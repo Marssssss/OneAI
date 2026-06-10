@@ -1,0 +1,23 @@
+[package]
+name = "oneai-provider"
+description = "OneAI LLM provider implementations (OpenAI, Anthropic, Ollama)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+tokio-stream = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+oneai-core = { workspace = true }

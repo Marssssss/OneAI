@@ -1,0 +1,19 @@
+[package]
+name = "oneai-channel-demo"
+description = "Rust example demonstrating direct ChannelApprovalGate usage with manual approval flow"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "oneai-channel-demo"
+path = "src/main.rs"
+
+[dependencies]
+oneai-core = { workspace = true }
+oneai-app = { workspace = true }
+oneai-tool = { workspace = true }
+oneai-memory = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

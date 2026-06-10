@@ -1,0 +1,19 @@
+[package]
+name = "oneai-platform-android"
+description = "OneAI Android platform adapter — AlertDialog approval gate via JNI bridge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+oneai-core = { workspace = true }
+oneai-tool = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+jni = "0.21"
+
+[dev-dependencies]
+oneai-app = { workspace = true }

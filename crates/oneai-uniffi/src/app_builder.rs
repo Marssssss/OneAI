@@ -1,0 +1,136 @@
+//! UniFFI-exported AppBuilder wrapper for foreign-language bindings.
+//!
+//! The `OneAIAppBuilder` wraps `oneai_app::AppBuilder` and provides
+//! UniFFI-exportable methods that mirror the builder pattern.
+//!
+//! Since UniFFI methods on `Arc<Self>` consume self in a chained
+//! builder pattern, we use a Mutex to allow the builder to be
+//! taken out and reconstructed at each step.
+
+use std::sync::Arc;
+
+use oneai_memory::MemoryManager;
+use oneai_persistence::FilePersistence;
+
+use crate::types::OneAIErrorView;
+use crate::app::OneAIApp;
+
+/// UniFFI-exported AppBuilder wrapper.
+///
+/// Provides a builder-pattern API for foreign languages to construct
+/// a OneAI App with all the necessary components.
+#[derive(uniffi::Object)]
+pub struct OneAIAppBuilder {
+    inner: std::sync::Mutex<Option<oneai_app::AppBuilder>>,
+}
+
+impl OneAIAppBuilder {
+    /// Create a new AppBuilder.
+    #[uniffi::constructor]
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(Some(oneai_app::AppBuilder::new())),
+        }
+    }
+
+    /// Use the auto-approve gate (for testing).
+    pub fn auto_approval_gate(self: Arc<Self>) -> Arc<Self> {
+        let builder = self.take_inner().auto_approval_gate();
+        Arc::new(Self::from_builder(builder))
+    }
+
+    /// Use the blocking (always-deny) gate.
+    pub fn blocking_approval_gate(self: Arc<Self>) -> Arc<Self> {
+        let builder = self.take_inner().blocking_approval_gate();
+        Arc::new(Self::from_builder(builder))
+    }
+
+    /// Use the default 3-layer parser.
+    pub fn default_parser(self: Arc<Self>) -> Arc<Self> {
+        let builder = self.take_inner().default_parser();
+        Arc::new(Self::from_builder(builder))
+    }
+
+    /// Set the memory manager with custom config.
+    pub fn memory_manager_with_config(self: Arc<Self>, window_size: u32, threshold_tokens: u32) -> Arc<Self> {
+        let config = oneai_memory::MemoryManagerConfig {
+            stm_window_size: window_size as usize,
+            compression_threshold_tokens: threshold_tokens as usize,
+            compression_keep_recent_turns: 6,
+            evict_to_ltm: true,
+        };
+        let manager = Arc::new(MemoryManager::with_config(config));
+        let builder = self.take_inner().memory_manager(manager);
+        Arc::new(Self::from_builder(builder))
+    }
+
+    /// Set the persistence layer.
+    pub fn persistence(self: Arc<Self>, path: String) -> Arc<Self> {
+        let persistence = Arc::new(FilePersistence::new(&path));
+        let builder = self.take_inner().persistence(persistence);
+        Arc::new(Self::from_builder(builder))
+    }
+
+    /// Build the application.
+    pub fn build(self: Arc<Self>) -> Result<Arc<OneAIApp>, OneAIErrorView> {
+        let builder = self.take_inner();
+        builder.build()
+            .map(|app| Arc::new(OneAIApp { inner: Arc::new(app) }))
+            .map_err(OneAIErrorView::from)
+    }
+}
+
+impl OneAIAppBuilder {
+    /// Take the inner builder out of the mutex.
+    fn take_inner(&self) -> oneai_app::AppBuilder {
+        self.inner.lock().unwrap().take().unwrap_or_else(oneai_app::AppBuilder::new)
+    }
+
+    /// Create from a raw builder.
+    fn from_builder(builder: oneai_app::AppBuilder) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(Some(builder)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_app_builder_auto_approve() {
+        let builder = Arc::new(OneAIAppBuilder::new());
+        let builder = builder.auto_approval_gate();
+        let builder = builder.default_parser();
+        let app = builder.build().expect("Build should succeed");
+
+        assert!(!app.inner.has_provider());
+    }
+
+    #[tokio::test]
+    async fn test_app_builder_blocking() {
+        let builder = Arc::new(OneAIAppBuilder::new());
+        let builder = builder.blocking_approval_gate();
+        let builder = builder.default_parser();
+        let app = builder.build().expect("Build should succeed");
+
+        app.inner.register_tool(Arc::new(oneai_tool::ShellTool::new())).await.unwrap();
+
+        let session = app.inner.create_session();
+        let result = session.execute_tool("shell", serde_json::json!({"command": "echo test"})).await.unwrap();
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_app_builder_with_persistence() {
+        let builder = Arc::new(OneAIAppBuilder::new());
+        let builder = builder.auto_approval_gate();
+        let builder = builder.persistence("/tmp/oneai_uniffi_test".to_string());
+        let app = builder.build().expect("Build should succeed");
+
+        let session = app.inner.create_session();
+        let checkpoint_id = session.save_checkpoint().await.unwrap();
+        assert!(!checkpoint_id.is_empty());
+    }
+}

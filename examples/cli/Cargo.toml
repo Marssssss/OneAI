@@ -1,0 +1,25 @@
+[package]
+name = "oneai-cli-demo"
+description = "OneAI CLI demo — interactive REPL showcasing the full pipeline"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "oneai-cli"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+oneai-core = { workspace = true }
+oneai-app = { workspace = true }
+oneai-tool = { workspace = true }
+oneai-memory = { workspace = true }
+oneai-rag = { workspace = true }
+oneai-workflow = { workspace = true }
+oneai-persistence = { workspace = true }
+oneai-parser = { workspace = true }
+oneai-uniffi = { workspace = true }
+oneai-trace = { workspace = true }

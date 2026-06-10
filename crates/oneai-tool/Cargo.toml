@@ -1,0 +1,21 @@
+[package]
+name = "oneai-tool"
+description = "OneAI tool management, registry, MCP integration, and approval gates"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+rmcp = { workspace = true }
+oneai-core = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

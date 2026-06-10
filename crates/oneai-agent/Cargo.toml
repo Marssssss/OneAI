@@ -1,0 +1,22 @@
+[package]
+name = "oneai-agent"
+description = "OneAI agent paradigms (Plan, ReAct, Reflection, Parallel)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+oneai-core = { workspace = true }
+oneai-provider = { workspace = true }
+oneai-parser = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

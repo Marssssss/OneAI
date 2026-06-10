@@ -1,0 +1,31 @@
+[package]
+name = "oneai-app"
+description = "OneAI application integration layer — wires all modules together"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+oneai-core = { workspace = true }
+oneai-provider = { workspace = true }
+oneai-agent = { workspace = true }
+oneai-tool = { workspace = true }
+oneai-memory = { workspace = true }
+oneai-skill = { workspace = true }
+oneai-parser = { workspace = true }
+oneai-rag = { workspace = true }
+oneai-workflow = { workspace = true }
+oneai-scheduler = { workspace = true }
+oneai-persistence = { workspace = true }
+oneai-trace = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

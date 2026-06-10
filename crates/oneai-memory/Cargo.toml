@@ -1,0 +1,18 @@
+[package]
+name = "oneai-memory"
+description = "OneAI memory system (short-term, long-term, context compression)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+oneai-core = { workspace = true }
+oneai-provider = { workspace = true }

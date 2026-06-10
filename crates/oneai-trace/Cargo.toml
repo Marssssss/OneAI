@@ -1,0 +1,21 @@
+[package]
+name = "oneai-trace"
+description = "OneAI Trajectory Logger — OpenInference-compatible trace mechanism for agent evaluation"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["trace"]
+trace = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

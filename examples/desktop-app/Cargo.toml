@@ -1,0 +1,21 @@
+[package]
+name = "oneai-desktop-demo"
+description = "Desktop platform approval gate demo for the OneAI framework"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "oneai-desktop-demo"
+path = "src/main.rs"
+
+[dependencies]
+oneai-core = { workspace = true }
+oneai-app = { workspace = true }
+oneai-tool = { workspace = true }
+oneai-memory = { workspace = true }
+oneai-persistence = { workspace = true }
+oneai-platform-desktop = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

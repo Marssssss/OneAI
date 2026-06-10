@@ -1,0 +1,24 @@
+[package]
+name = "oneai-parser"
+description = "OneAI 3-layer output parsing defense (constrained decoding, fuzzy repair, fallback)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+regex = "1"
+async-trait = { workspace = true }
+oneai-core = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+chrono = { workspace = true }
+oneai-memory = { workspace = true }
+oneai-agent = { workspace = true }
+oneai-skill = { workspace = true }

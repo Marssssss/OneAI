@@ -1,0 +1,27 @@
+[package]
+name = "oneai-platform-desktop"
+description = "OneAI desktop platform adapter — native UI approval gates for macOS, Windows, and Linux"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+oneai-core = { workspace = true }
+oneai-tool = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+# macOS native UI (only compiled on macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSRunningApplication"] }
+
+# Windows native UI (only compiled on Windows)
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+oneai-app = { workspace = true }

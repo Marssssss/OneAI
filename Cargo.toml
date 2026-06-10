@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oneai-core",
+    "crates/oneai-provider",
+    "crates/oneai-agent",
+    "crates/oneai-workflow",
+    "crates/oneai-memory",
+    "crates/oneai-tool",
+    "crates/oneai-skill",
+    "crates/oneai-parser",
+    "crates/oneai-rag",
+    "crates/oneai-scheduler",
+    "crates/oneai-persistence",
+    "crates/oneai-app",
+    "crates/oneai-uniffi",
+    "crates/oneai-platform-desktop",
+    "crates/oneai-platform-android",
+    "crates/oneai-platform-ios",
+    "crates/oneai-platform-harmony",
+    "crates/oneai-trace",
+    "examples/cli",
+    "examples/desktop-app",
+    "examples/rust",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/oneai-project/oneai"
+
+[workspace.dependencies]
+# Core
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+async-trait = "0.1"
+bytes = "1"
+base64 = "0.22"
+url = "2"
+
+# HTTP / SSE
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+eventsource-stream = "0.2"
+tokio-stream = "0.1"
+
+# Data structures
+daggy = "0.8"
+petgraph = "0.7"
+indexmap = "2"
+
+# Vector search — embedded lightweight implementation (no external dependency)
+# We implement our own simple HNSW-like store in oneai-memory for maximum portability
+
+# MCP
+rmcp = "0.1"
+
+# UniFFI
+uniffi = "0.28"
+
+# Internal crates (shared)
+oneai-core = { path = "crates/oneai-core" }
+oneai-provider = { path = "crates/oneai-provider" }
+oneai-agent = { path = "crates/oneai-agent" }
+oneai-workflow = { path = "crates/oneai-workflow" }
+oneai-memory = { path = "crates/oneai-memory" }
+oneai-tool = { path = "crates/oneai-tool" }
+oneai-skill = { path = "crates/oneai-skill" }
+oneai-parser = { path = "crates/oneai-parser" }
+oneai-rag = { path = "crates/oneai-rag" }
+oneai-scheduler = { path = "crates/oneai-scheduler" }
+oneai-persistence = { path = "crates/oneai-persistence" }
+oneai-app = { path = "crates/oneai-app" }
+oneai-uniffi = { path = "crates/oneai-uniffi" }
+oneai-platform-desktop = { path = "crates/oneai-platform-desktop" }
+oneai-platform-android = { path = "crates/oneai-platform-android" }
+oneai-platform-ios = { path = "crates/oneai-platform-ios" }
+oneai-platform-harmony = { path = "crates/oneai-platform-harmony" }
+oneai-trace = { path = "crates/oneai-trace" }
