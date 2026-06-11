@@ -276,9 +276,11 @@ impl App {
         AppSession::new(self)
     }
 
-    /// Register a tool.
+    /// Register a tool — adds it to both the tool executor and workflow executor.
     pub async fn register_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
-        self.tool_registry.register(tool).await
+        self.tool_registry.register(tool.clone()).await?;
+        self.workflow_executor.register_tool(tool).await;
+        Ok(())
     }
 
     /// Check if a provider is configured.

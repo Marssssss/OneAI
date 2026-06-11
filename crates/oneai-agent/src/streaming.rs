@@ -15,6 +15,7 @@
 //! call a tool even before the arguments are fully generated.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use oneai_core::{ContentBlock, InferenceStreamChunk};
 use oneai_core::error::Result;
@@ -114,7 +115,7 @@ pub struct IncrementalStreamParser {
     current_tool_call_id: Option<String>,
 
     /// Callback for stream events (typically UI notification).
-    on_event: Option<Box<dyn Fn(StreamEvent) + Send>>,
+    on_event: Option<Arc<dyn Fn(StreamEvent) + Send + Sync>>,
 }
 
 impl IncrementalStreamParser {
@@ -129,7 +130,7 @@ impl IncrementalStreamParser {
     }
 
     /// Create a parser with an event callback.
-    pub fn with_event_callback(on_event: Box<dyn Fn(StreamEvent) + Send>) -> Self {
+    pub fn with_event_callback(on_event: Arc<dyn Fn(StreamEvent) + Send + Sync>) -> Self {
         Self {
             text_buffer: String::new(),
             tool_call_builders: HashMap::new(),

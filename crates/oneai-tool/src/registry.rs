@@ -12,15 +12,21 @@ use tokio::sync::RwLock;
 /// Supports registration, lookup, and execution of local tools, MCP tools,
 /// and platform-specific tools. High-risk tools are gated through the ApprovalGate.
 pub struct ToolRegistry {
-    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
 }
 
 impl ToolRegistry {
     /// Create a new empty tool registry.
     pub fn new() -> Self {
         Self {
-            tools: RwLock::new(HashMap::new()),
+            tools: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Get the internal tools map as `Arc<RwLock<HashMap>>`.
+    /// This allows sharing the map with AgentLoop and WorkflowExecutor.
+    pub fn tools_map(&self) -> Arc<RwLock<HashMap<String, Arc<dyn Tool>>>> {
+        self.tools.clone()
     }
 
     /// Register a tool.

@@ -8,16 +8,18 @@ use std::sync::Arc;
 
 use oneai_core::{Conversation, GlobalState, Message, MemoryEntry, MemoryQuery};
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, StatePersistence};
+use oneai_core::traits::ApprovalGate;
+use oneai_core::traits::StatePersistence;
 
 use oneai_memory::MemoryManager;
-use oneai_tool::{ToolExecutor, ToolRegistry};
-use oneai_rag::{DocumentIndex, RetrievalQuery, assemble_context};
-use oneai_workflow::{WorkflowConfig, WorkflowDag, WorkflowExecutor, WorkflowResult};
+use oneai_tool::ToolExecutor;
+use oneai_rag::{DocumentIndex, assemble_context};
+use oneai_workflow::{WorkflowConfig, WorkflowExecutor, WorkflowResult};
 use oneai_persistence::FilePersistence;
 use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
 
-use crate::builder::App;
+use oneai_agent::{AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult,
+    ParadigmKind, ToolCallRequest, SubAgentKind};
 
 /// A running agent session with conversation context and memory.
 ///
@@ -42,6 +44,9 @@ struct AppResources {
     rag_index: Option<Arc<DocumentIndex>>,
     persistence: Option<Arc<FilePersistence>>,
     workflow_executor: Arc<WorkflowExecutor>,
+    provider: Option<Arc<dyn oneai_core::traits::LlmProvider>>,
+    parser: Arc<dyn oneai_core::traits::OutputParser>,
+    skill_selector: Arc<oneai_skill::SkillSelector>,
 }
 
 impl AppSession {
@@ -69,6 +74,9 @@ impl AppSession {
                 rag_index: app.rag_index.clone(),
                 persistence: app.persistence.clone(),
                 workflow_executor: app.workflow_executor.clone(),
+                provider: app.provider.clone(),
+                parser: app.parser.clone(),
+                skill_selector: app.skill_selector.clone(),
             }),
             conversation,
             session_id,
@@ -251,16 +259,133 @@ impl AppSession {
         self.trace_context.as_ref()
     }
 
-    /// Build the trace tree from collected spans and export as JSON.
-    /// Only available if tracing was enabled via AppBuilder.
-    pub fn build_trace_tree(&self) -> Option<oneai_trace::TraceTree> {
-        self.trace_context.as_ref().map(|ctx| ctx.build_tree())
+    /// Run the Agentic Loop on a user task.
+    ///
+    /// This is the primary interactive entry point: send a task to the
+    /// AgentLoop, which dynamically decides how to handle it (direct answer,
+    /// tool calls, delegation, paradigm switching). Returns the final result.
+    ///
+    /// Requires a configured LLM provider (set via AppBuilder).
+    /// Returns an error if no provider is available.
+    ///
+    /// Multi-turn: the session's full conversation history is passed to the
+    /// AgentLoop, so the model sees prior messages and can maintain context.
+    /// Memory: relevant memories are retrieved and injected as context.
+    pub async fn run_agent(
+        &mut self,
+        task: &str,
+        observer: &dyn AgentLoopObserver,
+    ) -> Result<AgentLoopResult> {
+        let provider = self.app.provider.as_ref()
+            .ok_or(oneai_core::error::OneAIError::Provider(
+                "No LLM provider configured. Set ONEAI_API_KEY and ONEAI_BASE_URL environment variables.".to_string()
+            ))?;
+
+        // Store user message in memory
+        self.app.memory_manager.add(MemoryEntry {
+            id: format!("msg_{}", uuid::Uuid::new_v4()),
+            content: task.to_string(),
+            timestamp: chrono::Utc::now(),
+            embedding: None,
+            metadata: std::collections::HashMap::from([
+                ("role".to_string(), "user".to_string()),
+                ("session_id".to_string(), self.session_id.clone()),
+            ]),
+        }).await?;
+
+        // Retrieve relevant memories for context injection
+        let memory_query = MemoryQuery {
+            text: task.to_string(),
+            embedding: None,
+            time_range: None,
+            metadata_filters: std::collections::HashMap::new(),
+        };
+        let memory_results = self.app.memory_manager.retrieve(&memory_query, 5).await?;
+        let memory_context = if memory_results.is_empty() {
+            String::new()
+        } else {
+            let lines = memory_results.iter()
+                .map(|e| {
+                    let role = e.metadata.get("role").map(|s| s.as_str()).unwrap_or("memory");
+                    format!("[{}] {}", role, e.content)
+                })
+                .collect::<Vec<_>>();
+            format!("Previous conversation context:\n{}", lines.join("\n"))
+        };
+
+        // Build conversation with history + memory context
+        let mut conversation = self.conversation.clone();
+
+        // Inject memory context as a system message (if we have prior memories)
+        if !memory_context.is_empty() && !conversation.messages.iter().any(|m| {
+            m.role == oneai_core::Role::System && m.text_content().contains("Previous conversation context")
+        }) {
+            conversation.add_message(Message::system(memory_context));
+        }
+
+        // Build the AgentLoop from session resources
+        let agent_loop = AgentLoop::new(
+            provider.clone(),
+            self.app.tool_executor.tools_map(),
+            self.app.parser.clone(),
+            self.app.approval_gate.clone(),
+            self.app.skill_selector.clone(),
+            Arc::new(oneai_core::budget::ContextBudgetManager::new(
+                oneai_core::budget::TokenBudget::new(100000),
+                oneai_core::budget::BudgetAllocation::default(),
+                Arc::new(oneai_core::budget::NoopCompressor),
+            )),
+            Arc::new(oneai_agent::DefaultSubAgentFactory::new(
+                provider.clone(),
+                self.app.parser.clone(),
+                self.app.approval_gate.clone(),
+                self.app.tool_executor.tools_map(),
+            )),
+            oneai_agent::ContextAssembler::new(),
+            oneai_agent::IncrementalStreamParser::new(),
+            None, // checkpoint manager — optional
+            AgentLoopConfig {
+                use_streaming: true,
+                ..AgentLoopConfig::default()
+            },
+        );
+
+        // Run with full conversation history (multi-turn)
+        let result = agent_loop.run_with_conversation(conversation, task, observer).await?;
+
+        // Store assistant response in memory
+        if !result.final_answer.is_empty() {
+            self.app.memory_manager.add(MemoryEntry {
+                id: format!("resp_{}", uuid::Uuid::new_v4()),
+                content: result.final_answer.clone(),
+                timestamp: chrono::Utc::now(),
+                embedding: None,
+                metadata: std::collections::HashMap::from([
+                    ("role".to_string(), "assistant".to_string()),
+                    ("session_id".to_string(), self.session_id.clone()),
+                ]),
+            }).await?;
+        }
+
+        // Merge the loop's conversation back into the session
+        self.conversation = result.conversation.clone();
+
+        Ok(result)
     }
 
-    /// End the session and close the SESSION span.
-    pub fn end_session(&self, status: SpanStatus) {
-        if let Some(ctx) = &self.trace_context {
-            ctx.exit_span(&ctx.current_span_id().unwrap_or_default(), status);
+    /// Run the Agentic Loop silently (no observer callbacks).
+    pub async fn run_agent_silent(&mut self, task: &str) -> Result<AgentLoopResult> {
+        struct SilentObserver;
+        impl AgentLoopObserver for SilentObserver {
+            fn on_iteration_start(&self, _: usize, _: ParadigmKind) {}
+            fn on_direct_answer(&self, _: &str) {}
+            fn on_tool_calls(&self, _: &[ToolCallRequest]) {}
+            fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
+            fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+            fn on_paradigm_switch(&self, _: ParadigmKind) {}
+            fn on_checkpoint(&self, _: usize) {}
+            fn on_complete(&self, _: &AgentLoopResult) {}
         }
+        self.run_agent(task, &SilentObserver).await
     }
 }

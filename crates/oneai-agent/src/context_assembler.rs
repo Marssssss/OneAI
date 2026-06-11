@@ -179,12 +179,15 @@ impl ContextAssembler {
     /// 3. If changes detected, injects them into the conversation
     /// 4. Updates the last snapshot
     pub fn assemble(&self, state: &crate::agent_loop::LoopState) -> Result<Conversation> {
-        // Implementation:
+        // TODO: Once take_snapshot() is implemented, add environment diff injection:
         // 1. Take current environment snapshot
         // 2. Compute diff with last_snapshot
-        // 3. If diff.has_changes(), inject EnvironmentDiff message
-        // 4. Return assembled conversation
-        todo!("Implementation in full code phase")
+        // 3. If diff.has_changes(), inject EnvironmentDiff message into conversation
+        // 4. Update last_snapshot
+
+        // For now: return the conversation from LoopState directly.
+        // When there are no environment changes, this is the correct behavior.
+        Ok(state.conversation.clone())
     }
 
     /// Take a snapshot of the current environment.

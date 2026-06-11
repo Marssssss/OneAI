@@ -14,6 +14,7 @@
 //! - Execution logging/tracing
 //! - Timeout enforcement for tool execution
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -229,8 +230,14 @@ impl ToolExecutor {
     }
 
     /// Get the tool registry.
+    /// Get the tool registry.
     pub fn registry(&self) -> &Arc<ToolRegistry> {
         &self.registry
+    }
+
+    /// Get the tools map (shared with registry) for use by AgentLoop.
+    pub fn tools_map(&self) -> Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>> {
+        self.registry.tools_map()
     }
 
     /// Get the approval gate.

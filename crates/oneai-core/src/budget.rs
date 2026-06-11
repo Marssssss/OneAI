@@ -13,9 +13,12 @@
 
 use std::sync::Arc;
 
-use crate::{Conversation, InferenceResponse, Message, Role};
+use crate::Conversation;
+use crate::InferenceResponse;
 use crate::error::Result;
-use crate::traits::LlmProvider;
+use crate::ContentBlock;
+use crate::Message;
+use crate::Role;
 
 // ─── ContextCompressor trait (defined in core for dependency inversion) ────
 
@@ -42,6 +45,41 @@ pub struct CompressedResult {
     pub compressed_conversation: Conversation,
     /// The generated summary (if compression was performed).
     pub summary: Option<String>,
+}
+
+/// No-op compressor — does nothing, returns the conversation unchanged.
+/// Used as a default when no real compressor is available (e.g., in CLI demo mode).
+pub struct NoopCompressor;
+
+#[async_trait::async_trait]
+impl ContextCompressorTrait for NoopCompressor {
+    fn estimate_tokens(&self, conversation: &Conversation) -> usize {
+        // Rough estimate: ~4 chars per token
+        conversation.messages.iter()
+            .map(|m| m.content.iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.len()),
+                    _ => Some(50), // rough estimate for non-text blocks
+                })
+                .sum::<usize>())
+            .sum::<usize>() / 4
+    }
+
+    fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
+        msg.content.iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.len()),
+                _ => Some(50),
+            })
+            .sum::<usize>() / 4
+    }
+
+    async fn compress(&self, conversation: &Conversation) -> Result<CompressedResult> {
+        Ok(CompressedResult {
+            compressed_conversation: conversation.clone(),
+            summary: None,
+        })
+    }
 }
 
 // ─── TokenBudget ────────────────────────────────────────────────────────────

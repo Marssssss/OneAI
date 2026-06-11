@@ -145,7 +145,8 @@ impl WorkflowContext {
 /// Between levels, the WorkflowContext is updated with step results.
 pub struct WorkflowExecutor {
     /// The tool registry for executing tool-based steps.
-    tools: Arc<HashMap<String, Arc<dyn Tool>>>,
+    /// Uses RwLock so tools can be registered after construction.
+    tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     /// The approval gate for high-risk tool approval.
     approval_gate: Arc<dyn ApprovalGate>,
 }
@@ -156,10 +157,25 @@ impl WorkflowExecutor {
         tools: Arc<HashMap<String, Arc<dyn Tool>>>,
         approval_gate: Arc<dyn ApprovalGate>,
     ) -> Self {
+        // Convert static HashMap into RwLock-backed HashMap for dynamic registration
         Self {
-            tools,
+            tools: Arc::new(tokio::sync::RwLock::new((*tools).clone())),
             approval_gate,
         }
+    }
+
+    /// Create a new executor with an empty tool registry.
+    /// Tools can be registered later via `register_tool()`.
+    pub fn new_empty(approval_gate: Arc<dyn ApprovalGate>) -> Self {
+        Self {
+            tools: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            approval_gate,
+        }
+    }
+
+    /// Register a tool for workflow step execution.
+    pub async fn register_tool(&self, tool: Arc<dyn Tool>) {
+        self.tools.write().await.insert(tool.name().to_string(), tool);
     }
 
     /// Execute a workflow DAG.
@@ -294,7 +310,7 @@ async fn execute_step(
     step: crate::config::StepConfig,
     retry_policy: RetryPolicy,
     timeout_secs: Option<u64>,
-    tools: Arc<HashMap<String, Arc<dyn Tool>>>,
+    tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     approval_gate: Arc<dyn ApprovalGate>,
     context: WorkflowContext,
 ) -> Result<StepResult> {
@@ -346,8 +362,9 @@ async fn execute_step(
     // Execute with retry loop
     for attempt in 0..=retry_policy.max_retries {
         let exec_result: std::result::Result<oneai_core::ToolOutput, OneAIError> = if let Some(tool_name) = &step.tool {
-            // Tool-based step
-            let tool = tools.get(tool_name);
+            // Tool-based step — read from RwLock
+            let tools_map = tools.read().await;
+            let tool = tools_map.get(tool_name);
             if let Some(tool) = tool {
                 let args = step.tool_args.clone().unwrap_or(serde_json::json!({}));
                 let timeout = timeout_secs.unwrap_or(60);

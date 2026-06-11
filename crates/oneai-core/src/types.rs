@@ -244,6 +244,7 @@ pub enum CloudProviderKind {
 
 /// Configuration for connecting to an LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ModelConfig {
     /// The type of provider.
     pub provider_type: ProviderType,
@@ -379,6 +380,21 @@ impl ModelConfig {
             (Some(url), None) => url.clone(),
             (None, Some(port)) => format!("http://localhost:{port}"),
             (None, None) => String::new(),
+        }
+    }
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            provider_type: ProviderType::Cloud,
+            cloud_kind: None,
+            api_key: None,
+            base_url: None,
+            port: None,
+            model_name: None,
+            model_path: None,
+            extra: HashMap::new(),
         }
     }
 }

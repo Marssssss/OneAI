@@ -13,6 +13,8 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 oneai-core = { workspace = true }
 oneai-app = { workspace = true }
 oneai-tool = { workspace = true }
@@ -21,5 +23,7 @@ oneai-rag = { workspace = true }
 oneai-workflow = { workspace = true }
 oneai-persistence = { workspace = true }
 oneai-parser = { workspace = true }
+oneai-provider = { workspace = true }
+oneai-agent = { workspace = true }
 oneai-uniffi = { workspace = true }
 oneai-trace = { workspace = true }
