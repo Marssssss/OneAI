@@ -205,6 +205,7 @@ impl ReActAgent {
                                 tool_name: name.clone(),
                                 args: args_value.clone(),
                                 risk_level: oneai_core::RiskLevel::High,
+                                permission_level: Some(oneai_core::PermissionLevel::Full),
                                 justification: format!(
                                     "Tool '{}' with args {} requires human approval",
                                     name, args
@@ -234,6 +235,15 @@ impl ReActAgent {
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         format_result(&output),
+                                    ));
+                                }
+                                oneai_core::ApprovalResponse::Observe { observation } => {
+                                    // Observe mode — pause execution and let user inspect state
+                                    // In the legacy ReAct agent, treat Observe as a pause signal
+                                    // and add the observation as context
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        format!("Execution paused for observation: {}", observation),
                                     ));
                                 }
                             }
@@ -413,6 +423,7 @@ impl ReActAgent {
                                 tool_name: name.clone(),
                                 args: args_value.clone(),
                                 risk_level: oneai_core::RiskLevel::High,
+                                permission_level: Some(oneai_core::PermissionLevel::Full),
                                 justification: format!("High-risk tool '{}'", name),
                             };
                             let approval_response = self.approval_gate.request_approval(approval_request).await?;
@@ -428,6 +439,10 @@ impl ReActAgent {
                                 oneai_core::ApprovalResponse::Modified { args } => {
                                     let output = tool.execute(args).await?;
                                     conv.add_message(Message::tool_result(id.clone(), format_result(&output)));
+                                }
+                                oneai_core::ApprovalResponse::Observe { observation } => {
+                                    conv.add_message(Message::tool_result(id.clone(),
+                                        format!("Execution paused for observation: {}", observation)));
                                 }
                             }
                         } else {

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oneai_core::{ApprovalRequest, ApprovalResponse, RiskLevel, ToolOutput};
+use oneai_core::{ApprovalRequest, ApprovalResponse, RiskLevel, PermissionLevel, ToolOutput};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{ApprovalGate, Tool};
 
@@ -126,6 +126,7 @@ impl ToolExecutor {
                 tool_name: tool_name.to_string(),
                 args: args.clone(),
                 risk_level: tool.risk_level(),
+                permission_level: Some(PermissionLevel::from_risk_level(tool.risk_level())),
                 justification: format!(
                     "Tool '{}' with risk level {:?} requires human approval",
                     tool_name, tool.risk_level()
@@ -160,6 +161,17 @@ impl ToolExecutor {
                         tool_name, modified_args
                     );
                     self.execute_with_timeout(tool, modified_args).await
+                }
+                ApprovalResponse::Observe { observation } => {
+                    tracing::info!(
+                        "Tool '{}' execution paused for observation: {}",
+                        tool_name, observation
+                    );
+                    Ok(ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Execution paused for observation: {}", observation)),
+                    })
                 }
             }
         } else {
@@ -235,7 +247,8 @@ impl ToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_tools::{CalculatorTool, ShellTool, FileReadTool};
+    use crate::local_tools::CalculatorTool;
+    use crate::tool_interfaces::{ShellTool, FileReadTool, FileEditTool};
     use crate::approval::{AutoApprovalGate, ChannelApprovalGateWithThreshold, ApprovalDecision};
     use oneai_core::RiskLevel;
 
@@ -379,7 +392,8 @@ mod tests {
     #[tokio::test]
     async fn test_tool_executor_require_medium_approval() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(FileReadTool::new())).await.unwrap();
+        // Use FileEditTool which has Standard/Medium permission level
+        registry.register(Arc::new(FileEditTool::new())).await.unwrap();
 
         let config = ToolExecutorConfig {
             require_approval_for_medium: true,
@@ -392,8 +406,8 @@ mod tests {
             config,
         );
 
-        // FileReadTool is medium-risk — should be denied with blocking gate
-        let result = executor.execute("read_file", serde_json::json!({"path": "/tmp/test"})).await.unwrap();
+        // FileEditTool is Standard-permission (Medium risk) — should be denied with blocking gate
+        let result = executor.execute("edit_file", serde_json::json!({"file_path": "/tmp/test", "old_string": "a", "new_string": "b"})).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("denied"));
     }

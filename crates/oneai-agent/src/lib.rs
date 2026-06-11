@@ -1,6 +1,7 @@
 //! # OneAI Agent
 //!
 //! Agent paradigms: Plan, ReAct, Reflection, Parallel execution with ScopeState isolation.
+//! New: Agentic Loop (dynamic decision-making), SubAgent delegation, streaming, prompts.
 
 pub mod scope_state;
 pub mod react_agent;
@@ -8,6 +9,12 @@ pub mod plan_agent;
 pub mod reflection_agent;
 pub mod parallel_executor;
 pub mod agent_runner;
+pub mod agent_loop;
+pub mod sub_agent;
+pub mod streaming;
+pub mod context_assembler;
+pub mod error_recovery;
+pub mod prompts;
 
 pub use scope_state::*;
 pub use react_agent::*;
@@ -15,6 +22,12 @@ pub use plan_agent::*;
 pub use reflection_agent::*;
 pub use parallel_executor::*;
 pub use agent_runner::*;
+pub use agent_loop::*;
+pub use sub_agent::*;
+pub use streaming::*;
+pub use context_assembler::*;
+pub use error_recovery::*;
+pub use prompts::*;
 
 #[cfg(test)]
 mod tests {

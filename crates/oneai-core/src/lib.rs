@@ -1,16 +1,21 @@
 //! # OneAI Core
 //!
 //! Core types, traits, and abstractions for the OneAI Agent framework.
+//! New: budget management, PermissionLevel, platform capabilities.
 
 pub mod types;
 pub mod traits;
 pub mod error;
 pub mod platform;
+pub mod budget;
+pub mod platform_capabilities;
 
 pub use types::*;
 pub use traits::*;
 pub use error::*;
 pub use platform::*;
+pub use budget::*;
+pub use platform_capabilities::*;
 
 #[cfg(test)]
 mod tests {

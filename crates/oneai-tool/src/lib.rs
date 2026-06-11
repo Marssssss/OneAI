@@ -1,18 +1,24 @@
 //! # OneAI Tool
 //!
 //! Tool management, registry, MCP integration, approval gates, and tool executor.
+//! New: PermissionAwareTool trait, expanded tool interfaces, real MCP implementation.
 
 pub mod registry;
 pub mod local_tools;
 pub mod mcp_tools;
+pub mod mcp_real;
 pub mod approval;
 pub mod executor;
+pub mod tool_interfaces;
 
+// Explicit imports to avoid ambiguity between local_tools and tool_interfaces
+// (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
 pub use registry::*;
-pub use local_tools::*;
+pub use local_tools::{FileWriteTool, CalculatorTool};
 pub use mcp_tools::*;
 pub use approval::*;
 pub use executor::*;
+pub use tool_interfaces::*;
 
 #[cfg(test)]
 mod tests {
@@ -125,16 +131,17 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_tool_custom_timeout() {
-        let tool = ShellTool::with_timeout(60);
-        assert_eq!(tool.timeout_secs(), 60);
+    fn test_shell_tool_timeout() {
+        let tool = ShellTool::new();
+        assert_eq!(tool.timeout_secs(), 120);
     }
 
     #[test]
     fn test_file_read_tool_properties() {
         let tool = FileReadTool::new();
         assert_eq!(tool.name(), "read_file");
-        assert_eq!(tool.risk_level(), RiskLevel::Medium);
+        // FileReadTool now uses PermissionLevel::Read → RiskLevel::Low
+        assert_eq!(tool.risk_level(), RiskLevel::Low);
     }
 
     #[test]
@@ -176,13 +183,14 @@ mod tests {
     #[tokio::test]
     async fn test_blocking_approval_gate() {
         use oneai_core::traits::ApprovalGate;
-        use oneai_core::{ApprovalRequest, ApprovalResponse};
+        use oneai_core::{ApprovalRequest, ApprovalResponse, PermissionLevel};
 
         let gate = BlockingApprovalGate;
         let request = ApprovalRequest {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "rm -rf /"}),
             risk_level: RiskLevel::High,
+            permission_level: Some(PermissionLevel::Full),
             justification: "Delete everything".to_string(),
         };
 

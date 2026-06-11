@@ -41,6 +41,39 @@ impl From<RiskLevelView> for oneai_core::RiskLevel {
     }
 }
 
+// ─── PermissionLevelView ────────────────────────────────────────────
+
+/// Permission level classification (UniFFI-compatible view).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum PermissionLevelView {
+    /// Read — only-observe operations. Auto-approved.
+    Read,
+    /// Standard — common operations. May require approval.
+    Standard,
+    /// Full — powerful operations. Always requires approval.
+    Full,
+}
+
+impl From<oneai_core::PermissionLevel> for PermissionLevelView {
+    fn from(level: oneai_core::PermissionLevel) -> Self {
+        match level {
+            oneai_core::PermissionLevel::Read => PermissionLevelView::Read,
+            oneai_core::PermissionLevel::Standard => PermissionLevelView::Standard,
+            oneai_core::PermissionLevel::Full => PermissionLevelView::Full,
+        }
+    }
+}
+
+impl From<PermissionLevelView> for oneai_core::PermissionLevel {
+    fn from(view: PermissionLevelView) -> Self {
+        match view {
+            PermissionLevelView::Read => oneai_core::PermissionLevel::Read,
+            PermissionLevelView::Standard => oneai_core::PermissionLevel::Standard,
+            PermissionLevelView::Full => oneai_core::PermissionLevel::Full,
+        }
+    }
+}
+
 // ─── ApprovalRequestView ────────────────────────────────────────────
 
 /// Approval request (UniFFI-compatible view).
@@ -55,6 +88,8 @@ pub struct ApprovalRequestView {
     pub args_json: String,
     /// The risk level classification.
     pub risk_level: RiskLevelView,
+    /// The permission level classification (optional — replaces risk_level).
+    pub permission_level: Option<PermissionLevelView>,
     /// Justification for why the tool should be allowed.
     pub justification: String,
 }
@@ -65,6 +100,7 @@ impl From<oneai_core::ApprovalRequest> for ApprovalRequestView {
             tool_name: req.tool_name,
             args_json: req.args.to_string(),
             risk_level: RiskLevelView::from(req.risk_level),
+            permission_level: req.permission_level.map(PermissionLevelView::from),
             justification: req.justification,
         }
     }
@@ -77,6 +113,7 @@ impl From<ApprovalRequestView> for oneai_core::ApprovalRequest {
             args: serde_json::from_str(&view.args_json)
                 .unwrap_or(serde_json::json!({})),
             risk_level: oneai_core::RiskLevel::from(view.risk_level),
+            permission_level: view.permission_level.map(oneai_core::PermissionLevel::from),
             justification: view.justification,
         }
     }
@@ -101,6 +138,11 @@ pub enum ApprovalResponseView {
         /// JSON-encoded modified arguments.
         args_json: String,
     },
+    /// Observe — pause execution and observe the agent's current state.
+    Observe {
+        /// The user's observation comment.
+        observation: String,
+    },
 }
 
 impl From<oneai_core::ApprovalResponse> for ApprovalResponseView {
@@ -118,6 +160,9 @@ impl From<oneai_core::ApprovalResponse> for ApprovalResponseView {
                 ApprovalResponseView::Modified {
                     args_json: args.to_string(),
                 }
+            }
+            oneai_core::ApprovalResponse::Observe { observation } => {
+                ApprovalResponseView::Observe { observation }
             }
         }
     }
@@ -141,6 +186,9 @@ impl From<ApprovalResponseView> for oneai_core::ApprovalResponse {
                     args: serde_json::from_str(&args_json)
                         .unwrap_or(serde_json::json!({})),
                 }
+            }
+            ApprovalResponseView::Observe { observation } => {
+                oneai_core::ApprovalResponse::Observe { observation }
             }
         }
     }
@@ -286,6 +334,8 @@ pub enum OneAIErrorView {
     Network { message: String },
     /// Timeout error.
     Timeout { message: String },
+    /// Platform capability error.
+    Platform { message: String },
     /// Generic error.
     Other { message: String },
 }
@@ -312,6 +362,7 @@ impl From<oneai_core::OneAIError> for OneAIErrorView {
             oneai_core::OneAIError::Serialization(msg) => OneAIErrorView::Serialization { message: msg },
             oneai_core::OneAIError::Network(msg) => OneAIErrorView::Network { message: msg },
             oneai_core::OneAIError::Timeout(msg) => OneAIErrorView::Timeout { message: msg },
+            oneai_core::OneAIError::Platform(msg) => OneAIErrorView::Platform { message: msg },
             oneai_core::OneAIError::Other(msg) => OneAIErrorView::Other { message: msg },
         }
     }
@@ -378,15 +429,18 @@ mod tests {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "ls"}),
             risk_level: oneai_core::RiskLevel::Medium,
+            permission_level: None,
             justification: "List files".to_string(),
         };
         let view: ApprovalRequestView = core_req.clone().into();
         assert_eq!(view.tool_name, "shell");
         assert_eq!(view.args_json, "{\"command\":\"ls\"}");
         assert_eq!(view.risk_level, RiskLevelView::Medium);
+        assert!(view.permission_level.is_none());
         let back: oneai_core::ApprovalRequest = view.into();
         assert_eq!(back.tool_name, "shell");
         assert_eq!(back.risk_level, oneai_core::RiskLevel::Medium);
+        assert!(back.permission_level.is_none());
     }
 
     #[test]

@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 rmcp = { workspace = true }
 oneai-core = { workspace = true }
 base64 = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

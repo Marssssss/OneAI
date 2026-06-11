@@ -17,6 +17,9 @@ async-trait = { workspace = true }
 oneai-core = { workspace = true }
 oneai-provider = { workspace = true }
 oneai-parser = { workspace = true }
+oneai-skill = { workspace = true }
+oneai-persistence = { workspace = true }
+oneai-memory = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }

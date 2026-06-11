@@ -250,6 +250,7 @@ mod tests {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "ls"}),
             risk_level: RiskLevel::High,
+            permission_level: None,
             justification: "List files".to_string(),
         };
 

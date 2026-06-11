@@ -252,6 +252,7 @@ mod tests {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "rm -rf /"}),
             risk_level: RiskLevel::High,
+            permission_level: None,
             justification: "Delete everything".to_string(),
         };
 
@@ -271,6 +272,7 @@ mod tests {
             tool_name: "calculator".to_string(),
             args: serde_json::json!({"expression": "2+2"}),
             risk_level: RiskLevel::Low,
+            permission_level: None,
             justification: "Simple calculation".to_string(),
         };
 
@@ -299,6 +301,7 @@ mod tests {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "ls"}),
             risk_level: RiskLevel::High,
+            permission_level: None,
             justification: "List files".to_string(),
         };
 
@@ -326,6 +329,7 @@ mod tests {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "rm -rf /"}),
             risk_level: RiskLevel::High,
+            permission_level: None,
             justification: "Delete everything".to_string(),
         };
 
@@ -355,6 +359,7 @@ mod tests {
             tool_name: "calculator".to_string(),
             args: serde_json::json!({"expression": "2+2"}),
             risk_level: RiskLevel::Low,
+            permission_level: None,
             justification: "Simple calculation".to_string(),
         };
 
@@ -383,6 +388,7 @@ mod tests {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "rm -rf /"}),
             risk_level: RiskLevel::High,
+            permission_level: None,
             justification: "Delete everything".to_string(),
         };
 

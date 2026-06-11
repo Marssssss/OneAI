@@ -309,6 +309,7 @@ async fn execute_step(
             tool_name: step.id.clone(),
             args: step.tool_args.clone().unwrap_or(serde_json::json!({})),
             risk_level: oneai_core::RiskLevel::High,
+            permission_level: Some(oneai_core::PermissionLevel::Full),
             justification: format!("Workflow step '{}' requires human approval", step.id),
         };
 
@@ -333,6 +334,11 @@ async fn execute_step(
             }
             oneai_core::ApprovalResponse::Modified { args } => {
                 // Use modified args
+            }
+            oneai_core::ApprovalResponse::Observe { observation } => {
+                // Observe mode — pause for human inspection
+                // In workflow context, treat observation as a pause/resume signal
+                tracing::info!("Workflow step '{}' paused for observation: {}", step_id, observation);
             }
         }
     }

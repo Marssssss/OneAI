@@ -65,6 +65,10 @@ pub enum OneAIError {
     #[error("Timeout: {0}")]
     Timeout(String),
 
+    /// Platform capability errors (features not available on current platform).
+    #[error("Platform error: {0}")]
+    Platform(String),
+
     /// Generic errors with context.
     #[error("{0}")]
     Other(String),

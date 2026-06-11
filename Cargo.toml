@@ -59,6 +59,9 @@ indexmap = "2"
 # Vector search — embedded lightweight implementation (no external dependency)
 # We implement our own simple HNSW-like store in oneai-memory for maximum portability
 
+# Regex
+regex = "1"
+
 # MCP
 rmcp = "0.1"
 

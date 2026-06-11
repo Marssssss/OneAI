@@ -46,6 +46,7 @@ mod tests {
             tool_name: "calculator".to_string(),
             args: serde_json::json!({"expression": "2+2"}),
             risk_level: RiskLevel::Low,
+            permission_level: None,
             justification: "Simple calculation".to_string(),
         };
 

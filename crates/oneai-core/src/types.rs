@@ -556,9 +556,13 @@ pub struct ToolOutput {
     pub error: Option<String>,
 }
 
-// ─── RiskLevel ────────────────────────────────────────────────────────────────
+// ─── RiskLevel (legacy) ────────────────────────────────────────────────────────
 
-/// Risk level classification for tool execution approval.
+/// Risk level classification for tool execution approval (legacy).
+///
+/// **Deprecated**: Use `PermissionLevel` instead. This enum is retained
+/// for backward compatibility with existing code and will be removed
+/// in a future version.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskLevel {
@@ -568,6 +572,69 @@ pub enum RiskLevel {
     Medium,
     /// High risk — must be approved by human before execution.
     High,
+}
+
+// ─── PermissionLevel ────────────────────────────────────────────────────────
+
+/// Permission level classification for tool execution (replaces RiskLevel).
+///
+/// Three-tier system inspired by Claude Code's Read/Standard/Full:
+/// - **Read**: Only-observe operations (file reading, search, environment sensing).
+///   These tools never modify state and are always auto-approved.
+/// - **Standard**: Common operations (file editing, tool calling, MCP interaction).
+///   These tools modify state but are generally safe with reasonable constraints.
+/// - **Full**: Powerful operations (shell execution, file deletion, system commands).
+///   These tools can cause significant changes and require explicit approval.
+///
+/// Tools are automatically categorized by their operation type:
+/// - FileReadTool, GrepTool, GlobTool, EnvironmentTool → Read
+/// - FileEditTool, FileWriteTool, NotebookEditTool → Standard
+/// - ShellTool, FileDeleteTool → Full
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionLevel {
+    /// Read — only-observe operations. Auto-approved.
+    Read,
+    /// Standard — common operations. May require approval depending on policy.
+    Standard,
+    /// Full — powerful operations. Always requires approval.
+    Full,
+}
+
+impl PermissionLevel {
+    /// Convert from legacy RiskLevel.
+    pub fn from_risk_level(risk: RiskLevel) -> Self {
+        match risk {
+            RiskLevel::Low => Self::Read,
+            RiskLevel::Medium => Self::Standard,
+            RiskLevel::High => Self::Full,
+        }
+    }
+
+    /// Convert to legacy RiskLevel.
+    pub fn to_risk_level(self) -> RiskLevel {
+        match self {
+            Self::Read => RiskLevel::Low,
+            Self::Standard => RiskLevel::Medium,
+            Self::Full => RiskLevel::High,
+        }
+    }
+
+    /// Whether this permission level should be auto-approved
+    /// given the configured approval threshold.
+    pub fn should_auto_approve(&self, threshold: &PermissionLevel) -> bool {
+        match (self, threshold) {
+            (Self::Read, Self::Read) => true,
+            (Self::Read, Self::Standard) => true,
+            (Self::Read, Self::Full) => true,
+            (Self::Standard, Self::Read) => false,
+            (Self::Standard, Self::Standard) => true,
+            (Self::Standard, Self::Full) => true,
+            (Self::Full, Self::Read) => false,
+            (Self::Full, Self::Standard) => false,
+            (Self::Full, Self::Full) => true,
+        }
+    }
 }
 
 // ─── ApprovalRequest / ApprovalResponse ───────────────────────────────────────
@@ -581,8 +648,12 @@ pub struct ApprovalRequest {
     /// The arguments the tool wants to execute with.
     pub args: serde_json::Value,
 
-    /// The risk level classification.
+    /// The risk level classification (legacy — use permission_level).
     pub risk_level: RiskLevel,
+
+    /// The permission level classification (new — replaces risk_level).
+    #[serde(default)]
+    pub permission_level: Option<PermissionLevel>,
 
     /// Justification for why the tool should be allowed to execute.
     pub justification: String,
@@ -602,6 +673,20 @@ pub enum ApprovalResponse {
     /// Modified — allow execution with different arguments.
     Modified {
         args: serde_json::Value,
+    },
+    /// Observe — pause execution and observe the agent's current state.
+    ///
+    /// This enables the "observation mode" (Issue #17):
+    /// humans can view the agent's state flow in real-time
+    /// and decide to continue, terminate, or modify at any point.
+    ///
+    /// When the AgentLoop receives an Observe response:
+    /// 1. Execution pauses
+    /// 2. The current LoopState snapshot is emitted to the UI
+    /// 3. The user decides: Continue / Terminate / Modify
+    Observe {
+        /// The user's observation comment (optional).
+        observation: String,
     },
 }
 
