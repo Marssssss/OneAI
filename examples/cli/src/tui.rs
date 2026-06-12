@@ -499,7 +499,7 @@ pub fn run_tui(
             builder = builder.provider(Arc::from(provider));
         }
 
-        let app = builder.build().expect("App build failed");
+        let app = builder.build().await.expect("App build failed");
         app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
 
         let tool_names = app.tool_executor().list_tools().await;

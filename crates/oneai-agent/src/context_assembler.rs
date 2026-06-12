@@ -11,11 +11,14 @@
 //! directory structure changes) and injects them as context even when
 //! no tool explicitly reported them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use oneai_core::Conversation;
 use oneai_core::error::Result;
+
+use oneai_domain::context_source::ContextSource;
 
 // ─── EnvironmentSnapshot ────────────────────────────────────────────────────
 
@@ -164,12 +167,33 @@ impl EnvironmentDiff {
 pub struct ContextAssembler {
     /// The previous environment snapshot (for diffing).
     last_snapshot: Option<EnvironmentSnapshot>,
+    /// Domain-specific context sources (injected from DomainPack).
+    context_sources: Vec<Arc<dyn ContextSource>>,
+    /// Cached context content from sources (for OnChange detection).
+    cached_context: HashMap<String, String>,
+    /// Whether initial load has been done (for OnceAtStart sources).
+    initial_load_done: bool,
 }
 
 impl ContextAssembler {
     /// Create a new context assembler.
     pub fn new() -> Self {
-        Self { last_snapshot: None }
+        Self {
+            last_snapshot: None,
+            context_sources: Vec::new(),
+            cached_context: HashMap::new(),
+            initial_load_done: false,
+        }
+    }
+
+    /// Create a context assembler with domain-specific context sources.
+    pub fn with_context_sources(context_sources: Vec<Arc<dyn ContextSource>>) -> Self {
+        Self {
+            last_snapshot: None,
+            context_sources,
+            cached_context: HashMap::new(),
+            initial_load_done: false,
+        }
     }
 
     /// Assemble the context for a loop iteration.
@@ -179,15 +203,56 @@ impl ContextAssembler {
     /// 3. If changes detected, injects them into the conversation
     /// 4. Updates the last snapshot
     pub fn assemble(&self, state: &crate::agent_loop::LoopState) -> Result<Conversation> {
-        // TODO: Once take_snapshot() is implemented, add environment diff injection:
-        // 1. Take current environment snapshot
-        // 2. Compute diff with last_snapshot
-        // 3. If diff.has_changes(), inject EnvironmentDiff message into conversation
-        // 4. Update last_snapshot
+        let mut conversation = state.conversation.clone();
 
-        // For now: return the conversation from LoopState directly.
-        // When there are no environment changes, this is the correct behavior.
-        Ok(state.conversation.clone())
+        // Inject domain context sources
+        if !self.context_sources.is_empty() {
+            // Sort sources by priority (lower = higher priority)
+            let mut sources: Vec<&Arc<dyn ContextSource>> = self.context_sources.iter().collect();
+            sources.sort_by_key(|s| s.priority());
+
+            for source in sources {
+                use oneai_domain::context_source::RefreshPolicy;
+
+                let should_load = match source.refresh_policy() {
+                    RefreshPolicy::EveryIteration => true,
+                    RefreshPolicy::OnceAtStart => !self.initial_load_done,
+                    RefreshPolicy::OnChange => {
+                        // Load if no cached content or if content changed
+                        // (for now, always load — change detection is async)
+                        true
+                    }
+                    RefreshPolicy::Periodic(_) => true, // Simplified — always load for now
+                };
+
+                if should_load {
+                    // We can't call async load() in a sync method,
+                    // so we inject from cached_context instead
+                    if let Some(content) = self.cached_context.get(source.key()) {
+                        let context_msg = format!("[Context: {}] {}", source.key(), content);
+                        conversation.add_message(oneai_core::Message::system(context_msg));
+                    }
+                }
+            }
+        }
+
+        Ok(conversation)
+    }
+
+    /// Refresh and cache all context sources (async — called from the loop).
+    pub async fn refresh_sources(&mut self) -> Result<()> {
+        self.initial_load_done = true;
+
+        for source in &self.context_sources {
+            let content = source.load().await?;
+            let prev = self.cached_context.get(source.key());
+            // Only update cache if content changed (for OnChange policy)
+            if prev.map_or(true, |p| p != &content) {
+                self.cached_context.insert(source.key().to_string(), content);
+            }
+        }
+
+        Ok(())
     }
 
     /// Take a snapshot of the current environment.

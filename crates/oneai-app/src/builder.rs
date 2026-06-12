@@ -23,6 +23,8 @@ use oneai_workflow::WorkflowExecutor;
 use oneai_persistence::FilePersistence;
 use oneai_trace::{TraceContext, TraceEmitter, InMemoryCollector};
 
+use oneai_domain::{DomainPack, MergedDomainPack};
+
 use crate::session::AppSession;
 
 /// Builder for assembling a OneAI application.
@@ -47,6 +49,8 @@ pub struct AppBuilder {
     platform: Option<Platform>,
     /// Trace context (optional — for trajectory logging).
     trace_context: Option<TraceContext>,
+    /// Domain packs (optional — for domain-specific configuration).
+    domain_packs: Vec<DomainPack>,
 }
 
 impl AppBuilder {
@@ -63,6 +67,7 @@ impl AppBuilder {
             persistence: None,
             platform: None,
             trace_context: None,
+            domain_packs: Vec::new(),
         }
     }
 
@@ -187,8 +192,53 @@ impl AppBuilder {
         self
     }
 
+    /// Add a domain pack for domain-specific configuration.
+    ///
+    /// A DomainPack provides the 5 layers of domain workflow embedding:
+    /// 1. Domain-specific tools and tool description overrides
+    /// 2. Domain-specific context sources (environment sensing)
+    /// 3. Domain-specific permission profile (approval rules)
+    /// 4. Domain-specific paradigm strategies (task → paradigm mapping)
+    /// 5. Domain-specific compression template (context preservation)
+    ///
+    /// Example:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .domain_pack(coding_pack("/project/dir"))  // ← one-line domain switch
+    ///     .build()?;
+    /// ```
+    pub fn domain_pack(mut self, pack: DomainPack) -> Self {
+        self.domain_packs.push(pack);
+        self
+    }
+
+    /// Add multiple domain packs for mixed domain configuration.
+    ///
+    /// When multiple packs are combined, the merge logic ensures:
+    /// - Tools: union (deduplicated by name)
+    /// - Permissions: strictest wins (safety first)
+    /// - Context sources: all inject
+    /// - System prompt: concatenated with section headers
+    ///
+    /// Example (coding + research):
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .domain_packs(vec![coding_pack("/project"), research_pack()])
+    ///     .build()?;
+    /// ```
+    pub fn domain_packs(mut self, packs: Vec<DomainPack>) -> Self {
+        self.domain_packs.extend(packs);
+        self
+    }
+
     /// Build the application.
-    pub fn build(self) -> Result<App> {
+    ///
+    /// This creates the App and eagerly registers all domain pack tools
+    /// into the ToolRegistry and WorkflowExecutor, so they are ready
+    /// before any session is created.
+    pub async fn build(self) -> Result<App> {
         let approval_gate = self.approval_gate.unwrap_or_else(|| {
             Arc::new(BlockingApprovalGate)
         });
@@ -201,19 +251,31 @@ impl AppBuilder {
             Arc::new(MemoryManager::new())
         });
 
+        // Merge domain packs (if any)
+        let merged_domain_pack = if self.domain_packs.is_empty() {
+            None
+        } else {
+            Some(Arc::new(MergedDomainPack::merge(self.domain_packs)))
+        };
+
         let tool_executor = Arc::new(ToolExecutor::with_approval_gate(
             self.tool_registry.clone(),
             approval_gate.clone(),
         ));
 
         // Build workflow executor with the tool registry
-        // We need to create a HashMap<String, Arc<dyn Tool>> from the registry
-        // Since we can't easily extract all tools from the async registry in sync context,
-        // we'll create an empty map and let the workflow executor handle tool lookup separately
         let workflow_executor = Arc::new(WorkflowExecutor::new(
             Arc::new(std::collections::HashMap::new()),
             approval_gate.clone(),
         ));
+
+        // Eagerly register domain pack tools at build time
+        if let Some(domain) = &merged_domain_pack {
+            for tool in &domain.tools {
+                self.tool_registry.register(tool.clone()).await?;
+                workflow_executor.register_tool(tool.clone()).await;
+            }
+        }
 
         let platform = self.platform.unwrap_or(Platform::current());
 
@@ -232,6 +294,7 @@ impl AppBuilder {
             workflow_executor,
             platform,
             trace_context: self.trace_context,
+            domain_pack: merged_domain_pack,
         })
     }
 }
@@ -268,6 +331,8 @@ pub struct App {
     pub platform: Platform,
     /// Trace context (optional — for trajectory logging).
     pub trace_context: Option<TraceContext>,
+    /// Domain pack (optional — for domain-specific configuration).
+    pub domain_pack: Option<Arc<MergedDomainPack>>,
 }
 
 impl App {
@@ -280,6 +345,19 @@ impl App {
     pub async fn register_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
         self.tool_registry.register(tool.clone()).await?;
         self.workflow_executor.register_tool(tool).await;
+        Ok(())
+    }
+
+    /// Register all tools from the domain pack.
+    ///
+    /// This is called automatically after build() when domain packs are configured.
+    /// It registers domain tools and applies tool decorators.
+    pub async fn register_domain_tools(&self) -> Result<()> {
+        if let Some(domain) = &self.domain_pack {
+            for tool in &domain.tools {
+                self.register_tool(tool.clone()).await?;
+            }
+        }
         Ok(())
     }
 
@@ -317,6 +395,11 @@ impl App {
     pub fn trace_context(&self) -> Option<&TraceContext> {
         self.trace_context.as_ref()
     }
+
+    /// Get the domain pack.
+    pub fn domain_pack(&self) -> Option<&Arc<MergedDomainPack>> {
+        self.domain_pack.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +415,7 @@ mod tests {
             .auto_approval_gate()
             .default_parser()
             .build()
+            .await
             .expect("Build should succeed");
 
         assert!(!app.has_provider()); // No provider set
@@ -343,6 +427,7 @@ mod tests {
         let app = AppBuilder::new()
             .auto_approval_gate()
             .build()
+            .await
             .expect("Build should succeed");
 
         app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
@@ -360,6 +445,7 @@ mod tests {
         let app = AppBuilder::new()
             .auto_approval_gate()
             .build()
+            .await
             .expect("Build should succeed");
 
         let mut session = app.create_session();
@@ -377,6 +463,7 @@ mod tests {
         let app = AppBuilder::new()
             .blocking_approval_gate()
             .build()
+            .await
             .expect("Build should succeed");
 
         app.register_tool(Arc::new(oneai_tool::ShellTool::new())).await.unwrap();
@@ -398,6 +485,7 @@ mod tests {
             .auto_approval_gate()
             .persistence(persistence)
             .build()
+            .await
             .expect("Build should succeed");
 
         let session = app.create_session();
@@ -416,6 +504,7 @@ mod tests {
         let app = AppBuilder::new()
             .platform_approval_gate(gate)
             .build()
+            .await
             .expect("Build should succeed");
 
         // Stub auto-approves, so tools should work
@@ -437,6 +526,7 @@ mod tests {
         let app = AppBuilder::new()
             .platform_adapter(adapter)
             .build()
+            .await
             .expect("Build should succeed");
 
         // Platform should be Android (set by the adapter)

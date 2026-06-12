@@ -1,0 +1,18 @@
+[package]
+name = "oneai-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Domain Pack system — pluggable, declarative, composable domain configuration for OneAI agents"
+
+[dependencies]
+oneai-core = { workspace = true }
+oneai-tool = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }

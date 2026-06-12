@@ -20,6 +20,7 @@ oneai-parser = { workspace = true }
 oneai-skill = { workspace = true }
 oneai-persistence = { workspace = true }
 oneai-memory = { workspace = true }
+oneai-domain = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }

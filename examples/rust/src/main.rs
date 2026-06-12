@@ -47,6 +47,7 @@ async fn main() {
         .default_parser()
         .memory_manager(Arc::new(MemoryManager::new()))
         .build()
+        .await
         .expect("App build should succeed");
     println!("   ✓ App built successfully");
     println!();
@@ -118,6 +119,7 @@ async fn main() {
         .default_parser()
         .memory_manager(Arc::new(MemoryManager::new()))
         .build()
+        .await
         .expect("App build should succeed");
 
     app2.register_tool(Arc::new(ShellTool::new())).await.unwrap();
@@ -153,6 +155,7 @@ async fn main() {
         .approval_gate(Arc::new(manual_gate))
         .default_parser()
         .build()
+        .await
         .expect("Manual app build should succeed");
 
     app3.register_tool(Arc::new(ShellTool::new())).await.unwrap();
@@ -187,6 +190,7 @@ async fn main() {
         .approval_gate(Arc::new(manual_gate2))
         .default_parser()
         .build()
+        .await
         .expect("Manual app build should succeed");
 
     app4.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();

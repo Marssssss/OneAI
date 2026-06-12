@@ -14,6 +14,7 @@ members = [
     "crates/oneai-persistence",
     "crates/oneai-app",
     "crates/oneai-uniffi",
+    "crates/oneai-domain",
     "crates/oneai-platform-desktop",
     "crates/oneai-platform-android",
     "crates/oneai-platform-ios",
@@ -91,3 +92,4 @@ oneai-platform-android = { path = "crates/oneai-platform-android" }
 oneai-platform-ios = { path = "crates/oneai-platform-ios" }
 oneai-platform-harmony = { path = "crates/oneai-platform-harmony" }
 oneai-trace = { path = "crates/oneai-trace" }
+oneai-domain = { path = "crates/oneai-domain" }

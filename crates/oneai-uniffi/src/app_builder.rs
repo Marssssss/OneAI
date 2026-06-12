@@ -72,9 +72,13 @@ impl OneAIAppBuilder {
     }
 
     /// Build the application.
-    pub fn build(self: Arc<Self>) -> Result<Arc<OneAIApp>, OneAIErrorView> {
+    ///
+    /// This is async because domain pack tools are eagerly registered
+    /// at build time, which requires async tool registry operations.
+    pub async fn build(self: Arc<Self>) -> Result<Arc<OneAIApp>, OneAIErrorView> {
         let builder = self.take_inner();
         builder.build()
+            .await
             .map(|app| Arc::new(OneAIApp { inner: Arc::new(app) }))
             .map_err(OneAIErrorView::from)
     }
@@ -103,7 +107,7 @@ mod tests {
         let builder = Arc::new(OneAIAppBuilder::new());
         let builder = builder.auto_approval_gate();
         let builder = builder.default_parser();
-        let app = builder.build().expect("Build should succeed");
+        let app = builder.build().await.expect("Build should succeed");
 
         assert!(!app.inner.has_provider());
     }
@@ -113,7 +117,7 @@ mod tests {
         let builder = Arc::new(OneAIAppBuilder::new());
         let builder = builder.blocking_approval_gate();
         let builder = builder.default_parser();
-        let app = builder.build().expect("Build should succeed");
+        let app = builder.build().await.expect("Build should succeed");
 
         app.inner.register_tool(Arc::new(oneai_tool::ShellTool::new())).await.unwrap();
 
@@ -127,7 +131,7 @@ mod tests {
         let builder = Arc::new(OneAIAppBuilder::new());
         let builder = builder.auto_approval_gate();
         let builder = builder.persistence("/tmp/oneai_uniffi_test".to_string());
-        let app = builder.build().expect("Build should succeed");
+        let app = builder.build().await.expect("Build should succeed");
 
         let session = app.inner.create_session();
         let checkpoint_id = session.save_checkpoint().await.unwrap();

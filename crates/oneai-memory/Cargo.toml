@@ -16,3 +16,4 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 oneai-core = { workspace = true }
 oneai-provider = { workspace = true }
+oneai-domain = { workspace = true }

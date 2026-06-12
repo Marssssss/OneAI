@@ -25,6 +25,8 @@ use oneai_core::{
 use oneai_core::error::Result;
 use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool};
 
+use oneai_domain::{MergedDomainPack, ToolDecorator, DecoratedTool, PermissionAction};
+
 use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 use crate::context_assembler::ContextAssembler;
 use crate::streaming::IncrementalStreamParser;
@@ -284,10 +286,11 @@ pub struct AgentLoop {
     skill_selector: Arc<oneai_skill::SkillSelector>,
     context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
     sub_agent_factory: Arc<dyn SubAgentFactory>,
-    context_assembler: ContextAssembler,
+    context_assembler: Arc<tokio::sync::RwLock<ContextAssembler>>,
     stream_parser: IncrementalStreamParser,
     checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
     config: AgentLoopConfig,
+    domain_pack: Option<Arc<MergedDomainPack>>,
 }
 
 impl AgentLoop {
@@ -306,7 +309,29 @@ impl AgentLoop {
         config: AgentLoopConfig,
     ) -> Self {
         Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
-            sub_agent_factory, context_assembler, stream_parser, checkpoint_manager, config }
+            sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
+            stream_parser, checkpoint_manager, config, domain_pack: None }
+    }
+
+    /// Create a new AgentLoop with a domain pack for domain-specific configuration.
+    pub fn with_domain_pack(
+        provider: Arc<dyn LlmProvider>,
+        tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+        parser: Arc<dyn OutputParser>,
+        approval_gate: Arc<dyn ApprovalGate>,
+        skill_selector: Arc<oneai_skill::SkillSelector>,
+        context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
+        sub_agent_factory: Arc<dyn SubAgentFactory>,
+        context_assembler: ContextAssembler,
+        stream_parser: IncrementalStreamParser,
+        checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
+        config: AgentLoopConfig,
+        domain_pack: Arc<MergedDomainPack>,
+    ) -> Self {
+        Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
+            sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
+            stream_parser, checkpoint_manager, config,
+            domain_pack: Some(domain_pack) }
     }
 
     /// Run the Agentic Loop with an observer for real-time UI updates.
@@ -358,8 +383,12 @@ impl AgentLoop {
             state.iterations += 1;
             observer.on_iteration_start(state.iterations, state.active_paradigm);
 
-            // 1. Assemble context
-            let assembled = self.context_assembler.assemble(&state)?;
+            // 1. Refresh domain context sources + assemble context
+            {
+                let mut ca = self.context_assembler.write().await;
+                ca.refresh_sources().await?;
+            }
+            let assembled = self.context_assembler.read().await.assemble(&state)?;
             if self.context_budget.needs_compression(&assembled) {
                 state.conversation = self.context_budget.compress(assembled).await?;
             }
@@ -503,63 +532,108 @@ impl AgentLoop {
     async fn execute_tool_calls(&self, calls: Vec<ToolCallRequest>) -> Result<Vec<ToolCallResult>> {
         let tools_map = self.tools.read().await;
         let mut results = Vec::new();
-        let futures: Vec<_> = calls.into_iter().map(|call| {
+
+        // Pre-check domain PermissionProfile for each call
+        let domain_permission_checks: Vec<Option<PermissionAction>> = calls.iter().map(|call| {
+            self.domain_pack.as_ref().map(|dp| dp.resolve_permission(&call.name, &call.args))
+        }).collect();
+
+        let futures: Vec<_> = calls.into_iter().enumerate().map(|(idx, call)| {
             let tool_name = call.name.clone();
             let call_id = call.id.clone();
             let args = call.args.clone();
             let tool_opt = tools_map.get(&tool_name).cloned();
             let approval_gate = self.approval_gate.clone();
+            let perm_check = domain_permission_checks[idx].clone();
             async move {
-                match tool_opt {
-                    Some(tool) => {
-                        let perm_level = oneai_core::PermissionLevel::from_risk_level(tool.risk_level());
-                        if perm_level == oneai_core::PermissionLevel::Full {
-                            let request = oneai_core::ApprovalRequest {
-                                tool_name: tool_name.clone(),
-                                args: args.clone(),
-                                risk_level: tool.risk_level(),
-                                permission_level: Some(perm_level),
-                                justification: format!("Full-permission tool '{}' requires approval", tool_name),
-                            };
-                            match approval_gate.request_approval(request).await {
-                                Ok(oneai_core::ApprovalResponse::Approved { .. }) => {
+                // Step 1: Check domain PermissionProfile (highest priority)
+                match perm_check {
+                    Some(PermissionAction::Deny { reason }) => {
+                        Ok(ToolCallResult { call_id, output: ToolOutput {
+                            success: false, content: String::new(),
+                            error: Some(format!("Denied by domain policy: {}", reason)),
+                        }})
+                    }
+                    Some(PermissionAction::AutoApprove) => {
+                        // Domain says auto-approve — skip approval gate
+                        match tool_opt {
+                            Some(tool) => {
+                                let output = tool.execute(args).await?;
+                                Ok::<ToolCallResult, oneai_core::error::OneAIError>(ToolCallResult { call_id, output })
+                            }
+                            None => Ok(ToolCallResult { call_id, output: ToolOutput {
+                                success: false, content: String::new(),
+                                error: Some(format!("Tool '{}' not found", tool_name)),
+                            }}),
+                        }
+                    }
+                    Some(PermissionAction::RequireConfirmation) => {
+                        // Domain says always require confirmation
+                        match tool_opt {
+                            Some(tool) => {
+                                let request = oneai_core::ApprovalRequest {
+                                    tool_name: tool_name.clone(),
+                                    args: args.clone(),
+                                    risk_level: oneai_core::RiskLevel::High,
+                                    permission_level: Some(oneai_core::PermissionLevel::Full),
+                                    justification: format!("Domain policy requires confirmation for '{}'", tool_name),
+                                };
+                                Self::handle_approval(approval_gate, request, tool, args, call_id).await
+                            }
+                            None => Ok(ToolCallResult { call_id, output: ToolOutput {
+                                success: false, content: String::new(),
+                                error: Some(format!("Tool '{}' not found", tool_name)),
+                            }}),
+                        }
+                    }
+                    Some(PermissionAction::UseDefaultPermission { level }) => {
+                        // Domain provides a specific level — use it
+                        match tool_opt {
+                            Some(tool) => {
+                                if level == oneai_core::PermissionLevel::Full {
+                                    let request = oneai_core::ApprovalRequest {
+                                        tool_name: tool_name.clone(),
+                                        args: args.clone(),
+                                        risk_level: tool.risk_level(),
+                                        permission_level: Some(level),
+                                        justification: format!("Full-permission tool '{}' requires approval", tool_name),
+                                    };
+                                    Self::handle_approval(approval_gate, request, tool, args, call_id).await
+                                } else {
                                     let output = tool.execute(args).await?;
                                     Ok::<ToolCallResult, oneai_core::error::OneAIError>(ToolCallResult { call_id, output })
                                 }
-                                Ok(oneai_core::ApprovalResponse::Denied { reason }) => {
-                                    Ok(ToolCallResult { call_id, output: ToolOutput {
-                                        success: false, content: String::new(),
-                                        error: Some(format!("Denied: {}", reason)),
-                                    }})
-                                }
-                                Ok(oneai_core::ApprovalResponse::Modified { args: modified_args }) => {
-                                    let output = tool.execute(modified_args).await?;
-                                    Ok(ToolCallResult { call_id, output })
-                                }
-                                Ok(oneai_core::ApprovalResponse::Observe { observation }) => {
-                                    Ok(ToolCallResult { call_id, output: ToolOutput {
-                                        success: false,
-                                        content: format!("Observe: {}", observation),
-                                        error: Some("Execution paused for observation".to_string()),
-                                    }})
-                                }
-                                Err(e) => {
-                                    Ok(ToolCallResult { call_id, output: ToolOutput {
-                                        success: false, content: String::new(),
-                                        error: Some(format!("Approval error: {}", e)),
-                                    }})
-                                }
                             }
-                        } else {
-                            let output = tool.execute(args).await?;
-                            Ok(ToolCallResult { call_id, output })
+                            None => Ok(ToolCallResult { call_id, output: ToolOutput {
+                                success: false, content: String::new(),
+                                error: Some(format!("Tool '{}' not found", tool_name)),
+                            }}),
                         }
                     }
                     None => {
-                        Ok(ToolCallResult { call_id, output: ToolOutput {
-                            success: false, content: String::new(),
-                            error: Some(format!("Tool '{}' not found", tool_name)),
-                        }})
+                        // No domain rule — fall back to tool's risk_level()
+                        match tool_opt {
+                            Some(tool) => {
+                                let perm_level = oneai_core::PermissionLevel::from_risk_level(tool.risk_level());
+                                if perm_level == oneai_core::PermissionLevel::Full {
+                                    let request = oneai_core::ApprovalRequest {
+                                        tool_name: tool_name.clone(),
+                                        args: args.clone(),
+                                        risk_level: tool.risk_level(),
+                                        permission_level: Some(perm_level),
+                                        justification: format!("Full-permission tool '{}' requires approval", tool_name),
+                                    };
+                                    Self::handle_approval(approval_gate, request, tool, args, call_id).await
+                                } else {
+                                    let output = tool.execute(args).await?;
+                                    Ok(ToolCallResult { call_id, output })
+                                }
+                            }
+                            None => Ok(ToolCallResult { call_id, output: ToolOutput {
+                                success: false, content: String::new(),
+                                error: Some(format!("Tool '{}' not found", tool_name)),
+                            }}),
+                        }
                     }
                 }
             }
@@ -701,14 +775,90 @@ impl AgentLoop {
 
     async fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
-        tools_map.values().map(|tool| ToolDefinition {
-            name: tool.name().to_string(),
-            description: tool.description().to_string(),
-            parameters_schema: tool.parameters_schema(),
-        }).collect()
+
+        // Apply domain pack tool decorators if present
+        if let Some(domain) = &self.domain_pack {
+            tools_map.values().map(|tool| {
+                // Check if there's a decorator for this tool
+                let decorator = domain.find_decorator(tool.name());
+                match decorator {
+                    Some(dec) => {
+                        // Use decorator overrides
+                        let description = dec.description_override.as_deref()
+                            .unwrap_or_else(|| tool.description());
+                        // Merge parameters schema with extra_params
+                        let schema = if dec.extra_params.is_null() || dec.extra_params == serde_json::json!({}) {
+                            tool.parameters_schema()
+                        } else {
+                            oneai_domain::merge_tool_schemas(
+                                tool.parameters_schema(),
+                                dec.extra_params.clone(),
+                            )
+                        };
+                        ToolDefinition {
+                            name: tool.name().to_string(),
+                            description: description.to_string(),
+                            parameters_schema: schema,
+                        }
+                    }
+                    None => ToolDefinition {
+                        name: tool.name().to_string(),
+                        description: tool.description().to_string(),
+                        parameters_schema: tool.parameters_schema(),
+                    },
+                }
+            }).collect()
+        } else {
+            // No domain pack — use raw tool definitions
+            tools_map.values().map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters_schema: tool.parameters_schema(),
+            }).collect()
+        }
     }
 
     fn active_skill_descriptors(&self) -> Result<Vec<oneai_core::SkillDescriptor>> {
         Ok(Vec::new())
+    }
+
+    /// Handle the approval gate interaction for a tool call.
+    async fn handle_approval(
+        approval_gate: Arc<dyn ApprovalGate>,
+        request: oneai_core::ApprovalRequest,
+        tool: Arc<dyn Tool>,
+        args: serde_json::Value,
+        call_id: String,
+    ) -> Result<ToolCallResult> {
+        match approval_gate.request_approval(request).await {
+            Ok(oneai_core::ApprovalResponse::Approved { modified_args }) => {
+                let final_args = modified_args.unwrap_or(args);
+                let output = tool.execute(final_args).await?;
+                Ok(ToolCallResult { call_id, output })
+            }
+            Ok(oneai_core::ApprovalResponse::Denied { reason }) => {
+                Ok(ToolCallResult { call_id, output: ToolOutput {
+                    success: false, content: String::new(),
+                    error: Some(format!("Denied: {}", reason)),
+                }})
+            }
+            Ok(oneai_core::ApprovalResponse::Modified { args: modified_args }) => {
+                let output = tool.execute(modified_args).await?;
+                Ok(ToolCallResult { call_id, output })
+            }
+            Ok(oneai_core::ApprovalResponse::Observe { observation }) => {
+                Ok(ToolCallResult { call_id, output: ToolOutput {
+                    success: false,
+                    content: format!("Observe: {}", observation),
+                    error: Some("Execution paused for observation".to_string()),
+                }})
+            }
+            Err(e) => {
+                Ok(ToolCallResult { call_id, output: ToolOutput {
+                    success: false, content: String::new(),
+                    error: Some(format!("Approval error: {}", e)),
+                }})
+            }
+        }
     }
 }

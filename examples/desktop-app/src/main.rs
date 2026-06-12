@@ -54,6 +54,7 @@ async fn main() {
         .memory_manager(Arc::new(MemoryManager::new()))
         .persistence(Arc::new(FilePersistence::new("/tmp/oneai_desktop_demo")))
         .build()
+        .await
         .expect("App build should succeed");
     println!("   ✓ App built successfully");
     println!();
@@ -140,6 +141,7 @@ async fn main() {
         .platform_approval_gate(Arc::new(manual_gate))
         .default_parser()
         .build()
+        .await
         .expect("Manual app build should succeed");
 
     manual_app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();

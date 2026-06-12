@@ -39,6 +39,7 @@ pub struct AppSession {
 /// Shared resources for all sessions.
 struct AppResources {
     tool_executor: Arc<ToolExecutor>,
+    tool_registry: Arc<oneai_tool::ToolRegistry>,
     approval_gate: Arc<dyn ApprovalGate>,
     memory_manager: Arc<MemoryManager>,
     rag_index: Option<Arc<DocumentIndex>>,
@@ -47,6 +48,7 @@ struct AppResources {
     provider: Option<Arc<dyn oneai_core::traits::LlmProvider>>,
     parser: Arc<dyn oneai_core::traits::OutputParser>,
     skill_selector: Arc<oneai_skill::SkillSelector>,
+    domain_pack: Option<Arc<oneai_domain::MergedDomainPack>>,
 }
 
 impl AppSession {
@@ -69,6 +71,7 @@ impl AppSession {
         Self {
             app: Arc::new(AppResources {
                 tool_executor: app.tool_executor.clone(),
+                tool_registry: app.tool_registry.clone(),
                 approval_gate: app.approval_gate.clone(),
                 memory_manager: app.memory_manager.clone(),
                 rag_index: app.rag_index.clone(),
@@ -77,6 +80,7 @@ impl AppSession {
                 provider: app.provider.clone(),
                 parser: app.parser.clone(),
                 skill_selector: app.skill_selector.clone(),
+                domain_pack: app.domain_pack.clone(),
             }),
             conversation,
             session_id,
@@ -323,32 +327,88 @@ impl AppSession {
             conversation.add_message(Message::system(memory_context));
         }
 
+        // Build context assembler (with domain sources if available)
+        let context_assembler = if let Some(domain) = &self.app.domain_pack {
+            oneai_agent::ContextAssembler::with_context_sources(domain.context_sources.clone())
+        } else {
+            oneai_agent::ContextAssembler::new()
+        };
+
         // Build the AgentLoop from session resources
-        let agent_loop = AgentLoop::new(
-            provider.clone(),
-            self.app.tool_executor.tools_map(),
-            self.app.parser.clone(),
-            self.app.approval_gate.clone(),
-            self.app.skill_selector.clone(),
-            Arc::new(oneai_core::budget::ContextBudgetManager::new(
-                oneai_core::budget::TokenBudget::new(100000),
-                oneai_core::budget::BudgetAllocation::default(),
-                Arc::new(oneai_core::budget::NoopCompressor),
-            )),
-            Arc::new(oneai_agent::DefaultSubAgentFactory::new(
-                provider.clone(),
-                self.app.parser.clone(),
-                self.app.approval_gate.clone(),
-                self.app.tool_executor.tools_map(),
-            )),
-            oneai_agent::ContextAssembler::new(),
-            oneai_agent::IncrementalStreamParser::new(),
-            None, // checkpoint manager — optional
-            AgentLoopConfig {
+        let agent_loop = if let Some(domain) = &self.app.domain_pack {
+            let config = AgentLoopConfig {
+                system_prompt: if domain.system_prompt_template.is_empty() {
+                    AgentLoopConfig::default().system_prompt
+                } else {
+                    domain.system_prompt_template.clone()
+                },
                 use_streaming: true,
                 ..AgentLoopConfig::default()
-            },
-        );
+            };
+            // Use the real ContextCompressor with the domain's CompressionTemplate,
+            // so that compression preserves domain-critical information.
+            let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> =
+                Arc::new(oneai_memory::ContextCompressor::with_template(
+                    80000,  // threshold_tokens — trigger compression at 80% of budget
+                    6,      // keep_recent_turns
+                    provider.clone(),
+                    domain.compression_template.clone(),
+                ));
+            AgentLoop::with_domain_pack(
+                provider.clone(),
+                self.app.tool_executor.tools_map(),
+                self.app.parser.clone(),
+                self.app.approval_gate.clone(),
+                self.app.skill_selector.clone(),
+                Arc::new(oneai_core::budget::ContextBudgetManager::new(
+                    oneai_core::budget::TokenBudget::new(100000),
+                    oneai_core::budget::BudgetAllocation::default(),
+                    compressor,
+                )),
+                Arc::new(oneai_agent::DefaultSubAgentFactory::new(
+                    provider.clone(),
+                    self.app.parser.clone(),
+                    self.app.approval_gate.clone(),
+                    self.app.tool_executor.tools_map(),
+                )),
+                context_assembler,
+                oneai_agent::IncrementalStreamParser::new(),
+                None, // checkpoint manager — optional
+                config,
+                domain.clone(),
+            )
+        } else {
+            let config = AgentLoopConfig {
+                use_streaming: true,
+                ..AgentLoopConfig::default()
+            };
+            // No domain pack — use NoopCompressor as a fallback.
+            // Without a domain's CompressionTemplate, real compression would use
+            // a generic prompt, which is less useful. The NoopCompressor ensures
+            // the loop still works without a provider for tool-only/workflow-only usage.
+            AgentLoop::new(
+                provider.clone(),
+                self.app.tool_executor.tools_map(),
+                self.app.parser.clone(),
+                self.app.approval_gate.clone(),
+                self.app.skill_selector.clone(),
+                Arc::new(oneai_core::budget::ContextBudgetManager::new(
+                    oneai_core::budget::TokenBudget::new(100000),
+                    oneai_core::budget::BudgetAllocation::default(),
+                    Arc::new(oneai_core::budget::NoopCompressor),
+                )),
+                Arc::new(oneai_agent::DefaultSubAgentFactory::new(
+                    provider.clone(),
+                    self.app.parser.clone(),
+                    self.app.approval_gate.clone(),
+                    self.app.tool_executor.tools_map(),
+                )),
+                context_assembler,
+                oneai_agent::IncrementalStreamParser::new(),
+                None, // checkpoint manager — optional
+                config,
+            )
+        };
 
         // Run with full conversation history (multi-turn)
         let result = agent_loop.run_with_conversation(conversation, task, observer).await?;

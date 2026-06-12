@@ -26,6 +26,7 @@ oneai-workflow = { workspace = true }
 oneai-scheduler = { workspace = true }
 oneai-persistence = { workspace = true }
 oneai-trace = { workspace = true }
+oneai-domain = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

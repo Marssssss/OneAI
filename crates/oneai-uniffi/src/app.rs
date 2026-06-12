@@ -113,7 +113,7 @@ mod tests {
     async fn test_app_create_session() {
         let builder = Arc::new(OneAIAppBuilder::new());
         let builder = builder.auto_approval_gate();
-        let app = builder.build().expect("Build should succeed");
+        let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();
         assert!(!session.session_id().is_empty());
@@ -123,7 +123,7 @@ mod tests {
     async fn test_session_send_message() {
         let builder = Arc::new(OneAIAppBuilder::new());
         let builder = builder.auto_approval_gate();
-        let app = builder.build().expect("Build should succeed");
+        let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();
         session.send_user_message("Hello from UniFFI!".to_string()).await.unwrap();
@@ -133,7 +133,7 @@ mod tests {
     async fn test_session_execute_tool() {
         let builder = Arc::new(OneAIAppBuilder::new());
         let builder = builder.auto_approval_gate();
-        let app = builder.build().expect("Build should succeed");
+        let app = builder.build().await.expect("Build should succeed");
 
         let calc_wrapper = Arc::new(OneAIToolWrapper {
             inner: Arc::new(oneai_tool::CalculatorTool::new()),
@@ -150,7 +150,7 @@ mod tests {
     async fn test_session_retrieve_memory() {
         let builder = Arc::new(OneAIAppBuilder::new());
         let builder = builder.auto_approval_gate();
-        let app = builder.build().expect("Build should succeed");
+        let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();
         session.send_user_message("Rust is a programming language".to_string()).await.unwrap();

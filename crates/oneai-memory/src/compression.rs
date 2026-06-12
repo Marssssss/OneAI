@@ -4,17 +4,25 @@
 //! 1. Keeps the most recent N turns intact
 //! 2. Summarizes older turns into a single compressed entry
 //! 3. Uses an LLM provider for the summarization
+//!
+//! Domain-specific behavior: when a CompressionTemplate is provided,
+//! the summarization prompt follows the domain's preservation priorities,
+//! producing structured summaries that preserve critical domain information.
 
 use std::sync::Arc;
 
 use oneai_core::{Conversation, InferenceRequest, Message, MemoryEntry, Role};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
+use oneai_core::budget::{ContextCompressorTrait, CompressedResult as CoreCompressedResult};
 
 /// Context compressor that uses an LLM to summarize older conversation turns.
 ///
 /// When the conversation exceeds a token threshold, the compressor keeps
 /// the most recent turns intact and summarizes older ones into a single entry.
+///
+/// Implements `oneai_core::budget::ContextCompressorTrait` so it can be injected
+/// into `ContextBudgetManager`, replacing the default `NoopCompressor`.
 pub struct ContextCompressor {
     /// Token threshold for triggering compression.
     threshold_tokens: usize,
@@ -22,6 +30,8 @@ pub struct ContextCompressor {
     keep_recent_turns: usize,
     /// LLM provider for summarization.
     summarizer: Arc<dyn LlmProvider>,
+    /// Domain-specific compression template (optional).
+    compression_template: Option<oneai_domain::CompressionTemplate>,
 }
 
 impl ContextCompressor {
@@ -31,6 +41,22 @@ impl ContextCompressor {
             threshold_tokens,
             keep_recent_turns,
             summarizer,
+            compression_template: None,
+        }
+    }
+
+    /// Create a compressor with a domain-specific compression template.
+    pub fn with_template(
+        threshold_tokens: usize,
+        keep_recent_turns: usize,
+        summarizer: Arc<dyn LlmProvider>,
+        template: oneai_domain::CompressionTemplate,
+    ) -> Self {
+        Self {
+            threshold_tokens,
+            keep_recent_turns,
+            summarizer,
+            compression_template: Some(template),
         }
     }
 
@@ -101,14 +127,24 @@ impl ContextCompressor {
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Request summarization from the LLM
-        let mut summary_conv = Conversation::new();
-        summary_conv.add_message(Message::system(
+        // Determine summarization prompt — use domain template if present
+        let task_desc = conversation.messages.iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.text_content())
+            .unwrap_or_else(|| "unknown task".to_string());
+
+        let summarization_prompt = if let Some(template) = &self.compression_template {
+            template.build_summarization_prompt(&task_desc)
+        } else {
             "You are a conversation summarizer. Summarize the conversation below \
             into a concise paragraph that captures the key facts, decisions, and \
             context needed to continue the conversation. Focus on information that \
-            would be needed for follow-up questions. Be concise but complete."
-        ));
+            would be needed for follow-up questions. Be concise but complete.".to_string()
+        };
+
+        // Request summarization from the LLM
+        let mut summary_conv = Conversation::new();
+        summary_conv.add_message(Message::system(summarization_prompt));
         summary_conv.add_message(Message::user(format!(
             "Summarize this conversation:\n\n{}", older_text
         )));
@@ -167,6 +203,36 @@ impl ContextCompressor {
             compressed_conversation: compressed,
             summary: Some(summary_text),
             removed_entries,
+        })
+    }
+}
+
+// ─── Implement core ContextCompressorTrait ────────────────────────────────────────
+
+/// Bridge between oneai-memory::ContextCompressor and oneai_core::budget::ContextCompressorTrait.
+///
+/// This allows the real ContextCompressor (with domain-specific CompressionTemplate)
+/// to be injected into ContextBudgetManager, replacing the default NoopCompressor.
+#[async_trait::async_trait]
+impl ContextCompressorTrait for ContextCompressor {
+    fn estimate_tokens(&self, conversation: &Conversation) -> usize {
+        Self::estimate_tokens(conversation)
+    }
+
+    fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
+        msg.content.iter()
+            .filter_map(|block| match block {
+                oneai_core::ContentBlock::Text { text } => Some(text.len()),
+                _ => Some(50),
+            })
+            .sum::<usize>() / 4 + 20  // overhead per message
+    }
+
+    async fn compress(&self, conversation: &Conversation) -> Result<CoreCompressedResult> {
+        let result = self.compress(conversation).await?;
+        Ok(CoreCompressedResult {
+            compressed_conversation: result.compressed_conversation,
+            summary: result.summary,
         })
     }
 }
