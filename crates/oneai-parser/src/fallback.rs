@@ -69,6 +69,7 @@ impl FallbackLoop {
                 top_p: original_request.top_p,
                 stop_sequences: original_request.stop_sequences.clone(),
                 constrained_output: original_request.constrained_output.clone(),
+                thinking_budget: None,
                 metadata: original_request.metadata.clone(),
             };
 

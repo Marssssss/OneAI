@@ -4,7 +4,7 @@
 //! - Left sidebar with tools list and session info
 //! - Right panel: header bar, scrollable chat area, input box at bottom
 //! - Streaming/typewriter effect for assistant responses
-//! - Enter=send, Ctrl+Enter=newline, Tab=toggle sidebar, Esc=quit
+//! - Enter=send, Ctrl+Enter=newline, Tab=toggle sidebar, Esc=vim, Ctrl+C=quit
 //!
 //! Usage:
 //!   # No LLM — tool-only mode
@@ -48,6 +48,15 @@ fn build_model_config_from_env() -> Option<ModelConfig> {
 
 fn main() {
     tracing_subscriber::fmt::init();
+
+    // Check if we're running in a TTY (interactive terminal)
+    // If not, we can't enter raw mode / alternate screen, so show an error
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        eprintln!("Error: OneAI TUI requires an interactive terminal (TTY).");
+        eprintln!("Please run this in a terminal, not in a pipe or script.");
+        std::process::exit(1);
+    }
 
     let provider_config = build_model_config_from_env();
 

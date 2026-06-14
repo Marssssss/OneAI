@@ -67,6 +67,23 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Called for each text fragment during streaming inference.
     /// Enables typewriter effect in the UI.
     fn on_stream_chunk(&self, _text: &str) {}
+
+    /// Called when the model produces thinking/reasoning content (extended thinking).
+    /// Each call contains a fragment of the thinking text (streaming).
+    fn on_thinking(&self, _text: &str) {}
+
+    /// Called when an approval request is pending (high-risk tool).
+    /// The UI can display an approval card and await user response.
+    fn on_approval_request(&self, _request: &oneai_core::ApprovalRequest) {}
+
+    /// Called when the user responds to an approval request.
+    fn on_approval_response(&self, _response: &oneai_core::ApprovalResponse) {}
+
+    /// Called after each inference with token usage stats.
+    fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {}
+
+    /// Called when cost updates (cumulative session cost).
+    fn on_cost_update(&self, _cost: f64) {}
 }
 
 // ─── AgentDecision ──────────────────────────────────────────────────────────
@@ -182,7 +199,13 @@ impl LoopState {
     pub fn feed_tool_results(&mut self, results: Vec<ToolCallResult>) {
         for result in results {
             let content = if result.output.success {
-                result.output.content.clone()
+                if result.output.content.is_empty() {
+                    // Provide a meaningful default message for successful tools with no output
+                    // (e.g., mkdir, file write, etc. — commands that succeed silently)
+                    "Tool executed successfully (no output).".to_string()
+                } else {
+                    result.output.content.clone()
+                }
             } else {
                 format!("Error: {}", result.output.error.as_deref().unwrap_or("Unknown error"))
             };
@@ -245,16 +268,51 @@ pub struct AgentLoopResult {
 
 // ─── AgentLoopConfig ────────────────────────────────────────────────────────
 
+/// Pricing configuration per 1K tokens (in USD).
+///
+/// Allows the AgentLoop to compute session cost after each inference
+/// and notify the observer via `on_cost_update`.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelPricing {
+    /// Cost per 1K prompt tokens (USD).
+    pub prompt_per_1k: f64,
+    /// Cost per 1K completion tokens (USD).
+    pub completion_per_1k: f64,
+}
+
+impl Default for ModelPricing {
+    /// Default pricing: rough GPT-4 rates ($0.03/1K prompt, $0.06/1K completion).
+    fn default() -> Self {
+        Self {
+            prompt_per_1k: 0.03,
+            completion_per_1k: 0.06,
+        }
+    }
+}
+
+impl ModelPricing {
+    /// Compute cost for a given token usage.
+    pub fn compute_cost(&self, prompt_tokens: u32, completion_tokens: u32) -> f64 {
+        (prompt_tokens as f64 / 1000.0) * self.prompt_per_1k
+            + (completion_tokens as f64 / 1000.0) * self.completion_per_1k
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
     pub system_prompt: String,
     pub use_streaming: bool,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Token budget for extended thinking/reasoning (Anthropic budget_tokens, etc).
+    /// None = thinking disabled; Some(N) = enable thinking with N token budget.
+    pub thinking_budget: Option<u32>,
     pub hard_max_iterations: usize,
     pub auto_checkpoint: bool,
     pub inject_skills: bool,
     pub detect_env_changes: bool,
+    /// Pricing configuration for cost tracking.
+    pub pricing: ModelPricing,
 }
 
 impl Default for AgentLoopConfig {
@@ -268,10 +326,12 @@ impl Default for AgentLoopConfig {
             use_streaming: false,
             temperature: None,
             max_tokens: None,
+            thinking_budget: Some(10000),
             hard_max_iterations: 50,
             auto_checkpoint: true,
             inject_skills: true,
             detect_env_changes: true,
+            pricing: ModelPricing::default(),
         }
     }
 }
@@ -379,6 +439,9 @@ impl AgentLoop {
         observer: &dyn AgentLoopObserver,
     ) -> Result<AgentLoopResult> {
 
+        // Track cumulative session cost
+        let mut cumulative_cost: f64 = 0.0;
+
         while !state.is_complete() && state.iterations < self.config.hard_max_iterations {
             state.iterations += 1;
             observer.on_iteration_start(state.iterations, state.active_paradigm);
@@ -411,6 +474,7 @@ impl AgentLoop {
                 top_p: None,
                 stop_sequences: vec![],
                 constrained_output: None,
+                thinking_budget: self.config.thinking_budget,
                 metadata: HashMap::new(),
             };
 
@@ -421,30 +485,72 @@ impl AgentLoop {
                 self.provider.infer(request).await?
             };
 
+            // 4b. Notify observer of token usage and cost
+            observer.on_token_usage(response.usage.prompt_tokens, response.usage.completion_tokens);
+            cumulative_cost += self.config.pricing.compute_cost(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+            );
+            observer.on_cost_update(cumulative_cost);
+
             // 5. Parse decision
             let decision = self.parse_decision(&response)?;
 
             // 6. Execute decision + notify observer
+            // IMPORTANT: The assistant's response (containing tool calls, delegation, etc.)
+            // MUST be added to the conversation BEFORE any tool results, so that the
+            // OpenAI/Anthropic API format is valid: assistant message with tool_calls
+            // precedes tool result messages that reference those call_ids.
             match decision {
                 AgentDecision::DirectAnswer { text } => {
                     observer.on_direct_answer(&text);
+                    // Add assistant response to conversation
+                    state.conversation.add_message(Message::assistant(&text));
                     state.set_final_answer(text);
                 }
                 AgentDecision::ToolCalls { calls } => {
                     observer.on_tool_calls(&calls);
+                    // Add the assistant's tool-call message to conversation FIRST
+                    // (the model's response with tool calls must precede tool results)
+                    state.conversation.add_message(response.message.clone());
+                    // Now execute tools and feed results
                     let results = self.execute_tool_calls(calls).await?;
                     for r in &results {
                         observer.on_tool_result(&r.call_id, "", &r.output);
                     }
-                    state.feed_tool_results(results);
+
+                    // Check if any tool call was denied by the approval gate.
+                    // If so, stop the agent loop to prevent repeated permission requests.
+                    let has_denied = results.iter().any(|r|
+                        !r.output.success && r.output.error.as_deref().map_or(false, |e| e.starts_with("Denied"))
+                    );
+                    if has_denied {
+                        state.set_final_answer("Task stopped: a required tool call was denied by the user.".to_string());
+                        // Still feed results so the model sees the denial
+                        state.feed_tool_results(results);
+                    } else {
+                        state.feed_tool_results(results);
+                    }
                 }
                 AgentDecision::Delegate { task, agent_type, budget } => {
                     observer.on_delegate(&task, &agent_type);
+                    // For delegate/switch_paradigm, these are internal meta-commands,
+                    // not real tools. Convert the response to a plain text assistant
+                    // message (stripping the internal ToolCall blocks) to avoid
+                    // orphaned tool calls with no matching tool results.
+                    let text_content = response.message.text_content();
+                    if !text_content.is_empty() {
+                        state.conversation.add_message(Message::assistant(&text_content));
+                    }
                     let summary = self.spawn_sub_agent(task, agent_type, budget)?;
                     state.feed_sub_agent_result(summary);
                 }
                 AgentDecision::SwitchParadigm { paradigm } => {
                     observer.on_paradigm_switch(paradigm);
+                    let text_content = response.message.text_content();
+                    if !text_content.is_empty() {
+                        state.conversation.add_message(Message::assistant(&text_content));
+                    }
                     let result = self.run_paradigm(paradigm, &state)?;
                     state.active_paradigm = paradigm;
                     state.feed_paradigm_result(paradigm, result);
@@ -475,6 +581,7 @@ impl AgentLoop {
             fn on_paradigm_switch(&self, _: ParadigmKind) {}
             fn on_checkpoint(&self, _: usize) {}
             fn on_complete(&self, _: &AgentLoopResult) {}
+            fn on_thinking(&self, _: &str) {}
         }
         self.run_with_observer(task, &SilentObserver).await
     }
@@ -685,6 +792,7 @@ impl AgentLoop {
 
         // Accumulate text and tool calls from the stream
         let mut text_buffer = String::new();
+        let mut thinking_buffer = String::new();
         let mut tool_call_buffers: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, args_buffer)
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
@@ -716,6 +824,10 @@ impl AgentLoop {
                             current_tool_args.push_str(args);
                         }
                     }
+                    ContentBlock::Thinking { text } => {
+                        thinking_buffer.push_str(text);
+                        observer.on_thinking(text);
+                    }
                     _ => {}
                 }
             }
@@ -741,6 +853,9 @@ impl AgentLoop {
 
         // Build the final message from assembled content
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
+        if !thinking_buffer.is_empty() {
+            content_blocks.push(ContentBlock::Thinking { text: thinking_buffer });
+        }
         if !text_buffer.is_empty() {
             content_blocks.push(ContentBlock::Text { text: text_buffer });
         }

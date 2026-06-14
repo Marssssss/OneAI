@@ -175,6 +175,13 @@ impl LlmProvider for OpenAIProvider {
         // Parse tool calls from the response
         let mut content_blocks = vec![ContentBlock::Text { text: content_str.clone() }];
 
+        // Parse reasoning_content (DeepSeek and other models that support thinking)
+        if let Some(reasoning) = message_obj.get("reasoning_content").and_then(|r| r.as_str()) {
+            if !reasoning.is_empty() {
+                content_blocks.insert(0, ContentBlock::Thinking { text: reasoning.to_string() });
+            }
+        }
+
         if let Some(tool_calls) = message_obj.get("tool_calls").and_then(|tc| tc.as_array()) {
             for tc in tool_calls {
                 let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -219,6 +226,8 @@ impl LlmProvider for OpenAIProvider {
     ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
         let mut body = self.to_openai_request(&req);
         body["stream"] = Value::Bool(true);
+        // Request usage data in streaming response (OpenAI requires stream_options)
+        body["stream_options"] = serde_json::json!({"include_usage": true});
 
         let url = self.chat_url();
 
@@ -287,6 +296,12 @@ impl LlmProvider for OpenAIProvider {
                             let mut content_blocks = Vec::new();
                             if !content.is_empty() {
                                 content_blocks.push(ContentBlock::Text { text: content.to_string() });
+                            }
+
+                            // Parse reasoning_content in delta (DeepSeek streaming)
+                            let reasoning = delta.get("reasoning_content").and_then(|c| c.as_str()).unwrap_or("");
+                            if !reasoning.is_empty() {
+                                content_blocks.push(ContentBlock::Thinking { text: reasoning.to_string() });
                             }
 
                             // Parse tool calls from stream delta

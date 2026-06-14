@@ -52,6 +52,12 @@ pub enum ContentBlock {
         call_id: String,
         content: String,
     },
+
+    /// Thinking/reasoning content from extended thinking models (Anthropic, DeepSeek).
+    #[serde(rename = "thinking")]
+    Thinking {
+        text: String,
+    },
 }
 
 /// Base64 serialization helpers for byte arrays in ContentBlock::Image.
@@ -486,6 +492,13 @@ pub struct InferenceRequest {
     /// Whether to request constrained/structured output.
     #[serde(default)]
     pub constrained_output: Option<ConstrainedOutputConfig>,
+
+    /// Token budget for extended thinking/reasoning.
+    /// Anthropic uses this as `thinking.budget_tokens`; other providers may ignore it.
+    /// When `None`, thinking is disabled. When `Some(N)`, providers that support thinking
+    /// will allocate up to N tokens for the model's internal reasoning.
+    #[serde(default)]
+    pub thinking_budget: Option<u32>,
 
     /// Request metadata.
     #[serde(default)]

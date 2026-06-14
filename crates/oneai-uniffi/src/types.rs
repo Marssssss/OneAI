@@ -261,6 +261,10 @@ pub enum ContentBlockView {
         call_id: String,
         content: String,
     },
+    /// Thinking/reasoning content from extended thinking models.
+    Thinking {
+        text: String,
+    },
 }
 
 impl From<oneai_core::ContentBlock> for ContentBlockView {
@@ -274,6 +278,9 @@ impl From<oneai_core::ContentBlock> for ContentBlockView {
             },
             oneai_core::ContentBlock::ToolResult { call_id, content } => {
                 ContentBlockView::ToolResult { call_id, content }
+            },
+            oneai_core::ContentBlock::Thinking { text } => {
+                ContentBlockView::Thinking { text }
             },
         }
     }
@@ -290,6 +297,9 @@ impl From<ContentBlockView> for oneai_core::ContentBlock {
             },
             ContentBlockView::ToolResult { call_id, content } => {
                 oneai_core::ContentBlock::ToolResult { call_id, content }
+            },
+            ContentBlockView::Thinking { text } => {
+                oneai_core::ContentBlock::Thinking { text }
             },
         }
     }

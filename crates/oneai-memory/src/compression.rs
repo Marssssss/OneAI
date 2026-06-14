@@ -83,6 +83,7 @@ impl ContextCompressor {
                     oneai_core::ContentBlock::File { .. } => 50,
                     oneai_core::ContentBlock::ToolCall { name, args, .. } => name.len() / 4 + args.len() / 4 + 30,
                     oneai_core::ContentBlock::ToolResult { content, .. } => content.len() / 4 + 20,
+                    oneai_core::ContentBlock::Thinking { text } => text.len() / 4 + 20,
                 }
             }).sum::<usize>()
         }).sum()
@@ -157,6 +158,7 @@ impl ContextCompressor {
             top_p: None,
             stop_sequences: vec![],
             constrained_output: None,
+            thinking_budget: None,
             metadata: std::collections::HashMap::new(),
         };
 

@@ -153,6 +153,24 @@ impl AnthropicProvider {
             );
         }
 
+        // Enable extended thinking if budget is provided
+        if let Some(budget) = req.thinking_budget {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+            // When thinking is enabled, max_tokens must be >= budget_tokens + output tokens
+            // Increase max_tokens if it's too small
+            if let Some(max_tokens) = req.max_tokens {
+                if max_tokens < budget + 4096 {
+                    body["max_tokens"] = Value::Number((budget + 4096).into());
+                }
+            } else {
+                // Default max_tokens (4096) is too small for thinking; set to budget + 4096
+                body["max_tokens"] = Value::Number((budget + 4096).into());
+            }
+        }
+
         // Add tool definitions (Anthropic format)
         if !req.tools.is_empty() {
             let tools_json = req.tools.iter().map(|t| {
@@ -213,6 +231,10 @@ impl LlmProvider for AnthropicProvider {
                         let input = block.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
                         let args = input.to_string();
                         content_blocks.push(ContentBlock::ToolCall { id, name, args });
+                    }
+                    "thinking" => {
+                        let text = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                        content_blocks.push(ContentBlock::Thinking { text: text.to_string() });
                     }
                     _ => {}
                 }
@@ -275,6 +297,8 @@ impl LlmProvider for AnthropicProvider {
         tokio::spawn(async move {
             let stream = response.bytes_stream();
             let mut buffer = String::new();
+            // Track input_tokens from message_start event (Anthropic sends them there, not in deltas)
+            let mut prompt_tokens_from_start: u32 = 0;
 
             use eventsource_stream::Eventsource;
             let mut sse_stream = stream.eventsource();
@@ -298,6 +322,14 @@ impl LlmProvider for AnthropicProvider {
                             let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                             match event_type {
+                                "message_start" => {
+                                    // Capture input_tokens from the message_start event
+                                    let msg = json.get("message").unwrap_or(&Value::Null);
+                                    let usage_obj = msg.get("usage").unwrap_or(&Value::Null);
+                                    prompt_tokens_from_start = usage_obj.get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
+                                }
                                 "content_block_delta" => {
                                     let delta = json.get("delta").unwrap_or(&Value::Null);
                                     let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -319,6 +351,17 @@ impl LlmProvider for AnthropicProvider {
                                             // We accumulate partial JSON for tool calls
                                             // The full tool call data comes in content_block_start + content_block_delta events
                                             buffer.push_str(partial_json);
+                                        }
+                                        "thinking_delta" => {
+                                            let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                                            if !text.is_empty() {
+                                                let _ = tx.send(InferenceStreamChunk {
+                                                    content: vec![ContentBlock::Thinking { text: text.to_string() }],
+                                                    is_final: false,
+                                                    usage: None,
+                                                    model: model_name.clone(),
+                                                }).await;
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -364,10 +407,11 @@ impl LlmProvider for AnthropicProvider {
                                     let stop_reason = delta.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
 
                                     let usage_obj = json.get("usage").unwrap_or(&Value::Null);
+                                    let output_tokens = usage_obj.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                                     let usage = TokenUsage {
-                                        prompt_tokens: 0, // Not provided in stream deltas
-                                        completion_tokens: usage_obj.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                        total_tokens: usage_obj.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                        prompt_tokens: prompt_tokens_from_start,
+                                        completion_tokens: output_tokens,
+                                        total_tokens: prompt_tokens_from_start + output_tokens,
                                     };
 
                                     let _ = tx.send(InferenceStreamChunk {

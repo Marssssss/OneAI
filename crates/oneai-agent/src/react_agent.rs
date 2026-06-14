@@ -158,6 +158,7 @@ impl ReActAgent {
                 top_p: None,
                 stop_sequences: vec![],
                 constrained_output: None,
+                thinking_budget: None,
                 metadata: HashMap::new(),
             };
 
@@ -320,6 +321,7 @@ impl ReActAgent {
                 top_p: None,
                 stop_sequences: vec![],
                 constrained_output: None,
+                thinking_budget: None,
                 metadata: HashMap::new(),
             };
 
