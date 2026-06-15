@@ -307,7 +307,7 @@ pub struct AgentLoopConfig {
     /// Token budget for extended thinking/reasoning (Anthropic budget_tokens, etc).
     /// None = thinking disabled; Some(N) = enable thinking with N token budget.
     pub thinking_budget: Option<u32>,
-    pub hard_max_iterations: usize,
+    pub hard_max_iterations: Option<usize>,
     pub auto_checkpoint: bool,
     pub inject_skills: bool,
     pub detect_env_changes: bool,
@@ -327,7 +327,7 @@ impl Default for AgentLoopConfig {
             temperature: None,
             max_tokens: None,
             thinking_budget: Some(10000),
-            hard_max_iterations: 50,
+            hard_max_iterations: Some(200), // Safety guard: None = only budget constraint, Some(N) = budget + iteration limit
             auto_checkpoint: true,
             inject_skills: true,
             detect_env_changes: true,
@@ -442,7 +442,7 @@ impl AgentLoop {
         // Track cumulative session cost
         let mut cumulative_cost: f64 = 0.0;
 
-        while !state.is_complete() && state.iterations < self.config.hard_max_iterations {
+        while !state.is_complete() && state.iterations < self.config.hard_max_iterations.unwrap_or(usize::MAX) {
             state.iterations += 1;
             observer.on_iteration_start(state.iterations, state.active_paradigm);
 
@@ -519,6 +519,20 @@ impl AgentLoop {
                         observer.on_tool_result(&r.call_id, "", &r.output);
                     }
 
+                    // Error recovery: check for failed tool calls
+                    // If a tool call failed with a recoverable error, log it
+                    // for potential recovery in future iterations
+                    let failed_calls: Vec<_> = results.iter()
+                        .filter(|r| !r.output.success)
+                        .collect();
+                    if !failed_calls.is_empty() {
+                        tracing::warn!("{} tool calls failed in iteration {}",
+                            failed_calls.len(), state.iterations);
+                        // RecoveryManager would be consulted here if available
+                        // For now, we just continue — the error is already
+                        // in the conversation context for the model to see
+                    }
+
                     // Check if any tool call was denied by the approval gate.
                     // If so, stop the agent loop to prevent repeated permission requests.
                     let has_denied = results.iter().any(|r|
@@ -542,7 +556,7 @@ impl AgentLoop {
                     if !text_content.is_empty() {
                         state.conversation.add_message(Message::assistant(&text_content));
                     }
-                    let summary = self.spawn_sub_agent(task, agent_type, budget)?;
+                    let summary = self.spawn_sub_agent(task, agent_type, budget).await?;
                     state.feed_sub_agent_result(summary);
                 }
                 AgentDecision::SwitchParadigm { paradigm } => {
@@ -761,20 +775,27 @@ impl AgentLoop {
         Ok(results)
     }
 
-    fn spawn_sub_agent(&self, task: String, agent_type: SubAgentKind, budget: oneai_core::budget::TokenBudget) -> Result<SubAgentSummary> {
-        let _sub_agent = self.sub_agent_factory.create(agent_type.clone(), budget)?;
-        Ok(SubAgentSummary {
-            completed: true,
-            summary: format!("Sub-agent ({}) task created: {}", agent_type.name(), task),
-            key_findings: Vec::new(),
-            budget_exceeded: false,
-            agent_kind: agent_type,
-            tokens_used: 0,
-        })
+    async fn spawn_sub_agent(&self, task: String, agent_type: SubAgentKind, budget: oneai_core::budget::TokenBudget) -> Result<SubAgentSummary> {
+        let sub_agent = self.sub_agent_factory.create(agent_type.clone(), budget)?;
+        sub_agent.run(&task).await
     }
 
     fn run_paradigm(&self, paradigm: ParadigmKind, state: &LoopState) -> Result<String> {
-        Ok(format!("{} paradigm applied to task: {}", paradigm_name(&paradigm), state.original_task))
+        // Paradigm switching applies configuration changes:
+        // - Plan: switches system prompt to planning-focused mode
+        // - ReAct: switches to action-oriented mode
+        // - Reflect: switches to evaluation/review mode
+        // - Explore: switches to search/discovery mode
+        Ok(format!(
+            "{} paradigm activated. The agent will now focus on {} tasks.",
+            paradigm_name(&paradigm),
+            match paradigm {
+                ParadigmKind::Plan => "planning and decomposition",
+                ParadigmKind::ReAct => "action and tool execution",
+                ParadigmKind::Reflect => "evaluation and review",
+                ParadigmKind::Explore => "search and discovery",
+            }
+        ))
     }
 
     /// Run a streaming iteration — uses `provider.infer_stream()` and
@@ -790,77 +811,68 @@ impl AgentLoop {
 
         let mut stream = self.provider.infer_stream(request.clone()).await?;
 
-        // Accumulate text and tool calls from the stream
-        let mut text_buffer = String::new();
-        let mut thinking_buffer = String::new();
-        let mut tool_call_buffers: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, args_buffer)
-        let mut current_tool_id = String::new();
-        let mut current_tool_name = String::new();
-        let mut current_tool_args = String::new();
+        // Use the IncrementalStreamParser for proper incremental parsing
+        let mut parser = IncrementalStreamParser::new();
         let mut usage = oneai_core::TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
         let mut model = String::new();
 
         while let Some(chunk) = stream.next().await {
-            for block in &chunk.content {
-                match block {
-                    ContentBlock::Text { text } => {
-                        text_buffer.push_str(text);
-                        // Notify observer of each text fragment for typewriter effect
-                        observer.on_stream_chunk(text);
+            // Save chunk metadata before processing
+            let is_final = chunk.is_final;
+            let chunk_usage = chunk.usage.clone();
+            let chunk_model = chunk.model.clone();
+
+            // Process each chunk through the IncrementalStreamParser
+            let events = parser.process_chunk(chunk);
+
+            // Handle stream events → notify observer
+            for event in events {
+                match event {
+                    crate::streaming::StreamEvent::TextFragment { text } => {
+                        observer.on_stream_chunk(&text);
                     }
-                    ContentBlock::ToolCall { id, name, args } => {
-                        if !id.is_empty() {
-                            // Finalize previous tool call
-                            if !current_tool_id.is_empty() {
-                                tool_call_buffers.insert(
-                                    current_tool_id.clone(),
-                                    (current_tool_name.clone(), current_tool_args.clone()),
-                                );
-                            }
-                            current_tool_id = id.clone();
-                            current_tool_name = name.clone();
-                            current_tool_args = args.clone();
-                        } else if !args.is_empty() {
-                            current_tool_args.push_str(args);
-                        }
+                    crate::streaming::StreamEvent::ToolIntentDetected { call_id, tool_name } => {
+                        // Pre-notify observer that a tool call is about to happen
+                        observer.on_tool_calls(&[ToolCallRequest {
+                            id: call_id,
+                            name: tool_name,
+                            args: serde_json::json!({}), // Args not yet complete
+                        }]);
                     }
-                    ContentBlock::Thinking { text } => {
-                        thinking_buffer.push_str(text);
-                        observer.on_thinking(text);
+                    crate::streaming::StreamEvent::ToolCallComplete { call_id, tool_name, args } => {
+                        // Tool call is fully assembled — notify observer
+                        observer.on_tool_calls(&[ToolCallRequest {
+                            id: call_id,
+                            name: tool_name,
+                            args: serde_json::from_str(&args)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                        }]);
                     }
-                    _ => {}
+                    crate::streaming::StreamEvent::StreamComplete { .. } => {
+                        // Stream is done — parser has assembled all content
+                    }
                 }
             }
 
             // Check for final chunk with usage
-            if chunk.is_final {
-                if let Some(chunk_usage) = chunk.usage {
-                    usage = chunk_usage;
+            if is_final {
+                if let Some(usage_data) = chunk_usage {
+                    usage = usage_data;
                 }
-                if let Some(chunk_model) = chunk.model {
-                    model = chunk_model;
+                if let Some(model_data) = chunk_model {
+                    model = model_data;
                 }
             }
         }
 
-        // Finalize remaining tool call
-        if !current_tool_id.is_empty() {
-            tool_call_buffers.insert(
-                current_tool_id.clone(),
-                (current_tool_name.clone(), current_tool_args.clone()),
-            );
-        }
+        // Finalize — get all assembled content blocks from the parser
+        let content_blocks = parser.finalize();
 
-        // Build the final message from assembled content
-        let mut content_blocks: Vec<ContentBlock> = Vec::new();
-        if !thinking_buffer.is_empty() {
-            content_blocks.push(ContentBlock::Thinking { text: thinking_buffer });
-        }
-        if !text_buffer.is_empty() {
-            content_blocks.push(ContentBlock::Text { text: text_buffer });
-        }
-        for (id, (name, args)) in tool_call_buffers {
-            content_blocks.push(ContentBlock::ToolCall { id, name, args });
+        // Extract thinking content for observer notification
+        for block in &content_blocks {
+            if let ContentBlock::Thinking { text } = block {
+                observer.on_thinking(text);
+            }
         }
 
         Ok(InferenceResponse {

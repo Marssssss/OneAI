@@ -37,6 +37,60 @@ impl SkillRegistry {
         let skills = self.skills.read().await;
         skills.values().cloned().collect()
     }
+
+    /// Register multiple built-in skills at once.
+    ///
+    /// Typically called with `builtin::coding_skills()`, `builtin::research_skills()`,
+    /// or `builtin::skills_for_domain("coding")`.
+    pub async fn register_builtin(&self, skills: Vec<SkillDescriptor>) -> Result<()> {
+        let mut map = self.skills.write().await;
+        for skill in skills {
+            map.insert(skill.name.clone(), skill);
+        }
+        Ok(())
+    }
+
+    /// Find a skill by its exact name.
+    ///
+    /// Returns `None` if the skill is not registered.
+    pub async fn find_by_name(&self, name: &str) -> Option<SkillDescriptor> {
+        let skills = self.skills.read().await;
+        skills.get(name).cloned()
+    }
+
+    /// Get all registered skill names (sorted alphabetically).
+    ///
+    /// Used by the TUI sidebar to display the skill list.
+    pub async fn skill_names(&self) -> Vec<String> {
+        let skills = self.skills.read().await;
+        let mut names: Vec<String> = skills.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Get the total number of registered skills.
+    pub async fn count(&self) -> usize {
+        let skills = self.skills.read().await;
+        skills.len()
+    }
+
+    /// Clear all registered skills.
+    ///
+    /// Called when switching domains to remove the old domain's skills
+    /// before registering the new domain's skills.
+    pub async fn clear(&self) {
+        let mut skills = self.skills.write().await;
+        skills.clear();
+    }
+
+    /// Replace all skills with a new set (clear + register).
+    ///
+    /// Convenience method for domain switching.
+    pub async fn replace_all(&self, skills: Vec<SkillDescriptor>) -> Result<()> {
+        self.clear().await;
+        self.register_builtin(skills).await?;
+        Ok(())
+    }
 }
 
 impl Default for SkillRegistry {

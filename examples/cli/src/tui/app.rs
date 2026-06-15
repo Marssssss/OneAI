@@ -12,6 +12,7 @@ use ratatui::widgets::ScrollbarState;
 
 use oneai_agent::ParadigmKind;
 use oneai_core::ApprovalRequest;
+use oneai_skill::SkillRegistry;
 
 use super::input_mode::{InputMode, VimMode};
 use super::history::MessageHistory;
@@ -24,6 +25,8 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/h",       "Shortcut for /help"),
     ("/tools",   "List registered tools"),
     ("/t",       "Shortcut for /tools"),
+    ("/skills",  "List all available skills"),
+    ("/skill",   "Activate, add, remove, or search skills (use /skill <name>)"),
     ("/clear",   "Clear conversation and create new session"),
     ("/cost",    "Show session cost and token usage"),
     ("/session", "Show session details"),
@@ -415,6 +418,18 @@ pub struct App {
     /// Registered tool names.
     pub tool_names: Vec<String>,
 
+    /// Skill registry (manages all registered skills).
+    pub skill_registry: SkillRegistry,
+
+    /// Skill names for sidebar display (sorted alphabetically).
+    /// Updated whenever skills are added/removed/switched.
+    pub skill_names: Vec<String>,
+
+    /// Currently activated skill name (None = no active skill).
+    /// When a skill is active, its prompt_template is injected into
+    /// the agent's system prompt for every query.
+    pub active_skill: Option<String>,
+
     /// Provider info string (e.g., "阿里百炼 · qwen-plus").
     pub provider_info: String,
 
@@ -549,6 +564,9 @@ impl App {
             messages: Vec::new(),
             scrollbar_state: ScrollbarState::default(),
             tool_names,
+            skill_registry: SkillRegistry::new(),
+            skill_names: Vec::new(),
+            active_skill: None,
             provider_info,
             session_id,
             sessions: vec![initial_session],

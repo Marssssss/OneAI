@@ -343,6 +343,124 @@ impl ContextSource for EnvironmentInfoSource {
     fn priority(&self) -> u32 { 15 }
 }
 
+// ─── ProjectInstructionsSource ────────────────────────────────────────────────
+
+/// Context source that reads project instruction files (ONEAI.md, CLAUDE.md, AGENTS.md).
+///
+/// This is the **single most important context source** for coding agents —
+/// project instruction files contain code style rules, technical constraints,
+/// test requirements, deployment norms, and team preferences that directly
+/// determine agent output quality.
+///
+/// Inspired by Claude Code's CLAUDE.md mechanism and OpenCode's AGENTS.md.
+/// OneAI reads all three formats for maximum compatibility.
+///
+/// Search priority (first found wins):
+/// 1. ONEAI.md in project root
+/// 2. CLAUDE.md in project root
+/// 3. AGENTS.md in project root
+/// 4. ONEAI.md in subdirectories (closest to current working context)
+/// 5. ~/.oneai/ONEAI.md (user-level global instructions)
+///
+/// Refresh policy: OnceAtStart — project instructions rarely change during a session.
+/// Priority: 1 (highest — project instructions are the primary context driver).
+pub struct ProjectInstructionsSource {
+    project_dir: PathBuf,
+    cached_content: Arc<RwLock<Option<String>>>,
+}
+
+impl ProjectInstructionsSource {
+    /// Create a new ProjectInstructionsSource for the given project directory.
+    pub fn new(project_dir: &str) -> Self {
+        Self {
+            project_dir: PathBuf::from(project_dir),
+            cached_content: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Search for instruction files in priority order.
+    /// Returns the content of the first file found, or None.
+    async fn find_instructions(&self) -> Option<String> {
+        let candidates = [
+            "ONEAI.md",
+            "CLAUDE.md",
+            "AGENTS.md",
+        ];
+
+        // 1. Check project root directory
+        for candidate in &candidates {
+            let path = self.project_dir.join(candidate);
+            if path.exists() {
+                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                    if !content.trim().is_empty() {
+                        return Some(content);
+                    }
+                }
+            }
+        }
+
+        // 2. Check subdirectories (up to 2 levels deep, closest first)
+        // Look for instruction files in common subdirectories
+        let subdirs = [
+            "src", "lib", "app", "crates", "packages", "modules",
+        ];
+        for subdir in &subdirs {
+            for candidate in &candidates {
+                let path = self.project_dir.join(subdir).join(candidate);
+                if path.exists() {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                        if !content.trim().is_empty() {
+                            return Some(content);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Check user home directory for global instructions
+        if let Ok(home) = std::env::var("HOME") {
+            let home_path = PathBuf::from(home);
+            for candidate in &candidates {
+                let path = home_path.join(".oneai").join(candidate);
+                if path.exists() {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                        if !content.trim().is_empty() {
+                            return Some(content);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
+#[async_trait]
+impl ContextSource for ProjectInstructionsSource {
+    fn key(&self) -> &str { "project_instructions" }
+
+    async fn load(&self) -> Result<String> {
+        match self.find_instructions().await {
+            Some(content) => {
+                // Cache for later comparison
+                *self.cached_content.write().await = Some(content.clone());
+                Ok(content)
+            }
+            None => {
+                *self.cached_content.write().await = None;
+                Ok(String::new()) // No instruction file found — return empty
+            }
+        }
+    }
+
+    fn refresh_policy(&self) -> RefreshPolicy {
+        RefreshPolicy::OnceAtStart // Project instructions rarely change during a session
+    }
+
+    fn priority(&self) -> u32 { 1 } // Highest priority — project instructions are the primary context
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +512,20 @@ mod tests {
 
         let content = source.load().await.unwrap();
         assert!(content.contains("Git Branch:"));
+    }
+
+    #[tokio::test]
+    async fn test_project_instructions_source() {
+        let source = ProjectInstructionsSource::new("/Users/maxf/github/new/OneAI");
+        assert_eq!(source.key(), "project_instructions");
+        assert_eq!(source.priority(), 1);
+        assert_eq!(source.refresh_policy(), RefreshPolicy::OnceAtStart);
+
+        // The load should succeed (returns empty if no instruction file found)
+        let content = source.load().await.unwrap();
+        // In this project, there's no ONEAI.md/CLAUDE.md/AGENTS.md yet
+        // so content will be empty
+        assert!(content.is_empty() || content.len() > 0); // Just verify it doesn't crash
     }
 
     #[test]

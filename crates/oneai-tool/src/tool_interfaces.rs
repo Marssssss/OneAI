@@ -859,46 +859,106 @@ impl Tool for GrepTool {
         let regex = regex::Regex::new(pattern);
         match regex {
             Ok(re) => {
-                // Use grep command as a practical implementation
-                let (shell, shell_arg) = if cfg!(target_os = "windows") {
-                    ("powershell", "-Command")
+                // Native Rust implementation — no shell command required
+                let mut results = Vec::new();
+                let mut match_count = 0;
+                let max_matches = 500; // Prevent context overflow
+
+                let search_path = std::path::Path::new(path);
+                if !search_path.exists() {
+                    return Ok(ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Path does not exist: {}", path)),
+                    });
+                }
+
+                // Build glob pattern for file filtering
+                let glob_pattern = if file_pattern == "*" {
+                    "**/*".to_string()
                 } else {
-                    ("sh", "-c")
+                    format!("**/{}", file_pattern)
                 };
 
-                let grep_cmd = if cfg!(target_os = "windows") {
-                    format!("Select-String -Path '{}' -Pattern '{}' | ForEach-Object {{ $_.ToString() }}", path, pattern)
-                } else {
-                    format!("grep -rn '{}' {} --include='{}'", pattern, path, file_pattern)
-                };
+                // Walk the directory tree and search matching files
+                for entry in walkdir::WalkDir::new(search_path)
+                    .into_iter()
+                    .filter_entry(|e| {
+                        // Skip hidden dirs, target, node_modules
+                        let name = e.file_name().to_string_lossy();
+                        !name.starts_with('.')
+                            && name != "target"
+                            && name != "node_modules"
+                            && name != ".git"
+                    })
+                {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
 
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    tokio::process::Command::new(shell)
-                        .arg(shell_arg)
-                        .arg(grep_cmd)
-                        .output()
-                ).await;
-
-                match result {
-                    Ok(Ok(output)) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        Ok(ToolOutput {
-                            success: true,
-                            content: stdout,
-                            error: None,
-                        })
+                    if !entry.file_type().is_file() {
+                        continue;
                     }
-                    Ok(Err(e)) => Ok(ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(format!("Failed to execute grep: {}", e)),
-                    }),
-                    Err(_) => Ok(ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some("Grep command timed out".to_string()),
-                    }),
+
+                    // Check glob pattern match
+                    let file_path_str = entry.path().to_string_lossy();
+                    let relative_path = entry.path().strip_prefix(search_path)
+                        .unwrap_or(entry.path())
+                        .to_string_lossy();
+
+                    if file_pattern != "*" {
+                        let glob_matcher = glob::Pattern::new(file_pattern);
+                        match glob_matcher {
+                            Ok(gm) => {
+                                // Match against just the filename component
+                                let file_name = entry.path().file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                if !gm.matches(&file_name) {
+                                    continue;
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+
+                    // Read and search the file
+                    let content = std::fs::read_to_string(entry.path());
+                    match content {
+                        Ok(text) => {
+                            for (line_num, line) in text.lines().enumerate() {
+                                if re.is_match(line) {
+                                    if match_count >= max_matches {
+                                        results.push(format!("... [truncated: {} matches found, showing first {}]",
+                                            match_count + 1, max_matches));
+                                        break;
+                                    }
+                                    results.push(format!("{}:{}: {}", file_path_str, line_num + 1, line.trim()));
+                                    match_count += 1;
+                                }
+                            }
+                        }
+                        Err(_) => continue, // Skip binary/unreadable files
+                    }
+
+                    if match_count >= max_matches {
+                        break;
+                    }
+                }
+
+                if results.is_empty() {
+                    Ok(ToolOutput {
+                        success: true,
+                        content: format!("No matches found for pattern '{}' in {}", pattern, path),
+                        error: None,
+                    })
+                } else {
+                    Ok(ToolOutput {
+                        success: true,
+                        content: results.join("\n"),
+                        error: None,
+                    })
                 }
             }
             Err(e) => Ok(ToolOutput {
@@ -981,46 +1041,66 @@ impl Tool for GlobTool {
             });
         }
 
-        // Use find command as practical implementation
-        let (shell, shell_arg) = if cfg!(target_os = "windows") {
-            ("powershell", "-Command")
+        // Native Rust implementation — no shell command required
+        let search_path = std::path::Path::new(path);
+        if !search_path.exists() {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("Path does not exist: {}", path)),
+            });
+        }
+
+        let mut results = Vec::new();
+        let max_results = 1000; // Prevent context overflow
+
+        // Build the full glob pattern (path + pattern)
+        let full_pattern = if pattern.starts_with('/') {
+            pattern.to_string()
         } else {
-            ("sh", "-c")
+            format!("{}/{}", path, pattern)
         };
 
-        let find_cmd = if cfg!(target_os = "windows") {
-            format!("Get-ChildItem -Path '{}' -Filter '{}' -Recurse | Select-Object -ExpandProperty FullName", path, pattern)
-        } else {
-            format!("find {} -name '{}'", path, pattern)
-        };
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            tokio::process::Command::new(shell)
-                .arg(shell_arg)
-                .arg(find_cmd)
-                .output()
-        ).await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                Ok(ToolOutput {
-                    success: true,
-                    content: stdout,
-                    error: None,
-                })
+        // Use glob crate for pattern matching
+        match glob::glob(&full_pattern) {
+            Ok(paths) => {
+                for entry in paths {
+                    match entry {
+                        Ok(path) => {
+                            if results.len() >= max_results {
+                                results.push(format!("... [truncated: more than {} files match]", max_results));
+                                break;
+                            }
+                            results.push(path.to_string_lossy().to_string());
+                        }
+                        Err(e) => {
+                            // Skip paths that can't be accessed
+                            tracing::debug!("Glob path error: {:?}", e);
+                        }
+                    }
+                }
             }
-            Ok(Err(e)) => Ok(ToolOutput {
-                success: false,
-                content: String::new(),
-                error: Some(format!("Failed to execute glob search: {}", e)),
-            }),
-            Err(_) => Ok(ToolOutput {
-                success: false,
-                content: String::new(),
-                error: Some("Glob search timed out".to_string()),
-            }),
+            Err(e) => {
+                return Ok(ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(format!("Invalid glob pattern '{}': {}", pattern, e)),
+                });
+            }
+        }
+
+        if results.is_empty() {
+            Ok(ToolOutput {
+                success: true,
+                content: format!("No files found matching pattern '{}' in {}", pattern, path),
+                error: None,
+            })
+        } else {
+            Ok(ToolOutput {
+                success: true,
+                content: results.join("\n"),
+                error: None,
+            })
         }
     }
 }
@@ -1183,8 +1263,6 @@ impl Tool for NotebookEditTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        // Basic placeholder implementation — a production version would
-        // parse the .ipynb JSON, modify cells, and write back
         let notebook_path = args.get("notebook_path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -1197,11 +1275,238 @@ impl Tool for NotebookEditTool {
             });
         }
 
-        Ok(ToolOutput {
-            success: true,
-            content: format!("Notebook edit operation recorded for: {}", notebook_path),
-            error: None,
-        })
+        // Security: reject path traversal
+        if notebook_path.contains("..") {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("Path traversal detected".to_string()),
+            });
+        }
+
+        // Verify it's a .ipynb file
+        if !notebook_path.ends_with(".ipynb") {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("File must be a .ipynb notebook".to_string()),
+            });
+        }
+
+        // Read the notebook
+        let content = tokio::fs::read_to_string(notebook_path).await;
+        match content {
+            Ok(text) => {
+                // Parse as JSON
+                let mut notebook: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Ok(ToolOutput {
+                            success: false,
+                            content: String::new(),
+                            error: Some(format!("Failed to parse notebook JSON: {}", e)),
+                        });
+                    }
+                };
+
+                // Get parameters
+                let cell_id = args.get("cell_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let new_source = args.get("new_source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let cell_type = args.get("cell_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("code");
+                let edit_mode = args.get("edit_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("replace");
+
+                // Get the cells array
+                let cells = notebook.get_mut("cells")
+                    .and_then(|c| c.as_array_mut());
+
+                if cells.is_none() {
+                    return Ok(ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some("Notebook has no 'cells' array".to_string()),
+                    });
+                }
+
+                let cells_mut = cells.unwrap();
+
+                match edit_mode {
+                    "replace" => {
+                        // Find the cell with matching cell_id and replace its source
+                        if cell_id.is_empty() {
+                            // If no cell_id, try to find by position or return error
+                            return Ok(ToolOutput {
+                                success: false,
+                                content: String::new(),
+                                error: Some("cell_id is required for replace mode".to_string()),
+                            });
+                        }
+
+                        let found = cells_mut.iter_mut().find(|cell| {
+                            cell.get("id").and_then(|v| v.as_str()) == Some(cell_id)
+                        });
+
+                        if let Some(cell) = found {
+                            // Update source — convert string to array of lines (ipynb format)
+                            let source_lines: Vec<serde_json::Value> = new_source.lines()
+                                .map(|line| serde_json::Value::String(format!("{}\n", line)))
+                                .chain(std::iter::once(serde_json::Value::String(String::new())))
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .skip(1) // Remove trailing empty line we added
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+
+                            // Actually: ipynb format stores source as array of strings with \n appended to each line
+                            // except the last line which doesn't have \n
+                            let lines: Vec<&str> = new_source.lines().collect();
+                            let source_array: Vec<serde_json::Value> = if lines.is_empty() {
+                                vec![serde_json::Value::String(String::new())]
+                            } else {
+                                lines.iter().enumerate().map(|(i, line)| {
+                                    if i < lines.len() - 1 {
+                                        serde_json::Value::String(format!("{}\n", line))
+                                    } else {
+                                        serde_json::Value::String(line.to_string())
+                                    }
+                                }).collect()
+                            };
+
+                            cell.as_object_mut().unwrap().insert(
+                                "source".to_string(),
+                                serde_json::Value::Array(source_array),
+                            );
+                            cell.as_object_mut().unwrap().insert(
+                                "cell_type".to_string(),
+                                serde_json::Value::String(cell_type.to_string()),
+                            );
+
+                            let write_result = tokio::fs::write(notebook_path, serde_json::to_string_pretty(&notebook).unwrap()).await;
+                            match write_result {
+                                Ok(_) => Ok(ToolOutput {
+                                    success: true,
+                                    content: format!("Successfully replaced cell '{}' in {}", cell_id, notebook_path),
+                                    error: None,
+                                }),
+                                Err(e) => Ok(ToolOutput {
+                                    success: false,
+                                    content: String::new(),
+                                    error: Some(format!("Failed to write notebook: {}", e)),
+                                }),
+                            }
+                        } else {
+                            Ok(ToolOutput {
+                                success: false,
+                                content: String::new(),
+                                error: Some(format!("Cell '{}' not found in notebook", cell_id)),
+                            })
+                        }
+                    }
+                    "insert" => {
+                        // Insert a new cell after the specified cell_id (or at the end if empty)
+                        let new_cell = serde_json::json!({
+                            "cell_type": cell_type,
+                            "id": uuid::Uuid::new_v4().to_string(),
+                            "metadata": {},
+                            "source": new_source.lines().enumerate().map(|(i, line)| {
+                                if i < new_source.lines().count() - 1 {
+                                    format!("{}\n", line)
+                                } else {
+                                    line.to_string()
+                                }
+                            }).collect::<Vec<String>>(),
+                            "outputs": if cell_type == "code" { serde_json::json!([]) } else { serde_json::Value::Null },
+                            "execution_count": if cell_type == "code" { serde_json::json!(0) } else { serde_json::Value::Null },
+                        });
+
+                        if cell_id.is_empty() {
+                            // Insert at the end
+                            cells_mut.push(new_cell);
+                        } else {
+                            // Find the index of the specified cell and insert after it
+                            let pos = cells_mut.iter().position(|cell| {
+                                cell.get("id").and_then(|v| v.as_str()) == Some(cell_id)
+                            });
+                            match pos {
+                                Some(idx) => cells_mut.insert(idx + 1, new_cell),
+                                None => cells_mut.push(new_cell), // Fallback: insert at end
+                            }
+                        }
+
+                        let write_result = tokio::fs::write(notebook_path, serde_json::to_string_pretty(&notebook).unwrap()).await;
+                        match write_result {
+                            Ok(_) => Ok(ToolOutput {
+                                success: true,
+                                content: format!("Successfully inserted new cell in {}", notebook_path),
+                                error: None,
+                            }),
+                            Err(e) => Ok(ToolOutput {
+                                success: false,
+                                content: String::new(),
+                                error: Some(format!("Failed to write notebook: {}", e)),
+                            }),
+                        }
+                    }
+                    "delete" => {
+                        // Delete the cell with matching cell_id
+                        if cell_id.is_empty() {
+                            return Ok(ToolOutput {
+                                success: false,
+                                content: String::new(),
+                                error: Some("cell_id is required for delete mode".to_string()),
+                            });
+                        }
+
+                        let original_len = cells_mut.len();
+                        cells_mut.retain(|cell| {
+                            cell.get("id").and_then(|v| v.as_str()) != Some(cell_id)
+                        });
+
+                        if cells_mut.len() == original_len {
+                            return Ok(ToolOutput {
+                                success: false,
+                                content: String::new(),
+                                error: Some(format!("Cell '{}' not found in notebook", cell_id)),
+                            });
+                        }
+
+                        let write_result = tokio::fs::write(notebook_path, serde_json::to_string_pretty(&notebook).unwrap()).await;
+                        match write_result {
+                            Ok(_) => Ok(ToolOutput {
+                                success: true,
+                                content: format!("Successfully deleted cell '{}' from {}", cell_id, notebook_path),
+                                error: None,
+                            }),
+                            Err(e) => Ok(ToolOutput {
+                                success: false,
+                                content: String::new(),
+                                error: Some(format!("Failed to write notebook: {}", e)),
+                            }),
+                        }
+                    }
+                    _ => Ok(ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Unknown edit_mode: '{}'. Use 'replace', 'insert', or 'delete'", edit_mode)),
+                    }),
+                }
+            }
+            Err(e) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("Failed to read notebook file: {}", e)),
+            }),
+        }
     }
 }
 
@@ -1287,6 +1592,178 @@ impl Tool for FileDeleteTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Failed to delete file: {}", e)),
+            }),
+        }
+    }
+}
+
+// ─── WebFetchTool (Standard permission) ────────────────────────────────────────
+
+/// Web fetch tool — fetches URL content and converts HTML to Markdown.
+///
+/// Inspired by Claude Code's WebFetch tool. Fetches a web page at a given URL,
+/// converts the HTML content to structured Markdown (preserving headings, links,
+/// lists, and other semantic elements), and returns it for agent consumption.
+///
+/// This is a Standard-permission tool because it sends requests to external servers
+/// (which the user should be aware of), but the operation itself is read-only
+/// (no modifications to any system).
+pub struct WebFetchTool {
+    /// HTTP client for making requests.
+    client: reqwest::Client,
+    /// Maximum content size to return (in bytes, ~100KB).
+    max_content_bytes: usize,
+    /// Request timeout in seconds.
+    timeout_secs: u64,
+}
+
+impl WebFetchTool {
+    /// Create a new WebFetchTool with default settings.
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            max_content_bytes: 100_000, // ~100KB max content
+            timeout_secs: 30,
+        }
+    }
+
+    /// Create with custom settings.
+    pub fn with_config(max_content_bytes: usize, timeout_secs: u64) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            max_content_bytes,
+            timeout_secs,
+        }
+    }
+}
+
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PermissionAwareTool for WebFetchTool {
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Standard
+    }
+}
+
+#[async_trait]
+impl Tool for WebFetchTool {
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Fetch content from a web URL and convert it to structured Markdown. \
+        Preserves headings, links, lists, and other semantic elements. \
+        Returns the converted content for reading and analysis. \
+        Use for: fetching documentation pages, API references, blog posts, \
+        and any web content that needs to be understood by the agent."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch content from"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Optional prompt to focus on specific aspects of the fetched content",
+                    "default": ""
+                }
+            },
+            "required": ["url"]
+        })
+    }
+
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Medium
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        let url = args.get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if url.is_empty() {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("No URL provided".to_string()),
+            });
+        }
+
+        // Validate URL format
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("URL must start with http:// or https://".to_string()),
+            });
+        }
+
+        // Fetch the URL content
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            self.client.get(url)
+                .header("User-Agent", "OneAI-Agent/0.1.0")
+                .send()
+        ).await;
+
+        match result {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                if !status.is_success() {
+                    return Ok(ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("HTTP error {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"))),
+                    });
+                }
+
+                // Get the response body
+                let body_result = response.text().await;
+                match body_result {
+                    Ok(html) => {
+                        // Convert HTML to Markdown using html2text
+                        let markdown = html2text::from_read(html.as_bytes(), 200);
+
+                        // Truncate if exceeds max content size
+                        let content = if markdown.len() > self.max_content_bytes {
+                            let mut truncated = markdown[..self.max_content_bytes].to_string();
+                            truncated.push_str("\n... [content truncated due to size limit]");
+                            truncated
+                        } else {
+                            markdown
+                        };
+
+                        Ok(ToolOutput {
+                            success: true,
+                            content,
+                            error: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Failed to read response body: {}", e)),
+                    }),
+                }
+            }
+            Ok(Err(e)) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("HTTP request failed: {}", e)),
+            }),
+            Err(_) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("Request timed out after {} seconds", self.timeout_secs)),
             }),
         }
     }

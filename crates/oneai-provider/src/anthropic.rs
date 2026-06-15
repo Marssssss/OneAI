@@ -296,9 +296,14 @@ impl LlmProvider for AnthropicProvider {
         let model_name = self.config.model_name.clone();
         tokio::spawn(async move {
             let stream = response.bytes_stream();
-            let mut buffer = String::new();
-            // Track input_tokens from message_start event (Anthropic sends them there, not in deltas)
+            // Track input_tokens from message_start event
             let mut prompt_tokens_from_start: u32 = 0;
+
+            // Per-tool-call-id state: (name, args_buffer)
+            // Used to accumulate input_json_delta fragments for each tool call
+            let mut tool_call_state: HashMap<String, (String, String)> = HashMap::new();
+            // Current tool call ID being streamed (set by content_block_start, cleared by content_block_stop)
+            let mut current_tool_call_id: Option<String> = None;
 
             use eventsource_stream::Eventsource;
             let mut sse_stream = stream.eventsource();
@@ -330,6 +335,30 @@ impl LlmProvider for AnthropicProvider {
                                         .and_then(|v| v.as_u64())
                                         .unwrap_or(0) as u32;
                                 }
+                                "content_block_start" => {
+                                    let content_block = json.get("content_block").unwrap_or(&Value::Null);
+                                    let cb_type = content_block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                                    if cb_type == "tool_use" {
+                                        let id = content_block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let name = content_block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        // Initialize args buffer for this tool call
+                                        tool_call_state.insert(id.clone(), (name.clone(), String::new()));
+                                        current_tool_call_id = Some(id.clone());
+
+                                        // Emit ToolCall with id and name, empty args (intent detected)
+                                        let _ = tx.send(InferenceStreamChunk {
+                                            content: vec![ContentBlock::ToolCall {
+                                                id: id.clone(),
+                                                name,
+                                                args: String::new(), // Args will be filled on content_block_stop
+                                            }],
+                                            is_final: false,
+                                            usage: None,
+                                            model: model_name.clone(),
+                                        }).await;
+                                    }
+                                }
                                 "content_block_delta" => {
                                     let delta = json.get("delta").unwrap_or(&Value::Null);
                                     let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -347,10 +376,13 @@ impl LlmProvider for AnthropicProvider {
                                             }
                                         }
                                         "input_json_delta" => {
+                                            // Accumulate partial JSON into the current tool call's args buffer
                                             let partial_json = delta.get("partial_json").and_then(|p| p.as_str()).unwrap_or("");
-                                            // We accumulate partial JSON for tool calls
-                                            // The full tool call data comes in content_block_start + content_block_delta events
-                                            buffer.push_str(partial_json);
+                                            if let Some(tc_id) = &current_tool_call_id {
+                                                if let Some((_name, args_buffer)) = tool_call_state.get_mut(tc_id) {
+                                                    args_buffer.push_str(partial_json);
+                                                }
+                                            }
                                         }
                                         "thinking_delta" => {
                                             let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
@@ -366,40 +398,35 @@ impl LlmProvider for AnthropicProvider {
                                         _ => {}
                                     }
                                 }
-                                "content_block_start" => {
-                                    let content_block = json.get("content_block").unwrap_or(&Value::Null);
-                                    let cb_type = content_block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-                                    if cb_type == "tool_use" {
-                                        let id = content_block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let name = content_block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        buffer.clear();
-                                        // Store the tool call ID and name for later
-                                        buffer = format!("{{\"id\":\"{}\",\"name\":\"{}\",\"args\":\"", id, name);
-                                    }
-                                }
                                 "content_block_stop" => {
-                                    // If we were accumulating a tool call, finalize it
-                                    if buffer.starts_with("{\"id\":") {
-                                        buffer.push_str("\"}");
-                                        // Parse the accumulated buffer
-                                        if let Ok(parsed) = serde_json::from_str::<Value>(&buffer) {
-                                            let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                            // Get the accumulated partial JSON from input_json_delta events
-                                            // This is simplified — real implementation would accumulate properly
+                                    // If we were accumulating a tool call, finalize it with complete args
+                                    if let Some(tc_id) = current_tool_call_id.take() {
+                                        if let Some((name, args_buffer)) = tool_call_state.remove(&tc_id) {
+                                            // The args_buffer contains all accumulated partial_json fragments
+                                            // Validate it's proper JSON; if not, wrap it as-is
+                                            let args = if args_buffer.is_empty() {
+                                                "{}".to_string()
+                                            } else {
+                                                // Try to parse as JSON to validate
+                                                if serde_json::from_str::<Value>(&args_buffer).is_ok() {
+                                                    args_buffer
+                                                } else {
+                                                    // If invalid JSON, still pass it (provider may send incomplete)
+                                                    args_buffer
+                                                }
+                                            };
+
                                             let _ = tx.send(InferenceStreamChunk {
                                                 content: vec![ContentBlock::ToolCall {
-                                                    id,
-                                                    name,
-                                                    args: "{}".to_string(), // Simplified
+                                                    id: tc_id.clone(),
+                                                    name: name.clone(),
+                                                    args,
                                                 }],
                                                 is_final: false,
                                                 usage: None,
                                                 model: model_name.clone(),
                                             }).await;
                                         }
-                                        buffer.clear();
                                     }
                                 }
                                 "message_delta" => {

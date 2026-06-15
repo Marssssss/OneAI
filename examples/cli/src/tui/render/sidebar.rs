@@ -19,6 +19,7 @@ use super::super::app::App;
 use super::super::theme::*;
 
 use oneai_agent::ParadigmKind;
+use oneai_skill::builtin::skill_icon;
 
 /// Draw the sidebar.
 pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
@@ -169,6 +170,51 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         items.push(ListItem::new(Line::from(Span::styled(
             format!(" {} {}", indicator, name),
             style,
+        ))));
+    }
+
+    // ── Skills section ───────────────────────────────────────────────────
+    items.push(ListItem::new(Line::from(Span::styled(
+        " ──────────",
+        Style::default().fg(SIDEBAR_BORDER),
+    ))));
+
+    let skill_count = app.skill_names.len();
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            " 🎯 Skills",
+            Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" ({})", skill_count),
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        ),
+    ])));
+
+    // Display first 5 skills, with active skill highlighted
+    let max_display = 5;
+    let display_names: Vec<&String> = app.skill_names.iter().take(max_display).collect();
+    let overflow_count = skill_count.saturating_sub(max_display);
+
+    for name in display_names {
+        let is_active = app.active_skill.as_deref() == Some(name.as_str());
+        let icon = skill_icon(name);
+        let indicator = if is_active { "▸" } else { "•" };
+        let style = if is_active {
+            Style::default().fg(CONTEXT_PARADIGM_COLOR).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(INACTIVE_TOOL_COLOR)
+        };
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!(" {} {} {}", indicator, icon, name),
+            style,
+        ))));
+    }
+
+    if overflow_count > 0 {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("   ...and {} more", overflow_count),
+            Style::default().fg(ratatui::style::Color::DarkGray),
         ))));
     }
 

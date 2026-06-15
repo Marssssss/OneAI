@@ -205,6 +205,19 @@ impl ContextAssembler {
     pub fn assemble(&self, state: &crate::agent_loop::LoopState) -> Result<Conversation> {
         let mut conversation = state.conversation.clone();
 
+        // Inject environment diff if there are changes from previous snapshot
+        if let Some(ref last) = self.last_snapshot {
+            if let Some(ref current) = state.env_snapshot {
+                let diff = self.compute_diff(last, current);
+                if diff.has_changes() {
+                    let context_msg = diff.to_context_string();
+                    if !context_msg.is_empty() {
+                        conversation.add_message(oneai_core::Message::system(context_msg));
+                    }
+                }
+            }
+        }
+
         // Inject domain context sources
         if !self.context_sources.is_empty() {
             // Sort sources by priority (lower = higher priority)
@@ -218,19 +231,18 @@ impl ContextAssembler {
                     RefreshPolicy::EveryIteration => true,
                     RefreshPolicy::OnceAtStart => !self.initial_load_done,
                     RefreshPolicy::OnChange => {
-                        // Load if no cached content or if content changed
-                        // (for now, always load — change detection is async)
-                        true
+                        // Only inject if cached content exists (was loaded by refresh_sources)
+                        self.cached_context.contains_key(source.key())
                     }
-                    RefreshPolicy::Periodic(_) => true, // Simplified — always load for now
+                    RefreshPolicy::Periodic(_) => self.cached_context.contains_key(source.key()),
                 };
 
                 if should_load {
-                    // We can't call async load() in a sync method,
-                    // so we inject from cached_context instead
                     if let Some(content) = self.cached_context.get(source.key()) {
-                        let context_msg = format!("[Context: {}] {}", source.key(), content);
-                        conversation.add_message(oneai_core::Message::system(context_msg));
+                        if !content.is_empty() {
+                            let context_msg = format!("[Context: {}] {}", source.key(), content);
+                            conversation.add_message(oneai_core::Message::system(context_msg));
+                        }
                     }
                 }
             }
@@ -259,12 +271,30 @@ impl ContextAssembler {
     ///
     /// This scans:
     /// - Working directory (via std::env::current_dir)
-    /// - Available tools (from tool registry)
+    /// - Available tools (from tool names)
     /// - Git status (if in a git repo)
-    /// - File modifications (compare with known state)
-    async fn take_snapshot(&self) -> Result<EnvironmentSnapshot> {
-        // Implementation: scan filesystem, check git status, etc.
-        todo!("Implementation in full code phase")
+    /// - Modified/created/deleted files (from git diff)
+    pub async fn take_snapshot(&self, available_tools: &HashSet<String>) -> Result<EnvironmentSnapshot> {
+        let working_dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+
+        let platform = oneai_core::platform::Platform::Unknown;
+
+        // Get git status
+        let git_status = get_git_status(&working_dir).await;
+
+        // Get modified/created/deleted files from git
+        let (modified_files, created_files, deleted_files) = get_git_file_changes(&working_dir).await;
+
+        Ok(EnvironmentSnapshot {
+            working_dir,
+            platform,
+            available_tools: available_tools.clone(),
+            git_status,
+            modified_files,
+            created_files,
+            deleted_files,
+        })
     }
 
     /// Compute the diff between two snapshots.
@@ -289,5 +319,83 @@ impl ContextAssembler {
 impl Default for ContextAssembler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── Helper functions for environment scanning ────────────────────────────────
+
+/// Get git status summary for a directory.
+///
+/// Returns a short summary like "2 modified, 1 added, 0 deleted" or None if not a git repo.
+async fn get_git_status(dir: &PathBuf) -> Option<String> {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let (shell, shell_arg) = if cfg!(target_os = "windows") {
+        ("powershell", "-Command")
+    } else {
+        ("sh", "-c")
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(shell)
+            .arg(shell_arg)
+            .arg(format!("cd {} && git status --short 2>/dev/null", dir_str))
+            .output()
+    ).await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if stdout.is_empty() {
+                Some("clean".to_string())
+            } else {
+                let lines = stdout.lines().count();
+                Some(format!("{} files changed", lines))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Get modified, created, and deleted file lists from git diff.
+///
+/// Returns three vectors of file paths.
+async fn get_git_file_changes(dir: &PathBuf) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let (shell, shell_arg) = if cfg!(target_os = "windows") {
+        ("powershell", "-Command")
+    } else {
+        ("sh", "-c")
+    };
+
+    // Get modified files (M prefix in git status --short)
+    let modified = get_git_files_by_prefix(dir_str, shell, shell_arg, "M").await;
+    // Get created files (A prefix)
+    let created = get_git_files_by_prefix(dir_str, shell, shell_arg, "A").await;
+    // Get deleted files (D prefix)
+    let deleted = get_git_files_by_prefix(dir_str, shell, shell_arg, "D").await;
+
+    (modified, created, deleted)
+}
+
+/// Get files matching a specific git status prefix.
+async fn get_git_files_by_prefix(dir: &str, shell: &str, shell_arg: &str, prefix: &str) -> Vec<String> {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(shell)
+            .arg(shell_arg)
+            .arg(format!("cd {} && git status --short 2>/dev/null | grep '^{}' | sed 's/^{}\\s*//' || true", dir, prefix, prefix))
+            .output()
+    ).await;
+
+    match result {
+        Ok(Ok(output)) => {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.trim().to_string())
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }

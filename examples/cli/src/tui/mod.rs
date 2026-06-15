@@ -120,7 +120,14 @@ pub fn run_tui(
         let session_state = SessionState { app: app_arc.clone(), session };
         let session_state = Arc::new(tokio::sync::Mutex::new(session_state));
 
-        (App::new(provider_info, tool_names, session_id), session_state, approval_rx)
+        let mut tui_app = App::new(provider_info, tool_names, session_id);
+
+        // Register built-in skills for the current domain (coding by default)
+        let skills = oneai_skill::builtin::skills_for_domain("coding");
+        tui_app.skill_registry.register_builtin(skills).await.unwrap();
+        tui_app.skill_names = tui_app.skill_registry.skill_names().await;
+
+        (tui_app, session_state, approval_rx)
     });
 
     // Channel for observer events
@@ -373,7 +380,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /clear · /cost · /session · /paradigm · /domain · /compact · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /session · /paradigm · /domain · /compact · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>");
                 return;
             }
             "/tools" | "/t" => {
@@ -475,14 +482,24 @@ fn handle_user_input_async(
                             // Also keep CalculatorTool
                             state.app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
                             app.tool_names = state.app.tool_executor().list_tools().await;
+                            // Switch skills to coding domain
+                            app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain("coding")).await.unwrap();
+                            app.skill_names = app.skill_registry.skill_names().await;
                         });
                         app.current_domain = "coding".to_string();
-                        app.add_message(ChatRole::System, "Switched to coding domain. Tools: read_file, edit_file, shell, grep, glob, list_directory, notebook_edit, environment, calculator");
+                        app.active_skill = None;
+                        app.add_message(ChatRole::System, "Switched to coding domain. Tools: read_file, edit_file, shell, grep, glob, list_directory, notebook_edit, environment, calculator\nSkills: project-planning, code-review, debug-analysis, refactoring, test-strategy, documentation, git-workflow, dependency-analysis + general skills");
                     }
                     "general" => {
                         // Minimal domain — just calculator (note: cannot remove existing tools dynamically)
+                        rt.block_on(async {
+                            // Switch skills to general-only (no domain-specific skills)
+                            app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain("general")).await.unwrap();
+                            app.skill_names = app.skill_registry.skill_names().await;
+                        });
                         app.current_domain = "general".to_string();
-                        app.add_message(ChatRole::System, "Switched to general domain preference. Note: existing tools remain registered until session restart. Primary tool: calculator");
+                        app.active_skill = None;
+                        app.add_message(ChatRole::System, "Switched to general domain. Note: existing tools remain registered until session restart.\nSkills: summarization, translation, creative-writing");
                     }
                     _ => {
                         app.add_message(ChatRole::Error, format!("Unknown domain: {}. Available: coding, general", name));
@@ -521,6 +538,190 @@ fn handle_user_input_async(
                 app.add_new_session(new_session_id);
                 app.add_message(ChatRole::System, "Conversation context compacted. Key messages preserved. New session created.");
                 return;
+            }
+            "/skills" => {
+                // List all registered skills with descriptions and keywords
+                rt.block_on(async {
+                    let skills = app.skill_registry.list().await;
+                    if skills.is_empty() {
+                        app.add_message(ChatRole::System, "No skills registered. Switch domain with /domain or add skills with /skill add <name> <description>");
+                    } else {
+                        let mut lines = vec![format!("🎯 Available Skills ({})\n", skills.len())];
+                        for skill in &skills {
+                            let icon = oneai_skill::builtin::skill_icon(&skill.name);
+                            let active_marker = if app.active_skill.as_deref() == Some(&skill.name) {
+                                " ▸ ACTIVE"
+                            } else {
+                                ""
+                            };
+                            lines.push(format!("  {} {} — {}{}", icon, skill.name, skill.description, active_marker));
+                            lines.push(format!("     Keywords: {}", skill.trigger_keywords.join(", ")));
+                        }
+                        let active_info = if let Some(name) = &app.active_skill {
+                            format!("\nActive: {}", name)
+                        } else {
+                            "\nActive: none".to_string()
+                        };
+                        lines.push(active_info);
+                        lines.push("\nType /skill <name> to activate, /skill search <query> to find relevant skills".to_string());
+                        app.add_message(ChatRole::System, lines.join("\n"));
+                    }
+                });
+                return;
+            }
+            "/skill" => {
+                // Skill sub-command dispatch: add, remove, info, search, off, <name>
+                if parts.len() < 2 {
+                    app.add_message(ChatRole::System, "Skill commands:\n  /skill <name>        — Activate a skill\n  /skill off            — Deactivate current skill\n  /skill add <name> <desc> — Register a custom skill\n  /skill remove <name>  — Remove a skill\n  /skill info <name>    — Show skill details\n  /skill search <query> — Find relevant skills");
+                    return;
+                }
+                let sub_cmd = parts[1];
+
+                match sub_cmd {
+                    "off" => {
+                        if let Some(name) = app.active_skill.take() {
+                            app.add_message(ChatRole::System, format!("✅ Skill deactivated: {}", name));
+                        } else {
+                            app.add_message(ChatRole::System, "No active skill to deactivate.");
+                        }
+                        app.dirty = true;
+                        return;
+                    }
+                    "add" => {
+                        // /skill add <name> <description>
+                        // parts[0]="/skill", parts[1]="add", parts[2]="name description"
+                        if parts.len() < 3 {
+                            app.add_message(ChatRole::Error, "Usage: /skill add <name> <description>");
+                            return;
+                        }
+                        // Split the third part into name + description
+                        // The name is the first word, the rest is description
+                        let add_args: Vec<&str> = parts[2].splitn(2, ' ').collect();
+                        if add_args.len() < 2 {
+                            app.add_message(ChatRole::Error, "Usage: /skill add <name> <description> (description required)");
+                            return;
+                        }
+                        let skill_name = add_args[0];
+                        let skill_desc = add_args[1];
+
+                        let prompt_template = format!("Act as a {} expert. {}", skill_name, skill_desc);
+                        let trigger_keywords = vec![skill_name.to_string()];
+
+                        let skill = oneai_core::SkillDescriptor {
+                            name: skill_name.to_string(),
+                            description: skill_desc.to_string(),
+                            prompt_template: prompt_template.clone(),
+                            trigger_keywords,
+                            embedding: None,
+                        };
+
+                        rt.block_on(async {
+                            app.skill_registry.register(skill).await.unwrap();
+                            app.skill_names = app.skill_registry.skill_names().await;
+                        });
+                        app.add_message(ChatRole::System, format!(
+                            "✅ Skill registered: {}\n  Description: {}\n  Prompt: \"{}\"\n  Keywords: [{}]",
+                            skill_name, skill_desc, prompt_template, skill_name
+                        ));
+                        app.dirty = true;
+                        return;
+                    }
+                    "remove" => {
+                        // /skill remove <name>
+                        if parts.len() < 3 {
+                            app.add_message(ChatRole::Error, "Usage: /skill remove <name>");
+                            return;
+                        }
+                        let skill_name = parts[2];
+                        // Don't allow removing the active skill
+                        if app.active_skill.as_deref() == Some(skill_name) {
+                            app.add_message(ChatRole::Error, format!("Cannot remove active skill '{}'. Deactivate first with /skill off.", skill_name));
+                            return;
+                        }
+                        rt.block_on(async {
+                            let existed = app.skill_registry.find_by_name(skill_name).await;
+                            app.skill_registry.remove(skill_name).await.unwrap();
+                            app.skill_names = app.skill_registry.skill_names().await;
+                            if existed.is_some() {
+                                app.add_message(ChatRole::System, format!("✅ Skill removed: {}", skill_name));
+                            } else {
+                                app.add_message(ChatRole::Error, format!("Skill '{}' not found.", skill_name));
+                            }
+                        });
+                        app.dirty = true;
+                        return;
+                    }
+                    "info" => {
+                        // /skill info <name>
+                        if parts.len() < 3 {
+                            app.add_message(ChatRole::Error, "Usage: /skill info <name>");
+                            return;
+                        }
+                        let skill_name = parts[2];
+                        rt.block_on(async {
+                            let skill = app.skill_registry.find_by_name(skill_name).await;
+                            if let Some(s) = skill {
+                                let icon = oneai_skill::builtin::skill_icon(&s.name);
+                                let active = if app.active_skill.as_deref() == Some(&s.name) {
+                                    " ▸ ACTIVE"
+                                } else {
+                                    ""
+                                };
+                                app.add_message(ChatRole::System, format!(
+                                    "{} {} — {}{}\n\nPrompt template:\n{}\n\nTrigger keywords: [{}]",
+                                    icon, s.name, s.description, active, s.prompt_template, s.trigger_keywords.join(", ")
+                                ));
+                            } else {
+                                app.add_message(ChatRole::Error, format!("Skill '{}' not found.", skill_name));
+                            }
+                        });
+                        return;
+                    }
+                    "search" => {
+                        // /skill search <query>
+                        if parts.len() < 3 {
+                            app.add_message(ChatRole::Error, "Usage: /skill search <query>");
+                            return;
+                        }
+                        let query = parts[2];
+                        rt.block_on(async {
+                            let skills = app.skill_registry.list().await;
+                            let selector = oneai_skill::SkillSelector::new();
+                            let matches = selector.select_skills(query, &skills).await.unwrap();
+                            if matches.is_empty() {
+                                app.add_message(ChatRole::System, format!("No skills matching '{}'.", query));
+                            } else {
+                                let mut lines = vec![format!("🎯 Skill search results for '{}':\n", query)];
+                                for skill in &matches {
+                                    let icon = oneai_skill::builtin::skill_icon(&skill.name);
+                                    lines.push(format!("  {} {} — {}", icon, skill.name, skill.description));
+                                }
+                                lines.push(format!("\nTop match: {}", matches[0].name));
+                                lines.push(format!("Type /skill {} to activate", matches[0].name));
+                                app.add_message(ChatRole::System, lines.join("\n"));
+                            }
+                        });
+                        return;
+                    }
+                    // /skill <name> — activate a skill by name
+                    _ => {
+                        let skill_name = sub_cmd;
+                        rt.block_on(async {
+                            let skill = app.skill_registry.find_by_name(skill_name).await;
+                            if let Some(s) = skill {
+                                app.active_skill = Some(s.name.clone());
+                                app.add_message(ChatRole::System, format!(
+                                    "✅ Skill activated: {}\nPrompt injected: \"{}\"\nThe agent will now prioritize this skill's approach.\nType /skill off to deactivate, or /skill <other> to switch.",
+                                    s.name, s.prompt_template
+                                ));
+                            } else {
+                                app.add_message(ChatRole::Error, format!("Skill '{}' not found. Use /skills to see available skills.", skill_name));
+                            }
+                        });
+                        app.dirty = true;
+                        return;
+                    }
+                }
             }
             "/tool" => {
                 if parts.len() < 3 {

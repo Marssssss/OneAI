@@ -20,7 +20,7 @@ use oneai_core::PermissionLevel;
 use oneai_core::traits::Tool;
 use oneai_tool::{
     ShellTool, FileReadTool, FileEditTool, GrepTool, GlobTool,
-    FileListTool, NotebookEditTool, EnvironmentTool,
+    FileListTool, NotebookEditTool, EnvironmentTool, WebFetchTool,
 };
 
 use crate::domain_pack::DomainPack;
@@ -30,6 +30,7 @@ use crate::paradigm_strategy::{ParadigmStrategy, SubAgentTypeDefinition, DomainP
 use crate::compression_template::CompressionTemplate;
 use crate::builtin_sources::{
     GitStatusSource, FileTreeSource, ProjectConfigSource, DateSource, EnvironmentInfoSource,
+    ProjectInstructionsSource,
 };
 
 // ─── Coding System Prompt ──────────────────────────────────────────────────────
@@ -149,6 +150,7 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
             Arc::new(FileListTool::new()) as Arc<dyn Tool>,
             Arc::new(NotebookEditTool::new()) as Arc<dyn Tool>,
             Arc::new(EnvironmentTool::new()) as Arc<dyn Tool>,
+            Arc::new(WebFetchTool::new()) as Arc<dyn Tool>,
         ],
 
         // Layer 1 supplement: Tool decorators — coding-specific descriptions
@@ -195,10 +197,17 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 "Get environment information: working directory, platform, shell, \
                 available tools. Pure observation — no modifications."
             ),
+            ToolDecorator::with_description(
+                "web_fetch",
+                "Fetch content from a web URL and convert it to structured Markdown. \
+                Preserves headings, links, and other semantic elements. Use for: \
+                fetching documentation, API references, blog posts, and any web content."
+            ),
         ],
 
         // Layer 2: Context sources — coding environment sensing
         context_sources: vec![
+            Arc::new(ProjectInstructionsSource::new(project_dir)), // Highest priority — project instructions
             Arc::new(GitStatusSource::new(project_dir)),
             Arc::new(FileTreeSource::new(project_dir)),
             Arc::new(ProjectConfigSource::new(project_dir)),
@@ -313,9 +322,9 @@ mod tests {
         let pack = coding_pack("/tmp/test_project");
 
         assert_eq!(pack.name, "coding");
-        assert_eq!(pack.tools.len(), 8);
-        assert_eq!(pack.tool_decorators.len(), 7);
-        assert_eq!(pack.context_sources.len(), 5);
+        assert_eq!(pack.tools.len(), 9); // 8 original + WebFetchTool
+        assert_eq!(pack.tool_decorators.len(), 8); // 7 original + web_fetch
+        assert_eq!(pack.context_sources.len(), 6); // 5 original + ProjectInstructionsSource
         assert!(!pack.system_prompt_template.is_empty());
     }
 

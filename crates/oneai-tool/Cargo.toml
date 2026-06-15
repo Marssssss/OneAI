@@ -17,6 +17,10 @@ rmcp = { workspace = true }
 oneai-core = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
+html2text = "0.5"
+walkdir = "2"
+glob = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
