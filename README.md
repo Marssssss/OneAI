@@ -1,21 +1,22 @@
 # OneAI
 
-> A cross-platform AI agent framework built in Rust — modular, type-safe, and eval-ready.
+> A cross-platform AI agent framework built in Rust — modular, type-safe, domain-pluggable, and eval-ready.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Crates: 18](https://img.shields.io/badge/Crates-18-orange.svg)]()
-[![Tests: 212](https://img.shields.io/badge/Tests-212-green.svg)]()
+[![Crates: 19](https://img.shields.io/badge/Crates-19-orange.svg)]()
+[![Tests: 257](https://img.shields.io/badge/Tests-257-green.svg)]()
 
 ---
 
 ## What is OneAI?
 
-OneAI is a full-stack agent framework written in Rust. It provides everything you need to build, run, and evaluate AI agents — from LLM provider abstraction to tool execution, memory management, workflow orchestration, and trajectory logging — all with cross-platform support via UniFFI bindings.
+OneAI is a full-stack agent framework written in Rust. It provides everything you need to build, run, and evaluate AI agents — from LLM provider abstraction to tool execution, memory management, workflow orchestration, domain-specific configuration, and trajectory logging — all with cross-platform support via UniFFI bindings.
 
 **Key principles:**
 
-- **Modular by design** — 18 independent crates, each with a clear responsibility. Use only what you need.
+- **Modular by design** — 19 independent crates, each with a clear responsibility. Use only what you need.
 - **Type-safe throughout** — sealed enum hierarchies, trait-driven abstractions, no stringly-typed configs.
+- **Domain-pluggable** — DomainPack system makes domain knowledge declarative, composable, and switchable with a single line.
 - **Cross-platform** — runs on macOS, Windows, Linux, Android, iOS, and HarmonyOS via UniFFI (Kotlin, Swift, C++, C#).
 - **Eval-ready** — built-in OpenInference-compatible trajectory logger for agent evaluation (success rate, cost, latency, fault tolerance).
 - **Human-machine collaboration** — approval gates with native UI dialogs for high-risk tool operations.
@@ -36,10 +37,16 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 │          │          │          │          │          │              │
 │ AgentLoop│ Config → │ STM +    │ Registry │ Document │ Selector     │
 │ +SubAgent│ DAG +    │ LTM +    │ + MCP +  │ Index +  │ + Registry   │
-│ +ReAct   │ StateGrph│ Compress │ Approval │ Embedding│              │
-│ +Plan    │ Compile →│          │ Executor │ Retrieval│              │
-│ +Reflect │ Execute  │          │ +30 tools│          │              │
+│ +ReAct   │ StateGrph│ Compress │ Approval │ Embedding│ + Built-in   │
+│ +Plan    │ Compile →│          │ Executor │ Retrieval│   domain     │
+│ +Reflect │ Execute  │          │ +12 tools│          │   skills     │
+│ +Stream  │          │          │          │          │              │
+│ +CtxAsmbl│          │          │          │          │              │
 ├──────────┴──────────┴──────────┴──────────┴──────────┴──────────────┤
+│                     oneai-domain (Domain Configuration)               │
+│  DomainPack (5-layer), CodingPack, ToolDecorator, ContextSource,     │
+│  PermissionProfile, ParadigmStrategy, CompressionTemplate, Merge     │
+├──────────────────────────────────────────────────────────────────────┤
 │                     oneai-core (Foundation)                          │
 │  ContentBlock, Message, Conversation, PermissionLevel, Budget,      │
 │  ContextBudgetManager, PlatformCapabilities, Traits                  │
@@ -67,12 +74,13 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 | Crate | Description | Tests |
 |-------|-------------|-------|
 | `oneai-core` | Core types, traits, PermissionLevel, ContextBudgetManager, PlatformCapabilities | 28 |
-| `oneai-provider` | LLM providers (OpenAI, Anthropic, Ollama) | — |
+| `oneai-provider` | LLM providers (OpenAI, Anthropic, Ollama) | 6 |
 | `oneai-parser` | 3-layer output parsing defense | 12 |
 | `oneai-memory` | Memory system (STM, LTM, compression, HNSW) | 20 |
-| `oneai-tool` | Tool registry, MCP, approval gates, executor, 10+ tools | 32 |
-| `oneai-skill` | Skill system with progressive disclosure | — |
-| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect/Parallel | 15 |
+| `oneai-tool` | Tool registry, MCP, approval gates, executor, 12 tools | 32 |
+| `oneai-skill` | Skill system with selector + 16 built-in domain skills | — |
+| `oneai-domain` | DomainPack system (5-layer config), CodingPack, merge | 40 |
+| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler | 15 |
 | `oneai-rag` | RAG with EmbeddingService (FastEmbed/Ollama/OpenAI) | 20 |
 | `oneai-workflow` | Workflow DAG + StateGraph + executor | 26 |
 | `oneai-scheduler` | In-memory task scheduling | 6 |
@@ -84,7 +92,7 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 | `oneai-platform-android` | Android platform | 2 |
 | `oneai-platform-ios` | iOS platform | 1 |
 | `oneai-platform-harmony` | HarmonyOS platform | 1 |
-| **Total** | | **212** |
+| **Total** | | **257** |
 
 ---
 
@@ -110,18 +118,17 @@ cargo test
 use std::sync::Arc;
 use oneai_app::AppBuilder;
 use oneai_tool::CalculatorTool;
+use oneai_domain::coding_pack;
 
 #[tokio::main]
 async fn main() {
-    // Build an app with auto-approval (for testing)
+    // Build an app with a coding domain pack (one-line domain switch)
     let app = AppBuilder::new()
         .auto_approval_gate()
         .default_parser()
+        .domain_pack(coding_pack("/project/dir"))  // ← domain switch
         .build()
         .expect("App build should succeed");
-
-    // Register a tool
-    app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
 
     // Create a session and execute
     let session = app.create_session();
@@ -130,17 +137,81 @@ async fn main() {
 }
 ```
 
-### Full Demo
+### Full Demo (TUI)
 
 ```bash
-cargo run -p oneai-cli-demo
+cargo run -p oneai-cli
 ```
 
-This demonstrates the full pipeline: tools, memory, RAG, workflow, checkpoint, and trajectory logging.
+This launches an interactive TUI (ratatui + crossterm) demonstrating the full pipeline: tools, memory, RAG, workflow, checkpoint, trajectory logging, and domain packs.
 
 ---
 
 ## Core Concepts
+
+### Domain Pack System
+
+The DomainPack is OneAI's key architectural innovation — it makes domain knowledge **declarative, pluggable, and composable** instead of hardcoded.
+
+> "Coding Agent embeds workflow via 5-layer implicit configuration. OneAI makes these 5 layers declarative, pluggable, and composable."
+
+A DomainPack encapsulates 5 layers of domain-specific configuration:
+
+| Layer | Component | Purpose |
+|-------|-----------|---------|
+| 1 | **Tools + ToolDecorators** | Domain-specific tool set and description overrides |
+| 2 | **ContextSources** | Domain-specific environment sensing with refresh policies |
+| 3 | **PermissionProfile** | Domain-specific permission classification (deny/auto/confirm) |
+| 4 | **ParadigmStrategies** | Domain-specific task → paradigm mapping |
+| 5 | **CompressionTemplate** | Domain-specific context preservation priorities |
+
+Switch domains with one line:
+
+```rust
+let app = AppBuilder::new()
+    .provider(provider)
+    .domain_pack(coding_pack("/project/dir"))  // ← one-line domain switch
+    .build()?;
+```
+
+DomainPacks can be **merged** for multi-domain agents (e.g., coding + research) using strictest-wins rules for permissions and priority-based merging for context sources.
+
+#### CodingPack (Built-in)
+
+The first concrete DomainPack, modeled after Claude Code's workflow embedding:
+
+- **9 tools**: FileRead, FileEdit, Shell, Grep, Glob, FileList, NotebookEdit, Environment, WebFetch
+- **8 tool decorators**: coding-specific descriptions (e.g., Shell described for compilation/testing, not general command execution)
+- **6 context sources**: ProjectInstructions, GitStatus, FileTree, ProjectConfig, Date, EnvironmentInfo
+- **Permission profile**: auto-approve reads, confirm edits/shell, deny dangerous commands (`rm -rf`, `mkfs`)
+- **4 paradigm strategies**: refactor → Plan+ReAct+Reflect, bug → Plan+ReAct, search → Explore, implement → ReAct
+- **3 sub-agent types**: searcher (read+grep+glob), coder (edit+shell), reviewer (read+grep)
+- **Compression template**: preserve file paths, progress status, key decisions
+
+#### ToolDecorator
+
+Overrides tool descriptions for domain context — ShellTool's description changes from generic to "Execute shell commands for compilation, testing, and running scripts" in the coding domain.
+
+#### ContextSource
+
+Pluggable environment sensing with independent refresh policies:
+
+| Policy | Behavior |
+|--------|----------|
+| `EveryIteration` | Refresh on each loop (git status) |
+| `OnChange` | Refresh only when diff detected (file tree) |
+| `OnceAtStart` | Load once, never refresh (project config) |
+| `Periodic(Duration)` | Refresh at fixed interval (date/time) |
+
+#### PermissionProfile
+
+Domain-level permission overrides with resolution order:
+
+1. `deny_by_default` → always block matching patterns (highest priority)
+2. `permission_overrides` → override tool's default PermissionLevel
+3. `auto_approve` → skip approval gate
+4. `require_confirmation` → always route through approval gate
+5. Fall back to tool's own `risk_level()`
 
 ### Agentic Loop (AgentLoop)
 
@@ -155,13 +226,23 @@ The core execution engine is a **dynamic loop** — not a fixed pipeline. Each i
 
 Iteration limits are governed by **TokenBudget** (not hardcoded `max_iterations`). When remaining budget can't support another inference, the loop auto-terminates.
 
+### Incremental Stream Parser
+
+Real-time detection of tool_use blocks during streaming — the UI can show the agent's intent before arguments are fully generated. Inspired by Claude Code's incremental parsing approach, replacing the old "collect full stream before processing" model.
+
+### ContextAssembler
+
+Constructs conversation context for each loop iteration, with automatic **environment diff detection** — detects changes (new files, git modifications, directory changes) between iterations and injects them as context even when no tool explicitly reported them.
+
 ### Sub-Agent System
 
-Hierarchical task decomposition: the main agent delegates complex subtasks to specialized sub-agents (Plan, Explore, Code, Review), each running with its own context window and token budget. Sub-agents return only a **summary** to the main agent, keeping the main context window clean.
+Hierarchical task decomposition: the main agent delegates complex subtasks to specialized sub-agents. Domain packs define custom sub-agent types via `SubAgentTypeDefinition`:
 
 ```rust
 pub enum SubAgentKind { Plan, Explore, Code, Review, Custom(String) }
 ```
+
+Custom sub-agents (defined in DomainPack) have domain-specific system prompts, tool subsets, and permission thresholds.
 
 ### Permission Levels
 
@@ -195,6 +276,7 @@ Three providers are included: **OpenAI**, **Anthropic**, and **Ollama**.
 | **Plan** | Decompose → ordered step list | Complex multi-step tasks |
 | **Reflection** | Verify → suggest corrections | Quality assurance, self-check |
 | **Parallel** | ScopeState isolation → merge | Independent sub-tasks |
+| **Explore** | Search → understand → summarize | Codebase/search exploration |
 
 All agents use `ScopeState` for safe parallel execution.
 
@@ -215,7 +297,7 @@ pub trait PermissionAwareTool: Tool {
 }
 ```
 
-**Built-in tools:** ShellTool (with safety blacklist + sandbox), FileReadTool (offset+limit), FileEditTool, FileWriteTool, FileListTool, GrepTool, GlobTool, EnvironmentTool, NotebookEditTool, FileDeleteTool, CalculatorTool.
+**Built-in tools (12):** ShellTool (with safety blacklist + sandbox), FileReadTool (offset+limit), FileEditTool, FileWriteTool, FileListTool, GrepTool, GlobTool, EnvironmentTool, NotebookEditTool, FileDeleteTool, CalculatorTool, WebFetchTool.
 
 MCP integration via the `rmcp` crate — connect to any MCP-compatible tool server (stdio, SSE, streamable-http transports).
 
@@ -227,6 +309,18 @@ MCP integration via the `rmcp` crate — connect to any MCP-compatible tool serv
 | `AutoApprovalGate` | Always approves (testing only) |
 | `ChannelApprovalGate` | Sends to platform UI for human review |
 | `PlatformApprovalGate` | Native dialog (NSAlert / AlertDialog / UIAlertController) |
+
+### Skill System
+
+Progressive disclosure of agent capabilities via skills. Built-in skills organized by domain:
+
+| Domain | Skills |
+|--------|--------|
+| **Coding** (8) | project-planning, code-review, debug-analysis, refactoring, test-strategy, documentation, git-workflow, dependency-analysis |
+| **Research** (5) | deep-research, academic-search, data-extraction, citation-management, fact-verification |
+| **General** (3) | summarization, translation, creative-writing |
+
+Skills are matched via `SkillSelector` using trigger keywords or embeddings, and injected into agent context on activation.
 
 ### Memory System
 
@@ -316,9 +410,10 @@ oneai/
 │   ├── oneai-provider/      # LLM providers (OpenAI, Anthropic, Ollama)
 │   ├── oneai-parser/        # 3-layer output parsing
 │   ├── oneai-memory/        # STM, LTM, compression, HNSW, MemoryManager
-│   ├── oneai-tool/          # Registry, 10+ local tools, MCP, approval, executor
-│   ├── oneai-skill/         # Skill registry + selector
-│   ├── oneai-agent/         # AgentLoop, SubAgent, ReAct, Plan, Reflect, Parallel
+│   ├── oneai-tool/          # Registry, 12 local tools, MCP, approval, executor
+│   ├── oneai-skill/         # Skill registry + selector + 16 built-in domain skills
+│   ├── oneai-domain/        # DomainPack system (5-layer), CodingPack, merge
+│   ├── oneai-agent/         # AgentLoop, SubAgent, ReAct, Plan, Reflect, StreamParser, ContextAssembler
 │   ├── oneai-rag/           # Document, index, EmbeddingService, retrieval
 │   ├── oneai-workflow/      # DAG, StateGraph, compiler, validator, executor
 │   ├── oneai-scheduler/     # InMemoryScheduler
@@ -331,9 +426,11 @@ oneai/
 │   ├── oneai-platform-ios/
 │   └── oneai-platform-harmony/
 ├── examples/
-│   ├── cli/                 # Interactive REPL demo
+│   ├── cli/                 # Interactive TUI demo (ratatui + crossterm)
 │   ├── desktop-app/         # Desktop approval gate demo
-│   └── rust/                # Channel approval gate demo
+│   ├── rust/                # Channel approval gate demo
+│   ├── android-app/         # Android demo (Kotlin)
+│   └── ios-app/             # iOS demo (Swift)
 ├── bindings/                # Generated UniFFI bindings
 ├── scripts/                 # Build and binding generation scripts
 └── Cargo.toml               # Workspace root
@@ -346,15 +443,16 @@ oneai/
 | Phase | Focus | Status |
 |-------|-------|--------|
 | 1 | Core types, providers, parser | ✅ Complete |
-| 2 | Agent paradigms (ReAct, Plan, Reflection, Parallel) | ✅ Complete |
+| 2 | Agent paradigms (ReAct, Plan, Reflection, Parallel, Explore) | ✅ Complete |
 | 3 | Memory, Tools (MCP + Approval), RAG basics | ✅ Complete |
 | 4 | Workflow (Config + DAG + Executor), Persistence, Scheduler | ✅ Complete |
 | 5 | AppBuilder + AppSession, UniFFI bindings | ✅ Complete |
 | 6 | Platform UI + native approval gates | ✅ Complete |
 | 7 | Trajectory Logger (OpenInference) | ✅ Complete |
 | 8 | Agentic Loop, SubAgent, StateGraph, Budget, PermissionLevel | ✅ Complete |
-| 9 | 10+ tools, ShellTool safety, MCP real impl, EmbeddingService | ✅ Complete |
+| 9 | 12 tools, ShellTool safety, MCP real impl, EmbeddingService, WebFetchTool | ✅ Complete |
 | 10 | ProgressiveCheckpoint, ErrorRecovery, PromptTemplates, PlatformCapabilities | ✅ Complete |
+| 11 | DomainPack system (5-layer), CodingPack, Skill built-ins, StreamParser, ContextAssembler, TUI | ✅ Complete |
 
 ---
 
