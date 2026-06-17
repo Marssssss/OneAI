@@ -27,6 +27,8 @@ use oneai_domain::{DomainPack, MergedDomainPack};
 
 use oneai_a2a::A2AClient;
 
+use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleManager, WasmActionTool};
+
 use crate::session::AppSession;
 
 /// Builder for assembling a OneAI application.
@@ -55,6 +57,8 @@ pub struct AppBuilder {
     domain_packs: Vec<DomainPack>,
     /// A2A client (optional — for inter-agent communication).
     a2a_client: Option<Arc<A2AClient>>,
+    /// WASM runtime (optional — for WASM sandbox execution).
+    wasm_runtime: Option<Arc<WasmRuntime>>,
 }
 
 impl AppBuilder {
@@ -73,6 +77,7 @@ impl AppBuilder {
             trace_context: None,
             domain_packs: Vec::new(),
             a2a_client: None,
+            wasm_runtime: None,
         }
     }
 
@@ -353,6 +358,59 @@ impl AppBuilder {
         self
     }
 
+    /// Set the WASM runtime for sandboxed tool execution.
+    ///
+    /// The WASM runtime enables:
+    /// - WASM module tools (loaded from .wasm files or bytes)
+    /// - WASM action templates (compute, sort, filter, extract)
+    /// - Code-as-action execution in a secure sandbox
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let wasm_runtime = Arc::new(WasmRuntime::new(WasmRuntimeConfig::default())?);
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .wasm_runtime(wasm_runtime)  // ← enable WASM sandbox
+    ///     .build()?;
+    /// ```
+    pub fn wasm_runtime(mut self, runtime: Arc<WasmRuntime>) -> Self {
+        self.wasm_runtime = Some(runtime);
+        self
+    }
+
+    /// Use a WASM runtime with default configuration.
+    ///
+    /// Default: strict pure-computation sandbox (no WASI, 1MB memory, 100K fuel).
+    /// Also registers WASM action tools (compute, sort, filter, extract).
+    pub fn default_wasm_runtime(self) -> Self {
+        let runtime = WasmRuntime::with_defaults()
+            .expect("WASM runtime creation should succeed");
+        let app = self.wasm_runtime(Arc::new(runtime));
+
+        // Register WASM action tools
+        app.register_wasm_action_tools()
+    }
+
+    /// Use a WASM runtime with custom configuration.
+    pub fn wasm_runtime_with_config(mut self, config: WasmRuntimeConfig) -> Self {
+        let runtime = WasmRuntime::new(config)
+            .expect("WASM runtime creation should succeed");
+        self.wasm_runtime = Some(Arc::new(runtime));
+        self.register_wasm_action_tools()
+    }
+
+    /// Register WASM action tools (compute, sort, filter, extract).
+    ///
+    /// These are always available when WASM runtime is configured.
+    /// They provide safe pure-computation alternatives to ShellTool
+    /// for mathematical operations, data sorting, filtering, and extraction.
+    fn register_wasm_action_tools(self) -> Self {
+        // WASM action tools will be registered in build() when the
+        // tool registry is available. We store a flag to indicate
+        // that WASM action tools should be registered.
+        self
+    }
+
     /// Build the application.
     ///
     /// This creates the App and eagerly registers all domain pack tools
@@ -378,6 +436,11 @@ impl AppBuilder {
             Some(Arc::new(MergedDomainPack::merge(self.domain_packs)))
         };
 
+        // Create WASM module manager if runtime is provided
+        let wasm_module_manager = self.wasm_runtime.as_ref().map(|rt| {
+            WasmModuleManager::new(rt.clone())
+        });
+
         let tool_executor = Arc::new(ToolExecutor::with_approval_gate(
             self.tool_registry.clone(),
             approval_gate.clone(),
@@ -394,6 +457,13 @@ impl AppBuilder {
             for tool in &domain.tools {
                 self.tool_registry.register(tool.clone()).await?;
                 workflow_executor.register_tool(tool.clone()).await;
+            }
+        }
+
+        // Register WASM action tools if runtime is configured
+        if self.wasm_runtime.is_some() {
+            for action_tool in WasmActionTool::all() {
+                self.tool_registry.register(Arc::new(action_tool)).await?;
             }
         }
 
@@ -416,6 +486,8 @@ impl AppBuilder {
             trace_context: self.trace_context,
             domain_pack: merged_domain_pack,
             a2a_client: self.a2a_client,
+            wasm_runtime: self.wasm_runtime,
+            wasm_module_manager,
         })
     }
 }
@@ -456,6 +528,10 @@ pub struct App {
     pub domain_pack: Option<Arc<MergedDomainPack>>,
     /// A2A client (optional — for inter-agent communication).
     pub a2a_client: Option<Arc<A2AClient>>,
+    /// WASM runtime (optional — for sandboxed tool execution).
+    pub wasm_runtime: Option<Arc<WasmRuntime>>,
+    /// WASM module manager (optional — for WASM module lifecycle).
+    pub wasm_module_manager: Option<WasmModuleManager>,
 }
 
 impl App {
@@ -527,6 +603,16 @@ impl App {
     /// Get the A2A client (for inter-agent communication).
     pub fn a2a_client(&self) -> Option<&Arc<A2AClient>> {
         self.a2a_client.as_ref()
+    }
+
+    /// Get the WASM runtime (for sandboxed tool execution).
+    pub fn wasm_runtime(&self) -> Option<&Arc<WasmRuntime>> {
+        self.wasm_runtime.as_ref()
+    }
+
+    /// Get the WASM module manager (for WASM module lifecycle).
+    pub fn wasm_module_manager(&self) -> Option<&WasmModuleManager> {
+        self.wasm_module_manager.as_ref()
     }
 }
 

@@ -69,6 +69,10 @@ pub enum OneAIError {
     #[error("Platform error: {0}")]
     Platform(String),
 
+    /// WASM sandbox execution errors.
+    #[error("WASM error: {0}")]
+    Wasm(String),
+
     /// Generic errors with context.
     #[error("{0}")]
     Other(String),

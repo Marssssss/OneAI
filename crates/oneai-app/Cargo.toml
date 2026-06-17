@@ -28,6 +28,7 @@ oneai-persistence = { workspace = true }
 oneai-trace = { workspace = true }
 oneai-domain = { workspace = true }
 oneai-a2a = { workspace = true }
+oneai-wasm = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

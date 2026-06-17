@@ -1,0 +1,24 @@
+[package]
+name = "oneai-wasm"
+description = "OneAI WASM sandbox execution engine — Wasmtime-based code-as-action runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wasmtime = "45"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+oneai-core = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+oneai-tool = { workspace = true }
+oneai-domain = { workspace = true }

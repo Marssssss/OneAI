@@ -346,6 +346,8 @@ pub enum OneAIErrorView {
     Timeout { message: String },
     /// Platform capability error.
     Platform { message: String },
+    /// WASM sandbox error.
+    Wasm { message: String },
     /// Generic error.
     Other { message: String },
 }
@@ -373,6 +375,7 @@ impl From<oneai_core::OneAIError> for OneAIErrorView {
             oneai_core::OneAIError::Network(msg) => OneAIErrorView::Network { message: msg },
             oneai_core::OneAIError::Timeout(msg) => OneAIErrorView::Timeout { message: msg },
             oneai_core::OneAIError::Platform(msg) => OneAIErrorView::Platform { message: msg },
+            oneai_core::OneAIError::Wasm(msg) => OneAIErrorView::Wasm { message: msg },
             oneai_core::OneAIError::Other(msg) => OneAIErrorView::Other { message: msg },
         }
     }
