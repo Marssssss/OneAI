@@ -588,6 +588,7 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             inject_skills: false, // Sub-agents don't need skill injection
             detect_env_changes: false, // Sub-agents don't need env diff detection
             pricing: crate::agent_loop::ModelPricing::default(),
+            structured_output: None, // Sub-agents don't have structured output validation
         };
 
         // Create a basic context assembler (no domain sources for sub-agents)

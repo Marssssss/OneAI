@@ -383,16 +383,85 @@ impl LlmProvider for MockProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
-        // Spawn a task that emits each content block as a separate stream chunk
+        // Spawn a task that emits each content block as incremental stream chunks.
+        // This addresses the MockProvider streaming compatibility gap:
+        // the IncrementalStreamParser expects incremental fragments for ToolCall blocks
+        // (name intent chunk + arg continuation chunks), not complete blocks in one chunk.
+        //
+        // For ToolCall blocks, we emit:
+        //   1. Name intent chunk: ContentBlock::ToolCall { id, name, args: "" }
+        //   2. Arg continuation chunks: ContentBlock::ToolCall { id: "", name: "", args: fragment }
+        //      (args are split into ~20-char fragments)
+        //
+        // For Thinking blocks, we emit fragments (compatible with the ThinkingFragment fix).
+        //
+        // For Text blocks, we emit the complete text in one chunk (text fragments are
+        // displayed immediately, no incremental benefit).
         tokio::spawn(async move {
-            // Emit each content block as a separate chunk
             for block in &response.message.content {
-                tx.send(InferenceStreamChunk {
-                    content: vec![block.clone()],
-                    is_final: false,
-                    usage: None,
-                    model: Some(response.model.clone()),
-                }).await.ok();
+                match block {
+                    ContentBlock::ToolCall { id, name, args } => {
+                        // Phase 1: emit name intent (tool call detected)
+                        tx.send(InferenceStreamChunk {
+                            content: vec![ContentBlock::ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                args: String::new(), // Empty args — intent only
+                            }],
+                            is_final: false,
+                            usage: None,
+                            model: Some(response.model.clone()),
+                        }).await.ok();
+
+                        // Phase 2: emit arg fragments (~20 chars each)
+                        if !args.is_empty() {
+                            let chunk_size = 20;
+                            let chars = args.chars().collect::<Vec<_>>();
+                            for start in (0..chars.len()).step_by(chunk_size) {
+                                let end = std::cmp::min(start + chunk_size, chars.len());
+                                let fragment: String = chars[start..end].iter().collect();
+                                tx.send(InferenceStreamChunk {
+                                    content: vec![ContentBlock::ToolCall {
+                                        id: String::new(),    // Empty id = arg continuation
+                                        name: String::new(),  // Empty name = arg continuation
+                                        args: fragment,
+                                    }],
+                                    is_final: false,
+                                    usage: None,
+                                    model: Some(response.model.clone()),
+                                }).await.ok();
+                            }
+                        }
+                    }
+                    ContentBlock::Thinking { text } => {
+                        // Emit thinking fragments (~30 chars each) for incremental display
+                        if !text.is_empty() {
+                            let chunk_size = 30;
+                            let chars = text.chars().collect::<Vec<_>>();
+                            for start in (0..chars.len()).step_by(chunk_size) {
+                                let end = std::cmp::min(start + chunk_size, chars.len());
+                                let fragment: String = chars[start..end].iter().collect();
+                                tx.send(InferenceStreamChunk {
+                                    content: vec![ContentBlock::Thinking {
+                                        text: fragment,
+                                    }],
+                                    is_final: false,
+                                    usage: None,
+                                    model: Some(response.model.clone()),
+                                }).await.ok();
+                            }
+                        }
+                    }
+                    // Text blocks are emitted as-is (immediate display, no incremental benefit)
+                    _ => {
+                        tx.send(InferenceStreamChunk {
+                            content: vec![block.clone()],
+                            is_final: false,
+                            usage: None,
+                            model: Some(response.model.clone()),
+                        }).await.ok();
+                    }
+                }
             }
 
             // Final chunk with usage info

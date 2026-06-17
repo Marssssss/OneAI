@@ -883,3 +883,265 @@ pub enum SelectionMode {
 pub fn keyword_matches(text: &str, keyword: &str) -> bool {
     text.to_lowercase().contains(&keyword.to_lowercase())
 }
+
+// ─── Lifecycle Hooks ──────────────────────────────────────────────────────────
+
+/// Hook point — when in the agent lifecycle a hook is triggered.
+///
+/// Inspired by Claude Code's hooks system (PreToolUse/PostToolUse/Notification/Stop),
+/// this extends the model to include inference lifecycle hooks as well.
+/// This represents the evolution from "围栏式安全" (ApprovalGate — execution gate)
+/// to "生命周期安全" (LifecycleHook — event-driven policy at every stage).
+///
+/// Hook points and their purposes:
+/// - **PreToolUse**: Inspect/modify/deny tool calls before execution. This replaces
+///   some ApprovalGate use cases with programmatic hooks (e.g., CI/CD auto-approve
+///   read tools, deny dangerous commands).
+/// - **PostToolUse**: Audit/log/transform tool outputs after execution. Used for
+///   compliance logging, output sanitization, or result enrichment.
+/// - **PreInfer**: Modify the inference request before sending to the LLM. Used for
+///   context injection (add safety reminders, domain constraints) or request filtering.
+/// - **PostInfer**: Inspect/modify the inference response after receiving it. Used for
+///   content filtering, response validation, or logging.
+/// - **PreCheckpoint**: Inspect/modify state before checkpointing. Used for state
+///   sanitization or selective checkpoint policies.
+/// - **Notification**: General notification event (not a decision point). Used for
+///   progress tracking, metrics collection, or external system alerts.
+/// - **Stop**: Final hook before the loop terminates. Used for cleanup, final logging,
+///   or state persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HookPoint {
+    /// Before a tool is executed — can allow/deny/modify the tool call.
+    PreToolUse,
+    /// After a tool has been executed — can audit/log/transform the output.
+    PostToolUse,
+    /// Before LLM inference — can modify the request (inject context, filter).
+    PreInfer,
+    /// After LLM inference — can modify the response (filter content, validate).
+    PostInfer,
+    /// Before a checkpoint is saved — can modify/skip the checkpoint.
+    PreCheckpoint,
+    /// General notification event — informational, not a decision point.
+    Notification,
+    /// Before the loop terminates — cleanup/final logging.
+    Stop,
+}
+
+/// Hook result — the outcome of running a lifecycle hook.
+///
+/// This mirrors Claude Code's allow/deny/modify tri-state:
+/// - **Allow**: Proceed without changes (the default for audit/logging hooks).
+/// - **Deny**: Block the action (the hook vetoes the operation).
+/// - **Modify**: Proceed but with changed parameters (the hook transforms the input).
+///
+/// For PreToolUse hooks:
+/// - Allow → tool executes with original args
+/// - Deny → tool is not executed, error message injected
+/// - Modify → tool executes with modified_args
+///
+/// For PreInfer hooks:
+/// - Allow → request sent unchanged
+/// - Deny → inference skipped (rare, mainly for safety constraints)
+/// - Modify → request sent with modifications (extra context, filtered tools)
+///
+/// For PostToolUse/PostInfer hooks:
+/// - Allow → output/response passed through unchanged
+/// - Deny → output/response replaced with error message
+/// - Modify → output/response replaced with modified_args content
+#[derive(Debug, Clone)]
+pub enum HookResult {
+    /// Allow the action to proceed without modification.
+    Allow,
+
+    /// Deny (block) the action with a reason.
+    /// The reason is injected into the conversation as an error message.
+    Deny { reason: String },
+
+    /// Allow the action but with modified parameters.
+    /// The modified_args replace the original parameters.
+    Modify { modified_args: serde_json::Value },
+}
+
+// ─── HookContext ───────────────────────────────────────────────────────────────
+
+/// Context provided to a lifecycle hook when it runs.
+///
+/// Contains the relevant data for the hook point — not all fields
+/// are populated for every point. The hook should check which fields
+/// are relevant for its registered point(s).
+///
+/// Example: a PreToolUse hook receives `tool_name` and `tool_args`,
+/// but not `tool_output` (the tool hasn't executed yet).
+#[derive(Debug, Clone)]
+pub struct HookContext {
+    /// Which hook point triggered this call.
+    pub point: HookPoint,
+
+    /// The tool name (populated for PreToolUse/PostToolUse).
+    pub tool_name: Option<String>,
+
+    /// The tool arguments (populated for PreToolUse — may be modified by hook).
+    pub tool_args: Option<serde_json::Value>,
+
+    /// The tool output (populated for PostToolUse — may be transformed by hook).
+    pub tool_output: Option<ToolOutput>,
+
+    /// The inference request (populated for PreInfer — may be modified by hook).
+    pub inference_request: Option<InferenceRequest>,
+
+    /// The inference response (populated for PostInfer — may be modified by hook).
+    pub inference_response: Option<InferenceResponse>,
+
+    /// The current loop iteration number.
+    pub iteration: usize,
+
+    /// The active paradigm name.
+    pub paradigm: String,
+}
+
+// ─── Interrupt/Resume ──────────────────────────────────────────────────────────
+
+/// An interrupt point in the agent loop.
+///
+/// When the loop is interrupted, it pauses at an iteration boundary,
+/// saves the LoopState, and returns a partial result. The interrupt
+/// can later be resumed by injecting human feedback and continuing execution.
+///
+/// This is the HITL evolution from "审批门" (ApprovalGate — gate-based pause)
+/// to "暂停恢复" (Interrupt — arbitrary-point pause with feedback injection).
+/// Inspired by LangGraph's interrupt() + Command(resume) pattern.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptPoint {
+    /// Unique interrupt ID (for resuming).
+    pub id: String,
+
+    /// The iteration at which the interrupt occurred.
+    pub iteration: usize,
+
+    /// The reason for the interrupt.
+    pub reason: InterruptReason,
+
+    /// The checkpoint ID for resuming from this interrupt (if checkpointing is enabled).
+    pub checkpoint_id: Option<String>,
+}
+
+/// Why the loop was interrupted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum InterruptReason {
+    /// Human approval needed for a tool call (from ApprovalGate or LifecycleHook).
+    HumanApprovalNeeded {
+        tool_name: String,
+        args: serde_json::Value,
+    },
+
+    /// Human feedback requested — the agent wants guidance before proceeding.
+    HumanFeedbackRequested {
+        question: String,
+    },
+
+    /// Paradigm boundary — pause at paradigm switch for human review.
+    ParadigmBoundary {
+        from: String,
+        to: String,
+    },
+
+    /// Custom interrupt reason (user-defined).
+    Custom {
+        reason: String,
+    },
+}
+
+/// Resume signal — injected when the loop resumes from an interrupt.
+///
+/// Contains the human's feedback and the action to take:
+/// continue as-is, modify the approach, or stop entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeSignal {
+    /// The interrupt ID being resumed from.
+    pub interrupt_id: String,
+
+    /// Human feedback text to inject into the conversation.
+    pub feedback: String,
+
+    /// What to do when resuming.
+    pub action: ResumeAction,
+}
+
+/// What to do when resuming from an interrupt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ResumeAction {
+    /// Continue execution as planned (just inject the feedback).
+    Continue,
+
+    /// Modify the current approach based on feedback.
+    Modify {
+        modified_args: Option<serde_json::Value>,
+    },
+
+    /// Stop the loop entirely (human decided to abort).
+    Stop,
+}
+
+// ─── StructuredOutput + ModelRetry ─────────────────────────────────────────────
+
+/// Configuration for structured output validation with automatic retry.
+///
+/// When the model's final output doesn't conform to the specified JSON Schema,
+/// the AgentLoop can automatically re-prompt the model with the validation error
+/// for self-correction. This is the "Rust 版 PydanticAI" pattern — leveraging
+/// Rust's type safety for output quality assurance.
+///
+/// The validation happens at the DirectAnswer stage (after the loop decides
+/// the model has produced a final answer). If validation fails:
+/// 1. The error details are injected as a system message
+/// 2. The loop continues (without incrementing the iteration counter)
+/// 3. The model re-generates its output with the error feedback
+/// 4. Repeat until validation passes or max_retries is exhausted
+///
+/// Retry attempts don't count against the hard_max_iterations budget,
+/// since they're self-correction attempts, not new task iterations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredOutputConfig {
+    /// JSON Schema that the model's final output must conform to.
+    pub schema: serde_json::Value,
+
+    /// Maximum retry attempts when validation fails.
+    pub max_retries: usize,
+
+    /// Whether to re-prompt with validation error (ModelRetry pattern).
+    /// When true, validation failures trigger a re-prompt with the error.
+    /// When false, validation failures are treated as final (loop ends with error).
+    pub re_prompt_on_failure: bool,
+
+    /// Custom validation error prompt template.
+    /// If None, a default template is used:
+    /// "Your previous output did not conform to the required schema.
+    ///  Errors: {errors}. Please re-generate your output conforming to the schema."
+    pub error_prompt_template: Option<String>,
+}
+
+/// Model retry information — injected into re-prompt context when
+/// structured output validation fails.
+///
+/// This is inspired by PydanticAI's ModelRetry pattern:
+/// when a model's output fails validation, the error context is
+/// fed back to the model for self-correction. The model sees:
+/// - What it produced (failed_output)
+/// - What went wrong (error_message)
+/// - What was expected (expected_schema)
+/// - How many retries have happened (retry_count)
+#[derive(Debug, Clone)]
+pub struct ModelRetry {
+    /// The validation error message (what went wrong).
+    pub error_message: String,
+
+    /// How many retry attempts have been made so far.
+    pub retry_count: usize,
+
+    /// The JSON Schema that was expected.
+    pub expected_schema: serde_json::Value,
+
+    /// The actual output that failed validation.
+    pub failed_output: String,
+}

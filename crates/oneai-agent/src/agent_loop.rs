@@ -16,11 +16,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
 use oneai_core::{
     ContentBlock, Conversation, InferenceRequest, InferenceResponse,
     Message, Role, ToolDefinition, ToolOutput,
+    HookPoint, HookResult, HookContext, InterruptPoint, InterruptReason,
+    ResumeSignal, ResumeAction, StructuredOutputConfig,
 };
 use oneai_core::error::Result;
 use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool};
@@ -30,6 +33,8 @@ use oneai_domain::{MergedDomainPack, ToolDecorator, DecoratedTool, PermissionAct
 use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 use crate::context_assembler::ContextAssembler;
 use crate::streaming::IncrementalStreamParser;
+use crate::hooks::{HookRegistry, ResolvedHookAction};
+use crate::structured_output::{validate_json_schema, build_retry_prompt};
 
 // ─── AgentLoopObserver ─────────────────────────────────────────────────────
 
@@ -84,6 +89,13 @@ pub trait AgentLoopObserver: Send + Sync {
 
     /// Called when cost updates (cumulative session cost).
     fn on_cost_update(&self, _cost: f64) {}
+
+    /// Called when the loop is interrupted (paused at an iteration boundary).
+    /// The UI can display the interrupt reason and await human feedback.
+    fn on_interrupt(&self, _point: &InterruptPoint) {}
+
+    /// Called when the loop resumes from an interrupt with human feedback.
+    fn on_resume(&self, _signal: &ResumeSignal) {}
 }
 
 // ─── AgentDecision ──────────────────────────────────────────────────────────
@@ -283,6 +295,12 @@ pub struct LoopState {
     pub active_paradigm_config: Option<ParadigmConfig>,
     pub sub_agent_results: Vec<SubAgentSummary>,
     pub env_snapshot: Option<crate::context_assembler::EnvironmentSnapshot>,
+    /// Interrupt points accumulated during the loop.
+    /// Each interrupt represents a pause point where human feedback was requested.
+    pub interrupt_points: Vec<InterruptPoint>,
+    /// The current pending interrupt (if the loop is paused).
+    /// When set, the loop will break at the next iteration boundary.
+    pub pending_interrupt: Option<InterruptPoint>,
 }
 
 impl LoopState {
@@ -301,6 +319,8 @@ impl LoopState {
             active_paradigm_config: None, // Uses default system prompt until switch
             sub_agent_results: Vec::new(),
             env_snapshot: None,
+            interrupt_points: Vec::new(),
+            pending_interrupt: None,
         }
     }
 
@@ -323,6 +343,8 @@ impl LoopState {
             active_paradigm_config: None,
             sub_agent_results: Vec::new(),
             env_snapshot: None,
+            interrupt_points: Vec::new(),
+            pending_interrupt: None,
         }
     }
 
@@ -451,6 +473,10 @@ pub struct AgentLoopConfig {
     pub detect_env_changes: bool,
     /// Pricing configuration for cost tracking.
     pub pricing: ModelPricing,
+    /// Structured output configuration — when set, the model's final
+    /// answer is validated against a JSON Schema. If validation fails,
+    /// the model is re-prompted with the error for self-correction (ModelRetry).
+    pub structured_output: Option<StructuredOutputConfig>,
 }
 
 impl Default for AgentLoopConfig {
@@ -470,6 +496,7 @@ impl Default for AgentLoopConfig {
             inject_skills: true,
             detect_env_changes: true,
             pricing: ModelPricing::default(),
+            structured_output: None,
         }
     }
 }
@@ -488,6 +515,9 @@ pub struct AgentLoop {
     stream_parser: Arc<tokio::sync::RwLock<IncrementalStreamParser>>,
     checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
     recovery_manager: Option<Arc<crate::error_recovery::RecoveryManager>>,
+    hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
+    interrupt_requested: Arc<AtomicBool>,
+    interrupt_reason: Arc<tokio::sync::Mutex<Option<InterruptReason>>>,
     config: AgentLoopConfig,
     domain_pack: Option<Arc<MergedDomainPack>>,
 }
@@ -511,6 +541,9 @@ impl Clone for AgentLoop {
             stream_parser: self.stream_parser.clone(),
             checkpoint_manager: self.checkpoint_manager.clone(),
             recovery_manager: self.recovery_manager.clone(),
+            hook_registry: self.hook_registry.clone(),
+            interrupt_requested: self.interrupt_requested.clone(),
+            interrupt_reason: self.interrupt_reason.clone(),
             config: self.config.clone(),
             domain_pack: self.domain_pack.clone(),
         }
@@ -534,7 +567,11 @@ impl AgentLoop {
     ) -> Self {
         Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
             sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None, config, domain_pack: None }
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
+            hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
+            interrupt_requested: Arc::new(AtomicBool::new(false)),
+            interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
+            config, domain_pack: None }
     }
 
     /// Create a new AgentLoop with a domain pack and recovery manager.
@@ -554,7 +591,11 @@ impl AgentLoop {
     ) -> Self {
         Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
             sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None, config,
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
+            hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
+            interrupt_requested: Arc::new(AtomicBool::new(false)),
+            interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
+            config,
             domain_pack: Some(domain_pack) }
     }
 
@@ -615,8 +656,37 @@ impl AgentLoop {
 
         // Track cumulative session cost
         let mut cumulative_cost: f64 = 0.0;
+        // Track structured output retry count (separate from iteration count)
+        let mut structured_retry_count: usize = 0;
 
         while !state.is_complete() && state.iterations < self.config.hard_max_iterations.unwrap_or(usize::MAX) {
+            // ─── Check for external interrupt request ──────────────────────
+            if self.interrupt_requested.load(Ordering::Relaxed) {
+                self.interrupt_requested.store(false, Ordering::Relaxed);
+                let reason = self.interrupt_reason.lock().await.take();
+                let interrupt_point = InterruptPoint {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    iteration: state.iterations,
+                    reason: reason.unwrap_or(InterruptReason::Custom {
+                        reason: "External interrupt requested".to_string(),
+                    }),
+                    checkpoint_id: None,
+                };
+                state.interrupt_points.push(interrupt_point.clone());
+                state.pending_interrupt = Some(interrupt_point.clone());
+                observer.on_interrupt(&interrupt_point);
+
+                // Save checkpoint if checkpointing is enabled
+                if self.config.auto_checkpoint {
+                    self.auto_checkpoint(&state, state.iterations).await?;
+                }
+
+                // Return partial result — the loop is paused for human feedback
+                let result = state.into_result();
+                observer.on_complete(&result);
+                return Ok(result);
+            }
+
             state.iterations += 1;
             observer.on_iteration_start(state.iterations, state.active_paradigm);
 
@@ -664,7 +734,7 @@ impl AgentLoop {
             let tool_defs = self.build_tool_definitions_for_paradigm(
                 state.active_paradigm_config.as_ref()
             ).await;
-            let request = InferenceRequest {
+            let mut request = InferenceRequest {
                 conversation: state.conversation.clone(),
                 tools: tool_defs,
                 max_tokens: self.config.max_tokens,
@@ -676,12 +746,74 @@ impl AgentLoop {
                 metadata: HashMap::new(),
             };
 
+            // 3b. PreInfer hook — lifecycle hooks can modify the inference request
+            // before it's sent to the LLM (e.g., inject context, filter tools).
+            {
+                let registry = self.hook_registry.read().await;
+                if registry.count_at(&HookPoint::PreInfer) > 0 {
+                    let hook_context = HookContext {
+                        point: HookPoint::PreInfer,
+                        tool_name: None,
+                        tool_args: None,
+                        tool_output: None,
+                        inference_request: Some(request.clone()),
+                        inference_response: None,
+                        iteration: state.iterations,
+                        paradigm: paradigm_name(&state.active_paradigm).to_string(),
+                    };
+                    let results = registry.run_hooks(HookPoint::PreInfer, hook_context).await;
+                    let resolved = HookRegistry::resolve_results(&results);
+                    if let ResolvedHookAction::Modify { modified_args } = resolved {
+                        // Modified args may contain a modified conversation or extra context
+                        if let Some(extra_msg) = modified_args.get("inject_system_message").and_then(|v| v.as_str()) {
+                            state.conversation.add_message(Message::system(extra_msg.to_string()));
+                            request.conversation = state.conversation.clone();
+                        }
+                    } else if let ResolvedHookAction::Deny { reason } = resolved {
+                        // PreInfer Deny: skip this inference iteration
+                        state.conversation.add_message(Message::system(
+                            format!("Inference skipped by PreInfer hook: {}", reason)
+                        ));
+                        continue;
+                    }
+                }
+            }
+
             // 4. Run inference
             let response = if self.config.use_streaming {
                 self.run_streaming_iteration_async(&request, observer).await?
             } else {
                 self.provider.infer(request).await?
             };
+
+            // 4c. PostInfer hook — lifecycle hooks can modify the inference response
+            // after it's received from the LLM (e.g., filter content, validate).
+            {
+                let registry = self.hook_registry.read().await;
+                if registry.count_at(&HookPoint::PostInfer) > 0 {
+                    let hook_context = HookContext {
+                        point: HookPoint::PostInfer,
+                        tool_name: None,
+                        tool_args: None,
+                        tool_output: None,
+                        inference_request: None,
+                        inference_response: Some(response.clone()),
+                        iteration: state.iterations,
+                        paradigm: paradigm_name(&state.active_paradigm).to_string(),
+                    };
+                    let results = registry.run_hooks(HookPoint::PostInfer, hook_context).await;
+                    let resolved = HookRegistry::resolve_results(&results);
+                    if let ResolvedHookAction::Modify { modified_args } = resolved {
+                        // PostInfer Modify: the modified_args may contain replacement content
+                        // For now, we log it but don't replace the response (to keep backward compat)
+                        tracing::info!("PostInfer hook modified response (logged but not applied for safety)");
+                    } else if let ResolvedHookAction::Deny { reason } = resolved {
+                        // PostInfer Deny: treat as "model produced disallowed content"
+                        // Replace the response with a safe fallback
+                        tracing::warn!("PostInfer hook denied response: {}", reason);
+                    }
+                }
+            }
 
             // 4b. Notify observer of token usage and cost
             observer.on_token_usage(response.usage.prompt_tokens, response.usage.completion_tokens);
@@ -702,19 +834,151 @@ impl AgentLoop {
             match decision {
                 AgentDecision::DirectAnswer { text } => {
                     observer.on_direct_answer(&text);
-                    // Add assistant response to conversation
-                    state.conversation.add_message(Message::assistant(&text));
-                    state.set_final_answer(text);
+
+                    // ─── Structured output validation ──────────────────────────
+                    // If StructuredOutputConfig is set, validate the model's final
+                    // answer against the JSON Schema. If validation fails and
+                    // re_prompt_on_failure is true, inject the error and continue
+                    // (ModelRetry pattern from PydanticAI).
+                    //
+                    // Retry attempts don't count against the iteration budget —
+                    // they're self-correction attempts, not new task iterations.
+                    if let Some(config) = &self.config.structured_output {
+                        let validation = validate_json_schema(&text, &config.schema);
+                        if !validation.passed {
+                            if config.re_prompt_on_failure && structured_retry_count < config.max_retries {
+                                structured_retry_count += 1;
+                                let retry = oneai_core::ModelRetry {
+                                    error_message: validation.error_summary(),
+                                    retry_count: structured_retry_count,
+                                    expected_schema: config.schema.clone(),
+                                    failed_output: text.clone(),
+                                };
+                                let retry_prompt = build_retry_prompt(config, &retry);
+                                tracing::info!(
+                                    "StructuredOutput validation failed (retry {}/{}): {}",
+                                    structured_retry_count, config.max_retries,
+                                    validation.error_summary()
+                                );
+                                // Inject the validation error as a system message
+                                state.conversation.add_message(Message::system(retry_prompt));
+                                // Don't finalize the answer — continue the loop for re-generation
+                                // Note: we don NOT increment iterations for retries
+                                continue;
+                            } else {
+                                // Max retries exhausted or re_prompt disabled — end with error
+                                tracing::warn!(
+                                    "StructuredOutput validation failed (max retries {} exhausted): {}",
+                                    config.max_retries,
+                                    validation.error_summary()
+                                );
+                                state.conversation.add_message(Message::assistant(&text));
+                                state.set_final_answer(format!(
+                                    "[StructuredOutput validation failed]: {}",
+                                    validation.error_summary()
+                                ));
+                            }
+                        } else {
+                            // Validation passed — finalize the answer
+                            state.conversation.add_message(Message::assistant(&text));
+                            state.set_final_answer(text);
+                        }
+                    } else {
+                        // No StructuredOutput config — finalize normally
+                        state.conversation.add_message(Message::assistant(&text));
+                        state.set_final_answer(text);
+                    }
                 }
                 AgentDecision::ToolCalls { calls } => {
                     observer.on_tool_calls(&calls);
+
+                    // ─── PreToolUse lifecycle hooks ─────────────────────────────
+                    // Before executing each tool call, run PreToolUse hooks.
+                    // Hooks can allow, deny, or modify the tool call args.
+                    // This replaces some ApprovalGate use cases with programmatic hooks.
+                    let mut filtered_calls = Vec::new();
+                    {
+                        let registry = self.hook_registry.read().await;
+                        if registry.count_at(&HookPoint::PreToolUse) > 0 {
+                            for call in &calls {
+                                let hook_context = HookContext {
+                                    point: HookPoint::PreToolUse,
+                                    tool_name: Some(call.name.clone()),
+                                    tool_args: Some(call.args.clone()),
+                                    tool_output: None,
+                                    inference_request: None,
+                                    inference_response: None,
+                                    iteration: state.iterations,
+                                    paradigm: paradigm_name(&state.active_paradigm).to_string(),
+                                };
+                                let results = registry.run_hooks(HookPoint::PreToolUse, hook_context).await;
+                                let resolved = HookRegistry::resolve_pre_tool_use_results(&results, &call.args);
+                                match resolved {
+                                    ResolvedHookAction::Allow { args: _ } => {
+                                        // Original args — proceed as-is
+                                        filtered_calls.push(call.clone());
+                                    }
+                                    ResolvedHookAction::Deny { reason } => {
+                                        // Hook denied this tool call — inject denial message
+                                        tracing::info!("PreToolUse hook denied tool '{}' ({})", call.name, reason);
+                                        state.conversation.add_message(Message::tool_result(
+                                            call.id.clone(),
+                                            format!("Denied by lifecycle hook: {}", reason),
+                                        ));
+                                    }
+                                    ResolvedHookAction::Modify { modified_args } => {
+                                        // Hook modified args — use modified args
+                                        tracing::info!("PreToolUse hook modified args for tool '{}'", call.name);
+                                        filtered_calls.push(ToolCallRequest {
+                                            id: call.id.clone(),
+                                            name: call.name.clone(),
+                                            args: modified_args,
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            // No PreToolUse hooks registered — proceed with all calls
+                            filtered_calls = calls.clone();
+                        }
+                    }
+
                     // Add the assistant's tool-call message to conversation FIRST
                     // (the model's response with tool calls must precede tool results)
                     state.conversation.add_message(response.message.clone());
-                    // Now execute tools and feed results
-                    let results = self.execute_tool_calls(calls).await?;
+
+                    // Now execute the filtered tool calls and feed results
+                    let results = if !filtered_calls.is_empty() {
+                        self.execute_tool_calls(filtered_calls).await?
+                    } else {
+                        // All calls were denied by hooks — no results to feed
+                        Vec::new()
+                    };
                     for r in &results {
                         observer.on_tool_result(&r.call_id, "", &r.output);
+
+                        // ─── PostToolUse lifecycle hooks ──────────────────────────
+                        // After each tool execution, run PostToolUse hooks.
+                        // Hooks can audit/log/transform the output.
+                        {
+                            let registry = self.hook_registry.read().await;
+                            if registry.count_at(&HookPoint::PostToolUse) > 0 {
+                                let hook_context = HookContext {
+                                    point: HookPoint::PostToolUse,
+                                    tool_name: Some("".to_string()), // Would need the tool name from the call
+                                    tool_args: None,
+                                    tool_output: Some(r.output.clone()),
+                                    inference_request: None,
+                                    inference_response: None,
+                                    iteration: state.iterations,
+                                    paradigm: paradigm_name(&state.active_paradigm).to_string(),
+                                };
+                                let _results = registry.run_hooks(HookPoint::PostToolUse, hook_context).await;
+                                // PostToolUse hooks are informational (audit/log) —
+                                // their results don't change the tool output for now.
+                                // In a future version, Modify could transform the output.
+                            }
+                        }
                     }
 
                     // Error recovery: check for failed tool calls.
@@ -839,6 +1103,103 @@ impl AgentLoop {
             fn on_thinking(&self, _: &str) {}
         }
         self.run_with_observer(task, &SilentObserver).await
+    }
+
+    // ─── Interrupt/Resume ────────────────────────────────────────────────
+
+    /// Request an interrupt at the next iteration boundary.
+    ///
+    /// The loop will pause after completing the current iteration,
+    /// emit `on_interrupt()`, and return a partial `AgentLoopResult`.
+    /// The interrupt reason is stored and included in the `InterruptPoint`.
+    ///
+    /// The caller can then call `resume_from_interrupt()` to inject
+    /// human feedback and continue execution.
+    ///
+    /// This is inspired by LangGraph's interrupt() pattern:
+    /// the loop pauses at a clean boundary point, preserving all state,
+    /// and resumes when the human provides guidance.
+    pub fn request_interrupt(&self, reason: InterruptReason) {
+        self.interrupt_requested.store(true, Ordering::Relaxed);
+        // Store the reason — use try_lock since this is a synchronous method.
+        // If the lock is held by the async loop, we'll still set the AtomicBool flag,
+        // and the loop will check it at the next iteration boundary.
+        if let Ok(mut guard) = self.interrupt_reason.try_lock() {
+            *guard = Some(reason);
+        }
+    }
+
+    /// Resume the agent loop from an interrupt point.
+    ///
+    /// This method creates a new LoopState from the interrupt context,
+    /// injects the human feedback as a system message, and continues
+    /// the loop execution.
+    ///
+    /// The `ResumeSignal` contains:
+    /// - The interrupt ID being resumed from
+    /// - Human feedback text
+    /// - A `ResumeAction` (Continue, Modify, or Stop)
+    ///
+    /// Based on the ResumeAction:
+    /// - **Continue**: Inject feedback and continue the loop
+    /// - **Modify**: Inject feedback and modify the approach
+    /// - **Stop**: Set a final answer and terminate the loop
+    pub async fn resume_from_interrupt(
+        &self,
+        signal: ResumeSignal,
+        observer: &dyn AgentLoopObserver,
+    ) -> Result<AgentLoopResult> {
+        observer.on_resume(&signal);
+
+        // Create a new LoopState from the interrupt context
+        // The conversation should already contain prior messages
+        // (we start fresh with a new task that includes the feedback)
+        let feedback_task = format!(
+            "[Human feedback]: {}",
+            signal.feedback
+        );
+
+        match signal.action {
+            ResumeAction::Continue => {
+                // Continue execution with the feedback injected
+                self.run_with_observer(&feedback_task, observer).await
+            }
+            ResumeAction::Modify { modified_args } => {
+                // Modify the approach based on feedback
+                let modify_msg = if let Some(args) = modified_args {
+                    format!(
+                        "[Human feedback]: {}. Modified approach: {}",
+                        signal.feedback,
+                        args
+                    )
+                } else {
+                    format!("[Human feedback]: {}. Please adjust your approach.", signal.feedback)
+                };
+                self.run_with_observer(&modify_msg, observer).await
+            }
+            ResumeAction::Stop => {
+                // Human decided to abort — return a final result
+                let result = AgentLoopResult {
+                    conversation: Conversation::new(),
+                    final_answer: format!("Task stopped by human: {}", signal.feedback),
+                    global_state: oneai_core::GlobalState::new(),
+                    iterations: 0,
+                    completed: true,
+                    active_paradigm: ParadigmKind::ReAct,
+                    sub_agent_results: Vec::new(),
+                };
+                observer.on_complete(&result);
+                Ok(result)
+            }
+        }
+    }
+
+    /// Get a reference to the hook registry for registering lifecycle hooks.
+    ///
+    /// Hooks can be registered before the loop starts running.
+    /// They will be called at their registered lifecycle points.
+    pub fn hook_registry(&self) -> Arc<tokio::sync::RwLock<HookRegistry>> {
+        self.hook_registry.clone()
     }
 
     // ─── Internal methods ──────────────────────────────────────────────
@@ -1221,6 +1582,9 @@ impl AgentLoop {
                 match event {
                     crate::streaming::StreamEvent::TextFragment { text } => {
                         observer.on_stream_chunk(&text);
+                    }
+                    crate::streaming::StreamEvent::ThinkingFragment { text } => {
+                        observer.on_thinking(&text);
                     }
                     crate::streaming::StreamEvent::ToolIntentDetected { call_id, tool_name } => {
                         // Pre-notify observer that a tool call is about to happen

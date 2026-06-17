@@ -15,6 +15,7 @@
 use crate::error::Result;
 use crate::types::*;
 use crate::platform::Platform;
+use crate::types::{HookPoint, HookResult, HookContext};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
@@ -349,6 +350,40 @@ pub struct CheckpointInfo {
 
     /// Brief description of what was checkpointed.
     pub description: String,
+}
+
+// ─── LifecycleHook ────────────────────────────────────────────────────────────
+
+/// A lifecycle hook that runs at specific points in the agent loop.
+///
+/// Lifecycle hooks are the evolution from ApprovalGate's "围栏式安全"
+/// (gate-based: approve/deny before execution) to "生命周期安全"
+/// (event-driven: allow/deny/modify at every lifecycle stage).
+///
+/// Inspired by Claude Code's hooks system (PreToolUse/PostToolUse/Notification/Stop),
+/// OneAI extends this to include inference lifecycle hooks (PreInfer/PostInfer).
+///
+/// Hooks can:
+/// - **Allow**: Proceed without changes (audit/logging hooks)
+/// - **Deny**: Block the action (safety/policy hooks)
+/// - **Modify**: Transform the parameters (constraint enforcement hooks)
+///
+/// Multiple hooks can be registered at the same point. They execute in
+/// registration order. For PreToolUse: if any hook returns Deny, the overall
+/// result is Deny; if any hook returns Modify, the last Modify's args win.
+#[async_trait]
+pub trait LifecycleHook: Send + Sync {
+    /// The hook points where this hook should be triggered.
+    /// A hook can register at multiple points (e.g., a logging hook
+    /// at both PreToolUse and PostToolUse).
+    fn points(&self) -> Vec<HookPoint>;
+
+    /// Run the hook at the given context.
+    /// Returns a HookResult indicating whether to allow, deny, or modify.
+    async fn run(&self, context: HookContext) -> HookResult;
+
+    /// Unique name for this hook (for logging/debugging/identification).
+    fn name(&self) -> &str;
 }
 
 // ─── VectorStore ──────────────────────────────────────────────────────────────

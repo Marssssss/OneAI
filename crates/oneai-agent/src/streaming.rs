@@ -34,6 +34,14 @@ pub enum StreamEvent {
         text: String,
     },
 
+    /// Thinking/reasoning content fragment received (partial — accumulates).
+    /// Extended thinking models (Anthropic, DeepSeek) produce Thinking blocks
+    /// during streaming. Each chunk may contain a partial thinking fragment.
+    ThinkingFragment {
+        /// The thinking text fragment received.
+        text: String,
+    },
+
     /// A tool call intent has been detected.
     /// The tool name is known, but arguments may still be streaming.
     ToolIntentDetected {
@@ -107,6 +115,12 @@ pub struct IncrementalStreamParser {
     /// Buffer for accumulating text content.
     text_buffer: String,
 
+    /// Buffer for accumulating thinking/reasoning content.
+    /// Extended thinking models produce ContentBlock::Thinking during streaming.
+    /// These fragments are accumulated and emitted as ThinkingFragment events,
+    /// then finalized as a ContentBlock::Thinking block.
+    thinking_buffer: String,
+
     /// Builders for tool calls being assembled.
     /// Keyed by tool call ID.
     tool_call_builders: HashMap<String, ToolCallBuilder>,
@@ -123,6 +137,7 @@ impl IncrementalStreamParser {
     pub fn new() -> Self {
         Self {
             text_buffer: String::new(),
+            thinking_buffer: String::new(),
             tool_call_builders: HashMap::new(),
             current_tool_call_id: None,
             on_event: None,
@@ -133,6 +148,7 @@ impl IncrementalStreamParser {
     pub fn with_event_callback(on_event: Arc<dyn Fn(StreamEvent) + Send + Sync>) -> Self {
         Self {
             text_buffer: String::new(),
+            thinking_buffer: String::new(),
             tool_call_builders: HashMap::new(),
             current_tool_call_id: None,
             on_event: Some(on_event),
@@ -201,7 +217,17 @@ impl IncrementalStreamParser {
                         }
                     }
                 }
-                _ => {}
+                ContentBlock::Thinking { text } => {
+                    // Extended thinking/reasoning content — accumulate into buffer
+                    // and emit ThinkingFragment events for real-time UI display.
+                    // This addresses the known gap where Thinking blocks were
+                    // silently dropped by `_ => {}` in process_chunk().
+                    self.thinking_buffer.push_str(text);
+                    let event = StreamEvent::ThinkingFragment { text: text.clone() };
+                    events.push(event.clone());
+                    self.emit_event(event);
+                }
+                _ => {} // Image, File, ToolResult — not handled in streaming
             }
         }
 
@@ -217,6 +243,13 @@ impl IncrementalStreamParser {
     /// return all assembled content blocks.
     pub fn finalize(&mut self) -> Vec<ContentBlock> {
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
+
+        // Add thinking content (before text — thinking precedes the answer)
+        if !self.thinking_buffer.is_empty() {
+            content_blocks.push(ContentBlock::Thinking {
+                text: self.thinking_buffer.clone(),
+            });
+        }
 
         // Add text content
         if !self.text_buffer.is_empty() {
@@ -236,6 +269,7 @@ impl IncrementalStreamParser {
 
         // Clear buffers
         self.text_buffer.clear();
+        self.thinking_buffer.clear();
         self.tool_call_builders.clear();
         self.current_tool_call_id = None;
 
