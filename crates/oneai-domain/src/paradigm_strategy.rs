@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use oneai_core::PermissionLevel;
+use oneai_core::StructuredOutputConfig;
 
 // ─── ParadigmKind ──────────────────────────────────────────────────────────────
 
@@ -59,21 +60,34 @@ impl DomainParadigmKind {
 /// Definition of a domain-specific sub-agent type.
 ///
 /// This extends the fixed `SubAgentKind` enum with custom types that have
-/// domain-specific metadata: system prompt, tool set, permission threshold.
+/// domain-specific metadata: system prompt, tool set, permission threshold,
+/// budget, isolation policy, and optional structured output validation.
 ///
 /// When the main agent delegates to a `SubAgentKind::Custom(name)` sub-agent,
 /// the DefaultSubAgentFactory looks up the SubAgentTypeDefinition by name
 /// and uses its metadata to configure the sub-agent's behavior.
+///
+/// Additionally, standard sub-agent kinds (plan, explore, code, review)
+/// can be overridden via these definitions when a DomainPack is active —
+/// enabling domain-specific roles (e.g., a "code_review" sub-agent in a
+/// CodingPack has different prompts and tools than a generic "review" sub-agent).
 ///
 /// Examples:
 /// - Coding: "searcher" — explores codebase with read+grep+glob tools
 /// - Coding: "coder" — implements changes with edit+shell tools
 /// - Research: "searcher" — searches web with web_search+web_fetch tools
 /// - Research: "verifier" — verifies claims with citation tools
+///
+/// **Design note**: The `merge_strategy` field uses a DomainPack-level
+/// `SubAgentMergeStrategy` enum (not `WorktreeConfig::MergeStrategy` from
+/// `oneai-agent`) to keep this struct as a pure configuration layer.
+/// The `DefaultSubAgentFactory` maps these at execution time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubAgentTypeDefinition {
     /// Unique name for this sub-agent type.
-    /// Maps to `SubAgentKind::Custom(name)` in oneai-agent.
+    /// Maps to `SubAgentKind::from_str()` in oneai-agent.
+    /// Standard names: "plan", "explore", "code", "review".
+    /// Custom names: any user-defined string (e.g., "security_review").
     pub name: String,
 
     /// Human-readable description of what this sub-agent does.
@@ -82,16 +96,174 @@ pub struct SubAgentTypeDefinition {
 
     /// System prompt for this sub-agent type.
     /// Defines the sub-agent's role, capabilities, and constraints.
+    /// For standard kinds (plan, explore, etc.), this overrides the
+    /// SubAgentKind's default_system_prompt(). For custom kinds,
+    /// this is the primary behavioral specification.
     pub system_prompt: String,
 
     /// Tools available to this sub-agent (subset of domain tools).
     /// The sub-agent can only use these tools, not the full domain tool set.
+    /// This applies at both the definition level (what the LLM sees) and
+    /// the execution level (what the agent can actually call).
     pub available_tools: Vec<String>,
 
     /// Permission level threshold for this sub-agent.
     /// Tools at or below this level are auto-approved within the sub-agent.
     /// Tools above this level still require the approval gate.
     pub permission_threshold: PermissionLevel,
+
+    /// Default token budget allocation for this sub-agent.
+    /// Maximum tokens the sub-agent can consume during execution.
+    /// If 0, uses a default budget (typically 50,000 tokens).
+    #[serde(default)]
+    pub budget: u32,
+
+    /// Whether this sub-agent modifies files.
+    /// If true, the DefaultSubAgentFactory will configure worktree
+    /// isolation (git worktree for Code/Custom agents).
+    /// If false, the sub-agent operates in the project directory directly.
+    #[serde(default)]
+    pub modifies_files: bool,
+
+    /// Merge strategy for worktree isolation.
+    /// Only relevant when `modifies_files = true`.
+    /// Determines how the sub-agent's changes are merged back
+    /// to the main branch after completion.
+    #[serde(default = "default_merge_strategy")]
+    pub merge_strategy: SubAgentMergeStrategy,
+
+    /// Structured output schema for validating sub-agent return values.
+    /// If Some, the SubAgentSummary returned by the sub-agent is validated
+    /// against this JSON Schema. Validation failures trigger ModelRetry.
+    /// If None, no structured output validation is applied.
+    #[serde(default)]
+    pub structured_output: Option<StructuredOutputConfig>,
+}
+
+/// Default merge strategy (PreserveOnly for read-only agents).
+fn default_merge_strategy() -> SubAgentMergeStrategy {
+    SubAgentMergeStrategy::PreserveOnly
+}
+
+impl SubAgentTypeDefinition {
+    /// Create a standard "plan" sub-agent definition.
+    pub fn plan() -> Self {
+        Self {
+            name: "plan".to_string(),
+            description: "Task decomposition agent — creates structured plans".to_string(),
+            system_prompt: "You are a planning agent. Decompose the given task into ordered steps \
+                with dependencies. Return a structured plan as a numbered list.".to_string(),
+            available_tools: vec!["read_file".into(), "grep".into(), "glob".into()],
+            permission_threshold: PermissionLevel::Read,
+            budget: 30_000,
+            modifies_files: false,
+            merge_strategy: SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
+        }
+    }
+
+    /// Create a standard "explore" sub-agent definition.
+    pub fn explore() -> Self {
+        Self {
+            name: "explore".to_string(),
+            description: "Exploration agent — searches and understands the codebase".to_string(),
+            system_prompt: "You are an exploration agent. Search and understand the codebase \
+                using available tools. Return a comprehensive summary of your findings.".to_string(),
+            available_tools: vec![
+                "read_file".into(), "grep".into(), "glob".into(),
+                "list_directory".into(),
+            ],
+            permission_threshold: PermissionLevel::Read,
+            budget: 40_000,
+            modifies_files: false,
+            merge_strategy: SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
+        }
+    }
+
+    /// Create a standard "code" sub-agent definition.
+    pub fn code() -> Self {
+        Self {
+            name: "code".to_string(),
+            description: "Code implementation agent — writes and modifies code".to_string(),
+            system_prompt: "You are a code implementation agent. Write and modify code based \
+                on the given specification. Return a summary of all changes you made.".to_string(),
+            available_tools: vec![
+                "read_file".into(), "edit_file".into(), "shell".into(),
+                "grep".into(), "glob".into(),
+            ],
+            permission_threshold: PermissionLevel::Standard,
+            budget: 80_000,
+            modifies_files: true,
+            merge_strategy: SubAgentMergeStrategy::Merge,
+            structured_output: None,
+        }
+    }
+
+    /// Create a standard "review" sub-agent definition.
+    pub fn review() -> Self {
+        Self {
+            name: "review".to_string(),
+            description: "Review agent — reviews and audits existing work".to_string(),
+            system_prompt: "You are a code review agent. Review code for correctness bugs, \
+                style issues, and potential improvements. Return a structured review.".to_string(),
+            available_tools: vec![
+                "read_file".into(), "grep".into(), "glob".into(),
+                "list_directory".into(),
+            ],
+            permission_threshold: PermissionLevel::Read,
+            budget: 30_000,
+            modifies_files: false,
+            merge_strategy: SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
+        }
+    }
+
+    /// Create a custom sub-agent definition.
+    pub fn custom(name: &str, description: &str, system_prompt: &str, tools: Vec<String>, budget: u32, modifies_files: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            system_prompt: system_prompt.to_string(),
+            available_tools: tools,
+            permission_threshold: if modifies_files { PermissionLevel::Standard } else { PermissionLevel::Read },
+            budget,
+            modifies_files,
+            merge_strategy: if modifies_files {
+                SubAgentMergeStrategy::Merge
+            } else {
+                SubAgentMergeStrategy::PreserveOnly
+            },
+            structured_output: None,
+        }
+    }
+
+    /// Get all standard sub-agent definitions (plan, explore, code, review).
+    pub fn defaults() -> Vec<Self> {
+        vec![Self::plan(), Self::explore(), Self::code(), Self::review()]
+    }
+}
+
+// ─── SubAgentMergeStrategy ──────────────────────────────────────────────────────
+
+/// Merge strategy for worktree isolation — DomainPack-level configuration.
+///
+/// This is a simplified version of `WorktreeConfig::MergeStrategy` from
+/// `oneai-agent`. The `DefaultSubAgentFactory` maps these to the
+/// corresponding `worktree_isolation::MergeStrategy` at execution time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubAgentMergeStrategy {
+    /// Merge the worktree branch into the main branch.
+    Merge,
+
+    /// Rebase the worktree branch onto the main branch, then fast-forward.
+    Rebase,
+
+    /// Cherry-pick specific commits from the worktree branch.
+    CherryPick,
+
+    /// Don't merge — preserve the worktree branch for manual review.
+    PreserveOnly,
 }
 
 // ─── ParadigmStrategy ──────────────────────────────────────────────────────────
@@ -209,10 +381,41 @@ mod tests {
             system_prompt: "You are a code exploration agent...".to_string(),
             available_tools: vec!["read_file".to_string(), "grep".to_string(), "glob".to_string()],
             permission_threshold: PermissionLevel::Read,
+            budget: 40_000,
+            modifies_files: false,
+            merge_strategy: SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
         };
 
         assert_eq!(definition.name, "searcher");
         assert_eq!(definition.available_tools.len(), 3);
+        assert!(!definition.modifies_files);
+        assert_eq!(definition.budget, 40_000);
+    }
+
+    #[test]
+    fn test_sub_agent_type_definition_defaults() {
+        let defaults = SubAgentTypeDefinition::defaults();
+        assert_eq!(defaults.len(), 4);
+
+        // Code agent modifies files and uses Merge strategy
+        let code = defaults.iter().find(|d| d.name == "code").unwrap();
+        assert!(code.modifies_files);
+        assert_eq!(code.merge_strategy, SubAgentMergeStrategy::Merge);
+
+        // Explore agent doesn't modify files
+        let explore = defaults.iter().find(|d| d.name == "explore").unwrap();
+        assert!(!explore.modifies_files);
+    }
+
+    #[test]
+    fn test_sub_agent_merge_strategy_serialization() {
+        let strategy = SubAgentMergeStrategy::Merge;
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(json, "\"Merge\"");
+
+        let parsed: SubAgentMergeStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SubAgentMergeStrategy::Merge);
     }
 
     #[test]

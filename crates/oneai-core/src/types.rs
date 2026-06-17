@@ -1101,7 +1101,7 @@ pub enum ResumeAction {
 ///
 /// Retry attempts don't count against the hard_max_iterations budget,
 /// since they're self-correction attempts, not new task iterations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StructuredOutputConfig {
     /// JSON Schema that the model's final output must conform to.
     pub schema: serde_json::Value,
@@ -1131,7 +1131,7 @@ pub struct StructuredOutputConfig {
 /// - What went wrong (error_message)
 /// - What was expected (expected_schema)
 /// - How many retries have happened (retry_count)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelRetry {
     /// The validation error message (what went wrong).
     pub error_message: String,

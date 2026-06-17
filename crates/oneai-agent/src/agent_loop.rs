@@ -511,6 +511,13 @@ pub struct AgentLoop {
     skill_selector: Arc<oneai_skill::SkillSelector>,
     context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
     sub_agent_factory: Arc<dyn SubAgentFactory>,
+    /// Optional async task runner for parallel sub-agent delegation.
+    /// When enabled, the AgentLoop can submit sub-agent tasks to the
+    /// runner for background execution, continuing work while sub-agents
+    /// run independently. The runner uses the same SubAgentFactory as
+    /// serial delegation, ensuring consistent sub-agent creation.
+    /// If None, all delegation is serial (spawn_sub_agent → wait).
+    async_task_runner: Option<Arc<crate::async_task_runner::AsyncTaskRunner>>,
     context_assembler: Arc<tokio::sync::RwLock<ContextAssembler>>,
     stream_parser: Arc<tokio::sync::RwLock<IncrementalStreamParser>>,
     checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
@@ -537,6 +544,7 @@ impl Clone for AgentLoop {
             skill_selector: self.skill_selector.clone(),
             context_budget: self.context_budget.clone(),
             sub_agent_factory: self.sub_agent_factory.clone(),
+            async_task_runner: self.async_task_runner.clone(),
             context_assembler: self.context_assembler.clone(),
             stream_parser: self.stream_parser.clone(),
             checkpoint_manager: self.checkpoint_manager.clone(),
@@ -566,7 +574,8 @@ impl AgentLoop {
         config: AgentLoopConfig,
     ) -> Self {
         Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
-            sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
+            sub_agent_factory, async_task_runner: None,
+            context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
             stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
@@ -590,13 +599,52 @@ impl AgentLoop {
         domain_pack: Arc<MergedDomainPack>,
     ) -> Self {
         Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
-            sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
+            sub_agent_factory, async_task_runner: None,
+            context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
             stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
             config,
             domain_pack: Some(domain_pack) }
+    }
+
+    /// Enable parallel sub-agent delegation with the AsyncTaskRunner.
+    ///
+    /// When enabled, the AgentLoop can submit sub-agent tasks to the
+    /// runner for background execution. The main loop continues working
+    /// while sub-agents run independently, and results are collected
+    /// when the sub-agents complete.
+    ///
+    /// The runner uses the same SubAgentFactory as serial delegation,
+    /// ensuring consistent sub-agent creation across both modes.
+    ///
+    /// **Usage**: Call this after creating the AgentLoop, before running it.
+    /// ```ignore
+    /// let agent_loop = AgentLoop::new(...).with_parallel_delegation();
+    /// ```
+    pub fn with_parallel_delegation(self) -> Self {
+        let runner = Arc::new(crate::async_task_runner::AsyncTaskRunner::new(
+            self.sub_agent_factory.clone(),
+        ));
+        Self {
+            async_task_runner: Some(runner),
+            ..self
+        }
+    }
+
+    /// Enable parallel sub-agent delegation with a custom budget.
+    ///
+    /// The custom budget applies to all background sub-agent tasks.
+    pub fn with_parallel_delegation_and_budget(self, budget: oneai_core::budget::TokenBudget) -> Self {
+        let runner = Arc::new(crate::async_task_runner::AsyncTaskRunner::with_budget(
+            self.sub_agent_factory.clone(),
+            budget,
+        ));
+        Self {
+            async_task_runner: Some(runner),
+            ..self
+        }
     }
 
     /// Set the RecoveryManager for error recovery during the loop.

@@ -41,6 +41,7 @@ pub mod config_parser;
 pub mod repo_map;
 
 pub use domain_pack::*;
+pub use paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
 pub use context_source::*;
 pub use permission_profile::*;
 pub use paradigm_strategy::*;

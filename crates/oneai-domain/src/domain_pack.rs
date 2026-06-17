@@ -28,6 +28,7 @@ use crate::permission_profile::PermissionProfile;
 use crate::paradigm_strategy::ParadigmStrategy;
 use crate::compression_template::CompressionTemplate;
 use crate::tool_decorator::ToolDecorator;
+use crate::paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
 
 // ─── DomainPack ────────────────────────────────────────────────────────────────
 
@@ -119,6 +120,41 @@ pub struct DomainPack {
     ///
     /// Example: react-loop StateGraph in CodingPack.
     pub state_graphs: Vec<oneai_workflow::StateGraph>,
+
+    /// Domain-specific sub-agent type definitions.
+    ///
+    /// These define how sub-agents of different kinds are configured
+    /// when spawned by the main agent loop during delegation.
+    /// Each SubAgentTypeDefinition specifies the system prompt,
+    /// tool whitelist, budget, isolation policy, and optional
+    /// structured output validation for a sub-agent kind.
+    ///
+    /// When a DomainPack is active, these definitions override
+    /// the default SubAgentKind configurations. This enables
+    /// domain-specific agent roles — e.g., a CodingPack's "code"
+    /// sub-agent has a coding-focused prompt and edit tools,
+    /// while a ResearchPack's "explore" sub-agent has search tools.
+    ///
+    /// If a sub-agent kind is not defined here, the DefaultSubAgentFactory
+    /// falls back to the kind's default configuration.
+    pub sub_agent_definitions: Vec<SubAgentTypeDefinition>,
+}
+
+impl DomainPack {
+    /// Look up a sub-agent definition by kind name.
+    ///
+    /// Returns the first definition whose `kind` matches the given name
+    /// (case-insensitive comparison). Returns None if no definition is
+    /// found for this kind.
+    ///
+    /// The `DefaultSubAgentFactory` calls this method before creating
+    /// a sub-agent. If a definition is found, it uses the definition's
+    /// configuration (system_prompt, available_tools, etc.). If not,
+    /// it falls back to the SubAgentKind's default configuration.
+    pub fn get_sub_agent_definition(&self, kind: &str) -> Option<&SubAgentTypeDefinition> {
+        self.sub_agent_definitions.iter()
+            .find(|d| d.name.eq_ignore_ascii_case(kind))
+    }
 }
 
 // Manual Debug impl — dyn Tool and dyn ContextSource don't implement Debug
@@ -136,6 +172,7 @@ impl std::fmt::Debug for DomainPack {
             .field("system_prompt_template", &self.system_prompt_template)
             .field("workflows_count", &self.workflows.len())
             .field("state_graphs_count", &self.state_graphs.len())
+            .field("sub_agent_definitions_count", &self.sub_agent_definitions.len())
             .finish()
     }
 }
@@ -157,6 +194,7 @@ pub struct DomainPackBuilder {
     system_prompt_template: String,
     workflows: Vec<oneai_workflow::WorkflowConfig>,
     state_graphs: Vec<oneai_workflow::StateGraph>,
+    sub_agent_definitions: Vec<SubAgentTypeDefinition>,
 }
 
 impl DomainPackBuilder {
@@ -174,6 +212,7 @@ impl DomainPackBuilder {
             system_prompt_template: String::new(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
+            sub_agent_definitions: Vec::new(),
         }
     }
 
@@ -273,6 +312,23 @@ impl DomainPackBuilder {
         self
     }
 
+    /// Add a sub-agent type definition.
+    pub fn sub_agent_definition(mut self, definition: SubAgentTypeDefinition) -> Self {
+        self.sub_agent_definitions.push(definition);
+        self
+    }
+
+    /// Add multiple sub-agent type definitions.
+    pub fn sub_agent_definitions(mut self, definitions: Vec<SubAgentTypeDefinition>) -> Self {
+        self.sub_agent_definitions.extend(definitions);
+        self
+    }
+
+    /// Use the standard sub-agent definitions (plan, explore, code, review).
+    pub fn default_sub_agent_definitions(self) -> Self {
+        self.sub_agent_definitions(SubAgentTypeDefinition::defaults())
+    }
+
     /// Build the DomainPack.
     pub fn build(self) -> DomainPack {
         DomainPack {
@@ -287,6 +343,7 @@ impl DomainPackBuilder {
             system_prompt_template: self.system_prompt_template,
             workflows: self.workflows,
             state_graphs: self.state_graphs,
+            sub_agent_definitions: self.sub_agent_definitions,
         }
     }
 }
@@ -312,5 +369,86 @@ mod tests {
         assert_eq!(pack.description, "A test domain pack");
         assert_eq!(pack.tools.len(), 1);
         assert_eq!(pack.system_prompt_template, "You are a test domain agent.");
+    }
+
+    #[test]
+    fn test_sub_agent_type_definition_defaults() {
+        let defs = SubAgentTypeDefinition::defaults();
+        assert_eq!(defs.len(), 4);
+
+        // Check each kind
+        assert_eq!(defs[0].name, "plan");
+        assert!(!defs[0].modifies_files);
+        assert_eq!(defs[1].name, "explore");
+        assert!(!defs[1].modifies_files);
+        assert_eq!(defs[2].name, "code");
+        assert!(defs[2].modifies_files);
+        assert_eq!(defs[3].name, "review");
+        assert!(!defs[3].modifies_files);
+    }
+
+    #[test]
+    fn test_sub_agent_type_definition_custom() {
+        let def = SubAgentTypeDefinition::custom(
+            "security_review",
+            "Security-focused code review",
+            "You are a security-focused reviewer.",
+            vec!["read_file".into(), "grep".into()],
+            20_000,
+            false,
+        );
+        assert_eq!(def.name, "security_review");
+        assert!(!def.modifies_files);
+        assert_eq!(def.merge_strategy, SubAgentMergeStrategy::PreserveOnly);
+    }
+
+    #[test]
+    fn test_domain_pack_with_sub_agent_definitions() {
+        let pack = DomainPackBuilder::new("coding")
+            .description("Coding domain")
+            .sub_agent_definitions(SubAgentTypeDefinition::defaults())
+            .build();
+
+        assert_eq!(pack.sub_agent_definitions.len(), 4);
+
+        // Lookup by kind name
+        let code_def = pack.get_sub_agent_definition("code").unwrap();
+        assert!(code_def.modifies_files);
+        assert_eq!(code_def.merge_strategy, SubAgentMergeStrategy::Merge);
+
+        // Lookup should be case-insensitive
+        let explore_def = pack.get_sub_agent_definition("Explore").unwrap();
+        assert_eq!(explore_def.name, "explore");
+
+        // Unknown kind → None
+        assert!(pack.get_sub_agent_definition("unknown").is_none());
+    }
+
+    #[test]
+    fn test_domain_pack_builder_custom_sub_agent() {
+        let custom_def = SubAgentTypeDefinition::custom(
+            "security_audit",
+            "Security audit agent",
+            "Audit for security vulnerabilities.",
+            vec!["read_file".into(), "grep".into(), "glob".into()],
+            25_000,
+            false,
+        );
+
+        let pack = DomainPackBuilder::new("security")
+            .description("Security domain")
+            .sub_agent_definition(custom_def)
+            .build();
+
+        assert_eq!(pack.sub_agent_definitions.len(), 1);
+        let def = pack.get_sub_agent_definition("security_audit").unwrap();
+        assert_eq!(def.name, "security_audit");
+    }
+
+    #[test]
+    fn test_sub_agent_merge_strategy_equality() {
+        assert_eq!(SubAgentMergeStrategy::Merge, SubAgentMergeStrategy::Merge);
+        assert_ne!(SubAgentMergeStrategy::Merge, SubAgentMergeStrategy::Rebase);
+        assert_ne!(SubAgentMergeStrategy::Merge, SubAgentMergeStrategy::PreserveOnly);
     }
 }

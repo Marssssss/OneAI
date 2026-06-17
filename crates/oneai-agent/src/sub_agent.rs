@@ -196,6 +196,13 @@ pub struct SubAgentWrapper {
     /// The project directory (root of the git repository).
     /// Used by WorktreeIsolation to create worktrees.
     project_path: Option<PathBuf>,
+    /// Structured output schema for validating sub-agent return values.
+    /// If Some, the SubAgentSummary's summary field is validated against
+    /// this JSON Schema. Validation failures trigger a log warning
+    /// (but don't block the summary — sub-agent results are informational).
+    /// For strict validation with ModelRetry, use the AgentLoop's
+    /// structured_output config instead.
+    structured_output_schema: Option<serde_json::Value>,
 }
 
 impl SubAgentWrapper {
@@ -211,6 +218,7 @@ impl SubAgentWrapper {
             agent_loop,
             worktree_config: WorktreeConfig::read_only(),
             project_path: None,
+            structured_output_schema: None,
         }
     }
 
@@ -233,6 +241,29 @@ impl SubAgentWrapper {
             agent_loop,
             worktree_config,
             project_path: Some(project_path),
+            structured_output_schema: None,
+        }
+    }
+
+    /// Create a SubAgentWrapper with structured output validation.
+    ///
+    /// When a schema is provided, the sub-agent's summary text is validated
+    /// against the JSON Schema after execution. If the summary doesn't conform,
+    /// a warning is logged and the summary includes the validation error info.
+    /// This is informational validation — it doesn't block the sub-agent result.
+    pub fn with_structured_output(
+        kind: SubAgentKind,
+        budget: TokenBudget,
+        agent_loop: AgentLoop,
+        schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind,
+            budget,
+            agent_loop,
+            worktree_config: WorktreeConfig::read_only(),
+            project_path: None,
+            structured_output_schema: Some(schema),
         }
     }
 
@@ -349,11 +380,15 @@ impl SubAgent for SubAgentWrapper {
                 if !matches!(merge_result, MergeResult::Skipped { .. }) {
                     s.key_findings.push(format!("Worktree merge: {}", merge_result.description()));
                 }
-                return Ok(s);
+                return Ok(self.validate_structured_output(s));
             }
         }
 
-        summary
+        // Apply structured output validation if configured
+        match summary {
+            Ok(s) => Ok(self.validate_structured_output(s)),
+            Err(e) => Err(e),
+        }
     }
 
     fn kind(&self) -> &SubAgentKind {
@@ -362,6 +397,58 @@ impl SubAgent for SubAgentWrapper {
 
     fn budget(&self) -> &TokenBudget {
         &self.budget
+    }
+}
+
+// ─── SubAgentWrapper helper methods ────────────────────────────────────────────
+
+impl SubAgentWrapper {
+    /// Validate structured output of a SubAgentSummary.
+    ///
+    /// If a structured_output_schema is configured, validates the summary text
+    /// against the JSON Schema. Validation failures are logged as warnings
+    /// and included in the summary's key_findings — they don't block the
+    /// sub-agent result (informational validation).
+    fn validate_structured_output(&self, summary: SubAgentSummary) -> SubAgentSummary {
+        if let Some(schema) = &self.structured_output_schema {
+            let validation = crate::structured_output::validate_json_schema(&summary.summary, schema);
+
+            if !validation.passed {
+                tracing::warn!(
+                    "Sub-agent '{}' structured output validation failed: {}",
+                    self.kind.name(),
+                    validation.error_summary()
+                );
+                // Include validation error in key findings for visibility
+                let mut findings = summary.key_findings;
+                findings.push(format!(
+                    "[Validation warning]: Sub-agent output didn't conform to schema — {}",
+                    validation.error_summary()
+                ));
+                SubAgentSummary {
+                    key_findings: findings,
+                    ..summary
+                }
+            } else {
+                tracing::info!(
+                    "Sub-agent '{}' structured output validation passed",
+                    self.kind.name()
+                );
+                // Include parsed output in key findings if available
+                if let Some(parsed) = validation.parsed_output {
+                    let mut findings = summary.key_findings;
+                    findings.push("[Structured output validated]".to_string());
+                    SubAgentSummary {
+                        key_findings: findings,
+                        ..summary
+                    }
+                } else {
+                    summary
+                }
+            }
+        } else {
+            summary
+        }
     }
 }
 

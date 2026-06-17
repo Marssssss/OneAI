@@ -95,6 +95,10 @@ fn research_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
                 "calculator".to_string(),
             ],
             permission_threshold: PermissionLevel::Standard,
+            budget: 50_000,
+            modifies_files: false,
+            merge_strategy: crate::paradigm_strategy::SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
         },
         SubAgentTypeDefinition {
             name: "analyzer".to_string(),
@@ -111,6 +115,10 @@ fn research_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
                 "grep".to_string(),
             ],
             permission_threshold: PermissionLevel::Read,
+            budget: 30_000,
+            modifies_files: false,
+            merge_strategy: crate::paradigm_strategy::SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
         },
         SubAgentTypeDefinition {
             name: "verifier".to_string(),
@@ -125,6 +133,10 @@ fn research_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
                 "read_file".to_string(),
             ],
             permission_threshold: PermissionLevel::Standard,
+            budget: 25_000,
+            modifies_files: false,
+            merge_strategy: crate::paradigm_strategy::SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
         },
     ]
 }
@@ -334,6 +346,28 @@ pub fn research_pack(project_dir: &str) -> DomainPack {
         ],
         state_graphs: vec![
             research_loop_graph(),
+        ],
+        sub_agent_definitions: vec![
+            // Research domain has a specialized explore sub-agent
+            SubAgentTypeDefinition {
+                name: "explore".to_string(),
+                description: "Research exploration agent".to_string(),
+                system_prompt: "You are a research exploration agent. Search and analyze \
+                    documents, papers, and web resources to gather relevant information. \
+                    Return a comprehensive summary with citations, key findings, and \
+                    relevance scores for each source.".to_string(),
+                available_tools: vec![
+                    "read_file".into(), "grep".into(), "glob".into(),
+                    "list_directory".into(), "web_fetch".into(),
+                ],
+                permission_threshold: oneai_core::PermissionLevel::Read,
+                budget: 50_000,
+                modifies_files: false,
+                merge_strategy: crate::paradigm_strategy::SubAgentMergeStrategy::PreserveOnly,
+                structured_output: None,
+            },
+            SubAgentTypeDefinition::plan(),
+            SubAgentTypeDefinition::review(),
         ],
     }
 }

@@ -29,7 +29,7 @@ use oneai_workflow::{WorkflowConfig, StepConfig, StateGraph, GraphNode, GraphEdg
 use crate::domain_pack::DomainPack;
 use crate::tool_decorator::ToolDecorator;
 use crate::permission_profile::{PermissionProfile, DenyPattern};
-use crate::paradigm_strategy::{ParadigmStrategy, SubAgentTypeDefinition, DomainParadigmKind};
+use crate::paradigm_strategy::{ParadigmStrategy, SubAgentTypeDefinition, SubAgentMergeStrategy, DomainParadigmKind};
 use crate::compression_template::CompressionTemplate;
 use crate::builtin_sources::{
     GitStatusSource, FileTreeSource, ProjectConfigSource, DateSource, EnvironmentInfoSource,
@@ -84,6 +84,10 @@ fn coding_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
                 "list_directory".to_string(),
             ],
             permission_threshold: PermissionLevel::Read,
+            budget: 40_000,
+            modifies_files: false,
+            merge_strategy: SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
         },
         SubAgentTypeDefinition {
             name: "coder".to_string(),
@@ -100,6 +104,10 @@ fn coding_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
                 "glob".to_string(),
             ],
             permission_threshold: PermissionLevel::Standard,
+            budget: 80_000,
+            modifies_files: true,
+            merge_strategy: SubAgentMergeStrategy::Merge,
+            structured_output: None,
         },
         SubAgentTypeDefinition {
             name: "reviewer".to_string(),
@@ -114,6 +122,10 @@ fn coding_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
                 "glob".to_string(),
             ],
             permission_threshold: PermissionLevel::Read,
+            budget: 30_000,
+            modifies_files: false,
+            merge_strategy: SubAgentMergeStrategy::PreserveOnly,
+            structured_output: None,
         },
     ]
 }
@@ -334,6 +346,7 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
         state_graphs: vec![
             react_state_graph(),
         ],
+        sub_agent_definitions: SubAgentTypeDefinition::defaults(),
     }
 }
 

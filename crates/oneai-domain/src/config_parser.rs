@@ -193,6 +193,10 @@ pub struct SubAgentConfig {
     /// Permission threshold ("read", "standard", "admin").
     #[serde(default = "default_permission_threshold")]
     pub permission_threshold: String,
+
+    /// Whether this sub-agent modifies files (needs worktree isolation).
+    #[serde(default)]
+    pub modifies_files: bool,
 }
 
 fn default_permission_threshold() -> String {
@@ -259,6 +263,7 @@ pub fn resolve_config(config: &DomainPackConfig, project_dir: &str) -> DomainPac
         system_prompt_template: config.system_prompt.clone(),
         workflows: Vec::new(),
         state_graphs: Vec::new(),
+        sub_agent_definitions: Vec::new(),
     }
 }
 // ─── Tool Resolution ──────────────────────────────────────────────────────────
@@ -369,6 +374,14 @@ fn resolve_paradigm_strategy(config: &ParadigmStrategyConfig) -> ParadigmStrateg
                     "admin" => PermissionLevel::Full,
                     _ => PermissionLevel::Standard,
                 },
+                budget: 0, // Default: uses SubAgentKind's default budget
+                modifies_files: sa.modifies_files,
+                merge_strategy: if sa.modifies_files {
+                    crate::paradigm_strategy::SubAgentMergeStrategy::Merge
+                } else {
+                    crate::paradigm_strategy::SubAgentMergeStrategy::PreserveOnly
+                },
+                structured_output: None, // Not configurable via YAML yet
             }
         }).collect(),
         description: config.description.clone(),
@@ -614,6 +627,7 @@ preserve_fields = ["critical_files", "progress_status"]
                 system_prompt: "You search".to_string(),
                 available_tools: vec!["web_search".to_string()],
                 permission_threshold: "standard".to_string(),
+                modifies_files: false,
             }],
             description: "Research workflow".to_string(),
         };

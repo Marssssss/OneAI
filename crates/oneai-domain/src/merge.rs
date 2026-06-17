@@ -19,6 +19,7 @@ use std::sync::Arc;
 use oneai_core::traits::Tool;
 
 use crate::domain_pack::DomainPack;
+use crate::paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
 use crate::context_source::ContextSource;
 use crate::permission_profile::PermissionProfile;
 use crate::paradigm_strategy::ParadigmStrategy;
@@ -71,6 +72,9 @@ pub struct MergedDomainPack {
 
     /// Merged predefined StateGraphs (union, deduplicated by name).
     pub state_graphs: Vec<oneai_workflow::StateGraph>,
+
+    /// Merged sub-agent type definitions (union, later pack overrides earlier for same kind).
+    pub sub_agent_definitions: Vec<SubAgentTypeDefinition>,
 }
 
 impl MergedDomainPack {
@@ -107,6 +111,7 @@ impl MergedDomainPack {
                 system_prompt_template: pack.system_prompt_template.clone(),
                 workflows: pack.workflows.clone(),
                 state_graphs: pack.state_graphs.clone(),
+                sub_agent_definitions: pack.sub_agent_definitions.clone(),
             };
         }
 
@@ -208,6 +213,16 @@ impl MergedDomainPack {
         }
         let state_graphs = graph_map.values().cloned().collect();
 
+        // SubAgentDefinitions: union, later pack overrides earlier for same kind
+        let mut sub_agent_map: std::collections::HashMap<String, SubAgentTypeDefinition> = std::collections::HashMap::new();
+        for pack in &packs {
+            for definition in &pack.sub_agent_definitions {
+                // Later pack's definition overrides earlier for same kind
+                sub_agent_map.insert(definition.name.clone(), definition.clone());
+            }
+        }
+        let sub_agent_definitions = sub_agent_map.values().cloned().collect();
+
         Self {
             name,
             description,
@@ -220,6 +235,7 @@ impl MergedDomainPack {
             system_prompt_template,
             workflows,
             state_graphs,
+            sub_agent_definitions,
         }
     }
 
@@ -240,6 +256,7 @@ impl MergedDomainPack {
             system_prompt_template: String::new(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
+            sub_agent_definitions: Vec::new(),
         }
     }
 
@@ -291,6 +308,20 @@ impl MergedDomainPack {
     pub fn state_graph_names(&self) -> Vec<String> {
         self.state_graphs.iter().map(|g| g.name.clone()).collect()
     }
+
+    /// Look up a sub-agent definition by kind name.
+    ///
+    /// Returns the first definition whose `kind` matches the given name
+    /// (case-insensitive). Returns None if no definition is found.
+    pub fn get_sub_agent_definition(&self, kind: &str) -> Option<&SubAgentTypeDefinition> {
+        self.sub_agent_definitions.iter()
+            .find(|d| d.name.eq_ignore_ascii_case(kind))
+    }
+
+    /// Get all available sub-agent kind names.
+    pub fn sub_agent_kind_names(&self) -> Vec<String> {
+        self.sub_agent_definitions.iter().map(|d| d.name.clone()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -315,6 +346,7 @@ mod tests {
             system_prompt_template: format!("You are a {} agent.", name),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
+            sub_agent_definitions: Vec::new(),
         }
     }
 
@@ -348,6 +380,7 @@ mod tests {
             system_prompt_template: "You are a coding agent.".to_string(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
+            sub_agent_definitions: Vec::new(),
         };
 
         let pack_b = DomainPack {
@@ -369,6 +402,7 @@ mod tests {
             system_prompt_template: "You are a research agent.".to_string(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
+            sub_agent_definitions: Vec::new(),
         };
 
         let merged = MergedDomainPack::merge(vec![pack_a, pack_b]);

@@ -829,3 +829,70 @@ async fn e2e_structured_output_max_retries_exhausted() {
     // The final answer should contain the validation failure message
     assert!(result.final_answer.contains("StructuredOutput validation failed") || result.final_answer.contains("not valid JSON"));
 }
+
+// ─── Scenario 9: Parallel sub-agent delegation with AsyncTaskRunner ──────────────
+
+#[tokio::test]
+async fn e2e_scenario_9_parallel_sub_agent_delegation() {
+    use crate::async_task_runner::AsyncTaskRunner;
+
+    // Create the AsyncTaskRunner with MockSubAgentFactory
+    let runner = AsyncTaskRunner::new(Arc::new(MockSubAgentFactory));
+
+    // Submit two tasks in parallel
+    let id1 = runner.submit("Find authentication code", SubAgentKind::Explore).await.unwrap();
+    let id2 = runner.submit("Find database queries", SubAgentKind::Explore).await.unwrap();
+
+    // Wait for both to complete
+    let r1 = runner.wait_for(&id1).await.unwrap();
+    let r2 = runner.wait_for(&id2).await.unwrap();
+
+    // Both should have completed
+    assert!(r1.completed);
+    assert!(r2.completed);
+    assert!(r1.summary.contains("Explored and found"));
+    assert!(r2.summary.contains("Explored and found"));
+    assert_eq!(r1.key_findings.len(), 2); // file1.rs, file2.rs
+    assert_eq!(r2.key_findings.len(), 2);
+
+    // Collect all completed results
+    let completed = runner.collect_completed().await;
+    assert_eq!(completed.len(), 2);
+}
+
+// ─── Scenario 10: Sub-agent with structured output validation ──────────────────────
+
+#[tokio::test]
+async fn e2e_scenario_10_sub_agent_structured_output() {
+    use crate::sub_agent::{SubAgentWrapper, SubAgentKind};
+    use crate::structured_output::validate_json_schema;
+
+    // Create a sub-agent with structured output validation
+    let schema = serde_json::json!({
+        "type": "object",
+        "required": ["completed"],
+        "properties": {
+            "completed": { "type": "boolean" }
+        }
+    });
+
+    // Create a mock summary that should pass validation
+    let valid_summary = SubAgentSummary {
+        completed: true,
+        summary: "{\"completed\": true, \"answer\": \"found bugs\"}".to_string(),
+        key_findings: vec!["bug1.rs".to_string()],
+        budget_exceeded: false,
+        agent_kind: SubAgentKind::Explore,
+        tokens_used: 3000,
+    };
+
+    // Validate directly using the validate_json_schema function
+    let validation = validate_json_schema(&valid_summary.summary, &schema);
+    assert!(validation.passed, "Valid JSON should pass schema validation");
+
+    // Create a mock summary that should fail validation
+    let invalid_summary_text = "This is not JSON at all";
+    let invalid_validation = validate_json_schema(invalid_summary_text, &schema);
+    assert!(!invalid_validation.passed, "Non-JSON text should fail schema validation");
+    assert!(invalid_validation.errors.iter().any(|e| e.message.contains("not valid JSON")));
+}

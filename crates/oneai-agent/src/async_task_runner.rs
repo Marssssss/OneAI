@@ -17,6 +17,12 @@
 //!   through the AgentLoopObserver, enabling TUI updates
 //! - **Budget awareness**: Background tasks consume from the shared
 //!   token budget, and the runner respects budget limits
+//!
+//! **Interface unification**: AsyncTaskRunner now uses the same
+//! `SubAgentFactory` trait from `sub_agent.rs`, ensuring consistent
+//! sub-agent creation across the system. The factory creates a
+//! `Box<dyn SubAgent>` with a scoped tool set and budget, which
+//! the runner spawns as an independent tokio task.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +32,8 @@ use tokio::sync::{RwLock, Mutex};
 use tokio::task::JoinHandle;
 
 use oneai_core::error::Result;
-use crate::sub_agent::{SubAgent, SubAgentSummary, SubAgentKind};
+use oneai_core::budget::TokenBudget;
+use crate::sub_agent::{SubAgent, SubAgentSummary, SubAgentKind, SubAgentFactory};
 
 // ─── Task Status ────────────────────────────────────────────────────────────
 
@@ -75,9 +82,17 @@ pub struct TaskInfo {
 /// 4. Cancel tasks that are no longer needed
 ///
 /// This is the OneAI equivalent of Claude Code's background agent spawning.
-pub struct AsyncTaskRunner<F: SubAgentFactory> {
+///
+/// **Interface unification**: Uses the same `SubAgentFactory` trait as
+/// `DefaultSubAgentFactory` from `sub_agent.rs`, ensuring consistent
+/// sub-agent creation across serial delegation (AgentLoop::spawn_sub_agent)
+/// and parallel delegation (AsyncTaskRunner::submit).
+pub struct AsyncTaskRunner {
     /// The sub-agent factory used to create sub-agents for each task.
-    factory: Arc<F>,
+    /// Uses the same SubAgentFactory trait as DefaultSubAgentFactory.
+    factory: Arc<dyn SubAgentFactory>,
+    /// Default budget for sub-agent tasks.
+    default_budget: TokenBudget,
     /// Active background tasks and their handles.
     tasks: Arc<RwLock<HashMap<String, TaskHandle>>>,
     /// Task info (status, description, results).
@@ -94,22 +109,27 @@ struct TaskHandle {
     cancelled: bool,
 }
 
-/// Factory trait for creating sub-agents.
-///
-/// The main agent loop provides this factory to the AsyncTaskRunner,
-/// allowing it to create appropriately scoped sub-agents for each
-/// background task.
-#[async_trait]
-pub trait SubAgentFactory: Send + Sync {
-    /// Create a sub-agent for the given kind and task description.
-    async fn create(&self, kind: &SubAgentKind, task: &str) -> Result<Arc<dyn SubAgent>>;
-}
-
-impl<F: SubAgentFactory> AsyncTaskRunner<F> {
+impl AsyncTaskRunner {
     /// Create a new AsyncTaskRunner with the given sub-agent factory.
-    pub fn new(factory: Arc<F>) -> Self {
+    ///
+    /// The factory must implement the `SubAgentFactory` trait from
+    /// `sub_agent.rs`. This is the same factory used by the AgentLoop
+    /// for serial delegation, ensuring consistent sub-agent creation.
+    pub fn new(factory: Arc<dyn SubAgentFactory>) -> Self {
         Self {
             factory,
+            default_budget: TokenBudget::new(50_000), // Default sub-agent budget
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            info: Arc::new(RwLock::new(HashMap::new())),
+            next_id: Arc::new(Mutex::new(1)),
+        }
+    }
+
+    /// Create an AsyncTaskRunner with a custom default budget.
+    pub fn with_budget(factory: Arc<dyn SubAgentFactory>, budget: TokenBudget) -> Self {
+        Self {
+            factory,
+            default_budget: budget,
             tasks: Arc::new(RwLock::new(HashMap::new())),
             info: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
@@ -118,8 +138,8 @@ impl<F: SubAgentFactory> AsyncTaskRunner<F> {
 
     /// Submit a task for background execution.
     ///
-    /// Creates a sub-agent of the specified kind, spawns it as an
-    /// independent tokio task, and returns a task ID for tracking.
+    /// Creates a sub-agent of the specified kind using the SubAgentFactory,
+    /// spawns it as an independent tokio task, and returns a task ID for tracking.
     ///
     /// The main agent can continue working while the task executes.
     /// Use `status()` to check progress and `result()` to get the outcome.
@@ -132,8 +152,8 @@ impl<F: SubAgentFactory> AsyncTaskRunner<F> {
             id
         };
 
-        // Create the sub-agent
-        let sub_agent = self.factory.create(&kind, task).await?;
+        // Create the sub-agent using the unified SubAgentFactory
+        let sub_agent = self.factory.create(kind.clone(), self.default_budget.clone()).await?;
         let task_owned = task.to_string();
         let kind_owned = kind.clone();
         let id_clone = id.clone();
@@ -195,6 +215,87 @@ impl<F: SubAgentFactory> AsyncTaskRunner<F> {
         }
 
         tracing::info!("AsyncTaskRunner: submitted background task '{}' (kind: {})", id, kind.name());
+
+        Ok(id)
+    }
+
+    /// Submit a task with a custom budget override.
+    ///
+    /// Useful when different tasks need different budget allocations
+    /// (e.g., exploration tasks need less budget than code implementation tasks).
+    pub async fn submit_with_budget(&self, task: &str, kind: SubAgentKind, budget: TokenBudget) -> Result<String> {
+        // Generate a unique task ID
+        let id = {
+            let mut counter = self.next_id.lock().await;
+            let id = format!("bg_task_{}", *counter);
+            *counter += 1;
+            id
+        };
+
+        // Create the sub-agent with the specified budget
+        let sub_agent = self.factory.create(kind.clone(), budget.clone()).await?;
+        let task_owned = task.to_string();
+        let kind_owned = kind.clone();
+        let id_clone = id.clone();
+        let info_arc = self.info.clone();
+        let budget_total = budget.total;
+
+        // Store initial task info
+        {
+            let mut info = self.info.write().await;
+            info.insert(id.clone(), TaskInfo {
+                id: id.clone(),
+                agent_kind: kind.clone(),
+                description: task.to_string(),
+                status: TaskStatus::Pending,
+                result: None,
+                allocated_tokens: budget_total,
+            });
+        }
+
+        // Spawn the sub-agent as an independent tokio task
+        let handle = tokio::spawn(async move {
+            // Update status to Running
+            {
+                let mut info = info_arc.write().await;
+                if let Some(task_info) = info.get_mut(&id_clone) {
+                    task_info.status = TaskStatus::Running;
+                }
+            }
+
+            // Run the sub-agent
+            let result = sub_agent.run(&task_owned).await;
+
+            // Update status with result
+            {
+                let mut info = info_arc.write().await;
+                if let Some(task_info) = info.get_mut(&id_clone) {
+                    match &result {
+                        Ok(summary) => {
+                            task_info.status = TaskStatus::Completed;
+                            task_info.result = Some(summary.clone());
+                            task_info.allocated_tokens = summary.tokens_used;
+                        }
+                        Err(e) => {
+                            task_info.status = TaskStatus::Failed(e.to_string());
+                        }
+                    }
+                }
+            }
+
+            result
+        });
+
+        // Store the task handle
+        {
+            let mut tasks = self.tasks.write().await;
+            tasks.insert(id.clone(), TaskHandle {
+                join_handle: handle,
+                cancelled: false,
+            });
+        }
+
+        tracing::info!("AsyncTaskRunner: submitted background task '{}' (kind: {}, budget: {})", id, kind.name(), budget.total);
 
         Ok(id)
     }
@@ -360,23 +461,30 @@ mod tests {
         }
         fn kind(&self) -> &SubAgentKind { &self.kind }
         fn budget(&self) -> &TokenBudget {
-            // Return a default budget
             static BUDGET: TokenBudget = TokenBudget { total: 10000, consumed: 0 };
             &BUDGET
         }
     }
 
-    // ─── Mock Factory ─────────────────────────────────────────────────────────
+    // ─── Mock Factory (uses sub_agent.rs SubAgentFactory trait) ─────────────────
 
     struct MockFactory;
 
     #[async_trait]
     impl SubAgentFactory for MockFactory {
-        async fn create(&self, kind: &SubAgentKind, task: &str) -> Result<Arc<dyn SubAgent>> {
-            Ok(Arc::new(MockSubAgent {
+        async fn create(&self, kind: SubAgentKind, _budget: TokenBudget) -> Result<Box<dyn SubAgent>> {
+            Ok(Box::new(MockSubAgent {
                 kind: kind.clone(),
-                response: format!("Result for: {}", task),
+                response: format!("Result for kind {}", kind.name()),
             }))
+        }
+
+        fn available_kinds(&self) -> Vec<SubAgentKind> {
+            vec![SubAgentKind::Explore, SubAgentKind::Code]
+        }
+
+        fn is_available(&self, kind: &SubAgentKind) -> bool {
+            matches!(kind, SubAgentKind::Explore | SubAgentKind::Code)
         }
     }
 
@@ -391,7 +499,7 @@ mod tests {
         // Wait for the task to complete
         let result = runner.wait_for(&task_id).await.unwrap();
         assert!(result.completed);
-        assert!(result.summary.contains("Find all authentication functions"));
+        assert!(result.summary.contains("Result for kind"));
     }
 
     #[tokio::test]
@@ -420,7 +528,7 @@ mod tests {
 
         let id1 = runner.submit("Explore module A", SubAgentKind::Explore).await.unwrap();
         let id2 = runner.submit("Explore module B", SubAgentKind::Explore).await.unwrap();
-        let id3 = runner.submit("Review code changes", SubAgentKind::Review).await.unwrap();
+        let id3 = runner.submit("Review code changes", SubAgentKind::Code).await.unwrap();
 
         // Wait for all tasks
         let r1 = runner.wait_for(&id1).await.unwrap();
@@ -476,5 +584,17 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, id1);
         assert_eq!(tasks[0].agent_kind, SubAgentKind::Explore);
+    }
+
+    #[tokio::test]
+    async fn test_submit_with_custom_budget() {
+        let factory = Arc::new(MockFactory);
+        let runner = AsyncTaskRunner::new(factory);
+
+        let custom_budget = TokenBudget::new(30_000);
+        let task_id = runner.submit_with_budget("Small task", SubAgentKind::Explore, custom_budget).await.unwrap();
+
+        let result = runner.wait_for(&task_id).await.unwrap();
+        assert!(result.completed);
     }
 }
