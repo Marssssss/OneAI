@@ -12,3 +12,6 @@ pub mod session;
 
 pub use builder::*;
 pub use session::*;
+
+#[cfg(test)]
+mod e2e_tests;

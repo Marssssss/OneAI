@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -22,6 +23,7 @@ oneai-persistence = { workspace = true }
 oneai-memory = { workspace = true }
 oneai-domain = { workspace = true }
 oneai-workflow = { workspace = true }
+oneai-tool = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }

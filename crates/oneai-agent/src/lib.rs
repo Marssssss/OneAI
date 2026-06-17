@@ -2,6 +2,8 @@
 //!
 //! Agent paradigms: Plan, ReAct, Reflection, Parallel execution with ScopeState isolation.
 //! New: Agentic Loop (dynamic decision-making), SubAgent delegation, streaming, prompts.
+//!
+//! E2E testing infrastructure: MockProvider, MockTool for deterministic loop verification.
 
 pub mod scope_state;
 pub mod react_agent;
@@ -17,6 +19,8 @@ pub mod error_recovery;
 pub mod prompts;
 pub mod async_task_runner;
 pub mod worktree_isolation;
+pub mod mock_provider;
+pub mod mock_tool;
 
 pub use scope_state::*;
 pub use react_agent::*;
@@ -32,6 +36,11 @@ pub use error_recovery::*;
 pub use prompts::*;
 pub use async_task_runner::*;
 pub use worktree_isolation::*;
+pub use mock_provider::*;
+pub use mock_tool::*;
+
+#[cfg(test)]
+mod e2e_tests;
 
 #[cfg(test)]
 mod tests {
