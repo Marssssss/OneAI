@@ -72,9 +72,24 @@ pub struct ShellTool {
 }
 
 /// Sandbox execution mode.
+///
+/// **Updated**: SandboxMode now supports a real SandboxBackend for
+/// process-level isolation (Seatbelt on macOS, Docker on Linux).
+/// When a backend is provided, commands are wrapped before execution
+/// to enforce filesystem, network, and process restrictions.
 pub enum SandboxMode {
-    /// Full sandbox — restricted working directory, no dangerous commands.
-    Enabled,
+    /// Full sandbox — uses a SandboxBackend for real process-level isolation.
+    /// The backend wraps commands before execution, restricting:
+    /// - File system writes (only to allowed directories)
+    /// - Network access (can be restricted)
+    /// - Process execution (can restrict which binaries can run)
+    ///
+    /// If no backend is provided (None), falls back to regex-only blocking.
+    Enabled {
+        /// The sandbox backend to use for command wrapping.
+        /// If None, uses the regex blacklist + working dir restriction (improved baseline).
+        backend: Option<std::sync::Arc<dyn crate::sandbox::SandboxBackend>>,
+    },
 
     /// Sandbox disabled — allows any command in any directory.
     /// Must be explicitly enabled by the user (analogous to Claude Code's
@@ -85,16 +100,39 @@ pub enum SandboxMode {
     },
 }
 
+impl Default for SandboxMode {
+    fn default() -> Self {
+        Self::Enabled { backend: None }
+    }
+}
+
 impl ShellTool {
     /// Create a new ShellTool with default safety settings.
+    /// Sandbox is enabled by default (regex-only, no backend).
     pub fn new() -> Self {
         Self {
             blocked_patterns: default_blocked_patterns(),
             default_timeout_secs: 120,
             max_timeout_secs: 600,
             allowed_working_dirs: Vec::new(),
-            sandbox_mode: SandboxMode::Enabled,
+            sandbox_mode: SandboxMode::Enabled { backend: None },
             max_output_bytes: 100_000, // ~100KB max output
+        }
+    }
+
+    /// Create a ShellTool with a real sandbox backend for process-level isolation.
+    ///
+    /// The backend wraps commands before execution, providing real isolation
+    /// (Seatbelt on macOS, Docker on Linux, etc.). This replaces the
+    /// regex-only approach with actual process-level restrictions.
+    pub fn with_sandbox_backend(backend: std::sync::Arc<dyn crate::sandbox::SandboxBackend>) -> Self {
+        Self {
+            blocked_patterns: default_blocked_patterns(),
+            default_timeout_secs: 120,
+            max_timeout_secs: 600,
+            allowed_working_dirs: Vec::new(),
+            sandbox_mode: SandboxMode::Enabled { backend: Some(backend) },
+            max_output_bytes: 100_000,
         }
     }
 
@@ -120,7 +158,7 @@ impl ShellTool {
             default_timeout_secs: timeout_secs.min(600), // Clamp to max
             max_timeout_secs: 600,
             allowed_working_dirs: Vec::new(),
-            sandbox_mode: SandboxMode::Enabled,
+            sandbox_mode: SandboxMode::Enabled { backend: None },
             max_output_bytes: 100_000,
         }
     }
@@ -128,6 +166,11 @@ impl ShellTool {
     /// Get the configured default timeout in seconds.
     pub fn timeout_secs(&self) -> u64 {
         self.default_timeout_secs
+    }
+
+    /// Get a reference to the sandbox mode.
+    pub fn sandbox_mode(&self) -> &SandboxMode {
+        &self.sandbox_mode
     }
 }
 
@@ -176,9 +219,21 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command on the local system. Returns the command output (stdout and stderr). \
-        Use with caution — this is a high-risk tool that requires human approval before execution. \
-        Dangerous commands (rm -rf /, mkfs, etc.) are blocked by default."
+        "Execute a shell command on the local system. Returns the command output (stdout and stderr).\n\n\
+        This is a HIGH-RISK tool that requires explicit approval before execution. Commands run \
+        within a sandbox that restricts filesystem access to allowed directories and blocks \
+        dangerous operations (rm -rf /, mkfs, dd, chmod 777, etc.) by default.\n\n\
+        **Usage guidelines**:\n\
+        - Use for: compilation, testing, running scripts, git operations, package management\n\
+        - Default timeout: 120 seconds (max: 600 seconds)\n\
+        - Working directory: restricted to project directory\n\
+        - Output is truncated if exceeds size limit to prevent context overflow\n\n\
+        **Preferences**:\n\
+        - Prefer targeted commands over broad ones (e.g., 'cargo test specific_test' over 'cargo test')\n\
+        - For file reading, prefer read_file tool over 'cat' commands\n\
+        - For searching, prefer grep/glob tools over shell grep/find\n\
+        - Combine commands with && for sequential operations\n\
+        - Use timeout parameter for long-running commands"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -216,7 +271,7 @@ impl Tool for ShellTool {
             });
         }
 
-        // Check against blocked patterns
+        // Check against blocked patterns (always applied, regardless of sandbox backend)
         for pattern in &self.blocked_patterns {
             if pattern.is_match(command) {
                 return Ok(ToolOutput {
@@ -228,7 +283,36 @@ impl Tool for ShellTool {
             }
         }
 
+        // Determine the actual command to run — wrap with sandbox backend if available
+        let effective_command = match &self.sandbox_mode {
+            SandboxMode::Enabled { backend } => {
+                if let Some(b) = backend {
+                    // Use real sandbox backend for process-level isolation
+                    let working_dir = if self.allowed_working_dirs.is_empty() {
+                        std::path::PathBuf::from(".")
+                    } else {
+                        self.allowed_working_dirs[0].clone()
+                    };
+                    let wrapped = b.wrap_command(command, &working_dir)?;
+                    tracing::info!("ShellTool: command wrapped by {} sandbox backend", b.name());
+                    // The wrapped command is already a complete shell command
+                    // (e.g., "sandbox-exec -p '...' sh -c '...'" for Seatbelt,
+                    //  or "docker run --rm ... sh -c '...'" for Docker)
+                    wrapped.shell_command
+                } else {
+                    // No backend — just use the raw command (regex-only protection)
+                    command.to_string()
+                }
+            }
+            SandboxMode::Disabled { reason } => {
+                tracing::warn!("ShellTool: sandbox disabled — reason: {}", reason);
+                command.to_string()
+            }
+        };
+
         // Determine the shell based on the platform
+        // If the command is already wrapped by a sandbox backend (contains "sandbox-exec" or "docker"),
+        // we need to use a shell that can execute the wrapped command directly.
         let (shell, shell_arg) = if cfg!(target_os = "windows") {
             ("powershell", "-Command")
         } else {
@@ -245,7 +329,7 @@ impl Tool for ShellTool {
             std::time::Duration::from_secs(timeout),
             tokio::process::Command::new(shell)
                 .arg(shell_arg)
-                .arg(command)
+                .arg(&effective_command)
                 .output()
         ).await;
 
@@ -345,9 +429,19 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a local file. Supports offset+limit parameters \
-        for partial reads of large files. Returns the file content as text. \
-        For binary files, returns a base64-encoded representation."
+        "Read the contents of a local file. Supports offset+limit parameters for \
+        partial reads of large files. Returns the file content as text with line \
+        numbers. For binary files, returns a base64-encoded representation.\n\n\
+        **Usage guidelines**:\n\
+        - Always use read_file before editing a file to understand its current content\n\
+        - Use offset+limit for large files to avoid overflowing the context window\n\
+        - Start with a small limit (e.g., 50 lines) to preview, then read more if needed\n\
+        - For searching across multiple files, prefer grep or glob tools\n\n\
+        **Preferences**:\n\
+        - Read entire file for small files (<500 lines)\n\
+        - Use offset+limit for large files, starting from relevant sections\n\
+        - Multiple targeted reads are better than one huge read\n\
+        - Re-read files after editing to verify changes"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -528,8 +622,22 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Perform an exact string replacement in a file. The old_string must be \
-        unique in the file. This is a precise, safe editing mechanism."
+        "Perform an exact string replacement in a file. The old_string must match \
+        exactly (including whitespace and indentation) and must be unique in the file.\n\n\
+        **Usage guidelines**:\n\
+        - ALWAYS read the file first to understand the current content before editing\n\
+        - The old_string must be an exact, unique match in the file — partial matches fail\n\
+        - For multi-line replacements, include the full original block in old_string\n\
+        - For multiple edits in one operation, use apply_patch instead\n\n\
+        **Preferences**:\n\
+        - Prefer targeted edits over large rewrites\n\
+        - Include enough context in old_string to ensure uniqueness\n\
+        - Avoid replacing entire functions — replace only the changed lines\n\
+        - When in doubt, use a smaller old_string that includes unique identifiers\n\n\
+        **Common mistakes**:\n\
+        - Don't forget trailing whitespace or newlines in old_string\n\
+        - Don't use approximate matches — they will fail silently\n\
+        - Don't try to edit a file you haven't read yet"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -805,9 +913,21 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents using regex patterns. Recursively searches files \
-        in a directory for lines matching a pattern. Returns matching lines with \
-        file paths and line numbers."
+        "Search file contents using regex patterns. Native Rust implementation \
+        (no shell dependency). Recursively searches files in a directory for \
+        lines matching a pattern. Returns matching lines with file paths and \
+        line numbers.\n\n\
+        **Usage guidelines**:\n\
+        - Use for finding function definitions, usages, patterns across the codebase\n\
+        - Pattern must be a valid regex (e.g., 'fn authenticate', 'impl.*Handler')\n\
+        - Use file_pattern to narrow search scope (e.g., '*.rs' for Rust files only)\n\
+        - Results are limited to 500 matches to prevent context overflow\n\
+        - Skips hidden dirs, .git, target, node_modules by default\n\n\
+        **Preferences**:\n\
+        - Prefer specific patterns over broad ones to reduce noise\n\
+        - Use file_pattern to focus on relevant file types\n\
+        - For file discovery by name, prefer glob tool\n\
+        - For content of a specific file, prefer read_file tool"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -999,8 +1119,18 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files matching a glob pattern (e.g., '**/*.rs', 'src/**/*.toml'). \
-        Returns matching file paths."
+        "Find files matching a glob pattern. Native Rust implementation (no shell \
+        dependency). Returns matching file paths with sizes.\n\n\
+        **Usage guidelines**:\n\
+        - Use for finding source files, config files, test files by name pattern\n\
+        - Pattern examples: '**/*.rs' (all Rust files), 'src/**/*.toml' (all TOML in src)\n\
+        - Faster than grep for file discovery — doesn't read file contents\n\
+        - Skips hidden dirs, .git, target, node_modules by default\n\
+        - Results are limited to 1000 matches to prevent context overflow\n\n\
+        **Preferences**:\n\
+        - Prefer glob for file discovery, grep for content search\n\
+        - Use specific patterns to reduce noise\n\
+        - Combine with grep: first glob to find files, then grep to search their content"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1657,10 +1787,19 @@ impl Tool for WebFetchTool {
 
     fn description(&self) -> &str {
         "Fetch content from a web URL and convert it to structured Markdown. \
-        Preserves headings, links, lists, and other semantic elements. \
-        Returns the converted content for reading and analysis. \
-        Use for: fetching documentation pages, API references, blog posts, \
-        and any web content that needs to be understood by the agent."
+        Preserves headings, links, lists, and other semantic elements. Returns \
+        the converted content for reading and analysis.\n\n\
+        **Usage guidelines**:\n\
+        - Use for: fetching documentation pages, API references, blog posts\n\
+        - Content is converted from HTML to Markdown for easier reading\n\
+        - Large pages are truncated to ~100KB to prevent context overflow\n\
+        - Timeout: 30 seconds (adjustable)\n\
+        - Requires http:// or https:// URL prefix\n\n\
+        **Preferences**:\n\
+        - Prefer web_search to discover relevant URLs first\n\
+        - Then use web_fetch to read the most promising results\n\
+        - Focus on specific sections using the prompt parameter\n\
+        - Don't fetch URLs you're not interested in — saves context tokens"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1767,4 +1906,747 @@ impl Tool for WebFetchTool {
             }),
         }
     }
+}
+
+// ─── WebSearchTool (Standard permission) ────────────────────────────────────────
+
+/// Web search tool — searches the web for information using search APIs.
+///
+/// Inspired by Claude Code's WebSearch tool. Searches the web using
+/// configurable search engine APIs (Google Custom Search, Bing, SerpAPI)
+/// and returns structured results with titles, URLs, and snippets.
+///
+/// This addresses the "无 WebSearch 本地工具" gap — previously, web search
+/// was only available through MCP (which was todo!()). Now it's a first-class
+/// local tool that the agent can use directly.
+///
+/// The tool supports multiple search backends:
+/// 1. **Google Custom Search API** — requires API key + CX ID
+/// 2. **Bing Search API** — requires API key
+/// 3. **SerpAPI** — requires API key (most versatile)
+/// 4. **DuckDuckGo** — no API key required (free, but limited)
+///
+/// Search backend is selected via environment variables:
+/// - `ONEAI_SEARCH_BACKEND`: "google", "bing", "serpapi", or "duckduckgo"
+/// - `ONEAI_SEARCH_API_KEY`: API key for the chosen backend
+/// - `ONEAI_SEARCH_CX`: Google Custom Search CX ID (Google only)
+///
+/// If no backend is configured, DuckDuckGo (free) is used as default.
+pub struct WebSearchTool {
+    /// HTTP client for making requests.
+    client: reqwest::Client,
+    /// Maximum number of results to return.
+    max_results: usize,
+    /// Request timeout in seconds.
+    timeout_secs: u64,
+}
+
+impl WebSearchTool {
+    /// Create a new WebSearchTool with default settings.
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            max_results: 10,
+            timeout_secs: 30,
+        }
+    }
+
+    /// Create with custom settings.
+    pub fn with_config(max_results: usize, timeout_secs: u64) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            max_results,
+            timeout_secs,
+        }
+    }
+}
+
+impl Default for WebSearchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PermissionAwareTool for WebSearchTool {
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Standard
+    }
+}
+
+/// A single search result from a web search.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    /// Title of the result.
+    pub title: String,
+    /// URL of the result.
+    pub url: String,
+    /// Snippet/summary of the result.
+    pub snippet: String,
+}
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search the web for information. Returns a list of results with titles, \
+        URLs, and snippets. Supports multiple search backends.\n\n\
+        **Search backends** (configured via ONEAI_SEARCH_BACKEND env var):\n\
+        - DuckDuckGo (default) — free, no API key required, limited coverage\n\
+        - Google Custom Search — requires ONEAI_SEARCH_API_KEY + ONEAI_SEARCH_CX\n\
+        - Bing Search — requires ONEAI_SEARCH_API_KEY\n\
+        - SerpAPI — requires ONEAI_SEARCH_API_KEY (most versatile)\n\n\
+        **Usage guidelines**:\n\
+        - Use for: finding documentation, researching topics, looking up APIs\n\
+        - Start with broad queries, then narrow down with specific terms\n\
+        - Use web_fetch to read the actual content of promising results\n\
+        - Cross-reference findings from multiple queries for accuracy\n\
+        - Note: search results may be time-sensitive, check dates\n\n\
+        **Preferences**:\n\
+        - Prefer web_search over reading local docs for current information\n\
+        - Use specific, well-formed queries for better results\n\
+        - Combine multiple searches to build comprehensive understanding"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to look up on the web"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 10)",
+                    "default": 10
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Medium
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        let query = args.get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let max_results = args.get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.max_results as u64) as usize;
+
+        if query.is_empty() {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("No search query provided".to_string()),
+            });
+        }
+
+        // Determine search backend from environment
+        let backend = std::env::var("ONEAI_SEARCH_BACKEND")
+            .unwrap_or_else(|_| "duckduckgo".to_string());
+
+        let results = match backend.to_lowercase().as_str() {
+            "google" => self.search_google(query, max_results).await,
+            "bing" => self.search_bing(query, max_results).await,
+            "serpapi" => self.search_serpapi(query, max_results).await,
+            "duckduckgo" | _ => self.search_duckduckgo(query, max_results).await,
+        };
+
+        match results {
+            Ok(results) => {
+                if results.is_empty() {
+                    Ok(ToolOutput {
+                        success: true,
+                        content: format!("No results found for query '{}'", query),
+                        error: None,
+                    })
+                } else {
+                    let content = results.iter()
+                        .map(|r| format!("## {}\n{}\n[{}]({})", r.title, r.snippet, r.url, r.url))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+
+                    Ok(ToolOutput {
+                        success: true,
+                        content: format!("Found {} results for '{}':\n\n{}", results.len(), query, content),
+                        error: None,
+                    })
+                }
+            }
+            Err(e) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("Search failed: {}", e)),
+            }),
+        }
+    }
+}
+
+impl WebSearchTool {
+    /// Search using Google Custom Search API.
+    ///
+    /// Requires ONEAI_SEARCH_API_KEY and ONEAI_SEARCH_CX environment variables.
+    async fn search_google(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+        let api_key = std::env::var("ONEAI_SEARCH_API_KEY")
+            .map_err(|_| "ONEAI_SEARCH_API_KEY not set — required for Google Search")?;
+        let cx = std::env::var("ONEAI_SEARCH_CX")
+            .map_err(|_| "ONEAI_SEARCH_CX not set — required for Google Custom Search")?;
+
+        let url = format!(
+            "https://www.googleapis.com/customsearch/v1?key={}&cx={}&q={}&num={}",
+            api_key, cx,
+            urlencoding::encode(query),
+            max_results.min(10)
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            self.client.get(&url)
+                .header("User-Agent", "OneAI-Agent/0.1.0")
+                .send()
+        ).await;
+
+        match result {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(format!("Google Search API error: {}", status));
+                }
+
+                let body: serde_json::Value = response.json().await
+                    .map_err(|e| format!("Failed to parse Google Search response: {}", e))?;
+
+                let items = body.get("items")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                Ok(items.iter().take(max_results).map(|item| {
+                    SearchResult {
+                        title: item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        url: item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    }
+                }).collect())
+            }
+            Ok(Err(e)) => Err(format!("Google Search request failed: {}", e)),
+            Err(_) => Err(format!("Google Search timed out after {} seconds", self.timeout_secs)),
+        }
+    }
+
+    /// Search using Bing Search API.
+    ///
+    /// Requires ONEAI_SEARCH_API_KEY environment variable.
+    async fn search_bing(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+        let api_key = std::env::var("ONEAI_SEARCH_API_KEY")
+            .map_err(|_| "ONEAI_SEARCH_API_KEY not set — required for Bing Search")?;
+
+        let url = format!(
+            "https://api.bing.microsoft.com/v7.0/search?q={}&count={}",
+            urlencoding::encode(query),
+            max_results.min(50)
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            self.client.get(&url)
+                .header("User-Agent", "OneAI-Agent/0.1.0")
+                .header("Ocp-Apim-Subscription-Key", &api_key)
+                .send()
+        ).await;
+
+        match result {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(format!("Bing Search API error: {}", status));
+                }
+
+                let body: serde_json::Value = response.json().await
+                    .map_err(|e| format!("Failed to parse Bing Search response: {}", e))?;
+
+                let pages = body.get("webPages")
+                    .and_then(|v| v.get("value"))
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                Ok(pages.iter().take(max_results).map(|item| {
+                    SearchResult {
+                        title: item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        url: item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    }
+                }).collect())
+            }
+            Ok(Err(e)) => Err(format!("Bing Search request failed: {}", e)),
+            Err(_) => Err(format!("Bing Search timed out after {} seconds", self.timeout_secs)),
+        }
+    }
+
+    /// Search using SerpAPI.
+    ///
+    /// Requires ONEAI_SEARCH_API_KEY environment variable.
+    async fn search_serpapi(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+        let api_key = std::env::var("ONEAI_SEARCH_API_KEY")
+            .map_err(|_| "ONEAI_SEARCH_API_KEY not set — required for SerpAPI")?;
+
+        let url = format!(
+            "https://serpapi.com/search.json?q={}&num={}&api_key={}",
+            urlencoding::encode(query),
+            max_results.min(100),
+            api_key
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            self.client.get(&url)
+                .header("User-Agent", "OneAI-Agent/0.1.0")
+                .send()
+        ).await;
+
+        match result {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(format!("SerpAPI error: {}", status));
+                }
+
+                let body: serde_json::Value = response.json().await
+                    .map_err(|e| format!("Failed to parse SerpAPI response: {}", e))?;
+
+                let results = body.get("organic_results")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                Ok(results.iter().take(max_results).map(|item| {
+                    SearchResult {
+                        title: item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        url: item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    }
+                }).collect())
+            }
+            Ok(Err(e)) => Err(format!("SerpAPI request failed: {}", e)),
+            Err(_) => Err(format!("SerpAPI timed out after {} seconds", self.timeout_secs)),
+        }
+    }
+
+    /// Search using DuckDuckGo (free, no API key required).
+    ///
+    /// Uses DuckDuckGo's HTML search endpoint and parses the results.
+    /// This is the default backend when no API key is configured.
+    async fn search_duckduckgo(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+        // DuckDuckGo HTML search endpoint
+        let url = format!(
+            "https://html.duckduckgo.com/html/?q={}",
+            urlencoding::encode(query)
+        );
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(self.timeout_secs),
+            self.client.get(&url)
+                .header("User-Agent", "Mozilla/5.0 (compatible; OneAI-Agent/0.1.0)")
+                .send()
+        ).await;
+
+        match result {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(format!("DuckDuckGo search error: {}", status));
+                }
+
+                let html = response.text().await
+                    .map_err(|e| format!("Failed to read DuckDuckGo response: {}", e))?;
+
+                // Parse DuckDuckGo HTML results
+                // The HTML format uses <a class="result__a"> for titles and URLs,
+                // and <a class="result__snippet"> for snippets
+                let mut results = Vec::new();
+
+                // Simple regex-based parsing of DuckDuckGo HTML results
+                let title_re = regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
+                let snippet_re = regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
+
+                for (idx, cap) in title_re.captures_iter(&html).enumerate() {
+                    let url_raw = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let title_raw = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+                    // DuckDuckGo wraps URLs with redirects — extract the actual URL
+                    let actual_url = if url_raw.contains("uddg=") {
+                        // Extract from redirect URL
+                        if let Some(start) = url_raw.find("uddg=") {
+                            let encoded_url = &url_raw[start + 5..];
+                            urlencoding::decode(encoded_url)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|_| encoded_url.to_string())
+                        } else {
+                            url_raw.to_string()
+                        }
+                    } else {
+                        url_raw.to_string()
+                    };
+
+                    // Clean HTML entities from title
+                    let title = html_entities_clean(title_raw);
+
+                    // Find matching snippet (after this title in the HTML)
+                    let snippet = snippet_re.captures_iter(&html)
+                        .nth(idx)
+                        .map(|cap| html_entities_clean(cap.get(1).map(|m| m.as_str()).unwrap_or("")))
+                        .unwrap_or_default();
+
+                    results.push(SearchResult {
+                        title,
+                        url: actual_url,
+                        snippet,
+                    });
+
+                    if results.len() >= max_results {
+                        break;
+                    }
+                }
+
+                Ok(results)
+            }
+            Ok(Err(e)) => Err(format!("DuckDuckGo request failed: {}", e)),
+            Err(_) => Err(format!("DuckDuckGo timed out after {} seconds", self.timeout_secs)),
+        }
+    }
+}
+
+/// Clean HTML entities from text (basic decode of common entities).
+fn html_entities_clean(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
+        .replace("<b>", "")
+        .replace("</b>", "")
+        .replace("<em>", "")
+        .replace("</em>", "")
+        .replace("<strong>", "")
+        .replace("</strong>", "")
+        .trim()
+        .to_string()
+}
+
+// ─── BrowserTool ────────────────────────────────────────────────────────────
+
+/// BrowserTool — web page interaction and content extraction.
+///
+/// Provides lightweight web automation capabilities for the agent:
+/// - **navigate**: Fetch a web page and extract its content as structured text
+/// - **extract**: Extract specific content from a page (links, headings, text)
+/// - **form_submit**: Submit form data via HTTP GET/POST
+///
+/// Unlike Claude Code's computer use (which requires a browser GUI),
+/// OneAI's BrowserTool operates in "content extraction" mode — it
+/// fetches pages via HTTP and converts HTML to structured Markdown.
+/// This is more portable (works on Android/iOS/HarmonyOS) and
+/// doesn't require a browser binary.
+///
+/// For full browser automation (screenshots, click/type, JS execution),
+/// a future "PlaywrightTool" can be added that shells out to a
+/// Playwright subprocess (requires Node.js + browser binary).
+///
+/// PermissionLevel: Standard — browser access is moderately risky
+/// (can access internal URLs, requires network access).
+pub struct BrowserTool {
+    client: reqwest::Client,
+    timeout: std::time::Duration,
+}
+
+impl BrowserTool {
+    /// Create a new BrowserTool with default settings.
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .user_agent("OneAI-Agent/0.1 (content extraction)")
+                .build()
+                .unwrap_or_default(),
+            timeout: std::time::Duration::from_secs(30),
+        }
+    }
+
+    /// Create a BrowserTool with custom timeout.
+    pub fn with_timeout(timeout_secs: u64) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .user_agent("OneAI-Agent/0.1 (content extraction)")
+                .build()
+                .unwrap_or_default(),
+            timeout: std::time::Duration::from_secs(timeout_secs),
+        }
+    }
+
+    /// Navigate to a URL and extract page content.
+    async fn navigate(&self, url: &str) -> Result<ToolOutput> {
+        let result = tokio::time::timeout(self.timeout, async {
+            let response = self.client.get(url).send().await
+                .map_err(|e| oneai_core::error::OneAIError::Provider(
+                    format!("Browser navigate error for {}: {}", url, e)
+                ))?;
+
+            if !response.status().is_success() {
+                return Err(oneai_core::error::OneAIError::Provider(
+                    format!("Browser navigate returned status {} for {}", response.status().as_u16(), url)
+                ));
+            }
+
+            let html = response.text().await
+                .map_err(|e| oneai_core::error::OneAIError::Provider(
+                    format!("Browser navigate read error: {}", e)
+                ))?;
+
+            // Convert HTML to structured Markdown
+            let markdown = html2text::from_read(html.as_bytes(), 200);
+
+            Ok::<String, oneai_core::error::OneAIError>(markdown)
+        }).await;
+
+        match result {
+            Ok(Ok(markdown)) => {
+                // Truncate if too long (prevent context overflow)
+                let content = if markdown.len() > 10000 {
+                    format!("{}... [truncated, total {} chars]", &markdown[..10000], markdown.len())
+                } else {
+                    markdown
+                };
+                Ok(ToolOutput {
+                    success: true,
+                    content,
+                    error: None,
+                })
+            }
+            Ok(Err(e)) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(e.to_string()),
+            }),
+            Err(_) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("Browser navigate timed out after {} seconds for {}", self.timeout.as_secs(), url)),
+            }),
+        }
+    }
+
+    /// Extract specific content from a page.
+    async fn extract(&self, url: &str, selector: &str) -> Result<ToolOutput> {
+        // Fetch the page first
+        let fetch_result = self.navigate(url).await?;
+        if !fetch_result.success {
+            return Ok(fetch_result);
+        }
+
+        let content = fetch_result.content;
+
+        // Apply selector-based extraction
+        // Since we don't have a DOM parser, use heuristic text extraction
+        let extracted = match selector {
+            "links" | "a" => {
+                // Extract links from the content (lines containing http/https URLs)
+                content.lines()
+                    .filter(|l| l.contains("http://") || l.contains("https://"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            "headings" | "h" => {
+                // Extract heading lines (lines starting with # in markdown)
+                content.lines()
+                    .filter(|l| l.trim().starts_with('#'))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            "text" | "p" => {
+                // Extract paragraph text (lines not starting with # or [)
+                content.lines()
+                    .filter(|l| !l.trim().starts_with('#') && !l.trim().starts_with('[') && !l.trim().is_empty())
+                    .take(50) // Limit to 50 lines
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            "title" => {
+                // Extract just the first heading
+                content.lines()
+                    .find(|l| l.trim().starts_with('#'))
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_else(|| "No title found".to_string())
+            }
+            other => {
+                // Generic: search for lines containing the selector keyword
+                content.lines()
+                    .filter(|l| l.contains(other))
+                    .take(20)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
+        let result = if extracted.is_empty() {
+            "No content found matching selector".to_string()
+        } else if extracted.len() > 5000 {
+            format!("{}... [truncated]", &extracted[..5000])
+        } else {
+            extracted
+        };
+
+        Ok(ToolOutput {
+            success: true,
+            content: result,
+            error: None,
+        })
+    }
+
+    /// Submit a form via HTTP POST.
+    async fn form_submit(&self, url: &str, data: &serde_json::Value) -> Result<ToolOutput> {
+        let result = tokio::time::timeout(self.timeout, async {
+            let response = self.client.post(url)
+                .json(data)
+                .send().await
+                .map_err(|e| oneai_core::error::OneAIError::Provider(
+                    format!("Browser form submit error for {}: {}", url, e)
+                ))?;
+
+            let status = response.status();
+            let body = response.text().await
+                .map_err(|e| oneai_core::error::OneAIError::Provider(
+                    format!("Browser form submit read error: {}", e)
+                ))?;
+
+            // Try to convert response body to markdown if it's HTML
+            let content = if body.contains("<html") || body.contains("<!DOCTYPE") {
+                let md = html2text::from_read(body.as_bytes(), 200);
+                if md.len() > 5000 {
+                    format!("{}... [truncated]", &md[..5000])
+                } else {
+                    md
+                }
+            } else if body.len() > 5000 {
+                format!("Status: {}\n{}", status.as_u16(), &body[..5000])
+            } else {
+                format!("Status: {}\n{}", status.as_u16(), body)
+            };
+
+            Ok::<String, oneai_core::error::OneAIError>(content)
+        }).await;
+
+        match result {
+            Ok(Ok(content)) => Ok(ToolOutput {
+                success: true,
+                content,
+                error: None,
+            }),
+            Ok(Err(e)) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(e.to_string()),
+            }),
+            Err(_) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("Browser form submit timed out after {} seconds", self.timeout.as_secs())),
+            }),
+        }
+    }
+}
+
+impl Default for BrowserTool {
+    fn default() -> Self { Self::new() }
+}
+
+#[async_trait]
+impl Tool for BrowserTool {
+    fn name(&self) -> &str { "browser" }
+
+    fn description(&self) -> &str {
+        "Web page browser — navigate URLs, extract content, submit forms. \
+        Actions: navigate (fetch page as markdown), extract (extract specific \
+        content by selector), form_submit (POST data to a URL). \
+        Lightweight HTTP-based approach — works without browser binary."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["navigate", "extract", "form_submit"],
+                    "description": "The browser action to perform"
+                },
+                "url": {
+                    "type": "string",
+                    "description": "The URL to navigate to or submit data to"
+                },
+                "selector": {
+                    "type": "string",
+                    "description": "Content selector for extract action: 'links', 'headings', 'text', 'title', or custom keyword",
+                    "default": "text"
+                },
+                "data": {
+                    "type": "object",
+                    "description": "Form data for form_submit action (JSON object)"
+                }
+            },
+            "required": ["action", "url"]
+        })
+    }
+
+    fn risk_level(&self) -> RiskLevel { RiskLevel::Medium }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+        let action = args.get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("navigate");
+        let url = args.get("url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("");
+
+        if url.is_empty() {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("browser: url parameter is required".to_string()),
+            });
+        }
+
+        match action {
+            "navigate" => self.navigate(url).await,
+            "extract" => {
+                let selector = args.get("selector")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("text");
+                self.extract(url, selector).await
+            }
+            "form_submit" => {
+                let data = args.get("data").cloned().unwrap_or(serde_json::json!({}));
+                self.form_submit(url, &data).await
+            }
+            other => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!("browser: unknown action '{}'. Use: navigate, extract, form_submit", other)),
+            }),
+        }
+    }
+}
+
+impl PermissionAwareTool for BrowserTool {
+    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Standard }
 }

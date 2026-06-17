@@ -14,9 +14,35 @@ use oneai_core::traits::StatePersistence;
 use oneai_memory::MemoryManager;
 use oneai_tool::ToolExecutor;
 use oneai_rag::{DocumentIndex, assemble_context};
-use oneai_workflow::{WorkflowConfig, WorkflowExecutor, WorkflowResult};
+use oneai_workflow::{WorkflowConfig, WorkflowExecutor, WorkflowResult, StateGraph, GraphExecutionResult, StateGraphExecutor, NoopDelegateFactory, render_dag_ascii, render_state_graph_ascii};
 use oneai_persistence::FilePersistence;
 use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
+
+use tokio::sync::Mutex;
+
+/// A record of a workflow execution in the session history.
+#[derive(Debug, Clone)]
+pub struct WorkflowHistoryEntry {
+    /// The workflow or graph name.
+    pub name: String,
+    /// Whether this was a DAG workflow or a StateGraph execution.
+    pub kind: WorkflowKind,
+    /// Whether the execution completed successfully.
+    pub success: bool,
+    /// Timestamp of the execution.
+    pub timestamp: String,
+    /// Brief summary of results.
+    pub summary: String,
+}
+
+/// The kind of workflow execution recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowKind {
+    /// A DAG (acyclic) workflow.
+    Dag,
+    /// A StateGraph (cyclic) execution.
+    StateGraph,
+}
 
 use oneai_agent::{AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult,
     ParadigmKind, ToolCallRequest, SubAgentKind};
@@ -34,6 +60,8 @@ pub struct AppSession {
     session_id: String,
     /// Trace context (optional — for trajectory logging).
     trace_context: Option<TraceContext>,
+    /// Workflow execution history for this session.
+    workflow_history: Vec<WorkflowHistoryEntry>,
 }
 
 /// Shared resources for all sessions.
@@ -85,6 +113,7 @@ impl AppSession {
             conversation,
             session_id,
             trace_context,
+            workflow_history: Vec::new(),
         }
     }
 
@@ -209,7 +238,9 @@ impl AppSession {
     }
 
     /// Execute a workflow (compile, validate, and run).
-    pub async fn execute_workflow(&self, config: &WorkflowConfig) -> Result<WorkflowResult> {
+    ///
+    /// Records the execution result in the session's workflow history.
+    pub async fn execute_workflow(&mut self, config: &WorkflowConfig) -> Result<WorkflowResult> {
         let dag = oneai_workflow::compile(config);
         let validation = oneai_workflow::validate(config, &dag);
         if !validation.is_valid {
@@ -220,7 +251,105 @@ impl AppSession {
                 "Workflow validation failed: {}", errors.join(", ")
             )));
         }
-        self.app.workflow_executor.execute(&dag, config).await
+        let result = self.app.workflow_executor.execute(&dag, config).await?;
+
+        // Record in history
+        self.workflow_history.push(WorkflowHistoryEntry {
+            name: config.name.clone(),
+            kind: WorkflowKind::Dag,
+            success: result.success,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            summary: format!(
+                "{} steps, {} completed, {} failed, {}ms",
+                result.step_results.len(),
+                result.completed_steps().len(),
+                result.failed_steps().len(),
+                result.total_time_ms
+            ),
+        });
+
+        Ok(result)
+    }
+
+    /// Get all available predefined workflows from the domain pack.
+    pub fn get_available_workflows(&self) -> Vec<WorkflowConfig> {
+        self.app.domain_pack.as_ref()
+            .map(|dp| dp.workflows.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get a predefined workflow configuration by name.
+    pub fn get_workflow_config(&self, name: &str) -> Option<WorkflowConfig> {
+        self.app.domain_pack.as_ref()
+            .and_then(|dp| dp.get_workflow_config(name))
+            .cloned()
+    }
+
+    /// Get a predefined StateGraph by name.
+    pub fn get_state_graph(&self, name: &str) -> Option<StateGraph> {
+        self.app.domain_pack.as_ref()
+            .and_then(|dp| dp.get_state_graph(name))
+            .cloned()
+    }
+
+    /// Get all available StateGraph names from the domain pack.
+    pub fn get_state_graph_names(&self) -> Vec<String> {
+        self.app.domain_pack.as_ref()
+            .map(|dp| dp.state_graph_names())
+            .unwrap_or_default()
+    }
+
+    /// Render a WorkflowDag as ASCII text (for `/wf show`).
+    pub fn render_workflow_dag(&self, config: &WorkflowConfig) -> String {
+        let dag = oneai_workflow::compile(config);
+        render_dag_ascii(&dag)
+    }
+
+    /// Render a StateGraph as ASCII text (for `/wf graph`).
+    pub fn render_state_graph(&self, graph: &StateGraph) -> String {
+        render_state_graph_ascii(graph)
+    }
+
+    /// Execute a StateGraph (create executor, run, and return result).
+    ///
+    /// Requires a configured LLM provider. Returns an error if no provider is available.
+    /// Records the execution result in the session's workflow history.
+    pub async fn execute_state_graph(&mut self, graph: &StateGraph) -> Result<GraphExecutionResult> {
+        let provider = self.app.provider.as_ref()
+            .ok_or(oneai_core::error::OneAIError::Provider(
+                "No LLM provider configured. Cannot execute StateGraph.".to_string()
+            ))?;
+
+        let executor = StateGraphExecutor::with_defaults(
+            provider.clone(),
+            self.app.workflow_executor.tools_handle(),
+            Arc::new(NoopDelegateFactory), // Use noop for now; real impl wired in later
+            self.app.approval_gate.clone(),
+        );
+
+        let initial_state = oneai_workflow::GraphState::new();
+        let result = executor.execute(graph, initial_state).await?;
+
+        // Record in history
+        self.workflow_history.push(WorkflowHistoryEntry {
+            name: graph.name.clone(),
+            kind: WorkflowKind::StateGraph,
+            success: result.completed,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            summary: format!(
+                "{} iterations, completed: {}, terminal: {}",
+                result.iterations,
+                result.completed,
+                result.terminal_node.as_deref().unwrap_or("none")
+            ),
+        });
+
+        Ok(result)
+    }
+
+    /// Get the workflow execution history for this session.
+    pub fn workflow_history(&self) -> &[WorkflowHistoryEntry] {
+        &self.workflow_history
     }
 
     /// Save a checkpoint of the current session state.

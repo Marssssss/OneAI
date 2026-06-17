@@ -15,6 +15,8 @@ pub mod streaming;
 pub mod context_assembler;
 pub mod error_recovery;
 pub mod prompts;
+pub mod async_task_runner;
+pub mod worktree_isolation;
 
 pub use scope_state::*;
 pub use react_agent::*;
@@ -28,6 +30,8 @@ pub use streaming::*;
 pub use context_assembler::*;
 pub use error_recovery::*;
 pub use prompts::*;
+pub use async_task_runner::*;
+pub use worktree_isolation::*;
 
 #[cfg(test)]
 mod tests {

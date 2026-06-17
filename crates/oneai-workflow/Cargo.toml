@@ -1,6 +1,6 @@
 [package]
 name = "oneai-workflow"
-description = "OneAI workflow compiler, DAG, validator, and executor"
+description = "OneAI workflow compiler, DAG, validator, executor, StateGraph, and StateGraphExecutor"
 version.workspace = true
 edition.workspace = true
 
@@ -16,4 +16,3 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 daggy = { workspace = true }
 oneai-core = { workspace = true }
-oneai-agent = { workspace = true }

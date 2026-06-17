@@ -1,7 +1,21 @@
 //! Anthropic Claude native protocol provider implementation.
 //!
-//! Uses the Anthropic Messages API for streaming and non-streaming inference.
+//! Uses the Anthropic API for streaming and non-streaming inference.
 //! Claude uses a different API format than OpenAI (no "choices" array, direct message output).
+//!
+//! **Two API modes**:
+//! - **Messages API** (default): Classic Anthropic API where you manually manage
+//!   conversation history and tool result messages. Endpoint: `/messages`
+//! - **Responses API** (optional): Agent-oriented API where the server manages
+//!   conversation state. You reference previous responses by ID instead of
+//!   re-sending the entire conversation. Endpoint: `/responses`
+//!
+//!   The Responses API is designed for multi-turn agent workflows:
+//!   - Server-side conversation state (no need to re-send history)
+//!   - Automatic tool use handling (tool results are sent as "function_call_output")
+//!   - More natural multi-turn flow with response IDs
+//!
+//!   Configure via `ModelConfig.extra["api_mode"] = "responses"` (default: "messages")
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -16,6 +30,15 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
+
+/// API mode selection for Anthropic provider.
+#[derive(Debug, Clone, PartialEq)]
+enum ApiMode {
+    /// Messages API — classic, manually managed conversation.
+    Messages,
+    /// Responses API — agent-oriented, server-managed conversation state.
+    Responses,
+}
 
 /// Anthropic Claude LLM provider.
 pub struct AnthropicProvider {
@@ -39,6 +62,20 @@ impl AnthropicProvider {
     fn messages_url(&self) -> String {
         let base = self.config.resolved_url();
         format!("{}/messages", base.trim_end_matches('/'))
+    }
+
+    /// Get the Anthropic Responses API endpoint URL.
+    fn responses_url(&self) -> String {
+        let base = self.config.resolved_url();
+        format!("{}/responses", base.trim_end_matches('/'))
+    }
+
+    /// Determine which API mode to use based on configuration.
+    fn api_mode(&self) -> ApiMode {
+        match self.config.extra.get("api_mode").map(|s| s.as_str()) {
+            Some("responses") => ApiMode::Responses,
+            _ => ApiMode::Messages,
+        }
     }
 
     /// Convert an InferenceRequest to Anthropic Messages API format.
@@ -126,8 +163,17 @@ impl AnthropicProvider {
             "messages": messages,
         });
 
+        // Use Anthropic prompt caching — mark system prompt and tools
+        // with cache_control: ephemeral to avoid re-sending static context every turn.
+        // Anthropic's prompt caching requires the system field to be an array of content blocks.
         if !system_text.is_empty() {
-            body["system"] = Value::String(system_text.trim().to_string());
+            body["system"] = serde_json::json!([
+                {
+                    "type": "text",
+                    "text": system_text.trim(),
+                    "cache_control": { "type": "ephemeral" }
+                }
+            ]);
         }
 
         if let Some(max_tokens) = req.max_tokens {
@@ -172,16 +218,212 @@ impl AnthropicProvider {
         }
 
         // Add tool definitions (Anthropic format)
+        // Mark the last tool with cache_control: ephemeral for prompt caching.
+        // Anthropic recommends placing cache breakpoints at the end of the tools array
+        // so that the entire tool definitions block is cached as a single prefix.
         if !req.tools.is_empty() {
-            let tools_json = req.tools.iter().map(|t| {
+            let mut tools_json: Vec<Value> = req.tools.iter().map(|t| {
                 serde_json::json!({
                     "name": t.name,
                     "description": t.description,
                     "input_schema": t.parameters_schema,
                 })
-            }).collect::<Vec<Value>>();
+            }).collect();
+
+            // Add cache_control to the last tool definition — this creates a
+            // cache breakpoint that covers the entire system + tools prefix.
+            // On subsequent turns with the same system+tools prefix, Anthropic
+            // reuses the cached prefix tokens, reducing cost and latency.
+            if let Some(last_tool) = tools_json.last_mut() {
+                if let Some(obj) = last_tool.as_object_mut() {
+                    obj.insert(
+                        "cache_control".to_string(),
+                        serde_json::json!({ "type": "ephemeral" })
+                    );
+                }
+            }
+
             body["tools"] = Value::Array(tools_json);
         }
+
+        body
+    }
+
+    /// Convert an InferenceRequest to Anthropic Responses API format.
+    ///
+    /// The Responses API is designed for agent-oriented workflows:
+    /// - Uses `input` (message list) instead of `messages`
+    /// - Supports `previous_response_id` for server-side conversation state
+    /// - Tool results are wrapped in `function_call_output` items
+    /// - Returns structured output items (text, function_call, function_call_output)
+    fn to_responses_request(&self, req: &InferenceRequest) -> Value {
+        let mut input_items = Vec::new();
+
+        for msg in &req.conversation.messages {
+            match msg.role {
+                Role::System => {
+                    // System messages are handled via the `instructions` field in Responses API
+                    // (not included in input items)
+                }
+                Role::User => {
+                    // User messages become `message` input items
+                    let mut content = Vec::new();
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text { text } => {
+                                content.push(serde_json::json!({
+                                    "type": "input_text",
+                                    "text": text,
+                                }));
+                            }
+                            ContentBlock::Image { mime_type, data } => {
+                                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                                content.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": mime_type,
+                                        "data": BASE64.encode(data),
+                                    }
+                                }));
+                            }
+                            ContentBlock::ToolResult { call_id, content } => {
+                                // Tool results become `function_call_output` items in Responses API
+                                input_items.push(serde_json::json!({
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": content,
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !content.is_empty() {
+                        input_items.push(serde_json::json!({
+                            "type": "message",
+                            "role": "user",
+                            "content": content,
+                        }));
+                    }
+                }
+                Role::Assistant => {
+                    // Assistant messages become `message` input items
+                    let mut content = Vec::new();
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text { text } => {
+                                content.push(serde_json::json!({
+                                    "type": "output_text",
+                                    "text": text,
+                                }));
+                            }
+                            ContentBlock::ToolCall { id, name, args } => {
+                                // Tool calls become `function_call` items in Responses API
+                                let input = serde_json::from_str::<Value>(args)
+                                    .unwrap_or(Value::Object(serde_json::Map::new()));
+                                content.push(serde_json::json!({
+                                    "type": "function_call",
+                                    "id": id,
+                                    "name": name,
+                                    "input": input,
+                                }));
+                            }
+                            ContentBlock::Thinking { text } => {
+                                content.push(serde_json::json!({
+                                    "type": "thinking",
+                                    "thinking": text,
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !content.is_empty() {
+                        input_items.push(serde_json::json!({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": content,
+                        }));
+                    }
+                }
+                Role::Tool => {
+                    // Tool results in Responses API are `function_call_output` items
+                    for block in &msg.content {
+                        if let ContentBlock::ToolResult { call_id, content } = block {
+                            input_items.push(serde_json::json!({
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": content,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect system text for the `instructions` field
+        let instructions = req.conversation.messages.iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut body = serde_json::json!({
+            "model": self.config.model_name.as_deref().unwrap_or("claude-sonnet-4-20250514"),
+            "input": input_items,
+        });
+
+        if !instructions.is_empty() {
+            body["instructions"] = Value::String(instructions.trim().to_string());
+        }
+
+        if let Some(max_tokens) = req.max_tokens {
+            body["max_output_tokens"] = Value::Number(max_tokens.into());
+        } else {
+            body["max_output_tokens"] = Value::Number(4096.into());
+        }
+
+        if let Some(temperature) = req.temperature {
+            body["temperature"] = Value::Number(
+                serde_json::Number::from_f64(temperature as f64).unwrap_or(serde_json::Number::from(1))
+            );
+        }
+        if let Some(top_p) = req.top_p {
+            body["top_p"] = Value::Number(
+                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1))
+            );
+        }
+
+        // Enable extended thinking if budget is provided
+        if let Some(budget) = req.thinking_budget {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+            if let Some(max_tokens) = req.max_tokens {
+                if max_tokens < budget + 4096 {
+                    body["max_output_tokens"] = Value::Number((budget + 4096).into());
+                }
+            } else {
+                body["max_output_tokens"] = Value::Number((budget + 4096).into());
+            }
+        }
+
+        // Add tool definitions (Responses API format)
+        if !req.tools.is_empty() {
+            let tools_json: Vec<Value> = req.tools.iter().map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters_schema,
+                })
+            }).collect();
+
+            body["tools"] = Value::Array(tools_json);
+        }
+
+        // Add stream mode for Responses API
+        body["stream"] = Value::Bool(false);
 
         body
     }
@@ -190,6 +432,34 @@ impl AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn infer(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+        match self.api_mode() {
+            ApiMode::Messages => self.infer_messages(req).await,
+            ApiMode::Responses => self.infer_responses(req).await,
+        }
+    }
+
+    async fn infer_stream(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+        match self.api_mode() {
+            ApiMode::Messages => self.infer_stream_messages(req).await,
+            ApiMode::Responses => self.infer_stream_responses(req).await,
+        }
+    }
+
+    fn capabilities(&self) -> ModelCapability {
+        ModelCapability::claude_class()
+    }
+
+    fn config(&self) -> &ModelConfig {
+        &self.config
+    }
+}
+
+impl AnthropicProvider {
+    /// Messages API: non-streaming inference.
+    async fn infer_messages(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
         let body = self.to_anthropic_request(&req);
         let url = self.messages_url();
 
@@ -266,7 +536,8 @@ impl LlmProvider for AnthropicProvider {
         })
     }
 
-    async fn infer_stream(
+    /// Messages API: streaming inference.
+    async fn infer_stream_messages(
         &self,
         req: InferenceRequest,
     ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
@@ -463,11 +734,264 @@ impl LlmProvider for AnthropicProvider {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
-    fn capabilities(&self) -> ModelCapability {
-        ModelCapability::claude_class()
+    /// Responses API: non-streaming inference.
+    async fn infer_responses(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+        let body = self.to_responses_request(&req);
+        let url = self.responses_url();
+
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("x-api-key", self.config.api_key.as_deref().unwrap_or(""))
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| OneAIError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            return Err(OneAIError::Provider(format!("Anthropic Responses API error {}: {}", status, text)));
+        }
+
+        let json: Value = response.json().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+
+        // Parse Anthropic Responses API format
+        // The response has a different structure from Messages API:
+        // - `output` array contains items (message, function_call, function_call_output)
+        // - `usage` is in the top-level object
+        let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+
+        let output_items = json.get("output").and_then(|o| o.as_array());
+
+        let mut content_blocks = Vec::new();
+        if let Some(items) = output_items {
+            for item in items {
+                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match item_type {
+                    "message" => {
+                        // Message items have a content array
+                        let content = item.get("content").and_then(|c| c.as_array());
+                        if let Some(content) = content {
+                            for block in content {
+                                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                match block_type {
+                                    "output_text" | "text" => {
+                                        let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                        content_blocks.push(ContentBlock::Text { text: text.to_string() });
+                                    }
+                                    "thinking" => {
+                                        let text = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                                        content_blocks.push(ContentBlock::Thinking { text: text.to_string() });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    "function_call" => {
+                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let input = item.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                        let args = input.to_string();
+                        content_blocks.push(ContentBlock::ToolCall { id, name, args });
+                    }
+                    "function_call_output" => {
+                        // Tool results — these are returned in the output but
+                        // they're part of the conversation history, not the current response
+                        let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let output = item.get("output").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        content_blocks.push(ContentBlock::ToolResult { call_id, content: output });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let usage = json.get("usage").map(|u| TokenUsage {
+            prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
+                + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        }).unwrap_or(TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        });
+
+        let stop_reason = json.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
+
+        Ok(InferenceResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content_blocks,
+                metadata: HashMap::from([("stop_reason".to_string(), stop_reason.to_string())]),
+            },
+            usage,
+            model,
+            metadata: HashMap::new(),
+        })
     }
 
-    fn config(&self) -> &ModelConfig {
-        &self.config
+    /// Responses API: streaming inference.
+    async fn infer_stream_responses(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+        let mut body = self.to_responses_request(&req);
+        body["stream"] = Value::Bool(true);
+
+        let url = self.responses_url();
+
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("x-api-key", self.config.api_key.as_deref().unwrap_or(""))
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| OneAIError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            return Err(OneAIError::Provider(format!("Anthropic Responses API error {}: {}", status, text)));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        let model_name = self.config.model_name.clone();
+        tokio::spawn(async move {
+            let stream = response.bytes_stream();
+            let mut prompt_tokens_from_start: u32 = 0;
+
+            // Per-function-call-id state: (name, args_buffer)
+            let mut function_call_state: HashMap<String, (String, String)> = HashMap::new();
+            let mut current_function_call_id: Option<String> = None;
+
+            use eventsource_stream::Eventsource;
+            let mut sse_stream = stream.eventsource();
+
+            while let Some(event) = sse_stream.next().await {
+                match event {
+                    Ok(event) => {
+                        if let Ok(json) = serde_json::from_str::<Value>(&event.data) {
+                            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                            match event_type {
+                                "response.start" => {
+                                    let usage_obj = json.get("response")
+                                        .and_then(|r| r.get("usage"))
+                                        .unwrap_or(&Value::Null);
+                                    prompt_tokens_from_start = usage_obj.get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
+                                }
+                                "response.output_item.start" => {
+                                    let item = json.get("item").unwrap_or(&Value::Null);
+                                    let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    if item_type == "function_call" {
+                                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        function_call_state.insert(id.clone(), (name.clone(), String::new()));
+                                        current_function_call_id = Some(id.clone());
+
+                                        let _ = tx.send(InferenceStreamChunk {
+                                            content: vec![ContentBlock::ToolCall {
+                                                id: id.clone(),
+                                                name,
+                                                args: String::new(),
+                                            }],
+                                            is_final: false,
+                                            usage: None,
+                                            model: model_name.clone(),
+                                        }).await;
+                                    }
+                                }
+                                "response.output_text.delta" => {
+                                    let text = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                                    if !text.is_empty() {
+                                        let _ = tx.send(InferenceStreamChunk {
+                                            content: vec![ContentBlock::Text { text: text.to_string() }],
+                                            is_final: false,
+                                            usage: None,
+                                            model: model_name.clone(),
+                                        }).await;
+                                    }
+                                }
+                                "response.function_call_arguments.delta" => {
+                                    let partial = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                                    if let Some(fc_id) = &current_function_call_id {
+                                        if let Some((_name, args_buffer)) = function_call_state.get_mut(fc_id) {
+                                            args_buffer.push_str(partial);
+                                        }
+                                    }
+                                }
+                                "response.output_item.done" => {
+                                    if let Some(fc_id) = current_function_call_id.take() {
+                                        if let Some((name, args_buffer)) = function_call_state.remove(&fc_id) {
+                                            let args = if args_buffer.is_empty() {
+                                                "{}".to_string()
+                                            } else {
+                                                args_buffer
+                                            };
+                                            let _ = tx.send(InferenceStreamChunk {
+                                                content: vec![ContentBlock::ToolCall {
+                                                    id: fc_id.clone(),
+                                                    name: name.clone(),
+                                                    args,
+                                                }],
+                                                is_final: false,
+                                                usage: None,
+                                                model: model_name.clone(),
+                                            }).await;
+                                        }
+                                    }
+                                }
+                                "response.thinking.delta" => {
+                                    let text = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                                    if !text.is_empty() {
+                                        let _ = tx.send(InferenceStreamChunk {
+                                            content: vec![ContentBlock::Thinking { text: text.to_string() }],
+                                            is_final: false,
+                                            usage: None,
+                                            model: model_name.clone(),
+                                        }).await;
+                                    }
+                                }
+                                "response.done" => {
+                                    let usage_obj = json.get("response")
+                                        .and_then(|r| r.get("usage"))
+                                        .unwrap_or(&Value::Null);
+                                    let output_tokens = usage_obj.get("output_tokens")
+                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    let usage = TokenUsage {
+                                        prompt_tokens: prompt_tokens_from_start,
+                                        completion_tokens: output_tokens,
+                                        total_tokens: prompt_tokens_from_start + output_tokens,
+                                    };
+                                    let _ = tx.send(InferenceStreamChunk {
+                                        content: vec![],
+                                        is_final: true,
+                                        usage: Some(usage),
+                                        model: model_name.clone(),
+                                    }).await;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Anthropic Responses SSE stream error: {:?}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 }

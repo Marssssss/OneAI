@@ -7,6 +7,7 @@
 //! - Input box: single-line with Enter=send, Esc=quit, Tab=sidebar
 
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -380,7 +381,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /session · /paradigm · /domain · /compact · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /session · /paradigm · /domain · /compact · /wf · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history");
                 return;
             }
             "/tools" | "/t" => {
@@ -757,6 +758,10 @@ fn handle_user_input_async(
                 }
                 return;
             }
+            "/wf" => {
+                handle_workflow_command(app, session_state, &parts, rt);
+                return;
+            }
             _ => {
                 app.add_message(ChatRole::Error, format!("Unknown command: {cmd}"));
                 return;
@@ -807,6 +812,350 @@ fn handle_user_input_async(
             }
         }
     });
+}
+
+/// Handle `/wf` workflow commands.
+fn handle_workflow_command(
+    app: &mut App,
+    session_state: Arc<tokio::sync::Mutex<SessionState>>,
+    parts: &[&str],
+    rt: &tokio::runtime::Runtime,
+) {
+    if parts.len() < 2 {
+        app.add_message(ChatRole::System,
+            "Workflow commands:\n\
+             /wf list              — Show available workflows\n\
+             /wf run <name>        — Execute a workflow\n\
+             /wf run <name> --vars — Execute with variables\n\
+             /wf define <json>     — Define & execute from JSON\n\
+             /wf define --file <p> — Define & execute from file\n\
+             /wf show <name>       — Show DAG visualization\n\
+             /wf graph <name>      — Show StateGraph visualization\n\
+             /wf status            — Show recent workflow results\n\
+             /wf cancel            — Cancel running workflow (not yet supported)\n\
+             /wf history           — Show workflow execution history");
+        return;
+    }
+
+    match parts[1] {
+        "list" => {
+            let workflows = rt.block_on(async {
+                session_state.lock().await.session.get_available_workflows()
+            });
+            let graph_names = rt.block_on(async {
+                session_state.lock().await.session.get_state_graph_names()
+            });
+
+            if workflows.is_empty() && graph_names.is_empty() {
+                app.add_message(ChatRole::System,
+                    "No predefined workflows available. Use /domain coding to load coding workflows.");
+            } else {
+                let mut lines = vec![format!("📋 Available Workflows ({})\n", workflows.len())];
+                for wf in &workflows {
+                    lines.push(format!("  • {} — {}", wf.name, wf.description));
+                }
+                if !graph_names.is_empty() {
+                    lines.push(format!("\n📋 Available StateGraphs ({})\n", graph_names.len()));
+                    for name in &graph_names {
+                        lines.push(format!("  • {}", name));
+                    }
+                }
+                lines.push("\nType /wf run <name> to execute".to_string());
+                app.add_message(ChatRole::System, lines.join("\n"));
+            }
+        }
+
+        "run" => {
+            if parts.len() < 3 {
+                app.add_message(ChatRole::Error, "Usage: /wf run <name> [--vars key=value ...]");
+                return;
+            }
+            let wf_name = parts[2];
+
+            // Parse --vars arguments
+            let mut vars = HashMap::new();
+            let mut i = 3;
+            while i < parts.len() {
+                if parts[i] == "--vars" || parts[i].starts_with("--vars") {
+                    i += 1;
+                    while i < parts.len() && !parts[i].starts_with("--") {
+                        if let Some((k, v)) = parts[i].split_once('=') {
+                            vars.insert(k.to_string(), v.to_string());
+                        }
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+
+            // Try as workflow first, then as StateGraph
+            let wf_config = rt.block_on(async {
+                session_state.lock().await.session.get_workflow_config(wf_name)
+            });
+
+            if let Some(mut config) = wf_config {
+                // Merge user variables
+                for (k, v) in vars {
+                    config.variables.insert(k, v);
+                }
+
+                app.add_message(ChatRole::System,
+                    format!("▶ Starting workflow '{}' with {} steps...", config.name, config.steps.len()));
+
+                let result = rt.block_on(async {
+                    session_state.lock().await.session.execute_workflow(&config).await
+                });
+
+                match result {
+                    Ok(result) => {
+                        let mut lines = vec![format!("✅ Workflow '{}' completed", result.name)];
+                        lines.push(format!("   Steps: {} total, {} completed, {} failed",
+                            result.step_results.len(),
+                            result.completed_steps().len(),
+                            result.failed_steps().len()));
+                        lines.push(format!("   Time: {}ms", result.total_time_ms));
+
+                        for (step_id, step) in &result.step_results {
+                            let status_icon = match step.status {
+                                oneai_workflow::StepStatus::Completed => "✅",
+                                oneai_workflow::StepStatus::Failed => "❌",
+                                oneai_workflow::StepStatus::Skipped => "⏭️",
+                                _ => "⏳",
+                            };
+                            let output_preview = step.output.as_ref()
+                                .map(|o| {
+                                    let truncated = if o.len() > 200 {
+                                        format!("{}...", &o[..200])
+                                    } else {
+                                        o.clone()
+                                    };
+                                    truncated
+                                })
+                                .unwrap_or_else(|| "no output".to_string());
+                            lines.push(format!("   {} {}: {}", status_icon, step_id, output_preview));
+                        }
+
+                        app.add_message(ChatRole::System, lines.join("\n"));
+                    }
+                    Err(e) => {
+                        app.add_message(ChatRole::Error, format!("❌ Workflow failed: {}", e));
+                    }
+                }
+            } else {
+                // Try as StateGraph
+                let graph = rt.block_on(async {
+                    session_state.lock().await.session.get_state_graph(wf_name)
+                });
+
+                if let Some(graph) = graph {
+                    app.add_message(ChatRole::System,
+                        format!("▶ Starting StateGraph '{}' execution...", graph.name));
+
+                    let result = rt.block_on(async {
+                        session_state.lock().await.session.execute_state_graph(&graph).await
+                    });
+
+                    match result {
+                        Ok(result) => {
+                            let mut lines = vec![format!("✅ StateGraph '{}' completed", result.name)];
+                            lines.push(format!("   Iterations: {}", result.iterations));
+                            lines.push(format!("   Completed: {}", result.completed));
+                            if let Some(terminal) = &result.terminal_node {
+                                lines.push(format!("   Terminal node: {}", terminal));
+                            }
+                            if let Some(output) = &result.final_state.last_result {
+                                let preview = if output.len() > 500 {
+                                    format!("{}...", &output[..500])
+                                } else {
+                                    output.clone()
+                                };
+                                lines.push(format!("   Result: {}", preview));
+                            }
+                            app.add_message(ChatRole::System, lines.join("\n"));
+                        }
+                        Err(e) => {
+                            app.add_message(ChatRole::Error, format!("❌ StateGraph failed: {}", e));
+                        }
+                    }
+                } else {
+                    app.add_message(ChatRole::Error,
+                        format!("Workflow '{}' not found. Use /wf list to see available workflows.", wf_name));
+                }
+            }
+        }
+
+        "define" => {
+            if parts.len() < 3 {
+                app.add_message(ChatRole::Error,
+                    "Usage: /wf define <json_string> OR /wf define --file <path>");
+                return;
+            }
+
+            let config = if parts[2] == "--file" {
+                if parts.len() < 4 {
+                    app.add_message(ChatRole::Error, "Usage: /wf define --file <path>");
+                    return;
+                }
+                let path = parts[3];
+                let content = std::fs::read_to_string(path);
+                match content {
+                    Ok(content) => {
+                        oneai_workflow::WorkflowConfig::from_json(&content)
+                    }
+                    Err(e) => {
+                        app.add_message(ChatRole::Error, format!("Cannot read file: {}", e));
+                        return;
+                    }
+                }
+            } else {
+                // Direct JSON string
+                oneai_workflow::WorkflowConfig::from_json(parts[2])
+            };
+
+            match config {
+                Ok(config) => {
+                    app.add_message(ChatRole::System,
+                        format!("▶ Executing custom workflow '{}' with {} steps...",
+                            config.name, config.steps.len()));
+
+                    let result = rt.block_on(async {
+                        session_state.lock().await.session.execute_workflow(&config).await
+                    });
+
+                    match result {
+                        Ok(result) => {
+                            app.add_message(ChatRole::System,
+                                format!("✅ Workflow '{}' completed. Steps: {}, Time: {}ms",
+                                    result.name, result.step_results.len(), result.total_time_ms));
+                        }
+                        Err(e) => {
+                            app.add_message(ChatRole::Error, format!("❌ Workflow failed: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    app.add_message(ChatRole::Error, format!("Invalid workflow definition: {}", e));
+                }
+            }
+        }
+
+        "show" => {
+            if parts.len() < 3 {
+                app.add_message(ChatRole::Error, "Usage: /wf show <name>");
+                return;
+            }
+            let wf_name = parts[2];
+            let config = rt.block_on(async {
+                session_state.lock().await.session.get_workflow_config(wf_name)
+            });
+
+            match config {
+                Some(config) => {
+                    let viz = rt.block_on(async {
+                        session_state.lock().await.session.render_workflow_dag(&config)
+                    });
+                    app.add_message(ChatRole::System, format!("Workflow: {}\n{}", config.name, viz));
+                }
+                None => {
+                    app.add_message(ChatRole::Error, format!("Workflow '{}' not found.", wf_name));
+                }
+            }
+        }
+
+        "graph" => {
+            if parts.len() < 3 {
+                app.add_message(ChatRole::Error, "Usage: /wf graph <name>");
+                return;
+            }
+            let graph_name = parts[2];
+            let graph = rt.block_on(async {
+                session_state.lock().await.session.get_state_graph(graph_name)
+            });
+
+            match graph {
+                Some(graph) => {
+                    let viz = rt.block_on(async {
+                        session_state.lock().await.session.render_state_graph(&graph)
+                    });
+                    app.add_message(ChatRole::System, viz);
+                }
+                None => {
+                    app.add_message(ChatRole::Error, format!("StateGraph '{}' not found.", graph_name));
+                }
+            }
+        }
+
+        "status" => {
+            // Show the latest workflow execution result from history
+            let history = rt.block_on(async {
+                session_state.lock().await.session.workflow_history().to_vec()
+            });
+
+            if history.is_empty() {
+                app.add_message(ChatRole::System,
+                    "No workflow executions in this session. Use /wf run <name> to start one.");
+            } else {
+                let last = history.last().unwrap();
+                let kind_str = match last.kind {
+                    oneai_app::session::WorkflowKind::Dag => "DAG Workflow",
+                    oneai_app::session::WorkflowKind::StateGraph => "StateGraph",
+                };
+                let status_icon = if last.success { "✅" } else { "❌" };
+                app.add_message(ChatRole::System, format!(
+                    "Last workflow execution:\n  {} {} ({})\n  Status: {} {}\n  Time: {}\n  Summary: {}",
+                    status_icon, last.name, kind_str, status_icon,
+                    if last.success { "completed" } else { "failed" },
+                    last.timestamp, last.summary
+                ));
+            }
+        }
+
+        "history" => {
+            // Show all workflow execution history
+            let history = rt.block_on(async {
+                session_state.lock().await.session.workflow_history().to_vec()
+            });
+
+            if history.is_empty() {
+                app.add_message(ChatRole::System,
+                    "No workflow executions in this session. Use /wf run <name> to start one.");
+            } else {
+                let mut lines = vec![format!("📋 Workflow Execution History ({})\n", history.len())];
+                for (idx, entry) in history.iter().enumerate() {
+                    let kind_str = match entry.kind {
+                        oneai_app::session::WorkflowKind::Dag => "DAG",
+                        oneai_app::session::WorkflowKind::StateGraph => "Graph",
+                    };
+                    let status_icon = if entry.success { "✅" } else { "❌" };
+                    lines.push(format!(
+                        "  {} {} [{}] {} — {} ({})",
+                        status_icon, idx + 1, kind_str, entry.name,
+                        entry.summary, entry.timestamp
+                    ));
+                }
+                app.add_message(ChatRole::System, lines.join("\n"));
+            }
+        }
+
+        "cancel" => {
+            // /wf cancel — cancel a running workflow
+            // This requires async cancellation which is not yet implemented.
+            // Currently workflow execution is synchronous (blocking) within the
+            // TUI event loop, so there's no way to cancel mid-execution.
+            // Future implementation: use tokio::sync::CancellationToken in
+            // StateGraphExecutor and WorkflowExecutor to support graceful cancellation.
+            app.add_message(ChatRole::System,
+                "⚠️ /wf cancel is not yet supported. Workflows execute synchronously \
+                 within the TUI event loop and cannot be cancelled mid-execution.\n\n\
+                 Future implementation will use CancellationToken for graceful \
+                 cancellation of StateGraph and DAG workflows.");
+        }
+
+        _ => {
+            app.add_message(ChatRole::Error, format!("Unknown workflow command: {}. Type /wf for help.", parts[1]));
+        }
+    }
 }
 
 /// Process an observer event and update the app state.

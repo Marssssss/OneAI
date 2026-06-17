@@ -1,7 +1,8 @@
 //! # OneAI Tool
 //!
 //! Tool management, registry, MCP integration, approval gates, and tool executor.
-//! New: PermissionAwareTool trait, expanded tool interfaces, real MCP implementation.
+//! New: PermissionAwareTool trait, expanded tool interfaces, real MCP implementation,
+//! ApplyPatchTool for batch editing via unified diff format.
 
 pub mod registry;
 pub mod local_tools;
@@ -10,6 +11,8 @@ pub mod mcp_real;
 pub mod approval;
 pub mod executor;
 pub mod tool_interfaces;
+pub mod apply_patch;
+pub mod sandbox;
 
 // Explicit imports to avoid ambiguity between local_tools and tool_interfaces
 // (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
@@ -19,6 +22,9 @@ pub use mcp_tools::*;
 pub use approval::*;
 pub use executor::*;
 pub use tool_interfaces::*;
+pub use apply_patch::{ApplyPatchTool, DiffHunk, DiffLine, parse_unified_diff};
+pub use sandbox::{SandboxBackend, SeatbeltBackend, DockerBackend, RegexBackend, WrappedCommand, default_sandbox_backend};
+pub use tool_interfaces::{WebSearchTool, SearchResult};
 
 #[cfg(test)]
 mod tests {

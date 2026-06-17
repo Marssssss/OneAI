@@ -11,6 +11,8 @@
 //! - ParadigmStrategies: union (deduplicated by trigger_pattern)
 //! - CompressionTemplate: use the primary pack (first pack in the list)
 //! - System prompt: concatenate with section headers
+//! - Workflows: union (deduplicated by name)
+//! - StateGraphs: union (deduplicated by name)
 
 use std::sync::Arc;
 
@@ -63,6 +65,12 @@ pub struct MergedDomainPack {
 
     /// Merged system prompt (concatenated with section headers).
     pub system_prompt_template: String,
+
+    /// Merged predefined workflows (union, deduplicated by name).
+    pub workflows: Vec<oneai_workflow::WorkflowConfig>,
+
+    /// Merged predefined StateGraphs (union, deduplicated by name).
+    pub state_graphs: Vec<oneai_workflow::StateGraph>,
 }
 
 impl MergedDomainPack {
@@ -97,6 +105,8 @@ impl MergedDomainPack {
                 paradigm_strategies: pack.paradigm_strategies.clone(),
                 compression_template: pack.compression_template.clone(),
                 system_prompt_template: pack.system_prompt_template.clone(),
+                workflows: pack.workflows.clone(),
+                state_graphs: pack.state_graphs.clone(),
             };
         }
 
@@ -176,6 +186,28 @@ impl MergedDomainPack {
                 .join("\n\n")
         };
 
+        // Workflows: union, deduplicated by name
+        let mut workflow_map: std::collections::HashMap<String, oneai_workflow::WorkflowConfig> = std::collections::HashMap::new();
+        for pack in &packs {
+            for workflow in &pack.workflows {
+                if !workflow_map.contains_key(&workflow.name) {
+                    workflow_map.insert(workflow.name.clone(), workflow.clone());
+                }
+            }
+        }
+        let workflows = workflow_map.values().cloned().collect();
+
+        // StateGraphs: union, deduplicated by name
+        let mut graph_map: std::collections::HashMap<String, oneai_workflow::StateGraph> = std::collections::HashMap::new();
+        for pack in &packs {
+            for graph in &pack.state_graphs {
+                if !graph_map.contains_key(&graph.name) {
+                    graph_map.insert(graph.name.clone(), graph.clone());
+                }
+            }
+        }
+        let state_graphs = graph_map.values().cloned().collect();
+
         Self {
             name,
             description,
@@ -186,6 +218,8 @@ impl MergedDomainPack {
             paradigm_strategies,
             compression_template,
             system_prompt_template,
+            workflows,
+            state_graphs,
         }
     }
 
@@ -204,6 +238,8 @@ impl MergedDomainPack {
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::default(),
             system_prompt_template: String::new(),
+            workflows: Vec::new(),
+            state_graphs: Vec::new(),
         }
     }
 
@@ -235,6 +271,26 @@ impl MergedDomainPack {
     pub fn has_context_sources(&self) -> bool {
         !self.context_sources.is_empty()
     }
+
+    /// Get a predefined workflow configuration by name.
+    pub fn get_workflow_config(&self, name: &str) -> Option<&oneai_workflow::WorkflowConfig> {
+        self.workflows.iter().find(|w| w.name == name)
+    }
+
+    /// Get a predefined StateGraph by name.
+    pub fn get_state_graph(&self, name: &str) -> Option<&oneai_workflow::StateGraph> {
+        self.state_graphs.iter().find(|g| g.name == name)
+    }
+
+    /// Get all available workflow names.
+    pub fn workflow_names(&self) -> Vec<String> {
+        self.workflows.iter().map(|w| w.name.clone()).collect()
+    }
+
+    /// Get all available StateGraph names.
+    pub fn state_graph_names(&self) -> Vec<String> {
+        self.state_graphs.iter().map(|g| g.name.clone()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +313,8 @@ mod tests {
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new(name),
             system_prompt_template: format!("You are a {} agent.", name),
+            workflows: Vec::new(),
+            state_graphs: Vec::new(),
         }
     }
 
@@ -288,6 +346,8 @@ mod tests {
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new("coding"),
             system_prompt_template: "You are a coding agent.".to_string(),
+            workflows: Vec::new(),
+            state_graphs: Vec::new(),
         };
 
         let pack_b = DomainPack {
@@ -307,6 +367,8 @@ mod tests {
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new("research"),
             system_prompt_template: "You are a research agent.".to_string(),
+            workflows: Vec::new(),
+            state_graphs: Vec::new(),
         };
 
         let merged = MergedDomainPack::merge(vec![pack_a, pack_b]);

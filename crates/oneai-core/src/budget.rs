@@ -49,6 +49,10 @@ pub struct CompressedResult {
 
 /// No-op compressor — does nothing, returns the conversation unchanged.
 /// Used as a default when no real compressor is available (e.g., in CLI demo mode).
+///
+/// **Warning**: NoopCompressor does NOT actually compress. Long conversations
+/// will overflow the model's context window. Use `TruncationCompressor` as
+/// the default fallback instead — it truncates without requiring an LLM.
 pub struct NoopCompressor;
 
 #[async_trait::async_trait]
@@ -78,6 +82,208 @@ impl ContextCompressorTrait for NoopCompressor {
         Ok(CompressedResult {
             compressed_conversation: conversation.clone(),
             summary: None,
+        })
+    }
+}
+
+// ─── TruncationCompressor ────────────────────────────────────────────────────
+
+/// Truncation-based compressor — always works without requiring an LLM.
+///
+/// This is the recommended default compressor. Unlike `NoopCompressor` which
+/// does nothing, TruncationCompressor actively prevents context overflow by:
+///
+/// 1. Keeping system messages intact (they're essential for agent behavior)
+/// 2. Keeping the most recent N turns intact (they're the most relevant)
+/// 3. Truncating older turns to their first `max_summary_chars` characters
+/// 4. Truncating tool results to `max_tool_result_chars` characters
+/// 5. Adding a summary message indicating what was truncated
+///
+/// This approach trades information completeness for guaranteed context safety.
+/// It's the right default because:
+/// - It never requires an LLM call (no dependency, no cost, no latency)
+/// - It always produces a valid conversation (never overflows the window)
+/// - It preserves the most important context (system + recent turns)
+///
+/// For higher-quality compression, use `ContextCompressor` from oneai-memory
+/// which uses an LLM to summarize — but TruncationCompressor is the safe fallback.
+pub struct TruncationCompressor {
+    /// Maximum length for tool result content (in characters).
+    /// Long shell outputs, file contents, etc. are truncated to this length.
+    pub max_tool_result_chars: usize,
+
+    /// Maximum length for older turn summaries (in characters).
+    /// Each older message is truncated to this length with a "[...truncated]" suffix.
+    pub max_summary_chars: usize,
+
+    /// Number of recent turns to keep intact (not truncated).
+    /// Recent turns are the most relevant for the agent's current reasoning.
+    pub keep_recent_turns: usize,
+}
+
+impl TruncationCompressor {
+    /// Create a new TruncationCompressor with default settings.
+    pub fn new() -> Self {
+        Self {
+            max_tool_result_chars: 2000,
+            max_summary_chars: 200,
+            keep_recent_turns: 6, // Keep last 3 exchanges (user+assistant pairs)
+        }
+    }
+
+    /// Create with custom settings.
+    pub fn with_config(
+        max_tool_result_chars: usize,
+        max_summary_chars: usize,
+        keep_recent_turns: usize,
+    ) -> Self {
+        Self {
+            max_tool_result_chars,
+            max_summary_chars,
+            keep_recent_turns,
+        }
+    }
+}
+
+impl Default for TruncationCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl ContextCompressorTrait for TruncationCompressor {
+    fn estimate_tokens(&self, conversation: &Conversation) -> usize {
+        // Same heuristic as NoopCompressor: ~4 chars per token
+        conversation.messages.iter()
+            .map(|m| m.content.iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.len()),
+                    _ => Some(50),
+                })
+                .sum::<usize>())
+            .sum::<usize>() / 4
+    }
+
+    fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
+        msg.content.iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.len()),
+                _ => Some(50),
+            })
+            .sum::<usize>() / 4
+    }
+
+    async fn compress(&self, conversation: &Conversation) -> Result<CompressedResult> {
+        let total_messages = conversation.messages.len();
+
+        // If conversation is short enough, no compression needed
+        if total_messages <= self.keep_recent_turns + 1 { // +1 for system message
+            return Ok(CompressedResult {
+                compressed_conversation: conversation.clone(),
+                summary: None,
+            });
+        }
+
+        let mut compressed = Conversation::with_id(conversation.id.clone());
+        compressed.metadata = conversation.metadata.clone();
+
+        // Collect info about what was truncated for the summary
+        let mut truncated_count = 0;
+
+        // Process messages in order
+        for (idx, msg) in conversation.messages.iter().enumerate() {
+            // Determine if this is a "recent" message (keep intact) or "older" (truncate)
+            let is_recent = idx >= total_messages - self.keep_recent_turns;
+            let is_system = msg.role == Role::System;
+
+            if is_system || is_recent {
+                // Keep system messages and recent turns intact
+                // But truncate long tool results even in recent turns
+                let processed_content = msg.content.iter().map(|block| {
+                    match block {
+                        ContentBlock::ToolResult { call_id, content } => {
+                            if content.len() > self.max_tool_result_chars {
+                                ContentBlock::ToolResult {
+                                    call_id: call_id.clone(),
+                                    content: format!("{}{}",
+                                        &content[..self.max_tool_result_chars.min(content.len())],
+                                        "\n[...output truncated]"
+                                    ),
+                                }
+                            } else {
+                                block.clone()
+                            }
+                        }
+                        ContentBlock::Text { text } => {
+                            // Truncate very long text in recent turns (e.g., large file reads)
+                            if !is_system && text.len() > self.max_tool_result_chars {
+                                ContentBlock::Text {
+                                    text: format!("{}{}",
+                                        &text[..self.max_tool_result_chars.min(text.len())],
+                                        "\n[...content truncated]"
+                                    ),
+                                }
+                            } else {
+                                block.clone()
+                            }
+                        }
+                        _ => block.clone(),
+                    }
+                }).collect::<Vec<_>>();
+
+                compressed.add_message(Message {
+                    role: msg.role,
+                    content: processed_content,
+                    metadata: msg.metadata.clone(),
+                });
+            } else {
+                // Older message — truncate to summary
+                truncated_count += 1;
+                let text = msg.text_content();
+                if text.len() > self.max_summary_chars {
+                    let summary = format!(
+                        "[{}]: {} [...truncated]",
+                        match msg.role {
+                            Role::System => "System",
+                            Role::User => "User",
+                            Role::Assistant => "Assistant",
+                            Role::Tool => "Tool",
+                        },
+                        &text[..self.max_summary_chars.min(text.len())]
+                    );
+                    compressed.add_message(Message::system(summary));
+                } else if !text.is_empty() {
+                    compressed.add_message(Message::system(format!(
+                        "[{} (older)]: {}",
+                        match msg.role {
+                            Role::System => "System",
+                            Role::User => "User",
+                            Role::Assistant => "Assistant",
+                            Role::Tool => "Tool",
+                        },
+                        text
+                    )));
+                }
+                // Skip empty older messages entirely
+            }
+        }
+
+        // Add truncation summary if any messages were truncated
+        let summary = if truncated_count > 0 {
+            Some(format!(
+                "Compressed: {} older messages truncated to {}-char summaries. \
+                {} recent turns preserved intact. Tool outputs capped at {} chars.",
+                truncated_count, self.max_summary_chars,
+                self.keep_recent_turns, self.max_tool_result_chars
+            ))
+        } else {
+            None
+        };
+
+        Ok(CompressedResult {
+            compressed_conversation: compressed,
+            summary,
         })
     }
 }

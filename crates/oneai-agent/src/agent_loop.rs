@@ -118,6 +118,138 @@ pub enum ParadigmKind {
     Explore,
 }
 
+// ─── ParadigmConfig ──────────────────────────────────────────────────────────
+
+/// Configuration for a specific paradigm — defines how the agent behaves
+/// when this paradigm is active.
+///
+/// Each paradigm changes three things:
+/// 1. **System prompt**: A paradigm-specific prompt that defines the agent's
+///    role and behavioral constraints for this mode.
+/// 2. **Tool filter**: The set of tools available in this paradigm.
+///    Plan paradigm doesn't need execution tools; Explore doesn't need edit tools.
+/// 3. **Decision hint**: A brief description injected into context telling the
+///    model what kind of decisions to make in this paradigm.
+///
+/// This addresses the "范式切换语义空洞" gap — previously, `run_paradigm()`
+/// just returned a text string like "Plan paradigm activated" without any
+/// actual behavioral change. Now, paradigm switching produces real, observable
+/// effects: system prompt changes, tool filtering, and decision guidance.
+///
+/// Inspired by Aider's Architect/Editor dual-model pattern where each "role"
+/// has its own prompt and tool set. OneAI extends this to 4 paradigms.
+#[derive(Debug, Clone)]
+pub struct ParadigmConfig {
+    /// The paradigm this config applies to.
+    pub paradigm: ParadigmKind,
+
+    /// System prompt for this paradigm — replaces the default system prompt
+    /// when this paradigm is active.
+    pub system_prompt: String,
+
+    /// Tools available in this paradigm — only these tools are sent to the
+    /// model as tool definitions. Other tools are hidden from the model.
+    pub tool_filter: Vec<String>,
+
+    /// Decision hint — injected into context as a system message when
+    /// this paradigm becomes active. Tells the model what kind of
+    /// decisions to make (plan vs execute vs review vs explore).
+    pub decision_hint: String,
+}
+
+impl ParadigmConfig {
+    /// Get the default configuration for each paradigm kind.
+    ///
+    /// These defaults are modeled after Aider's Architect/Editor pattern:
+    /// - Plan: No execution tools, focus on decomposition
+    /// - ReAct: Full tool set, focus on action
+    /// - Reflect: Read-only tools, focus on review
+    /// - Explore: Read + search tools, focus on discovery
+    pub fn defaults() -> Vec<ParadigmConfig> {
+        vec![
+            ParadigmConfig {
+                paradigm: ParadigmKind::Plan,
+                system_prompt: "You are a planning agent. Your ONLY job is to decompose the given \
+                    task into a structured plan with ordered steps and dependencies. \
+                    Do NOT execute any tools — produce only a plan as a numbered list. \
+                    Each step should be specific, actionable, and identify which tool would be needed. \
+                    Focus on: understanding the task scope, identifying dependencies, \
+                    ordering steps logically, and flagging risks or unknowns."
+                    .to_string(),
+                tool_filter: vec![
+                    "read_file".into(), "grep".into(), "glob".into(),
+                    "list_directory".into(), "environment".into(),
+                ],
+                decision_hint: "You are in PLAN mode — focus on decomposing the task into ordered steps. \
+                    Do NOT execute any tools. Produce only a plan.".to_string(),
+            },
+            ParadigmConfig {
+                paradigm: ParadigmKind::ReAct,
+                system_prompt: "You are a ReAct agent — you reason about what to do, then act using \
+                    available tools, observe the results, and iterate. This is the default \
+                    execution mode. Use tools to accomplish the task, and report the final \
+                    answer when done. If you encounter errors, try to fix them in subsequent iterations. \
+                    Focus on: executing actions efficiently, verifying results, and iterating until complete."
+                    .to_string(),
+                tool_filter: vec![
+                    "read_file".into(), "edit_file".into(), "apply_patch".into(),
+                    "shell".into(), "grep".into(), "glob".into(),
+                    "list_directory".into(), "environment".into(),
+                    "web_fetch".into(), "notebook_edit".into(),
+                ],
+                decision_hint: "You are in REACT mode — reason about what to do, then act using tools, \
+                    observe results, and iterate.".to_string(),
+            },
+            ParadigmConfig {
+                paradigm: ParadigmKind::Reflect,
+                system_prompt: "You are a reflection agent. Your job is to review the current state \
+                    of work, identify errors, improvements, and missing steps. You have \
+                    read-only access — you can examine files and search the codebase, but \
+                    you cannot make changes. Your output should be a structured review \
+                    with: (1) issues found, (2) improvements suggested, (3) next steps recommended. \
+                    Focus on: correctness, completeness, quality, and potential risks."
+                    .to_string(),
+                tool_filter: vec![
+                    "read_file".into(), "grep".into(), "glob".into(),
+                    "list_directory".into(), "environment".into(),
+                ],
+                decision_hint: "You are in REFLECT mode — review the current state, identify errors \
+                    and improvements, and suggest next steps.".to_string(),
+            },
+            ParadigmConfig {
+                paradigm: ParadigmKind::Explore,
+                system_prompt: "You are an exploration agent. Your job is to search and understand \
+                    the codebase/environment. You can read files, search patterns, and list \
+                    directories, but you cannot modify anything. Return a comprehensive \
+                    summary of your findings including: file paths, function signatures, \
+                    key patterns, relevant dependencies, and any important observations. \
+                    Focus on: thoroughness, accuracy, and providing useful context for \
+                    subsequent planning or execution."
+                    .to_string(),
+                tool_filter: vec![
+                    "read_file".into(), "grep".into(), "glob".into(),
+                    "list_directory".into(), "environment".into(),
+                    "web_fetch".into(),
+                ],
+                decision_hint: "You are in EXPLORE mode — search and understand the environment. \
+                    Report findings without modifying anything.".to_string(),
+            },
+        ]
+    }
+
+    /// Get the ParadigmConfig for a specific paradigm kind from the defaults.
+    pub fn for_paradigm(kind: ParadigmKind) -> ParadigmConfig {
+        Self::defaults().into_iter()
+            .find(|c| c.paradigm == kind)
+            .unwrap_or_else(|| ParadigmConfig {
+                paradigm: kind,
+                system_prompt: String::new(),
+                tool_filter: vec![], // Empty filter = all tools available
+                decision_hint: String::new(),
+            })
+    }
+}
+
 // ─── ToolCallRequest / ToolCallResult ────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -145,6 +277,10 @@ pub struct LoopState {
     pub final_answer: Option<String>,
     pub active_skills: Vec<oneai_core::SkillDescriptor>,
     pub active_paradigm: ParadigmKind,
+    /// The active paradigm configuration — determines system prompt,
+    /// tool filter, and decision hint for the current paradigm.
+    /// Updated when paradigm switching occurs.
+    pub active_paradigm_config: Option<ParadigmConfig>,
     pub sub_agent_results: Vec<SubAgentSummary>,
     pub env_snapshot: Option<crate::context_assembler::EnvironmentSnapshot>,
 }
@@ -162,6 +298,7 @@ impl LoopState {
             final_answer: None,
             active_skills: Vec::new(),
             active_paradigm: ParadigmKind::ReAct,
+            active_paradigm_config: None, // Uses default system prompt until switch
             sub_agent_results: Vec::new(),
             env_snapshot: None,
         }
@@ -183,6 +320,7 @@ impl LoopState {
             final_answer: None,
             active_skills: Vec::new(),
             active_paradigm: ParadigmKind::ReAct,
+            active_paradigm_config: None,
             sub_agent_results: Vec::new(),
             env_snapshot: None,
         }
@@ -347,10 +485,36 @@ pub struct AgentLoop {
     context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
     sub_agent_factory: Arc<dyn SubAgentFactory>,
     context_assembler: Arc<tokio::sync::RwLock<ContextAssembler>>,
-    stream_parser: IncrementalStreamParser,
+    stream_parser: Arc<tokio::sync::RwLock<IncrementalStreamParser>>,
     checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
+    recovery_manager: Option<Arc<crate::error_recovery::RecoveryManager>>,
     config: AgentLoopConfig,
     domain_pack: Option<Arc<MergedDomainPack>>,
+}
+
+/// Manual Clone implementation for AgentLoop — all fields are Arc/RwLock/Arc<RwLock>,
+/// so cloning is cheap (just Arc pointer cloning, no data duplication).
+///
+/// This enables SubAgentWrapper to clone the AgentLoop for tokio::spawn,
+/// allowing sub-agents to run on separate async tasks independently.
+impl Clone for AgentLoop {
+    fn clone(&self) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            tools: self.tools.clone(),
+            parser: self.parser.clone(),
+            approval_gate: self.approval_gate.clone(),
+            skill_selector: self.skill_selector.clone(),
+            context_budget: self.context_budget.clone(),
+            sub_agent_factory: self.sub_agent_factory.clone(),
+            context_assembler: self.context_assembler.clone(),
+            stream_parser: self.stream_parser.clone(),
+            checkpoint_manager: self.checkpoint_manager.clone(),
+            recovery_manager: self.recovery_manager.clone(),
+            config: self.config.clone(),
+            domain_pack: self.domain_pack.clone(),
+        }
+    }
 }
 
 impl AgentLoop {
@@ -370,10 +534,10 @@ impl AgentLoop {
     ) -> Self {
         Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
             sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser, checkpoint_manager, config, domain_pack: None }
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None, config, domain_pack: None }
     }
 
-    /// Create a new AgentLoop with a domain pack for domain-specific configuration.
+    /// Create a new AgentLoop with a domain pack and recovery manager.
     pub fn with_domain_pack(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
@@ -390,8 +554,18 @@ impl AgentLoop {
     ) -> Self {
         Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
             sub_agent_factory, context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser, checkpoint_manager, config,
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None, config,
             domain_pack: Some(domain_pack) }
+    }
+
+    /// Set the RecoveryManager for error recovery during the loop.
+    ///
+    /// When set, failed tool calls trigger recovery strategy evaluation.
+    /// The RecoveryManager can apply Retry, ConditionalFallback, Rollback,
+    /// ExternalFeedback, or Escalate strategies based on the error type.
+    pub fn with_recovery_manager(mut self, manager: Arc<crate::error_recovery::RecoveryManager>) -> Self {
+        self.recovery_manager = Some(manager);
+        self
     }
 
     /// Run the Agentic Loop with an observer for real-time UI updates.
@@ -451,6 +625,28 @@ impl AgentLoop {
                 let mut ca = self.context_assembler.write().await;
                 ca.refresh_sources().await?;
             }
+
+            // 1b. Context Epoch — take environment snapshot for diff detection.
+            // This addresses the "Context Epoch 未接入 Loop" gap.
+            // take_snapshot() and compute_diff() already exist in ContextAssembler,
+            // but were never called from the loop. Now, each iteration takes a
+            // snapshot, and the assembler injects the diff into context on the
+            // next iteration (when last_snapshot differs from the current one).
+            if self.config.detect_env_changes {
+                let tools_map = self.tools.read().await;
+                let tool_names: std::collections::HashSet<String> = tools_map.keys().cloned().collect();
+                let snapshot = {
+                    let ca = self.context_assembler.read().await;
+                    ca.take_snapshot(&tool_names).await?
+                };
+                // Update the assembler's last_snapshot for next iteration's diff
+                {
+                    let mut ca = self.context_assembler.write().await;
+                    ca.update_snapshot(snapshot.clone());
+                }
+                state.env_snapshot = Some(snapshot);
+            }
+
             let assembled = self.context_assembler.read().await.assemble(&state)?;
             if self.context_budget.needs_compression(&assembled) {
                 state.conversation = self.context_budget.compress(assembled).await?;
@@ -464,8 +660,10 @@ impl AgentLoop {
                 state.active_skills = skills;
             }
 
-            // 3. Build inference request
-            let tool_defs = self.build_tool_definitions().await;
+            // 3. Build inference request (with paradigm-aware tool definitions)
+            let tool_defs = self.build_tool_definitions_for_paradigm(
+                state.active_paradigm_config.as_ref()
+            ).await;
             let request = InferenceRequest {
                 conversation: state.conversation.clone(),
                 tools: tool_defs,
@@ -519,18 +717,60 @@ impl AgentLoop {
                         observer.on_tool_result(&r.call_id, "", &r.output);
                     }
 
-                    // Error recovery: check for failed tool calls
-                    // If a tool call failed with a recoverable error, log it
-                    // for potential recovery in future iterations
+                    // Error recovery: check for failed tool calls.
+                    // This addresses the "RecoveryManager 未接线" gap.
+                    // Previously, only a tracing::warn! was emitted. Now, if a
+                    // RecoveryManager is wired in, failed calls trigger strategy
+                    // evaluation and recovery feedback is injected into the conversation.
                     let failed_calls: Vec<_> = results.iter()
                         .filter(|r| !r.output.success)
                         .collect();
                     if !failed_calls.is_empty() {
                         tracing::warn!("{} tool calls failed in iteration {}",
                             failed_calls.len(), state.iterations);
-                        // RecoveryManager would be consulted here if available
-                        // For now, we just continue — the error is already
-                        // in the conversation context for the model to see
+
+                        // If RecoveryManager is available, evaluate recovery strategies
+                        if let Some(rm) = &self.recovery_manager {
+                            for failed in &failed_calls {
+                                let strategy = self.select_recovery_strategy(failed);
+                                let context = crate::error_recovery::ValidationContext {
+                                    task: state.original_task.clone(),
+                                    result: failed.output.error.as_deref().unwrap_or("Unknown error").to_string(),
+                                    variables: std::collections::HashMap::from([
+                                        ("tool_name".to_string(), "unknown".to_string()),
+                                        ("iteration".to_string(), state.iterations.to_string()),
+                                    ]),
+                                };
+
+                                let outcome = rm.apply(&strategy, &context).await?;
+                                match outcome {
+                                    crate::error_recovery::RecoveryOutcome::ValidationFailed { feedback } => {
+                                        state.conversation.add_message(Message::system(
+                                            format!("Recovery feedback: {}", feedback)
+                                        ));
+                                    }
+                                    crate::error_recovery::RecoveryOutcome::Escalated { summary } => {
+                                        state.conversation.add_message(Message::system(
+                                            format!("Error escalated: {}", summary)
+                                        ));
+                                    }
+                                    crate::error_recovery::RecoveryOutcome::RetryScheduled { max_retries } => {
+                                        state.conversation.add_message(Message::system(
+                                            format!("Recovery: retry scheduled (max {} attempts)", max_retries)
+                                        ));
+                                    }
+                                    crate::error_recovery::RecoveryOutcome::RollbackTo { checkpoint_id } => {
+                                        state.conversation.add_message(Message::system(
+                                            format!("Recovery: rollback to checkpoint {}", checkpoint_id)
+                                        ));
+                                    }
+                                    _ => {
+                                        // Other outcomes are informational — just log
+                                        tracing::debug!("Recovery outcome: {:?}", outcome);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Check if any tool call was denied by the approval gate.
@@ -565,8 +805,9 @@ impl AgentLoop {
                     if !text_content.is_empty() {
                         state.conversation.add_message(Message::assistant(&text_content));
                     }
-                    let result = self.run_paradigm(paradigm, &state)?;
-                    state.active_paradigm = paradigm;
+                    // Try to execute a predefined StateGraph for this paradigm,
+                    // fall back to semantic paradigm switch if no graph is available.
+                    let result = self.apply_paradigm_switch_with_graph(paradigm, &mut state).await?;
                     state.feed_paradigm_result(paradigm, result);
                 }
             }
@@ -776,26 +1017,176 @@ impl AgentLoop {
     }
 
     async fn spawn_sub_agent(&self, task: String, agent_type: SubAgentKind, budget: oneai_core::budget::TokenBudget) -> Result<SubAgentSummary> {
-        let sub_agent = self.sub_agent_factory.create(agent_type.clone(), budget)?;
+        let sub_agent = self.sub_agent_factory.create(agent_type.clone(), budget).await?;
         sub_agent.run(&task).await
     }
 
-    fn run_paradigm(&self, paradigm: ParadigmKind, state: &LoopState) -> Result<String> {
-        // Paradigm switching applies configuration changes:
-        // - Plan: switches system prompt to planning-focused mode
-        // - ReAct: switches to action-oriented mode
-        // - Reflect: switches to evaluation/review mode
-        // - Explore: switches to search/discovery mode
-        Ok(format!(
-            "{} paradigm activated. The agent will now focus on {} tasks.",
+    /// Apply a paradigm switch — produces real, observable behavior changes.
+    ///
+    /// This addresses the "范式切换语义空洞" gap. Previously, `run_paradigm()`
+    /// just returned a formatted string like "Plan paradigm activated" — no
+    /// actual behavior change. Now, paradigm switching does three things:
+    ///
+    /// 1. **Replaces the system prompt** in the conversation — removes the
+    ///    old system message and adds a paradigm-specific one.
+    /// 2. **Stores ParadigmConfig** in LoopState — `build_tool_definitions()`
+    ///    uses the config's tool_filter to only send relevant tools to the model.
+    /// 3. **Injects a decision hint** — a brief system message telling the model
+    ///    what kind of decisions to make in this paradigm.
+    ///
+    /// Inspired by Aider's Architect/Editor dual-model pattern where each
+    /// "role" has its own prompt and tool set. OneAI extends this to 4 paradigms.
+    fn apply_paradigm_switch(&self, paradigm: ParadigmKind, state: &mut LoopState) -> String {
+        let config = ParadigmConfig::for_paradigm(paradigm);
+
+        // Step 1: Replace system prompt in conversation
+        // Remove existing system messages and add the paradigm-specific one
+        state.conversation.messages.retain(|m| m.role != Role::System);
+        state.conversation.add_message(Message::system(&config.system_prompt));
+
+        // Step 2: Inject decision hint as additional context
+        if !config.decision_hint.is_empty() {
+            state.conversation.add_message(Message::system(
+                format!("[Paradigm switch]: {}", config.decision_hint)
+            ));
+        }
+
+        // Step 3: Store ParadigmConfig for tool filtering
+        state.active_paradigm = paradigm;
+        state.active_paradigm_config = Some(config.clone());
+
+        // Return a concise summary for the loop
+        format!(
+            "{} paradigm activated — system prompt changed, tools filtered to: [{}]",
             paradigm_name(&paradigm),
-            match paradigm {
-                ParadigmKind::Plan => "planning and decomposition",
-                ParadigmKind::ReAct => "action and tool execution",
-                ParadigmKind::Reflect => "evaluation and review",
-                ParadigmKind::Explore => "search and discovery",
+            config.tool_filter.join(", ")
+        )
+    }
+
+    /// Apply paradigm switch — with optional StateGraph execution.
+    ///
+    /// When a DomainPack has a predefined StateGraph matching the paradigm
+    /// (e.g., "react-loop" for ReAct), this method first applies the
+    /// semantic paradigm switch, then attempts to execute the StateGraph.
+    /// If the StateGraph executes successfully, its output is injected
+    /// into the conversation as an assistant message.
+    ///
+    /// If no StateGraph is found, or execution fails, this falls back
+    /// to the purely semantic paradigm switch (apply_paradigm_switch).
+    async fn apply_paradigm_switch_with_graph(
+        &self,
+        paradigm: ParadigmKind,
+        state: &mut LoopState,
+    ) -> Result<String> {
+        // First, apply the semantic paradigm switch (always happens)
+        let base_result = self.apply_paradigm_switch(paradigm, state);
+
+        // Look for a predefined StateGraph for this paradigm in the DomainPack
+        let graph_key = match paradigm {
+            ParadigmKind::ReAct => "react-loop",
+            ParadigmKind::Plan => "plan-workflow",
+            ParadigmKind::Reflect => "reflect-workflow",
+            ParadigmKind::Explore => "explore-workflow",
+        };
+
+        let graph = self.domain_pack.as_ref()
+            .and_then(|dp| dp.get_state_graph(graph_key))
+            .cloned();
+
+        if let Some(graph) = graph {
+            tracing::info!(
+                "Found predefined StateGraph '{}' for paradigm {}. Attempting execution.",
+                graph.name, paradigm_name(&paradigm)
+            );
+
+            // Build a StateGraphExecutor from the AgentLoop's dependencies
+            // Use the AgentLoop's SubAgentFactory as the DelegateFactory bridge
+            let delegate_factory: Arc<dyn oneai_workflow::DelegateFactory> =
+                Arc::new(crate::sub_agent::SubAgentDelegateFactory::new(
+                    self.sub_agent_factory.clone(),
+                ));
+
+            let executor = oneai_workflow::StateGraphExecutor::with_defaults(
+                self.provider.clone(),
+                self.tools.clone(),
+                delegate_factory,
+                self.approval_gate.clone(),
+            );
+
+            // Build initial state from the current conversation
+            let mut initial_state = oneai_workflow::GraphState::new();
+            initial_state.conversation = state.conversation.clone();
+            // Copy relevant variables from LoopState into graph state
+            initial_state.variables.insert("task".to_string(), state.original_task.clone());
+
+            let graph_result = executor.execute(&graph, initial_state).await;
+
+            match graph_result {
+                Ok(result) => {
+                    if result.completed {
+                        tracing::info!(
+                            "StateGraph '{}' completed successfully after {} iterations. Terminal: {}",
+                            result.name, result.iterations,
+                            result.terminal_node.as_deref().unwrap_or("none")
+                        );
+                        // Inject the StateGraph's final output into the loop conversation
+                        if let Some(output) = &result.final_state.last_result {
+                            state.conversation.add_message(Message::assistant(
+                                format!("[StateGraph {} result]: {}", result.name, output)
+                            ));
+                        }
+                        // Merge any new variables from the graph state back
+                        for (key, value) in &result.final_state.variables {
+                            if !key.starts_with("_") { // Skip internal variables
+                                state.global_state.context.insert(key.clone(), value.clone());
+                            }
+                        }
+                        return Ok(format!(
+                            "{} paradigm + StateGraph '{}' executed ({} iterations). {}",
+                            paradigm_name(&paradigm),
+                            result.name,
+                            result.iterations,
+                            base_result
+                        ));
+                    } else {
+                        tracing::warn!(
+                            "StateGraph '{}' did not reach a terminal node after {} iterations.",
+                            result.name, result.iterations
+                        );
+                        // Still useful — inject partial results
+                        if let Some(output) = &result.final_state.last_result {
+                            state.conversation.add_message(Message::assistant(
+                                format!("[StateGraph {} partial]: {}", result.name, output)
+                            ));
+                        }
+                        return Ok(format!(
+                            "{} paradigm + StateGraph '{}' incomplete ({} iterations). {}",
+                            paradigm_name(&paradigm),
+                            result.name,
+                            result.iterations,
+                            base_result
+                        ));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "StateGraph '{}' execution failed: {}. Falling back to semantic paradigm switch.",
+                        graph.name, e
+                    );
+                    // Fall back — the semantic switch was already applied
+                    return Ok(format!(
+                        "{} paradigm activated (StateGraph '{}' failed: {}). {}",
+                        paradigm_name(&paradigm),
+                        graph.name,
+                        e,
+                        base_result
+                    ));
+                }
             }
-        ))
+        }
+
+        // No predefined StateGraph — semantic switch only (already applied)
+        Ok(base_result)
     }
 
     /// Run a streaming iteration — uses `provider.infer_stream()` and
@@ -903,6 +1294,15 @@ impl AgentLoop {
     async fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
 
+        // Determine the active paradigm config for tool filtering.
+        // If a paradigm config is active, only send tools in the config's
+        // tool_filter to the model. This is the real behavioral change
+        // that makes paradigm switching meaningful.
+        //
+        // When no paradigm config is active (initial state before any switch),
+        // all tools are available (default ReAct behavior).
+        let tool_filter: Option<&[String]> = None; // Will be checked from LoopState in run_loop
+
         // Apply domain pack tool decorators if present
         if let Some(domain) = &self.domain_pack {
             tools_map.values().map(|tool| {
@@ -945,8 +1345,116 @@ impl AgentLoop {
         }
     }
 
+    /// Build tool definitions filtered by paradigm config.
+    ///
+    /// This is called from run_loop() where we have access to the
+    /// LoopState's active_paradigm_config. Paradigm-configured tool
+    /// filtering is the key behavioral change that makes paradigm
+    /// switching meaningful — Plan mode shouldn't see edit tools,
+    /// Explore mode shouldn't see execution tools.
+    async fn build_tool_definitions_for_paradigm(&self, paradigm_config: Option<&ParadigmConfig>) -> Vec<ToolDefinition> {
+        let tools_map = self.tools.read().await;
+
+        // If a paradigm config is active, filter tools by its tool_filter list.
+        // Only tools in the filter are sent to the model — this prevents the
+        // model from calling tools that aren appropriate for the current paradigm.
+        let filtered_tools: Vec<&Arc<dyn Tool>> = if let Some(config) = paradigm_config {
+            if config.tool_filter.is_empty() {
+                // Empty filter means "all tools available" — no restriction
+                tools_map.values().collect()
+            } else {
+                // Filter: only include tools that are in the paradigm's tool_filter
+                tools_map.values()
+                    .filter(|tool| config.tool_filter.contains(&tool.name().to_string()))
+                    .collect()
+            }
+        } else {
+            // No paradigm config — all tools available (default ReAct behavior)
+            tools_map.values().collect()
+        };
+
+        // Apply domain pack tool decorators if present
+        if let Some(domain) = &self.domain_pack {
+            filtered_tools.iter().map(|tool| {
+                // Check if there's a decorator for this tool
+                let decorator = domain.find_decorator(tool.name());
+                match decorator {
+                    Some(dec) => {
+                        // Use decorator overrides
+                        let description = dec.description_override.as_deref()
+                            .unwrap_or_else(|| tool.description());
+                        // Merge parameters schema with extra_params
+                        let schema = if dec.extra_params.is_null() || dec.extra_params == serde_json::json!({}) {
+                            tool.parameters_schema()
+                        } else {
+                            oneai_domain::merge_tool_schemas(
+                                tool.parameters_schema(),
+                                dec.extra_params.clone(),
+                            )
+                        };
+                        ToolDefinition {
+                            name: tool.name().to_string(),
+                            description: description.to_string(),
+                            parameters_schema: schema,
+                        }
+                    }
+                    None => ToolDefinition {
+                        name: tool.name().to_string(),
+                        description: tool.description().to_string(),
+                        parameters_schema: tool.parameters_schema(),
+                    },
+                }
+            }).collect()
+        } else {
+            // No domain pack — use raw tool definitions
+            filtered_tools.iter().map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters_schema: tool.parameters_schema(),
+            }).collect()
+        }
+    }
+
     fn active_skill_descriptors(&self) -> Result<Vec<oneai_core::SkillDescriptor>> {
         Ok(Vec::new())
+    }
+
+    /// Select a recovery strategy based on the type of tool call failure.
+    ///
+    /// Maps error patterns to appropriate RecoveryStrategy types:
+    /// - Network/timeout errors → Retry (transient, may succeed on retry)
+    /// - Permission denied → Escalate (requires human intervention)
+    /// - Tool not found → ConditionalFallback (route to alternative tool)
+    /// - Execution errors → ExternalFeedback (use validator to judge)
+    ///
+    /// This is a basic mapping — more sophisticated strategy selection
+    /// can be added based on DomainPack recovery configurations.
+    fn select_recovery_strategy(&self, failed: &ToolCallResult) -> crate::error_recovery::RecoveryStrategy {
+        let error_msg = failed.output.error.as_deref().unwrap_or("");
+
+        if error_msg.contains("timeout") || error_msg.contains("timed out")
+            || error_msg.contains("network") || error_msg.contains("rate_limit") {
+            // Transient errors → Retry with exponential backoff
+            crate::error_recovery::RecoveryStrategy::Retry {
+                policy: crate::error_recovery::RetryPolicy::default(),
+            }
+        } else if error_msg.starts_with("Denied") || error_msg.contains("permission") {
+            // Permission denied → Escalate to human
+            crate::error_recovery::RecoveryStrategy::Escalate {
+                error_summary: format!("Tool call denied: {}", error_msg),
+            }
+        } else if error_msg.contains("not found") {
+            // Tool not found → Fallback to alternative
+            crate::error_recovery::RecoveryStrategy::ConditionalFallback {
+                error_node: "tool_call".to_string(),
+                fix_node: "alternative_approach".to_string(),
+            }
+        } else {
+            // Default: escalate — let the main agent decide
+            crate::error_recovery::RecoveryStrategy::Escalate {
+                error_summary: format!("Tool execution error: {}", error_msg),
+            }
+        }
     }
 
     /// Handle the approval gate interaction for a tool call.

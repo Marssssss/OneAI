@@ -1,11 +1,12 @@
 //! DomainPack — the core domain configuration structure.
 //!
-//! A DomainPack encapsulates the 5 layers of domain-specific workflow embedding:
+//! A DomainPack encapsulates the 6 layers of domain-specific workflow embedding:
 //! 1. Tools + ToolDecorators: domain-specific tool set and description overrides
 //! 2. ContextSources: domain-specific environment sensing with refresh policies
 //! 3. PermissionProfile: domain-specific permission classification
 //! 4. ParadigmStrategies: domain-specific task → paradigm mapping
 //! 5. CompressionTemplate: domain-specific context preservation priorities
+//! 6. Workflows + StateGraphs: domain-specific predefined workflows and cyclic graphs
 //!
 //! The DomainPack is the central unit of domain configuration. It's what
 //! you pass to `AppBuilder::domain_pack()` to switch the agent's domain.
@@ -98,6 +99,26 @@ pub struct DomainPack {
     /// this domain. When a DomainPack is active, this replaces the default
     /// generic system prompt in AgentLoopConfig.
     pub system_prompt_template: String,
+
+    // ─── Layer 6: Predefined workflows ──────────────────────────────────────
+
+    /// Domain-specific predefined WorkflowDag configurations.
+    ///
+    /// These are declared in the DomainPack and can be executed via
+    /// the `/wf run <name>` CLI command. They provide deterministic
+    /// step-by-step workflows for common domain tasks.
+    ///
+    /// Example: code-review, debug, refactor, test workflows in CodingPack.
+    pub workflows: Vec<oneai_workflow::WorkflowConfig>,
+
+    /// Domain-specific predefined StateGraph configurations.
+    ///
+    /// These are cyclic graph definitions for iterative agent patterns
+    /// like ReAct loops. They can be visualized via `/wf graph <name>`
+    /// and executed via `/wf run <name>` (for StateGraph-based workflows).
+    ///
+    /// Example: react-loop StateGraph in CodingPack.
+    pub state_graphs: Vec<oneai_workflow::StateGraph>,
 }
 
 // Manual Debug impl — dyn Tool and dyn ContextSource don't implement Debug
@@ -113,6 +134,8 @@ impl std::fmt::Debug for DomainPack {
             .field("paradigm_strategies", &self.paradigm_strategies)
             .field("compression_template", &self.compression_template)
             .field("system_prompt_template", &self.system_prompt_template)
+            .field("workflows_count", &self.workflows.len())
+            .field("state_graphs_count", &self.state_graphs.len())
             .finish()
     }
 }
@@ -132,6 +155,8 @@ pub struct DomainPackBuilder {
     paradigm_strategies: Vec<ParadigmStrategy>,
     compression_template: CompressionTemplate,
     system_prompt_template: String,
+    workflows: Vec<oneai_workflow::WorkflowConfig>,
+    state_graphs: Vec<oneai_workflow::StateGraph>,
 }
 
 impl DomainPackBuilder {
@@ -147,6 +172,8 @@ impl DomainPackBuilder {
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::default(),
             system_prompt_template: String::new(),
+            workflows: Vec::new(),
+            state_graphs: Vec::new(),
         }
     }
 
@@ -222,6 +249,30 @@ impl DomainPackBuilder {
         self
     }
 
+    /// Add a predefined workflow configuration.
+    pub fn workflow(mut self, workflow: oneai_workflow::WorkflowConfig) -> Self {
+        self.workflows.push(workflow);
+        self
+    }
+
+    /// Add multiple predefined workflow configurations.
+    pub fn workflows(mut self, workflows: Vec<oneai_workflow::WorkflowConfig>) -> Self {
+        self.workflows.extend(workflows);
+        self
+    }
+
+    /// Add a predefined StateGraph configuration.
+    pub fn state_graph(mut self, graph: oneai_workflow::StateGraph) -> Self {
+        self.state_graphs.push(graph);
+        self
+    }
+
+    /// Add multiple predefined StateGraph configurations.
+    pub fn state_graphs(mut self, graphs: Vec<oneai_workflow::StateGraph>) -> Self {
+        self.state_graphs.extend(graphs);
+        self
+    }
+
     /// Build the DomainPack.
     pub fn build(self) -> DomainPack {
         DomainPack {
@@ -234,6 +285,8 @@ impl DomainPackBuilder {
             paradigm_strategies: self.paradigm_strategies,
             compression_template: self.compression_template,
             system_prompt_template: self.system_prompt_template,
+            workflows: self.workflows,
+            state_graphs: self.state_graphs,
         }
     }
 }

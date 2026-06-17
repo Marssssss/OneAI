@@ -5,6 +5,7 @@
 //!
 //! - `api.openai.com` → OpenAI
 //! - `api.anthropic.com` → Anthropic
+//! - `generativelanguage.googleapis.com` → Gemini
 //! - `dashscope.aliyuncs.com` → OpenAI-compatible (阿里百炼)
 //! - `api.deepseek.com` → OpenAI-compatible (DeepSeek)
 //! - `open.bigmodel.cn` → OpenAI-compatible (智谱)
@@ -13,6 +14,7 @@
 
 use crate::openai::OpenAIProvider;
 use crate::anthropic::AnthropicProvider;
+use crate::gemini::GeminiProvider;
 use crate::ollama::OllamaProvider;
 use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
 use oneai_core::traits::LlmProvider;
@@ -36,6 +38,9 @@ impl ProviderFactory {
                 match resolved_config.cloud_kind {
                     Some(CloudProviderKind::Anthropic) => {
                         Box::new(AnthropicProvider::new(resolved_config))
+                    }
+                    Some(CloudProviderKind::Gemini) => {
+                        Box::new(GeminiProvider::new(resolved_config))
                     }
                     // OpenAI and all OpenAI-compatible services (百炼, DeepSeek, 智谱, etc.)
                     Some(CloudProviderKind::OpenAI) | None => {
@@ -71,6 +76,14 @@ impl ProviderFactory {
         if url.contains("anthropic.com") {
             return ModelConfig {
                 cloud_kind: Some(CloudProviderKind::Anthropic),
+                ..config
+            };
+        }
+
+        // Detect Gemini
+        if url.contains("generativelanguage.googleapis.com") || url.contains("aiplatform.googleapis.com") {
+            return ModelConfig {
+                cloud_kind: Some(CloudProviderKind::Gemini),
                 ..config
             };
         }

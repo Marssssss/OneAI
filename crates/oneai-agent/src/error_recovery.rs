@@ -323,6 +323,7 @@ impl Default for RecoveryManager {
 // ─── RecoveryOutcome ──────────────────────────────────────────────────
 
 /// Outcome of applying a recovery strategy.
+#[derive(Debug)]
 pub enum RecoveryOutcome {
     /// Retry scheduled with max retries.
     RetryScheduled { max_retries: usize },

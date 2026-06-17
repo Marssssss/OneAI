@@ -244,6 +244,8 @@ pub enum CloudProviderKind {
     OpenAI,
     /// Anthropic Claude native API protocol.
     Anthropic,
+    /// Google Gemini native API protocol.
+    Gemini,
 }
 
 // ─── ModelConfig ──────────────────────────────────────────────────────────────
@@ -320,6 +322,20 @@ impl ModelConfig {
             cloud_kind: Some(CloudProviderKind::Anthropic),
             api_key: Some(api_key),
             base_url: Some("https://api.anthropic.com/v1".to_string()),
+            port: None,
+            model_name: Some(model_name),
+            model_path: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    /// Create a Google Gemini cloud provider config.
+    pub fn gemini(api_key: String, model_name: String) -> Self {
+        Self {
+            provider_type: ProviderType::Cloud,
+            cloud_kind: Some(CloudProviderKind::Gemini),
+            api_key: Some(api_key),
+            base_url: Some("https://generativelanguage.googleapis.com/v1beta".to_string()),
             port: None,
             model_name: Some(model_name),
             model_path: None,

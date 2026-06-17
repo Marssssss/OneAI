@@ -9,6 +9,7 @@ description = "Domain Pack system — pluggable, declarative, composable domain 
 [dependencies]
 oneai-core = { workspace = true }
 oneai-tool = { workspace = true }
+oneai-workflow = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,3 +17,5 @@ async-trait = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+serde_yaml = "0.9"
+toml = "0.8"

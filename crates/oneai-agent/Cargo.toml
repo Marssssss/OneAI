@@ -21,6 +21,7 @@ oneai-skill = { workspace = true }
 oneai-persistence = { workspace = true }
 oneai-memory = { workspace = true }
 oneai-domain = { workspace = true }
+oneai-workflow = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
