@@ -35,14 +35,51 @@ use oneai_core::error::Result;
 /// - Sub-agent delegation (spawning a specialized sub-agent)
 /// - Human approval (a checkpoint requiring human intervention)
 /// - Condition check (a routing node that evaluates a condition)
+/// - Paradigm switch (changing the active paradigm for subsequent nodes)
+///
+/// When a `GraphActionExecutor` (from `oneai-agent`) is configured,
+/// the LlmInfer and ToolCall nodes delegate to the AgentLoop's full
+/// inference and execution pipeline (context assembly, tool definitions,
+/// hooks, permission, domain pack). This is the P2-2 "闭环" mechanism.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeAction {
     /// LLM inference node — sends conversation to the model and gets a response.
+    ///
+    /// When `include_tool_definitions` is true, the GraphActionExecutor will
+    /// build tool definitions for this node (filtered by `tool_filter_override`
+    /// or the active paradigm's tool set). This is critical for ReAct loops —
+    /// the model needs to see available tools to decide whether to call them.
+    ///
+    /// When `include_tool_definitions` is false, the node sends a pure inference
+    /// request without tool definitions (for final answer nodes, condition checks, etc).
     LlmInfer {
         /// System prompt override for this node (if any).
         system_prompt_override: Option<String>,
         /// Whether to use streaming inference.
+        #[serde(default)]
         use_streaming: bool,
+        /// Whether to include tool definitions in the inference request.
+        /// When true, the GraphActionExecutor builds tool definitions based on
+        /// `tool_filter_override` or the active paradigm config.
+        /// When false (default), the LLM receives a pure text prompt without tools.
+        #[serde(default)]
+        include_tool_definitions: bool,
+        /// Override the tool filter for this node (if any).
+        /// When Some, only these tools are included in the inference request.
+        /// When None, the active paradigm's tool_filter is used (or all tools
+        /// if no paradigm is active).
+        #[serde(default)]
+        tool_filter_override: Option<Vec<String>>,
+        /// Token budget for extended thinking/reasoning (Anthropic budget_tokens).
+        /// None = thinking disabled; Some(N) = enable thinking with N token budget.
+        #[serde(default)]
+        thinking_budget: Option<u32>,
+        /// Temperature for sampling (0.0 = deterministic, 1.0 = creative).
+        #[serde(default)]
+        temperature: Option<f32>,
+        /// Maximum tokens to generate.
+        #[serde(default)]
+        max_tokens: Option<u32>,
     },
 
     /// Tool execution node — calls a specific tool with arguments.
@@ -77,6 +114,21 @@ pub enum NodeAction {
         /// Examples: "has_tool_calls", "is_final_answer", "error_occurred"
         condition: String,
     },
+
+    /// Paradigm switch node — changes the active paradigm for subsequent nodes.
+    ///
+    /// When executed, this node updates `GraphState.active_paradigm` and
+    /// clears `GraphState.parsed_decision`. Subsequent LlmInfer nodes
+    /// (with `include_tool_definitions = true`) will use the new paradigm's
+    /// tool set and system prompt. This enables multi-paradigm workflows
+    /// as explicit graph paths (e.g., Plan → ReAct → Reflect).
+    ///
+    /// The paradigm string maps to ParadigmKind in `oneai-agent`:
+    /// "plan", "react", "reflect", "explore".
+    SwitchParadigm {
+        /// The target paradigm to switch to.
+        paradigm: String,
+    },
 }
 
 // ─── EdgeCondition ──────────────────────────────────────────────────────────
@@ -87,15 +139,23 @@ pub enum NodeAction {
 /// - After an LLM inference node, route to tool execution if tool calls present
 /// - After a tool execution node, route back to LLM inference (ReAct loop)
 /// - After an LLM inference node, route to end if no tool calls (final answer)
+///
+/// P2-2 improvement: HasToolCalls, IsFinalAnswer, and RequestsDelegation
+/// now evaluate against `GraphState.parsed_decision` (a structured `GraphDecision`)
+/// rather than unreliable string pattern matching. This makes edge routing
+/// consistent with the AgentLoop's decision parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EdgeCondition {
     /// Route if the model output contains tool calls.
+    /// Now evaluates `state.parsed_decision == GraphDecision::ToolCalls`.
     HasToolCalls,
 
     /// Route if the model output is a final answer (no tool calls).
+    /// Now evaluates `state.parsed_decision == GraphDecision::DirectAnswer`.
     IsFinalAnswer,
 
     /// Route if the model output requests delegation.
+    /// Now evaluates `state.parsed_decision == GraphDecision::Delegate`.
     RequestsDelegation,
 
     /// Route if an error occurred in the previous node.
@@ -114,6 +174,20 @@ pub enum EdgeCondition {
     Custom {
         name: String,
         description: String,
+    },
+
+    /// Route if the active paradigm matches the specified paradigm.
+    /// Evaluates `state.active_paradigm == paradigm`.
+    ParadigmEquals {
+        /// The paradigm to match (e.g., "plan", "react", "reflect", "explore").
+        paradigm: String,
+    },
+
+    /// Route if the iteration count exceeds the specified threshold.
+    /// Useful for adding safety caps to iterative loops.
+    IterationExceeds {
+        /// The iteration threshold — route is followed when iterations > count.
+        count: usize,
     },
 }
 
@@ -304,6 +378,12 @@ impl StateGraph {
 /// State is passed from node to node via the edges. Each node can
 /// read from and write to this state. The state is serializable
 /// for checkpoint persistence.
+///
+/// P2-2 extension: added fields for AgentLoop integration —
+/// `parsed_decision` enables edge routing based on structured decisions
+/// (not unreliable string pattern matching), `active_paradigm` tracks
+/// the current paradigm for tool filtering, and `iteration_count`
+/// enables IterationExceeds edge conditions for loop safety.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphState {
     /// The current conversation.
@@ -324,6 +404,54 @@ pub struct GraphState {
     /// Metadata.
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    // ─── P2-2: AgentLoop integration fields ──────────────────────────────────
+
+    /// The parsed decision from the most recent LLM inference.
+    ///
+    /// After each LlmInfer node, the `GraphActionExecutor` parses the LLM
+    /// response into a `GraphDecision` and stores it here. Edge conditions
+    /// (HasToolCalls, IsFinalAnswer, RequestsDelegation) evaluate against
+    /// this field instead of raw string content, making routing reliable
+    /// and consistent with the AgentLoop's decision parsing.
+    ///
+    /// Cleared when a SwitchParadigm node is executed (new inference needed).
+    #[serde(default)]
+    pub parsed_decision: Option<oneai_core::GraphDecision>,
+
+    /// The active paradigm for tool filtering and system prompts.
+    ///
+    /// When set, subsequent LlmInfer nodes (with `include_tool_definitions = true`)
+    /// use the paradigm's tool_filter to build tool definitions. Paradigm-specific
+    /// system prompts are also injected into the conversation.
+    ///
+    /// Set by SwitchParadigm nodes, or initialized from the AgentLoop's
+    /// active paradigm when the graph starts executing.
+    #[serde(default)]
+    pub active_paradigm: Option<String>,
+
+    /// The current iteration count in the graph walk.
+    ///
+    /// Incremented each time the executor processes a node. Enables
+    /// IterationExceeds edge conditions for loop safety (e.g., "route
+    /// to error_handler if iterations > 20").
+    #[serde(default)]
+    pub iteration_count: usize,
+
+    /// Remaining token budget (in tokens).
+    ///
+    /// Decremented after each LLM inference. When it reaches 0,
+    /// the graph should terminate (budget exhaustion).
+    #[serde(default)]
+    pub token_budget_remaining: u32,
+
+    /// Accumulated interrupt points during execution.
+    ///
+    /// When a HumanApproval node is encountered (with `interrupt: true`),
+    /// the executor records the interrupt point here. These are also
+    /// included in `GraphExecutionResult.interrupt_checkpoints`.
+    #[serde(default)]
+    pub interrupt_points: Vec<oneai_core::InterruptPoint>,
 }
 
 impl GraphState {
@@ -336,6 +464,19 @@ impl GraphState {
             last_error: None,
             should_terminate: false,
             metadata: HashMap::new(),
+            parsed_decision: None,
+            active_paradigm: None,
+            iteration_count: 0,
+            token_budget_remaining: 0, // 0 means "no budget limit set"
+            interrupt_points: Vec::new(),
+        }
+    }
+
+    /// Create a graph state with a token budget.
+    pub fn with_budget(budget: u32) -> Self {
+        Self {
+            token_budget_remaining: budget,
+            ..Self::new()
         }
     }
 }

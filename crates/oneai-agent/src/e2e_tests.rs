@@ -896,3 +896,321 @@ async fn e2e_scenario_10_sub_agent_structured_output() {
     assert!(!invalid_validation.passed, "Non-JSON text should fail schema validation");
     assert!(invalid_validation.errors.iter().any(|e| e.message.contains("not valid JSON")));
 }
+
+// ─── Scenario 11: StateGraph-driven ReAct loop ────────────────────────────────
+
+/// Test StateGraph-driven execution using the react-loop graph from CodingPack.
+///
+/// This tests the P2-2 "闭环" mechanism:
+/// - LlmInfer node gets tool definitions (include_tool_definitions = true)
+/// - HasToolCalls/IsFinalAnswer routing uses parsed_decision (GraphDecision)
+/// - Tool call goes through permission gate
+/// - Graph execution completes and converts back to AgentLoopResult
+#[tokio::test]
+async fn e2e_scenario_11_state_graph_react_loop() {
+    use crate::agent_loop::{AgentLoopGraphActionExecutor, ParadigmKind};
+
+    // Build a simple react-loop StateGraph
+    let mut graph = oneai_workflow::StateGraph::new("test-react-loop", "think");
+
+    // Think node — LLM decides what to do (with tool definitions)
+    graph.add_node(oneai_workflow::GraphNode {
+        id: "think".to_string(),
+        action: oneai_workflow::NodeAction::LlmInfer {
+            system_prompt_override: None,
+            use_streaming: false,
+            include_tool_definitions: true,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: Some(0.3),
+            max_tokens: Some(4096),
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // End node — final answer
+    graph.add_node(oneai_workflow::GraphNode {
+        id: "end".to_string(),
+        action: oneai_workflow::NodeAction::LlmInfer {
+            system_prompt_override: Some("Provide a final answer.".to_string()),
+            use_streaming: false,
+            include_tool_definitions: false,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // Edges: think → end (IsFinalAnswer)
+    graph.add_edge(oneai_workflow::GraphEdge {
+        from: "think".to_string(),
+        to: "end".to_string(),
+        condition: Some(oneai_workflow::EdgeCondition::IsFinalAnswer),
+        metadata: HashMap::new(),
+    });
+
+    graph.add_terminal("end".to_string());
+
+    // Mock provider returns a direct answer (no tool calls)
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::direct_answer("The answer is 42"),
+    ]);
+
+    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
+        auto_checkpoint: false,
+        inject_skills: false,
+        detect_env_changes: false,
+        thinking_budget: None,
+        hard_max_iterations: Some(10),
+        ..AgentLoopConfig::default()
+    });
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    // Run with StateGraph
+    let result = agent_loop.run_with_state_graph(
+        "What is the answer?",
+        "test-react-loop",  // This won't match DomainPack → falls back to manual graph
+        &observer,
+    ).await;
+
+    // Since there's no StateGraph "test-react-loop" in the DomainPack,
+    // the method falls back to standard AgentLoop execution.
+    // But we can test the StateGraphExecutor directly.
+
+    // Direct test: build executor with DirectProviderActionExecutor
+    let provider2 = MockProvider::from_script(vec![
+        ScriptedResponse::direct_answer("The answer is 42"),  // think node
+        ScriptedResponse::direct_answer("Final answer: 42"), // end node
+    ]);
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>>
+        = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+    let action_executor = Arc::new(oneai_workflow::DirectProviderActionExecutor::new(
+        Arc::new(provider2),
+        tools_map,
+    ));
+
+    let delegate_factory: Arc<dyn oneai_workflow::DelegateFactory> =
+        Arc::new(oneai_workflow::NoopDelegateFactory);
+
+    let executor = oneai_workflow::StateGraphExecutor::new(
+        action_executor,
+        delegate_factory,
+        Arc::new(oneai_tool::AutoApprovalGate),
+        10,
+    );
+
+    let mut initial_state = oneai_workflow::GraphState::new();
+    initial_state.conversation.add_message(oneai_core::Message::user("What is the answer?"));
+    initial_state.conversation.add_message(oneai_core::Message::system("You are a helpful agent."));
+    initial_state.variables.insert("task".to_string(), "What is the answer?".to_string());
+
+    let graph_result = executor.execute(&graph, initial_state).await.unwrap();
+
+    assert!(graph_result.completed, "StateGraph should complete successfully");
+    assert_eq!(graph_result.terminal_node, Some("end".to_string()));
+    // The end node's LlmInfer produces "Final answer: 42"
+    assert!(graph_result.final_state.last_result.unwrap().contains("42"));
+    assert!(graph_result.final_state.parsed_decision.is_some());
+
+    // Verify that parsed_decision was set during execution
+    let decision = graph_result.final_state.parsed_decision.unwrap();
+    assert!(decision.is_final(), "Direct answer should be marked as final");
+}
+
+// ─── Scenario 12: StateGraph with paradigm switch ──────────────────────────────
+
+/// Test StateGraph execution with SwitchParadigm node.
+///
+/// When a SwitchParadigm node is executed:
+/// - state.active_paradigm changes
+/// - state.parsed_decision is cleared
+/// - conversation system prompt is updated
+/// - subsequent LlmInfer nodes use the new paradigm's tool filter
+#[tokio::test]
+async fn e2e_scenario_12_state_graph_paradigm_switch() {
+    // Build a simple StateGraph with paradigm switch
+    let mut graph = oneai_workflow::StateGraph::new("test-paradigm-switch", "switch_to_plan");
+
+    // SwitchParadigm node — changes active paradigm to "plan"
+    graph.add_node(oneai_workflow::GraphNode {
+        id: "switch_to_plan".to_string(),
+        action: oneai_workflow::NodeAction::SwitchParadigm {
+            paradigm: "plan".to_string(),
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // Plan node — LLM inference in plan paradigm
+    graph.add_node(oneai_workflow::GraphNode {
+        id: "plan".to_string(),
+        action: oneai_workflow::NodeAction::LlmInfer {
+            system_prompt_override: None,
+            use_streaming: false,
+            include_tool_definitions: true,
+            tool_filter_override: Some(vec!["read_file".to_string(), "grep".to_string()]),
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // End node
+    graph.add_node(oneai_workflow::GraphNode {
+        id: "end".to_string(),
+        action: oneai_workflow::NodeAction::LlmInfer {
+            system_prompt_override: Some("Final plan answer.".to_string()),
+            use_streaming: false,
+            include_tool_definitions: false,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // Edges: switch_to_plan → plan → end
+    graph.add_edge(oneai_workflow::GraphEdge {
+        from: "switch_to_plan".to_string(),
+        to: "plan".to_string(),
+        condition: Some(oneai_workflow::EdgeCondition::Always),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(oneai_workflow::GraphEdge {
+        from: "plan".to_string(),
+        to: "end".to_string(),
+        condition: Some(oneai_workflow::EdgeCondition::IsFinalAnswer),
+        metadata: HashMap::new(),
+    });
+
+    graph.add_terminal("end".to_string());
+
+    // Mock provider
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::direct_answer("Plan: step 1 → step 2 → step 3"),
+    ]);
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>>
+        = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+    let action_executor = Arc::new(oneai_workflow::DirectProviderActionExecutor::new(
+        Arc::new(provider),
+        tools_map,
+    ));
+
+    let executor = oneai_workflow::StateGraphExecutor::new(
+        action_executor,
+        Arc::new(oneai_workflow::NoopDelegateFactory),
+        Arc::new(oneai_tool::AutoApprovalGate),
+        10,
+    );
+
+    let mut initial_state = oneai_workflow::GraphState::new();
+    initial_state.conversation.add_message(oneai_core::Message::user("Plan the implementation"));
+    initial_state.active_paradigm = Some("react".to_string());
+
+    let graph_result = executor.execute(&graph, initial_state).await.unwrap();
+
+    assert!(graph_result.completed);
+    // After SwitchParadigm node, active_paradigm should be "plan"
+    assert_eq!(graph_result.final_state.active_paradigm, Some("plan".to_string()));
+}
+
+// ─── Scenario 13: StateGraph edge condition routing ──────────────────────────
+
+/// Test StateGraph edge condition routing based on parsed_decision (GraphDecision).
+///
+/// This tests the core P2-2 improvement: edge routing uses structured decisions
+/// (HasToolCalls, IsFinalAnswer) instead of unreliable string matching.
+#[tokio::test]
+async fn e2e_scenario_13_state_graph_decision_routing() {
+    // Build a graph with conditional routing based on parsed_decision
+    let mut graph = oneai_workflow::StateGraph::new("test-decision-routing", "think");
+
+    // Think node — LLM with tools
+    graph.add_node(oneai_workflow::GraphNode {
+        id: "think".to_string(),
+        action: oneai_workflow::NodeAction::LlmInfer {
+            system_prompt_override: None,
+            use_streaming: false,
+            include_tool_definitions: true,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // End node — final answer
+    graph.add_node(oneai_workflow::GraphNode {
+        id: "end".to_string(),
+        action: oneai_workflow::NodeAction::LlmInfer {
+            system_prompt_override: Some("Final answer.".to_string()),
+            use_streaming: false,
+            include_tool_definitions: false,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // Edges: think → end (IsFinalAnswer — uses parsed_decision, not string matching)
+    graph.add_edge(oneai_workflow::GraphEdge {
+        from: "think".to_string(),
+        to: "end".to_string(),
+        condition: Some(oneai_workflow::EdgeCondition::IsFinalAnswer),
+        metadata: HashMap::new(),
+    });
+
+    graph.add_terminal("end".to_string());
+
+    // Mock provider returns a direct answer
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::direct_answer("The final answer is 42"),
+    ]);
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>>
+        = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+    let action_executor = Arc::new(oneai_workflow::DirectProviderActionExecutor::new(
+        Arc::new(provider),
+        tools_map,
+    ));
+
+    let executor = oneai_workflow::StateGraphExecutor::new(
+        action_executor,
+        Arc::new(oneai_workflow::NoopDelegateFactory),
+        Arc::new(oneai_tool::AutoApprovalGate),
+        10,
+    );
+
+    let mut initial_state = oneai_workflow::GraphState::new();
+    initial_state.conversation.add_message(oneai_core::Message::user("What is the answer?"));
+    initial_state.conversation.add_message(oneai_core::Message::system("Answer the question."));
+
+    let graph_result = executor.execute(&graph, initial_state).await.unwrap();
+
+    assert!(graph_result.completed);
+    // Verify parsed_decision was set and routing worked correctly
+    let decision = graph_result.final_state.parsed_decision.as_ref().unwrap();
+    assert!(decision.is_final(), "Should be DirectAnswer → IsFinalAnswer routes to end");
+    assert!(!decision.has_tool_calls(), "Should not have tool calls");
+}

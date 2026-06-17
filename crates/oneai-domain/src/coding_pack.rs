@@ -670,6 +670,11 @@ fn react_state_graph() -> StateGraph {
         action: NodeAction::LlmInfer {
             system_prompt_override: None,
             use_streaming: true,
+            include_tool_definitions: true,  // P2-2: Send tools so model can decide to call them
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
         },
         interrupt: false,
         metadata: HashMap::new(),
@@ -702,6 +707,11 @@ fn react_state_graph() -> StateGraph {
         action: NodeAction::LlmInfer {
             system_prompt_override: Some("Provide a final answer to the user's question.".to_string()),
             use_streaming: true,
+            include_tool_definitions: false,  // P2-2: No tools for final answer node
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
         },
         interrupt: false,
         metadata: HashMap::new(),

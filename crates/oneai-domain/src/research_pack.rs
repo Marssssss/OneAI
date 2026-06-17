@@ -547,6 +547,11 @@ fn research_loop_graph() -> StateGraph {
                  If you have enough, provide your synthesis.".to_string()
             ),
             use_streaming: true,
+            include_tool_definitions: true,  // P2-2: Send tools so model can decide
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
         },
         interrupt: false,
         metadata: HashMap::new(),
@@ -573,6 +578,11 @@ fn research_loop_graph() -> StateGraph {
                  Decide if you have enough information or need to search more.".to_string()
             ),
             use_streaming: true,
+            include_tool_definitions: true,  // P2-2: Send tools for decision-making
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
         },
         interrupt: false,
         metadata: HashMap::new(),
@@ -588,6 +598,11 @@ fn research_loop_graph() -> StateGraph {
                  conclusions, and areas for further research. Use [Source: URL] for citations.".to_string()
             ),
             use_streaming: true,
+            include_tool_definitions: false,  // P2-2: No tools for final report
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
         },
         interrupt: false,
         metadata: HashMap::new(),

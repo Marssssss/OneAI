@@ -320,7 +320,7 @@ impl AppSession {
                 "No LLM provider configured. Cannot execute StateGraph.".to_string()
             ))?;
 
-        let executor = StateGraphExecutor::with_defaults(
+        let executor = StateGraphExecutor::with_direct_provider_defaults(
             provider.clone(),
             self.app.workflow_executor.tools_handle(),
             Arc::new(NoopDelegateFactory), // Use noop for now; real impl wired in later

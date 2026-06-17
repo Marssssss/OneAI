@@ -80,17 +80,19 @@ pub fn render_state_graph_ascii(graph: &StateGraph) -> String {
     for node_id in &node_ids {
         let node = graph.nodes.get(node_id).unwrap();
         let action_str = match &node.action {
-            NodeAction::LlmInfer { system_prompt_override, .. } => {
+            NodeAction::LlmInfer { system_prompt_override, include_tool_definitions, .. } => {
+                let tools_str = if *include_tool_definitions { " +tools" } else { "" };
                 if system_prompt_override.is_some() {
-                    format!("🧠 LLM (custom prompt)")
+                    format!("🧠 LLM (custom prompt){}", tools_str)
                 } else {
-                    "🧠 LLM".to_string()
+                    format!("🧠 LLM{}", tools_str)
                 }
             }
             NodeAction::ToolCall { tool_name, .. } => format!("🔧 {}", tool_name),
             NodeAction::Delegate { agent_kind, .. } => format!("🤖 →{}", agent_kind),
             NodeAction::HumanApproval { description } => format!("✋ {}", description),
             NodeAction::ConditionCheck { condition } => format!("🔀 {}", condition),
+            NodeAction::SwitchParadigm { paradigm } => format!("🔄 →{}", paradigm),
         };
         let interrupt_str = if node.interrupt { " ⏸" } else { "" };
         lines.push(format!("  {} [{}]{}", node_id, action_str, interrupt_str));
@@ -107,6 +109,8 @@ pub fn render_state_graph_ascii(graph: &StateGraph) -> String {
                         format!(" [{}={}]", variable, value),
                     Some(EdgeCondition::Always) => String::new(),
                     Some(EdgeCondition::Custom { name, .. }) => format!(" [Custom:{}]", name),
+                    Some(EdgeCondition::ParadigmEquals { paradigm }) => format!(" [Paradigm={}]", paradigm),
+                    Some(EdgeCondition::IterationExceeds { count }) => format!(" [Iter>{}]", count),
                     None => String::new(),
                 };
                 lines.push(format!("    → {}{}", edge.to, cond_str));
@@ -191,6 +195,11 @@ mod tests {
             action: crate::state_graph::NodeAction::LlmInfer {
                 system_prompt_override: None,
                 use_streaming: true,
+                include_tool_definitions: true,
+                tool_filter_override: None,
+                thinking_budget: None,
+                temperature: None,
+                max_tokens: None,
             },
             interrupt: false,
             metadata: HashMap::new(),
@@ -201,6 +210,11 @@ mod tests {
             action: crate::state_graph::NodeAction::LlmInfer {
                 system_prompt_override: Some("Final answer".to_string()),
                 use_streaming: false,
+                include_tool_definitions: false,
+                tool_filter_override: None,
+                thinking_budget: None,
+                temperature: None,
+                max_tokens: None,
             },
             interrupt: false,
             metadata: HashMap::new(),

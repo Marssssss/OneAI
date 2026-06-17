@@ -7,6 +7,10 @@
 //! It defines steps, dependencies, tool bindings, and execution policies.
 //! The workflow is compiled into a DAG (for acyclic workflows) or a
 //! StateGraph (for cyclic workflows like ReAct loops) and executed.
+//!
+//! P2-2: GraphActionExecutor trait enables AgentLoop integration —
+//! LlmInfer/ToolCall nodes can delegate to the AgentLoop's full pipeline
+//! (hooks, permission, domain pack, tool definitions, context assembly).
 
 pub mod config;
 pub mod dag;

@@ -8,18 +8,29 @@
 //!
 //! Key features:
 //! - Walks graph from `entry_point` through conditional edges
-//! - Executes 5 NodeAction variants (LlmInfer, ToolCall, Delegate, HumanApproval, ConditionCheck)
-//! - Evaluates 7 EdgeCondition variants for dynamic routing
+//! - Executes 6 NodeAction variants (LlmInfer, ToolCall, Delegate, HumanApproval, ConditionCheck, SwitchParadigm)
+//! - Evaluates 9 EdgeCondition variants for dynamic routing (including ParadigmEquals, IterationExceeds)
 //! - Handles interrupt points (nodes with `interrupt: true`)
 //! - Bounded by `max_iterations` to prevent infinite loops
 //! - Supports `{{variable}}` template interpolation in tool_name and args_template
+//!
+//! P2-2: GraphActionExecutor bridge
+//! ------------------------------
+//! The `GraphActionExecutor` trait enables AgentLoop integration — when a
+//! concrete implementation (from `oneai-agent`) is provided, LlmInfer and
+//! ToolCall nodes delegate to the AgentLoop's full pipeline (hooks, permission,
+//! domain pack, tool definitions). This makes StateGraph execution a first-class
+//! execution mode of the AgentLoop, not a separate disconnected system.
+//!
+//! The `DirectProviderActionExecutor` provides backward-compatible behavior
+//! (direct provider.infer() + tool.execute() without AgentLoop integration).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{ApprovalGate, LlmProvider, Tool};
-use oneai_core::{Conversation, InferenceRequest, Message, Role};
+use oneai_core::{Conversation, InferenceRequest, InferenceResponse, Message, Role, ToolOutput};
 
 use crate::state_graph::{
     StateGraph, GraphNode, GraphState, GraphEdge, NodeAction, EdgeCondition, GraphExecutionResult,
@@ -58,11 +69,297 @@ impl DelegateFactory for NoopDelegateFactory {
 
 /// The result of executing a single node action.
 #[derive(Debug, Clone)]
-struct ActionResult {
+pub struct ActionResult {
     /// The output content from this action.
-    output: String,
+    pub output: String,
     /// Error message if the action failed.
-    error: Option<String>,
+    pub error: Option<String>,
+}
+
+// ─── GraphActionExecutor Trait ──────────────────────────────────────────────────
+
+/// Trait for executing graph node actions with full AgentLoop integration.
+///
+/// This is the P2-2 bridge — when a concrete implementation (from `oneai-agent`)
+/// is provided, the StateGraphExecutor delegates LlmInfer and ToolCall nodes
+/// to the AgentLoop's full pipeline instead of directly calling provider.infer()
+/// and tool.execute(). This means:
+///
+/// - **LlmInfer**: Gets proper tool definitions (filtered by paradigm config),
+///   domain pack tool decorators, PreInfer/PostInfer hooks, context assembly,
+///   and the OutputParser for decision parsing.
+/// - **ToolCall**: Gets PreToolUse/PostToolUse hooks, domain permission checks,
+///   approval gate interaction, and error recovery.
+/// - **SwitchParadigm**: Changes the active paradigm (updates tool filter
+///   and system prompt for subsequent nodes).
+///
+/// The `DirectProviderActionExecutor` provides backward-compatible behavior
+/// (direct provider + tool execution, no AgentLoop integration). It's used
+/// when no AgentLoop is available (e.g., standalone StateGraph execution).
+#[async_trait::async_trait]
+pub trait GraphActionExecutor: Send + Sync {
+    /// Execute an LLM inference node — using full AgentLoop infrastructure.
+    ///
+    /// When `include_tool_definitions` is true, builds tool definitions based on
+    /// `tool_filter_override` or the active paradigm's tool set. This is critical
+    /// for ReAct loops — the model needs tools to decide whether to call them.
+    ///
+    /// After inference, the response is parsed into a `GraphDecision` and stored
+    /// in `state.parsed_decision` for edge condition routing.
+    async fn execute_llm_infer(
+        &self,
+        action: &NodeAction,
+        state: &mut GraphState,
+    ) -> Result<ActionResult>;
+
+    /// Execute a tool call node — using AgentLoop's permission and hooks.
+    ///
+    /// When a GraphActionExecutor from `oneai-agent` is used, this method
+    /// runs PreToolUse hooks, checks domain permissions, interacts with the
+    /// approval gate, executes the tool, runs PostToolUse hooks, and handles
+    /// error recovery.
+    async fn execute_tool_call(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        state: &mut GraphState,
+    ) -> Result<ActionResult>;
+
+    /// Execute a paradigm switch node.
+    ///
+    /// Updates `state.active_paradigm` and clears `state.parsed_decision`.
+    /// Subsequent LlmInfer nodes will use the new paradigm's tool set
+    /// and system prompt.
+    async fn execute_paradigm_switch(
+        &self,
+        paradigm: &str,
+        state: &mut GraphState,
+    ) -> Result<ActionResult>;
+
+    /// Parse an LLM response into a GraphDecision.
+    ///
+    /// Uses the same OutputParser as the AgentLoop for consistent
+    /// decision parsing. Stores the result in `state.parsed_decision`.
+    async fn parse_decision(
+        &self,
+        response: &InferenceResponse,
+        state: &mut GraphState,
+    ) -> Result<oneai_core::GraphDecision>;
+}
+
+// ─── DirectProviderActionExecutor ──────────────────────────────────────────────
+
+/// Backward-compatible GraphActionExecutor that directly calls provider + tools.
+///
+/// This is the "no AgentLoop integration" path — used when StateGraphExecutor
+/// is constructed via `with_direct_provider()`. It mimics the original behavior:
+/// - LlmInfer: calls provider.infer() with a basic request (no hooks, no domain pack)
+/// - ToolCall: calls tool.execute() directly (no permission, no hooks)
+/// - SwitchParadigm: updates state.active_paradigm (no paradigm config)
+/// - parse_decision: simple ContentBlock-based parsing
+///
+/// For full AgentLoop integration, use `AgentLoopGraphActionExecutor` from
+/// `oneai-agent`.
+pub struct DirectProviderActionExecutor {
+    provider: Arc<dyn LlmProvider>,
+    tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+}
+
+impl DirectProviderActionExecutor {
+    /// Create a new direct executor with provider and tools.
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    ) -> Self {
+        Self { provider, tools }
+    }
+}
+
+#[async_trait::async_trait]
+impl GraphActionExecutor for DirectProviderActionExecutor {
+    async fn execute_llm_infer(
+        &self,
+        action: &NodeAction,
+        state: &mut GraphState,
+    ) -> Result<ActionResult> {
+        // Extract LlmInfer fields
+        let (system_prompt_override, use_streaming, include_tool_definitions,
+             tool_filter_override, thinking_budget, temperature, max_tokens) = match action {
+            NodeAction::LlmInfer {
+                system_prompt_override, use_streaming, include_tool_definitions,
+                tool_filter_override, thinking_budget, temperature, max_tokens,
+            } => (
+                system_prompt_override.clone(),
+                *use_streaming,
+                *include_tool_definitions,
+                tool_filter_override.clone(),
+                *thinking_budget,
+                *temperature,
+                *max_tokens,
+            ),
+            _ => return Err(OneAIError::Workflow("Expected LlmInfer action".to_string())),
+        };
+
+        // Build system prompt
+        let system_prompt = system_prompt_override
+            .unwrap_or_else(|| "You are an intelligent agent. Respond to the task.".to_string());
+
+        let mut conversation = state.conversation.clone();
+        if !conversation.messages.iter().any(|m| m.role == Role::System) {
+            conversation.add_message(Message::system(&system_prompt));
+        }
+
+        // Build tool definitions if requested
+        let tool_defs = if include_tool_definitions {
+            let tools_map = self.tools.read().await;
+            if let Some(filter) = &tool_filter_override {
+                // Filter: only include specified tools
+                tools_map.values()
+                    .filter(|t| filter.contains(&t.name().to_string()))
+                    .map(|t| oneai_core::ToolDefinition {
+                        name: t.name().to_string(),
+                        description: t.description().to_string(),
+                        parameters_schema: t.parameters_schema(),
+                    })
+                    .collect()
+            } else {
+                // No filter — include all tools
+                tools_map.values().map(|t| oneai_core::ToolDefinition {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters_schema: t.parameters_schema(),
+                }).collect()
+            }
+        } else {
+            vec![] // No tool definitions — pure text prompt
+        };
+
+        let request = InferenceRequest {
+            conversation,
+            tools: tool_defs,
+            max_tokens: max_tokens.or(Some(4096)),
+            temperature: temperature.or(Some(0.3)),
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget,
+            metadata: HashMap::new(),
+        };
+
+        let response = self.provider.infer(request).await?;
+        let output = response.message.text_content();
+
+        // Update conversation state
+        state.conversation.add_message(response.message.clone());
+
+        // Parse decision and store in state
+        let decision = self.parse_decision(&response, state).await?;
+
+        Ok(ActionResult {
+            output,
+            error: None,
+        })
+    }
+
+    async fn execute_tool_call(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        state: &mut GraphState,
+    ) -> Result<ActionResult> {
+        let tools_map = self.tools.read().await;
+        let tool = tools_map.get(tool_name)
+            .ok_or_else(|| OneAIError::Workflow(
+                format!("Tool '{}' not found for ToolCall node", tool_name)
+            ))?;
+
+        let output = tool.execute(args.clone()).await?;
+
+        state.conversation.add_message(Message::tool_result(
+            format!("graph_tool_{}", tool_name),
+            output.content.clone(),
+        ));
+
+        Ok(ActionResult {
+            output: output.content,
+            error: output.error,
+        })
+    }
+
+    async fn execute_paradigm_switch(
+        &self,
+        paradigm: &str,
+        state: &mut GraphState,
+    ) -> Result<ActionResult> {
+        state.active_paradigm = Some(paradigm.to_string());
+        state.parsed_decision = None; // Clear — new inference needed
+
+        Ok(ActionResult {
+            output: format!("Paradigm switched to: {}", paradigm),
+            error: None,
+        })
+    }
+
+    async fn parse_decision(
+        &self,
+        response: &InferenceResponse,
+        state: &mut GraphState,
+    ) -> Result<oneai_core::GraphDecision> {
+        // Simple ContentBlock-based parsing (mirrors the AgentLoop's parse_decision logic
+        // but produces GraphDecision instead of AgentDecision)
+        let mut tool_calls = Vec::new();
+        let mut text_parts = Vec::new();
+
+        for block in &response.message.content {
+            match block {
+                oneai_core::ContentBlock::ToolCall { id: _, name, args } => {
+                    // Check for special internal tools (delegate, switch_paradigm)
+                    if name == "delegate" {
+                        // Parse delegate args
+                        let args_value: serde_json::Value = serde_json::from_str(args)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        let agent_kind = args_value.get("agent_type")
+                            .and_then(|v| v.as_str()).unwrap_or("Explore").to_string();
+                        let task = args_value.get("task")
+                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let decision = oneai_core::GraphDecision::Delegate {
+                            agent_kind,
+                            task,
+                        };
+                        state.parsed_decision = Some(decision.clone());
+                        return Ok(decision);
+                    }
+                    if name == "switch_paradigm" {
+                        let args_value: serde_json::Value = serde_json::from_str(args)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        let paradigm = args_value.get("paradigm")
+                            .and_then(|v| v.as_str()).unwrap_or("react").to_string();
+                        let decision = oneai_core::GraphDecision::SwitchParadigm { paradigm };
+                        state.parsed_decision = Some(decision.clone());
+                        return Ok(decision);
+                    }
+                    tool_calls.push(name.clone());
+                }
+                oneai_core::ContentBlock::Text { text } => {
+                    text_parts.push(text.clone());
+                }
+                _ => {}
+            }
+        }
+
+        let decision = if !tool_calls.is_empty() {
+            oneai_core::GraphDecision::ToolCalls {
+                count: tool_calls.len(),
+            }
+        } else {
+            oneai_core::GraphDecision::DirectAnswer {
+                text: text_parts.join("\n"),
+            }
+        };
+
+        state.parsed_decision = Some(decision.clone());
+        Ok(decision)
+    }
 }
 
 // ─── StateGraphExecutor ──────────────────────────────────────────────────────
@@ -71,18 +368,23 @@ struct ActionResult {
 ///
 /// The executor processes a StateGraph by:
 /// 1. Starting at the `entry_point` node
-/// 2. Executing each node's `NodeAction`
+/// 2. Executing each node's `NodeAction` via the `GraphActionExecutor`
 /// 3. Evaluating outgoing `EdgeCondition`s to select the next node
 /// 4. Handling interrupt points (nodes marked with `interrupt: true`)
 /// 5. Terminating when a terminal node is reached or max iterations exceeded
 ///
-/// Template interpolation (`{{variable}}`) is applied to `tool_name` and
+/// P2-2: The executor now uses a `GraphActionExecutor` for node action execution.
+/// This enables AgentLoop integration — when an `AgentLoopGraphActionExecutor`
+/// (from `oneai-agent`) is provided, LlmInfer/ToolCall nodes delegate to the
+/// AgentLoop's full pipeline (hooks, permission, domain pack, tool definitions).
+///
+/// Template interpolation (`{{variable}}`) is still applied to `tool_name` and
 /// `args_template` fields before tool execution, using `GraphState.variables`.
 pub struct StateGraphExecutor {
-    /// LLM provider for LlmInfer nodes.
-    provider: Arc<dyn LlmProvider>,
-    /// Tool registry for ToolCall nodes.
-    tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    /// Action executor — delegates node action execution.
+    /// Can be DirectProviderActionExecutor (backward compat) or
+    /// AgentLoopGraphActionExecutor (full AgentLoop integration).
+    action_executor: Arc<dyn GraphActionExecutor>,
     /// Delegate factory for Delegate nodes.
     delegate_factory: Arc<dyn DelegateFactory>,
     /// Approval gate for interrupt points and HumanApproval nodes.
@@ -93,17 +395,18 @@ pub struct StateGraphExecutor {
 }
 
 impl StateGraphExecutor {
-    /// Create a new StateGraphExecutor with all dependencies.
+    /// Create a new StateGraphExecutor with a GraphActionExecutor.
+    ///
+    /// This is the P2-2 constructor — when an `AgentLoopGraphActionExecutor`
+    /// is provided, LlmInfer/ToolCall nodes get full AgentLoop integration.
     pub fn new(
-        provider: Arc<dyn LlmProvider>,
-        tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+        action_executor: Arc<dyn GraphActionExecutor>,
         delegate_factory: Arc<dyn DelegateFactory>,
         approval_gate: Arc<dyn ApprovalGate>,
         max_iterations: usize,
     ) -> Self {
         Self {
-            provider,
-            tools,
+            action_executor,
             delegate_factory,
             approval_gate,
             max_iterations,
@@ -112,12 +415,39 @@ impl StateGraphExecutor {
 
     /// Create with default max_iterations (50).
     pub fn with_defaults(
+        action_executor: Arc<dyn GraphActionExecutor>,
+        delegate_factory: Arc<dyn DelegateFactory>,
+        approval_gate: Arc<dyn ApprovalGate>,
+    ) -> Self {
+        Self::new(action_executor, delegate_factory, approval_gate, 50)
+    }
+
+    /// Create with direct provider + tools (backward-compatible constructor).
+    ///
+    /// This constructor creates a `DirectProviderActionExecutor` internally,
+    /// providing the same behavior as the original StateGraphExecutor (before P2-2).
+    /// Use this when you don't have an AgentLoop available (e.g., standalone
+    /// StateGraph execution without AgentLoop integration).
+    pub fn with_direct_provider(
+        provider: Arc<dyn LlmProvider>,
+        tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+        delegate_factory: Arc<dyn DelegateFactory>,
+        approval_gate: Arc<dyn ApprovalGate>,
+        max_iterations: usize,
+    ) -> Self {
+        let action_executor = Arc::new(DirectProviderActionExecutor::new(provider, tools));
+        Self::new(action_executor, delegate_factory, approval_gate, max_iterations)
+    }
+
+    /// Create with direct provider + default max_iterations (50).
+    /// Backward-compatible with the original `with_defaults()` constructor.
+    pub fn with_direct_provider_defaults(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
         delegate_factory: Arc<dyn DelegateFactory>,
         approval_gate: Arc<dyn ApprovalGate>,
     ) -> Self {
-        Self::new(provider, tools, delegate_factory, approval_gate, 50)
+        Self::with_direct_provider(provider, tools, delegate_factory, approval_gate, 50)
     }
 
     /// Execute a StateGraph starting from its entry point.
@@ -137,6 +467,7 @@ impl StateGraphExecutor {
 
         while iterations < self.max_iterations {
             iterations += 1;
+            state.iteration_count = iterations;
 
             // 1. Get the current node
             let node = graph.get_node(&current_node_id)
@@ -146,7 +477,6 @@ impl StateGraphExecutor {
 
             // 2. Check if this is a terminal node
             if graph.terminal_nodes.contains(&current_node_id) {
-                // Execute the terminal node's action (usually LlmInfer for final answer)
                 let action_result = self.execute_node_action(&node.action, &mut state).await?;
                 state.last_result = Some(action_result.output.clone());
                 state.last_error = action_result.error.clone();
@@ -247,45 +577,20 @@ impl StateGraphExecutor {
     }
 
     /// Execute a node's action and update the state.
+    ///
+    /// P2-2: LlmInfer and ToolCall nodes delegate to the GraphActionExecutor,
+    /// which may be an AgentLoopGraphActionExecutor (full AgentLoop integration)
+    /// or a DirectProviderActionExecutor (backward compat).
     async fn execute_node_action(
         &self,
         action: &NodeAction,
         state: &mut GraphState,
     ) -> Result<ActionResult> {
         match action {
-            NodeAction::LlmInfer { system_prompt_override, use_streaming } => {
-                // Build inference request
-                let system_prompt = system_prompt_override.clone()
-                    .unwrap_or_else(|| "You are an intelligent agent. Respond to the task.".to_string());
-
-                let mut conversation = state.conversation.clone();
-                // Inject system prompt if not already present
-                if !conversation.messages.iter().any(|m| m.role == Role::System) {
-                    conversation.add_message(Message::system(&system_prompt));
-                }
-
-                let request = InferenceRequest {
-                    conversation,
-                    tools: vec![], // LLM infer nodes don't send tool definitions
-                    max_tokens: Some(4096),
-                    temperature: Some(0.3),
-                    top_p: None,
-                    stop_sequences: vec![],
-                    constrained_output: None,
-                    thinking_budget: None,
-                    metadata: HashMap::new(),
-                };
-
-                let response = self.provider.infer(request).await?;
-                let output = response.message.text_content();
-
-                // Update conversation state with the response
-                state.conversation.add_message(response.message.clone());
-
-                Ok(ActionResult {
-                    output,
-                    error: None,
-                })
+            NodeAction::LlmInfer { .. } => {
+                // Delegate to GraphActionExecutor — which may build tool definitions,
+                // run hooks, use domain pack, and parse the response into GraphDecision.
+                self.action_executor.execute_llm_infer(action, state).await
             }
 
             NodeAction::ToolCall { tool_name, args_template } => {
@@ -299,25 +604,9 @@ impl StateGraphExecutor {
                     serde_json::json!({})
                 };
 
-                // Find and execute the tool
-                let tools_map = self.tools.read().await;
-                let tool = tools_map.get(&resolved_name)
-                    .ok_or_else(|| OneAIError::Workflow(
-                        format!("Tool '{}' not found for ToolCall node", resolved_name)
-                    ))?;
-
-                let output = tool.execute(resolved_args).await?;
-
-                // Append tool result to conversation
-                state.conversation.add_message(Message::tool_result(
-                    format!("graph_tool_{}", resolved_name),
-                    output.content.clone(),
-                ));
-
-                Ok(ActionResult {
-                    output: output.content,
-                    error: output.error,
-                })
+                // Delegate to GraphActionExecutor — which may run hooks,
+                // check permissions, interact with approval gate.
+                self.action_executor.execute_tool_call(&resolved_name, &resolved_args, state).await
             }
 
             NodeAction::Delegate { agent_kind, task_template } => {
@@ -329,6 +618,12 @@ impl StateGraphExecutor {
                 state.conversation.add_message(Message::assistant(
                     format!("[Delegate {}]: {}", agent_kind, result)
                 ));
+
+                // Set parsed_decision to Delegate
+                state.parsed_decision = Some(oneai_core::GraphDecision::Delegate {
+                    agent_kind: agent_kind.clone(),
+                    task,
+                });
 
                 Ok(ActionResult {
                     output: result,
@@ -352,6 +647,11 @@ impl StateGraphExecutor {
                     output: result.to_string(),
                     error: None,
                 })
+            }
+
+            NodeAction::SwitchParadigm { paradigm } => {
+                // Delegate to GraphActionExecutor — updates state.active_paradigm
+                self.action_executor.execute_paradigm_switch(paradigm, state).await
             }
         }
     }
@@ -380,6 +680,11 @@ impl StateGraphExecutor {
     }
 
     /// Evaluate an edge condition against the current state.
+    ///
+    /// P2-2: HasToolCalls, IsFinalAnswer, and RequestsDelegation now evaluate
+    /// against `state.parsed_decision` (a structured `GraphDecision`) rather
+    /// than unreliable string pattern matching. This makes edge routing
+    /// consistent with the AgentLoop's decision parsing.
     fn evaluate_edge_condition(
         &self,
         condition: &EdgeCondition,
@@ -387,22 +692,23 @@ impl StateGraphExecutor {
     ) -> Result<bool> {
         match condition {
             EdgeCondition::HasToolCalls => {
-                // Check if the last result contains tool call markers
-                Ok(state.last_result.as_ref()
-                    .map(|r| r.contains("tool_use") || r.contains("function_call")
-                        || r.contains("<tool_call>") || r.contains("ToolCall"))
+                // P2-2: Use parsed_decision instead of string matching
+                Ok(state.parsed_decision.as_ref()
+                    .map(|d| d.has_tool_calls())
                     .unwrap_or(false))
             }
 
             EdgeCondition::IsFinalAnswer => {
-                // Opposite of HasToolCalls — no tool calls in the output
-                Ok(!self.evaluate_edge_condition(&EdgeCondition::HasToolCalls, state)?)
+                // P2-2: Use parsed_decision instead of !HasToolCalls
+                Ok(state.parsed_decision.as_ref()
+                    .map(|d| d.is_final())
+                    .unwrap_or(false))
             }
 
             EdgeCondition::RequestsDelegation => {
-                Ok(state.last_result.as_ref()
-                    .map(|r| r.contains("delegate") || r.contains("sub_agent")
-                        || r.contains("DELEGATE"))
+                // P2-2: Use parsed_decision
+                Ok(state.parsed_decision.as_ref()
+                    .map(|d| d.is_delegation())
                     .unwrap_or(false))
             }
 
@@ -423,14 +729,22 @@ impl StateGraphExecutor {
                 );
                 Ok(false)
             }
+
+            EdgeCondition::ParadigmEquals { paradigm } => {
+                Ok(state.active_paradigm.as_ref() == Some(paradigm))
+            }
+
+            EdgeCondition::IterationExceeds { count } => {
+                Ok(state.iteration_count > *count)
+            }
         }
     }
 
     /// Evaluate a condition expression (for ConditionCheck nodes).
     ///
     /// Simple condition expressions:
-    /// - "has_tool_calls" → checks last_result for tool call markers
-    /// - "is_final_answer" → opposite of has_tool_calls
+    /// - "has_tool_calls" → checks parsed_decision for ToolCalls
+    /// - "is_final_answer" → checks parsed_decision for DirectAnswer
     /// - "error_occurred" → checks if last_error is set
     /// - "variable==value" → checks state variable equality
     fn evaluate_condition_expression(&self, condition: &str, state: &GraphState) -> Result<bool> {
@@ -491,6 +805,11 @@ mod tests {
             action: NodeAction::LlmInfer {
                 system_prompt_override: Some("Final answer".to_string()),
                 use_streaming: false,
+                include_tool_definitions: false,
+                tool_filter_override: None,
+                thinking_budget: None,
+                temperature: None,
+                max_tokens: None,
             },
             interrupt: false,
             metadata: HashMap::new(),
@@ -553,20 +872,86 @@ mod tests {
         let mut state = GraphState::new();
         let executor = make_test_executor();
 
-        // No result → false
+        // No parsed_decision → false
         assert!(!executor.evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state).unwrap());
 
-        // Result without tool calls → false
-        state.last_result = Some("Just a text answer".to_string());
+        // DirectAnswer → false
+        state.parsed_decision = Some(oneai_core::GraphDecision::DirectAnswer {
+            text: "Just a text answer".to_string(),
+        });
         assert!(!executor.evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state).unwrap());
 
-        // Result with tool_call marker → true
-        state.last_result = Some("I need to use tool_use: shell".to_string());
+        // ToolCalls → true
+        state.parsed_decision = Some(oneai_core::GraphDecision::ToolCalls { count: 1 });
         assert!(executor.evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state).unwrap());
+    }
 
-        // Result with function_call marker → true
-        state.last_result = Some("function_call: calculator".to_string());
-        assert!(executor.evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state).unwrap());
+    #[test]
+    fn test_evaluate_edge_condition_is_final_answer() {
+        let mut state = GraphState::new();
+        let executor = make_test_executor();
+
+        // No parsed_decision → false
+        assert!(!executor.evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state).unwrap());
+
+        // DirectAnswer → true
+        state.parsed_decision = Some(oneai_core::GraphDecision::DirectAnswer {
+            text: "The answer is 42".to_string(),
+        });
+        assert!(executor.evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state).unwrap());
+
+        // ToolCalls → false
+        state.parsed_decision = Some(oneai_core::GraphDecision::ToolCalls { count: 2 });
+        assert!(!executor.evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_edge_condition_requests_delegation() {
+        let mut state = GraphState::new();
+        let executor = make_test_executor();
+
+        // Delegate decision → true
+        state.parsed_decision = Some(oneai_core::GraphDecision::Delegate {
+            agent_kind: "Explore".to_string(),
+            task: "Search the codebase".to_string(),
+        });
+        assert!(executor.evaluate_edge_condition(&EdgeCondition::RequestsDelegation, &state).unwrap());
+
+        // ToolCalls → false
+        state.parsed_decision = Some(oneai_core::GraphDecision::ToolCalls { count: 1 });
+        assert!(!executor.evaluate_edge_condition(&EdgeCondition::RequestsDelegation, &state).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_edge_condition_paradigm_equals() {
+        let mut state = GraphState::new();
+        let executor = make_test_executor();
+
+        // No paradigm → false
+        let cond = EdgeCondition::ParadigmEquals { paradigm: "react".to_string() };
+        assert!(!executor.evaluate_edge_condition(&cond, &state).unwrap());
+
+        // Wrong paradigm → false
+        state.active_paradigm = Some("plan".to_string());
+        assert!(!executor.evaluate_edge_condition(&cond, &state).unwrap());
+
+        // Matching paradigm → true
+        state.active_paradigm = Some("react".to_string());
+        assert!(executor.evaluate_edge_condition(&cond, &state).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_edge_condition_iteration_exceeds() {
+        let mut state = GraphState::new();
+        let executor = make_test_executor();
+
+        // iteration_count = 0, threshold = 5 → false
+        let cond = EdgeCondition::IterationExceeds { count: 5 };
+        assert!(!executor.evaluate_edge_condition(&cond, &state).unwrap());
+
+        // iteration_count = 10, threshold = 5 → true
+        state.iteration_count = 10;
+        assert!(executor.evaluate_edge_condition(&cond, &state).unwrap());
     }
 
     #[test]
@@ -606,16 +991,18 @@ mod tests {
         fn evaluate_edge_condition(&self, condition: &EdgeCondition, state: &GraphState) -> Result<bool> {
             match condition {
                 EdgeCondition::HasToolCalls => {
-                    Ok(state.last_result.as_ref()
-                        .map(|r| r.contains("tool_use") || r.contains("function_call"))
+                    Ok(state.parsed_decision.as_ref()
+                        .map(|d| d.has_tool_calls())
                         .unwrap_or(false))
                 }
                 EdgeCondition::IsFinalAnswer => {
-                    Ok(!self.evaluate_edge_condition(&EdgeCondition::HasToolCalls, state)?)
+                    Ok(state.parsed_decision.as_ref()
+                        .map(|d| d.is_final())
+                        .unwrap_or(false))
                 }
                 EdgeCondition::RequestsDelegation => {
-                    Ok(state.last_result.as_ref()
-                        .map(|r| r.contains("delegate") || r.contains("sub_agent"))
+                    Ok(state.parsed_decision.as_ref()
+                        .map(|d| d.is_delegation())
                         .unwrap_or(false))
                 }
                 EdgeCondition::ErrorOccurred => Ok(state.last_error.is_some()),
@@ -626,6 +1013,12 @@ mod tests {
                 EdgeCondition::Custom { name, .. } => {
                     tracing::warn!("Custom condition '{}' not registered, defaulting to false", name);
                     Ok(false)
+                }
+                EdgeCondition::ParadigmEquals { paradigm } => {
+                    Ok(state.active_paradigm.as_ref() == Some(paradigm))
+                }
+                EdgeCondition::IterationExceeds { count } => {
+                    Ok(state.iteration_count > *count)
                 }
             }
         }
@@ -649,5 +1042,31 @@ mod tests {
 
     fn make_test_executor() -> TestStateGraphExecutor {
         TestStateGraphExecutor { max_iterations: 50 }
+    }
+
+    #[test]
+    fn test_graph_decision_enum() {
+        let decision = oneai_core::GraphDecision::DirectAnswer {
+            text: "42".to_string(),
+        };
+        assert!(decision.is_final());
+        assert!(!decision.has_tool_calls());
+
+        let tool_calls = oneai_core::GraphDecision::ToolCalls { count: 2 };
+        assert!(tool_calls.has_tool_calls());
+        assert!(!tool_calls.is_final());
+
+        let delegate = oneai_core::GraphDecision::Delegate {
+            agent_kind: "Explore".to_string(),
+            task: "Search".to_string(),
+        };
+        assert!(delegate.is_delegation());
+        assert!(!delegate.has_tool_calls());
+
+        let switch = oneai_core::GraphDecision::SwitchParadigm {
+            paradigm: "plan".to_string(),
+        };
+        assert!(!switch.is_final());
+        assert!(!switch.has_tool_calls());
     }
 }

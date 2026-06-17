@@ -1145,3 +1145,73 @@ pub struct ModelRetry {
     /// The actual output that failed validation.
     pub failed_output: String,
 }
+
+// ─── GraphDecision ──────────────────────────────────────────────────────────────
+
+/// A structured decision parsed from LLM output in a StateGraph execution context.
+///
+/// This is the lightweight version of `AgentDecision` (from `oneai-agent`),
+/// placed in `oneai-core` to avoid circular dependencies. `oneai-workflow` uses
+/// this in `GraphState.parsed_decision` for edge condition routing, and
+/// `oneai-agent`'s `AgentLoopGraphActionExecutor` maps `AgentDecision` →
+/// `GraphDecision` when bridging between the two execution models.
+///
+/// The four variants correspond to the four outcomes an LLM can produce:
+/// - **DirectAnswer**: The model produced a final text answer (no tool calls).
+/// - **ToolCalls**: The model wants to invoke one or more tools.
+/// - **Delegate**: The model wants to delegate a subtask to a specialized sub-agent.
+/// - **SwitchParadigm**: The model wants to switch to a different paradigm.
+///
+/// This enables StateGraph edge conditions to route based on structured decisions
+/// rather than unreliable string pattern matching (e.g., checking for "tool_use"
+/// in raw text).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "decision_type")]
+pub enum GraphDecision {
+    /// The model produced a final answer — no tool calls, no delegation.
+    #[serde(rename = "direct_answer")]
+    DirectAnswer {
+        /// The answer text.
+        text: String,
+    },
+
+    /// The model wants to invoke one or more tools.
+    #[serde(rename = "tool_calls")]
+    ToolCalls {
+        /// Number of tool calls requested.
+        count: usize,
+    },
+
+    /// The model wants to delegate a subtask to a specialized sub-agent.
+    #[serde(rename = "delegate")]
+    Delegate {
+        /// The sub-agent kind (e.g., "explore", "code", "review").
+        agent_kind: String,
+        /// The task description for the sub-agent.
+        task: String,
+    },
+
+    /// The model wants to switch to a different paradigm.
+    #[serde(rename = "switch_paradigm")]
+    SwitchParadigm {
+        /// The target paradigm (e.g., "plan", "react", "reflect", "explore").
+        paradigm: String,
+    },
+}
+
+impl GraphDecision {
+    /// Check if this decision is a direct answer (loop should end).
+    pub fn is_final(&self) -> bool {
+        matches!(self, Self::DirectAnswer { .. })
+    }
+
+    /// Check if this decision involves tool calls.
+    pub fn has_tool_calls(&self) -> bool {
+        matches!(self, Self::ToolCalls { .. })
+    }
+
+    /// Check if this decision involves delegation.
+    pub fn is_delegation(&self) -> bool {
+        matches!(self, Self::Delegate { .. })
+    }
+}

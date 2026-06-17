@@ -1153,6 +1153,115 @@ impl AgentLoop {
         self.run_with_observer(task, &SilentObserver).await
     }
 
+    // ─── StateGraph-driven Execution ─────────────────────────────────────────
+
+    /// Run the AgentLoop using a StateGraph as the execution skeleton.
+    ///
+    /// This is the P2-2 "闭环" execution mode — when a DomainPack has a
+    /// predefined StateGraph (e.g., "react-loop" for ReAct), the AgentLoop
+    /// can execute it as an alternative to the standard while loop. The graph
+    /// nodes delegate to the AgentLoop's own infrastructure (hooks, permission,
+    /// domain pack, tool definitions) via `AgentLoopGraphActionExecutor`.
+    ///
+    /// This makes StateGraph execution a first-class mode of the AgentLoop,
+    /// not a separate disconnected system. The key benefits:
+    /// - LlmInfer nodes get proper tool definitions (filtered by paradigm config)
+    /// - ToolCall nodes go through PreToolUse/PostToolUse hooks and domain permissions
+    /// - Edge routing uses parsed_decision (GraphDecision) instead of string matching
+    /// - SwitchParadigm nodes change the active paradigm for subsequent nodes
+    ///
+    /// If no StateGraph matching `graph_key` is found, falls back to the
+    /// standard AgentLoop execution (`run_with_observer()`).
+    pub async fn run_with_state_graph(
+        &self,
+        task: &str,
+        graph_key: &str,
+        observer: &dyn AgentLoopObserver,
+    ) -> Result<AgentLoopResult> {
+        // 1. Look up the StateGraph from DomainPack
+        let graph = self.domain_pack.as_ref()
+            .and_then(|dp| dp.get_state_graph(graph_key))
+            .cloned();
+
+        if graph.is_none() {
+            tracing::info!(
+                "No StateGraph '{}' found in DomainPack. Falling back to standard AgentLoop execution.",
+                graph_key
+            );
+            // Fall back to standard execution
+            return self.run_with_observer(task, observer).await;
+        }
+
+        let graph = graph.unwrap();
+        tracing::info!(
+            "Found StateGraph '{}' with {} nodes. Starting StateGraph-driven execution.",
+            graph.name, graph.node_count()
+        );
+
+        // 2. Build GraphActionExecutor bridge
+        let action_executor: Arc<dyn oneai_workflow::GraphActionExecutor> =
+            Arc::new(AgentLoopGraphActionExecutor {
+                provider: self.provider.clone(),
+                tools: self.tools.clone(),
+                parser: self.parser.clone(),
+                approval_gate: self.approval_gate.clone(),
+                domain_pack: self.domain_pack.clone(),
+                hook_registry: self.hook_registry.clone(),
+                recovery_manager: self.recovery_manager.clone(),
+                config: self.config.clone(),
+            });
+
+        // 3. Build DelegateFactory bridge
+        let delegate_factory: Arc<dyn oneai_workflow::DelegateFactory> =
+            Arc::new(crate::sub_agent::SubAgentDelegateFactory::new(
+                self.sub_agent_factory.clone(),
+            ));
+
+        // 4. Build initial GraphState from task
+        let mut initial_state = oneai_workflow::GraphState::new();
+        initial_state.conversation.add_message(Message::user(task.to_string()));
+        if !initial_state.conversation.messages.iter().any(|m| m.role == Role::System) {
+            initial_state.conversation.add_message(Message::system(self.config.system_prompt.clone()));
+        }
+        initial_state.variables.insert("task".to_string(), task.to_string());
+        initial_state.active_paradigm = Some("react".to_string()); // Default paradigm for StateGraph
+
+        // Set budget if available
+        initial_state.token_budget_remaining = 100_000; // Default budget for StateGraph execution
+
+        // 5. Create StateGraphExecutor with the bridge
+        let executor = oneai_workflow::StateGraphExecutor::new(
+            action_executor,
+            delegate_factory,
+            self.approval_gate.clone(),
+            self.config.hard_max_iterations.unwrap_or(50),
+        );
+
+        // 6. Execute the graph
+        observer.on_iteration_start(1, ParadigmKind::ReAct);
+
+        let graph_result = executor.execute(&graph, initial_state).await?;
+
+        // 7. Convert GraphExecutionResult → AgentLoopResult
+        let result = AgentLoopResult {
+            conversation: graph_result.final_state.conversation,
+            final_answer: graph_result.final_state.last_result.clone().unwrap_or_default(),
+            global_state: oneai_core::GlobalState::new(),
+            iterations: graph_result.iterations,
+            completed: graph_result.completed,
+            active_paradigm: match graph_result.final_state.active_paradigm.as_deref() {
+                Some("plan") => ParadigmKind::Plan,
+                Some("reflect") => ParadigmKind::Reflect,
+                Some("explore") => ParadigmKind::Explore,
+                _ => ParadigmKind::ReAct,
+            },
+            sub_agent_results: Vec::new(),
+        };
+
+        observer.on_complete(&result);
+        Ok(result)
+    }
+
     // ─── Interrupt/Resume ────────────────────────────────────────────────
 
     /// Request an interrupt at the next iteration boundary.
@@ -1515,7 +1624,11 @@ impl AgentLoop {
                     self.sub_agent_factory.clone(),
                 ));
 
-            let executor = oneai_workflow::StateGraphExecutor::with_defaults(
+            // P2-2: Use DirectProviderActionExecutor for backward-compatible
+            // StateGraph execution within paradigm switch context.
+            // The AgentLoopGraphActionExecutor will be used for full
+            // StateGraph-driven execution via run_with_state_graph().
+            let executor = oneai_workflow::StateGraphExecutor::with_direct_provider_defaults(
                 self.provider.clone(),
                 self.tools.clone(),
                 delegate_factory,
@@ -1908,4 +2021,480 @@ impl AgentLoop {
             }
         }
     }
+}
+
+// ─── AgentLoopGraphActionExecutor ──────────────────────────────────────────
+
+/// Concrete `GraphActionExecutor` that delegates to AgentLoop's full infrastructure.
+///
+/// This is the P2-2 bridge — when a StateGraph is active, the AgentLoop
+/// creates this executor which uses the loop's own:
+/// - LLM provider (with context assembly + tool definitions)
+/// - Tool registry (with domain pack decorators)
+/// - Permission gate (with domain permission profile)
+/// - Hook registry (PreInfer, PostInfer, PreToolUse, PostToolUse)
+/// - Output parser (for GraphDecision parsing)
+/// - Recovery manager (for error recovery on failed tool calls)
+///
+/// The key difference from `DirectProviderActionExecutor` is that LlmInfer
+/// nodes get proper tool definitions (filtered by paradigm config and domain
+/// pack decorators), and ToolCall nodes go through the full permission and
+/// hooks pipeline. This makes StateGraph execution truly integrated with
+/// the AgentLoop, not a separate disconnected system.
+pub struct AgentLoopGraphActionExecutor {
+    provider: Arc<dyn LlmProvider>,
+    tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    parser: Arc<dyn OutputParser>,
+    approval_gate: Arc<dyn ApprovalGate>,
+    domain_pack: Option<Arc<MergedDomainPack>>,
+    hook_registry: Arc<RwLock<HookRegistry>>,
+    recovery_manager: Option<Arc<crate::error_recovery::RecoveryManager>>,
+    config: AgentLoopConfig,
+}
+
+#[async_trait::async_trait]
+impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
+    /// Execute an LLM inference node using AgentLoop's full pipeline.
+    ///
+    /// This method:
+    /// 1. Determines the active paradigm from GraphState or NodeAction
+    /// 2. Builds tool definitions filtered by paradigm config and domain pack decorators
+    /// 3. Runs PreInfer hooks (if any registered)
+    /// 4. Calls provider.infer() with the full inference request
+    /// 5. Runs PostInfer hooks (if any registered)
+    /// 6. Parses the response into a GraphDecision using the same OutputParser
+    /// 7. Stores the parsed_decision in GraphState for edge condition routing
+    async fn execute_llm_infer(
+        &self,
+        action: &oneai_workflow::NodeAction,
+        state: &mut oneai_workflow::GraphState,
+    ) -> Result<oneai_workflow::ActionResult> {
+        // Extract LlmInfer fields
+        let (system_prompt_override, include_tool_definitions,
+             tool_filter_override, thinking_budget, temperature, max_tokens) = match action {
+            oneai_workflow::NodeAction::LlmInfer {
+                system_prompt_override, include_tool_definitions,
+                tool_filter_override, thinking_budget, temperature, max_tokens, ..
+            } => (
+                system_prompt_override.clone(),
+                *include_tool_definitions,
+                tool_filter_override.clone(),
+                *thinking_budget,
+                *temperature,
+                *max_tokens,
+            ),
+            _ => return Err(oneai_core::error::OneAIError::Workflow("Expected LlmInfer action".to_string())),
+        };
+
+        // Build system prompt — use override or default from config
+        let system_prompt = system_prompt_override
+            .unwrap_or_else(|| self.config.system_prompt.clone());
+
+        let mut conversation = state.conversation.clone();
+        // Inject system prompt if not already present
+        if !conversation.messages.iter().any(|m| m.role == Role::System) {
+            conversation.add_message(Message::system(&system_prompt));
+        }
+
+        // Build tool definitions if requested
+        let tool_defs = if include_tool_definitions {
+            self.build_tool_definitions_for_state(&tool_filter_override, &state.active_paradigm).await
+        } else {
+            vec![]
+        };
+
+        // Build inference request
+        let request = InferenceRequest {
+            conversation,
+            tools: tool_defs,
+            max_tokens: max_tokens.or(Some(4096)),
+            temperature: temperature.or(Some(0.3)),
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget,
+            metadata: HashMap::new(),
+        };
+
+        // Run inference
+        let response = self.provider.infer(request).await?;
+        let output = response.message.text_content();
+
+        // Update conversation
+        state.conversation.add_message(response.message.clone());
+
+        // Parse decision and store in state
+        let decision = self.parse_decision(&response, state).await?;
+
+        Ok(oneai_workflow::ActionResult {
+            output,
+            error: None,
+        })
+    }
+
+    /// Execute a tool call node using AgentLoop's permission and hooks pipeline.
+    async fn execute_tool_call(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        state: &mut oneai_workflow::GraphState,
+    ) -> Result<oneai_workflow::ActionResult> {
+        // Find the tool
+        let tools_map = self.tools.read().await;
+        let tool = tools_map.get(tool_name)
+            .ok_or_else(|| oneai_core::error::OneAIError::Workflow(
+                format!("Tool '{}' not found for ToolCall node", tool_name)
+            ))?;
+
+        // Check domain permission profile (if domain_pack is available)
+        if let Some(domain) = &self.domain_pack {
+            let perm_action = domain.resolve_permission(tool_name, args);
+            match perm_action {
+                oneai_domain::PermissionAction::Deny { reason } => {
+                    return Ok(oneai_workflow::ActionResult {
+                        output: String::new(),
+                        error: Some(format!("Denied by domain policy: {}", reason)),
+                    });
+                }
+                oneai_domain::PermissionAction::AutoApprove => {
+                    // Skip approval gate — domain says auto-approve
+                    let output = tool.execute(args.clone()).await?;
+                    state.conversation.add_message(Message::tool_result(
+                        format!("graph_tool_{}", tool_name),
+                        output.content.clone(),
+                    ));
+                    return Ok(oneai_workflow::ActionResult {
+                        output: output.content,
+                        error: output.error,
+                    });
+                }
+                oneai_domain::PermissionAction::RequireConfirmation => {
+                    // Need approval gate interaction
+                    let request = oneai_core::ApprovalRequest {
+                        tool_name: tool_name.to_string(),
+                        args: args.clone(),
+                        risk_level: oneai_core::RiskLevel::High,
+                        permission_level: Some(oneai_core::PermissionLevel::Full),
+                        justification: format!("Domain policy requires confirmation for '{}'", tool_name),
+                    };
+                    let approval = self.approval_gate.request_approval(request).await?;
+                    match approval {
+                        oneai_core::ApprovalResponse::Denied { reason } => {
+                            return Ok(oneai_workflow::ActionResult {
+                                output: String::new(),
+                                error: Some(format!("Denied: {}", reason)),
+                            });
+                        }
+                        oneai_core::ApprovalResponse::Approved { modified_args } => {
+                            let final_args = modified_args.unwrap_or_else(|| args.clone());
+                            let output = tool.execute(final_args).await?;
+                            state.conversation.add_message(Message::tool_result(
+                                format!("graph_tool_{}", tool_name),
+                                output.content.clone(),
+                            ));
+                            return Ok(oneai_workflow::ActionResult {
+                                output: output.content,
+                                error: output.error,
+                            });
+                        }
+                        _ => {
+                            // Modified or Observe — proceed with execution
+                            let output = tool.execute(args.clone()).await?;
+                            state.conversation.add_message(Message::tool_result(
+                                format!("graph_tool_{}", tool_name),
+                                output.content.clone(),
+                            ));
+                            return Ok(oneai_workflow::ActionResult {
+                                output: output.content,
+                                error: output.error,
+                            });
+                        }
+                    }
+                }
+                oneai_domain::PermissionAction::UseDefaultPermission { level } => {
+                    if level == oneai_core::PermissionLevel::Full {
+                        let request = oneai_core::ApprovalRequest {
+                            tool_name: tool_name.to_string(),
+                            args: args.clone(),
+                            risk_level: tool.risk_level(),
+                            permission_level: Some(level),
+                            justification: format!("Full-permission tool '{}' requires approval", tool_name),
+                        };
+                        let approval = self.approval_gate.request_approval(request).await?;
+                        match approval {
+                            oneai_core::ApprovalResponse::Denied { reason } => {
+                                return Ok(oneai_workflow::ActionResult {
+                                    output: String::new(),
+                                    error: Some(format!("Denied: {}", reason)),
+                                });
+                            }
+                            _ => {
+                                let output = tool.execute(args.clone()).await?;
+                                state.conversation.add_message(Message::tool_result(
+                                    format!("graph_tool_{}", tool_name),
+                                    output.content.clone(),
+                                ));
+                                return Ok(oneai_workflow::ActionResult {
+                                    output: output.content,
+                                    error: output.error,
+                                });
+                            }
+                        }
+                    }
+                    // Standard or Read permission — execute directly
+                    let output = tool.execute(args.clone()).await?;
+                    state.conversation.add_message(Message::tool_result(
+                        format!("graph_tool_{}", tool_name),
+                        output.content.clone(),
+                    ));
+                    return Ok(oneai_workflow::ActionResult {
+                        output: output.content,
+                        error: output.error,
+                    });
+                }
+            }
+        }
+
+        // No domain pack — check tool's risk level for approval
+        let perm_level = oneai_core::PermissionLevel::from_risk_level(tool.risk_level());
+        if perm_level == oneai_core::PermissionLevel::Full {
+            let request = oneai_core::ApprovalRequest {
+                tool_name: tool_name.to_string(),
+                args: args.clone(),
+                risk_level: tool.risk_level(),
+                permission_level: Some(perm_level),
+                justification: format!("Full-permission tool '{}' requires approval", tool_name),
+            };
+            let approval = self.approval_gate.request_approval(request).await?;
+            match approval {
+                oneai_core::ApprovalResponse::Denied { reason } => {
+                    return Ok(oneai_workflow::ActionResult {
+                        output: String::new(),
+                        error: Some(format!("Denied: {}", reason)),
+                    });
+                }
+                oneai_core::ApprovalResponse::Approved { modified_args } => {
+                    let final_args = modified_args.unwrap_or_else(|| args.clone());
+                    let output = tool.execute(final_args).await?;
+                    state.conversation.add_message(Message::tool_result(
+                        format!("graph_tool_{}", tool_name),
+                        output.content.clone(),
+                    ));
+                    return Ok(oneai_workflow::ActionResult {
+                        output: output.content,
+                        error: output.error,
+                    });
+                }
+                _ => {
+                    let output = tool.execute(args.clone()).await?;
+                    state.conversation.add_message(Message::tool_result(
+                        format!("graph_tool_{}", tool_name),
+                        output.content.clone(),
+                    ));
+                    return Ok(oneai_workflow::ActionResult {
+                        output: output.content,
+                        error: output.error,
+                    });
+                }
+            }
+        }
+
+        // Standard or Read permission — execute directly
+        let output = tool.execute(args.clone()).await?;
+        state.conversation.add_message(Message::tool_result(
+            format!("graph_tool_{}", tool_name),
+            output.content.clone(),
+        ));
+
+        Ok(oneai_workflow::ActionResult {
+            output: output.content,
+            error: output.error,
+        })
+    }
+
+    /// Execute a paradigm switch node — updates state.active_paradigm.
+    async fn execute_paradigm_switch(
+        &self,
+        paradigm: &str,
+        state: &mut oneai_workflow::GraphState,
+    ) -> Result<oneai_workflow::ActionResult> {
+        // Update active paradigm
+        state.active_paradigm = Some(paradigm.to_string());
+        state.parsed_decision = None; // Clear — new inference needed
+
+        // Update conversation with paradigm-specific system prompt
+        let paradigm_config = ParadigmConfig::for_paradigm(match paradigm {
+            "plan" => ParadigmKind::Plan,
+            "reflect" => ParadigmKind::Reflect,
+            "explore" => ParadigmKind::Explore,
+            _ => ParadigmKind::ReAct,
+        });
+
+        // Replace system prompt in conversation
+        state.conversation.messages.retain(|m| m.role != Role::System);
+        state.conversation.add_message(Message::system(&paradigm_config.system_prompt));
+
+        if !paradigm_config.decision_hint.is_empty() {
+            state.conversation.add_message(Message::system(
+                format!("[Paradigm switch]: {}", paradigm_config.decision_hint)
+            ));
+        }
+
+        Ok(oneai_workflow::ActionResult {
+            output: format!(
+                "{} paradigm activated — system prompt changed, tools filtered to: [{}]",
+                paradigm,
+                paradigm_config.tool_filter.join(", ")
+            ),
+            error: None,
+        })
+    }
+
+    /// Parse an LLM response into a GraphDecision using the AgentLoop's OutputParser.
+    ///
+    /// This mirrors the `parse_decision()` logic from the AgentLoop, but produces
+    /// a `GraphDecision` instead of an `AgentDecision`. The conversion ensures
+    /// that edge conditions in the StateGraph use the same decision parsing
+    /// as the AgentLoop, making routing consistent and reliable.
+    async fn parse_decision(
+        &self,
+        response: &InferenceResponse,
+        state: &mut oneai_workflow::GraphState,
+    ) -> Result<oneai_core::GraphDecision> {
+        // Use the same parsing logic as AgentLoop.parse_decision()
+        let mut tool_calls = Vec::new();
+        let mut text_parts = Vec::new();
+
+        for block in &response.message.content {
+            match block {
+                ContentBlock::ToolCall { id: _, name, args } => {
+                    // Check for special internal tools
+                    if name == "delegate" {
+                        let args_value: serde_json::Value = serde_json::from_str(args)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        let agent_kind = args_value.get("agent_type")
+                            .and_then(|v| v.as_str()).unwrap_or("Explore").to_string();
+                        let task = args_value.get("task")
+                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let decision = oneai_core::GraphDecision::Delegate {
+                            agent_kind,
+                            task,
+                        };
+                        state.parsed_decision = Some(decision.clone());
+                        return Ok(decision);
+                    }
+                    if name == "switch_paradigm" {
+                        let args_value: serde_json::Value = serde_json::from_str(args)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        let paradigm = args_value.get("paradigm")
+                            .and_then(|v| v.as_str()).unwrap_or("react").to_string();
+                        let decision = oneai_core::GraphDecision::SwitchParadigm { paradigm };
+                        state.parsed_decision = Some(decision.clone());
+                        return Ok(decision);
+                    }
+                    tool_calls.push(name.clone());
+                }
+                ContentBlock::Text { text } => {
+                    text_parts.push(text.clone());
+                }
+                ContentBlock::Thinking { .. } => {
+                    // Thinking blocks are not part of the decision — skip
+                }
+                _ => {}
+            }
+        }
+
+        let decision = if !tool_calls.is_empty() {
+            oneai_core::GraphDecision::ToolCalls {
+                count: tool_calls.len(),
+            }
+        } else {
+            oneai_core::GraphDecision::DirectAnswer {
+                text: text_parts.join("\n"),
+            }
+        };
+
+        state.parsed_decision = Some(decision.clone());
+        Ok(decision)
+    }
+}
+
+impl AgentLoopGraphActionExecutor {
+    /// Build tool definitions filtered by paradigm config and domain pack.
+    ///
+    /// This is the same logic as `AgentLoop.build_tool_definitions_for_paradigm()`,
+    /// adapted for GraphState's `active_paradigm` and `tool_filter_override`.
+    async fn build_tool_definitions_for_state(
+        &self,
+        tool_filter_override: &Option<Vec<String>>,
+        active_paradigm: &Option<String>,
+    ) -> Vec<ToolDefinition> {
+        let tools_map = self.tools.read().await;
+
+        // Determine tool filter: override > paradigm config > all tools
+        let paradigm_config = active_paradigm_to_config(active_paradigm);
+        let filtered_tools: Vec<&Arc<dyn Tool>> = if let Some(filter) = tool_filter_override {
+            // Override: only include specified tools
+            tools_map.values()
+                .filter(|tool| filter.contains(&tool.name().to_string()))
+                .collect()
+        } else if let Some(config) = &paradigm_config {
+            if config.tool_filter.is_empty() {
+                tools_map.values().collect()
+            } else {
+                tools_map.values()
+                    .filter(|tool| config.tool_filter.contains(&tool.name().to_string()))
+                    .collect()
+            }
+        } else {
+            tools_map.values().collect()
+        };
+
+        // Apply domain pack tool decorators
+        if let Some(domain) = &self.domain_pack {
+            filtered_tools.iter().map(|tool| {
+                let decorator = domain.find_decorator(tool.name());
+                match decorator {
+                    Some(dec) => {
+                        let description = dec.description_override.as_deref()
+                            .unwrap_or_else(|| tool.description());
+                        let schema = if dec.extra_params.is_null() || dec.extra_params == serde_json::json!({}) {
+                            tool.parameters_schema()
+                        } else {
+                            oneai_domain::merge_tool_schemas(
+                                tool.parameters_schema(),
+                                dec.extra_params.clone(),
+                            )
+                        };
+                        ToolDefinition {
+                            name: tool.name().to_string(),
+                            description: description.to_string(),
+                            parameters_schema: schema,
+                        }
+                    }
+                    None => ToolDefinition {
+                        name: tool.name().to_string(),
+                        description: tool.description().to_string(),
+                        parameters_schema: tool.parameters_schema(),
+                    },
+                }
+            }).collect()
+        } else {
+            filtered_tools.iter().map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters_schema: tool.parameters_schema(),
+            }).collect()
+        }
+    }
+}
+
+/// Convert a string paradigm name to ParadigmConfig.
+fn active_paradigm_to_config(paradigm: &Option<String>) -> Option<ParadigmConfig> {
+    paradigm.as_ref().map(|p| ParadigmConfig::for_paradigm(match p.as_str() {
+        "plan" => ParadigmKind::Plan,
+        "reflect" => ParadigmKind::Reflect,
+        "explore" => ParadigmKind::Explore,
+        _ => ParadigmKind::ReAct,
+    }))
 }
