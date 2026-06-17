@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// WASM execution errors.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum WasmError {
     /// Module compilation failed.
     #[error("WASM module compilation failed: {0}")]

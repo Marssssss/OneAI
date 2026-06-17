@@ -48,6 +48,7 @@ impl OllamaProvider {
                 Role::User => "user",
                 Role::Assistant => "assistant",
                 Role::Tool => "tool",
+                _ => "user", // #[non_exhaustive] catch-all
             };
             messages.push(serde_json::json!({
                 "role": role,

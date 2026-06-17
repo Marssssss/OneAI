@@ -365,6 +365,7 @@ fn paradigm_display_name(kind: &ParadigmKind) -> &str {
         ParadigmKind::Plan => "Plan",
         ParadigmKind::Reflect => "Reflect",
         ParadigmKind::Explore => "Explore",
+        _ => "Unknown",
     }
 }
 
@@ -1313,6 +1314,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 ParadigmKind::ReAct => "ReAct",
                 ParadigmKind::Reflect => "Reflect",
                 ParadigmKind::Explore => "Explore",
+                _ => "Unknown",
             };
             app.add_message(ChatRole::System, format!("switching to {} paradigm", name));
         }

@@ -103,6 +103,7 @@ pub trait AgentLoopObserver: Send + Sync {
 
 /// The decision type produced by parsing the model's output each loop iteration.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AgentDecision {
     /// The model produced a final answer — no tool calls, no delegation.
     DirectAnswer { text: String },
@@ -124,6 +125,7 @@ pub enum AgentDecision {
 // ─── ParadigmKind ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ParadigmKind {
     Plan,
     ReAct,

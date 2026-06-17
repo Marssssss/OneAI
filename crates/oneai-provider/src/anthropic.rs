@@ -155,6 +155,7 @@ impl AnthropicProvider {
                         }
                     }
                 }
+                _ => {} // #[non_exhaustive] catch-all
             }
         }
 
@@ -357,6 +358,7 @@ impl AnthropicProvider {
                         }
                     }
                 }
+                _ => {} // #[non_exhaustive] catch-all
             }
         }
 

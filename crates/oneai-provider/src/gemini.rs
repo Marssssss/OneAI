@@ -190,6 +190,7 @@ impl GeminiProvider {
                         }
                     }
                 }
+                _ => {} // #[non_exhaustive] catch-all
             }
         }
 

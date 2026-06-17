@@ -58,6 +58,7 @@ pub fn agent_card_from_domain_pack(domain: &oneai_domain::DomainPack, url: &str)
                         oneai_domain::DomainParadigmKind::ReAct => "ReAct",
                         oneai_domain::DomainParadigmKind::Reflect => "Reflect",
                         oneai_domain::DomainParadigmKind::Explore => "Explore",
+                        _ => "Unknown", // #[non_exhaustive] catch-all
                     }
                 })
                 .collect::<Vec<_>>()

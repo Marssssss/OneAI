@@ -52,6 +52,7 @@ impl OpenAIProvider {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                     Role::Tool => "tool",
+                    _ => "user",
                 },
             });
 

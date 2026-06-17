@@ -15,6 +15,7 @@ use uuid::Uuid;
 /// Models the sealed class hierarchy from the design specification:
 /// Text, Image, File, ToolCall, ToolResult.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     /// Plain text content.
@@ -80,6 +81,7 @@ mod base64_bytes {
 /// Message role in a conversation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Role {
     System,
     User,

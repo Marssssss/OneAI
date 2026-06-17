@@ -256,6 +256,7 @@ impl ContextAssembler {
                         RefreshPolicy::Periodic(_) => {
                             self.cached_context.contains_key(source.key())
                         }
+                        _ => true, // #[non_exhaustive] catch-all
                     };
 
                     if should_load {
@@ -317,6 +318,7 @@ impl ContextAssembler {
                                 false
                             }
                         }
+                        _ => true, // #[non_exhaustive] catch-all
                     };
 
                     if should_load {

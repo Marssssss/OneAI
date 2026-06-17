@@ -26,6 +26,7 @@ use crate::config::{WorkflowConfig, RetryPolicy};
 
 /// The status of a workflow step execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StepStatus {
     /// Not yet started.
     Pending,

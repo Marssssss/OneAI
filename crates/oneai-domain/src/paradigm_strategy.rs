@@ -25,6 +25,7 @@ use oneai_core::StructuredOutputConfig;
 /// between the two representations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum DomainParadigmKind {
     Plan,
     ReAct,
@@ -252,6 +253,7 @@ impl SubAgentTypeDefinition {
 /// `oneai-agent`. The `DefaultSubAgentFactory` maps these to the
 /// corresponding `worktree_isolation::MergeStrategy` at execution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SubAgentMergeStrategy {
     /// Merge the worktree branch into the main branch.
     Merge,

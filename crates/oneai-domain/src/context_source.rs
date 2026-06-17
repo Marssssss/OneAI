@@ -26,6 +26,7 @@ use oneai_core::error::Result;
 /// - Current date changes daily → Periodic(24h)
 /// - Device registry is stable → OnceAtStart
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RefreshPolicy {
     /// Always refresh on each loop iteration.
     /// Use for frequently-changing data like git status.

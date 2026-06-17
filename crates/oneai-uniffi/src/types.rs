@@ -282,6 +282,7 @@ impl From<oneai_core::ContentBlock> for ContentBlockView {
             oneai_core::ContentBlock::Thinking { text } => {
                 ContentBlockView::Thinking { text }
             },
+            _ => ContentBlockView::Text { text: "[unsupported content block]".to_string() },
         }
     }
 }
@@ -377,6 +378,7 @@ impl From<oneai_core::OneAIError> for OneAIErrorView {
             oneai_core::OneAIError::Platform(msg) => OneAIErrorView::Platform { message: msg },
             oneai_core::OneAIError::Wasm(msg) => OneAIErrorView::Wasm { message: msg },
             oneai_core::OneAIError::Other(msg) => OneAIErrorView::Other { message: msg },
+            _ => OneAIErrorView::Other { message: "unknown error".to_string() }, // #[non_exhaustive] catch-all
         }
     }
 }
@@ -405,6 +407,7 @@ impl From<oneai_core::platform::Platform> for PlatformView {
             oneai_core::platform::Platform::Ios => PlatformView::Ios,
             oneai_core::platform::Platform::Harmony => PlatformView::Harmony,
             oneai_core::platform::Platform::Unknown => PlatformView::Unknown,
+            _ => PlatformView::Unknown, // #[non_exhaustive] catch-all
         }
     }
 }

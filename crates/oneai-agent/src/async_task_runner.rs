@@ -39,6 +39,7 @@ use crate::sub_agent::{SubAgent, SubAgentSummary, SubAgentKind, SubAgentFactory}
 
 /// Status of an asynchronous background task.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TaskStatus {
     /// Task has been submitted but not yet started.
     Pending,

@@ -84,6 +84,7 @@ impl ContextCompressor {
                     oneai_core::ContentBlock::ToolCall { name, args, .. } => name.len() / 4 + args.len() / 4 + 30,
                     oneai_core::ContentBlock::ToolResult { content, .. } => content.len() / 4 + 20,
                     oneai_core::ContentBlock::Thinking { text } => text.len() / 4 + 20,
+                    _ => 50, // #[non_exhaustive] catch-all
                 }
             }).sum::<usize>()
         }).sum()
@@ -122,6 +123,7 @@ impl ContextCompressor {
                     Role::User => "User",
                     Role::Assistant => "Assistant",
                     Role::Tool => "Tool",
+                    _ => "User", // #[non_exhaustive] catch-all
                 };
                 format!("[{}]: {}", role, msg.text_content())
             })
@@ -194,6 +196,7 @@ impl ContextCompressor {
                             Role::User => "user".to_string(),
                             Role::Assistant => "assistant".to_string(),
                             Role::Tool => "tool".to_string(),
+                            _ => "user".to_string(), // #[non_exhaustive] catch-all
                         }),
                         ("compressed".to_string(), "true".to_string()),
                     ]),

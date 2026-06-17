@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// The top-level error type for all OneAI operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum OneAIError {
     /// Errors from LLM provider interactions.
     #[error("Provider error: {0}")]
@@ -80,6 +81,7 @@ pub enum OneAIError {
 
 /// Parser-specific errors, used by the 3-layer parsing defense.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ParserError {
     /// Layer 2: JSON could not be repaired.
     #[error("Fuzzy JSON repair failed: {0}")]

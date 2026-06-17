@@ -48,5 +48,6 @@ fn paradigm_display_name(kind: &oneai_agent::ParadigmKind) -> &str {
         oneai_agent::ParadigmKind::Plan => "Plan",
         oneai_agent::ParadigmKind::Reflect => "Reflect",
         oneai_agent::ParadigmKind::Explore => "Explore",
+        _ => "Unknown",
     }
 }

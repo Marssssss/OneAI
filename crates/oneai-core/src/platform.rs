@@ -102,6 +102,7 @@ impl PlatformApprovalGate for StubPlatformApprovalGate {
 /// The platform enum — identifies which platform the app is running on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Platform {
     Macos,
     Windows,

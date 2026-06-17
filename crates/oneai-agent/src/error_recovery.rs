@@ -33,6 +33,7 @@ use oneai_core::error::Result;
 /// verifiable objective indicators (test results, compilation status,
 /// API response codes) rather than LLM self-assessment alone.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum RecoveryStrategy {
     /// Retry the failed action with a configurable policy.
     ///
@@ -145,6 +146,7 @@ impl Default for RetryPolicy {
 
 /// Backoff strategy for retry delays.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BackoffStrategy {
     /// Fixed delay — same delay for each retry.
     Fixed,

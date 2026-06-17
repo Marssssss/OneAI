@@ -433,6 +433,7 @@ pub struct BudgetAllocationTokens {
 /// 4. Skills (can be reduced to name-only descriptions)
 /// 5. Recent turns (last resort — these are the most important)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum CompressionPriority {
     /// Trim tool results first.
     ToolResults = 1,

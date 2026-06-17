@@ -42,6 +42,7 @@ use oneai_core::error::Result;
 /// inference and execution pipeline (context assembly, tool definitions,
 /// hooks, permission, domain pack). This is the P2-2 "闭环" mechanism.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum NodeAction {
     /// LLM inference node — sends conversation to the model and gets a response.
     ///
@@ -145,6 +146,7 @@ pub enum NodeAction {
 /// rather than unreliable string pattern matching. This makes edge routing
 /// consistent with the AgentLoop's decision parsing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EdgeCondition {
     /// Route if the model output contains tool calls.
     /// Now evaluates `state.parsed_decision == GraphDecision::ToolCalls`.
