@@ -73,6 +73,11 @@ opentelemetry-otlp = { version = "0.27", features = ["trace", "metrics", "grpc-t
 # SQLite
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# CLI
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"

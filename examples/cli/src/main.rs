@@ -1,66 +1,130 @@
-//! OneAI Interactive TUI — Terminal-based AI agent interface.
+//! OneAI CLI — interactive REPL and non-interactive inference.
 //!
-//! This provides a rich terminal UI (TUI) inspired by opencode:
-//! - Left sidebar with tools list and session info
-//! - Right panel: header bar, scrollable chat area, input box at bottom
-//! - Streaming/typewriter effect for assistant responses
-//! - Enter=send, Ctrl+Enter=newline, Tab=toggle sidebar, Esc=vim, Ctrl+C=quit
-//!
-//! Usage:
-//!   # No LLM — tool-only mode
-//!   cargo run -p oneai-cli-demo
-//!
-//!   # 百炼 (阿里 DashScope)
-//!   ONEAI_API_KEY=sk-xxx ONEAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 \
-//!     ONEAI_MODEL=qwen-plus cargo run -p oneai-cli-demo
-//!
-//!   # OpenAI
-//!   ONEAI_API_KEY=sk-xxx ONEAI_MODEL=gpt-4 cargo run -p oneai-cli-demo
-//!
-//!   # DeepSeek
-//!   ONEAI_API_KEY=sk-xxx ONEAI_BASE_URL=https://api.deepseek.com/v1 \
-//!     ONEAI_MODEL=deepseek-chat cargo run -p oneai-cli-demo
-//!
-//!   # Ollama (local)
-//!   ONEAI_BASE_URL=http://localhost:11434 ONEAI_MODEL=llama3 cargo run -p oneai-cli-demo
+//! Subcommands:
+//!   oneai chat          — Launch the interactive TUI
+//!   oneai run <prompt>  — Single-shot inference (stdout)
+//!   oneai pack list     — List available DomainPacks
+//!   oneai pack show <n> — Show DomainPack details
+//!   oneai pack install  — Install a DomainPack
+//!   oneai config show   — Show current configuration
+//!   oneai config init   — Create default config file
+//!   oneai version       — Version information
 
+mod config;
+mod cmd_chat;
+mod cmd_run;
+mod cmd_pack;
+mod cmd_config;
+mod cmd_version;
 mod tui;
 
-use oneai_core::ModelConfig;
+use clap::{Parser, Subcommand};
 
-/// Build ModelConfig from environment variables.
-fn build_model_config_from_env() -> Option<ModelConfig> {
-    let api_key = std::env::var("ONEAI_API_KEY").ok();
-    let base_url = std::env::var("ONEAI_BASE_URL").ok();
-    let model = std::env::var("ONEAI_MODEL").unwrap_or("gpt-4".to_string());
+#[derive(Parser)]
+#[command(
+    name = "oneai",
+    version,
+    about = "OneAI — Rust Agent Framework CLI",
+    long_about = "OneAI is a Rust Agent framework with pluggable domain configuration (DomainPack), \
+                  dynamic paradigm switching, and WASM sandbox execution.\n\n\
+                  Use 'oneai chat' for interactive mode or 'oneai run <prompt>' for non-interactive inference."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-    if api_key.is_none() && base_url.is_none() {
-        return None;
-    }
+#[derive(Subcommand)]
+enum Commands {
+    /// Launch the interactive TUI (default when no subcommand given)
+    Chat {
+        /// Domain pack to use (coding, research, general)
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model to use (overrides config and env)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Run a single-shot inference and output to stdout
+    Run {
+        /// The prompt to send to the agent
+        prompt: String,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model to use
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Manage domain packs
+    Pack {
+        #[command(subcommand)]
+        action: PackAction,
+    },
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Show version information
+    Version,
+}
 
-    Some(ModelConfig {
-        api_key,
-        base_url,
-        model_name: Some(model),
-        ..ModelConfig::default()
-    })
+#[derive(Subcommand)]
+enum PackAction {
+    /// List available domain packs
+    List,
+    /// Show details of a domain pack
+    Show {
+        /// Pack name
+        name: String,
+    },
+    /// Install a domain pack from a path or git URL
+    Install {
+        /// Source path or git URL
+        source: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show current configuration
+    Show,
+    /// Create default configuration file
+    Init,
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    let cli = Cli::parse();
 
-    // Check if we're running in a TTY (interactive terminal)
-    // If not, we can't enter raw mode / alternate screen, so show an error
-    use std::io::IsTerminal;
-    if !std::io::stdout().is_terminal() {
-        eprintln!("Error: OneAI TUI requires an interactive terminal (TTY).");
-        eprintln!("Please run this in a terminal, not in a pipe or script.");
-        std::process::exit(1);
-    }
+    let config = config::OneaiConfig::load_or_default();
 
-    let provider_config = build_model_config_from_env();
-
-    if let Err(e) = tui::run_tui(provider_config) {
-        eprintln!("Error: {}", e);
+    match cli.command {
+        None => {
+            // Default: launch TUI (same as "oneai chat" with no options)
+            cmd_chat::cmd_chat(&config, None, None);
+        }
+        Some(Commands::Chat { domain, model }) => {
+            cmd_chat::cmd_chat(&config, domain.as_deref(), model.as_deref());
+        }
+        Some(Commands::Run { prompt, domain, model }) => {
+            cmd_run::cmd_run(&prompt, &config, domain.as_deref(), model.as_deref());
+        }
+        Some(Commands::Pack { action }) => {
+            match action {
+                PackAction::List => cmd_pack::cmd_pack_list(),
+                PackAction::Show { name } => cmd_pack::cmd_pack_show(&name),
+                PackAction::Install { source } => cmd_pack::cmd_pack_install(&source),
+            }
+        }
+        Some(Commands::Config { action }) => {
+            match action {
+                ConfigAction::Show => cmd_config::cmd_config_show(),
+                ConfigAction::Init => cmd_config::cmd_config_init(),
+            }
+        }
+        Some(Commands::Version) => {
+            cmd_version::cmd_version();
+        }
     }
 }

@@ -50,6 +50,7 @@ pub mod theme;
 /// terminal, and runs the main event loop.
 pub fn run_tui(
     provider_config: Option<ModelConfig>,
+    domain_name: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Setup panic hook to restore terminal state if we crash
     let original_hook = Arc::new(std::panic::take_hook());
@@ -105,8 +106,13 @@ pub fn run_tui(
 
         let app = builder.build().await.expect("App build failed");
 
-        // Register domain-specific tools from the coding domain pack
-        let domain = coding_pack(".");
+        // Register domain-specific tools from the selected domain pack
+        let domain_pack_name = domain_name.unwrap_or("coding");
+        let domain = crate::cmd_pack::get_builtin_pack(domain_pack_name, ".")
+            .unwrap_or_else(|| {
+                // Try loading from installed packs or project directory
+                oneai_domain::domain_pack_from_dir(".").unwrap_or_else(|_| coding_pack("."))
+            });
         for tool in &domain.tools {
             app.register_tool(tool.clone()).await.unwrap();
         }
@@ -123,10 +129,11 @@ pub fn run_tui(
 
         let mut tui_app = App::new(provider_info, tool_names, session_id);
 
-        // Register built-in skills for the current domain (coding by default)
-        let skills = oneai_skill::builtin::skills_for_domain("coding");
+        // Register built-in skills for the current domain
+        let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
         tui_app.skill_registry.register_builtin(skills).await.unwrap();
         tui_app.skill_names = tui_app.skill_registry.skill_names().await;
+        tui_app.current_domain = domain_pack_name.to_string();
 
         (tui_app, session_state, approval_rx)
     });
@@ -465,45 +472,42 @@ fn handle_user_input_async(
             "/domain" => {
                 if parts.len() < 2 {
                     app.add_message(ChatRole::System, format!(
-                        "Current domain: {}\nAvailable domains:\n  • coding — Software development (8 tools: read, edit, grep, glob, shell, list, notebook, environment)\n  • general — General-purpose (calculator only)\n\nUsage: /domain <name>",
+                        "Current domain: {}\nAvailable domains:\n  • coding — Software development (8+ tools)\n  • research — Research & analysis (7+ tools)\n  • general — General-purpose (calculator only)\n\nUsage: /domain <name>",
                         app.current_domain,
                     ));
                     return;
                 }
                 let name = parts[1];
-                match name {
-                    "coding" => {
-                        // Register coding domain tools
+                let domain = crate::cmd_pack::get_builtin_pack(name, ".");
+                match domain {
+                    Some(pack) => {
+                        // Register domain tools
                         rt.block_on(async {
-                            let domain = coding_pack(".");
                             let state = session_state.lock().await;
-                            for tool in &domain.tools {
+                            for tool in &pack.tools {
                                 state.app.register_tool(tool.clone()).await.unwrap();
                             }
-                            // Also keep CalculatorTool
+                            // Also keep CalculatorTool as general-purpose
                             state.app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
                             app.tool_names = state.app.tool_executor().list_tools().await;
-                            // Switch skills to coding domain
-                            app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain("coding")).await.unwrap();
+                            // Switch skills to domain
+                            app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain(name)).await.unwrap();
                             app.skill_names = app.skill_registry.skill_names().await;
                         });
-                        app.current_domain = "coding".to_string();
+                        app.current_domain = name.to_string();
                         app.active_skill = None;
-                        app.add_message(ChatRole::System, "Switched to coding domain. Tools: read_file, edit_file, shell, grep, glob, list_directory, notebook_edit, environment, calculator\nSkills: project-planning, code-review, debug-analysis, refactoring, test-strategy, documentation, git-workflow, dependency-analysis + general skills");
+                        let tool_names_str: Vec<String> = pack.tools.iter().map(|t| t.name().to_string()).collect();
+                        app.add_message(ChatRole::System, format!(
+                            "Switched to {} domain. Tools: {}\nSkills: {} domain skills + general skills",
+                            name,
+                            tool_names_str.join(", "),
+                            name,
+                        ));
                     }
-                    "general" => {
-                        // Minimal domain — just calculator (note: cannot remove existing tools dynamically)
-                        rt.block_on(async {
-                            // Switch skills to general-only (no domain-specific skills)
-                            app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain("general")).await.unwrap();
-                            app.skill_names = app.skill_registry.skill_names().await;
-                        });
-                        app.current_domain = "general".to_string();
-                        app.active_skill = None;
-                        app.add_message(ChatRole::System, "Switched to general domain. Note: existing tools remain registered until session restart.\nSkills: summarization, translation, creative-writing");
-                    }
-                    _ => {
-                        app.add_message(ChatRole::Error, format!("Unknown domain: {}. Available: coding, general", name));
+                    None => {
+                        app.add_message(ChatRole::Error, format!(
+                            "Unknown domain: {}. Available: coding, research, general", name
+                        ));
                     }
                 }
                 return;
