@@ -63,6 +63,11 @@ indexmap = "2"
 # Regex
 regex = "1"
 
+# OpenTelemetry
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["trace", "metrics", "grpc-tonic", "http-proto"] }
+
 # SQLite
 rusqlite = { version = "0.31", features = ["bundled"] }
 

@@ -559,6 +559,26 @@ impl AppSession {
         // Merge the loop's conversation back into the session
         self.conversation = result.conversation.clone();
 
+        // ─── STM↔LTM Closed Loop: Memory Reflection ──────────────
+        // At session end, reflect on the STM entries and generate
+        // an episodic memory for long-term retention.
+        // This is only triggered when a MemoryReflection engine is
+        // configured (via AppBuilder.with_memory_reflection()).
+        if let Some(reflection) = self.app.memory_manager.reflection() {
+            let config = reflection.config();
+            if config.auto_reflect {
+                let episodic = self.app.memory_manager.reflect(&self.session_id).await?;
+                if let Some(episodic) = episodic {
+                    tracing::info!(
+                        "Memory reflection completed for session {}: {} insights, {} decisions",
+                        self.session_id,
+                        episodic.key_insights.len(),
+                        episodic.decisions.len()
+                    );
+                }
+            }
+        }
+
         Ok(result)
     }
 

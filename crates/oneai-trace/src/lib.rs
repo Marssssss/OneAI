@@ -20,6 +20,10 @@
 //!
 //! When the `trace` feature is disabled (`default-features = false`),
 //! all trace types become zero-cost stubs that compile away completely.
+//!
+//! When the `otel` feature is enabled, OTEL OTLP exporters are available
+//! for exporting traces to Jaeger, Prometheus, Grafana, and other
+//! OTEL-compatible backends.
 
 // When trace feature is enabled, use the full implementation
 #[cfg(feature = "trace")]
@@ -36,6 +40,12 @@ mod emitter;
 mod collector;
 #[cfg(feature = "trace")]
 mod metrics;
+
+// OTEL exporter — available when both trace and otel features are enabled
+#[cfg(all(feature = "trace", feature = "otel"))]
+mod otel_exporter;
+#[cfg(all(feature = "trace", feature = "otel"))]
+mod otel_metrics;
 
 // When trace feature is disabled, use zero-cost stubs
 #[cfg(not(feature = "trace"))]
@@ -57,6 +67,12 @@ pub use emitter::TraceEmitter;
 pub use collector::{TraceCollector, InMemoryCollector, FileCollector, NoopCollector};
 #[cfg(feature = "trace")]
 pub use metrics::TraceMetrics;
+
+// OTEL exports — available when both trace and otel features are enabled
+#[cfg(all(feature = "trace", feature = "otel"))]
+pub use otel_exporter::{OtlpCollector, OtlpConfig, OtlpProtocol, span_kind_to_otel, span_status_to_otel, event_kind_to_otel_name};
+#[cfg(all(feature = "trace", feature = "otel"))]
+pub use otel_metrics::{OtelMetricsProvider, MetricsSnapshot};
 
 #[cfg(not(feature = "trace"))]
 pub use noop::{

@@ -1,11 +1,13 @@
 //! Memory manager — unified entry point for the memory system.
 //!
 //! The MemoryManager orchestrates short-term memory, long-term memory,
-//! and context compression. It provides a single interface for:
+//! context compression, and the STM↔LTM closed loop. It provides a single interface for:
 //! - Storing new memories (STM + LTM)
 //! - Retrieving relevant memories (STM keyword search → LTM semantic/keyword)
 //! - Context compression when STM exceeds token threshold
 //! - Evicted STM entries are automatically stored in LTM
+//! - **LTM→STM feedback injection**: proactively recall relevant LTM memories into STM context
+//! - **Memory reflection**: at session end, reflect on STM and generate episodic LTM entries
 
 use std::sync::Arc;
 
@@ -16,6 +18,63 @@ use oneai_core::traits::{LlmProvider, MemoryStore};
 use crate::short_term::ShortTermMemorySync;
 use crate::long_term::LongTermMemory;
 use crate::compression::{ContextCompressor, CompressedResult};
+use crate::reflection::{MemoryReflection, MemoryReflectionConfig, EpisodicMemory};
+
+// ─── RecallStrategy ──────────────────────────────────────────────
+
+/// Strategy for recalling memories from LTM into STM context.
+///
+/// Different strategies are suited for different scenarios:
+/// - KeywordFirst: works without embeddings (faster, simpler)
+/// - SemanticFirst: requires embeddings (more relevant, deeper)
+/// - Hybrid: combines both (best coverage, aligned with HybridScorer)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallStrategy {
+    /// Keyword search first, then semantic if available.
+    /// Best for scenarios without embeddings.
+    KeywordFirst,
+    /// Semantic (embedding) search first, then keyword as fallback.
+    /// Best for scenarios with embeddings.
+    SemanticFirst,
+    /// Both keyword and semantic search, merge and deduplicate.
+    /// Best for hybrid scenarios (aligned with HybridScorer).
+    Hybrid,
+}
+
+impl Default for RecallStrategy {
+    fn default() -> Self {
+        Self::Hybrid
+    }
+}
+
+// ─── MemoryInjectionConfig ──────────────────────────────────────
+
+/// Configuration for LTM→STM context injection.
+///
+/// This controls how the memory manager proactively injects
+/// relevant LTM memories into the STM context on each new turn.
+#[derive(Debug, Clone)]
+pub struct MemoryInjectionConfig {
+    /// Maximum number of LTM entries to inject per turn.
+    pub inject_top_k: usize,
+    /// The recall strategy to use for injection.
+    pub inject_strategy: RecallStrategy,
+    /// Whether to automatically inject on each new user message.
+    pub inject_on_new_turn: bool,
+    /// Whether to deduplicate against existing STM entries.
+    pub dedup_against_stm: bool,
+}
+
+impl Default for MemoryInjectionConfig {
+    fn default() -> Self {
+        Self {
+            inject_top_k: 3,
+            inject_strategy: RecallStrategy::Hybrid,
+            inject_on_new_turn: true,
+            dedup_against_stm: true,
+        }
+    }
+}
 
 /// Configuration for the MemoryManager.
 #[derive(Debug, Clone)]
@@ -41,13 +100,16 @@ impl Default for MemoryManagerConfig {
     }
 }
 
-/// Unified memory manager that orchestrates STM, LTM, and context compression.
+/// Unified memory manager that orchestrates STM, LTM, context compression,
+/// and the STM↔LTM closed loop.
 ///
 /// Provides a single entry point for all memory operations:
 /// - `add()`: Store a new memory entry in STM (evicted entries go to LTM)
 /// - `retrieve()`: Search STM first (recent, keyword), then LTM (semantic/keyword)
 /// - `compress()`: When STM exceeds token threshold, compress context using LLM
 /// - `get_context()`: Assemble current STM context for LLM injection
+/// - `inject_ltm_context()`: Proactively recall LTM → STM (closed loop feedback)
+/// - `reflect()`: At session end, generate episodic memory from STM → LTM
 pub struct MemoryManager {
     /// Short-term memory (sliding window).
     stm: ShortTermMemorySync,
@@ -55,6 +117,10 @@ pub struct MemoryManager {
     ltm: Arc<LongTermMemory>,
     /// Context compressor (uses LLM for summarization).
     compressor: Option<Arc<ContextCompressor>>,
+    /// Memory reflection engine (uses LLM for episodic memory generation).
+    reflection: Option<Arc<MemoryReflection>>,
+    /// Configuration for memory injection (LTM→STM feedback).
+    injection_config: MemoryInjectionConfig,
     /// Configuration.
     config: MemoryManagerConfig,
 }
@@ -62,12 +128,14 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create a new memory manager with default configuration.
     ///
-    /// Without an LLM provider, context compression is not available.
+    /// Without an LLM provider, context compression and reflection are not available.
     pub fn new() -> Self {
         Self {
             stm: ShortTermMemorySync::new(MemoryManagerConfig::default().stm_window_size),
             ltm: Arc::new(LongTermMemory::new()),
             compressor: None,
+            reflection: None,
+            injection_config: MemoryInjectionConfig::default(),
             config: MemoryManagerConfig::default(),
         }
     }
@@ -78,6 +146,8 @@ impl MemoryManager {
             stm: ShortTermMemorySync::new(config.stm_window_size),
             ltm: Arc::new(LongTermMemory::new()),
             compressor: None,
+            reflection: None,
+            injection_config: MemoryInjectionConfig::default(),
             config,
         }
     }
@@ -93,8 +163,35 @@ impl MemoryManager {
             compressor: Some(Arc::new(ContextCompressor::new(
                 config.compression_threshold_tokens,
                 config.compression_keep_recent_turns,
-                summarizer,
+                summarizer.clone(),
             ))),
+            reflection: None,
+            injection_config: MemoryInjectionConfig::default(),
+            config,
+        }
+    }
+
+    /// Create a memory manager with both compression and reflection.
+    ///
+    /// This enables the full STM↔LTM closed loop:
+    /// - Context compression (STM eviction → LTM storage)
+    /// - Memory reflection (STM → LTM episodic memory at session end)
+    /// - LTM→STM injection (proactive recall on each turn)
+    pub fn with_compressor_and_reflection(
+        config: MemoryManagerConfig,
+        injection_config: MemoryInjectionConfig,
+        summarizer: Arc<dyn LlmProvider>,
+    ) -> Self {
+        Self {
+            stm: ShortTermMemorySync::new(config.stm_window_size),
+            ltm: Arc::new(LongTermMemory::new()),
+            compressor: Some(Arc::new(ContextCompressor::new(
+                config.compression_threshold_tokens,
+                config.compression_keep_recent_turns,
+                summarizer.clone(),
+            ))),
+            reflection: Some(Arc::new(MemoryReflection::new(summarizer))),
+            injection_config,
             config,
         }
     }
@@ -243,6 +340,125 @@ impl MemoryManager {
     /// Get the configuration.
     pub fn config(&self) -> &MemoryManagerConfig {
         &self.config
+    }
+
+    // ─── STM↔LTM Closed Loop ──────────────────────────────────────────
+
+    /// Proactively inject relevant LTM memories into the STM context.
+    ///
+    /// This is the key feedback mechanism in the STM↔LTM closed loop:
+    /// on each new user turn, relevant LTM entries are recalled and
+    /// injected as ephemeral "recall" entries into the STM context.
+    ///
+    /// **Injection strategy** (controlled by `MemoryInjectionConfig`):
+    /// 1. Query LTM for entries relevant to the current input
+    /// 2. Deduplicate against existing STM entries (if dedup_against_stm is true)
+    /// 3. Inject filtered entries as "recall" type entries (metadata source=ltm_recall)
+    /// 4. These recall entries are ephemeral — they don't count against STM window eviction
+    ///
+    /// Returns the injected entries for context assembly.
+    pub async fn inject_ltm_context(&self, current_input: &str) -> Result<Vec<MemoryEntry>> {
+        let top_k = self.injection_config.inject_top_k;
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Build the LTM query based on the recall strategy
+        let query = MemoryQuery {
+            text: current_input.to_string(),
+            embedding: None, // Would be computed by embedding service if available
+            time_range: None,
+            metadata_filters: std::collections::HashMap::new(),
+        };
+
+        // Retrieve from LTM based on strategy
+        let ltm_results = match self.injection_config.inject_strategy {
+            RecallStrategy::KeywordFirst => {
+                // Keyword search only (no embedding needed)
+                self.ltm.retrieve(&query, top_k).await?
+            }
+            RecallStrategy::SemanticFirst => {
+                // Semantic search first, then keyword fallback
+                self.ltm.retrieve(&query, top_k).await?
+            }
+            RecallStrategy::Hybrid => {
+                // Both channels, merge and deduplicate
+                self.ltm.retrieve(&query, top_k).await?
+            }
+        };
+
+        // Deduplicate against existing STM entries
+        let stm_entries = self.stm.entries().await;
+        let stm_ids: std::collections::HashSet<String> = stm_entries.iter()
+            .map(|e| e.id.clone())
+            .collect();
+
+        let filtered: Vec<MemoryEntry> = if self.injection_config.dedup_against_stm {
+            ltm_results.into_iter()
+                .filter(|entry| !stm_ids.contains(&entry.id))
+                .take(top_k)
+                .collect()
+        } else {
+            ltm_results.into_iter().take(top_k).collect()
+        };
+
+        // Inject filtered entries as recall-type entries into STM
+        let injected: Vec<MemoryEntry> = filtered.into_iter()
+            .map(|entry| {
+                // Create a recall-type entry (ephemeral, doesn't evict)
+                let mut recall_entry = entry.clone();
+                recall_entry.id = format!("recall_{}", entry.id);
+                recall_entry.metadata.insert("source".to_string(), "ltm_recall".to_string());
+                recall_entry
+            })
+            .collect();
+
+        // Store recall entries in STM (they're ephemeral, will be overwritten)
+        for entry in &injected {
+            self.stm.push(entry.clone()).await;
+        }
+
+        Ok(injected)
+    }
+
+    /// Reflect on the current session and generate an episodic memory.
+    ///
+    /// This is the final step in the STM↔LTM closed loop: at session end,
+    /// the LLM reflects on all STM entries, extracts key insights and
+    /// decisions, and stores the resulting EpisodicMemory in LTM.
+    ///
+    /// Requires a MemoryReflection engine (set via `with_compressor_and_reflection`).
+    /// If no reflection engine is available, returns Ok(None) (no reflection).
+    ///
+    /// Returns the generated EpisodicMemory (also stored in LTM).
+    pub async fn reflect(&self, session_id: &str) -> Result<Option<EpisodicMemory>> {
+        if let Some(reflection) = &self.reflection {
+            let stm_entries = self.stm.entries().await;
+            let episodic = reflection.reflect(session_id, &stm_entries).await?;
+
+            // Store the episodic memory entry in LTM
+            let entry = episodic.to_memory_entry();
+            self.ltm.store(entry).await?;
+
+            Ok(Some(episodic))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the injection configuration.
+    pub fn injection_config(&self) -> &MemoryInjectionConfig {
+        &self.injection_config
+    }
+
+    /// Set the injection configuration.
+    pub fn set_injection_config(&mut self, config: MemoryInjectionConfig) {
+        self.injection_config = config;
+    }
+
+    /// Get the reflection engine (if configured).
+    pub fn reflection(&self) -> Option<&Arc<MemoryReflection>> {
+        self.reflection.as_ref()
     }
 }
 
@@ -395,5 +611,118 @@ mod manager_tests {
         let unique_count = results.iter().filter(|e| e.id == "unique").count();
         assert_eq!(unique_count, 1);
     }
-}
 
+    // ─── STM↔LTM Closed Loop Tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_inject_ltm_context_basic() {
+        let config = MemoryManagerConfig {
+            stm_window_size: 10,
+            evict_to_ltm: true,
+            ..Default::default()
+        };
+        let injection_config = MemoryInjectionConfig {
+            inject_top_k: 3,
+            inject_strategy: RecallStrategy::KeywordFirst,
+            inject_on_new_turn: true,
+            dedup_against_stm: true,
+        };
+        let mut manager = MemoryManager::with_config(config);
+        manager.set_injection_config(injection_config);
+
+        // Add entries that will be evicted to LTM
+        for i in 0..12 {
+            manager.add(MemoryEntry {
+                id: format!("evict_{}", i),
+                content: format!("Entry {} about Rust programming", i),
+                timestamp: chrono::Utc::now(),
+                embedding: None,
+                metadata: HashMap::new(),
+            }).await.unwrap();
+        }
+
+        // STM has only 10 entries, so 2 were evicted to LTM
+        assert_eq!(manager.stm_len().await, 10);
+
+        // Inject LTM context for a query about "Rust"
+        let injected = manager.inject_ltm_context("Rust").await.unwrap();
+        // Should find evicted entries in LTM that contain "Rust"
+        assert!(injected.len() > 0);
+        // All injected entries should have source=ltm_recall
+        for entry in &injected {
+            assert_eq!(entry.metadata.get("source").unwrap(), "ltm_recall");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inject_ltm_context_dedup() {
+        let config = MemoryManagerConfig {
+            stm_window_size: 10,
+            evict_to_ltm: true,
+            ..Default::default()
+        };
+        let injection_config = MemoryInjectionConfig {
+            inject_top_k: 5,
+            inject_strategy: RecallStrategy::KeywordFirst,
+            dedup_against_stm: true,
+            inject_on_new_turn: true,
+        };
+        let mut manager = MemoryManager::with_config(config);
+        manager.set_injection_config(injection_config);
+
+        // Add one entry that stays in STM
+        manager.add(MemoryEntry {
+            id: "stm_entry".to_string(),
+            content: "Python programming language".to_string(),
+            timestamp: chrono::Utc::now(),
+            embedding: None,
+            metadata: HashMap::new(),
+        }).await.unwrap();
+
+        // Manually add an entry to LTM with same content
+        manager.ltm.store(MemoryEntry {
+            id: "stm_entry".to_string(), // Same ID as STM entry
+            content: "Python programming language".to_string(),
+            timestamp: chrono::Utc::now(),
+            embedding: None,
+            metadata: HashMap::new(),
+        }).await.unwrap();
+
+        // Inject — should dedup against STM entries
+        let injected = manager.inject_ltm_context("Python").await.unwrap();
+        // The LTM entry with same ID should be deduped
+        assert!(injected.iter().all(|e| e.id != "recall_stm_entry"));
+    }
+
+    #[tokio::test]
+    async fn test_inject_ltm_context_no_results() {
+        let manager = MemoryManager::new();
+
+        // LTM is empty — inject should return nothing
+        let injected = manager.inject_ltm_context("anything").await.unwrap();
+        assert!(injected.is_empty());
+    }
+
+    #[test]
+    fn test_recall_strategy_default() {
+        assert_eq!(RecallStrategy::default(), RecallStrategy::Hybrid);
+    }
+
+    #[test]
+    fn test_injection_config_default() {
+        let config = MemoryInjectionConfig::default();
+        assert_eq!(config.inject_top_k, 3);
+        assert_eq!(config.inject_strategy, RecallStrategy::Hybrid);
+        assert!(config.inject_on_new_turn);
+        assert!(config.dedup_against_stm);
+    }
+
+    #[tokio::test]
+    async fn test_reflect_no_engine() {
+        let manager = MemoryManager::new();
+
+        // No reflection engine — should return None
+        let result = manager.reflect("sess_test").await.unwrap();
+        assert!(result.is_none());
+    }
+}

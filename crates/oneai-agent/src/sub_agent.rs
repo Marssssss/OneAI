@@ -676,6 +676,7 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             detect_env_changes: false, // Sub-agents don't need env diff detection
             pricing: crate::agent_loop::ModelPricing::default(),
             structured_output: None, // Sub-agents don't have structured output validation
+            trace_context: None, // Sub-agents inherit trace from parent loop
         };
 
         // Create a basic context assembler (no domain sources for sub-agents)

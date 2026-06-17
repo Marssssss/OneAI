@@ -35,6 +35,7 @@ use crate::context_assembler::ContextAssembler;
 use crate::streaming::IncrementalStreamParser;
 use crate::hooks::{HookRegistry, ResolvedHookAction};
 use crate::structured_output::{validate_json_schema, build_retry_prompt};
+use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
 
 // ─── AgentLoopObserver ─────────────────────────────────────────────────────
 
@@ -477,6 +478,11 @@ pub struct AgentLoopConfig {
     /// answer is validated against a JSON Schema. If validation fails,
     /// the model is re-prompted with the error for self-correction (ModelRetry).
     pub structured_output: Option<StructuredOutputConfig>,
+    /// Trace context for observability — when set, spans and events are
+    /// emitted at key lifecycle points (iteration, inference, tool call,
+    /// paradigm switch, delegation, approval). When None, tracing is
+    /// completely disabled (zero overhead).
+    pub trace_context: Option<TraceContext>,
 }
 
 impl Default for AgentLoopConfig {
@@ -497,6 +503,7 @@ impl Default for AgentLoopConfig {
             detect_env_changes: true,
             pricing: ModelPricing::default(),
             structured_output: None,
+            trace_context: None,
         }
     }
 }
@@ -707,6 +714,16 @@ impl AgentLoop {
         // Track structured output retry count (separate from iteration count)
         let mut structured_retry_count: usize = 0;
 
+        // ─── Trace: start AGENT span for the entire loop ──────────────
+        let loop_span_id = if let Some(ctx) = &self.config.trace_context {
+            let span_id = ctx.enter_span(SpanKind::AGENT, "agent_loop", None);
+            ctx.set_attribute("agent.task", serde_json::json!(state.original_task));
+            ctx.set_attribute("agent.paradigm", serde_json::json!(paradigm_name(&state.active_paradigm)));
+            span_id
+        } else {
+            String::new()
+        };
+
         while !state.is_complete() && state.iterations < self.config.hard_max_iterations.unwrap_or(usize::MAX) {
             // ─── Check for external interrupt request ──────────────────────
             if self.interrupt_requested.load(Ordering::Relaxed) {
@@ -737,6 +754,14 @@ impl AgentLoop {
 
             state.iterations += 1;
             observer.on_iteration_start(state.iterations, state.active_paradigm);
+
+            // ─── Trace: log iteration event ──────────────────────────
+            if let Some(ctx) = &self.config.trace_context {
+                ctx.log_event(EventKind::WorkflowStepStart, "agent.iteration", HashMap::from([
+                    ("agent.iteration".to_string(), serde_json::json!(state.iterations)),
+                    ("agent.paradigm".to_string(), serde_json::json!(paradigm_name(&state.active_paradigm))),
+                ]));
+            }
 
             // 1. Refresh domain context sources + assemble context
             {
@@ -828,11 +853,34 @@ impl AgentLoop {
             }
 
             // 4. Run inference
+            // ─── Trace: start LLM span for inference ──────────────────
+            let infer_span_id = if let Some(ctx) = &self.config.trace_context {
+                let span_id = ctx.enter_span(SpanKind::LLM, "inference", None);
+                ctx.log_event(EventKind::InferenceStart, "llm.inference.start", HashMap::from([
+                    ("agent.iteration".to_string(), serde_json::json!(state.iterations)),
+                ]));
+                span_id
+            } else {
+                String::new()
+            };
+
             let response = if self.config.use_streaming {
                 self.run_streaming_iteration_async(&request, observer).await?
             } else {
                 self.provider.infer(request).await?
             };
+
+            // ─── Trace: end LLM span and log token usage ────────────
+            if let Some(ctx) = &self.config.trace_context {
+                if !infer_span_id.is_empty() {
+                    ctx.log_event_in_span(&infer_span_id, EventKind::InferenceEnd, "llm.inference.end", HashMap::from([
+                        ("llm.prompt_tokens".to_string(), serde_json::json!(response.usage.prompt_tokens)),
+                        ("llm.completion_tokens".to_string(), serde_json::json!(response.usage.completion_tokens)),
+                        ("llm.total_tokens".to_string(), serde_json::json!(response.usage.prompt_tokens + response.usage.completion_tokens)),
+                    ]));
+                    ctx.exit_span(&infer_span_id, SpanStatus::Ok);
+                }
+            }
 
             // 4c. PostInfer hook — lifecycle hooks can modify the inference response
             // after it's received from the LLM (e.g., filter content, validate).
@@ -882,6 +930,13 @@ impl AgentLoop {
             match decision {
                 AgentDecision::DirectAnswer { text } => {
                     observer.on_direct_answer(&text);
+
+                    // ─── Trace: log DirectAnswer event ──────────────
+                    if let Some(ctx) = &self.config.trace_context {
+                        ctx.log_event(EventKind::Thought, "agent.direct_answer", HashMap::from([
+                            ("agent.answer_length".to_string(), serde_json::json!(text.len())),
+                        ]));
+                    }
 
                     // ─── Structured output validation ──────────────────────────
                     // If StructuredOutputConfig is set, validate the model's final
@@ -939,6 +994,16 @@ impl AgentLoop {
                 }
                 AgentDecision::ToolCalls { calls } => {
                     observer.on_tool_calls(&calls);
+
+                    // ─── Trace: log tool calls ──────────────────────────
+                    if let Some(ctx) = &self.config.trace_context {
+                        for call in &calls {
+                            ctx.log_event(EventKind::Action, "tool.call", HashMap::from([
+                                ("tool.name".to_string(), serde_json::json!(call.name)),
+                                ("tool.call_id".to_string(), serde_json::json!(call.id)),
+                            ]));
+                        }
+                    }
 
                     // ─── PreToolUse lifecycle hooks ─────────────────────────────
                     // Before executing each tool call, run PreToolUse hooks.
@@ -1100,6 +1165,14 @@ impl AgentLoop {
                 }
                 AgentDecision::Delegate { task, agent_type, budget } => {
                     observer.on_delegate(&task, &agent_type);
+
+                    // ─── Trace: log delegation event ──────────────────────
+                    if let Some(ctx) = &self.config.trace_context {
+                        ctx.log_event(EventKind::WorkflowStepStart, "agent.delegate", HashMap::from([
+                            ("agent.delegate_task".to_string(), serde_json::json!(task)),
+                            ("agent.delegate_type".to_string(), serde_json::json!(format!("{:?}", agent_type))),
+                        ]));
+                    }
                     // For delegate/switch_paradigm, these are internal meta-commands,
                     // not real tools. Convert the response to a plain text assistant
                     // message (stripping the internal ToolCall blocks) to avoid
@@ -1113,6 +1186,14 @@ impl AgentLoop {
                 }
                 AgentDecision::SwitchParadigm { paradigm } => {
                     observer.on_paradigm_switch(paradigm);
+
+                    // ─── Trace: log paradigm switch event ──────────────────
+                    if let Some(ctx) = &self.config.trace_context {
+                        ctx.log_event(EventKind::WorkflowStepStart, "agent.paradigm_switch", HashMap::from([
+                            ("agent.new_paradigm".to_string(), serde_json::json!(paradigm_name(&paradigm))),
+                            ("agent.old_paradigm".to_string(), serde_json::json!(paradigm_name(&state.active_paradigm))),
+                        ]));
+                    }
                     let text_content = response.message.text_content();
                     if !text_content.is_empty() {
                         state.conversation.add_message(Message::assistant(&text_content));
@@ -1132,6 +1213,16 @@ impl AgentLoop {
         }
 
         let result = state.into_result();
+
+        // ─── Trace: end AGENT span for the loop ──────────────────
+        if let Some(ctx) = &self.config.trace_context {
+            if !loop_span_id.is_empty() {
+                ctx.set_attribute_on_span(&loop_span_id, "agent.iterations", serde_json::json!(result.iterations));
+                ctx.set_attribute_on_span(&loop_span_id, "agent.completed", serde_json::json!(result.completed));
+                ctx.exit_span(&loop_span_id, if result.completed { SpanStatus::Ok } else { SpanStatus::Error });
+            }
+        }
+
         observer.on_complete(&result);
         Ok(result)
     }

@@ -15,7 +15,7 @@ use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool};
 use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
 
 use oneai_tool::{ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate, ChannelApprovalGateWithThreshold};
-use oneai_memory::MemoryManager;
+use oneai_memory::{MemoryManager, MemoryManagerConfig};
 use oneai_rag::DocumentIndex;
 use oneai_skill::SkillSelector;
 use oneai_parser::ThreeLayerParser;
@@ -189,6 +189,102 @@ impl AppBuilder {
     /// Disable tracing (no events will be collected).
     pub fn trace_disabled(mut self) -> Self {
         self.trace_context = Some(TraceContext::disabled());
+        self
+    }
+
+    /// Enable OTEL tracing — exports spans to an OTEL backend via OTLP protocol.
+    ///
+    /// Creates an `OtlpCollector` that converts OneAI spans to OTEL format
+    /// and exports them to the specified endpoint (e.g., Jaeger, Grafana).
+    ///
+    /// Requires the `otel` feature on `oneai-trace`.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .trace_otel("http://localhost:4317")
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "otel")]
+    pub fn trace_otel(mut self, endpoint: &str) -> Self {
+        let config = oneai_trace::OtlpConfig::grpc(endpoint, "oneai-agent");
+        let collector = oneai_trace::OtlpCollector::new(config);
+        let ctx = TraceEmitter::global().create_context_with_collector(
+            Arc::new(collector)
+        );
+        self.trace_context = Some(ctx);
+        self
+    }
+
+    /// Enable OTEL tracing with HTTP protocol.
+    #[cfg(feature = "otel")]
+    pub fn trace_otel_http(mut self, endpoint: &str) -> Self {
+        let config = oneai_trace::OtlpConfig::http(endpoint, "oneai-agent");
+        let collector = oneai_trace::OtlpCollector::new(config);
+        let ctx = TraceEmitter::global().create_context_with_collector(
+            Arc::new(collector)
+        );
+        self.trace_context = Some(ctx);
+        self
+    }
+
+    /// Enable OTEL tracing with custom configuration.
+    #[cfg(feature = "otel")]
+    pub fn trace_otel_config(mut self, config: oneai_trace::OtlpConfig) -> Self {
+        let collector = oneai_trace::OtlpCollector::new(config);
+        let ctx = TraceEmitter::global().create_context_with_collector(
+            Arc::new(collector)
+        );
+        self.trace_context = Some(ctx);
+        self
+    }
+
+    /// Enable memory reflection — the STM↔LTM closed loop.
+    ///
+    /// When enabled, the memory manager will:
+    /// 1. Proactively recall relevant LTM memories into STM context on each turn
+    /// 2. At session end, reflect on STM entries and generate episodic LTM memories
+    ///
+    /// This requires an LLM provider for the reflection prompt.
+    /// The same provider is used for both reflection and compression.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .with_memory_reflection()  // ← enables STM↔LTM closed loop
+    ///     .build()?;
+    /// ```
+    pub fn with_memory_reflection(mut self) -> Self {
+        if let Some(provider) = &self.provider {
+            let config = MemoryManagerConfig::default();
+            let injection_config = oneai_memory::MemoryInjectionConfig::default();
+            self.memory_manager = Some(Arc::new(
+                MemoryManager::with_compressor_and_reflection(
+                    config,
+                    injection_config,
+                    provider.clone(),
+                )
+            ));
+        }
+        // If no provider is set yet, reflection will be enabled when
+        // the provider is set (via the build() method).
+        self
+    }
+
+    /// Enable memory reflection with custom injection configuration.
+    pub fn with_memory_reflection_config(mut self, injection_config: oneai_memory::MemoryInjectionConfig) -> Self {
+        if let Some(provider) = &self.provider {
+            let config = MemoryManagerConfig::default();
+            self.memory_manager = Some(Arc::new(
+                MemoryManager::with_compressor_and_reflection(
+                    config,
+                    injection_config,
+                    provider.clone(),
+                )
+            ));
+        }
         self
     }
 

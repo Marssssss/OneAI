@@ -1,7 +1,7 @@
 //! # OneAI Memory
 //!
 //! Short-term memory (sliding window), long-term memory (HNSW vector store + content store + hybrid scoring),
-//! context compression, and MemoryManager for unified access.
+//! context compression, memory reflection (STM↔LTM closed loop), and MemoryManager for unified access.
 
 pub mod short_term;
 pub mod long_term;
@@ -9,6 +9,7 @@ pub mod compression;
 pub mod hybrid_scorer;
 pub mod vector_store;
 pub mod manager;
+pub mod reflection;
 
 pub use short_term::*;
 pub use long_term::*;
@@ -16,6 +17,7 @@ pub use compression::*;
 pub use hybrid_scorer::*;
 pub use vector_store::*;
 pub use manager::*;
+pub use reflection::{MemoryReflection, MemoryReflectionConfig, EpisodicMemory};
 
 #[cfg(test)]
 mod tests {
