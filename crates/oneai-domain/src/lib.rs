@@ -51,6 +51,7 @@ pub mod research_pack;
 pub mod builtin_sources;
 pub mod config_parser;
 pub mod repo_map;
+pub mod market;
 
 pub use domain_pack::*;
 pub use paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
@@ -65,3 +66,4 @@ pub use research_pack::*;
 pub use builtin_sources::*;
 pub use config_parser::*;
 pub use repo_map::*;
+pub use market::*;

@@ -339,6 +339,34 @@ impl AppBuilder {
         self
     }
 
+    /// Add a domain pack from a PackSource.
+    ///
+    /// Uses the PackRegistry to install and load the pack from the given source.
+    /// This is the programmatic equivalent of `oneai pack install <source>`.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let registry = oneai_domain::PackRegistry::default_path();
+    /// let source = oneai_domain::PackSource::Git {
+    ///     repo_url: "https://github.com/oneai-project/oneai-pack-devops.git".to_string(),
+    ///     ref_: None,
+    /// };
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .domain_pack_from_source(&source, ".")  // ← install + load
+    ///     .build()?;
+    /// ```
+    pub fn domain_pack_from_source(mut self, source: &oneai_domain::PackSource, project_dir: &str) -> Self {
+        let registry = oneai_domain::PackRegistry::default_path();
+        let pack_name = registry.install(source);
+        if let Ok(name) = pack_name {
+            if let Ok(pack) = registry.load_installed(&name, project_dir) {
+                self.domain_packs.push(pack);
+            }
+        }
+        self
+    }
+
     /// Set the A2A client for inter-agent communication.
     ///
     /// The A2A client enables the OneAI agent to discover and communicate
