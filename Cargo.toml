@@ -20,6 +20,7 @@ members = [
     "crates/oneai-platform-ios",
     "crates/oneai-platform-harmony",
     "crates/oneai-trace",
+    "crates/oneai-a2a",
     "examples/cli",
     "examples/desktop-app",
     "examples/rust",
@@ -101,3 +102,4 @@ oneai-platform-ios = { path = "crates/oneai-platform-ios" }
 oneai-platform-harmony = { path = "crates/oneai-platform-harmony" }
 oneai-trace = { path = "crates/oneai-trace" }
 oneai-domain = { path = "crates/oneai-domain" }
+oneai-a2a = { path = "crates/oneai-a2a" }

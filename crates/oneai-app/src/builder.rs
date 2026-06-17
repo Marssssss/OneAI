@@ -25,6 +25,8 @@ use oneai_trace::{TraceContext, TraceEmitter, InMemoryCollector};
 
 use oneai_domain::{DomainPack, MergedDomainPack};
 
+use oneai_a2a::A2AClient;
+
 use crate::session::AppSession;
 
 /// Builder for assembling a OneAI application.
@@ -51,6 +53,8 @@ pub struct AppBuilder {
     trace_context: Option<TraceContext>,
     /// Domain packs (optional — for domain-specific configuration).
     domain_packs: Vec<DomainPack>,
+    /// A2A client (optional — for inter-agent communication).
+    a2a_client: Option<Arc<A2AClient>>,
 }
 
 impl AppBuilder {
@@ -68,6 +72,7 @@ impl AppBuilder {
             platform: None,
             trace_context: None,
             domain_packs: Vec::new(),
+            a2a_client: None,
         }
     }
 
@@ -329,6 +334,25 @@ impl AppBuilder {
         self
     }
 
+    /// Set the A2A client for inter-agent communication.
+    ///
+    /// The A2A client enables the OneAI agent to discover and communicate
+    /// with remote A2A agents. This allows the agent to delegate tasks to
+    /// specialized remote agents and receive results.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let a2a_client = A2AClient::new("https://remote-agent.example.com");
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .a2a_client(Arc::new(a2a_client))  // ← enable A2A inter-agent communication
+    ///     .build()?;
+    /// ```
+    pub fn a2a_client(mut self, client: Arc<A2AClient>) -> Self {
+        self.a2a_client = Some(client);
+        self
+    }
+
     /// Build the application.
     ///
     /// This creates the App and eagerly registers all domain pack tools
@@ -391,6 +415,7 @@ impl AppBuilder {
             platform,
             trace_context: self.trace_context,
             domain_pack: merged_domain_pack,
+            a2a_client: self.a2a_client,
         })
     }
 }
@@ -429,6 +454,8 @@ pub struct App {
     pub trace_context: Option<TraceContext>,
     /// Domain pack (optional — for domain-specific configuration).
     pub domain_pack: Option<Arc<MergedDomainPack>>,
+    /// A2A client (optional — for inter-agent communication).
+    pub a2a_client: Option<Arc<A2AClient>>,
 }
 
 impl App {
@@ -495,6 +522,11 @@ impl App {
     /// Get the domain pack.
     pub fn domain_pack(&self) -> Option<&Arc<MergedDomainPack>> {
         self.domain_pack.as_ref()
+    }
+
+    /// Get the A2A client (for inter-agent communication).
+    pub fn a2a_client(&self) -> Option<&Arc<A2AClient>> {
+        self.a2a_client.as_ref()
     }
 }
 
