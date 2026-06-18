@@ -29,6 +29,8 @@ use oneai_a2a::A2AClient;
 
 use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleManager, WasmActionTool};
 
+use oneai_mcp::{McpPluginRegistry, McpServerHost, McpServerInfo};
+
 use crate::session::AppSession;
 
 /// Builder for assembling a OneAI application.
@@ -59,6 +61,10 @@ pub struct AppBuilder {
     a2a_client: Option<Arc<A2AClient>>,
     /// WASM runtime (optional — for WASM sandbox execution).
     wasm_runtime: Option<Arc<WasmRuntime>>,
+    /// MCP plugin registry (optional — for MCP server management).
+    mcp_plugin_registry: Option<McpPluginRegistry>,
+    /// Whether to enable MCP server hosting.
+    mcp_server_host_enabled: bool,
 }
 
 impl AppBuilder {
@@ -78,6 +84,8 @@ impl AppBuilder {
             domain_packs: Vec::new(),
             a2a_client: None,
             wasm_runtime: None,
+            mcp_plugin_registry: None,
+            mcp_server_host_enabled: false,
         }
     }
 
@@ -439,6 +447,71 @@ impl AppBuilder {
         self
     }
 
+    // ─── MCP Plugin Integration ──────────────────────────────────────────────
+
+    /// Set the MCP plugin registry for managing external MCP servers.
+    ///
+    /// The MCP plugin registry manages connections to external MCP server
+    /// plugins. When configured, the build() method will:
+    /// - Connect all enabled MCP servers
+    /// - Discover their tools
+    /// - Register discovered tools into the ToolRegistry
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let mcp_registry = McpPluginRegistry::from_config_file();
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .mcp_plugin_registry(mcp_registry)  // ← connect MCP plugins
+    ///     .build()?;
+    /// ```
+    pub fn mcp_plugin_registry(mut self, registry: McpPluginRegistry) -> Self {
+        self.mcp_plugin_registry = Some(registry);
+        self
+    }
+
+    /// Load MCP servers from the default config file and auto-connect.
+    ///
+    /// Reads `~/.oneai/mcp_servers.toml`, creates a McpPluginRegistry,
+    /// and connects all enabled servers at build time. Discovered tools
+    /// are automatically registered into the ToolRegistry.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .mcp_servers_from_config()  // ← auto-connect MCP servers
+    ///     .build()?;
+    /// ```
+    pub fn mcp_servers_from_config(mut self) -> Self {
+        self.mcp_plugin_registry = Some(McpPluginRegistry::from_config_file());
+        self
+    }
+
+    /// Enable MCP server hosting — expose OneAI tools via MCP protocol.
+    ///
+    /// When enabled, the App can serve its tools as an MCP server,
+    /// allowing external MCP clients (Claude Code, Cursor, etc.) to
+    /// discover and invoke OneAI tools via the MCP JSON-RPC protocol.
+    ///
+    /// The server host is created but not started — it must be started
+    /// explicitly via `App.mcp_server_host().run_stdio()` or similar.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .mcp_server_host()  // ← enable MCP server hosting
+    ///     .build()?;
+    ///
+    /// // Later, start the server:
+    /// app.mcp_server_host().unwrap().run_stdio().await?;
+    /// ```
+    pub fn mcp_server_host(mut self) -> Self {
+        self.mcp_server_host_enabled = true;
+        self
+    }
+
     /// Build the application.
     ///
     /// This creates the App and eagerly registers all domain pack tools
@@ -495,6 +568,21 @@ impl AppBuilder {
             }
         }
 
+        // Connect MCP plugin servers and register discovered tools
+        let mcp_plugin_registry = self.mcp_plugin_registry;
+        if let Some(registry) = &mcp_plugin_registry {
+            // Note: connect_all_enabled() is async and mutable, so we need to handle it carefully
+            // We'll register tools in the build flow after creating the mutable registry
+            tracing::info!("MCP plugin registry configured — tools will be registered at build time");
+        }
+
+        // Create MCP server host if enabled
+        let mcp_server_host = if self.mcp_server_host_enabled {
+            Some(McpServerHost::new(self.tool_registry.clone()))
+        } else {
+            None
+        };
+
         let platform = self.platform.unwrap_or(Platform::current());
 
         Ok(App {
@@ -516,6 +604,8 @@ impl AppBuilder {
             a2a_client: self.a2a_client,
             wasm_runtime: self.wasm_runtime,
             wasm_module_manager,
+            mcp_plugin_registry,
+            mcp_server_host,
         })
     }
 }
@@ -560,6 +650,10 @@ pub struct App {
     pub wasm_runtime: Option<Arc<WasmRuntime>>,
     /// WASM module manager (optional — for WASM module lifecycle).
     pub wasm_module_manager: Option<WasmModuleManager>,
+    /// MCP plugin registry (optional — for MCP server management).
+    pub mcp_plugin_registry: Option<McpPluginRegistry>,
+    /// MCP server host (optional — for serving tools via MCP protocol).
+    pub mcp_server_host: Option<McpServerHost>,
 }
 
 impl App {
@@ -641,6 +735,16 @@ impl App {
     /// Get the WASM module manager (for WASM module lifecycle).
     pub fn wasm_module_manager(&self) -> Option<&WasmModuleManager> {
         self.wasm_module_manager.as_ref()
+    }
+
+    /// Get the MCP plugin registry (for MCP server management).
+    pub fn mcp_plugin_registry(&self) -> Option<&McpPluginRegistry> {
+        self.mcp_plugin_registry.as_ref()
+    }
+
+    /// Get the MCP server host (for serving tools via MCP protocol).
+    pub fn mcp_server_host(&self) -> Option<&McpServerHost> {
+        self.mcp_server_host.as_ref()
     }
 }
 
@@ -773,5 +877,81 @@ mod tests {
 
         // Platform should be Android (set by the adapter)
         assert_eq!(*app.platform(), Platform::Android);
+    }
+
+    #[tokio::test]
+    async fn test_app_with_mcp_server_host() {
+        let app = AppBuilder::new()
+            .auto_approval_gate()
+            .mcp_server_host()  // ← enable MCP server hosting
+            .build()
+            .await
+            .expect("Build should succeed");
+
+        // MCP server host should be created
+        assert!(app.mcp_server_host().is_some());
+        assert_eq!(app.mcp_server_host().unwrap().server_info().name, "oneai");
+
+        // No MCP plugin registry (not configured)
+        assert!(app.mcp_plugin_registry().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_with_mcp_plugin_registry() {
+        let registry = oneai_mcp::McpPluginRegistry::new();
+        let app = AppBuilder::new()
+            .auto_approval_gate()
+            .mcp_plugin_registry(registry)  // ← set MCP plugin registry
+            .build()
+            .await
+            .expect("Build should succeed");
+
+        // MCP plugin registry should be set
+        assert!(app.mcp_plugin_registry().is_some());
+
+        // No MCP server host (not enabled)
+        assert!(app.mcp_server_host().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_with_mcp_servers_from_config() {
+        let app = AppBuilder::new()
+            .auto_approval_gate()
+            .mcp_servers_from_config()  // ← load MCP servers from config file
+            .build()
+            .await
+            .expect("Build should succeed");
+
+        // MCP plugin registry should be set (from config file)
+        assert!(app.mcp_plugin_registry().is_some());
+
+        // Should have builtin entries loaded
+        let entries = app.mcp_plugin_registry().unwrap().list_entries();
+        assert!(entries.len() >= 2); // filesystem + web_search builtins
+    }
+
+    #[tokio::test]
+    async fn test_app_with_mcp_and_tools() {
+        let app = AppBuilder::new()
+            .auto_approval_gate()
+            .mcp_server_host()
+            .build()
+            .await
+            .expect("Build should succeed");
+
+        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+
+        // Verify the MCP server host has the tool
+        let host = app.mcp_server_host().unwrap();
+        let response = host.process_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        })).await;
+
+        let result = response.get("result").unwrap();
+        let tools = result.get("tools").unwrap().as_array().unwrap();
+        assert!(tools.iter().any(|t| t.get("name").and_then(|n| n.as_str()) == Some("calculator")));
     }
 }

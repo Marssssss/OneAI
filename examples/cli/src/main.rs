@@ -7,6 +7,11 @@
 //!   oneai pack list     — List available DomainPacks
 //!   oneai pack show <n> — Show DomainPack details
 //!   oneai pack install  — Install a DomainPack
+//!   oneai mcp serve     — Run as MCP server (Stdio mode)
+//!   oneai mcp list      — List configured MCP servers
+//!   oneai mcp add <n>   — Add MCP server config
+//!   oneai mcp remove <n>— Remove MCP server config
+//!   oneai mcp connect <n>— Test MCP server connection
 //!   oneai eval list     — List available eval suites
 //!   oneai eval run <n>  — Run an eval suite
 //!   oneai eval score <n>— Run metrics only (no agent)
@@ -22,6 +27,7 @@ mod cmd_eval;
 mod cmd_config;
 mod cmd_version;
 mod cmd_studio;
+mod cmd_mcp;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -86,6 +92,11 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Manage MCP server plugins and run as MCP server
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
     /// Show version information
     Version,
 }
@@ -133,6 +144,48 @@ enum ConfigAction {
     Init,
 }
 
+#[derive(Subcommand)]
+enum McpAction {
+    /// Run as MCP server (Stdio mode — for integration with Claude Code/Cursor)
+    Serve {
+        /// Domain pack to expose via MCP
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// List configured MCP servers
+    List,
+    /// Add an MCP server configuration
+    Add {
+        /// Server name
+        name: String,
+        /// Transport type: stdio, sse, streamable_http
+        #[arg(long)]
+        transport: String,
+        /// Command to launch (for stdio transport)
+        #[arg(long)]
+        command: Option<String>,
+        /// URL endpoint (for sse/streamable_http transport)
+        #[arg(long)]
+        url: Option<String>,
+        /// Command arguments (comma-separated, for stdio transport)
+        #[arg(long)]
+        args: Option<String>,
+        /// Whether server is enabled
+        #[arg(long, default_value_t = true)]
+        enabled: bool,
+    },
+    /// Remove an MCP server configuration
+    Remove {
+        /// Server name
+        name: String,
+    },
+    /// Test connecting to an MCP server and show discovered tools
+    Connect {
+        /// Server name
+        name: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -176,6 +229,23 @@ fn main() {
             match action {
                 ConfigAction::Show => cmd_config::cmd_config_show(),
                 ConfigAction::Init => cmd_config::cmd_config_init(),
+            }
+        }
+        Some(Commands::Mcp { action }) => {
+            match action {
+                McpAction::Serve { domain } => {
+                    cmd_mcp::cmd_mcp_serve(domain.as_deref());
+                }
+                McpAction::List => cmd_mcp::cmd_mcp_list(),
+                McpAction::Add { name, transport, command, url, args, enabled } => {
+                    cmd_mcp::cmd_mcp_add(&name, &transport, command.as_deref(), url.as_deref(), args.as_deref(), enabled);
+                }
+                McpAction::Remove { name } => {
+                    cmd_mcp::cmd_mcp_remove(&name);
+                }
+                McpAction::Connect { name } => {
+                    cmd_mcp::cmd_mcp_connect(&name);
+                }
             }
         }
         Some(Commands::Version) => {

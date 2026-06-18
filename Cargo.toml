@@ -24,6 +24,7 @@ members = [
     "crates/oneai-wasm",
     "crates/oneai-eval",
     "crates/oneai-studio",
+    "crates/oneai-mcp",
     "examples/cli",
     "examples/desktop-app",
     "examples/rust",
@@ -114,6 +115,7 @@ oneai-a2a = { path = "crates/oneai-a2a" }
 oneai-wasm = { path = "crates/oneai-wasm" }
 oneai-eval = { path = "crates/oneai-eval" }
 oneai-studio = { path = "crates/oneai-studio" }
+oneai-mcp = { path = "crates/oneai-mcp" }
 
 # WASM
 wasmtime = "45"
