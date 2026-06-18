@@ -74,6 +74,10 @@ pub enum OneAIError {
     #[error("WASM error: {0}")]
     Wasm(String),
 
+    /// Evaluation errors (eval suite not found, runner errors, etc.).
+    #[error("Eval error: {0}")]
+    Eval(String),
+
     /// Generic errors with context.
     #[error("{0}")]
     Other(String),

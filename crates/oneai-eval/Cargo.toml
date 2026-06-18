@@ -1,0 +1,23 @@
+[package]
+name = "oneai-eval"
+description = "OneAI Evaluation Framework — structured eval suites, metrics, and runner for agent quality assessment"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+regex = { workspace = true }
+
+oneai-core = { workspace = true }
+oneai-trace = { workspace = true }
+oneai-app = { workspace = true }
+oneai-domain = { workspace = true }
+oneai-agent = { workspace = true }

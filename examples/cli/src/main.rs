@@ -6,6 +6,9 @@
 //!   oneai pack list     — List available DomainPacks
 //!   oneai pack show <n> — Show DomainPack details
 //!   oneai pack install  — Install a DomainPack
+//!   oneai eval list     — List available eval suites
+//!   oneai eval run <n>  — Run an eval suite
+//!   oneai eval score <n>— Run metrics only (no agent)
 //!   oneai config show   — Show current configuration
 //!   oneai config init   — Create default config file
 //!   oneai version       — Version information
@@ -14,6 +17,7 @@ mod config;
 mod cmd_chat;
 mod cmd_run;
 mod cmd_pack;
+mod cmd_eval;
 mod cmd_config;
 mod cmd_version;
 mod tui;
@@ -61,6 +65,11 @@ enum Commands {
         #[command(subcommand)]
         action: PackAction,
     },
+    /// Run evaluation suites
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
+    },
     /// Manage configuration
     Config {
         #[command(subcommand)]
@@ -83,6 +92,25 @@ enum PackAction {
     Install {
         /// Source path or git URL
         source: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalAction {
+    /// List available eval suites
+    List,
+    /// Run an eval suite with agent execution
+    Run {
+        /// Suite name (coding_basics, tool_use, general)
+        name: String,
+        /// Output format (markdown, json, compact)
+        #[arg(long, default_value = "markdown")]
+        format: String,
+    },
+    /// Run metrics only (no agent execution — uses expected answers as outputs)
+    Score {
+        /// Suite name
+        name: String,
     },
 }
 
@@ -115,6 +143,19 @@ fn main() {
                 PackAction::List => cmd_pack::cmd_pack_list(),
                 PackAction::Show { name } => cmd_pack::cmd_pack_show(&name),
                 PackAction::Install { source } => cmd_pack::cmd_pack_install(&source),
+            }
+        }
+        Some(Commands::Eval { action }) => {
+            match action {
+                EvalAction::List => cmd_eval::cmd_eval_list(),
+                EvalAction::Run { name, format } => {
+                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                    rt.block_on(cmd_eval::cmd_eval_run(&name, &format));
+                }
+                EvalAction::Score { name } => {
+                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                    rt.block_on(cmd_eval::cmd_eval_score(&name));
+                }
             }
         }
         Some(Commands::Config { action }) => {
