@@ -3,6 +3,7 @@
 //! Subcommands:
 //!   oneai chat          — Launch the interactive TUI
 //!   oneai run <prompt>  — Single-shot inference (stdout)
+//!   oneai studio        — Launch Studio Web UI (port 3000)
 //!   oneai pack list     — List available DomainPacks
 //!   oneai pack show <n> — Show DomainPack details
 //!   oneai pack install  — Install a DomainPack
@@ -20,6 +21,7 @@ mod cmd_pack;
 mod cmd_eval;
 mod cmd_config;
 mod cmd_version;
+mod cmd_studio;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -59,6 +61,15 @@ enum Commands {
         /// Model to use
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Launch Studio Web UI for visualizing agent execution
+    Studio {
+        /// Port to listen on (default: 3000)
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
     },
     /// Manage domain packs
     Pack {
@@ -137,6 +148,9 @@ fn main() {
         }
         Some(Commands::Run { prompt, domain, model }) => {
             cmd_run::cmd_run(&prompt, &config, domain.as_deref(), model.as_deref());
+        }
+        Some(Commands::Studio { port, domain }) => {
+            cmd_studio::cmd_studio(port, domain.as_deref());
         }
         Some(Commands::Pack { action }) => {
             match action {

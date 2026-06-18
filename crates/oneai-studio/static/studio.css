@@ -1,0 +1,272 @@
+/* OneAI Studio — Main Styles */
+
+:root {
+    --primary: #4a90d9;
+    --bg: #1a1a2e;
+    --bg-panel: #16213e;
+    --bg-card: #0f3460;
+    --text: #e0e0e0;
+    --text-muted: #8892b0;
+    --accent: #e94560;
+    --success: #4ecca3;
+    --warning: #ffd93d;
+    --error: #ff6b6b;
+    --border: #233554;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Header */
+.studio-header {
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+}
+
+.logo { display: flex; align-items: center; gap: 8px; }
+.logo-icon { font-size: 24px; }
+.logo-text { font-size: 18px; font-weight: bold; color: var(--primary); }
+
+.session-info { display: flex; align-items: center; gap: 8px; }
+.badge {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+}
+.connection-status { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block;
+}
+.status-dot.connected { background: var(--success); }
+.status-dot.disconnected { background: var(--error); }
+
+/* Main Layout */
+.studio-main {
+    flex: 1;
+    display: flex;
+    gap: 4px;
+    overflow: hidden;
+}
+
+.trace-panel, .graph-panel, .output-panel {
+    flex: 1;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.trace-panel { flex: 0 0 250px; }
+.output-panel { flex: 0 0 350px; }
+
+h3 {
+    background: var(--bg-card);
+    padding: 6px 12px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+/* Trace List */
+.trace-list, .output-content, .checkpoint-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+.trace-empty, .output-empty {
+    color: var(--text-muted);
+    text-align: center;
+    padding: 32px;
+}
+
+.trace-entry {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+}
+
+.trace-entry .event-kind {
+    font-weight: bold;
+    color: var(--primary);
+}
+
+.trace-entry.iteration { color: var(--success); }
+.trace-entry.tool-call { color: var(--warning); }
+.trace-entry.tool-result { color: var(--success); }
+.trace-entry.error { color: var(--error); }
+.trace-entry.thinking { color: var(--text-muted); }
+.trace-entry.approval { color: var(--accent); }
+
+/* Graph */
+.graph-selector {
+    padding: 6px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.graph-selector label { font-size: 12px; color: var(--text-muted); }
+.graph-selector select {
+    background: var(--bg-card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.graph-container {
+    flex: 1;
+    overflow: hidden;
+}
+
+.graph-container svg { display: block; }
+
+/* SVG Graph Styles */
+.graph-node {
+    cursor: pointer;
+}
+.graph-node rect {
+    rx: 8; ry: 8;
+    stroke: var(--border);
+    stroke-width: 2;
+    fill: var(--bg-card);
+}
+.graph-node.active rect {
+    stroke: var(--success);
+    stroke-width: 3;
+}
+.graph-node.interrupt rect {
+    stroke: var(--warning);
+}
+.graph-node text {
+    fill: var(--text);
+    font-size: 12px;
+    font-family: monospace;
+}
+.graph-edge path {
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    fill: none;
+}
+.graph-edge.conditional path {
+    stroke: var(--primary);
+}
+.graph-edge-label text {
+    fill: var(--text-muted);
+    font-size: 10px;
+}
+
+/* Output */
+.output-entry {
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+.output-entry.direct-answer {
+    background: var(--bg-card);
+    border-left: 3px solid var(--success);
+}
+.output-entry.tool-output {
+    border-left: 3px solid var(--primary);
+}
+.output-entry.error {
+    border-left: 3px solid var(--error);
+    color: var(--error);
+}
+.output-entry .label {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+/* Footer */
+.studio-footer {
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+    height: 200px;
+}
+
+.checkpoints-panel, .metrics-panel {
+    flex: 1;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+}
+
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    padding: 8px;
+}
+
+.metric-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    text-align: center;
+}
+.metric-label { font-size: 10px; color: var(--text-muted); display: block; }
+.metric-value { font-size: 16px; font-weight: bold; display: block; }
+
+/* Checkpoint */
+.checkpoint-entry {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-bottom: 4px;
+    font-size: 11px;
+}
+.checkpoint-entry.active {
+    border-color: var(--success);
+}
+.checkpoint-entry .cp-id { color: var(--primary); font-weight: bold; }
+.checkpoint-entry .cp-time { color: var(--text-muted); }
+
+.btn-secondary {
+    background: var(--bg-card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.btn-secondary:hover { background: var(--primary); color: white; }
+
+.btn-danger {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+}

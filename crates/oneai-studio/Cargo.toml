@@ -1,0 +1,40 @@
+[package]
+name = "oneai-studio"
+description = "OneAI Studio — Playground/Studio Web UI for visualizing agent execution, StateGraphs, and checkpoint time-travel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Core
+tokio = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# HTTP / WebSocket
+axum = { version = "0.8", features = ["ws"] }
+tokio-tungstenite = "0.26"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+
+# Internal crates
+oneai-core = { workspace = true }
+oneai-trace = { workspace = true, features = ["trace"] }
+oneai-agent = { workspace = true }
+oneai-workflow = { workspace = true }
+oneai-persistence = { workspace = true }
+oneai-domain = { workspace = true }
+oneai-tool = { workspace = true }
+oneai-eval = { workspace = true }
+
+[features]
+default = ["studio"]
+studio = []
+
+[dev-dependencies]
+tempfile = "3"

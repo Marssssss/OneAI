@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OneAI Studio</title>
+    <link rel="stylesheet" href="/static/studio.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="studio-header">
+        <div class="logo">
+            <span class="logo-icon">🤖</span>
+            <span class="logo-text">OneAI Studio</span>
+        </div>
+        <div class="session-info" id="session-info">
+            <span id="session-id">No session</span>
+            <span id="paradigm-badge" class="badge">—</span>
+            <span id="iteration-badge" class="badge">Iter: 0</span>
+        </div>
+        <div class="connection-status" id="connection-status">
+            <span class="status-dot disconnected" id="ws-dot"></span>
+            <span id="ws-status-text">Disconnected</span>
+        </div>
+    </header>
+
+    <!-- Main Layout -->
+    <main class="studio-main">
+        <!-- Left Panel: Trace Events -->
+        <aside class="trace-panel" id="trace-panel">
+            <h3>Trace Events</h3>
+            <div class="trace-list" id="trace-list">
+                <div class="trace-empty">Connect to start receiving events</div>
+            </div>
+        </aside>
+
+        <!-- Center: Graph View -->
+        <section class="graph-panel" id="graph-panel">
+            <h3>StateGraph</h3>
+            <div class="graph-selector">
+                <label for="graph-select">Graph:</label>
+                <select id="graph-select">
+                    <option value="">Select a graph...</option>
+                </select>
+            </div>
+            <div class="graph-container" id="graph-container">
+                <svg id="graph-svg" width="100%" height="100%"></svg>
+            </div>
+        </section>
+
+        <!-- Right Panel: Conversation Output -->
+        <section class="output-panel" id="output-panel">
+            <h3>Agent Output</h3>
+            <div class="output-content" id="output-content">
+                <div class="output-empty">Waiting for agent execution...</div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Bottom Panel -->
+    <footer class="studio-footer">
+        <!-- Checkpoints Timeline -->
+        <div class="checkpoints-panel" id="checkpoints-panel">
+            <h3>Checkpoints</h3>
+            <div class="checkpoint-list" id="checkpoint-list">
+                <button class="btn-secondary" id="load-checkpoints-btn">Load Checkpoints</button>
+            </div>
+        </div>
+
+        <!-- Metrics -->
+        <div class="metrics-panel" id="metrics-panel">
+            <h3>Metrics</h3>
+            <div class="metrics-grid" id="metrics-grid">
+                <div class="metric-card">
+                    <span class="metric-label">Tokens</span>
+                    <span class="metric-value" id="metric-tokens">0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-label">Cost</span>
+                    <span class="metric-value" id="metric-cost">$0.00</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-label">Success Rate</span>
+                    <span class="metric-value" id="metric-success">0%</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-label">Tool Calls</span>
+                    <span class="metric-value" id="metric-tools">0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-label">Errors</span>
+                    <span class="metric-value" id="metric-errors">0</span>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <script src="/static/studio.js"></script>
+    <script src="/static/graph-render.js"></script>
+</body>
+</html>
