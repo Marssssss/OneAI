@@ -1,16 +1,23 @@
 //! # OneAI MCP
 //!
-//! MCP Server hosting and Plugin Registry for the Model Context Protocol ecosystem.
+//! MCP Server hosting, Client, Plugin Registry, and Discovery for the
+//! Model Context Protocol ecosystem.
 //!
-//! This crate provides two major capabilities:
+//! This crate provides three major capabilities:
 //!
 //! 1. **MCP Server Host** — Expose OneAI's tools as an MCP server, enabling
 //!    external MCP clients (Claude Code, Cursor, VS Code, etc.) to discover
 //!    and invoke OneAI tools via the MCP JSON-RPC protocol.
 //!
-//! 2. **MCP Plugin Registry** — Config-based management of MCP server plugins,
-//!    mirroring the DomainPack market pattern. Enables discovery, installation,
-//!    connection, and health monitoring of external MCP servers.
+//! 2. **MCP Client** — Connect to external MCP servers as a client, discover
+//!    their tools, and invoke them. Wraps the existing `McpServerManager`
+//!    infrastructure for a simpler, standalone API.
+//!
+//! 3. **MCP Plugin Registry** — Config-based management of MCP server plugins,
+//!    mirroring the DomainPack market pattern.
+//!
+//! 4. **MCP Discovery** — One-shot "connect_and_discover" for quick inspection
+//!    of what tools an MCP server offers.
 //!
 //! ## MCP Server Host
 //!
@@ -18,38 +25,22 @@
 //! - `initialize` → handshake with client capabilities
 //! - `tools/list` → list all registered OneAI tools as MCP tool definitions
 //! - `tools/call` → invoke a OneAI tool and return MCP-format content blocks
-//! - `resources/list` → list MCP resources (basic implementation)
 //!
-//! Transport modes:
-//! - **Stdio** — reads from stdin, writes to stdout with Content-Length framing
-//! - **SSE** — HTTP endpoint for remote clients (future)
-//! - **StreamableHttp** — HTTP with session management (future)
+//! ## MCP Client
 //!
-//! ## MCP Plugin Registry
-//!
-//! The `McpPluginRegistry` manages external MCP server configurations:
-//! - Load from `~/.oneai/mcp_servers.toml` config file
-//! - Connect/disconnect servers, discover their tools
-//! - Auto-register discovered tools into OneAI's ToolRegistry
-//! - Health monitoring and lifecycle management
-//!
-//! ## Usage
-//!
+//! The `McpClient` provides a standalone API for connecting to external MCP servers:
 //! ```ignore
-//! // Run as MCP server (Stdio mode):
-//! let host = McpServerHost::new(tool_registry);
-//! host.run_stdio().await?;
+//! let client = McpClient::stdio("npx", &["@anthropic/mcp-server-filesystem"]);
+//! client.connect().await?;
+//! let tools = client.discover_tools().await?;
+//! client.disconnect().await?;
+//! ```
 //!
-//! // Load MCP plugins from config:
-//! let registry = McpPluginRegistry::from_config_file();
-//! let tools = registry.connect_all_and_discover().await?;
+//! ## MCP Discovery
 //!
-//! // Add to AppBuilder:
-//! let app = AppBuilder::new()
-//!     .provider(provider)
-//!     .mcp_servers_from_config()  // ← auto-connect MCP plugins
-//!     .mcp_server_host()           // ← enable serving tools via MCP
-//!     .build()?;
+//! One-shot discovery for quick tool inspection:
+//! ```ignore
+//! let tools = McpDiscovery::discover_stdio("npx", &["@anthropic/mcp-server-filesystem"]).await?;
 //! ```
 
 //! # Stability
@@ -69,6 +60,9 @@ pub mod handler;
 pub mod router;
 pub mod plugin;
 pub mod config;
+pub mod client;
+pub mod discovery;
+pub mod error;
 
 pub use server::*;
 pub use transport::*;
@@ -76,3 +70,6 @@ pub use handler::*;
 pub use router::*;
 pub use plugin::*;
 pub use config::*;
+pub use client::McpClient;
+pub use discovery::McpDiscovery;
+pub use error::{McpError, Result as McpResult};
