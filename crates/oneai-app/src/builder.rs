@@ -11,12 +11,14 @@
 use std::sync::Arc;
 
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool};
+use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool, EmbeddingService};
+use oneai_core::EmbeddingConfig;
 use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
 
 use oneai_tool::{ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate, ChannelApprovalGateWithThreshold};
 use oneai_memory::{MemoryManager, MemoryManagerConfig};
 use oneai_rag::DocumentIndex;
+use oneai_rag::EmbeddingConfigExt;
 use oneai_skill::SkillSelector;
 use oneai_parser::ThreeLayerParser;
 use oneai_workflow::WorkflowExecutor;
@@ -83,6 +85,10 @@ pub struct AppBuilder {
     sqlite_store: Option<Arc<SqliteSessionStore>>,
     /// Checkpoint backend (overrides default in-memory backend).
     checkpoint_backend: Option<Arc<dyn CheckpointBackend>>,
+    /// Embedding service (optional — enables auto-embedding for RAG and memory search).
+    embedding_service: Option<Arc<dyn EmbeddingService>>,
+    /// Embedding config (optional — for lazy embedding service creation).
+    embedding_config: Option<EmbeddingConfig>,
 }
 
 impl AppBuilder {
@@ -111,6 +117,8 @@ impl AppBuilder {
             a2a_server_agent_card: None,
             sqlite_store: None,
             checkpoint_backend: None,
+            embedding_service: None,
+            embedding_config: None,
         }
     }
 
@@ -510,6 +518,61 @@ impl AppBuilder {
         self.wasm_resource_monitor(Arc::new(WasmResourceMonitor::new()))
     }
 
+    // ─── Embedding Service Integration ──────────────────────────────────────────
+
+    /// Set the embedding service for automatic embedding generation.
+    ///
+    /// When an embedding service is configured, embeddings are automatically
+    /// computed for:
+    /// - RAG document chunks (AutoEmbeddingDocumentIndex)
+    /// - Memory entries (MemoryManager auto-embedding)
+    /// - LTM context injection queries (semantic recall)
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let embedding_service = Arc::new(FastEmbedService::new());
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .embedding_service(embedding_service)  // ← enable auto-embedding
+    ///     .build()?;
+    /// ```
+    pub fn embedding_service(mut self, service: Arc<dyn EmbeddingService>) -> Self {
+        self.embedding_service = Some(service);
+        self
+    }
+
+    /// Configure embedding service via EmbeddingConfig (lazy creation).
+    ///
+    /// The embedding service is created at build time using the config.
+    /// This is the recommended way to configure embeddings when you
+    /// want the builder to manage service creation.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .embedding_config(EmbeddingConfig::default())  // ← FastEmbed default
+    ///     .build()?;
+    ///
+    /// // Or with OpenAI:
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .embedding_config(EmbeddingConfig::openai("sk-...", EmbeddingModel::OpenAISmall))
+    ///     .build()?;
+    /// ```
+    pub fn embedding_config(mut self, config: EmbeddingConfig) -> Self {
+        self.embedding_config = Some(config);
+        self
+    }
+
+    /// Use the default FastEmbed embedding service (local, no API key).
+    ///
+    /// This is the simplest way to enable auto-embedding. Uses
+    /// AllMiniLML6V2 (384-dim, fast, good Chinese support).
+    pub fn default_embedding_service(self) -> Self {
+        self.embedding_config(EmbeddingConfig::default())
+    }
+
     // ─── SQLite Persistence ────────────────────────────────────────────────
 
     /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
@@ -695,10 +758,6 @@ impl AppBuilder {
             Arc::new(ThreeLayerParser::new())
         });
 
-        let memory_manager = self.memory_manager.unwrap_or_else(|| {
-            Arc::new(MemoryManager::new())
-        });
-
         // Merge domain packs (if any)
         let merged_domain_pack = if self.domain_packs.is_empty() {
             None
@@ -783,6 +842,30 @@ impl AppBuilder {
             None
         };
 
+        // Resolve embedding service: use explicitly set service, or build from config
+        let embedding_service = self.embedding_service.or_else(|| {
+            self.embedding_config.as_ref().and_then(|config| {
+                match config.build_service() {
+                    Ok(service) => Some(service),
+                    Err(err) => {
+                        tracing::warn!("Failed to build embedding service from config: {}", err);
+                        None
+                    }
+                }
+            })
+        });
+
+        // Wire embedding service into MemoryManager if configured
+        let memory_manager = if embedding_service.is_some() && self.memory_manager.is_none() {
+            // Create MemoryManager with embedding service
+            let config = MemoryManagerConfig::default();
+            Arc::new(MemoryManager::with_embedding(config, embedding_service.clone().unwrap()))
+        } else {
+            self.memory_manager.unwrap_or_else(|| {
+                Arc::new(MemoryManager::new())
+            })
+        };
+
         let platform = self.platform.unwrap_or(Platform::current());
 
         Ok(App {
@@ -810,6 +893,7 @@ impl AppBuilder {
             mcp_server_host,
             a2a_server_host,
             sqlite_store: self.sqlite_store,
+            embedding_service,
         })
     }
 }
@@ -866,6 +950,8 @@ pub struct App {
     pub a2a_server_host: Option<A2AServerHost>,
     /// SQLite session store (for memory + conversation persistence).
     pub sqlite_store: Option<Arc<SqliteSessionStore>>,
+    /// Embedding service (optional — for auto-embedding RAG and memory search).
+    pub embedding_service: Option<Arc<dyn EmbeddingService>>,
 }
 
 impl App {
@@ -972,6 +1058,11 @@ impl App {
     /// Get the A2A server host (for serving agent capabilities via A2A protocol).
     pub fn a2a_server_host(&self) -> Option<&A2AServerHost> {
         self.a2a_server_host.as_ref()
+    }
+
+    /// Get the embedding service (for auto-embedding RAG and memory search).
+    pub fn embedding_service(&self) -> Option<&Arc<dyn EmbeddingService>> {
+        self.embedding_service.as_ref()
     }
 }
 

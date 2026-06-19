@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use oneai_core::{Conversation, MemoryEntry, MemoryQuery};
 use oneai_core::error::Result;
-use oneai_core::traits::{LlmProvider, MemoryStore, MemoryPersistence};
+use oneai_core::traits::{LlmProvider, MemoryStore, MemoryPersistence, EmbeddingService};
 
 use crate::short_term::ShortTermMemorySync;
 use crate::long_term::LongTermMemory;
@@ -128,6 +128,12 @@ pub struct MemoryManager {
     /// When set, STM/LTM entries are persisted to SQLite on each operation,
     /// enabling session resume and knowledge accumulation across restarts.
     persistence: Option<Arc<dyn MemoryPersistence>>,
+    /// Embedding service (optional — enables automatic embedding generation).
+    ///
+    /// When set, embeddings are automatically computed for memory entries
+    /// during `add()` and `inject_ltm_context()`, enabling true semantic
+    /// search in LTM. Without this, memory search is limited to keyword matching.
+    embedding_service: Option<Arc<dyn EmbeddingService>>,
 }
 
 impl MemoryManager {
@@ -135,6 +141,7 @@ impl MemoryManager {
     ///
     /// Without an LLM provider, context compression and reflection are not available.
     /// Without a persistence backend, memory is purely in-memory (lost on restart).
+    /// Without an embedding service, memory search is limited to keyword matching.
     pub fn new() -> Self {
         Self {
             stm: ShortTermMemorySync::new(MemoryManagerConfig::default().stm_window_size),
@@ -144,6 +151,7 @@ impl MemoryManager {
             injection_config: MemoryInjectionConfig::default(),
             config: MemoryManagerConfig::default(),
             persistence: None,
+            embedding_service: None,
         }
     }
 
@@ -157,6 +165,7 @@ impl MemoryManager {
             injection_config: MemoryInjectionConfig::default(),
             config,
             persistence: None,
+            embedding_service: None,
         }
     }
 
@@ -177,6 +186,7 @@ impl MemoryManager {
             injection_config: MemoryInjectionConfig::default(),
             config,
             persistence: None,
+            embedding_service: None,
         }
     }
 
@@ -203,23 +213,11 @@ impl MemoryManager {
             injection_config,
             config,
             persistence: None,
+            embedding_service: None,
         }
     }
 
     /// Create a memory manager with SQLite persistence.
-    ///
-    /// When persistence is enabled, all STM/LTM operations are mirrored
-    /// to SQLite, enabling session resume and knowledge accumulation
-    /// across application restarts.
-    ///
-    /// **Usage**:
-    /// ```ignore
-    /// let persistence = Arc::new(SqliteSessionStore::with_defaults());
-    /// let manager = MemoryManager::with_persistence(
-    ///     MemoryManagerConfig::default(),
-    ///     persistence,
-    /// );
-    /// ```
     pub fn with_persistence(
         config: MemoryManagerConfig,
         persistence: Arc<dyn MemoryPersistence>,
@@ -232,6 +230,7 @@ impl MemoryManager {
             injection_config: MemoryInjectionConfig::default(),
             config,
             persistence: Some(persistence),
+            embedding_service: None,
         }
     }
 
@@ -260,6 +259,96 @@ impl MemoryManager {
             injection_config,
             config,
             persistence: Some(persistence),
+            embedding_service: None,
+        }
+    }
+
+    /// Create a memory manager with embedding service for automatic embedding generation.
+    ///
+    /// When an embedding service is configured, embeddings are automatically
+    /// computed for each memory entry during `add()`, enabling true semantic
+    /// search in LTM. Without this, memory search is limited to keyword matching.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let embedding_service = Arc::new(FastEmbedService::new());
+    /// let manager = MemoryManager::with_embedding(
+    ///     MemoryManagerConfig::default(),
+    ///     embedding_service,
+    /// );
+    /// ```
+    pub fn with_embedding(
+        config: MemoryManagerConfig,
+        embedding_service: Arc<dyn EmbeddingService>,
+    ) -> Self {
+        Self {
+            stm: ShortTermMemorySync::new(config.stm_window_size),
+            ltm: Arc::new(LongTermMemory::new()),
+            compressor: None,
+            reflection: None,
+            injection_config: MemoryInjectionConfig::default(),
+            config,
+            persistence: None,
+            embedding_service: Some(embedding_service),
+        }
+    }
+
+    /// Create a memory manager with compression, reflection, and embedding service.
+    ///
+    /// This enables the full STM↔LTM closed loop with semantic search:
+    /// - Context compression (STM eviction → LTM storage with embeddings)
+    /// - Memory reflection (STM → LTM episodic memory with embeddings)
+    /// - LTM→STM injection (semantic recall via embedding similarity)
+    pub fn with_compressor_reflection_and_embedding(
+        config: MemoryManagerConfig,
+        injection_config: MemoryInjectionConfig,
+        summarizer: Arc<dyn LlmProvider>,
+        embedding_service: Arc<dyn EmbeddingService>,
+    ) -> Self {
+        Self {
+            stm: ShortTermMemorySync::new(config.stm_window_size),
+            ltm: Arc::new(LongTermMemory::new()),
+            compressor: Some(Arc::new(ContextCompressor::new(
+                config.compression_threshold_tokens,
+                config.compression_keep_recent_turns,
+                summarizer.clone(),
+            ))),
+            reflection: Some(Arc::new(MemoryReflection::new(summarizer))),
+            injection_config,
+            config,
+            persistence: None,
+            embedding_service: Some(embedding_service),
+        }
+    }
+
+    /// Create a memory manager with all features: compression, reflection, persistence, embedding.
+    ///
+    /// This is the **complete** MemoryManager configuration enabling:
+    /// - Context compression (STM eviction → LTM storage → SQLite)
+    /// - Memory reflection (STM → LTM episodic memory → SQLite)
+    /// - LTM→STM injection (semantic recall via embedding similarity)
+    /// - Session resume (load from SQLite on restart)
+    /// - Auto-embedding (each entry gets a computed embedding for semantic search)
+    pub fn with_all_features(
+        config: MemoryManagerConfig,
+        injection_config: MemoryInjectionConfig,
+        summarizer: Arc<dyn LlmProvider>,
+        persistence: Arc<dyn MemoryPersistence>,
+        embedding_service: Arc<dyn EmbeddingService>,
+    ) -> Self {
+        Self {
+            stm: ShortTermMemorySync::new(config.stm_window_size),
+            ltm: Arc::new(LongTermMemory::new()),
+            compressor: Some(Arc::new(ContextCompressor::new(
+                config.compression_threshold_tokens,
+                config.compression_keep_recent_turns,
+                summarizer.clone(),
+            ))),
+            reflection: Some(Arc::new(MemoryReflection::new(summarizer))),
+            injection_config,
+            config,
+            persistence: Some(persistence),
+            embedding_service: Some(embedding_service),
         }
     }
 
@@ -268,7 +357,24 @@ impl MemoryManager {
     /// Stores the entry in STM. If STM is full, the oldest entry is evicted.
     /// Evicted entries are optionally stored in LTM for long-term retrieval.
     /// If persistence is enabled, the entry is also persisted to SQLite.
+    /// If an embedding service is configured, the entry's embedding is
+    /// automatically computed (if the entry doesn't already have one).
     pub async fn add(&self, entry: MemoryEntry) -> Result<()> {
+        // Auto-embed: compute embedding if the entry doesn't have one
+        let entry = if entry.embedding.is_none() && self.embedding_service.is_some() {
+            let service = self.embedding_service.as_ref().unwrap();
+            let embedding = service.embed(&entry.content).await?;
+            MemoryEntry {
+                id: entry.id,
+                content: entry.content,
+                timestamp: entry.timestamp,
+                embedding: Some(embedding),
+                metadata: entry.metadata,
+            }
+        } else {
+            entry
+        };
+
         let evicted = self.stm.push(entry.clone()).await;
 
         // If STM evicted an entry and evict_to_ltm is enabled, store it in LTM
@@ -473,10 +579,18 @@ impl MemoryManager {
             return Ok(Vec::new());
         }
 
+        // Auto-embed: compute query embedding if embedding service is available
+        let query_embedding = if self.embedding_service.is_some() {
+            let service = self.embedding_service.as_ref().unwrap();
+            Some(service.embed(current_input).await?)
+        } else {
+            None
+        };
+
         // Build the LTM query based on the recall strategy
         let query = MemoryQuery {
             text: current_input.to_string(),
-            embedding: None, // Would be computed by embedding service if available
+            embedding: query_embedding,
             time_range: None,
             metadata_filters: std::collections::HashMap::new(),
         };
@@ -574,6 +688,19 @@ impl MemoryManager {
     /// Get the persistence backend (if configured).
     pub fn persistence(&self) -> Option<&Arc<dyn MemoryPersistence>> {
         self.persistence.as_ref()
+    }
+
+    /// Get the embedding service (if configured).
+    pub fn embedding_service(&self) -> Option<&Arc<dyn EmbeddingService>> {
+        self.embedding_service.as_ref()
+    }
+
+    /// Set the embedding service (for runtime configuration).
+    ///
+    /// This is useful when the embedding service is configured after
+    /// the MemoryManager is created (e.g., via AppBuilder).
+    pub fn set_embedding_service(&mut self, service: Arc<dyn EmbeddingService>) {
+        self.embedding_service = Some(service);
     }
 
     // ─── Session Persistence ──────────────────────────────────────────

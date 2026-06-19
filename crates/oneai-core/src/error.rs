@@ -74,6 +74,10 @@ pub enum OneAIError {
     #[error("WASM error: {0}")]
     Wasm(String),
 
+    /// Embedding service errors (API call failures, dimension mismatch, etc.).
+    #[error("Embedding error: {0}")]
+    Embedding(String),
+
     /// Evaluation errors (eval suite not found, runner errors, etc.).
     #[error("Eval error: {0}")]
     Eval(String),

@@ -4,6 +4,11 @@
 //!   oneai chat          — Launch the interactive TUI
 //!   oneai run <prompt>  — Single-shot inference (stdout)
 //!   oneai studio        — Launch Studio Web UI (port 3000)
+//!   oneai embed generate <text> — Generate embedding for text
+//!   oneai embed batch <texts>   — Generate embeddings for comma-separated texts
+//!   oneai embed list              — List available embedding models
+//!   oneai embed health            — Check embedding service health
+//!   oneai embed dimension         — Show embedding dimension
 //!   oneai pack list     — List available DomainPacks
 //!   oneai pack show <n> — Show DomainPack details
 //!   oneai pack install  — Install a DomainPack
@@ -48,6 +53,7 @@ mod cmd_mcp;
 mod cmd_a2a;
 mod cmd_wasm;
 mod cmd_session;
+mod cmd_embed;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -131,6 +137,11 @@ enum Commands {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+    /// Embedding service — generate vector embeddings for text
+    Embed {
+        #[command(subcommand)]
+        action: EmbedAction,
     },
     /// Show version information
     Version,
@@ -315,6 +326,64 @@ enum SessionAction {
     },
 }
 
+#[derive(Subcommand)]
+enum EmbedAction {
+    /// Generate an embedding for a text string
+    Generate {
+        /// Text to embed
+        text: String,
+        /// Embedding model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Service type: fastembed, ollama, openai, anthropic
+        #[arg(long)]
+        service: Option<String>,
+        /// API key (required for openai/anthropic services)
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Generate embeddings for multiple comma-separated texts
+    Batch {
+        /// Comma-separated texts to embed
+        texts: String,
+        /// Embedding model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Service type: fastembed, ollama, openai, anthropic
+        #[arg(long)]
+        service: Option<String>,
+        /// API key (required for openai/anthropic services)
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// List available embedding models
+    List,
+    /// Check embedding service health
+    Health {
+        /// Embedding model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Service type: fastembed, ollama, openai, anthropic
+        #[arg(long)]
+        service: Option<String>,
+        /// API key (required for openai/anthropic services)
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Show embedding dimension for a model
+    Dimension {
+        /// Embedding model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Service type: fastembed, ollama, openai, anthropic
+        #[arg(long)]
+        service: Option<String>,
+        /// API key (required for openai/anthropic services)
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -416,6 +485,23 @@ fn main() {
                 SessionAction::Resume { id } => cmd_session::cmd_session_resume(&id),
                 SessionAction::Delete { id } => cmd_session::cmd_session_delete(&id),
                 SessionAction::Info { id } => cmd_session::cmd_session_info(&id),
+            }
+        }
+        Some(Commands::Embed { action }) => {
+            match action {
+                EmbedAction::Generate { text, model, service, api_key } => {
+                    cmd_embed::cmd_embed_generate(&text, model.as_deref(), service.as_deref(), api_key.as_deref());
+                }
+                EmbedAction::Batch { texts, model, service, api_key } => {
+                    cmd_embed::cmd_embed_batch(&texts, model.as_deref(), service.as_deref(), api_key.as_deref());
+                }
+                EmbedAction::List => cmd_embed::cmd_embed_list(),
+                EmbedAction::Health { model, service, api_key } => {
+                    cmd_embed::cmd_embed_health(model.as_deref(), service.as_deref(), api_key.as_deref());
+                }
+                EmbedAction::Dimension { model, service, api_key } => {
+                    cmd_embed::cmd_embed_dimension(model.as_deref(), service.as_deref(), api_key.as_deref());
+                }
             }
         }
         Some(Commands::Version) => {
