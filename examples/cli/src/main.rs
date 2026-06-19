@@ -48,6 +48,15 @@
 //!   oneai config show   — Show current configuration
 //!   oneai config init   — Create default config file
 //!   oneai version       — Version information
+//!   oneai handoff list  — List available handoff targets
+//!   oneai handoff targets <p> — Show handoff target descriptions
+//!   oneai handoff config [<p>] — Show handoff configuration
+//!   oneai handoff run <t> <r> — Execute a handoff
+//!   oneai swarm list   — List available swarm presets
+//!   oneai swarm routing — Show routing strategies
+//!   oneai swarm config <p> — Show swarm configuration
+//!   oneai swarm agents <p> — Show swarm agent capabilities
+//!   oneai swarm run <task> — Execute a swarm task
 
 mod config;
 mod cmd_chat;
@@ -66,6 +75,8 @@ mod cmd_cost;
 mod cmd_provider;
 mod cmd_token;
 mod cmd_team;
+mod cmd_handoff;
+mod cmd_swarm;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -174,6 +185,16 @@ enum Commands {
     Team {
         #[command(subcommand)]
         action: TeamAction,
+    },
+    /// Handoff protocol — agent handoff-as-tool-call targets and configuration
+    Handoff {
+        #[command(subcommand)]
+        action: HandoffAction,
+    },
+    /// Swarm orchestration — dynamic agent pools with capability-driven routing
+    Swarm {
+        #[command(subcommand)]
+        action: SwarmAction,
     },
     /// Show version information
     Version,
@@ -530,6 +551,65 @@ enum TeamAction {
     },
 }
 
+#[derive(Subcommand)]
+enum HandoffAction {
+    /// List available handoff targets and presets
+    List,
+    /// Show detailed handoff target descriptions for a preset
+    Targets {
+        /// Preset name (development_chain, research_chain, support_routing)
+        preset: String,
+    },
+    /// Show current handoff configuration
+    Config {
+        /// Preset name (optional — defaults to development_chain)
+        #[arg(long)]
+        preset: Option<String>,
+    },
+    /// Execute a handoff to a target agent (demo mode)
+    Run {
+        /// Target agent name
+        target: String,
+        /// Reason for handoff
+        reason: String,
+        /// Preset name (optional — defaults to development_chain)
+        #[arg(long)]
+        preset: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SwarmAction {
+    /// List available swarm presets
+    List,
+    /// Show available routing strategies with descriptions
+    Routing,
+    /// Show swarm configuration details for a preset
+    Config {
+        /// Preset name (code_analysis, fast_research, budget_code, balanced_dev)
+        preset: String,
+    },
+    /// Show agents and capabilities in a swarm preset
+    Agents {
+        /// Preset name
+        preset: String,
+    },
+    /// Execute a swarm task
+    Run {
+        /// The task to execute
+        task: String,
+        /// Routing strategy (best-fit, load-balanced, cost-optimized, fastest)
+        #[arg(long, default_value = "best-fit")]
+        routing: String,
+        /// Use a preset swarm configuration
+        #[arg(long)]
+        preset: Option<String>,
+        /// Total token budget for the swarm (default: 100000)
+        #[arg(long)]
+        budget: Option<String>,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -707,6 +787,27 @@ fn main() {
                 TeamAction::Info { id } => cmd_team::cmd_team_info(&id),
                 TeamAction::Run { task, strategy, preset, budget } => {
                     cmd_team::cmd_team_run(&task, &strategy, preset.as_deref(), budget.as_deref());
+                }
+            }
+        }
+        Some(Commands::Handoff { action }) => {
+            match action {
+                HandoffAction::List => cmd_handoff::cmd_handoff_list(),
+                HandoffAction::Targets { preset } => cmd_handoff::cmd_handoff_targets(&preset),
+                HandoffAction::Config { preset } => cmd_handoff::cmd_handoff_config(preset.as_deref()),
+                HandoffAction::Run { target, reason, preset } => {
+                    cmd_handoff::cmd_handoff_run(&target, &reason, preset.as_deref());
+                }
+            }
+        }
+        Some(Commands::Swarm { action }) => {
+            match action {
+                SwarmAction::List => cmd_swarm::cmd_swarm_list(),
+                SwarmAction::Routing => cmd_swarm::cmd_swarm_routing(),
+                SwarmAction::Config { preset } => cmd_swarm::cmd_swarm_config(&preset),
+                SwarmAction::Agents { preset } => cmd_swarm::cmd_swarm_agents(&preset),
+                SwarmAction::Run { task, routing, preset, budget } => {
+                    cmd_swarm::cmd_swarm_run(&task, &routing, preset.as_deref(), budget.as_deref());
                 }
             }
         }

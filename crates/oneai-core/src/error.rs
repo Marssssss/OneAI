@@ -102,6 +102,14 @@ pub enum OneAIError {
     #[error("Team coordination error: {0}")]
     Team(String),
 
+    /// Handoff protocol errors (handoff validation, depth exceeded, target not found, etc.).
+    #[error("Handoff error: {0}")]
+    Handoff(String),
+
+    /// Swarm orchestration errors (swarm validation, routing failures, agent not found, etc.).
+    #[error("Swarm error: {0}")]
+    Swarm(String),
+
     /// Generic errors with context.
     #[error("{0}")]
     Other(String),

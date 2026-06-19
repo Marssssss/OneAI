@@ -3,7 +3,8 @@
 //! Agent paradigms: Plan, ReAct, Reflection, Parallel execution with ScopeState isolation.
 //! New: Agentic Loop (dynamic decision-making), SubAgent delegation, streaming, prompts.
 //! Phase 1: Lifecycle Hooks, Interrupt/Resume, StructuredOutput + ModelRetry.
-//! Phase 7: Team Coordinator (multi-agent coordination patterns).
+//! Phase 7: Team Coordinator (multi-agent coordination patterns), Handoff Protocol (agent handoff-as-tool-call),
+//! Swarm Orchestrator (dynamic agent pools with capability-driven routing).
 //!
 //! E2E testing infrastructure: MockProvider, MockTool for deterministic loop verification.
 
@@ -38,6 +39,8 @@ pub mod mock_tool;
 pub mod hooks;
 pub mod structured_output;
 pub mod team;
+pub mod handoff;
+pub mod swarm;
 
 pub use scope_state::*;
 pub use react_agent::*;
@@ -58,6 +61,8 @@ pub use mock_tool::*;
 pub use hooks::*;
 pub use structured_output::*;
 pub use team::*;
+pub use handoff::*;
+pub use swarm::*;
 
 #[cfg(test)]
 mod e2e_tests;
