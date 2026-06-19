@@ -90,6 +90,10 @@ pub enum OneAIError {
     #[error("Rate limit error: {0}")]
     RateLimit(String),
 
+    /// Provider fallback errors (all providers exhausted, fallback chain failed, etc.).
+    #[error("Fallback error: {0}")]
+    Fallback(String),
+
     /// Generic errors with context.
     #[error("{0}")]
     Other(String),

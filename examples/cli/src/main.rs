@@ -39,6 +39,9 @@
 //!   oneai cost budget <max>    — Set session budget limit (USD)
 //!   oneai cost models          — List pricing for known models
 //!   oneai cost export [--format]— Export usage records (json/csv)
+//!   oneai provider status      — Show provider pool status and health
+//!   oneai provider fallback-log — Show recent fallback events
+//!   oneai provider test        — Test all providers connectivity
 //!   oneai eval list     — List available eval suites
 //!   oneai eval run <n>  — Run an eval suite
 //!   oneai eval score <n>— Run metrics only (no agent)
@@ -60,6 +63,7 @@ mod cmd_wasm;
 mod cmd_session;
 mod cmd_embed;
 mod cmd_cost;
+mod cmd_provider;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -153,6 +157,11 @@ enum Commands {
     Cost {
         #[command(subcommand)]
         action: CostAction,
+    },
+    /// Provider pool management — multi-provider fallback status and health
+    Provider {
+        #[command(subcommand)]
+        action: ProviderAction,
     },
     /// Show version information
     Version,
@@ -419,6 +428,20 @@ enum CostAction {
     },
 }
 
+#[derive(Subcommand)]
+enum ProviderAction {
+    /// Show provider pool status — active provider, health, circuit states
+    Status,
+    /// Show recent fallback events from the pool log
+    FallbackLog {
+        /// Number of events to show (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: String,
+    },
+    /// Test all providers in the pool with a connectivity check
+    Test,
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -546,6 +569,19 @@ fn main() {
                 CostAction::Budget { max_usd } => cmd_cost::cmd_cost_budget(&max_usd),
                 CostAction::Models => cmd_cost::cmd_cost_models(),
                 CostAction::Export { format } => cmd_cost::cmd_cost_export(&format),
+            }
+        }
+        Some(Commands::Provider { action }) => {
+            match action {
+                ProviderAction::Status => {
+                    cmd_provider::run_provider_status();
+                }
+                ProviderAction::FallbackLog { limit } => {
+                    cmd_provider::run_fallback_log_with_limit(&limit);
+                }
+                ProviderAction::Test => {
+                    cmd_provider::run_provider_test();
+                }
             }
         }
         Some(Commands::Version) => {

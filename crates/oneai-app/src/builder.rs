@@ -17,6 +17,9 @@ use oneai_core::cost::{CostTracker, InMemoryCostTracker, ModelPricingCatalog, Co
 use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
 use oneai_core::circuit_breaker::{CircuitBreaker, ThresholdCircuitBreaker, CircuitBreakerConfig};
 use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
+use oneai_core::ProviderPoolConfig;
+
+use oneai_provider::{ProviderPool, ProviderEntry};
 
 use oneai_tool::{ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate, ChannelApprovalGateWithThreshold};
 use oneai_memory::{MemoryManager, MemoryManagerConfig};
@@ -106,6 +109,10 @@ pub struct AppBuilder {
     rate_limit_config: Option<RateLimitConfig>,
     /// Circuit breaker config (optional — for auto-creating circuit breaker).
     circuit_breaker_config: Option<CircuitBreakerConfig>,
+    /// Provider pool (optional — enables multi-provider fallback).
+    provider_pool: Option<Arc<ProviderPool>>,
+    /// Provider pool config (optional — for auto-creating provider pool).
+    provider_pool_config: Option<ProviderPoolConfig>,
 }
 
 impl AppBuilder {
@@ -143,6 +150,8 @@ impl AppBuilder {
             cost_budget: None,
             rate_limit_config: None,
             circuit_breaker_config: None,
+            provider_pool: None,
+            provider_pool_config: None,
         }
     }
 
@@ -731,6 +740,93 @@ impl AppBuilder {
         self
     }
 
+    // ─── Provider Pool (Multi-Provider Fallback) ────────────────────────────────
+
+    /// Set a provider pool for multi-provider fallback orchestration.
+    ///
+    /// When a primary provider fails (network errors, API errors, timeouts,
+    /// circuit breaker opens, rate limits exceeded), the pool automatically
+    /// falls over to alternative providers without manual intervention.
+    ///
+    /// ProviderPool implements `LlmProvider`, so it replaces the single
+    /// provider in the App. If both `provider()` and `provider_pool()` are
+    /// set, the pool takes precedence.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let pool = ProviderPool::new(
+    ///     vec![
+    ///         ProviderEntry::new("anthropic", anthropic_provider, 0),
+    ///         ProviderEntry::new("openai", openai_provider, 1),
+    ///         ProviderEntry::new("ollama", ollama_provider, 2),
+    ///     ],
+    ///     ProviderPoolConfig::default(),
+    /// ).with_circuit_breaker(cb).with_rate_limiter(rl).with_cost_tracker(ct);
+    ///
+    /// let app = AppBuilder::new()
+    ///     .provider_pool(Arc::new(pool))  // ← enable multi-provider fallback
+    ///     .build()?;
+    /// ```
+    pub fn provider_pool(mut self, pool: Arc<ProviderPool>) -> Self {
+        self.provider_pool = Some(pool);
+        self
+    }
+
+    /// Configure provider pool settings (for auto-creation at build time).
+    ///
+    /// The pool is created at build time using the given configuration.
+    /// If a circuit breaker, rate limiter, or cost tracker are also
+    /// configured, they are automatically wired into the pool.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let config = ProviderPoolConfig::anthropic_primary(
+    ///     Some(std::env::var("ANTHROPIC_API_KEY").ok()),
+    ///     Some(std::env::var("OPENAI_API_KEY").ok()),
+    /// );
+    ///
+    /// let app = AppBuilder::new()
+    ///     .provider_pool_config(config)  // ← configure pool
+    ///     .default_circuit_breaker()     // ← wire into pool
+    ///     .default_rate_limiter()        // ← wire into pool
+    ///     .default_cost_tracker()        // ← wire into pool
+    ///     .build()?;
+    /// ```
+    pub fn provider_pool_config(mut self, config: ProviderPoolConfig) -> Self {
+        self.provider_pool_config = Some(config);
+        self
+    }
+
+    /// Use the default Anthropic-primary provider pool.
+    ///
+    /// Creates a fallback chain: Anthropic Sonnet → OpenAI gpt-4o → Ollama qwen2.5.
+    /// API keys are read from environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY).
+    /// Ollama is always available if the local server is running.
+    pub fn default_provider_pool_anthropic(self) -> Self {
+        let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        self.provider_pool_config(ProviderPoolConfig::anthropic_primary(anthropic_key, openai_key))
+    }
+
+    /// Use the default OpenAI-primary provider pool.
+    ///
+    /// Creates a fallback chain: OpenAI gpt-4o → Anthropic Sonnet → Ollama qwen2.5.
+    pub fn default_provider_pool_openai(self) -> Self {
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        self.provider_pool_config(ProviderPoolConfig::openai_primary(openai_key, anthropic_key))
+    }
+
+    /// Use the default local-first provider pool.
+    ///
+    /// Creates a fallback chain: Ollama → OpenAI gpt-4o-mini → Anthropic Haiku.
+    /// Best for offline-first or low-cost scenarios.
+    pub fn default_provider_pool_local_first(self) -> Self {
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+        let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        self.provider_pool_config(ProviderPoolConfig::local_first(openai_key, anthropic_key))
+    }
+
     // ─── SQLite Persistence ────────────────────────────────────────────────
 
     /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
@@ -1055,6 +1151,32 @@ impl AppBuilder {
             })
         });
 
+        // Resolve provider pool: use explicitly set pool, or auto-create from config
+        // If a pool is created, it replaces the single provider (pool implements LlmProvider)
+        let provider_pool = self.provider_pool.or_else(|| {
+            self.provider_pool_config.map(|config| {
+                let pool = ProviderPool::from_config(config);
+                // Wire circuit breaker, rate limiter, cost tracker into the pool
+                let mut pool = pool;
+                if let Some(cb) = &circuit_breaker {
+                    pool = pool.with_circuit_breaker(cb.clone());
+                }
+                if let Some(rl) = &rate_limiter {
+                    pool = pool.with_rate_limiter(rl.clone());
+                }
+                if let Some(ct) = &cost_tracker {
+                    pool = pool.with_cost_tracker(ct.clone());
+                }
+                Arc::new(pool)
+            })
+        });
+
+        // If a provider pool is configured, use it as the provider
+        // (pool implements LlmProvider, so it's a drop-in replacement)
+        let provider = self.provider.or_else(|| {
+            provider_pool.clone().map(|pool| pool as Arc<dyn LlmProvider>)
+        });
+
         // Resolve pricing catalog: use explicitly set catalog, or default
         let pricing_catalog = self.pricing_catalog.or_else(|| {
             Some(ModelPricingCatalog::with_known_models())
@@ -1063,7 +1185,7 @@ impl AppBuilder {
         let platform = self.platform.unwrap_or(Platform::current());
 
         Ok(App {
-            provider: self.provider,
+            provider,
             tool_registry: self.tool_registry,
             tool_executor,
             approval_gate,
@@ -1092,6 +1214,7 @@ impl AppBuilder {
             rate_limiter,
             circuit_breaker,
             pricing_catalog,
+            provider_pool,
         })
     }
 }
@@ -1158,6 +1281,8 @@ pub struct App {
     pub circuit_breaker: Option<Arc<dyn CircuitBreaker>>,
     /// Model pricing catalog (optional — for per-model cost computation).
     pub pricing_catalog: Option<ModelPricingCatalog>,
+    /// Provider pool (optional — for multi-provider fallback orchestration).
+    pub provider_pool: Option<Arc<ProviderPool>>,
 }
 
 impl App {
@@ -1289,6 +1414,11 @@ impl App {
     /// Get the model pricing catalog (for per-model cost computation).
     pub fn pricing_catalog(&self) -> Option<&ModelPricingCatalog> {
         self.pricing_catalog.as_ref()
+    }
+
+    /// Get the provider pool (for multi-provider fallback orchestration).
+    pub fn provider_pool(&self) -> Option<&Arc<ProviderPool>> {
+        self.provider_pool.as_ref()
     }
 }
 
