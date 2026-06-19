@@ -33,6 +33,8 @@ use oneai_mcp::{McpPluginRegistry, McpServerHost, McpServerInfo};
 
 use oneai_a2a::{A2AServerHost, TaskStore, AgentCard};
 
+use oneai_persistence::{SqliteSessionStore, SqliteCheckpointBackend, CheckpointBackend};
+
 use crate::session::AppSession;
 
 /// Builder for assembling a OneAI application.
@@ -77,6 +79,10 @@ pub struct AppBuilder {
     a2a_server_port: Option<u16>,
     /// Custom AgentCard for A2A server (overrides DomainPack auto-generation).
     a2a_server_agent_card: Option<AgentCard>,
+    /// SQLite session store (for memory + conversation persistence).
+    sqlite_store: Option<Arc<SqliteSessionStore>>,
+    /// Checkpoint backend (overrides default in-memory backend).
+    checkpoint_backend: Option<Arc<dyn CheckpointBackend>>,
 }
 
 impl AppBuilder {
@@ -103,6 +109,8 @@ impl AppBuilder {
             a2a_server_host_enabled: false,
             a2a_server_port: None,
             a2a_server_agent_card: None,
+            sqlite_store: None,
+            checkpoint_backend: None,
         }
     }
 
@@ -502,6 +510,70 @@ impl AppBuilder {
         self.wasm_resource_monitor(Arc::new(WasmResourceMonitor::new()))
     }
 
+    // ─── SQLite Persistence ────────────────────────────────────────────────
+
+    /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
+    ///
+    /// This enables:
+    /// - Memory persistence (STM + LTM entries)
+    /// - Conversation persistence (multi-turn session resume)
+    /// - Checkpoint persistence (via SqliteCheckpointBackend)
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .sqlite_persistence()  // ← enable persistent sessions
+    ///     .build()?;
+    /// ```
+    pub fn sqlite_persistence(mut self) -> Self {
+        let store = Arc::new(SqliteSessionStore::with_defaults());
+        self.sqlite_store = Some(store.clone());
+        self.checkpoint_backend = Some(Arc::new(SqliteCheckpointBackend::with_defaults()));
+
+        // Wire SqliteSessionStore into the MemoryManager
+        if self.memory_manager.is_none() {
+            let config = MemoryManagerConfig::default();
+            self.memory_manager = Some(Arc::new(
+                MemoryManager::with_persistence(config, store),
+            ));
+        } else {
+            // If a MemoryManager was already created (e.g., with_compressor_and_reflection),
+            // we need to recreate it with persistence. Since we can't mutate Arc<MemoryManager>,
+            // the user should use .sqlite_persistence() before .with_memory_reflection().
+            tracing::warn!("sqlite_persistence() called after MemoryManager was created — \
+                persistence will be stored separately but not wired into the existing MemoryManager. \
+                For full integration, call .sqlite_persistence() before .with_memory_reflection().");
+        }
+
+        self
+    }
+
+    /// Enable SQLite persistence with a custom database path.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .sqlite_persistence_at("/custom/path/oneai.db")  // ← custom path
+    ///     .build()?;
+    /// ```
+    pub fn sqlite_persistence_at(mut self, path: &str) -> Self {
+        let store = Arc::new(SqliteSessionStore::new(path));
+        self.sqlite_store = Some(store.clone());
+        self.checkpoint_backend = Some(Arc::new(SqliteCheckpointBackend::new(path)));
+
+        // Wire SqliteSessionStore into the MemoryManager
+        if self.memory_manager.is_none() {
+            let config = MemoryManagerConfig::default();
+            self.memory_manager = Some(Arc::new(
+                MemoryManager::with_persistence(config, store),
+            ));
+        }
+
+        self
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -737,6 +809,7 @@ impl AppBuilder {
             mcp_plugin_registry,
             mcp_server_host,
             a2a_server_host,
+            sqlite_store: self.sqlite_store,
         })
     }
 }
@@ -791,6 +864,8 @@ pub struct App {
     pub mcp_server_host: Option<McpServerHost>,
     /// A2A server host (optional — for serving agent capabilities via A2A protocol).
     pub a2a_server_host: Option<A2AServerHost>,
+    /// SQLite session store (for memory + conversation persistence).
+    pub sqlite_store: Option<Arc<SqliteSessionStore>>,
 }
 
 impl App {

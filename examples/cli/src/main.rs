@@ -25,6 +25,10 @@
 //!   oneai wasm health    — Check WASM module health
 //!   oneai wasm unload <n>— Unload a WASM module
 //!   oneai wasm stats     — Show resource monitor statistics
+//!   oneai session list   — List all saved sessions
+//!   oneai session resume <id> — Resume a saved session
+//!   oneai session delete <id> — Delete a session
+//!   oneai session info <id>   — Show session details
 //!   oneai eval list     — List available eval suites
 //!   oneai eval run <n>  — Run an eval suite
 //!   oneai eval score <n>— Run metrics only (no agent)
@@ -43,6 +47,7 @@ mod cmd_studio;
 mod cmd_mcp;
 mod cmd_a2a;
 mod cmd_wasm;
+mod cmd_session;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -121,6 +126,11 @@ enum Commands {
     Wasm {
         #[command(subcommand)]
         action: WasmAction,
+    },
+    /// Manage saved sessions (requires SQLite persistence)
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
     },
     /// Show version information
     Version,
@@ -284,6 +294,27 @@ enum WasmAction {
     Stats,
 }
 
+#[derive(Subcommand)]
+enum SessionAction {
+    /// List all saved sessions
+    List,
+    /// Resume a saved session (show conversation history)
+    Resume {
+        /// Session ID to resume
+        id: String,
+    },
+    /// Delete a saved session
+    Delete {
+        /// Session ID to delete
+        id: String,
+    },
+    /// Show detailed info about a session
+    Info {
+        /// Session ID to inspect
+        id: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -377,6 +408,14 @@ fn main() {
                 }
                 WasmAction::Unload { name } => cmd_wasm::cmd_wasm_unload(&name),
                 WasmAction::Stats => cmd_wasm::cmd_wasm_stats(),
+            }
+        }
+        Some(Commands::Session { action }) => {
+            match action {
+                SessionAction::List => cmd_session::cmd_session_list(),
+                SessionAction::Resume { id } => cmd_session::cmd_session_resume(&id),
+                SessionAction::Delete { id } => cmd_session::cmd_session_delete(&id),
+                SessionAction::Info { id } => cmd_session::cmd_session_info(&id),
             }
         }
         Some(Commands::Version) => {

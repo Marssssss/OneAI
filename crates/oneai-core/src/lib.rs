@@ -1,7 +1,7 @@
 //! # OneAI Core
 //!
 //! Core types, traits, and abstractions for the OneAI Agent framework.
-//! New: budget management, PermissionLevel, platform capabilities.
+//! New: budget management, PermissionLevel, platform capabilities, MemoryPersistence.
 
 //! # Stability
 //!

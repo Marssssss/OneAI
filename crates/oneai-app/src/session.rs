@@ -16,6 +16,8 @@ use oneai_tool::ToolExecutor;
 use oneai_rag::{DocumentIndex, assemble_context};
 use oneai_workflow::{WorkflowConfig, WorkflowExecutor, WorkflowResult, StateGraph, GraphExecutionResult, StateGraphExecutor, NoopDelegateFactory, render_dag_ascii, render_state_graph_ascii};
 use oneai_persistence::FilePersistence;
+use oneai_persistence::SqliteSessionStore;
+use oneai_core::traits::MemoryPersistence;
 use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
 
 use tokio::sync::Mutex;
@@ -77,6 +79,8 @@ struct AppResources {
     parser: Arc<dyn oneai_core::traits::OutputParser>,
     skill_selector: Arc<oneai_skill::SkillSelector>,
     domain_pack: Option<Arc<oneai_domain::MergedDomainPack>>,
+    /// SQLite session store (for memory + conversation persistence).
+    sqlite_store: Option<Arc<SqliteSessionStore>>,
 }
 
 impl AppSession {
@@ -109,6 +113,7 @@ impl AppSession {
                 parser: app.parser.clone(),
                 skill_selector: app.skill_selector.clone(),
                 domain_pack: app.domain_pack.clone(),
+                sqlite_store: app.sqlite_store.clone(),
             }),
             conversation,
             session_id,
@@ -558,6 +563,15 @@ impl AppSession {
 
         // Merge the loop's conversation back into the session
         self.conversation = result.conversation.clone();
+
+        // ─── Auto-save session to SQLite ──────────────────────────────
+        // If SQLite persistence is enabled, save the conversation and STM
+        // after each agent run. This enables session resume on restart.
+        if let Some(sqlite) = &self.app.sqlite_store {
+            if let Err(e) = self.app.memory_manager.save_session(&self.session_id, &self.conversation).await {
+                tracing::warn!("Failed to auto-save session '{}': {}", self.session_id, e);
+            }
+        }
 
         // ─── STM↔LTM Closed Loop: Memory Reflection ──────────────
         // At session end, reflect on the STM entries and generate

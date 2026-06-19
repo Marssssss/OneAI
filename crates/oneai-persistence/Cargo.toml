@@ -1,6 +1,6 @@
 [package]
 name = "oneai-persistence"
-description = "OneAI state persistence and checkpoint management"
+description = "OneAI state persistence and checkpoint management — SQLite session store, STM/LTM/conversation persistence"
 version.workspace = true
 edition.workspace = true
 

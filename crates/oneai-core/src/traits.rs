@@ -414,6 +414,97 @@ pub struct VectorSearchResult {
     pub metadata: HashMap<String, String>,
 }
 
+// ─── MemoryPersistence ─────────────────────────────────────────────────────
+
+/// Trait for persisting and restoring memory and conversation state.
+///
+/// Enables SQLite (or other) backends to store STM entries, LTM entries,
+/// and conversation history, allowing session resume and knowledge accumulation
+/// across application restarts.
+///
+/// This addresses the critical gap where all memory is purely in-memory
+/// (HashMap, VecDeque) and lost on restart. With a MemoryPersistence backend,
+/// the agent framework becomes truly usable for production scenarios.
+#[async_trait]
+pub trait MemoryPersistence: Send + Sync {
+    /// Save STM entries for a session (bulk operation).
+    async fn save_stm(&self, session_id: &str, entries: &[MemoryEntry]) -> Result<()>;
+
+    /// Load STM entries for a session (ordered by position in the sliding window).
+    async fn load_stm(&self, session_id: &str) -> Result<Vec<MemoryEntry>>;
+
+    /// Clear STM entries for a session.
+    async fn clear_stm(&self, session_id: &str) -> Result<()>;
+
+    /// Save a single LTM entry.
+    async fn save_ltm(&self, entry: &MemoryEntry) -> Result<()>;
+
+    /// Load a LTM entry by ID.
+    async fn load_ltm(&self, id: &str) -> Result<Option<MemoryEntry>>;
+
+    /// Search LTM by keyword (case-insensitive substring match).
+    async fn search_ltm_keyword(&self, keyword: &str, top_k: usize) -> Result<Vec<MemoryEntry>>;
+
+    /// Search LTM by embedding (cosine similarity against stored embeddings).
+    ///
+    /// Loads entries with embeddings from storage, computes brute-force cosine
+    /// similarity in Rust (acceptable for <10K entries), and returns the top_k
+    /// most similar entries with their scores.
+    async fn search_ltm_embedding(&self, query: &[f32], top_k: usize) -> Result<Vec<(MemoryEntry, f32)>>;
+
+    /// Delete a LTM entry by ID.
+    async fn delete_ltm(&self, id: &str) -> Result<()>;
+
+    /// Clear all LTM entries.
+    async fn clear_ltm(&self) -> Result<()>;
+
+    /// Save a conversation (message history for multi-turn sessions).
+    async fn save_conversation(&self, id: &str, conversation: &Conversation) -> Result<()>;
+
+    /// Load a conversation by ID.
+    async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>>;
+
+    /// List all saved conversations (metadata only, not full message history).
+    async fn list_conversations(&self) -> Result<Vec<SessionInfo>>;
+
+    /// Delete a conversation and its associated STM entries by ID.
+    async fn delete_conversation(&self, id: &str) -> Result<()>;
+}
+
+// ─── SessionInfo ────────────────────────────────────────────────────────────
+
+/// Metadata about a saved conversation session.
+///
+/// Used by `MemoryPersistence::list_conversations()` to return summary
+/// information without loading the full message history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionInfo {
+    /// The session/conversation ID.
+    pub id: String,
+
+    /// When the session was first created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+
+    /// When the session was last updated (last message timestamp).
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+
+    /// Number of messages in the conversation.
+    pub message_count: usize,
+}
+
+impl SessionInfo {
+    /// Create a new SessionInfo with the given fields.
+    pub fn new(
+        id: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        message_count: usize,
+    ) -> Self {
+        Self { id, created_at, updated_at, message_count }
+    }
+}
+
 // ─── Re-export serde_json for trait definitions ──────────────────────────────
 
 use serde::{Deserialize, Serialize};
