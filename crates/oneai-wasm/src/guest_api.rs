@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use wasmtime::Linker;
 
 use crate::error::{WasmError, Result};
-use crate::runtime::WasmHostState;
+use crate::runtime::{WasmHostState, WasmStoreState};
 
 /// Host function types available to WASM guests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl Default for WasmGuestApi {
 /// Read a string from WASM linear memory using ptr + len.
 /// Takes a mutable caller to allow access to exports.
 fn read_string_from_memory(
-    caller: &mut wasmtime::Caller<'_, WasmHostState>,
+    caller: &mut wasmtime::Caller<'_, WasmStoreState>,
     ptr: u32,
     len: u32,
 ) -> Option<String> {
@@ -125,12 +125,12 @@ fn read_string_from_memory(
 ///
 /// Each host function reads from the guest's linear memory using
 /// the standard ptr + len WASM protocol.
-pub fn register_host_functions(linker: &mut Linker<WasmHostState>) -> Result<()> {
+pub fn register_host_functions(linker: &mut Linker<WasmStoreState>) -> Result<()> {
     // ─── host_log(level: u32, msg_ptr: u32, msg_len: u32) → void ────
     linker.func_wrap(
         "oneai",
         "host_log",
-        |mut caller: wasmtime::Caller<'_, WasmHostState>, level: u32, msg_ptr: u32, msg_len: u32| {
+        |mut caller: wasmtime::Caller<'_, WasmStoreState>, level: u32, msg_ptr: u32, msg_len: u32| {
             let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
                 Some(s) => s,
                 None => return,
@@ -153,18 +153,18 @@ pub fn register_host_functions(linker: &mut Linker<WasmHostState>) -> Result<()>
     linker.func_wrap(
         "oneai",
         "host_get_env",
-        |mut caller: wasmtime::Caller<'_, WasmHostState>, key_ptr: u32, key_len: u32| -> (u32, u32) {
+        |mut caller: wasmtime::Caller<'_, WasmStoreState>, key_ptr: u32, key_len: u32| -> (u32, u32) {
             let key = match read_string_from_memory(&mut caller, key_ptr, key_len) {
                 Some(s) => s,
                 None => return (0, 0),
             };
 
             // Look up in the whitelist and clone value before mutation
-            let val = caller.data().get_env(&key).cloned();
+            let val = caller.data().host_state().get_env(&key).cloned();
             match val {
                 Some(val_str) => {
                     let val_len = val_str.len() as u32;
-                    caller.data_mut().set_output(val_str.into_bytes());
+                    caller.data_mut().host_state_mut().set_output(val_str.into_bytes());
                     (1, val_len)
                 }
                 None => (0, 0),
@@ -176,14 +176,14 @@ pub fn register_host_functions(linker: &mut Linker<WasmHostState>) -> Result<()>
     linker.func_wrap(
         "oneai",
         "host_abort",
-        |mut caller: wasmtime::Caller<'_, WasmHostState>, msg_ptr: u32, msg_len: u32| {
+        |mut caller: wasmtime::Caller<'_, WasmStoreState>, msg_ptr: u32, msg_len: u32| {
             let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
                 Some(s) => s,
                 None => "unknown abort reason".to_string(),
             };
 
             tracing::warn!("WASM guest aborted: {}", msg);
-            caller.data_mut().set_output(format!("Guest aborted: {}", msg).into_bytes());
+            caller.data_mut().host_state_mut().set_output(format!("Guest aborted: {}", msg).into_bytes());
         },
     ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_abort: {}", e)))?;
 
@@ -192,20 +192,20 @@ pub fn register_host_functions(linker: &mut Linker<WasmHostState>) -> Result<()>
 
 /// Register a subset of host functions based on the WasmGuestApi configuration.
 pub fn register_host_functions_with_api(
-    linker: &mut Linker<WasmHostState>,
+    linker: &mut Linker<WasmStoreState>,
     api: &WasmGuestApi,
 ) -> Result<()> {
     // Always register abort — it's the guest's only error mechanism
     linker.func_wrap(
         "oneai",
         "host_abort",
-        |mut caller: wasmtime::Caller<'_, WasmHostState>, msg_ptr: u32, msg_len: u32| {
+        |mut caller: wasmtime::Caller<'_, WasmStoreState>, msg_ptr: u32, msg_len: u32| {
             let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
                 Some(s) => s,
                 None => "unknown abort reason".to_string(),
             };
             tracing::warn!("WASM guest aborted: {}", msg);
-            caller.data_mut().set_output(format!("Guest aborted: {}", msg).into_bytes());
+            caller.data_mut().host_state_mut().set_output(format!("Guest aborted: {}", msg).into_bytes());
         },
     ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_abort: {}", e)))?;
 
@@ -213,7 +213,7 @@ pub fn register_host_functions_with_api(
         linker.func_wrap(
             "oneai",
             "host_log",
-            |mut caller: wasmtime::Caller<'_, WasmHostState>, level: u32, msg_ptr: u32, msg_len: u32| {
+            |mut caller: wasmtime::Caller<'_, WasmStoreState>, level: u32, msg_ptr: u32, msg_len: u32| {
                 let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
                     Some(s) => s,
                     None => return,
@@ -233,16 +233,16 @@ pub fn register_host_functions_with_api(
         linker.func_wrap(
             "oneai",
             "host_get_env",
-            |mut caller: wasmtime::Caller<'_, WasmHostState>, key_ptr: u32, key_len: u32| -> (u32, u32) {
+            |mut caller: wasmtime::Caller<'_, WasmStoreState>, key_ptr: u32, key_len: u32| -> (u32, u32) {
                 let key = match read_string_from_memory(&mut caller, key_ptr, key_len) {
                     Some(s) => s,
                     None => return (0, 0),
                 };
-                let val = caller.data().get_env(&key).cloned();
+                let val = caller.data().host_state().get_env(&key).cloned();
                 match val {
                     Some(val_str) => {
                         let val_len = val_str.len() as u32;
-                        caller.data_mut().set_output(val_str.into_bytes());
+                        caller.data_mut().host_state_mut().set_output(val_str.into_bytes());
                         (1, val_len)
                     }
                     None => (0, 0),

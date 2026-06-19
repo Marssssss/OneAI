@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::config::WasmRuntimeConfig;
 use crate::error::{WasmError, Result};
 use crate::runtime::WasmRuntime;
-use crate::runtime::WasmHostState;
+use crate::runtime::WasmStoreState;
 use crate::tool::{WasmTool, WasmToolMetadata};
 
 /// WASM module manager — loading, caching, and lifecycle.
@@ -165,7 +165,7 @@ impl WasmModuleManager {
     /// of the string in the guest's linear memory.
     fn read_string_export(
         &self,
-        store: &mut wasmtime::Store<WasmHostState>,
+        store: &mut wasmtime::Store<WasmStoreState>,
         instance: &wasmtime::Instance,
         export_name: &str,
     ) -> Result<String> {

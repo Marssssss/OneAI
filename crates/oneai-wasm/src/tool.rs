@@ -12,7 +12,7 @@ use oneai_core::error::Result;
 use oneai_core::traits::Tool;
 
 use crate::error::WasmError;
-use crate::runtime::{WasmRuntime, WasmHostState};
+use crate::runtime::{WasmRuntime, WasmStoreState};
 
 /// Pre-extracted metadata for a WASM tool.
 #[derive(Debug, Clone)]
@@ -38,6 +38,15 @@ pub struct WasmTool {
     metadata: WasmToolMetadata,
     /// Reference to the WASM runtime.
     runtime: Arc<WasmRuntime>,
+}
+
+impl std::fmt::Debug for WasmTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmTool")
+            .field("module_name", &self.module_name)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl WasmTool {

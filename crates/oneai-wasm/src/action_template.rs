@@ -1,27 +1,50 @@
 //! WasmActionTemplate — predefined WASM templates for code-as-action execution.
 //!
-//! Phase 2 uses a template-based approach rather than a full Rust→WASM compiler:
-//! - Pre-compiled WASM modules for common computation patterns
-//! - Agent selects template + fills parameters → WASM sandbox execution
-//! - This provides the safety benefits of code-as-action without the
-//!   complexity of an in-process WASM compiler
-//!
 //! Available templates:
 //! - **Compute**: Mathematical expression evaluation (arithmetic, trigonometry, etc.)
 //! - **Sort**: Data sorting (ascending, descending, by key)
 //! - **Filter**: Data filtering (conditional, regex, threshold)
 //! - **Extract**: JSON data extraction (path-based, key-based)
 //!
-//! Future Phase 3/4 can extend this with a full WASM compiler service
-//! for arbitrary Rust/Python → WASM code-as-action.
+//! ## Execution Modes
+//!
+//! Templates can run in two modes:
+//! - **Native** (default): Pure Rust execution, always available
+//! - **Wasm**: Execution via WASM sandbox using pre-compiled bytes (future)
+//!
+//! When WASM mode is selected but no pre-compiled bytes are available,
+//! execution falls back to native mode transparently.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use oneai_core::{RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
 
-use crate::config::WasmRuntimeConfig;
 use crate::runtime::WasmRuntime;
+
+/// Execution mode for WASM action templates.
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum WasmActionExecutionMode {
+    /// Native Rust execution (always available, no WASM sandbox).
+    Native,
+    /// WASM sandbox execution (requires pre-compiled bytes, falls back to Native if unavailable).
+    Wasm {
+        /// Reference to the WASM runtime.
+        runtime: Arc<WasmRuntime>,
+    },
+}
+
+impl std::fmt::Debug for WasmActionExecutionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WasmActionExecutionMode::Native => write!(f, "Native"),
+            WasmActionExecutionMode::Wasm { .. } => write!(f, "Wasm {{ runtime: ... }}"),
+        }
+    }
+}
 
 /// Available WASM action template kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,22 +178,38 @@ impl WasmActionKind {
 /// WASM action template — a predefined computation pattern.
 ///
 /// Each template has a Rust-native implementation that can be
-/// executed directly (without WASM compilation) for simplicity
-/// in Phase 2. The execution is still "sandboxed" conceptually —
-/// these templates perform pure computation with no I/O side effects.
+/// executed directly (Native mode, always available) or via the
+/// WASM sandbox (Wasm mode, future — requires pre-compiled bytes).
 ///
-/// In future phases, templates can be backed by actual WASM modules
-/// compiled from Rust/C/AssemblyScript source.
+/// Native mode provides "sandboxed" conceptual execution — these templates
+/// perform pure computation with no I/O side effects.
+///
+/// In Wasm mode, templates attempt execution via pre-compiled WASM bytes.
+/// If no bytes are available (not yet compiled), execution falls back to
+/// Native mode transparently.
 #[derive(Debug, Clone)]
 pub struct WasmActionTemplate {
     /// The action kind (compute, sort, filter, extract).
     kind: WasmActionKind,
+    /// Execution mode (native or WASM).
+    mode: WasmActionExecutionMode,
 }
 
 impl WasmActionTemplate {
-    /// Create a template for the given action kind.
+    /// Create a template for the given action kind (Native mode).
     pub fn new(kind: WasmActionKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            mode: WasmActionExecutionMode::Native,
+        }
+    }
+
+    /// Create a template with WASM execution mode.
+    pub fn with_wasm(kind: WasmActionKind, runtime: Arc<WasmRuntime>) -> Self {
+        Self {
+            kind,
+            mode: WasmActionExecutionMode::Wasm { runtime },
+        }
     }
 
     /// Get the action kind.
@@ -178,11 +217,63 @@ impl WasmActionTemplate {
         &self.kind
     }
 
+    /// Get the execution mode.
+    pub fn mode(&self) -> &WasmActionExecutionMode {
+        &self.mode
+    }
+
     /// Execute the template with the given arguments.
     ///
-    /// Phase 2 implementation: native Rust execution for pure computation.
-    /// Future: WASM module execution via WasmRuntime.
-    pub fn execute_native(&self, args: serde_json::Value) -> ToolOutput {
+    /// In Native mode: executes the template logic in Rust directly.
+    /// In Wasm mode: attempts WASM execution first; falls back to Native
+    /// if pre-compiled bytes are not available.
+    pub fn execute(&self, args: serde_json::Value) -> ToolOutput {
+        match &self.mode {
+            WasmActionExecutionMode::Native => self.execute_native(args),
+            WasmActionExecutionMode::Wasm { runtime } => {
+                // Try WASM execution; fall back to native if bytes not available
+                let args_clone = args.clone();
+                match self.execute_wasm(args, runtime) {
+                    Ok(output) => output,
+                    Err(_) => self.execute_native(args_clone),
+                }
+            }
+        }
+    }
+
+    /// Get pre-compiled WASM bytes for this template kind (if available).
+    ///
+    /// Currently returns None for all templates — pre-compiled WASM modules
+    /// will be added via `include_bytes!()` when the Rust→WASM compilation
+    /// pipeline is set up.
+    fn wasm_bytes(&self) -> Option<&'static [u8]> {
+        match self.kind {
+            WasmActionKind::Compute => None,
+            WasmActionKind::Sort => None,
+            WasmActionKind::Filter => None,
+            WasmActionKind::Extract => None,
+        }
+    }
+
+    /// Execute via WASM sandbox (attempt WASM, fallback on failure).
+    fn execute_wasm(&self, _args: serde_json::Value, runtime: &Arc<WasmRuntime>) -> std::result::Result<ToolOutput, crate::error::WasmError> {
+        let bytes = self.wasm_bytes()
+            .ok_or_else(|| crate::error::WasmError::ModuleNotFound(format!(
+                "No pre-compiled WASM bytes for template '{}'", self.kind.template_name()
+            )))?;
+
+        // For now, this always returns Err because wasm_bytes() returns None.
+        // When pre-compiled bytes are added, this will:
+        // 1. Compile the bytes to a Module via runtime.compile_module()
+        // 2. Instantiate and execute in sandbox
+        // 3. Parse the output
+        Err(crate::error::WasmError::ModuleNotFound(format!(
+            "Pre-compiled WASM bytes not yet available for '{}'", self.kind.template_name()
+        )))
+    }
+
+    /// Execute using native Rust implementation.
+    fn execute_native(&self, args: serde_json::Value) -> ToolOutput {
         match self.kind {
             WasmActionKind::Compute => self.execute_compute(args),
             WasmActionKind::Sort => self.execute_sort(args),
@@ -350,43 +441,78 @@ impl WasmActionTemplate {
 /// This is the Tool trait implementation that the AgentLoop can call.
 /// It selects the appropriate template based on the tool name and
 /// executes it with the given arguments.
-///
-/// Phase 2: Uses native Rust execution (pure computation, no I/O).
-/// Future: Will use actual WASM module execution via WasmRuntime.
 pub struct WasmActionTool {
     /// The action template kind.
     kind: WasmActionKind,
+    /// Execution mode.
+    mode: WasmActionExecutionMode,
 }
 
 impl WasmActionTool {
-    /// Create a compute action tool.
+    /// Create a compute action tool (Native mode).
     pub fn compute() -> Self {
-        Self { kind: WasmActionKind::Compute }
+        Self { kind: WasmActionKind::Compute, mode: WasmActionExecutionMode::Native }
     }
 
-    /// Create a sort action tool.
+    /// Create a sort action tool (Native mode).
     pub fn sort() -> Self {
-        Self { kind: WasmActionKind::Sort }
+        Self { kind: WasmActionKind::Sort, mode: WasmActionExecutionMode::Native }
     }
 
-    /// Create a filter action tool.
+    /// Create a filter action tool (Native mode).
     pub fn filter() -> Self {
-        Self { kind: WasmActionKind::Filter }
+        Self { kind: WasmActionKind::Filter, mode: WasmActionExecutionMode::Native }
     }
 
-    /// Create an extract action tool.
+    /// Create an extract action tool (Native mode).
     pub fn extract() -> Self {
-        Self { kind: WasmActionKind::Extract }
+        Self { kind: WasmActionKind::Extract, mode: WasmActionExecutionMode::Native }
     }
 
-    /// Create all WASM action tools.
+    /// Create a compute action tool (Wasm mode).
+    pub fn compute_wasm(runtime: Arc<WasmRuntime>) -> Self {
+        Self { kind: WasmActionKind::Compute, mode: WasmActionExecutionMode::Wasm { runtime } }
+    }
+
+    /// Create a sort action tool (Wasm mode).
+    pub fn sort_wasm(runtime: Arc<WasmRuntime>) -> Self {
+        Self { kind: WasmActionKind::Sort, mode: WasmActionExecutionMode::Wasm { runtime } }
+    }
+
+    /// Create a filter action tool (Wasm mode).
+    pub fn filter_wasm(runtime: Arc<WasmRuntime>) -> Self {
+        Self { kind: WasmActionKind::Filter, mode: WasmActionExecutionMode::Wasm { runtime } }
+    }
+
+    /// Create an extract action tool (Wasm mode).
+    pub fn extract_wasm(runtime: Arc<WasmRuntime>) -> Self {
+        Self { kind: WasmActionKind::Extract, mode: WasmActionExecutionMode::Wasm { runtime } }
+    }
+
+    /// Create all WASM action tools (Native mode).
     pub fn all() -> Vec<Self> {
-        WasmActionKind::all().iter().map(|kind| Self { kind: kind.clone() }).collect()
+        WasmActionKind::all().iter().map(|kind| Self {
+            kind: kind.clone(),
+            mode: WasmActionExecutionMode::Native,
+        }).collect()
+    }
+
+    /// Create all WASM action tools (Wasm mode).
+    pub fn all_wasm(runtime: Arc<WasmRuntime>) -> Vec<Self> {
+        WasmActionKind::all().iter().map(|kind| Self {
+            kind: kind.clone(),
+            mode: WasmActionExecutionMode::Wasm { runtime: runtime.clone() },
+        }).collect()
     }
 
     /// Get the action kind.
     pub fn kind(&self) -> &WasmActionKind {
         &self.kind
+    }
+
+    /// Get the execution mode.
+    pub fn mode(&self) -> &WasmActionExecutionMode {
+        &self.mode
     }
 }
 
@@ -410,8 +536,11 @@ impl Tool for WasmActionTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let template = WasmActionTemplate::new(self.kind.clone());
-        Ok(template.execute_native(args))
+        let template = WasmActionTemplate {
+            kind: self.kind.clone(),
+            mode: self.mode.clone(),
+        };
+        Ok(template.execute(args))
     }
 }
 

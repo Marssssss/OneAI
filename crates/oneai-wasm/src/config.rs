@@ -1,7 +1,8 @@
 //! WasmRuntimeConfig — security policy and resource limits for WASM execution.
 
-use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::wasi::{WasiConfig, WasiDirConfig};
 
 /// Configuration for the WasmRuntime.
 ///
@@ -53,23 +54,12 @@ pub struct WasmRuntimeConfig {
     /// Default: 30 seconds.
     pub max_execution_time: Duration,
 
-    /// Whether to enable WASI (limited filesystem access).
+    /// WASI configuration for filesystem access.
     ///
-    /// **WARNING**: Enabling WASI provides filesystem access to the
-    /// WASM guest. Only enable this for trusted modules with carefully
-    /// configured `wasi_allowed_dirs`.
-    ///
-    /// Default: false (pure computation sandbox).
-    pub enable_wasi: bool,
-
-    /// WASI allowed directories (only effective when enable_wasi = true).
-    ///
-    /// When WASI is enabled, the guest can only access these directories.
-    /// This follows the same principle as ShellTool's sandbox: restrict
-    /// file access to only what's needed.
-    ///
-    /// Default: empty (no directories accessible).
-    pub wasi_allowed_dirs: Vec<PathBuf>,
+    /// Default: disabled (pure computation sandbox with zero I/O access).
+    /// Use `with_wasi_config()` to enable restricted filesystem access
+    /// with explicitly whitelisted directories.
+    pub wasi_config: WasiConfig,
 
     /// Maximum concurrent WASM instances.
     ///
@@ -87,8 +77,7 @@ impl Default for WasmRuntimeConfig {
             fuel_limit: Some(100_000),               // ~10s of computation
             epoch_interruption: true,                 // enable async timeout
             max_execution_time: Duration::from_secs(30), // 30s max
-            enable_wasi: false,                       // pure computation
-            wasi_allowed_dirs: Vec::new(),            // no filesystem access
+            wasi_config: WasiConfig::disabled(),     // pure computation
             max_instances: 10,                        // 10 concurrent
         }
     }
@@ -113,8 +102,7 @@ impl WasmRuntimeConfig {
             fuel_limit: Some(50_000),
             epoch_interruption: true,
             max_execution_time: Duration::from_secs(10),
-            enable_wasi: false,
-            wasi_allowed_dirs: Vec::new(),
+            wasi_config: WasiConfig::disabled(),
             max_instances: 5,
         }
     }
@@ -123,14 +111,13 @@ impl WasmRuntimeConfig {
     ///
     /// **WARNING**: This enables WASI filesystem access.
     /// Only use for trusted WASM modules.
-    pub fn permissive_with_wasi(allowed_dirs: Vec<PathBuf>) -> Self {
+    pub fn permissive_with_wasi(allowed_dirs: Vec<WasiDirConfig>) -> Self {
         Self {
             max_memory_pages: 256,                    // 256 * 64KB = 16MB
             fuel_limit: Some(1_000_000),              // ~100s of computation
             epoch_interruption: true,
             max_execution_time: Duration::from_secs(120),
-            enable_wasi: true,
-            wasi_allowed_dirs: allowed_dirs,
+            wasi_config: WasiConfig::restricted(allowed_dirs),
             max_instances: 20,
         }
     }
@@ -159,10 +146,20 @@ impl WasmRuntimeConfig {
         self
     }
 
-    /// Enable WASI with allowed directories.
-    pub fn with_wasi(mut self, allowed_dirs: Vec<PathBuf>) -> Self {
-        self.enable_wasi = true;
-        self.wasi_allowed_dirs = allowed_dirs;
+    /// Set the WASI configuration.
+    ///
+    /// Use `WasiConfig::restricted()` or `WasiConfig::restricted_with_env()`
+    /// to enable WASI with whitelisted directory access.
+    pub fn with_wasi_config(mut self, wasi_config: WasiConfig) -> Self {
+        self.wasi_config = wasi_config;
+        self
+    }
+
+    /// Enable WASI with allowed directories (convenience method).
+    ///
+    /// Creates a `WasiConfig::restricted()` with the specified directories.
+    pub fn with_wasi(mut self, allowed_dirs: Vec<WasiDirConfig>) -> Self {
+        self.wasi_config = WasiConfig::restricted(allowed_dirs);
         self
     }
 }

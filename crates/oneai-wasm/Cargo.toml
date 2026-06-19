@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 wasmtime = "45"
+wasmtime-wasi = "45"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,6 +16,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 oneai-core = { workspace = true }
 regex = { workspace = true }
 

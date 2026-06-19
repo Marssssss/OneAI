@@ -57,6 +57,26 @@ pub enum WasmError {
     /// Guest called abort with a message.
     #[error("WASM guest aborted: {0}")]
     GuestAbort(String),
+
+    /// WASI initialization failed.
+    #[error("WASI initialization failed: {0}")]
+    WasiInitFailed(String),
+
+    /// WASI directory access denied (path not in whitelist).
+    #[error("WASI directory access denied: '{0}' not in allowed_dirs")]
+    WasiAccessDenied(String),
+
+    /// Module registry error (duplicate name, not found, etc.).
+    #[error("WASM module registry error: {0}")]
+    RegistryError(String),
+
+    /// Module URL fetch failed.
+    #[error("Failed to fetch WASM module from URL: {0}")]
+    UrlFetchFailed(String),
+
+    /// Module health check failed.
+    #[error("WASM module health check failed for '{0}': {1}")]
+    HealthCheckFailed(String, String),
 }
 
 /// Result type for WASM operations.

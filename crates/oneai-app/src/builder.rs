@@ -27,7 +27,7 @@ use oneai_domain::{DomainPack, MergedDomainPack};
 
 use oneai_a2a::A2AClient;
 
-use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleManager, WasmActionTool};
+use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleManager, WasmActionTool, WasmModuleRegistry, WasmResourceMonitor};
 
 use oneai_mcp::{McpPluginRegistry, McpServerHost, McpServerInfo};
 
@@ -63,6 +63,10 @@ pub struct AppBuilder {
     a2a_client: Option<Arc<A2AClient>>,
     /// WASM runtime (optional — for WASM sandbox execution).
     wasm_runtime: Option<Arc<WasmRuntime>>,
+    /// WASM module registry (optional — for named module lifecycle management).
+    wasm_module_registry: Option<WasmModuleRegistry>,
+    /// WASM resource monitor (optional — for execution metrics tracking).
+    wasm_resource_monitor: Option<Arc<WasmResourceMonitor>>,
     /// MCP plugin registry (optional — for MCP server management).
     mcp_plugin_registry: Option<McpPluginRegistry>,
     /// Whether to enable MCP server hosting.
@@ -92,6 +96,8 @@ impl AppBuilder {
             domain_packs: Vec::new(),
             a2a_client: None,
             wasm_runtime: None,
+            wasm_module_registry: None,
+            wasm_resource_monitor: None,
             mcp_plugin_registry: None,
             mcp_server_host_enabled: false,
             a2a_server_host_enabled: false,
@@ -458,6 +464,44 @@ impl AppBuilder {
         self
     }
 
+    /// Set the WASM module registry (for named module lifecycle management).
+    ///
+    /// The registry provides module registration, health checking,
+    /// version tracking, and hot-reload capabilities.
+    pub fn wasm_module_registry(mut self, registry: WasmModuleRegistry) -> Self {
+        self.wasm_module_registry = Some(registry);
+        self
+    }
+
+    /// Use default WASM module registry with the configured runtime.
+    ///
+    /// Auto-creates a registry if a WASM runtime is configured.
+    /// If no runtime is configured, this is a no-op.
+    pub fn default_wasm_module_registry(self) -> Self {
+        if let Some(runtime) = &self.wasm_runtime {
+            let registry = WasmModuleRegistry::new(runtime.clone());
+            self.wasm_module_registry(registry)
+        } else {
+            self
+        }
+    }
+
+    /// Set the WASM resource monitor (for execution metrics tracking).
+    ///
+    /// The monitor records per-module execution metrics (calls, fuel,
+    /// time, errors) and emits resource events.
+    pub fn wasm_resource_monitor(mut self, monitor: Arc<WasmResourceMonitor>) -> Self {
+        self.wasm_resource_monitor = Some(monitor);
+        self
+    }
+
+    /// Use default WASM resource monitor.
+    ///
+    /// Creates a monitor with the logging subscriber.
+    pub fn default_wasm_resource_monitor(self) -> Self {
+        self.wasm_resource_monitor(Arc::new(WasmResourceMonitor::new()))
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -595,6 +639,22 @@ impl AppBuilder {
             WasmModuleManager::new(rt.clone())
         });
 
+        // Auto-create WASM module registry if runtime is set but no registry
+        let wasm_module_registry = self.wasm_module_registry.or_else(|| {
+            self.wasm_runtime.as_ref().map(|rt| {
+                WasmModuleRegistry::new(rt.clone())
+            })
+        });
+
+        // Auto-create WASM resource monitor if runtime is set but no monitor
+        let wasm_resource_monitor = self.wasm_resource_monitor.or_else(|| {
+            if self.wasm_runtime.is_some() {
+                Some(Arc::new(WasmResourceMonitor::new()))
+            } else {
+                None
+            }
+        });
+
         let tool_executor = Arc::new(ToolExecutor::with_approval_gate(
             self.tool_registry.clone(),
             approval_gate.clone(),
@@ -672,6 +732,8 @@ impl AppBuilder {
             a2a_client: self.a2a_client,
             wasm_runtime: self.wasm_runtime,
             wasm_module_manager,
+            wasm_module_registry,
+            wasm_resource_monitor,
             mcp_plugin_registry,
             mcp_server_host,
             a2a_server_host,
@@ -719,6 +781,10 @@ pub struct App {
     pub wasm_runtime: Option<Arc<WasmRuntime>>,
     /// WASM module manager (optional — for WASM module lifecycle).
     pub wasm_module_manager: Option<WasmModuleManager>,
+    /// WASM module registry (optional — for named module lifecycle management).
+    pub wasm_module_registry: Option<WasmModuleRegistry>,
+    /// WASM resource monitor (optional — for execution metrics tracking).
+    pub wasm_resource_monitor: Option<Arc<WasmResourceMonitor>>,
     /// MCP plugin registry (optional — for MCP server management).
     pub mcp_plugin_registry: Option<McpPluginRegistry>,
     /// MCP server host (optional — for serving tools via MCP protocol).
@@ -806,6 +872,16 @@ impl App {
     /// Get the WASM module manager (for WASM module lifecycle).
     pub fn wasm_module_manager(&self) -> Option<&WasmModuleManager> {
         self.wasm_module_manager.as_ref()
+    }
+
+    /// Get the WASM module registry (for named module lifecycle management).
+    pub fn wasm_module_registry(&self) -> Option<&WasmModuleRegistry> {
+        self.wasm_module_registry.as_ref()
+    }
+
+    /// Get the WASM resource monitor (for execution metrics tracking).
+    pub fn wasm_resource_monitor(&self) -> Option<&Arc<WasmResourceMonitor>> {
+        self.wasm_resource_monitor.as_ref()
     }
 
     /// Get the MCP plugin registry (for MCP server management).

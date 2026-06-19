@@ -6,15 +6,17 @@
 //! - Store creation per execution (memory isolation)
 //! - Fuel-based execution limiting (prevents infinite loops)
 //! - Epoch-based interruption (async timeout support)
+//! - Optional WASI filesystem access (restricted to whitelisted directories)
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 use wasmtime::{Config, Engine, Module, Store, Linker};
 
 use crate::config::WasmRuntimeConfig;
 use crate::error::{WasmError, Result};
+use crate::wasi::build_wasi_p1_ctx;
 
 /// WASM sandbox execution runtime — based on Wasmtime.
 ///
@@ -29,6 +31,7 @@ use crate::error::{WasmError, Result};
 /// - Epoch-based interruption (async timeout enforcement)
 /// - Memory limits (prevents runaway allocation)
 /// - Instance concurrency limits (prevents resource exhaustion)
+/// - WASI filesystem access only to whitelisted directories
 ///
 /// # Thread Safety
 ///
@@ -46,10 +49,6 @@ pub struct WasmRuntime {
     /// Compiled module cache (name → Module).
     /// Modules are compiled once and cached for fast re-instantiation.
     pub(crate) module_cache: Arc<RwLock<HashMap<String, Module>>>,
-
-    /// Semaphore controlling concurrent WASM instance creation.
-    /// Prevents resource exhaustion from parallel WASM execution.
-    instance_semaphore: Arc<Semaphore>,
 }
 
 impl WasmRuntime {
@@ -83,7 +82,6 @@ impl WasmRuntime {
             engine,
             config: config_clone,
             module_cache: Arc::new(RwLock::new(HashMap::new())),
-            instance_semaphore: Arc::new(Semaphore::new(config.max_instances)),
         })
     }
 
@@ -147,18 +145,28 @@ impl WasmRuntime {
         cache.keys().cloned().collect()
     }
 
-    /// Create a new Store<WasmHostState> for WASM execution.
+    /// Create a new Store<WasmStoreState> for WASM execution.
     ///
     /// Each execution gets an independent Store with:
     /// - Fuel initialized from config (if fuel limiting is enabled)
     /// - Epoch deadline set for interrupt support
+    /// - Optional WASI P1 context (if WASI is enabled in config)
     ///
     /// The Store is the WASM instance's "world" — it contains the memory,
     /// tables, and global variables. Each Store is completely isolated.
-    pub fn create_store(&self) -> Store<WasmHostState> {
+    pub fn create_store(&self) -> Store<WasmStoreState> {
+        // Build WASI P1 context if enabled
+        let wasi_p1_ctx = build_wasi_p1_ctx(&self.config.wasi_config);
+
         let host_state = WasmHostState::new();
 
-        let mut store = Store::new(&self.engine, host_state);
+        let store_state = if wasi_p1_ctx.is_some() {
+            WasmStoreState::with_wasi(host_state, wasi_p1_ctx.unwrap())
+        } else {
+            WasmStoreState::new(host_state)
+        };
+
+        let mut store = Store::new(&self.engine, store_state);
 
         // Initialize fuel using set_fuel (v45 API)
         if let Some(fuel_limit) = self.config.fuel_limit {
@@ -166,8 +174,6 @@ impl WasmRuntime {
         }
 
         // Set epoch deadline for interrupt support
-        // The deadline is relative to the current epoch — set a large value
-        // that will be checked periodically by the host
         if self.config.epoch_interruption {
             store.set_epoch_deadline(1_000_000); // Large deadline — host advances epoch to interrupt
         }
@@ -180,18 +186,22 @@ impl WasmRuntime {
     /// The Linker defines what host functions the WASM guest can call.
     /// This is the security boundary — only explicitly registered functions
     /// are available to the guest.
-    pub fn create_linker(&self) -> Result<Linker<WasmHostState>> {
+    ///
+    /// When WASI is enabled, WASI host functions are also registered,
+    /// providing restricted filesystem access to whitelisted directories.
+    pub fn create_linker(&self) -> Result<Linker<WasmStoreState>> {
         let mut linker = Linker::new(&self.engine);
 
-        // Register the minimal host API
+        // Register the minimal guest API (oneai host functions)
         crate::guest_api::register_host_functions(&mut linker)?;
 
-        Ok(linker)
-    }
+        // Register WASI P1 host functions if WASI is enabled
+        if self.config.wasi_config.enabled() {
+            wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state: &mut WasmStoreState| state.wasi_p1_ctx_mut())
+                .map_err(|e| WasmError::WasiInitFailed(format!("Failed to add WASI P1 to linker: {}", e)))?;
+        }
 
-    /// Acquire an instance permit (semaphore-based concurrency control).
-    pub async fn acquire_instance_permit(&self) -> tokio::sync::SemaphorePermit<'_> {
-        self.instance_semaphore.acquire().await.expect("semaphore should not be closed")
+        Ok(linker)
     }
 
     /// Get the number of cached modules.
@@ -210,7 +220,7 @@ impl WasmRuntime {
     }
 }
 
-/// Host state stored in each WASM Store.
+/// Host state stored in each WASM Store (buffers for data exchange).
 ///
 /// This is the mutable state accessible from host functions.
 /// It contains buffers for data exchange between host and guest.
@@ -280,10 +290,66 @@ impl WasmHostState {
     }
 }
 
+/// Combined store state — holds both host state and optional WASI P1 context.
+///
+/// This replaces `WasmHostState` as the Store data type. When WASI is
+/// disabled, only the host state is present. When WASI is enabled,
+/// the WASI P1 context is added for filesystem access.
+///
+/// The WASI P1 context is required by `wasmtime_wasi::p1::add_to_linker_sync()`
+/// which needs `&mut WasiP1Ctx` access via a closure on the store state.
+pub struct WasmStoreState {
+    /// Host state — buffers and environment whitelist.
+    host_state: WasmHostState,
+
+    /// Optional WASI P1 context — provides restricted filesystem access.
+    wasi_p1_ctx: Option<wasmtime_wasi::p1::WasiP1Ctx>,
+}
+
+impl WasmStoreState {
+    /// Create a store state without WASI (pure computation sandbox).
+    pub fn new(host_state: WasmHostState) -> Self {
+        Self {
+            host_state,
+            wasi_p1_ctx: None,
+        }
+    }
+
+    /// Create a store state with WASI P1 context (restricted filesystem access).
+    pub fn with_wasi(host_state: WasmHostState, wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx) -> Self {
+        Self {
+            host_state,
+            wasi_p1_ctx: Some(wasi_p1_ctx),
+        }
+    }
+
+    /// Get a reference to the host state.
+    pub fn host_state(&self) -> &WasmHostState {
+        &self.host_state
+    }
+
+    /// Get a mutable reference to the host state.
+    pub fn host_state_mut(&mut self) -> &mut WasmHostState {
+        &mut self.host_state
+    }
+
+    /// Get a mutable reference to the WASI P1 context.
+    ///
+    /// This is required by `wasmtime_wasi::p1::add_to_linker_sync()` for WASI
+    /// host function registration.
+    pub fn wasi_p1_ctx_mut(&mut self) -> &mut wasmtime_wasi::p1::WasiP1Ctx {
+        // This should only be called when WASI is enabled.
+        // If WASI is disabled, the linker won't have WASI functions,
+        // so this closure is never invoked by the linker.
+        self.wasi_p1_ctx.as_mut().expect("WASI P1 context should be present when WASI linker functions are called")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+    use crate::wasi::WasiConfig;
 
     #[test]
     fn test_wasm_runtime_creation() {
@@ -304,8 +370,7 @@ mod tests {
         assert_eq!(config.fuel_limit, Some(100_000));
         assert!(config.epoch_interruption);
         assert_eq!(config.max_execution_time, Duration::from_secs(30));
-        assert!(!config.enable_wasi);
-        assert!(config.wasi_allowed_dirs.is_empty());
+        assert!(!config.wasi_config.enabled());
         assert_eq!(config.max_instances, 10);
     }
 
@@ -323,7 +388,7 @@ mod tests {
         let runtime = WasmRuntime::with_defaults().unwrap();
         let mut store = runtime.create_store();
 
-        // Store should be created with WasmHostState
+        // Store should be created with WasmStoreState
         // Fuel should be initialized via set_fuel
         let fuel = store.get_fuel();
         assert!(fuel.is_ok(), "Fuel should be available since consume_fuel is enabled");
@@ -336,6 +401,30 @@ mod tests {
         let runtime = WasmRuntime::with_defaults().unwrap();
         let linker = runtime.create_linker();
         assert!(linker.is_ok(), "Failed to create linker: {:?}", linker.err());
+    }
+
+    #[test]
+    fn test_wasm_runtime_create_store_with_wasi() {
+        let wasi_config = WasiConfig::restricted(vec![
+            crate::wasi::WasiDirConfig::readonly(std::path::PathBuf::from("/tmp"), "/tmp"),
+        ]);
+        let config = WasmRuntimeConfig::default().with_wasi_config(wasi_config);
+        let runtime = WasmRuntime::new(config).unwrap();
+        let store = runtime.create_store();
+
+        // Store should be created with WasiP1Ctx
+        assert!(store.data().wasi_p1_ctx.is_some());
+    }
+
+    #[test]
+    fn test_wasm_runtime_create_linker_with_wasi() {
+        let wasi_config = WasiConfig::restricted(vec![
+            crate::wasi::WasiDirConfig::readonly(std::path::PathBuf::from("/tmp"), "/tmp"),
+        ]);
+        let config = WasmRuntimeConfig::default().with_wasi_config(wasi_config);
+        let runtime = WasmRuntime::new(config).unwrap();
+        let linker = runtime.create_linker();
+        assert!(linker.is_ok(), "Failed to create linker with WASI: {:?}", linker.err());
     }
 
     #[test]
@@ -359,10 +448,21 @@ mod tests {
         assert!(state.output().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_wasm_runtime_acquire_instance_permit() {
-        let runtime = WasmRuntime::with_defaults().unwrap();
-        let _permit = runtime.acquire_instance_permit().await;
+    #[test]
+    fn test_wasm_store_state_without_wasi() {
+        let host_state = WasmHostState::new();
+        let store_state = WasmStoreState::new(host_state);
+        assert!(store_state.wasi_p1_ctx.is_none());
+        assert_eq!(store_state.host_state().get_env("ONEAI_TOOL_MODE"), Some(&"sandbox".to_string()));
+    }
+
+    #[test]
+    fn test_wasm_store_state_with_wasi() {
+        let host_state = WasmHostState::new();
+        let wasi_p1_ctx = wasmtime_wasi::WasiCtx::builder().build_p1();
+        let store_state = WasmStoreState::with_wasi(host_state, wasi_p1_ctx);
+        assert!(store_state.wasi_p1_ctx.is_some());
+        assert_eq!(store_state.host_state().get_env("ONEAI_TOOL_MODE"), Some(&"sandbox".to_string()));
     }
 
     #[test]

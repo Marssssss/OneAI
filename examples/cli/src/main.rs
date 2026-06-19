@@ -19,6 +19,12 @@
 //!   oneai a2a discover <url> — Discover remote A2A agent
 //!   oneai a2a list        — List configured A2A endpoints
 //!   oneai a2a send <url> <msg> — Send task to remote agent
+//!   oneai wasm list       — List loaded WASM modules
+//!   oneai wasm load <n> <f> — Load a WASM module
+//!   oneai wasm run <n>   — Execute a WASM module
+//!   oneai wasm health    — Check WASM module health
+//!   oneai wasm unload <n>— Unload a WASM module
+//!   oneai wasm stats     — Show resource monitor statistics
 //!   oneai eval list     — List available eval suites
 //!   oneai eval run <n>  — Run an eval suite
 //!   oneai eval score <n>— Run metrics only (no agent)
@@ -36,6 +42,7 @@ mod cmd_version;
 mod cmd_studio;
 mod cmd_mcp;
 mod cmd_a2a;
+mod cmd_wasm;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -109,6 +116,11 @@ enum Commands {
     A2a {
         #[command(subcommand)]
         action: A2aAction,
+    },
+    /// Manage WASM modules and sandbox execution
+    Wasm {
+        #[command(subcommand)]
+        action: WasmAction,
     },
     /// Show version information
     Version,
@@ -235,6 +247,43 @@ enum A2aAction {
     },
 }
 
+#[derive(Subcommand)]
+enum WasmAction {
+    /// List loaded WASM modules
+    List,
+    /// Load a WASM module from file
+    Load {
+        /// Module name (identifier in registry)
+        name: String,
+        /// Path to .wasm file
+        file: String,
+    },
+    /// Execute a loaded WASM module with JSON input
+    Run {
+        /// Module name
+        name: String,
+        /// JSON input string
+        #[arg(long)]
+        input: Option<String>,
+        /// Input file path (alternative to --input)
+        #[arg(long)]
+        input_file: Option<String>,
+    },
+    /// Check WASM module health
+    Health {
+        /// Module name (optional — checks all if not specified)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Unload a WASM module
+    Unload {
+        /// Module name
+        name: String,
+    },
+    /// Show resource monitor statistics
+    Stats,
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -314,6 +363,20 @@ fn main() {
                 A2aAction::Send { url, message } => {
                     cmd_a2a::cmd_a2a_send(&url, &message);
                 }
+            }
+        }
+        Some(Commands::Wasm { action }) => {
+            match action {
+                WasmAction::List => cmd_wasm::cmd_wasm_list(),
+                WasmAction::Load { name, file } => cmd_wasm::cmd_wasm_load(&name, &file),
+                WasmAction::Run { name, input, input_file } => {
+                    cmd_wasm::cmd_wasm_run(&name, input.as_deref(), input_file.as_deref());
+                }
+                WasmAction::Health { name } => {
+                    cmd_wasm::cmd_wasm_health(name.as_deref());
+                }
+                WasmAction::Unload { name } => cmd_wasm::cmd_wasm_unload(&name),
+                WasmAction::Stats => cmd_wasm::cmd_wasm_stats(),
             }
         }
         Some(Commands::Version) => {
