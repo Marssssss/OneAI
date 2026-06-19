@@ -63,6 +63,17 @@ pub enum RouteProviderKind {
     Ollama,
 }
 
+impl std::fmt::Display for RouteProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anthropic => write!(f, "anthropic"),
+            Self::OpenAI => write!(f, "openai"),
+            Self::Gemini => write!(f, "gemini"),
+            Self::Ollama => write!(f, "ollama"),
+        }
+    }
+}
+
 impl RouteProviderKind {
     /// Convert to CloudProviderKind for ModelConfig.
     pub fn to_cloud_kind(&self) -> Option<CloudProviderKind> {
@@ -391,6 +402,11 @@ impl ModelRouter {
     /// Get the current routing rules.
     pub fn rules(&self) -> &[RouteRule] {
         &self.rules
+    }
+
+    /// Get the fallback model configuration.
+    pub fn fallback_config(&self) -> &ModelConfig {
+        &self.fallback_config
     }
 }
 

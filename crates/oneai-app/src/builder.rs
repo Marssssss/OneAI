@@ -17,9 +17,12 @@ use oneai_core::cost::{CostTracker, InMemoryCostTracker, ModelPricingCatalog, Co
 use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
 use oneai_core::circuit_breaker::{CircuitBreaker, ThresholdCircuitBreaker, CircuitBreakerConfig};
 use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
+use oneai_core::{ModelConfig, CloudProviderKind};
 use oneai_core::ProviderPoolConfig;
+use oneai_core::SmartRouteConfig;
+use oneai_core::RoutingStrategy;
 
-use oneai_provider::{ProviderPool, ProviderEntry};
+use oneai_provider::{ProviderPool, ProviderEntry, SmartRouter};
 
 use oneai_tool::{ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate, ChannelApprovalGateWithThreshold};
 use oneai_memory::{MemoryManager, MemoryManagerConfig};
@@ -113,6 +116,10 @@ pub struct AppBuilder {
     provider_pool: Option<Arc<ProviderPool>>,
     /// Provider pool config (optional — for auto-creating provider pool).
     provider_pool_config: Option<ProviderPoolConfig>,
+    /// Smart router (optional — enables intelligent model selection based on cost/latency/quality).
+    smart_router: Option<Arc<SmartRouter>>,
+    /// Smart route config (optional — for auto-creating smart router).
+    smart_route_config: Option<SmartRouteConfig>,
 }
 
 impl AppBuilder {
@@ -152,6 +159,8 @@ impl AppBuilder {
             circuit_breaker_config: None,
             provider_pool: None,
             provider_pool_config: None,
+            smart_router: None,
+            smart_route_config: None,
         }
     }
 
@@ -827,6 +836,87 @@ impl AppBuilder {
         self.provider_pool_config(ProviderPoolConfig::local_first(openai_key, anthropic_key))
     }
 
+    // ─── Smart Router ────────────────────────────────────────────────────
+
+    /// Set the smart router for intelligent model selection.
+    ///
+    /// The smart router considers cost, latency, quality, provider health,
+    /// budget constraints, and context window limits when selecting which
+    /// model/provider to use for each inference call.
+    ///
+    /// When attached to a ProviderPool, the router determines which provider
+    /// to try first (instead of always trying the primary). This enables
+    /// intelligent primary selection: e.g., "this is a simple task, start
+    /// with Haiku even though Opus is primary".
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let router = SmartRouter::new(
+    ///     ModelRouter::with_defaults(config),
+    ///     ModelPricingCatalog::with_known_models(),
+    ///     SmartRouteConfig::balanced(),
+    /// );
+    ///
+    /// let app = AppBuilder::new()
+    ///     .default_provider_pool_anthropic()
+    ///     .smart_router(Arc::new(router))  // ← enable intelligent routing
+    ///     .build()?;
+    /// ```
+    pub fn smart_router(mut self, router: Arc<SmartRouter>) -> Self {
+        self.smart_router = Some(router);
+        self
+    }
+
+    /// Configure smart routing settings (for auto-creation at build time).
+    ///
+    /// If a smart router is not explicitly set, but a smart route config is
+    /// provided, a SmartRouter is auto-created at build time using the
+    /// configured ModelRouter defaults and ModelPricingCatalog.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .default_provider_pool_anthropic()
+    ///     .smart_route_config(SmartRouteConfig::cost_optimized())  // ← cost-first routing
+    ///     .build()?;
+    /// ```
+    pub fn smart_route_config(mut self, config: SmartRouteConfig) -> Self {
+        self.smart_route_config = Some(config);
+        self
+    }
+
+    /// Use balanced smart routing (default).
+    ///
+    /// Balances cost, latency, and quality equally. Uses regex rules
+    /// as first-pass, then multi-factor scoring if regex fails validation.
+    pub fn default_smart_router_balanced(self) -> Self {
+        self.smart_route_config(SmartRouteConfig::balanced())
+    }
+
+    /// Use cost-optimized smart routing.
+    ///
+    /// Minimizes cost above all else. Cheaper models are preferred,
+    /// expensive models are avoided when budget is low.
+    pub fn default_smart_router_cost_optimized(self) -> Self {
+        self.smart_route_config(SmartRouteConfig::cost_optimized())
+    }
+
+    /// Use latency-optimized smart routing.
+    ///
+    /// Minimizes latency above all else. Faster models are preferred,
+    /// slow models are avoided when latency tolerance is exceeded.
+    pub fn default_smart_router_latency_optimized(self) -> Self {
+        self.smart_route_config(SmartRouteConfig::latency_optimized())
+    }
+
+    /// Use quality-optimized smart routing.
+    ///
+    /// Maximizes quality above all else. Powerful models are preferred,
+    /// cheap models are avoided unless budget constraints force downgrade.
+    pub fn default_smart_router_quality_optimized(self) -> Self {
+        self.smart_route_config(SmartRouteConfig::quality_optimized())
+    }
+
     // ─── SQLite Persistence ────────────────────────────────────────────────
 
     /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
@@ -1151,6 +1241,43 @@ impl AppBuilder {
             })
         });
 
+        // Resolve smart router: use explicitly set router, or auto-create from config
+        // The smart router uses ModelRouter defaults + ModelPricingCatalog
+        // It needs circuit breaker, rate limiter, and cost tracker to be already resolved
+        let resolved_smart_router = self.smart_router.or_else(|| {
+            self.smart_route_config.map(|config| {
+                // Create a default ModelRouter for the smart router's regex first-pass
+                // Use Anthropic as fallback config if no pool is configured
+                let fallback_config = ModelConfig {
+                    provider_type: oneai_core::ProviderType::Cloud,
+                    cloud_kind: Some(CloudProviderKind::Anthropic),
+                    api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                    base_url: None,
+                    port: None,
+                    model_name: Some("claude-sonnet-4-6-20250514".to_string()),
+                    model_path: None,
+                    extra: std::collections::HashMap::new(),
+                };
+                let model_router = oneai_provider::ModelRouter::with_defaults(fallback_config);
+                let catalog = ModelPricingCatalog::with_known_models();
+
+                let mut router = SmartRouter::new(model_router, catalog, config);
+                if let Some(cb) = &circuit_breaker {
+                    router = router.with_circuit_breaker(cb.clone());
+                }
+                if let Some(rl) = &rate_limiter {
+                    router = router.with_rate_limiter(rl.clone());
+                }
+                if let Some(ct) = &cost_tracker {
+                    router = router.with_cost_tracker(ct.clone());
+                }
+                if let Some(bc) = &self.cost_budget {
+                    router = router.with_budget_config(bc.clone());
+                }
+                Arc::new(router)
+            })
+        });
+
         // Resolve provider pool: use explicitly set pool, or auto-create from config
         // If a pool is created, it replaces the single provider (pool implements LlmProvider)
         let provider_pool = self.provider_pool.or_else(|| {
@@ -1166,6 +1293,10 @@ impl AppBuilder {
                 }
                 if let Some(ct) = &cost_tracker {
                     pool = pool.with_cost_tracker(ct.clone());
+                }
+                // Wire smart router into the pool if configured
+                if let Some(sr) = &resolved_smart_router {
+                    pool = pool.with_smart_router(sr.clone());
                 }
                 Arc::new(pool)
             })
@@ -1215,6 +1346,7 @@ impl AppBuilder {
             circuit_breaker,
             pricing_catalog,
             provider_pool,
+            smart_router: resolved_smart_router,
         })
     }
 }
@@ -1283,6 +1415,8 @@ pub struct App {
     pub pricing_catalog: Option<ModelPricingCatalog>,
     /// Provider pool (optional — for multi-provider fallback orchestration).
     pub provider_pool: Option<Arc<ProviderPool>>,
+    /// Smart router for intelligent model selection.
+    pub smart_router: Option<Arc<SmartRouter>>,
 }
 
 impl App {
@@ -1419,6 +1553,11 @@ impl App {
     /// Get the provider pool (for multi-provider fallback orchestration).
     pub fn provider_pool(&self) -> Option<&Arc<ProviderPool>> {
         self.provider_pool.as_ref()
+    }
+
+    /// Get the smart router (if configured).
+    pub fn smart_router(&self) -> Option<&Arc<SmartRouter>> {
+        self.smart_router.as_ref()
     }
 }
 

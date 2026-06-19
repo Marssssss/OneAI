@@ -51,6 +51,7 @@ use oneai_core::{
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::LlmProvider;
 use crate::ProviderFactory;
+use crate::SmartRouter;
 
 // ─── ProviderEntry ─────────────────────────────────────────────────────────────
 
@@ -162,6 +163,12 @@ pub struct ProviderPool {
     /// Cost tracker — record usage for whichever provider succeeded.
     cost_tracker: Option<Arc<dyn CostTracker>>,
 
+    /// Smart router — intelligent primary selection based on cost/latency/quality.
+    /// When present, the pool uses the router to determine which provider to try
+    /// first (instead of always trying the primary). If that provider fails,
+    /// fallback continues as usual.
+    smart_router: Option<Arc<SmartRouter>>,
+
     /// Currently active provider index (Atomically updated on fallback).
     active_index: AtomicU32,
 
@@ -182,6 +189,7 @@ impl ProviderPool {
             circuit_breaker: None,
             rate_limiter: None,
             cost_tracker: None,
+            smart_router: None,
             active_index: AtomicU32::new(0),
             fallback_log: Arc::new(InMemoryFallbackLog::new()),
         }
@@ -224,6 +232,23 @@ impl ProviderPool {
     /// Set the cost tracker for usage recording.
     pub fn with_cost_tracker(mut self, ct: Arc<dyn CostTracker>) -> Self {
         self.cost_tracker = Some(ct);
+        self
+    }
+
+    /// Set the smart router for intelligent primary selection.
+    ///
+    /// When a smart router is attached, the pool uses it to determine
+    /// which provider to try first for each inference call. Instead of
+    /// always trying the primary provider, the pool starts with the
+    /// smart router's recommendation (which considers cost, latency,
+    /// quality, health, budget, and context constraints).
+    ///
+    /// If the smart router's chosen provider fails, fallback continues
+    /// as usual (trying next providers in priority order).
+    ///
+    /// Without a smart router, the pool behavior is unchanged (backward compat).
+    pub fn with_smart_router(mut self, router: Arc<SmartRouter>) -> Self {
+        self.smart_router = Some(router);
         self
     }
 
@@ -326,15 +351,61 @@ impl ProviderPool {
 
     /// Try inference with fallback chain.
     ///
-    /// Iterates through providers in priority order, skipping providers
-    /// that are in cooldown, have open circuits, or are rate-limited.
+    /// Iterates through providers in priority order (or smart router order
+    /// if a smart router is attached), skipping providers that are in cooldown,
+    /// have open circuits, or are rate-limited.
     /// On success, records success in circuit breaker and cost tracker.
     /// On failure, records failure and logs a FallbackEvent.
     async fn infer_with_fallback(&self, request: InferenceRequest) -> Result<InferenceResponse> {
         let max_attempts = self.config.max_fallbacks.min(self.entries.len());
         let mut attempts = 0;
 
-        for entry in &self.entries {
+        // If a smart router is attached, use it to determine provider order
+        // Otherwise, use the default priority order
+        let ordered_indices: Vec<usize> = if let Some(router) = &self.smart_router {
+            // Use smart router to pick the best provider first
+            let decision = router.route_for_pool(
+                "", // No task description available at pool level
+                "react", // Default paradigm
+                &self.config,
+                None, // No session context at pool level
+                None, // No conversation token count at pool level
+            ).await;
+
+            // Reorder: start with the smart router's recommendation,
+            // then continue with remaining providers in priority order
+            let recommended_name = decision.provider;
+            let mut indices: Vec<usize> = Vec::new();
+
+            // Find the recommended provider's index
+            if let Some(idx) = self.entries.iter().position(|e| e.name == recommended_name) {
+                indices.push(idx);
+            }
+
+            // Add remaining providers in priority order
+            for (idx, entry) in self.entries.iter().enumerate() {
+                if !indices.contains(&idx) {
+                    indices.push(idx);
+                }
+            }
+
+            tracing::info!(
+                "SmartRouter recommends provider '{}' (model '{}'), reordered provider chain",
+                recommended_name, decision.model,
+            );
+
+            indices
+        } else {
+            // Default: use priority order (entries are sorted by priority)
+            (0..self.entries.len()).collect()
+        };
+
+        for idx in ordered_indices {
+            if attempts >= max_attempts {
+                break;
+            }
+
+            let entry = &self.entries[idx];
             if attempts >= max_attempts {
                 break;
             }
@@ -479,7 +550,41 @@ impl ProviderPool {
         let max_attempts = self.config.max_fallbacks.min(self.entries.len());
         let mut attempts = 0;
 
-        for entry in &self.entries {
+        // If a smart router is attached, use it to determine provider order
+        let ordered_indices: Vec<usize> = if let Some(router) = &self.smart_router {
+            let decision = router.route_for_pool(
+                "", "react", &self.config, None, None,
+            ).await;
+
+            let recommended_name = decision.provider;
+            let mut indices: Vec<usize> = Vec::new();
+
+            if let Some(idx) = self.entries.iter().position(|e| e.name == recommended_name) {
+                indices.push(idx);
+            }
+
+            for (idx, _entry) in self.entries.iter().enumerate() {
+                if !indices.contains(&idx) {
+                    indices.push(idx);
+                }
+            }
+
+            tracing::info!(
+                "SmartRouter recommends '{}' for streaming, reordered chain",
+                recommended_name,
+            );
+
+            indices
+        } else {
+            (0..self.entries.len()).collect()
+        };
+
+        for idx in ordered_indices {
+            if attempts >= max_attempts {
+                break;
+            }
+
+            let entry = &self.entries[idx];
             if attempts >= max_attempts {
                 break;
             }

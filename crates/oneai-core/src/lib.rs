@@ -2,7 +2,8 @@
 //!
 //! Core types, traits, and abstractions for the OneAI Agent framework.
 //! New: budget management, PermissionLevel, platform capabilities, MemoryPersistence,
-//! cost & usage management, rate limiting, circuit breaker, provider pool (fallback).
+//! cost & usage management, rate limiting, circuit breaker, provider pool (fallback),
+//! smart model router (cost/latency/quality routing).
 
 //! # Stability
 //!
@@ -26,6 +27,7 @@ pub mod cost;
 pub mod rate_limiter;
 pub mod circuit_breaker;
 pub mod provider_pool;
+pub mod smart_router;
 
 pub use types::*;
 pub use traits::*;
@@ -37,6 +39,7 @@ pub use cost::*;
 pub use rate_limiter::*;
 pub use circuit_breaker::*;
 pub use provider_pool::*;
+pub use smart_router::*;
 
 #[cfg(test)]
 mod tests {

@@ -440,6 +440,22 @@ enum ProviderAction {
     },
     /// Test all providers in the pool with a connectivity check
     Test,
+    /// Show routing decision for a task (dry run) — cost/latency/quality analysis
+    Route {
+        /// Task description to route
+        task: String,
+        /// Routing strategy (balanced, cost, latency, quality)
+        #[arg(long, default_value = "balanced")]
+        strategy: String,
+    },
+    /// Show recent routing decisions with rationale
+    RouteLog {
+        /// Number of decisions to show (default: 10)
+        #[arg(long, default_value = "10")]
+        limit: String,
+    },
+    /// Show current routing strategy and configuration
+    RouteConfig,
 }
 
 fn main() {
@@ -581,6 +597,15 @@ fn main() {
                 }
                 ProviderAction::Test => {
                     cmd_provider::run_provider_test();
+                }
+                ProviderAction::Route { task, strategy } => {
+                    cmd_provider::run_route_dry_run(&task, &strategy);
+                }
+                ProviderAction::RouteLog { limit } => {
+                    cmd_provider::run_route_log(&limit);
+                }
+                ProviderAction::RouteConfig => {
+                    cmd_provider::run_route_config();
                 }
             }
         }
