@@ -64,6 +64,7 @@ mod cmd_session;
 mod cmd_embed;
 mod cmd_cost;
 mod cmd_provider;
+mod cmd_token;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -162,6 +163,11 @@ enum Commands {
     Provider {
         #[command(subcommand)]
         action: ProviderAction,
+    },
+    /// Token counting & context management — count tokens, context windows, fit checks
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
     },
     /// Show version information
     Version,
@@ -458,6 +464,39 @@ enum ProviderAction {
     RouteConfig,
 }
 
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Count tokens in a text string
+    Count {
+        /// Text to count tokens for
+        text: String,
+        /// Model to use for estimation (affects chars-per-token ratio)
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Estimate tokens in a sample conversation
+    Estimate {
+        /// Model to use for estimation
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Show context window profile for a model
+    Context {
+        /// Model name to show profile for
+        model: String,
+    },
+    /// List all known tokenizer profiles
+    Models,
+    /// Check if text fits within a model's context window
+    Fits {
+        /// Text to check fit for
+        text: String,
+        /// Model to check against
+        #[arg(long)]
+        model: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -606,6 +645,25 @@ fn main() {
                 }
                 ProviderAction::RouteConfig => {
                     cmd_provider::run_route_config();
+                }
+            }
+        }
+        Some(Commands::Token { action }) => {
+            match action {
+                TokenAction::Count { text, model } => {
+                    cmd_token::run_token_count(&text, model.as_deref());
+                }
+                TokenAction::Estimate { model } => {
+                    cmd_token::run_token_estimate(model.as_deref());
+                }
+                TokenAction::Context { model } => {
+                    cmd_token::run_token_context(&model);
+                }
+                TokenAction::Models => {
+                    cmd_token::run_token_models();
+                }
+                TokenAction::Fits { text, model } => {
+                    cmd_token::run_token_fits(&text, &model);
                 }
             }
         }

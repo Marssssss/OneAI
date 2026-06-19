@@ -21,6 +21,9 @@ use oneai_core::{ModelConfig, CloudProviderKind};
 use oneai_core::ProviderPoolConfig;
 use oneai_core::SmartRouteConfig;
 use oneai_core::RoutingStrategy;
+use oneai_core::TokenCounter;
+use oneai_core::ContextManager;
+use oneai_core::ContextManagerConfig;
 
 use oneai_provider::{ProviderPool, ProviderEntry, SmartRouter};
 
@@ -120,6 +123,12 @@ pub struct AppBuilder {
     smart_router: Option<Arc<SmartRouter>>,
     /// Smart route config (optional — for auto-creating smart router).
     smart_route_config: Option<SmartRouteConfig>,
+    /// Token counter (optional — enables accurate token counting for context management).
+    token_counter: Option<Arc<dyn TokenCounter>>,
+    /// Context manager (optional — enables model-aware context trimming).
+    context_manager: Option<Arc<ContextManager>>,
+    /// Context manager config (optional — for auto-creating context manager).
+    context_manager_config: Option<ContextManagerConfig>,
 }
 
 impl AppBuilder {
@@ -161,6 +170,9 @@ impl AppBuilder {
             provider_pool_config: None,
             smart_router: None,
             smart_route_config: None,
+            token_counter: None,
+            context_manager: None,
+            context_manager_config: None,
         }
     }
 
@@ -917,6 +929,88 @@ impl AppBuilder {
         self.smart_route_config(SmartRouteConfig::quality_optimized())
     }
 
+    // ─── Token Counter & Context Manager ────────────────────────────────────
+
+    /// Set a custom token counter for accurate token counting.
+    ///
+    /// The token counter provides model-aware, language-aware token estimation,
+    /// improving accuracy over the simple ~4 chars/token heuristic.
+    /// It's used by SmartRouter for context window validation,
+    /// ContextBudgetManager for budget checks, and ContextManager for trimming.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let token_counter = Arc::new(HeuristicTokenCounter::new());
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .token_counter(token_counter)  // ← enable accurate token counting
+    ///     .build()?;
+    /// ```
+    pub fn token_counter(mut self, tc: Arc<dyn TokenCounter>) -> Self {
+        self.token_counter = Some(tc);
+        self
+    }
+
+    /// Use the default heuristic token counter (improved per-provider estimation).
+    ///
+    /// Includes profiles for 12 known models (Anthropic, OpenAI, Google, Ollama families).
+    /// Improves over the flat ~4 chars/token heuristic by:
+    /// - Per-provider chars-per-token ratios (OpenAI 4.0, Anthropic 3.8, etc.)
+    /// - CJK language detection (Chinese/Japanese/Korean: ~2 chars/token)
+    /// - Per-message overhead (role markers, formatting)
+    pub fn default_token_counter(self) -> Self {
+        self.token_counter(Arc::new(oneai_core::HeuristicTokenCounter::new()))
+    }
+
+    /// Set a custom context manager for model-aware context trimming.
+    ///
+    /// The context manager orchestrates trimming based on the target model's
+    /// context window. When SmartRouter selects a model, the context manager
+    /// checks if the conversation fits and trims if necessary.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let token_counter = Arc::new(HeuristicTokenCounter::new());
+    /// let context_manager = Arc::new(ContextManager::new(
+    ///     token_counter.clone(),
+    ///     ContextTrimmingStrategy::default(),
+    /// ));
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .context_manager(context_manager)  // ← enable model-aware trimming
+    ///     .build()?;
+    /// ```
+    pub fn context_manager(mut self, cm: Arc<ContextManager>) -> Self {
+        self.context_manager = Some(cm);
+        self
+    }
+
+    /// Configure context manager settings (for auto-creation at build time).
+    ///
+    /// If a context manager is not explicitly set, but a config is provided,
+    /// a ContextManager is auto-created at build time using the configured
+    /// TokenCounter (or a default HeuristicTokenCounter).
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .context_manager_config(ContextManagerConfig::truncate_oldest())  // ← TruncateOldest strategy
+    ///     .build()?;
+    /// ```
+    pub fn context_manager_config(mut self, config: ContextManagerConfig) -> Self {
+        self.context_manager_config = Some(config);
+        self
+    }
+
+    /// Use the default context manager (TruncateOldest + HeuristicTokenCounter).
+    ///
+    /// This is the simplest way to enable model-aware context trimming.
+    /// Uses TruncateOldest strategy (keep recent 6 turns, truncate older ones).
+    pub fn default_context_manager(self) -> Self {
+        self.context_manager_config(ContextManagerConfig::default())
+    }
+
     // ─── SQLite Persistence ────────────────────────────────────────────────
 
     /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
@@ -1241,6 +1335,26 @@ impl AppBuilder {
             })
         });
 
+        // Resolve token counter: use explicitly set counter, or create default
+        let resolved_token_counter = self.token_counter.or_else(|| {
+            if self.context_manager_config.is_some() || self.context_manager.is_some() {
+                // Auto-create if context manager is configured
+                Some(Arc::new(oneai_core::HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>)
+            } else {
+                None
+            }
+        });
+
+        // Resolve context manager: use explicitly set manager, or auto-create from config
+        let resolved_context_manager = self.context_manager.or_else(|| {
+            self.context_manager_config.map(|config| {
+                let tc = resolved_token_counter.clone().unwrap_or_else(|| {
+                    Arc::new(oneai_core::HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>
+                });
+                Arc::new(ContextManager::from_config(config, tc))
+            })
+        });
+
         // Resolve smart router: use explicitly set router, or auto-create from config
         // The smart router uses ModelRouter defaults + ModelPricingCatalog
         // It needs circuit breaker, rate limiter, and cost tracker to be already resolved
@@ -1273,6 +1387,10 @@ impl AppBuilder {
                 }
                 if let Some(bc) = &self.cost_budget {
                     router = router.with_budget_config(bc.clone());
+                }
+                // Wire TokenCounter into SmartRouter if configured
+                if let Some(tc) = &resolved_token_counter {
+                    router = router.with_token_counter(tc.clone());
                 }
                 Arc::new(router)
             })
@@ -1347,6 +1465,8 @@ impl AppBuilder {
             pricing_catalog,
             provider_pool,
             smart_router: resolved_smart_router,
+            token_counter: resolved_token_counter,
+            context_manager: resolved_context_manager,
         })
     }
 }
@@ -1417,6 +1537,10 @@ pub struct App {
     pub provider_pool: Option<Arc<ProviderPool>>,
     /// Smart router for intelligent model selection.
     pub smart_router: Option<Arc<SmartRouter>>,
+    /// Token counter for accurate token counting.
+    pub token_counter: Option<Arc<dyn TokenCounter>>,
+    /// Context manager for model-aware context trimming.
+    pub context_manager: Option<Arc<ContextManager>>,
 }
 
 impl App {

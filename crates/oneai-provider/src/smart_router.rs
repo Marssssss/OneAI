@@ -48,6 +48,7 @@ use oneai_core::{
     RoutingStrategy, RoutingTier, ModelQualityProfile,
     ProviderScore, SmartRoutingLog, InMemorySmartRoutingLog,
     ProviderPoolConfig, DegradationRule,
+    TokenCounter, ContextFitResult,
 };
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
@@ -92,6 +93,11 @@ pub struct SmartRouter {
 
     /// Routing decision log — audit trail for observability.
     routing_log: Arc<dyn SmartRoutingLog>,
+
+    /// Token counter — for accurate context window validation.
+    /// When set, replaces heuristic token estimation with model-aware counting.
+    /// Falls back to heuristic estimation when not set (backward compat).
+    token_counter: Option<Arc<dyn TokenCounter>>,
 }
 
 impl SmartRouter {
@@ -121,6 +127,7 @@ impl SmartRouter {
             cost_tracker: None,
             budget_config: None,
             routing_log: Arc::new(InMemorySmartRoutingLog::new()),
+            token_counter: None,
         }
     }
 
@@ -145,6 +152,24 @@ impl SmartRouter {
     /// Create with a budget config for budget limits.
     pub fn with_budget_config(mut self, bc: CostBudgetConfig) -> Self {
         self.budget_config = Some(bc);
+        self
+    }
+
+    /// Create with a token counter for accurate context window validation.
+    ///
+    /// When set, the smart router uses the TokenCounter for checking if a
+    /// conversation fits within a model's context window, instead of using
+    /// the heuristic estimate from ModelQualityProfile. This produces more
+    /// accurate routing decisions, especially for mixed-language conversations.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let token_counter = Arc::new(HeuristicTokenCounter::new());
+    /// let router = SmartRouter::new(model_router, catalog, config)
+    ///     .with_token_counter(token_counter);
+    /// ```
+    pub fn with_token_counter(mut self, tc: Arc<dyn TokenCounter>) -> Self {
+        self.token_counter = Some(tc);
         self
     }
 
@@ -708,8 +733,14 @@ impl SmartRouter {
         // ── Check context window ────────────────────────────────────
         if self.config.context_aware && conversation_tokens.is_some() {
             let tokens = conversation_tokens.unwrap();
-            let profile = self.find_profile_for_model(model);
-            let context_window = profile.map_or(128_000, |p| p.context_window_tokens);
+            let context_window = if let Some(tc) = &self.token_counter {
+                // Use TokenCounter for accurate context window lookup
+                tc.context_window_size(model) as u64
+            } else {
+                // Fallback to heuristic from ModelQualityProfile
+                let profile = self.find_profile_for_model(model);
+                profile.map_or(128_000, |p| p.context_window_tokens)
+            };
 
             let would_overflow = (tokens as f64 / context_window as f64) > self.config.context_overflow_threshold;
             factors.push(SmartRouteFactor::ContextOverflow {
@@ -1286,5 +1317,97 @@ mod tests {
         // Opus has estimated_latency 15000ms > max_latency 10000ms
         let score = router.compute_latency_score(&profile);
         assert_eq!(score, 0.0);
+    }
+
+    // ─── TokenCounter integration tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_smart_router_with_token_counter() {
+        use oneai_core::HeuristicTokenCounter;
+
+        let tc = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;
+        let router = SmartRouter::new(
+            ModelRouter::with_defaults(anthropic_fallback_config()),
+            ModelPricingCatalog::with_known_models(),
+            SmartRouteConfig::balanced(),
+        ).with_token_counter(tc);
+
+        // TokenCounter should be set
+        assert!(router.token_counter.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_smart_router_no_token_counter_fallback() {
+        // Without token counter, should use heuristic from ModelQualityProfile
+        let router = SmartRouter::new(
+            ModelRouter::with_defaults(anthropic_fallback_config()),
+            ModelPricingCatalog::with_known_models(),
+            SmartRouteConfig::balanced(),
+        );
+
+        assert!(router.token_counter.is_none());
+
+        // Should still work — falls back to heuristic
+        let decision = router.route("simple task", "react", None, Some(100)).await;
+        assert!(!decision.model.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_smart_router_context_aware_with_token_counter() {
+        use oneai_core::HeuristicTokenCounter;
+
+        let tc = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;
+        let router = SmartRouter::new(
+            ModelRouter::with_defaults(anthropic_fallback_config()),
+            ModelPricingCatalog::with_known_models(),
+            SmartRouteConfig::balanced(),
+        ).with_token_counter(tc.clone());
+
+        // Validate route with conversation tokens — should use TokenCounter for context window
+        let mut factors = Vec::new();
+        let valid = router.validate_route(
+            "anthropic", "claude-opus-4-8",
+            None, Some(50_000), // 50K tokens, well under 200K context
+            &mut factors,
+        ).await;
+        assert!(valid);
+
+        // Should have ContextOverflow factor
+        let ctx_factor = factors.iter().find(|f| matches!(f, SmartRouteFactor::ContextOverflow { .. }));
+        assert!(ctx_factor.is_some());
+        if let SmartRouteFactor::ContextOverflow { model_context_window, .. } = ctx_factor.unwrap() {
+            // TokenCounter should return 200K for claude-opus-4-8
+            assert_eq!(*model_context_window, 200_000);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_smart_router_context_overflow_with_token_counter() {
+        use oneai_core::HeuristicTokenCounter;
+
+        let tc = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;
+        let router = SmartRouter::new(
+            ModelRouter::with_defaults(anthropic_fallback_config()),
+            ModelPricingCatalog::with_known_models(),
+            SmartRouteConfig::balanced(),
+        ).with_token_counter(tc.clone());
+
+        // Validate route with too many tokens for qwen2.5:7b (32K context)
+        let mut factors = Vec::new();
+        let valid = router.validate_route(
+            "ollama", "qwen2.5:7b",
+            None, Some(30_000), // 30K tokens, over 80% of 32K = 25.6K threshold
+            &mut factors,
+        ).await;
+        assert!(!valid); // Should overflow
+
+        // Should have ContextOverflow factor with overflow
+        let ctx_factor = factors.iter().find(|f| matches!(f, SmartRouteFactor::ContextOverflow { would_overflow: true, .. }));
+        assert!(ctx_factor.is_some());
+        if let SmartRouteFactor::ContextOverflow { model_context_window, would_overflow, .. } = ctx_factor.unwrap() {
+            // TokenCounter should return 32K for qwen2.5:7b
+            assert_eq!(*model_context_window, 32_000);
+            assert!(*would_overflow);
+        }
     }
 }

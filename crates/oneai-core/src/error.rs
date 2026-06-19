@@ -94,6 +94,10 @@ pub enum OneAIError {
     #[error("Fallback error: {0}")]
     Fallback(String),
 
+    /// Token counting errors (context overflow, estimation failures, etc.).
+    #[error("Token counting error: {0}")]
+    TokenCount(String),
+
     /// Generic errors with context.
     #[error("{0}")]
     Other(String),

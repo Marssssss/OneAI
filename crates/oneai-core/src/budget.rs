@@ -471,6 +471,15 @@ pub struct ContextBudgetManager {
     /// The context compressor for summarizing older turns.
     /// Uses the trait interface defined above for dependency inversion.
     compressor: Arc<dyn ContextCompressorTrait>,
+
+    /// Optional token counter — for accurate token estimation.
+    /// When set, replaces the compressor's heuristic (~4 chars/token)
+    /// with model-aware, language-aware token counting.
+    /// Falls back to compressor heuristic when not set (backward compat).
+    token_counter: Option<Arc<dyn crate::token_counter::TokenCounter>>,
+
+    /// The model name used for token counting (needed by TokenCounter).
+    model_name: Option<String>,
 }
 
 impl ContextBudgetManager {
@@ -481,7 +490,7 @@ impl ContextBudgetManager {
         compressor: Arc<dyn ContextCompressorTrait>,
     ) -> Self {
         assert!(allocation.validate(), "BudgetAllocation fractions must sum to ~1.0");
-        Self { budget, allocation, compressor }
+        Self { budget, allocation, compressor, token_counter: None, model_name: None }
     }
 
     /// Create with default allocation based on a model's context window.
@@ -496,9 +505,34 @@ impl ContextBudgetManager {
         )
     }
 
+    /// Set a token counter for accurate token estimation.
+    ///
+    /// When set, `needs_compression()` and `estimate_source_tokens()` use
+    /// the TokenCounter instead of the compressor's heuristic (~4 chars/token).
+    /// This produces more accurate budget checks, especially for CJK text.
+    ///
+    /// The `model_name` is required so the TokenCounter knows which
+    /// tokenizer family to use for estimation.
+    pub fn with_token_counter(
+        mut self,
+        tc: Arc<dyn crate::token_counter::TokenCounter>,
+        model_name: String,
+    ) -> Self {
+        self.token_counter = Some(tc);
+        self.model_name = Some(model_name);
+        self
+    }
+
     /// Check if a conversation needs compression (total tokens exceed budget).
     pub fn needs_compression(&self, conversation: &Conversation) -> bool {
-        self.compressor.estimate_tokens(conversation) > self.budget.total as usize
+        let estimated_tokens = if let (Some(tc), Some(model)) = (&self.token_counter, &self.model_name) {
+            // Use TokenCounter for accurate estimation
+            tc.count_conversation_tokens(conversation, model) as usize
+        } else {
+            // Fallback to compressor heuristic
+            self.compressor.estimate_tokens(conversation)
+        };
+        estimated_tokens > self.budget.total as usize
     }
 
     /// Compress a conversation when the budget is exceeded.
