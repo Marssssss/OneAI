@@ -38,6 +38,7 @@ oneai-skill = { workspace = true }
 oneai-eval = { workspace = true }
 oneai-studio = { workspace = true }
 oneai-mcp = { workspace = true }
+oneai-a2a = { workspace = true }
 syntect = "5.2"
 pulldown-cmark = "0.11"
 unicode-width = "0.2"

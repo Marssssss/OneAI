@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 oneai-core = { workspace = true }
 oneai-domain = { workspace = true }
+oneai-tool = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

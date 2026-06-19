@@ -75,6 +75,10 @@ pub mod error;
 pub mod transport;
 pub mod client;
 pub mod card;
+pub mod task_store;
+pub mod handler;
+pub mod router;
+pub mod server;
 
 // ─── Public exports ──────────────────────────────────────────────────────────────
 
@@ -108,3 +112,11 @@ pub use card::{
     parse_agent_card_yaml,
     well_known_agent_card,
 };
+
+// Task store
+pub use task_store::TaskStore;
+
+// Server-side
+pub use handler::A2AHandler;
+pub use router::A2ARouter;
+pub use server::A2AServerHost;

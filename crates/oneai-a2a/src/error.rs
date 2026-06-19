@@ -44,6 +44,10 @@ pub enum A2AError {
     /// Timeout waiting for task completion
     #[error("A2A timeout: {0}")]
     Timeout(String),
+
+    /// Server-side error (task processing, HTTP server, etc.)
+    #[error("A2A server error: {0}")]
+    Server(String),
 }
 
 /// Convenience type alias for A2A Results.

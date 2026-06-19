@@ -322,6 +322,27 @@ impl MergedDomainPack {
     pub fn sub_agent_kind_names(&self) -> Vec<String> {
         self.sub_agent_definitions.iter().map(|d| d.name.clone()).collect()
     }
+
+    /// Convert this MergedDomainPack back into a DomainPack.
+    ///
+    /// Useful when a `DomainPack` is needed by APIs that only accept
+    /// `DomainPack` (e.g., `agent_card_from_domain_pack()`).
+    pub fn to_domain_pack(&self) -> DomainPack {
+        DomainPack {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            tools: self.tools.clone(),
+            tool_decorators: self.tool_decorators.clone(),
+            context_sources: self.context_sources.clone(),
+            permission_profile: self.permission_profile.clone(),
+            paradigm_strategies: self.paradigm_strategies.clone(),
+            compression_template: self.compression_template.clone(),
+            system_prompt_template: self.system_prompt_template.clone(),
+            workflows: self.workflows.clone(),
+            state_graphs: self.state_graphs.clone(),
+            sub_agent_definitions: self.sub_agent_definitions.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

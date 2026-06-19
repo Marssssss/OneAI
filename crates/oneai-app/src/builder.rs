@@ -31,6 +31,8 @@ use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleManager, WasmActionTo
 
 use oneai_mcp::{McpPluginRegistry, McpServerHost, McpServerInfo};
 
+use oneai_a2a::{A2AServerHost, TaskStore, AgentCard};
+
 use crate::session::AppSession;
 
 /// Builder for assembling a OneAI application.
@@ -65,6 +67,12 @@ pub struct AppBuilder {
     mcp_plugin_registry: Option<McpPluginRegistry>,
     /// Whether to enable MCP server hosting.
     mcp_server_host_enabled: bool,
+    /// Whether to enable A2A server hosting.
+    a2a_server_host_enabled: bool,
+    /// Custom port for A2A server (default: 8080).
+    a2a_server_port: Option<u16>,
+    /// Custom AgentCard for A2A server (overrides DomainPack auto-generation).
+    a2a_server_agent_card: Option<AgentCard>,
 }
 
 impl AppBuilder {
@@ -86,6 +94,9 @@ impl AppBuilder {
             wasm_runtime: None,
             mcp_plugin_registry: None,
             mcp_server_host_enabled: false,
+            a2a_server_host_enabled: false,
+            a2a_server_port: None,
+            a2a_server_agent_card: None,
         }
     }
 
@@ -447,6 +458,48 @@ impl AppBuilder {
         self
     }
 
+    // ─── A2A Server Integration ──────────────────────────────────────────────────
+
+    /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
+    ///
+    /// When enabled, the App can serve its AgentCard and receive tasks from
+    /// remote A2A agents. This makes OneAI both an A2A client (discovering
+    /// remote agents) AND server (being discoverable).
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .a2a_server_host()  // ← enable A2A server hosting
+    ///     .build()?;
+    ///
+    /// // The A2AServerHost is available for processing messages
+    /// app.a2a_server_host().unwrap().process_message(msg).await;
+    /// ```
+    pub fn a2a_server_host(mut self) -> Self {
+        self.a2a_server_host_enabled = true;
+        self
+    }
+
+    /// Enable A2A server hosting with a custom port.
+    ///
+    /// Default port is 8080 if not specified.
+    pub fn a2a_server_with_port(mut self, port: u16) -> Self {
+        self.a2a_server_host_enabled = true;
+        self.a2a_server_port = Some(port);
+        self
+    }
+
+    /// Enable A2A server hosting with a custom AgentCard.
+    ///
+    /// Use this when the AgentCard needs to be manually configured
+    /// instead of auto-generated from the DomainPack.
+    pub fn a2a_server_with_card(mut self, card: AgentCard) -> Self {
+        self.a2a_server_host_enabled = true;
+        self.a2a_server_agent_card = Some(card);
+        self
+    }
+
     // ─── MCP Plugin Integration ──────────────────────────────────────────────
 
     /// Set the MCP plugin registry for managing external MCP servers.
@@ -583,6 +636,21 @@ impl AppBuilder {
             None
         };
 
+        // Create A2A server host if enabled
+        let a2a_server_host = if self.a2a_server_host_enabled {
+            let agent_card = if let Some(card) = self.a2a_server_agent_card {
+                card
+            } else if let Some(domain) = &merged_domain_pack {
+                oneai_a2a::agent_card_from_domain_pack(&domain.as_ref().to_domain_pack(), "http://localhost:8080")
+            } else {
+                AgentCard::new("oneai-agent", "OneAI Agent", "http://localhost:8080")
+            };
+            let task_store = Arc::new(TaskStore::new());
+            Some(A2AServerHost::new(agent_card, task_store))
+        } else {
+            None
+        };
+
         let platform = self.platform.unwrap_or(Platform::current());
 
         Ok(App {
@@ -606,6 +674,7 @@ impl AppBuilder {
             wasm_module_manager,
             mcp_plugin_registry,
             mcp_server_host,
+            a2a_server_host,
         })
     }
 }
@@ -654,6 +723,8 @@ pub struct App {
     pub mcp_plugin_registry: Option<McpPluginRegistry>,
     /// MCP server host (optional — for serving tools via MCP protocol).
     pub mcp_server_host: Option<McpServerHost>,
+    /// A2A server host (optional — for serving agent capabilities via A2A protocol).
+    pub a2a_server_host: Option<A2AServerHost>,
 }
 
 impl App {
@@ -745,6 +816,11 @@ impl App {
     /// Get the MCP server host (for serving tools via MCP protocol).
     pub fn mcp_server_host(&self) -> Option<&McpServerHost> {
         self.mcp_server_host.as_ref()
+    }
+
+    /// Get the A2A server host (for serving agent capabilities via A2A protocol).
+    pub fn a2a_server_host(&self) -> Option<&A2AServerHost> {
+        self.a2a_server_host.as_ref()
     }
 }
 

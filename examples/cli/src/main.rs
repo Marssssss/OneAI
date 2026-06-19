@@ -15,6 +15,10 @@
 //!   oneai mcp add <n>   — Add MCP server config
 //!   oneai mcp remove <n>— Remove MCP server config
 //!   oneai mcp connect <n>— Test MCP server connection
+//!   oneai a2a serve       — Start A2A server
+//!   oneai a2a discover <url> — Discover remote A2A agent
+//!   oneai a2a list        — List configured A2A endpoints
+//!   oneai a2a send <url> <msg> — Send task to remote agent
 //!   oneai eval list     — List available eval suites
 //!   oneai eval run <n>  — Run an eval suite
 //!   oneai eval score <n>— Run metrics only (no agent)
@@ -31,6 +35,7 @@ mod cmd_config;
 mod cmd_version;
 mod cmd_studio;
 mod cmd_mcp;
+mod cmd_a2a;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -99,6 +104,11 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         action: McpAction,
+    },
+    /// A2A agent-to-agent protocol
+    A2a {
+        #[command(subcommand)]
+        action: A2aAction,
     },
     /// Show version information
     Version,
@@ -201,6 +211,30 @@ enum McpAction {
     },
 }
 
+#[derive(Subcommand)]
+enum A2aAction {
+    /// Start A2A server (serve OneAI agent capabilities)
+    Serve {
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Discover a remote A2A agent's capabilities
+    Discover {
+        /// Agent URL endpoint
+        url: String,
+    },
+    /// List configured A2A endpoints
+    List,
+    /// Send a task to a remote A2A agent
+    Send {
+        /// Agent URL endpoint
+        url: String,
+        /// Task message
+        message: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -263,6 +297,22 @@ fn main() {
                 }
                 McpAction::Connect { name } => {
                     cmd_mcp::cmd_mcp_connect(&name);
+                }
+            }
+        }
+        Some(Commands::A2a { action }) => {
+            match action {
+                A2aAction::Serve { domain } => {
+                    cmd_a2a::cmd_a2a_serve(domain.as_deref());
+                }
+                A2aAction::Discover { url } => {
+                    cmd_a2a::cmd_a2a_discover(&url);
+                }
+                A2aAction::List => {
+                    cmd_a2a::cmd_a2a_list();
+                }
+                A2aAction::Send { url, message } => {
+                    cmd_a2a::cmd_a2a_send(&url, &message);
                 }
             }
         }
