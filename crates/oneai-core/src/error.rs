@@ -98,6 +98,10 @@ pub enum OneAIError {
     #[error("Token counting error: {0}")]
     TokenCount(String),
 
+    /// Team coordination errors (team validation, strategy execution failures, etc.).
+    #[error("Team coordination error: {0}")]
+    Team(String),
+
     /// Generic errors with context.
     #[error("{0}")]
     Other(String),

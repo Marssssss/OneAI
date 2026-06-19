@@ -3,7 +3,8 @@
 //! Core types, traits, and abstractions for the OneAI Agent framework.
 //! New: budget management, PermissionLevel, platform capabilities, MemoryPersistence,
 //! cost & usage management, rate limiting, circuit breaker, provider pool (fallback),
-//! smart model router (cost/latency/quality routing), token counting & context management.
+//! smart model router (cost/latency/quality routing), token counting & context management,
+//! team coordination (multi-agent team strategies).
 
 //! # Stability
 //!
@@ -30,6 +31,7 @@ pub mod provider_pool;
 pub mod smart_router;
 pub mod token_counter;
 pub mod context_manager;
+pub mod team;
 
 pub use types::*;
 pub use traits::*;
@@ -44,6 +46,7 @@ pub use provider_pool::*;
 pub use smart_router::*;
 pub use token_counter::*;
 pub use context_manager::*;
+pub use team::*;
 
 #[cfg(test)]
 mod tests {

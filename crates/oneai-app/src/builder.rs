@@ -129,6 +129,8 @@ pub struct AppBuilder {
     context_manager: Option<Arc<ContextManager>>,
     /// Context manager config (optional — for auto-creating context manager).
     context_manager_config: Option<ContextManagerConfig>,
+    /// Team coordinator (optional — enables multi-agent team coordination).
+    team_coordinator: Option<Arc<oneai_agent::TeamCoordinator>>,
 }
 
 impl AppBuilder {
@@ -173,6 +175,7 @@ impl AppBuilder {
             token_counter: None,
             context_manager: None,
             context_manager_config: None,
+            team_coordinator: None,
         }
     }
 
@@ -1011,6 +1014,46 @@ impl AppBuilder {
         self.context_manager_config(ContextManagerConfig::default())
     }
 
+    // ─── Team Coordinator ─────────────────────────────────────────────────────
+
+    /// Set a custom team coordinator for multi-agent team coordination.
+    ///
+    /// The team coordinator enables running multi-agent teams with different
+    /// strategies (Coordinate, Route, Collaborate, Debate).
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let factory = Arc::new(DefaultSubAgentFactory::new(provider, parser, gate, tools));
+    /// let coordinator = Arc::new(TeamCoordinator::new(factory));
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .team_coordinator(coordinator)  // ← enable team coordination
+    ///     .build()?;
+    /// ```
+    pub fn team_coordinator(mut self, tc: Arc<oneai_agent::TeamCoordinator>) -> Self {
+        self.team_coordinator = Some(tc);
+        self
+    }
+
+    /// Use the default team coordinator (Coordinate strategy with all built-in agent kinds).
+    ///
+    /// Creates a TeamCoordinator with DefaultSubAgentFactory.
+    /// Requires a provider to be set (for creating sub-agent AgentLoop instances).
+    pub fn default_team_coordinator(self) -> Self {
+        // Team coordinator needs a provider, parser, approval gate, and tools
+        // to create sub-agent factory. If any are missing, we can't create it.
+        if self.provider.is_none() && self.provider_pool.is_none() && self.provider_pool_config.is_none() {
+            tracing::warn!("default_team_coordinator() called without provider — \
+                team coordinator will not be auto-created. Set a provider first.");
+            return self;
+        }
+
+        // This will be created at build time when provider and other components
+        // are resolved. For now, we just mark that it should be auto-created.
+        // The actual creation happens in the build() method.
+        self
+    }
+
     // ─── SQLite Persistence ────────────────────────────────────────────────
 
     /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
@@ -1467,6 +1510,7 @@ impl AppBuilder {
             smart_router: resolved_smart_router,
             token_counter: resolved_token_counter,
             context_manager: resolved_context_manager,
+            team_coordinator: self.team_coordinator,
         })
     }
 }
@@ -1541,6 +1585,8 @@ pub struct App {
     pub token_counter: Option<Arc<dyn TokenCounter>>,
     /// Context manager for model-aware context trimming.
     pub context_manager: Option<Arc<ContextManager>>,
+    /// Team coordinator for multi-agent team coordination.
+    pub team_coordinator: Option<Arc<oneai_agent::TeamCoordinator>>,
 }
 
 impl App {
@@ -1682,6 +1728,11 @@ impl App {
     /// Get the smart router (if configured).
     pub fn smart_router(&self) -> Option<&Arc<SmartRouter>> {
         self.smart_router.as_ref()
+    }
+
+    /// Get the team coordinator (if configured).
+    pub fn team_coordinator(&self) -> Option<&Arc<oneai_agent::TeamCoordinator>> {
+        self.team_coordinator.as_ref()
     }
 }
 

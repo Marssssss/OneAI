@@ -65,6 +65,7 @@ mod cmd_embed;
 mod cmd_cost;
 mod cmd_provider;
 mod cmd_token;
+mod cmd_team;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -168,6 +169,11 @@ enum Commands {
     Token {
         #[command(subcommand)]
         action: TokenAction,
+    },
+    /// Team coordination — multi-agent team strategies and execution
+    Team {
+        #[command(subcommand)]
+        action: TeamAction,
     },
     /// Show version information
     Version,
@@ -497,6 +503,33 @@ enum TokenAction {
     },
 }
 
+#[derive(Subcommand)]
+enum TeamAction {
+    /// List available team coordination strategies
+    Strategies,
+    /// List preset team configurations (code_review, research_route, dev_pipeline, arch_debate)
+    Presets,
+    /// Show team configuration details
+    Info {
+        /// Team ID or preset name
+        id: String,
+    },
+    /// Run a team coordination task
+    Run {
+        /// The task to coordinate
+        task: String,
+        /// Team strategy: coordinate, route, collaborate, debate
+        #[arg(long, default_value = "coordinate")]
+        strategy: String,
+        /// Use a preset team configuration
+        #[arg(long)]
+        preset: Option<String>,
+        /// Total token budget for the team (default: 100000)
+        #[arg(long)]
+        budget: Option<String>,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -664,6 +697,16 @@ fn main() {
                 }
                 TokenAction::Fits { text, model } => {
                     cmd_token::run_token_fits(&text, &model);
+                }
+            }
+        }
+        Some(Commands::Team { action }) => {
+            match action {
+                TeamAction::Strategies => cmd_team::cmd_team_strategies(),
+                TeamAction::Presets => cmd_team::cmd_team_presets(),
+                TeamAction::Info { id } => cmd_team::cmd_team_info(&id),
+                TeamAction::Run { task, strategy, preset, budget } => {
+                    cmd_team::cmd_team_run(&task, &strategy, preset.as_deref(), budget.as_deref());
                 }
             }
         }
