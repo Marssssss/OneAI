@@ -1,7 +1,8 @@
 //! # OneAI Core
 //!
 //! Core types, traits, and abstractions for the OneAI Agent framework.
-//! New: budget management, PermissionLevel, platform capabilities, MemoryPersistence.
+//! New: budget management, PermissionLevel, platform capabilities, MemoryPersistence,
+//! cost & usage management, rate limiting, circuit breaker.
 
 //! # Stability
 //!
@@ -21,6 +22,9 @@ pub mod error;
 pub mod platform;
 pub mod budget;
 pub mod platform_capabilities;
+pub mod cost;
+pub mod rate_limiter;
+pub mod circuit_breaker;
 
 pub use types::*;
 pub use traits::*;
@@ -28,6 +32,9 @@ pub use error::*;
 pub use platform::*;
 pub use budget::*;
 pub use platform_capabilities::*;
+pub use cost::*;
+pub use rate_limiter::*;
+pub use circuit_breaker::*;
 
 #[cfg(test)]
 mod tests {

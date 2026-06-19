@@ -461,7 +461,7 @@ impl ModelPricing {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentLoopConfig {
     pub system_prompt: String,
     pub use_streaming: bool,
@@ -476,6 +476,19 @@ pub struct AgentLoopConfig {
     pub detect_env_changes: bool,
     /// Pricing configuration for cost tracking.
     pub pricing: ModelPricing,
+    /// Cost tracker — records usage after each inference call.
+    /// When set, the loop automatically records token usage and cost.
+    pub cost_tracker: Option<Arc<dyn oneai_core::CostTracker>>,
+    /// Rate limiter — checks rate before each provider call.
+    /// When set, the loop waits if the rate limit is exceeded.
+    pub rate_limiter: Option<Arc<dyn oneai_core::RateLimiter>>,
+    /// Circuit breaker — provider failover on repeated failures.
+    /// When set, the loop skips calls to providers with open circuits.
+    pub circuit_breaker: Option<Arc<dyn oneai_core::CircuitBreaker>>,
+    /// Model pricing catalog — per-model cost computation.
+    /// When set, cost tracking uses this catalog for accurate pricing.
+    /// When None, uses the `pricing` field (backward-compatible).
+    pub pricing_catalog: Option<oneai_core::ModelPricingCatalog>,
     /// Structured output configuration — when set, the model's final
     /// answer is validated against a JSON Schema. If validation fails,
     /// the model is re-prompted with the error for self-correction (ModelRetry).
@@ -485,6 +498,29 @@ pub struct AgentLoopConfig {
     /// paradigm switch, delegation, approval). When None, tracing is
     /// completely disabled (zero overhead).
     pub trace_context: Option<TraceContext>,
+}
+
+impl std::fmt::Debug for AgentLoopConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentLoopConfig")
+            .field("system_prompt", &self.system_prompt)
+            .field("use_streaming", &self.use_streaming)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("thinking_budget", &self.thinking_budget)
+            .field("hard_max_iterations", &self.hard_max_iterations)
+            .field("auto_checkpoint", &self.auto_checkpoint)
+            .field("inject_skills", &self.inject_skills)
+            .field("detect_env_changes", &self.detect_env_changes)
+            .field("pricing", &self.pricing)
+            .field("cost_tracker", &self.cost_tracker.as_ref().map(|_| "Arc<dyn CostTracker>"))
+            .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
+            .field("circuit_breaker", &self.circuit_breaker.as_ref().map(|_| "Arc<dyn CircuitBreaker>"))
+            .field("pricing_catalog", &self.pricing_catalog)
+            .field("structured_output", &self.structured_output)
+            .field("trace_context", &self.trace_context)
+            .finish()
+    }
 }
 
 impl Default for AgentLoopConfig {
@@ -504,6 +540,10 @@ impl Default for AgentLoopConfig {
             inject_skills: true,
             detect_env_changes: true,
             pricing: ModelPricing::default(),
+            cost_tracker: None,
+            rate_limiter: None,
+            circuit_breaker: None,
+            pricing_catalog: None,
             structured_output: None,
             trace_context: None,
         }
@@ -568,6 +608,21 @@ impl Clone for AgentLoop {
 }
 
 impl AgentLoop {
+    /// Get the provider name for cost tracking.
+    fn provider_name(&self) -> String {
+        let config = self.provider.config();
+        match config.cloud_kind {
+            Some(oneai_core::CloudProviderKind::OpenAI) => "openai".to_string(),
+            Some(oneai_core::CloudProviderKind::Anthropic) => "anthropic".to_string(),
+            Some(oneai_core::CloudProviderKind::Gemini) => "gemini".to_string(),
+            None => match config.provider_type {
+                oneai_core::ProviderType::Local => "ollama".to_string(),
+                oneai_core::ProviderType::Transformers => "local".to_string(),
+                oneai_core::ProviderType::Cloud => "cloud".to_string(),
+            },
+        }
+    }
+
     /// Create a new AgentLoop with all dependencies.
     pub fn new(
         provider: Arc<dyn LlmProvider>,
@@ -755,6 +810,44 @@ impl AgentLoop {
             }
 
             state.iterations += 1;
+
+            // ─── Rate limiter check (wait if rate limit exceeded) ────────────
+            if let Some(rate_limiter) = &self.config.rate_limiter {
+                let provider_name = self.provider_name();
+                let wait_time = rate_limiter.wait_if_needed(&provider_name).await.unwrap_or(std::time::Duration::ZERO);
+                if wait_time > std::time::Duration::ZERO {
+                    tracing::warn!("Rate limit exceeded for provider {}, waiting {}ms",
+                        provider_name, wait_time.as_millis());
+                    tokio::time::sleep(wait_time).await;
+                }
+                let _ = rate_limiter.record_call(&provider_name).await;
+            }
+
+            // ─── Circuit breaker check (skip if provider is failing) ─────────
+            if let Some(circuit_breaker) = &self.config.circuit_breaker {
+                let provider_name = self.provider_name();
+                let circuit_state = circuit_breaker.check(&provider_name);
+                if circuit_state.is_failing() {
+                    tracing::warn!("Circuit breaker is OPEN for provider {}, skipping call",
+                        provider_name);
+                    // Skip this iteration — the loop will continue and may exit
+                    // on hard_max_iterations if all calls are blocked
+                    continue;
+                }
+            }
+
+            // ─── Budget enforcement check ─────────────────────────────────────
+            if let Some(cost_tracker) = &self.config.cost_tracker {
+                let budget_status = cost_tracker.check_budget(&state.conversation.id).await.unwrap_or(oneai_core::BudgetStatus::unlimited(state.iterations as u64));
+                if budget_status.budget_exceeded {
+                    tracing::warn!("Budget exceeded for session {} — terminating loop",
+                        state.conversation.id);
+                    observer.on_cost_update(cumulative_cost);
+                    let result = state.into_result();
+                    observer.on_complete(&result);
+                    return Ok(result);
+                }
+            }
             observer.on_iteration_start(state.iterations, state.active_paradigm);
 
             // ─── Trace: log iteration event ──────────────────────────
@@ -915,11 +1008,38 @@ impl AgentLoop {
 
             // 4b. Notify observer of token usage and cost
             observer.on_token_usage(response.usage.prompt_tokens, response.usage.completion_tokens);
-            cumulative_cost += self.config.pricing.compute_cost(
-                response.usage.prompt_tokens,
-                response.usage.completion_tokens,
-            );
+
+            // Use pricing catalog if available, otherwise fall back to ModelPricing
+            let iteration_cost = if let Some(catalog) = &self.config.pricing_catalog {
+                catalog.compute_cost(&response.model, response.usage.prompt_tokens, response.usage.completion_tokens)
+            } else {
+                self.config.pricing.compute_cost(
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                )
+            };
+            cumulative_cost += iteration_cost;
             observer.on_cost_update(cumulative_cost);
+
+            // 4c. Record usage in cost tracker (if configured)
+            if let Some(cost_tracker) = &self.config.cost_tracker {
+                let session_id = state.conversation.id.clone();
+                let provider_name = self.provider_name();
+                let record = oneai_core::UsageRecord::new(
+                    session_id,
+                    response.model.clone(),
+                    provider_name,
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                    iteration_cost,
+                );
+                let _ = cost_tracker.record_usage(record).await;
+            }
+
+            // 4d. Record circuit breaker success (if configured)
+            if let Some(circuit_breaker) = &self.config.circuit_breaker {
+                circuit_breaker.record_success(&self.provider_name());
+            }
 
             // 5. Parse decision
             let decision = self.parse_decision(&response)?;

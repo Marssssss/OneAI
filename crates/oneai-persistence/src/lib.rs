@@ -3,6 +3,7 @@
 //! State persistence and checkpoint management for agent loop recovery.
 //! New: ProgressiveCheckpointManager with auto-save per iteration.
 //! New: SqliteSessionStore for STM/LTM/conversation persistence (session resume).
+//! New: SqliteCostTracker for persistent cost & usage tracking.
 
 //! # Stability
 //!
@@ -20,8 +21,10 @@ pub mod checkpoint;
 pub mod state;
 pub mod progressive_checkpoint;
 pub mod sqlite_store;
+pub mod cost_tracker;
 
 pub use checkpoint::*;
 pub use state::*;
 pub use progressive_checkpoint::*;
 pub use sqlite_store::*;
+pub use cost_tracker::*;

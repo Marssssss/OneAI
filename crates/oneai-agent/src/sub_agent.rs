@@ -675,6 +675,10 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             inject_skills: false, // Sub-agents don't need skill injection
             detect_env_changes: false, // Sub-agents don't need env diff detection
             pricing: crate::agent_loop::ModelPricing::default(),
+            cost_tracker: None, // Sub-agents inherit cost tracker from parent loop
+            rate_limiter: None, // Sub-agents inherit rate limiter from parent loop
+            circuit_breaker: None, // Sub-agents inherit circuit breaker from parent loop
+            pricing_catalog: None, // Sub-agents inherit pricing catalog from parent loop
             structured_output: None, // Sub-agents don't have structured output validation
             trace_context: None, // Sub-agents inherit trace from parent loop
         };

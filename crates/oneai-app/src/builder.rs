@@ -13,6 +13,9 @@ use std::sync::Arc;
 use oneai_core::error::Result;
 use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool, EmbeddingService};
 use oneai_core::EmbeddingConfig;
+use oneai_core::cost::{CostTracker, InMemoryCostTracker, ModelPricingCatalog, CostBudgetConfig};
+use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
+use oneai_core::circuit_breaker::{CircuitBreaker, ThresholdCircuitBreaker, CircuitBreakerConfig};
 use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
 
 use oneai_tool::{ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate, ChannelApprovalGateWithThreshold};
@@ -89,6 +92,20 @@ pub struct AppBuilder {
     embedding_service: Option<Arc<dyn EmbeddingService>>,
     /// Embedding config (optional — for lazy embedding service creation).
     embedding_config: Option<EmbeddingConfig>,
+    /// Cost tracker (optional — enables cost tracking for LLM inference calls).
+    cost_tracker: Option<Arc<dyn CostTracker>>,
+    /// Rate limiter (optional — prevents exceeding provider API rate limits).
+    rate_limiter: Option<Arc<dyn RateLimiter>>,
+    /// Circuit breaker (optional — enables provider failover on repeated failures).
+    circuit_breaker: Option<Arc<dyn CircuitBreaker>>,
+    /// Model pricing catalog (optional — per-model cost computation).
+    pricing_catalog: Option<ModelPricingCatalog>,
+    /// Cost budget config (optional — session budget limits).
+    cost_budget: Option<CostBudgetConfig>,
+    /// Rate limit config (optional — for auto-creating rate limiter).
+    rate_limit_config: Option<RateLimitConfig>,
+    /// Circuit breaker config (optional — for auto-creating circuit breaker).
+    circuit_breaker_config: Option<CircuitBreakerConfig>,
 }
 
 impl AppBuilder {
@@ -119,6 +136,13 @@ impl AppBuilder {
             checkpoint_backend: None,
             embedding_service: None,
             embedding_config: None,
+            cost_tracker: None,
+            rate_limiter: None,
+            circuit_breaker: None,
+            pricing_catalog: None,
+            cost_budget: None,
+            rate_limit_config: None,
+            circuit_breaker_config: None,
         }
     }
 
@@ -573,6 +597,140 @@ impl AppBuilder {
         self.embedding_config(EmbeddingConfig::default())
     }
 
+    // ─── Cost & Usage Management ────────────────────────────────────────────
+
+    /// Set a custom cost tracker.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let cost_tracker = Arc::new(InMemoryCostTracker::new());
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .cost_tracker(cost_tracker)  // ← enable cost tracking
+    ///     .build()?;
+    /// ```
+    pub fn cost_tracker(mut self, tracker: Arc<dyn CostTracker>) -> Self {
+        self.cost_tracker = Some(tracker);
+        self
+    }
+
+    /// Use the default in-memory cost tracker (no persistence).
+    ///
+    /// Suitable for single-process sessions. For persistent cost tracking,
+    /// use `.sqlite_cost_tracker()` instead.
+    pub fn default_cost_tracker(self) -> Self {
+        self.cost_tracker(Arc::new(InMemoryCostTracker::new()))
+    }
+
+    /// Use a SQLite-backed cost tracker (persistent across restarts).
+    ///
+    /// Shares the same database as `SqliteSessionStore` if configured,
+    /// otherwise creates a new database at `~/.oneai/oneai.db`.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .sqlite_persistence()       // ← session persistence
+    ///     .sqlite_cost_tracker()      // ← cost persistence
+    ///     .build()?;
+    /// ```
+    pub fn sqlite_cost_tracker(mut self) -> Self {
+        let tracker = if let Some(store) = &self.sqlite_store {
+            Arc::new(oneai_persistence::SqliteCostTracker::from_store(store))
+        } else {
+            Arc::new(oneai_persistence::SqliteCostTracker::with_defaults())
+        };
+        self.cost_tracker = Some(tracker);
+        self
+    }
+
+    /// Set session budget limits (cost, tokens, or call count).
+    ///
+    /// When any limit is exceeded, the AgentLoop terminates the session.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .cost_budget(CostBudgetConfig::with_cost_limit(5.0))  // ← $5 max
+    ///     .build()?;
+    /// ```
+    pub fn cost_budget(mut self, config: CostBudgetConfig) -> Self {
+        self.cost_budget = Some(config);
+        self
+    }
+
+    /// Set a custom model pricing catalog.
+    ///
+    /// The pricing catalog provides per-model cost computation.
+    /// By default, uses `ModelPricingCatalog::with_known_models()`
+    /// which includes pricing for GPT-4o, Claude, Gemini, DeepSeek, etc.
+    pub fn pricing_catalog(mut self, catalog: ModelPricingCatalog) -> Self {
+        self.pricing_catalog = Some(catalog);
+        self
+    }
+
+    /// Use the default model pricing catalog (known models + fallback).
+    pub fn default_pricing_catalog(self) -> Self {
+        self.pricing_catalog(ModelPricingCatalog::with_known_models())
+    }
+
+    /// Set a custom rate limiter.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let rate_limiter = Arc::new(TokenWindowRateLimiter::with_common_limits());
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .rate_limiter(rate_limiter)  // ← enable rate limiting
+    ///     .build()?;
+    /// ```
+    pub fn rate_limiter(mut self, limiter: Arc<dyn RateLimiter>) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Use the default rate limiter (60 RPM / 1000 RPH global).
+    ///
+    /// No per-provider overrides. For provider-specific limits,
+    /// use `.rate_limit_config(RateLimitConfig::with_common_provider_limits())`.
+    pub fn default_rate_limiter(self) -> Self {
+        self.rate_limiter(Arc::new(TokenWindowRateLimiter::new()))
+    }
+
+    /// Configure rate limiter settings (for auto-creation at build time).
+    pub fn rate_limit_config(mut self, config: RateLimitConfig) -> Self {
+        self.rate_limit_config = Some(config);
+        self
+    }
+
+    /// Set a custom circuit breaker.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let circuit_breaker = Arc::new(ThresholdCircuitBreaker::new());
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .circuit_breaker(circuit_breaker)  // ← enable failover
+    ///     .build()?;
+    /// ```
+    pub fn circuit_breaker(mut self, breaker: Arc<dyn CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(breaker);
+        self
+    }
+
+    /// Use the default circuit breaker (5 failures → open, 3 successes → close, 60s open duration).
+    pub fn default_circuit_breaker(self) -> Self {
+        self.circuit_breaker(Arc::new(ThresholdCircuitBreaker::new()))
+    }
+
+    /// Configure circuit breaker settings (for auto-creation at build time).
+    pub fn circuit_breaker_config(mut self, config: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker_config = Some(config);
+        self
+    }
+
     // ─── SQLite Persistence ────────────────────────────────────────────────
 
     /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
@@ -866,6 +1024,42 @@ impl AppBuilder {
             })
         };
 
+        // Resolve cost tracker: use explicitly set tracker, or auto-create from budget config
+        let cost_tracker = self.cost_tracker.or_else(|| {
+            if self.cost_budget.is_some() || self.sqlite_store.is_some() {
+                // Auto-create if budget is set or persistence is available
+                if let Some(store) = &self.sqlite_store {
+                    Some(Arc::new(oneai_persistence::SqliteCostTracker::from_store(store))
+                        as Arc<dyn CostTracker>)
+                } else {
+                    Some(Arc::new(InMemoryCostTracker::with_budget(
+                        self.cost_budget.clone().unwrap_or_default()
+                    )) as Arc<dyn CostTracker>)
+                }
+            } else {
+                None
+            }
+        });
+
+        // Resolve rate limiter: use explicitly set limiter, or auto-create from config
+        let rate_limiter = self.rate_limiter.or_else(|| {
+            self.rate_limit_config.map(|config| {
+                Arc::new(TokenWindowRateLimiter::with_config(config)) as Arc<dyn RateLimiter>
+            })
+        });
+
+        // Resolve circuit breaker: use explicitly set breaker, or auto-create from config
+        let circuit_breaker = self.circuit_breaker.or_else(|| {
+            self.circuit_breaker_config.map(|config| {
+                Arc::new(ThresholdCircuitBreaker::with_config(config)) as Arc<dyn CircuitBreaker>
+            })
+        });
+
+        // Resolve pricing catalog: use explicitly set catalog, or default
+        let pricing_catalog = self.pricing_catalog.or_else(|| {
+            Some(ModelPricingCatalog::with_known_models())
+        });
+
         let platform = self.platform.unwrap_or(Platform::current());
 
         Ok(App {
@@ -894,6 +1088,10 @@ impl AppBuilder {
             a2a_server_host,
             sqlite_store: self.sqlite_store,
             embedding_service,
+            cost_tracker,
+            rate_limiter,
+            circuit_breaker,
+            pricing_catalog,
         })
     }
 }
@@ -952,6 +1150,14 @@ pub struct App {
     pub sqlite_store: Option<Arc<SqliteSessionStore>>,
     /// Embedding service (optional — for auto-embedding RAG and memory search).
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
+    /// Cost tracker (optional — for tracking LLM inference costs).
+    pub cost_tracker: Option<Arc<dyn CostTracker>>,
+    /// Rate limiter (optional — for provider API rate limiting).
+    pub rate_limiter: Option<Arc<dyn RateLimiter>>,
+    /// Circuit breaker (optional — for provider failover).
+    pub circuit_breaker: Option<Arc<dyn CircuitBreaker>>,
+    /// Model pricing catalog (optional — for per-model cost computation).
+    pub pricing_catalog: Option<ModelPricingCatalog>,
 }
 
 impl App {
@@ -1063,6 +1269,26 @@ impl App {
     /// Get the embedding service (for auto-embedding RAG and memory search).
     pub fn embedding_service(&self) -> Option<&Arc<dyn EmbeddingService>> {
         self.embedding_service.as_ref()
+    }
+
+    /// Get the cost tracker (for cost tracking and budget enforcement).
+    pub fn cost_tracker(&self) -> Option<&Arc<dyn CostTracker>> {
+        self.cost_tracker.as_ref()
+    }
+
+    /// Get the rate limiter (for provider API rate limiting).
+    pub fn rate_limiter(&self) -> Option<&Arc<dyn RateLimiter>> {
+        self.rate_limiter.as_ref()
+    }
+
+    /// Get the circuit breaker (for provider failover).
+    pub fn circuit_breaker(&self) -> Option<&Arc<dyn CircuitBreaker>> {
+        self.circuit_breaker.as_ref()
+    }
+
+    /// Get the model pricing catalog (for per-model cost computation).
+    pub fn pricing_catalog(&self) -> Option<&ModelPricingCatalog> {
+        self.pricing_catalog.as_ref()
     }
 }
 

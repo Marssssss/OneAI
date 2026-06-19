@@ -34,6 +34,11 @@
 //!   oneai session resume <id> — Resume a saved session
 //!   oneai session delete <id> — Delete a session
 //!   oneai session info <id>   — Show session details
+//!   oneai cost report          — Show global cost summary
+//!   oneai cost session <id>    — Show per-session cost details
+//!   oneai cost budget <max>    — Set session budget limit (USD)
+//!   oneai cost models          — List pricing for known models
+//!   oneai cost export [--format]— Export usage records (json/csv)
 //!   oneai eval list     — List available eval suites
 //!   oneai eval run <n>  — Run an eval suite
 //!   oneai eval score <n>— Run metrics only (no agent)
@@ -54,6 +59,7 @@ mod cmd_a2a;
 mod cmd_wasm;
 mod cmd_session;
 mod cmd_embed;
+mod cmd_cost;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -142,6 +148,11 @@ enum Commands {
     Embed {
         #[command(subcommand)]
         action: EmbedAction,
+    },
+    /// Cost & usage management — track LLM inference costs, budgets, and model pricing
+    Cost {
+        #[command(subcommand)]
+        action: CostAction,
     },
     /// Show version information
     Version,
@@ -384,6 +395,30 @@ enum EmbedAction {
     },
 }
 
+#[derive(Subcommand)]
+enum CostAction {
+    /// Show global cost summary (total tokens, cost, by-model breakdown)
+    Report,
+    /// Show per-session cost details
+    Session {
+        /// Session ID to inspect
+        id: String,
+    },
+    /// Set session budget limit in USD (e.g., 5.0 = $5 max)
+    Budget {
+        /// Maximum cost in USD (e.g., 5.0)
+        max_usd: String,
+    },
+    /// List pricing for known models
+    Models,
+    /// Export usage records (json or csv format)
+    Export {
+        /// Export format: json or csv (default: json)
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -502,6 +537,15 @@ fn main() {
                 EmbedAction::Dimension { model, service, api_key } => {
                     cmd_embed::cmd_embed_dimension(model.as_deref(), service.as_deref(), api_key.as_deref());
                 }
+            }
+        }
+        Some(Commands::Cost { action }) => {
+            match action {
+                CostAction::Report => cmd_cost::cmd_cost_report(),
+                CostAction::Session { id } => cmd_cost::cmd_cost_session(&id),
+                CostAction::Budget { max_usd } => cmd_cost::cmd_cost_budget(&max_usd),
+                CostAction::Models => cmd_cost::cmd_cost_models(),
+                CostAction::Export { format } => cmd_cost::cmd_cost_export(&format),
             }
         }
         Some(Commands::Version) => {
