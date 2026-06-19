@@ -7,6 +7,9 @@
 //!   oneai pack list     — List available DomainPacks
 //!   oneai pack show <n> — Show DomainPack details
 //!   oneai pack install  — Install a DomainPack
+//!   oneai pack validate — Validate a DomainPack spec file
+//!   oneai pack spec     — Export DomainPack spec as JSON Schema
+//!   oneai pack check <n>— Check installed pack against spec
 //!   oneai mcp serve     — Run as MCP server (Stdio mode)
 //!   oneai mcp list      — List configured MCP servers
 //!   oneai mcp add <n>   — Add MCP server config
@@ -115,6 +118,18 @@ enum PackAction {
         /// Source path or git URL
         source: String,
     },
+    /// Validate a DomainPack spec file (structural + semantic checks)
+    Validate {
+        /// Path to the DomainPack config file (.yaml, .yml, or .toml)
+        path: String,
+    },
+    /// Export DomainPack specification as JSON Schema
+    Spec,
+    /// Check an installed pack against the specification
+    Check {
+        /// Pack name to check
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -210,6 +225,9 @@ fn main() {
                 PackAction::List => cmd_pack::cmd_pack_list(),
                 PackAction::Show { name } => cmd_pack::cmd_pack_show(&name),
                 PackAction::Install { source } => cmd_pack::cmd_pack_install(&source),
+                PackAction::Validate { path } => cmd_pack::cmd_pack_validate(&path),
+                PackAction::Spec => cmd_pack::cmd_pack_spec(),
+                PackAction::Check { name } => cmd_pack::cmd_pack_check(&name),
             }
         }
         Some(Commands::Eval { action }) => {

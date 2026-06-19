@@ -332,3 +332,119 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     }
     Ok(())
 }
+
+/// Validate a DomainPack spec file — structural + semantic checks.
+pub fn cmd_pack_validate(path: &str) {
+    let file_path = std::path::Path::new(path);
+
+    if !file_path.exists() {
+        eprintln!("❌ File not found: {}", path);
+        return;
+    }
+
+    // Load the spec file
+    let spec_file = match oneai_domain::DomainPackSpecFile::load(file_path) {
+        Ok(sf) => sf,
+        Err(e) => {
+            eprintln!("❌ Failed to load spec file: {}", e);
+            return;
+        }
+    };
+
+    println!("🔍 Validating DomainPack: {}\n", spec_file.config.name);
+
+    // Validate
+    let result = spec_file.validate();
+
+    if result.is_valid() {
+        println!("✅ Validation PASSED — config is valid");
+    } else {
+        println!("❌ Validation FAILED — {} errors found", result.errors().len());
+    }
+
+    // Print all issues
+    if !result.issues().is_empty() {
+        println!();
+        for issue in result.issues() {
+            let icon = match issue.severity {
+                oneai_domain::ValidationSeverity::Error => "❌",
+                oneai_domain::ValidationSeverity::Warning => "⚠️",
+                oneai_domain::ValidationSeverity::Info => "ℹ️",
+                _ => "?",
+            };
+            let location = issue.location.as_ref()
+                .map(|l| format!(" at {}", l))
+                .unwrap_or_default();
+            println!("  {} {} [{}{}]: {}", icon, issue.severity, issue.layer, location, issue.message);
+        }
+    }
+
+    if !result.is_valid() {
+        println!("\nFix the errors above before using this DomainPack config.");
+    }
+}
+
+/// Export DomainPack specification as JSON Schema.
+pub fn cmd_pack_spec() {
+    let schema = oneai_domain::DomainPackSpec::schema();
+    let json = serde_json::to_string_pretty(&schema).unwrap_or_else(|e| {
+        eprintln!("Error serializing schema: {}", e);
+        "{}".to_string()
+    });
+
+    println!("📋 DomainPack Specification (JSON Schema v{})\n", oneai_domain::DomainPackSpec::SPEC_VERSION);
+    println!("{}", json);
+}
+
+/// Check an installed pack against the specification.
+pub fn cmd_pack_check(name: &str) {
+    // Try builtin first
+    if let Some(pack) = get_builtin_pack(name, ".") {
+        // Built-in packs are always valid (they're defined in Rust code)
+        println!("✅ Built-in pack '{}' is always valid (defined in Rust code).", name);
+        println!("   Tools: {}, Strategies: {}", pack.tools.len(), pack.paradigm_strategies.len());
+        return;
+    }
+
+    // Try installed pack
+    let packs_dir = super::config::OneaiConfig::packs_dir();
+    let pack_dir = packs_dir.join(name);
+
+    if !pack_dir.exists() {
+        eprintln!("❌ Pack '{}' not found. Use 'oneai pack list' to see available packs.", name);
+        return;
+    }
+
+    // Try loading and validating from config file
+    for file in &["ONEAI.domain.yaml", "ONEAI.domain.yml", "ONEAI.domain.toml"] {
+        let config_path = pack_dir.join(file);
+        if config_path.exists() {
+            match oneai_domain::DomainPackSpecFile::load(&config_path) {
+                Ok(spec_file) => {
+                    let result = spec_file.validate();
+                    if result.is_valid() {
+                        println!("✅ Pack '{}' validation PASSED", name);
+                    } else {
+                        println!("❌ Pack '{}' validation FAILED — {} errors", name, result.errors().len());
+                    }
+                    for issue in result.issues() {
+                        let icon = match issue.severity {
+                            oneai_domain::ValidationSeverity::Error => "❌",
+                            oneai_domain::ValidationSeverity::Warning => "⚠️",
+                            oneai_domain::ValidationSeverity::Info => "ℹ️",
+                            _ => "?",
+                        };
+                        println!("  {} {} [{}]: {}", icon, issue.severity, issue.layer, issue.message);
+                    }
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to load pack config from {}: {}", config_path.display(), e);
+                    return;
+                }
+            }
+        }
+    }
+
+    eprintln!("❌ Pack '{}' directory exists but no config file found.", name);
+}

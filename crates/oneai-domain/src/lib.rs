@@ -52,6 +52,9 @@ pub mod builtin_sources;
 pub mod config_parser;
 pub mod repo_map;
 pub mod market;
+pub mod spec;
+pub mod validator;
+pub mod spec_file;
 
 pub use domain_pack::*;
 pub use paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
@@ -67,3 +70,6 @@ pub use builtin_sources::*;
 pub use config_parser::*;
 pub use repo_map::*;
 pub use market::*;
+pub use spec::*;
+pub use validator::{ValidationSeverity, ValidationIssue, ValidationResult, DomainPackValidator};
+pub use spec_file::DomainPackSpecFile;
