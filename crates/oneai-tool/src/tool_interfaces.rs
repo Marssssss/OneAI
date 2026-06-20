@@ -2421,9 +2421,14 @@ impl BrowserTool {
 
         match result {
             Ok(Ok(markdown)) => {
-                // Truncate if too long (prevent context overflow)
+                // Truncate if too long (prevent context overflow, char-boundary-safe for CJK)
                 let content = if markdown.len() > 10000 {
-                    format!("{}... [truncated, total {} chars]", &markdown[..10000], markdown.len())
+                    let end = markdown.char_indices()
+                        .take_while(|(i, _)| *i < 10000)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(0);
+                    format!("{}... [truncated, total {} chars]", &markdown[..end], markdown.len())
                 } else {
                     markdown
                 };
@@ -2501,7 +2506,13 @@ impl BrowserTool {
         let result = if extracted.is_empty() {
             "No content found matching selector".to_string()
         } else if extracted.len() > 5000 {
-            format!("{}... [truncated]", &extracted[..5000])
+            // Char-boundary-safe truncation for CJK content
+            let end = extracted.char_indices()
+                .take_while(|(i, _)| *i < 5000)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            format!("{}... [truncated]", &extracted[..end])
         } else {
             extracted
         };
@@ -2533,12 +2544,24 @@ impl BrowserTool {
             let content = if body.contains("<html") || body.contains("<!DOCTYPE") {
                 let md = html2text::from_read(body.as_bytes(), 200);
                 if md.len() > 5000 {
-                    format!("{}... [truncated]", &md[..5000])
+                    // Char-boundary-safe truncation for CJK content
+                    let end = md.char_indices()
+                        .take_while(|(i, _)| *i < 5000)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(0);
+                    format!("{}... [truncated]", &md[..end])
                 } else {
                     md
                 }
             } else if body.len() > 5000 {
-                format!("Status: {}\n{}", status.as_u16(), &body[..5000])
+                // Char-boundary-safe truncation for CJK content
+                let end = body.char_indices()
+                    .take_while(|(i, _)| *i < 5000)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                format!("Status: {}\n{}", status.as_u16(), &body[..end])
             } else {
                 format!("Status: {}\n{}", status.as_u16(), body)
             };

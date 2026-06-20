@@ -163,7 +163,13 @@ impl ContextSource for FileTreeSource {
                 let tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 // Limit to 2000 chars to prevent context overflow
                 let truncated = if tree.len() > 2000 {
-                    format!("{}... [truncated]", &tree[..2000])
+                    // Char-boundary-safe truncation for CJK paths
+                    let end = tree.char_indices()
+                        .take_while(|(i, _)| *i < 2000)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(0);
+                    format!("{}... [truncated]", &tree[..end])
                 } else {
                     tree
                 };

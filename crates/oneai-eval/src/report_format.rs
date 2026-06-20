@@ -102,9 +102,14 @@ pub fn render_markdown(report: &EvalReport) -> String {
             continue;
         }
 
-        // Truncate long outputs for readability
+        // Truncate long outputs for readability (char-boundary-safe for CJK)
         let output_preview = if result.actual_output.len() > 200 {
-            format!("{}...", &result.actual_output[..200])
+            let end = result.actual_output.char_indices()
+                .take_while(|(i, _)| *i < 200)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            format!("{}...", &result.actual_output[..end])
         } else {
             result.actual_output.clone()
         };

@@ -91,6 +91,12 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Called when cost updates (cumulative session cost).
     fn on_cost_update(&self, _cost: f64) {}
 
+    /// Called after assembling the context for each iteration, with a breakdown
+    /// of how the context window is occupied. This includes the full assembled
+    /// conversation (system prompt, tool defs, context sources, messages),
+    /// not just the bare session conversation.
+    fn on_context_accounting(&self, _accounting: &oneai_core::ContextAccounting) {}
+
     /// Called when the loop is interrupted (paused at an iteration boundary).
     /// The UI can display the interrupt reason and await human feedback.
     fn on_interrupt(&self, _point: &InterruptPoint) {}
@@ -811,6 +817,14 @@ impl AgentLoop {
 
             state.iterations += 1;
 
+            tracing::info!(
+                "AgentLoop iteration {} started (paradigm: {}, messages: {}, is_complete: {})",
+                state.iterations,
+                paradigm_name(&state.active_paradigm),
+                state.conversation.messages.len(),
+                state.is_complete()
+            );
+
             // ─── Rate limiter check (wait if rate limit exceeded) ────────────
             if let Some(rate_limiter) = &self.config.rate_limiter {
                 let provider_name = self.provider_name();
@@ -947,6 +961,25 @@ impl AgentLoop {
                 }
             }
 
+            // 3c. Compute context accounting from the assembled request
+            // This uses HeuristicTokenCounter on the full assembled conversation + tool defs,
+            // giving accurate per-category breakdown that the sidebar and /context command can display.
+            //
+            // IMPORTANT: Use the actual model name from provider config (e.g., "glm-5.1")
+            // not the provider type name (e.g., "openai"). The model name determines:
+            // - Context window size (glm-5.1 → 203K, gpt-4o → 200K, etc.)
+            // - Tokenizer profile (chars-per-token ratios, overhead values)
+            // - Provider-specific estimation parameters
+            let model_name_for_accounting = self.provider.config().model_name
+                .as_deref()
+                .unwrap_or("default");
+            let accounting = oneai_core::ContextAccounting::account(
+                &request.conversation,
+                &model_name_for_accounting,
+                request.tools.len(),
+            );
+            observer.on_context_accounting(&accounting);
+
             // 4. Run inference
             // ─── Trace: start LLM span for inference ──────────────────
             let infer_span_id = if let Some(ctx) = &self.config.trace_context {
@@ -1042,7 +1075,122 @@ impl AgentLoop {
             }
 
             // 5. Parse decision
-            let decision = self.parse_decision(&response)?;
+            let mut decision = self.parse_decision(&response)?;
+
+            tracing::info!(
+                "AgentLoop iteration {} decision: {} (content_blocks: {}, text_length: {}, tool_calls: {})",
+                state.iterations,
+                match &decision {
+                    AgentDecision::DirectAnswer { .. } => "DirectAnswer".to_string(),
+                    AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
+                    AgentDecision::Delegate { .. } => "Delegate".to_string(),
+                    AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
+                },
+                response.message.content.len(),
+                response.message.text_content().len(),
+                response.message.content.iter().filter(|b| matches!(b, ContentBlock::ToolCall { .. })).count(),
+            );
+
+            // 5b. Empty response retry — if the model produced 0 content blocks,
+            // inject a clarification prompt and retry once. This handles:
+            // 1) SSE format incompatibility (model returns data we can't parse)
+            // 2) Model genuinely failing to respond (confused by context format)
+            // 3) Streaming response that was empty/malformed
+            //
+            // The retry injects a follow-up message asking the model to respond,
+            // giving it a second chance with a clearer prompt.
+            const MAX_EMPTY_RETRIES: usize = 1;
+            let mut empty_retry_count: usize = 0;
+            while matches!(&decision, AgentDecision::DirectAnswer { text } if text.trim().is_empty())
+                && empty_retry_count < MAX_EMPTY_RETRIES
+            {
+                empty_retry_count += 1;
+                tracing::warn!(
+                    "AgentLoop iteration {}: model produced empty response, retrying ({}/{}). \
+                    This usually means the model didn't properly see the context or the \
+                    streaming format caused parsing issues. Conversation has {} messages.",
+                    state.iterations,
+                    empty_retry_count,
+                    MAX_EMPTY_RETRIES,
+                    state.conversation.messages.len()
+                );
+
+                // Inject follow-up messages asking model to respond.
+                // We add an empty assistant message (representing the model's
+                // failed response) followed by a user message explicitly asking
+                // for a response. This preserves OpenAI API format validity.
+                state.conversation.add_message(Message {
+                    role: Role::Assistant,
+                    content: vec![],  // Empty assistant response
+                    metadata: HashMap::new(),
+                });
+                state.conversation.add_message(Message::user(
+                    "You did not respond in the previous turn. Please provide a response now — \
+                    either call a tool to accomplish the task, or give a direct answer.".to_string()
+                ));
+
+                // Re-build inference request with updated conversation
+                let retry_tool_defs = self.build_tool_definitions_for_paradigm(
+                    state.active_paradigm_config.as_ref()
+                ).await;
+                let retry_request = InferenceRequest {
+                    conversation: state.conversation.clone(),
+                    tools: retry_tool_defs,
+                    max_tokens: self.config.max_tokens,
+                    temperature: self.config.temperature,
+                    top_p: None,
+                    stop_sequences: vec![],
+                    constrained_output: None,
+                    thinking_budget: self.config.thinking_budget,
+                    metadata: HashMap::new(),
+                };
+
+                // Re-run inference with the follow-up prompt
+                let retry_response = if self.config.use_streaming {
+                    self.run_streaming_iteration_async(&retry_request, observer).await?
+                } else {
+                    self.provider.infer(retry_request).await?
+                };
+
+                // Notify observer of retry token usage
+                observer.on_token_usage(retry_response.usage.prompt_tokens, retry_response.usage.completion_tokens);
+                let retry_cost = if let Some(catalog) = &self.config.pricing_catalog {
+                    catalog.compute_cost(&retry_response.model, retry_response.usage.prompt_tokens, retry_response.usage.completion_tokens)
+                } else {
+                    self.config.pricing.compute_cost(
+                        retry_response.usage.prompt_tokens,
+                        retry_response.usage.completion_tokens,
+                    )
+                };
+                cumulative_cost += retry_cost;
+                observer.on_cost_update(cumulative_cost);
+
+                decision = self.parse_decision(&retry_response)?;
+
+                tracing::info!(
+                    "AgentLoop iteration {}: empty response retry {} produced decision: {} (content_blocks: {})",
+                    state.iterations,
+                    empty_retry_count,
+                    match &decision {
+                        AgentDecision::DirectAnswer { .. } => "DirectAnswer".to_string(),
+                        AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
+                        AgentDecision::Delegate { .. } => "Delegate".to_string(),
+                        AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
+                    },
+                    retry_response.message.content.len(),
+                );
+            }
+
+            // 5c. If retry also produced empty DirectAnswer, log and continue
+            // (the loop will still end with an empty answer, but at least we tried)
+            if matches!(&decision, AgentDecision::DirectAnswer { text } if text.trim().is_empty()) {
+                tracing::warn!(
+                    "AgentLoop iteration {}: model still produced empty DirectAnswer after retry. \
+                    Giving up — loop will end with empty answer. Conversation has {} messages.",
+                    state.iterations,
+                    state.conversation.messages.len()
+                );
+            }
 
             // 6. Execute decision + notify observer
             // IMPORTANT: The assistant's response (containing tool calls, delegation, etc.)
@@ -1284,6 +1432,15 @@ impl AgentLoop {
                     } else {
                         state.feed_tool_results(results);
                     }
+
+                    tracing::info!(
+                        "AgentLoop iteration {}: ToolCalls completed. has_denied={}, conversation now has {} messages. \
+                        Loop will continue with next iteration (is_complete={}).",
+                        state.iterations,
+                        has_denied,
+                        state.conversation.messages.len(),
+                        state.is_complete()
+                    );
                 }
                 AgentDecision::Delegate { task, agent_type, budget } => {
                     observer.on_delegate(&task, &agent_type);
@@ -1335,6 +1492,24 @@ impl AgentLoop {
         }
 
         let result = state.into_result();
+
+        tracing::info!(
+            "AgentLoop completed: iterations={}, completed={}, final_answer_len={}, final_answer_preview={}",
+            result.iterations,
+            result.completed,
+            result.final_answer.len(),
+            if result.final_answer.len() > 100 {
+                // Use char-boundary-safe truncation to avoid panic on CJK strings
+                let end = result.final_answer.char_indices()
+                    .take_while(|(i, _)| *i < 100)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                format!("{}...", &result.final_answer[..end])
+            } else {
+                result.final_answer.clone()
+            }
+        );
 
         // ─── Trace: end AGENT span for the loop ──────────────────
         if let Some(ctx) = &self.config.trace_context {
@@ -1960,16 +2135,17 @@ impl AgentLoop {
                     crate::streaming::StreamEvent::ThinkingFragment { text } => {
                         observer.on_thinking(&text);
                     }
-                    crate::streaming::StreamEvent::ToolIntentDetected { call_id, tool_name } => {
-                        // Pre-notify observer that a tool call is about to happen
-                        observer.on_tool_calls(&[ToolCallRequest {
-                            id: call_id,
-                            name: tool_name,
-                            args: serde_json::json!({}), // Args not yet complete
-                        }]);
+                    crate::streaming::StreamEvent::ToolIntentDetected { call_id: _, tool_name } => {
+                        // Tool intent detected — show the tool name in the TUI as a
+                        // lightweight "intent" indicator (no args yet, just the name).
+                        // This replaces the previous approach of calling on_tool_calls
+                        // with empty args, which created duplicate tool call cards in
+                        // the TUI (one for intent, one for completion). Now we only
+                        // send on_tool_calls for fully assembled tool calls.
+                        observer.on_stream_chunk(&format!("▸ preparing {}…", tool_name));
                     }
                     crate::streaming::StreamEvent::ToolCallComplete { call_id, tool_name, args } => {
-                        // Tool call is fully assembled — notify observer
+                        // Tool call is fully assembled — notify observer with complete args
                         observer.on_tool_calls(&[ToolCallRequest {
                             id: call_id,
                             name: tool_name,
@@ -2003,6 +2179,14 @@ impl AgentLoop {
                 observer.on_thinking(text);
             }
         }
+
+        tracing::info!(
+            "Streaming iteration completed: {} content blocks (text: {} chars, tool_calls: {}, thinking: {} chars)",
+            content_blocks.len(),
+            content_blocks.iter().filter_map(|b| match b { ContentBlock::Text { text } => Some(text.len()), _ => None }).sum::<usize>(),
+            content_blocks.iter().filter(|b| matches!(b, ContentBlock::ToolCall { .. })).count(),
+            content_blocks.iter().filter_map(|b| match b { ContentBlock::Thinking { text } => Some(text.len()), _ => None }).sum::<usize>(),
+        );
 
         Ok(InferenceResponse {
             message: Message {

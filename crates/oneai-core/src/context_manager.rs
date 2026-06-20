@@ -742,7 +742,13 @@ impl ContextManager {
                 let text = msg.text_content();
                 let role = role_name(&msg.role);
                 if text.len() > 100 {
-                    middle_summary_parts.push(format!("[{}]: {}...", role, &text[..100]));
+                    // Char-boundary-safe truncation for CJK strings
+                    let end = text.char_indices()
+                        .take_while(|(i, _)| *i < 100)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(0);
+                    middle_summary_parts.push(format!("[{}]: {}...", role, &text[..end]));
                 } else if !text.is_empty() {
                     middle_summary_parts.push(format!("[{}]: {}", role, text));
                 }
