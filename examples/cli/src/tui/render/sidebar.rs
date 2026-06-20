@@ -1,11 +1,12 @@
 //! Sidebar rendering — tools list, session info, context area, and four sections.
 //!
 //! The sidebar displays:
-//! - Top: Context area (provider, session, paradigm, cost)
+//! - Top: Context area (provider, session, paradigm, context occupancy, cost)
 //! - Sessions section (multi-session list with active indicator)
 //! - Tools section (with permission labels and active highlight)
 //! - Paradigm section (active/inactive indicators)
-//! - Cost section (token usage, cost, budget progress bar)
+//! - Skills section
+//! - Cost section (cost + context occupancy bar)
 
 use ratatui::{
     layout::Rect,
@@ -46,10 +47,32 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         Style::default().fg(CONTEXT_PARADIGM_COLOR),
     ))));
 
-    let token_display = app.token_usage.format_display();
+    // Context occupancy line — the only token display in the sidebar
+    let ctx_used = app.context_tokens;
+    let ctx_max = app.context_window_size;
+    let ctx_prefix = if app.context_tokens_is_estimated { "~" } else { "" };
+    let ctx_ratio = if ctx_max > 0 { ctx_used as f64 / ctx_max as f64 } else { 0.0 };
+    let ctx_pct = (ctx_ratio * 100.0).round() as u32;
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            format!(" 📝{}ctx {}%", ctx_prefix, ctx_pct),
+            Style::default().fg(if ctx_pct > 80 {
+                ratatui::style::Color::Rgb(255, 80, 80)
+            } else if ctx_pct > 50 {
+                ratatui::style::Color::Rgb(255, 220, 80)
+            } else {
+                CONTEXT_COST_COLOR
+            }),
+        ),
+        Span::styled(
+            format!(" {}/{}", format_token_count(ctx_used), format_token_count_u32(ctx_max)),
+            Style::default().fg(ratatui::style::Color::Gray),
+        ),
+    ])));
+
     let cost_prefix = if app.session_cost_is_estimated { "~" } else { "" };
     items.push(ListItem::new(Line::from(Span::styled(
-        format!(" 📊{} {}${:.3}", token_display, cost_prefix, app.session_cost),
+        format!(" 💰 {}${:.3}", cost_prefix, app.session_cost),
         Style::default().fg(CONTEXT_COST_COLOR),
     ))));
 
@@ -235,32 +258,18 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         Style::default().fg(CONTEXT_COST_COLOR),
     ))));
 
-    let total_tokens = app.token_usage.total;
-    let prompt_tokens = app.token_usage.prompt;
-    let completion_tokens = app.token_usage.completion;
-    let estimated_prefix = if app.token_usage.is_estimated { "~" } else { "" };
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(
-            format!("  📊 {}{} total", estimated_prefix, format_token_count(total_tokens)),
-            Style::default().fg(ratatui::style::Color::Gray),
-        ),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(
-            format!("  {}↑{} ↓{}", estimated_prefix, format_token_count(prompt_tokens), format_token_count(completion_tokens)),
-            Style::default().fg(ratatui::style::Color::Gray),
-        ),
-    ])));
-
-    // Context usage display — show token usage vs context window
-    let ctx_used = total_tokens;
+    // Context usage progress bar — visual representation of ctx occupancy
+    let ctx_used = app.context_tokens;
     let ctx_max = app.context_window_size;
+    let ctx_prefix = if app.context_tokens_is_estimated { "~" } else { "" };
     let ctx_ratio = if ctx_max > 0 { ctx_used as f64 / ctx_max as f64 } else { 0.0 };
     let ctx_pct = (ctx_ratio * 100.0).round() as u32;
     let ctx_warning = if ctx_pct > 80 { "⚠️" } else if ctx_pct > 50 { "⚡" } else { "" };
+    let budget_bar = render_context_bar(ctx_ratio, 20);
+    items.push(ListItem::new(Line::from(budget_bar)));
     items.push(ListItem::new(Line::from(vec![
         Span::styled(
-            format!("  📝 ctx {}%", ctx_pct),
+            format!("  📝{}ctx {}%", ctx_prefix, ctx_pct),
             Style::default().fg(if ctx_pct > 80 {
                 ratatui::style::Color::Rgb(255, 80, 80) // Red warning
             } else if ctx_pct > 50 {
@@ -279,10 +288,6 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         ),
     ])));
 
-    // Budget progress bar (if we have a budget configured)
-    let budget_bar = render_budget_bar(app, 20);
-    items.push(ListItem::new(Line::from(budget_bar)));
-
     let sidebar = List::new(items)
         .block(Block::default()
             .borders(Borders::RIGHT)
@@ -291,17 +296,9 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
     f.render_widget(sidebar, rect);
 }
 
-/// Render a simple progress bar for budget usage.
-fn render_budget_bar(app: &App, width: usize) -> Vec<Span<'static>> {
-    // Use token usage as a proxy for budget consumption
-    // Show a simple bar: [████░░░░░░░░░░░░] 1.2k/10k
-    let max_budget = 10000; // 10k tokens as visual max (not actual budget)
-    let used = app.token_usage.total;
-    let ratio = if max_budget > 0 {
-        (used as f64 / max_budget as f64).min(1.0)
-    } else {
-        0.0
-    };
+/// Render a context occupancy progress bar.
+fn render_context_bar(ctx_ratio: f64, width: usize) -> Vec<Span<'static>> {
+    let ratio = ctx_ratio.min(1.0);
     let filled = (ratio * width as f64).round() as usize;
     let empty = width - filled;
 
@@ -310,10 +307,6 @@ fn render_budget_bar(app: &App, width: usize) -> Vec<Span<'static>> {
         Span::styled("█".repeat(filled), Style::default().fg(PROGRESS_FILL)),
         Span::styled("░".repeat(empty), Style::default().fg(PROGRESS_BG)),
         Span::styled("]", Style::default().fg(SIDEBAR_BORDER)),
-        Span::styled(
-            format!(" {}", format_token_count(used)),
-            Style::default().fg(CONTEXT_COST_COLOR),
-        ),
     ]
 }
 

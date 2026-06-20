@@ -142,3 +142,7 @@ pub const SCROLLBAR_TRACK: Color = Color::Rgb(60, 60, 80); // Dark but visible
 
 /// Scrollbar thumb color.
 pub const SCROLLBAR_THUMB: Color = Color::Rgb(150, 150, 170); // Bright gray
+
+/// Background color for text selection highlight in chat area.
+/// A soft blue that's visible against the dark BRAND_BG.
+pub const SELECTED_BG: Color = Color::Rgb(50, 60, 90); // Soft blue selection

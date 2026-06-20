@@ -66,7 +66,8 @@ pub fn run_tui(
         }
     }));
 
-    // Setup terminal
+    // Setup terminal — enable mouse capture for scroll wheel support.
+    // Text selection works via mouse drag in chat area: drag to select → release to copy.
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
@@ -88,6 +89,10 @@ pub fn run_tui(
             format!("{detected} · {model}")
         }
         None => "No Provider".to_string(),
+    };
+    let model_name = match &provider_config {
+        Some(config) => config.model_name.as_deref().unwrap_or("unknown").to_string(),
+        None => "unknown".to_string(),
     };
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -127,7 +132,7 @@ pub fn run_tui(
         let session_state = SessionState { app: app_arc.clone(), session };
         let session_state = Arc::new(tokio::sync::Mutex::new(session_state));
 
-        let mut tui_app = App::new(provider_info, tool_names, session_id);
+        let mut tui_app = App::new(provider_info, model_name, tool_names, session_id);
 
         // Register built-in skills for the current domain
         let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
@@ -152,8 +157,8 @@ pub fn run_tui(
     result
 }
 
-/// Handle a single crossterm event (key or mouse).
-fn handle_single_event(
+/// Dispatch a crossterm event to the appropriate handler.
+fn dispatch_event(
     app: &mut App,
     event: Event,
     session_state: Arc<tokio::sync::Mutex<SessionState>>,
@@ -161,98 +166,213 @@ fn handle_single_event(
     rt: &tokio::runtime::Runtime,
 ) {
     match event {
-        Event::Key(key) => {
-            if app.approval_pending.is_some() {
-                handle_approval_key(app, key);
-                // add_message inside handle_approval_key sets dirty
-                return;
-            }
-            if app.search_mode {
-                handle_search_key(app, key);
-                app.dirty = true; // search mode always updates UI
-                return;
-            }
-            let msg = app.handle_key_event(key);
-            // handle_key_event already sets dirty = true
-            if let Some(user_input) = msg {
-                if !app.is_thinking {
-                    handle_user_input_async(app, session_state.clone(), user_input, observer_tx, rt);
-                }
-            }
-        }
-        // Handle mouse scroll events for chat area
-        // macOS natural scrolling convention: ScrollUp shows later content (scroll down in viewport),
-        // ScrollDown shows earlier content (scroll up in viewport).
-        Event::Mouse(mouse_event) => {
-            match mouse_event.kind {
-                crossterm::event::MouseEventKind::ScrollDown => {
-                    // Swipe/scroll down → scroll content up (see earlier content)
-                    app.chat_scroll_y = app.chat_scroll_y.saturating_add(3);
-                    app.user_scrolled = true;
-                    app.dirty = true;
-                }
-                crossterm::event::MouseEventKind::ScrollUp => {
-                    // Swipe/scroll up → scroll content down (see later content)
-                    app.chat_scroll_y = app.chat_scroll_y.saturating_sub(3);
-                    app.user_scrolled = true;
-                    app.dirty = true;
-                }
-                // Scrollbar drag support — map drag Y position to scroll position
-                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                    let chat_rect = app.last_chat_rect;
-                    // Only handle drags in the scrollbar column (rightmost 2 columns of chat area)
-                    if chat_rect.width > 0
-                        && mouse_event.column >= chat_rect.x + chat_rect.width - 2
-                        && mouse_event.column <= chat_rect.x + chat_rect.width
-                        && mouse_event.row >= chat_rect.y
-                        && mouse_event.row < chat_rect.y + chat_rect.height {
-                        // Map drag Y to scroll position proportionally
-                        let y_offset = (mouse_event.row - chat_rect.y) as usize;
-                        let track_height = chat_rect.height as usize;
-                        if track_height > 0 {
-                            // Calculate content_height from the render cache's known line count
-                            // We use a rough estimate based on messages, or just use ratio
-                            // The exact content height is computed during render — we store it
-                            let content_height = app.content_height;
-                            let viewport_height = chat_rect.height as usize;
-                            if content_height > viewport_height {
-                                let ratio = y_offset as f64 / track_height as f64;
-                                app.chat_scroll_y = ((ratio * content_height as f64) as usize)
-                                    .min(content_height.saturating_sub(viewport_height));
-                                app.user_scrolled = true;
-                                app.dirty = true;
-                            }
-                        }
-                    }
-                }
-                // Click on scrollbar track to jump to position
-                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                    let chat_rect = app.last_chat_rect;
-                    // Only handle clicks in the scrollbar column
-                    if chat_rect.width > 0
-                        && mouse_event.column >= chat_rect.x + chat_rect.width - 2
-                        && mouse_event.column <= chat_rect.x + chat_rect.width
-                        && mouse_event.row >= chat_rect.y
-                        && mouse_event.row < chat_rect.y + chat_rect.height {
-                        let y_offset = (mouse_event.row - chat_rect.y) as usize;
-                        let track_height = chat_rect.height as usize;
-                        if track_height > 0 {
-                            let content_height = app.content_height;
-                            let viewport_height = chat_rect.height as usize;
-                            if content_height > viewport_height {
-                                let ratio = y_offset as f64 / track_height as f64;
-                                app.chat_scroll_y = ((ratio * content_height as f64) as usize)
-                                    .min(content_height.saturating_sub(viewport_height));
-                                app.user_scrolled = true;
-                                app.dirty = true;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        Event::Key(key) => handle_key_event(app, key, session_state, observer_tx, rt),
+        Event::Mouse(mouse) => handle_mouse_event(app, mouse),
         _ => {}
+    }
+}
+
+/// Handle a single crossterm key event.
+fn handle_key_event(
+    app: &mut App,
+    key: KeyEvent,
+    session_state: Arc<tokio::sync::Mutex<SessionState>>,
+    observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
+    rt: &tokio::runtime::Runtime,
+) {
+    if app.approval_pending.is_some() {
+        handle_approval_key(app, key);
+        return;
+    }
+    if app.search_mode {
+        handle_search_key(app, key);
+        app.dirty = true;
+        return;
+    }
+    let msg = app.handle_key_event(key);
+    if let Some(user_input) = msg {
+        if !app.is_thinking {
+            handle_user_input_async(app, session_state.clone(), user_input, observer_tx, rt);
+        }
+    }
+}
+
+/// Handle a single crossterm mouse event.
+///
+/// Supports two interactions:
+/// 1. **Scroll wheel** — scrolls chat content up/down
+/// 2. **Left-click drag** — selects text in chat area; on release copies to clipboard
+/// 3. **Scrollbar drag/click** — drags scrollbar thumb or jumps to position
+fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) {
+    let chat_rect = app.last_chat_rect;
+    let is_in_chat = chat_rect.width > 0
+        && mouse_event.row >= chat_rect.y
+        && mouse_event.row < chat_rect.y + chat_rect.height;
+    let is_in_scrollbar = is_in_chat
+        && mouse_event.column >= chat_rect.x + chat_rect.width - 2
+        && mouse_event.column <= chat_rect.x + chat_rect.width;
+
+    match mouse_event.kind {
+        // ── Scroll wheel ──────────────────────────────────────────────────────
+        crossterm::event::MouseEventKind::ScrollDown => {
+            app.chat_scroll_y = app.chat_scroll_y.saturating_add(3);
+            app.user_scrolled = true;
+            app.dirty = true;
+        }
+        crossterm::event::MouseEventKind::ScrollUp => {
+            app.chat_scroll_y = app.chat_scroll_y.saturating_sub(3);
+            app.user_scrolled = true;
+            app.dirty = true;
+        }
+
+        // ── Left button down ─────────────────────────────────────────────────
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            if is_in_scrollbar {
+                // Scrollbar click — jump to position
+                let y_offset = (mouse_event.row - chat_rect.y) as usize;
+                let track_height = chat_rect.height as usize;
+                let content_height = app.content_height;
+                let viewport_height = chat_rect.height as usize;
+                if track_height > 0 && content_height > viewport_height {
+                    let ratio = y_offset as f64 / track_height as f64;
+                    app.chat_scroll_y = ((ratio * content_height as f64) as usize)
+                        .min(content_height.saturating_sub(viewport_height));
+                    app.user_scrolled = true;
+                    app.dirty = true;
+                }
+            } else if is_in_chat {
+                // Start text selection in chat area
+                app.text_selection.active = true;
+                app.text_selection.start_row = mouse_event.row.saturating_sub(chat_rect.y);
+                app.text_selection.end_row = mouse_event.row.saturating_sub(chat_rect.y);
+                app.dirty = true;
+            }
+        }
+
+        // ── Left button drag ──────────────────────────────────────────────────
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+            if is_in_scrollbar && !app.text_selection.active {
+                // Scrollbar drag — map Y position to scroll offset
+                let y_offset = (mouse_event.row - chat_rect.y) as usize;
+                let track_height = chat_rect.height as usize;
+                let content_height = app.content_height;
+                let viewport_height = chat_rect.height as usize;
+                if track_height > 0 && content_height > viewport_height {
+                    let ratio = y_offset as f64 / track_height as f64;
+                    app.chat_scroll_y = ((ratio * content_height as f64) as usize)
+                        .min(content_height.saturating_sub(viewport_height));
+                    app.user_scrolled = true;
+                    app.dirty = true;
+                }
+            } else if app.text_selection.active {
+                // Update text selection end position
+                // Clamp to chat area rows, with auto-scroll at edges
+                let row_in_chat = if mouse_event.row < chat_rect.y {
+                    // Dragged above chat area — auto-scroll up
+                    app.chat_scroll_y = app.chat_scroll_y.saturating_sub(1);
+                    app.user_scrolled = true;
+                    0 // Selection extends to top of viewport
+                } else if mouse_event.row >= chat_rect.y + chat_rect.height {
+                    // Dragged below chat area — auto-scroll down
+                    app.chat_scroll_y = app.chat_scroll_y.saturating_add(1);
+                    app.user_scrolled = true;
+                    chat_rect.height.saturating_sub(1) // Selection extends to bottom
+                } else if is_in_chat {
+                    mouse_event.row.saturating_sub(chat_rect.y)
+                } else {
+                    // Outside chat horizontally — keep last known position
+                    app.text_selection.end_row
+                };
+                app.text_selection.end_row = row_in_chat;
+                app.dirty = true;
+            }
+        }
+
+        // ── Left button release → copy selected text ─────────────────────────
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+            if app.text_selection.active {
+                let text = extract_selected_text(app);
+                app.text_selection.active = false;
+                app.dirty = true;
+
+                if !text.is_empty() {
+                    let char_count = text.chars().count();
+                    let success = copy_to_clipboard(&text);
+                    if success {
+                        app.add_message(ChatRole::System, format!(
+                            "📋 Copied {} chars to clipboard",
+                            char_count
+                        ));
+                    } else {
+                        app.add_message(ChatRole::System, format!(
+                            "📋 Selected {} chars — clipboard copy failed (install pbcopy/xclip)",
+                            char_count
+                        ));
+                    }
+                }
+            }
+        }
+
+        _ => {}
+    }
+}
+
+/// Extract the plain text content of the currently selected line range.
+///
+/// Maps the selection's start_row/end_row (viewport-relative) to absolute
+/// content line indices, then pulls text from `app.line_content`.
+fn extract_selected_text(app: &App) -> String {
+    let start = app.text_selection.start_row.min(app.text_selection.end_row) as usize;
+    let end = app.text_selection.end_row.max(app.text_selection.start_row) as usize;
+    let scroll_y = app.chat_scroll_y;
+    let viewport_height = app.last_chat_rect.height as usize;
+
+    // Convert viewport-relative rows to absolute content line indices
+    let abs_start = (scroll_y + start).min(app.line_content.len());
+    let abs_end = (scroll_y + end + 1).min(app.line_content.len()); // +1 for inclusive end
+
+    if abs_start >= abs_end {
+        return String::new();
+    }
+
+    // Clamp to viewport (don't select invisible lines)
+    let abs_start = abs_start.max(scroll_y);
+    let abs_end = abs_end.min(scroll_y + viewport_height);
+
+    app.line_content[abs_start..abs_end].join("\n")
+}
+
+/// Copy text to system clipboard using platform-native clipboard tool.
+///
+/// Uses `pbcopy` on macOS, `xclip` on Linux, `clip` on Windows.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::process::{Command, Stdio};
+
+    let (cmd, args) = if cfg!(target_os = "macos") {
+        ("pbcopy", &[] as &[&str])
+    } else if cfg!(target_os = "linux") {
+        ("xclip", &["-selection", "clipboard"] as &[&str])
+    } else if cfg!(target_os = "windows") {
+        ("clip", &[] as &[&str])
+    } else {
+        return false;
+    };
+
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn();
+
+    match child {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -298,13 +418,12 @@ fn run_main_loop(
 
         if event::poll(poll_interval)? {
             let first_event = event::read()?;
-            handle_single_event(&mut app, first_event, session_state.clone(), &observer_tx, rt);
+            dispatch_event(&mut app, first_event, session_state.clone(), &observer_tx, rt);
 
             // Drain all pending events (especially scroll events) in one frame
-            // for responsive continuous scrolling
             while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
                 if let Ok(ev) = event::read() {
-                    handle_single_event(&mut app, ev, session_state.clone(), &observer_tx, rt);
+                    dispatch_event(&mut app, ev, session_state.clone(), &observer_tx, rt);
                 } else {
                     break;
                 }
@@ -389,7 +508,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /session · /paradigm · /domain · /compact · /wf · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /context · /session · /paradigm · /domain · /compact · /wf · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category");
                 return;
             }
             "/tools" | "/t" => {
@@ -410,30 +529,66 @@ fn handle_user_input_async(
                     session_state.lock().await.session.session_id().to_string()
                 });
                 app.token_usage = TokenUsage::new();
+                app.context_tokens = 0;
+                app.context_tokens_is_estimated = false;
                 app.session_cost = 0.0;
                 app.session_cost_is_estimated = false;
                 app.current_iteration = 0;
+                app.last_context_accounting = None;
                 // Create a new session entry in the sidebar
                 app.add_new_session(app.session_id.clone());
                 app.add_message(ChatRole::System, "Conversation cleared.");
                 return;
             }
             "/cost" => {
-                let tokens = app.token_usage.format_display();
+                let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
                 app.add_message(ChatRole::System, format!(
-                    "Session cost: ${:.4}\nTokens: {} (prompt: {}, completion: {})",
-                    app.session_cost, tokens, app.token_usage.prompt, app.token_usage.completion
+                    "Session cost: {}${:.4}\nContext: {}{} / {}k tokens",
+                    if app.session_cost_is_estimated { "~" } else { "" },
+                    app.session_cost, ctx_est, app.context_tokens, app.context_window_size / 1000
                 ));
                 return;
             }
+            "/context" => {
+                // Use stored accounting from AgentLoop when available — this
+                // reflects the actual assembled context (system prompt, tool defs,
+                // domain pack, etc.), not the bare session conversation.
+                // Only fall back to session conversation if no agent run has occurred.
+                if let Some(accounting) = &app.last_context_accounting {
+                    app.add_message(ChatRole::System, accounting.format_display(&app.provider_info));
+                } else {
+                    // No agent run yet — compute from session conversation (best available)
+                    let accounting = rt.block_on(async {
+                        let state = session_state.lock().await;
+                        let conv = state.session.conversation();
+                        oneai_core::ContextAccounting::account(
+                            conv,
+                            &app.model_name,
+                            app.tool_names.len(),
+                        )
+                    });
+                    app.context_tokens = accounting.total_tokens;
+                    app.context_tokens_is_estimated = accounting.is_estimated;
+                    app.context_window_size = accounting.context_window_size;
+                    app.last_context_accounting = Some(accounting.clone());
+                    app.add_message(ChatRole::System, accounting.format_display(&app.provider_info));
+                }
+                app.dirty = true;
+                return;
+            }
             "/session" => {
+                let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
+                let cost_est = if app.session_cost_is_estimated { "~" } else { "" };
                 app.add_message(ChatRole::System, format!(
-                    "Session ID: {}\nProvider: {}\nParadigm: {}#{}\nTokens: {}\nCost: ${:.4}",
+                    "Session ID: {}\nProvider: {}\nParadigm: {}#{}\nContext: {}{} / {}k\nCost: {}${:.4}",
                     app.session_id,
                     app.provider_info,
                     paradigm_display_name(&app.active_paradigm),
                     app.current_iteration,
-                    app.token_usage.format_display(),
+                    ctx_est,
+                    app.context_tokens,
+                    app.context_window_size / 1000,
+                    cost_est,
                     app.session_cost,
                 ));
                 return;
@@ -524,9 +679,12 @@ fn handle_user_input_async(
                 app.messages.clear();
                 app.render_cache.invalidate_all();
                 app.token_usage = TokenUsage::new();
+                app.context_tokens = 0;
+                app.context_tokens_is_estimated = false;
                 app.session_cost = 0.0;
                 app.session_cost_is_estimated = false;
                 app.current_iteration = 0;
+                app.last_context_accounting = None;
                 app.add_new_session(new_session_id);
                 app.add_message(ChatRole::System, "New session created. Previous sessions preserved in sidebar.");
                 return;
@@ -1321,7 +1479,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
         ObserverEvent::Checkpoint(_iteration) => {
             // No visible message — checkpoint is silent in TUI
         }
-        ObserverEvent::Complete(_result) => {
+        ObserverEvent::Complete(result) => {
             // Flush any remaining buffered stream text before marking as done
             app.flush_stream_buffer();
             app.is_thinking = false;
@@ -1334,6 +1492,37 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                     true
                 }
             });
+
+            // If the agent loop terminated without producing a meaningful final answer,
+            // display a diagnostic message so the user knows what happened.
+            // Common causes: streaming response failed, provider rejected request format,
+            // or model produced empty response after tool calls.
+            if result.final_answer.trim().is_empty() {
+                let iterations = result.iterations;
+                let completed = result.completed;
+                let msg_content = if iterations <= 1 {
+                    String::from(
+                        "⚠️ Agent terminated without producing a response. \
+                        This usually means the LLM provider returned an error or empty response. \
+                        Possible causes:\n\
+                        • Provider doesn't support tool calling with this model\n\
+                        • Conversation format incompatible with the provider (智谱GLM/阿里百炼 require specific formats)\n\
+                        • API rate limit or budget exceeded\n\
+                        • Network error during streaming\n\
+                        Try: check ONEAI_API_KEY and ONEAI_BASE_URL, verify the model supports tool calling."
+                    )
+                } else {
+                    format!(
+                        "⚠️ Agent terminated after {} iterations without a final answer (completed={}). \
+                        The model may have produced an empty response after tool calls. \
+                        This could indicate a provider format issue with tool results. \
+                        Try: verify your provider supports multi-turn tool calling.",
+                        iterations, completed
+                    )
+                };
+                app.add_message(ChatRole::Error, msg_content);
+            }
+
             app.dirty = true; // Need redraw to stop spinner
         }
         ObserverEvent::StreamChunk(text) => {
@@ -1382,27 +1571,37 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.dirty = true;
         }
         ObserverEvent::TokenUsageUpdate(usage) => {
-            // Accumulate token usage across iterations
-            app.token_usage.prompt += usage.prompt;
-            app.token_usage.completion += usage.completion;
-            app.token_usage.total += usage.total;
-            // If provider returns zero tokens, estimate from conversation content
-            if app.token_usage.prompt == 0 && app.token_usage.completion == 0 && !app.messages.is_empty() {
-                let estimated = app.estimate_tokens_from_messages();
-                if estimated > 0 {
-                    app.token_usage.prompt = estimated * 3 / 4; // ~75% are prompt tokens
-                    app.token_usage.completion = estimated / 4;  // ~25% are completion tokens
-                    app.token_usage.total = estimated;
-                    app.token_usage.is_estimated = true;
-                    app.session_cost = App::estimate_cost_from_tokens(
-                        app.token_usage.prompt, app.token_usage.completion
-                    );
-                    app.session_cost_is_estimated = true;
-                }
-            } else if app.token_usage.prompt > 0 || app.token_usage.completion > 0 {
-                // Got real token data — mark as not estimated
-                app.token_usage.is_estimated = false;
+            // Accumulate raw usage for cost tracking (some providers report real data, others 0)
+            let iter_prompt = if usage.prompt > 0 { usage.prompt }
+                else if !app.messages.is_empty() { app.estimate_tokens_from_messages() * 3 / 4 }
+                else { 0 };
+            let iter_completion = if usage.completion > 0 { usage.completion }
+                else if !app.messages.is_empty() { app.estimate_tokens_from_messages() / 4 }
+                else { 0 };
+            let iter_total = iter_prompt + iter_completion;
+
+            app.token_usage.prompt += iter_prompt;
+            app.token_usage.completion += iter_completion;
+            app.token_usage.total += iter_total;
+            app.token_usage.is_estimated = usage.prompt == 0 && usage.completion == 0;
+
+            // Estimate cost when we don't have real data
+            if app.token_usage.is_estimated && iter_total > 0 {
+                app.session_cost = App::estimate_cost_from_tokens(
+                    app.token_usage.prompt, app.token_usage.completion
+                );
+                app.session_cost_is_estimated = true;
             }
+
+            // Use real API prompt_tokens as context size when available.
+            // This is the Claude Code approach — exact data from the API
+            // overrides the heuristic estimate from ContextAccountingUpdate.
+            // Flow: ContextAccountingUpdate (heuristic) → TokenUsageUpdate (exact, overrides)
+            if usage.prompt > 0 {
+                app.context_tokens = usage.prompt;
+                app.context_tokens_is_estimated = false;
+            }
+
             app.dirty = true; // Sidebar needs update
         }
         ObserverEvent::CostUpdate(cost) => {
@@ -1411,6 +1610,25 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 app.session_cost = cost;
                 app.session_cost_is_estimated = false;
             }
+            app.dirty = true; // Sidebar needs update
+        }
+        ObserverEvent::ContextAccountingUpdate(accounting) => {
+            // Context accounting from the assembled inference request.
+            // This is the REAL context breakdown — includes system prompt,
+            // tool definitions, context sources, domain pack, etc.
+            // Much more accurate than estimating from TUI-side messages alone.
+            //
+            // Store for the /context command — it reads this instead of
+            // recomputing from the bare session conversation.
+            app.last_context_accounting = Some(accounting.clone());
+
+            // Update sidebar context display.
+            // Note: TokenUsageUpdate (which fires AFTER inference) may
+            // override context_tokens with exact API data if available.
+            // Here we set the heuristic estimate as a baseline.
+            app.context_tokens = accounting.total_tokens;
+            app.context_tokens_is_estimated = accounting.is_estimated;
+            app.context_window_size = accounting.context_window_size;
             app.dirty = true; // Sidebar needs update
         }
     }
@@ -1640,10 +1858,11 @@ fn compact_conversation(app: &mut App) {
         .count();
 
     // Generate summary
+    let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
     let summary = format!(
-        "📊 Context summary: {} messages ({} user, {} assistant, {} tool calls). Tokens: {}, Cost: ${:.4}",
+        "📊 Context summary: {} messages ({} user, {} assistant, {} tool calls). Context: {}{} tokens, Cost: ${:.4}",
         total_messages, user_count, assistant_count, tool_count,
-        app.token_usage.format_display(), app.session_cost
+        ctx_est, app.context_tokens, app.session_cost
     );
 
     // Build compacted messages — no longer needed since we directly modify app
@@ -1665,6 +1884,8 @@ fn compact_conversation(app: &mut App) {
 
     // Reset counters for new session
     app.token_usage = TokenUsage::new();
+    app.context_tokens = 0;
+    app.context_tokens_is_estimated = false;
     app.session_cost = 0.0;
     app.current_iteration = 0;
 }

@@ -12,6 +12,21 @@ use ratatui::widgets::ScrollbarState;
 
 use oneai_agent::ParadigmKind;
 use oneai_core::ApprovalRequest;
+
+/// Text selection state for mouse drag in chat area.
+///
+/// Tracks the start/end positions of a text selection drag within the chat viewport.
+/// The positions are stored as row indices relative to the chat area's top-left corner.
+/// Actual text content is extracted from message data on completion.
+#[derive(Debug, Clone, Default)]
+pub struct TextSelection {
+    /// Whether a text selection drag is currently active.
+    pub active: bool,
+    /// Row where selection started (relative to chat area top, 0-based).
+    pub start_row: u16,
+    /// Row where selection currently ends (updated during drag).
+    pub end_row: u16,
+}
 use oneai_skill::SkillRegistry;
 
 use super::input_mode::{InputMode, VimMode};
@@ -28,7 +43,8 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/skills",  "List all available skills"),
     ("/skill",   "Activate, add, remove, or search skills (use /skill <name>)"),
     ("/clear",   "Clear conversation and create new session"),
-    ("/cost",    "Show session cost and token usage"),
+    ("/cost",    "Show session cost and context usage"),
+    ("/context", "Show detailed context window usage breakdown"),
     ("/session", "Show session details"),
     ("/paradigm", "Switch agent paradigm (ReAct/Plan/Reflect/Explore)"),
     ("/domain",  "Switch domain pack (coding/general)"),
@@ -434,6 +450,10 @@ pub struct App {
     /// Provider info string (e.g., "阿里百炼 · qwen-plus").
     pub provider_info: String,
 
+    /// Raw model name for token counting (e.g., "qwen-plus").
+    /// Used by ContextAccounting to pick the right tokenizer profile.
+    pub model_name: String,
+
     /// Session ID.
     pub session_id: String,
 
@@ -460,8 +480,16 @@ pub struct App {
     /// Current iteration number.
     pub current_iteration: usize,
 
-    /// Cumulative token usage.
+    /// Cumulative token usage (prompt + completion across all iterations).
     pub token_usage: TokenUsage,
+
+    /// Current context size — prompt tokens from the **latest** inference iteration.
+    /// This represents the actual context window occupancy (not cumulative).
+    /// Updated each iteration; if the provider returns 0, estimated from messages.
+    pub context_tokens: u32,
+
+    /// Whether context_tokens is estimated (from character count) rather than API-reported.
+    pub context_tokens_is_estimated: bool,
 
     /// Whether session_cost is estimated (from token estimation) rather than API-reported.
     pub session_cost_is_estimated: bool,
@@ -543,10 +571,31 @@ pub struct App {
 
     /// Cached rendered lines per message (avoids re-parsing markdown every frame).
     pub render_cache: MessageRenderCache,
+
+    /// Text selection state for mouse drag in chat area.
+    /// When the user drags in the chat area (not on scrollbar), we track
+    /// the selected row range and copy the corresponding text on release.
+    pub text_selection: TextSelection,
+
+    /// Plain-text content of each rendered line in the chat viewport.
+    /// Built during render from message content — used to extract text
+    /// for clipboard copy on mouse selection. Indexed by absolute line number.
+    pub line_content: Vec<String>,
+
+    /// Latest context accounting from the assembled inference request.
+    /// Updated each iteration by `ContextAccountingUpdate` from the AgentLoop.
+    /// The `/context` command reads this instead of recomputing from bare
+    /// session conversation — it reflects the actual assembled context that
+    /// the model sees (system prompt, tool defs, domain pack, etc.), not
+    /// just the bare conversation messages.
+    /// None until the first agent iteration completes.
+    pub last_context_accounting: Option<oneai_core::ContextAccounting>,
 }
 
 impl App {
-    pub fn new(provider_info: String, tool_names: Vec<String>, session_id: String) -> Self {
+    pub fn new(provider_info: String, model_name: String, tool_names: Vec<String>, session_id: String) -> Self {
+        // Compute context window from model name before it's moved into the struct
+        let context_window_size = oneai_core::token_counter::infer_context_window_for_tokenizer(model_name.as_str());
         let short_id = session_id[..8.min(session_id.len())].to_string();
         let initial_session = SessionInfo {
             short_id,
@@ -569,16 +618,19 @@ impl App {
             skill_names: Vec::new(),
             active_skill: None,
             provider_info,
+            model_name,
             session_id,
             sessions: vec![initial_session],
             current_domain: "coding".to_string(),
-            context_window_size: 128_000,
+            context_window_size,
             is_thinking: false,
 
             input_mode: InputMode::default(),
             active_paradigm: ParadigmKind::ReAct,
             current_iteration: 0,
             token_usage: TokenUsage::new(),
+            context_tokens: 0,
+            context_tokens_is_estimated: false,
             session_cost: 0.0,
             session_cost_is_estimated: false,
             collapsed_ids: HashSet::new(),
@@ -603,6 +655,9 @@ impl App {
             stream_buffer: String::new(),
             last_stream_flush: std::time::Instant::now(),
             render_cache: MessageRenderCache::new(),
+            text_selection: TextSelection::default(),
+            line_content: Vec::new(),
+            last_context_accounting: None,
         }
     }
 

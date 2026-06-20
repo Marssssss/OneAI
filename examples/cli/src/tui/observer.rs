@@ -3,7 +3,7 @@
 
 use oneai_agent::{AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest, SubAgentKind};
 use oneai_core::ToolOutput;
-use oneai_core::{ApprovalRequest, ApprovalResponse};
+use oneai_core::{ApprovalRequest, ApprovalResponse, ContextAccounting};
 
 use super::app::TokenUsage;
 
@@ -28,6 +28,7 @@ pub enum ObserverEvent {
     ApprovalResponse(ApprovalResponse),
     TokenUsageUpdate(TokenUsage),
     CostUpdate(f64),
+    ContextAccountingUpdate(ContextAccounting),
 
     /// Thinking/reasoning content fragment from extended thinking models.
     Thinking(String),
@@ -107,6 +108,10 @@ impl AgentLoopObserver for TuiObserver {
 
     fn on_cost_update(&self, cost: f64) {
         let _ = self.tx.send(ObserverEvent::CostUpdate(cost));
+    }
+
+    fn on_context_accounting(&self, accounting: &oneai_core::ContextAccounting) {
+        let _ = self.tx.send(ObserverEvent::ContextAccountingUpdate(accounting.clone()));
     }
 
     fn on_thinking(&self, text: &str) {

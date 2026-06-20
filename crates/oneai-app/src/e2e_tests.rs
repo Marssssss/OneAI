@@ -134,3 +134,64 @@ async fn e2e_app_session_with_domain_pack() {
 
     assert!(result.completed);
 }
+
+/// Test: empty response retry mechanism.
+///
+/// When the model produces 0 content blocks (empty DirectAnswer),
+/// the AgentLoop should detect this and retry once with a follow-up
+/// message. This handles SSE format incompatibility (e.g., GLM-5.1)
+/// or genuinely empty model responses.
+///
+/// Script: first call returns empty, second call returns a real answer.
+/// The AgentLoop should produce a non-empty final answer after the retry.
+#[tokio::test]
+async fn e2e_app_session_empty_response_retry() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::from_script(vec![
+        ScriptedResponse::empty_response(),  // First call: 0 content blocks
+        ScriptedResponse::direct_answer("I'll create the temporary directory for you."), // Retry: real answer
+    ]));
+
+    let app = AppBuilder::new()
+        .provider(provider)
+        .auto_approval_gate()
+        .default_parser()
+        .build()
+        .await
+        .expect("Build should succeed");
+
+    let mut session = app.create_session();
+    let result = session.run_agent("帮我创建一个临时目录", &SessionTestObserver).await.unwrap();
+
+    // The retry mechanism should have kicked in, producing a non-empty answer
+    assert!(result.completed);
+    assert!(!result.final_answer.trim().is_empty(), "Final answer should not be empty after retry. Got: '{}'", result.final_answer);
+}
+
+/// Test: double empty response — retry also produces empty.
+///
+/// When both the first call AND the retry produce empty responses,
+/// the AgentLoop should give up gracefully and produce an empty answer.
+/// This verifies the retry count limit (MAX_EMPTY_RETRIES = 1).
+#[tokio::test]
+async fn e2e_app_session_double_empty_response() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::from_script(vec![
+        ScriptedResponse::empty_response(),  // First call: empty
+        ScriptedResponse::empty_response(),  // Retry: also empty
+    ]));
+
+    let app = AppBuilder::new()
+        .provider(provider)
+        .auto_approval_gate()
+        .default_parser()
+        .build()
+        .await
+        .expect("Build should succeed");
+
+    let mut session = app.create_session();
+    let result = session.run_agent("Test empty response", &SessionTestObserver).await.unwrap();
+
+    // The loop should still complete (gracefully), even with empty answer
+    assert!(result.completed);
+    // The final answer is empty, but the loop didn't crash
+    assert!(result.iterations >= 1);
+}

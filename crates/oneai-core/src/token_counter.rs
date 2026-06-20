@@ -201,6 +201,7 @@ impl ProviderTokenizerType {
             Self::Google
         } else if lower.contains("ollama") || lower.contains("llama") || lower.contains("qwen")
             || lower.contains("deepseek") || lower.contains("mistral")
+            || lower.contains("glm") // GLM uses similar tokenization to Chinese-focused models
         {
             Self::Ollama
         } else {
@@ -604,7 +605,15 @@ impl TokenCounter for HeuristicTokenCounter {
 
     fn context_window_size(&self, model: &str) -> u32 {
         let profile = self.profile_for_model(model);
-        profile.context_window_tokens
+        // For known models in the profiles map, use the stored value.
+        // For unknown models (which get the default profile), dynamically infer
+        // from model name patterns — this handles models like "glm-5.1" that
+        // aren't in the default profiles but have known context windows.
+        if self.profiles.contains_key(model) {
+            profile.context_window_tokens
+        } else {
+            infer_context_window_for_tokenizer(model)
+        }
     }
 
     fn fits_context_window(
@@ -645,6 +654,13 @@ fn tokenizer_type_default_overhead(tokenizer_type: &ProviderTokenizerType) -> (f
 /// - "qwen", "llama" → 32K
 /// - "deepseek" → 64K
 pub fn infer_context_window_for_tokenizer(model: &str) -> u32 {
+    // Check explicit override first (highest priority)
+    if let Ok(size) = std::env::var("ONEAI_CONTEXT_WINDOW") {
+        if let Ok(val) = size.parse::<u32>() {
+            return val;
+        }
+    }
+
     let lower = model.to_lowercase();
     if lower.contains("gemini") {
         return 1_000_000;
@@ -654,6 +670,12 @@ pub fn infer_context_window_for_tokenizer(model: &str) -> u32 {
     }
     if lower.contains("haiku") || lower.contains("mini") || lower.contains("nano") {
         return 128_000;
+    }
+    if lower.contains("glm-4") || lower.contains("glm4") {
+        return 128_000;
+    }
+    if lower.contains("glm-5") || lower.contains("glm5") || lower.contains("glm") {
+        return 203_000;  // GLM-5.x series: ~203K context window
     }
     if lower.contains("deepseek-r1") {
         return 64_000;
@@ -772,7 +794,28 @@ mod tests {
         assert_eq!(counter.context_window_size("gpt-4o"), 200_000);
         assert_eq!(counter.context_window_size("gemini-2.5-pro"), 1_000_000);
         assert_eq!(counter.context_window_size("qwen2.5:7b"), 32_000);
+        assert_eq!(counter.context_window_size("glm-5.1"), 203_000);
+        assert_eq!(counter.context_window_size("glm-4-plus"), 128_000);
         assert_eq!(counter.context_window_size("unknown-model"), 128_000);
+    }
+
+    #[test]
+    fn test_infer_context_window_glm_models() {
+        assert_eq!(infer_context_window_for_tokenizer("glm-5.1"), 203_000);
+        assert_eq!(infer_context_window_for_tokenizer("glm-5.1-plus"), 203_000);
+        assert_eq!(infer_context_window_for_tokenizer("glm-4"), 128_000);
+        assert_eq!(infer_context_window_for_tokenizer("glm-4-plus"), 128_000);
+    }
+
+    #[test]
+    fn test_infer_context_window_env_override() {
+        // ONEAI_CONTEXT_WINDOW env var overrides all model inference
+        // Use a unique value to avoid collision with parallel tests
+        std::env::set_var("ONEAI_CONTEXT_WINDOW", "999999");
+        // Any model should return the env override value
+        let result = infer_context_window_for_tokenizer("some-unknown-model-xyz");
+        std::env::remove_var("ONEAI_CONTEXT_WINDOW");
+        assert_eq!(result, 999_999);
     }
 
     #[test]

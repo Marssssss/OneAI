@@ -231,9 +231,14 @@ impl IncrementalStreamParser {
             }
         }
 
-        // If this is the final chunk, finalize all tool calls
+        // If this is the final chunk, emit completion events.
+        // CRITICAL: Do NOT call finalize() here — finalize() clears the
+        // text/thinking/tool buffers, which would cause the second finalize()
+        // call (from run_streaming_iteration_async) to return empty content.
+        // Instead, emit completion events without clearing buffers.
+        // The outer code calls finalize() once after the stream loop ends.
         if chunk.is_final {
-            events.extend(self.finalize_stream());
+            events.extend(self.emit_completion_events());
         }
 
         events
@@ -277,6 +282,8 @@ impl IncrementalStreamParser {
     }
 
     /// Finalize stream events for the end of streaming.
+    /// This clears buffers and returns assembled content.
+    /// Used for explicit finalize() calls (not during stream processing).
     fn finalize_stream(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
@@ -297,6 +304,52 @@ impl IncrementalStreamParser {
         let assembled = self.finalize();
         let event = StreamEvent::StreamComplete {
             assembled_content: assembled,
+        };
+        events.push(event.clone());
+        self.emit_event(event);
+
+        events
+    }
+
+    /// Emit completion events for the end of streaming WITHOUT clearing buffers.
+    ///
+    /// This is used in process_chunk() when is_final=true. It emits
+    /// ToolCallComplete events for any pending tool calls and a
+    /// StreamComplete event, but does NOT call finalize() (which would
+    /// clear the text/thinking/tool buffers). The actual buffer clearing
+    /// happens in the finalize() call from run_streaming_iteration_async,
+    /// ensuring buffers are only cleared once.
+    fn emit_completion_events(&mut self) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+
+        // Complete any pending tool call (without clearing tool_call_builders)
+        if let Some(current_id) = self.current_tool_call_id.take() {
+            if let Some(builder) = self.tool_call_builders.get(&current_id) {
+                let event = StreamEvent::ToolCallComplete {
+                    call_id: builder.id.clone(),
+                    tool_name: builder.name.clone(),
+                    args: builder.args_buffer.clone(),
+                };
+                events.push(event.clone());
+                self.emit_event(event);
+            }
+        }
+
+        // Emit StreamComplete with a preview of assembled content
+        // (without calling finalize, which would clear buffers)
+        let preview_blocks: Vec<ContentBlock> = if !self.thinking_buffer.is_empty() {
+            vec![ContentBlock::Thinking { text: self.thinking_buffer.clone() }]
+        } else if !self.text_buffer.is_empty() {
+            vec![ContentBlock::Text { text: self.text_buffer.clone() }]
+        } else {
+            self.tool_call_builders.values().map(|b| ContentBlock::ToolCall {
+                id: b.id.clone(),
+                name: b.name.clone(),
+                args: b.args_buffer.clone(),
+            }).collect()
+        };
+        let event = StreamEvent::StreamComplete {
+            assembled_content: preview_blocks,
         };
         events.push(event.clone());
         self.emit_event(event);

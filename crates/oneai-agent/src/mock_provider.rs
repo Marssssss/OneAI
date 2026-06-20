@@ -227,6 +227,22 @@ impl ScriptedResponse {
             model: "mock-model".to_string(),
         }
     }
+
+    /// Create an empty response — the model produced no content at all.
+    /// This simulates the case where a streaming SSE parser produces
+    /// 0 content blocks (e.g., format incompatibility with GLM-5.1).
+    /// The AgentLoop should detect this and retry with a follow-up prompt.
+    pub fn empty_response() -> Self {
+        Self {
+            content: vec![],
+            usage: TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 0,
+                total_tokens: 100,
+            },
+            model: "mock-model".to_string(),
+        }
+    }
 }
 
 // ─── InferenceCallLog ────────────────────────────────────────────────────────
