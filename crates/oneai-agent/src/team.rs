@@ -19,14 +19,14 @@ use std::sync::Arc;
 use oneai_core::team::{
     TeamConfig, TeamResult, TeamStrategy, AgentResultEntry, AgentRole,
     TeamCoordinationLog, InMemoryTeamCoordinationLog,
-    SubAgentKindProxy, TokenBudgetProxy,
+    SubAgentKindProxy,
 };
 use oneai_core::budget::TokenBudget;
 use oneai_core::cost::CostTracker;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::context_manager::ContextManager;
 
-use crate::sub_agent::{SubAgent, SubAgentFactory, SubAgentKind, SubAgentSummary};
+use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 
 // ─── TeamCoordinator ─────────────────────────────────────────────────────────
 
@@ -338,7 +338,7 @@ impl TeamCoordinator {
 
             // Trim context if it's getting too long
             if accumulated_context.len() > 8000 {
-                if let Some(cm) = &self.context_manager {
+                if let Some(_cm) = &self.context_manager {
                     // Trim accumulated context to keep it manageable
                     accumulated_context = accumulated_context.chars().take(8000).collect();
                 }
@@ -500,7 +500,7 @@ impl TeamCoordinator {
         roles: &[AgentRole],
         task: &str,
         budget_per_agent: TokenBudget,
-        max_concurrent: usize,
+        _max_concurrent: usize,
         team_id: &str,
     ) -> Result<Vec<AgentResultEntry>> {
         let mut results = Vec::new();
@@ -660,6 +660,9 @@ mod tests {
     use oneai_core::budget::TokenBudget;
     use async_trait::async_trait;
     use oneai_core::error::Result;
+    // Test-only imports (kept out of the lib build to avoid unused-import warnings):
+    use oneai_core::team::TokenBudgetProxy;
+    use crate::sub_agent::SubAgent;
 
     // ─── Mock SubAgent ────────────────────────────────────────────────────────
 
@@ -900,7 +903,6 @@ mod tests {
 
     #[test]
     fn test_extract_route_target_exact() {
-        let factory = Arc::new(MockFactory);
         let coordinator = TeamCoordinator::new(Arc::new(MockFactory));
 
         let roles = vec![
@@ -914,7 +916,6 @@ mod tests {
 
     #[test]
     fn test_extract_route_target_case_insensitive() {
-        let factory = Arc::new(MockFactory);
         let coordinator = TeamCoordinator::new(Arc::new(MockFactory));
 
         let roles = vec![
@@ -928,7 +929,6 @@ mod tests {
 
     #[test]
     fn test_extract_route_target_substring() {
-        let factory = Arc::new(MockFactory);
         let coordinator = TeamCoordinator::new(Arc::new(MockFactory));
 
         let roles = vec![
@@ -942,7 +942,6 @@ mod tests {
 
     #[test]
     fn test_extract_route_target_fallback() {
-        let factory = Arc::new(MockFactory);
         let coordinator = TeamCoordinator::new(Arc::new(MockFactory));
 
         let roles = vec![
@@ -958,7 +957,6 @@ mod tests {
 
     #[test]
     fn test_synthesize_template_single() {
-        let factory = Arc::new(MockFactory);
         let coordinator = TeamCoordinator::new(Arc::new(MockFactory));
 
         let results = vec![AgentResultEntry {
@@ -977,7 +975,6 @@ mod tests {
 
     #[test]
     fn test_synthesize_template_multiple() {
-        let factory = Arc::new(MockFactory);
         let coordinator = TeamCoordinator::new(Arc::new(MockFactory));
 
         let results = vec![
@@ -1028,7 +1025,7 @@ mod tests {
             .with_budget(TokenBudgetProxy::new(50_000))
             .with_coordinator_agent(false);
 
-        let result = coordinator.execute(&config, "Analyze code").await.unwrap();
+        let _result = coordinator.execute(&config, "Analyze code").await.unwrap();
 
         // Check log events
         let events = log.events_for_team("logged_team").await;

@@ -22,7 +22,7 @@ use oneai_core::error::Result;
 use oneai_core::budget::TokenBudget;
 use oneai_core::traits::{LlmProvider, OutputParser, ApprovalGate, Tool};
 
-use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopObserver};
+use crate::agent_loop::{AgentLoop, AgentLoopConfig};
 use crate::worktree_isolation::{WorktreeIsolation, WorktreeConfig, WorktreeHandle, MergeResult};
 
 // ─── SubAgentKind ───────────────────────────────────────────────────────────
@@ -330,8 +330,8 @@ impl SubAgent for SubAgentWrapper {
         let kind = self.kind.clone();
         let task_owned = task.to_string();
         let is_isolated = worktree_handle.is_isolated;
-        let wt_path = worktree_handle.worktree_path.clone();
-        let wt_branch = worktree_handle.branch_name.clone();
+        let _wt_path = worktree_handle.worktree_path.clone();
+        let _wt_branch = worktree_handle.branch_name.clone();
         let project_path = worktree_handle.project_path.clone();
 
         // Spawn the sub-agent as an independent tokio task
@@ -435,7 +435,7 @@ impl SubAgentWrapper {
                     self.kind.name()
                 );
                 // Include parsed output in key findings if available
-                if let Some(parsed) = validation.parsed_output {
+                if let Some(_parsed) = validation.parsed_output {
                     let mut findings = summary.key_findings;
                     findings.push("[Structured output validated]".to_string());
                     SubAgentSummary {
@@ -654,7 +654,7 @@ impl SubAgentFactory for DefaultSubAgentFactory {
         // The scoped_tools registry already filters at the execution level,
         // but ParadigmConfig further filters at the definition level
         // (what the LLM sees), which is the correct double-layer filtering.
-        let paradigm_config = crate::agent_loop::ParadigmConfig::for_paradigm(
+        let _paradigm_config = crate::agent_loop::ParadigmConfig::for_paradigm(
             match kind {
                 SubAgentKind::Plan => crate::agent_loop::ParadigmKind::Plan,
                 SubAgentKind::Explore => crate::agent_loop::ParadigmKind::Explore,

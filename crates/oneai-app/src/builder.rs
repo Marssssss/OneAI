@@ -20,12 +20,11 @@ use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
 use oneai_core::{ModelConfig, CloudProviderKind};
 use oneai_core::ProviderPoolConfig;
 use oneai_core::SmartRouteConfig;
-use oneai_core::RoutingStrategy;
 use oneai_core::TokenCounter;
 use oneai_core::ContextManager;
 use oneai_core::ContextManagerConfig;
 
-use oneai_provider::{ProviderPool, ProviderEntry, SmartRouter};
+use oneai_provider::{ProviderPool, SmartRouter};
 
 use oneai_tool::{ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate, ChannelApprovalGateWithThreshold};
 use oneai_memory::{MemoryManager, MemoryManagerConfig};
@@ -43,7 +42,7 @@ use oneai_a2a::A2AClient;
 
 use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleManager, WasmActionTool, WasmModuleRegistry, WasmResourceMonitor};
 
-use oneai_mcp::{McpPluginRegistry, McpServerHost, McpServerInfo};
+use oneai_mcp::{McpPluginRegistry, McpServerHost};
 
 use oneai_a2a::{A2AServerHost, TaskStore, AgentCard};
 
@@ -1442,7 +1441,7 @@ impl AppBuilder {
 
         // Connect MCP plugin servers and register discovered tools
         let mcp_plugin_registry = self.mcp_plugin_registry;
-        if let Some(registry) = &mcp_plugin_registry {
+        if let Some(_registry) = &mcp_plugin_registry {
             // Note: connect_all_enabled() is async and mutable, so we need to handle it carefully
             // We'll register tools in the build flow after creating the mutable registry
             tracing::info!("MCP plugin registry configured — tools will be registered at build time");
@@ -1903,7 +1902,6 @@ impl App {
 mod tests {
     use super::*;
     use oneai_tool::CalculatorTool;
-    use oneai_core::traits::{ApprovalGate, Tool};
     use oneai_core::platform::StubPlatformApprovalGate;
 
     #[tokio::test]

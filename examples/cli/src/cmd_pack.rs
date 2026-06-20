@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 use oneai_domain::{DomainPack, coding_pack, research_pack};
-use oneai_core::traits::Tool;
 
 /// Builtin domain pack names and their descriptions.
 pub const BUILTIN_PACKS: &[(&str, &str, &str)] = &[
@@ -27,7 +26,7 @@ pub fn get_builtin_pack(name: &str, project_dir: &str) -> Option<DomainPack> {
 }
 
 /// General-purpose domain pack — minimal tool set (just calculator).
-fn general_pack(project_dir: &str) -> DomainPack {
+fn general_pack(_project_dir: &str) -> DomainPack {
     use std::collections::HashSet;
     use oneai_tool::CalculatorTool;
     use oneai_domain::permission_profile::PermissionProfile;

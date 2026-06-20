@@ -1,7 +1,7 @@
 //! CLI token subcommand — token counting, context window profiles, and fit checking.
 
-use oneai_core::{HeuristicTokenCounter, TokenCounter, ContextFitResult, ModelTokenizerProfile, ProviderTokenizerType};
-use oneai_core::{ContextManager, ContextManagerConfig, ContextTrimmingStrategy, ContextWindowProfile};
+use oneai_core::{HeuristicTokenCounter, TokenCounter, ModelTokenizerProfile, ProviderTokenizerType};
+use oneai_core::{ContextManager, ContextTrimmingStrategy};
 use std::sync::Arc;
 
 /// Count tokens in a text string for a specific model.

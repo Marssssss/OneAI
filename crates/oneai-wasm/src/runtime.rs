@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn test_wasm_runtime_create_store() {
         let runtime = WasmRuntime::with_defaults().unwrap();
-        let mut store = runtime.create_store();
+        let store = runtime.create_store();
 
         // Store should be created with WasmStoreState
         // Fuel should be initialized via set_fuel

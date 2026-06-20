@@ -472,7 +472,6 @@ impl WasmModuleRegistry {
 mod tests {
     use super::*;
     use crate::runtime::WasmRuntime;
-    use crate::config::WasmRuntimeConfig;
     use std::path::PathBuf;
 
     #[test]

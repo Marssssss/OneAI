@@ -1,10 +1,7 @@
 //! CLI cost subcommand — cost tracking, budget management, and model pricing.
 
-use std::sync::Arc;
 
 use oneai_core::cost::{CostTracker, InMemoryCostTracker, ModelPricingCatalog, CostBudgetConfig};
-use oneai_core::rate_limiter::{RateLimitConfig, TokenWindowRateLimiter};
-use oneai_core::circuit_breaker::{CircuitBreakerConfig, ThresholdCircuitBreaker};
 
 /// Show global cost summary.
 pub fn cmd_cost_report() {
@@ -70,7 +67,7 @@ pub fn cmd_cost_budget(max_usd: &str) {
         return;
     }
 
-    let config = CostBudgetConfig::with_cost_limit(max);
+    let _config = CostBudgetConfig::with_cost_limit(max);
 
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║          OneAI — Budget Configuration                   ║");

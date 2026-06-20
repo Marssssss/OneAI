@@ -242,7 +242,7 @@ fn render_tool_invocation_collapsed(tool_name: &str, args: &str, result: &Option
 ///
 /// Uses ── horizontal separator lines (no ┌┐└┘ boxes) for a clean,
 /// readable display inspired by Claude Code's tool output format.
-fn render_tool_invocation_expanded(tool_name: &str, args: &str, result: &Option<(bool, String)>, content: &str, is_file_op: bool, max_width: usize) -> Vec<Line<'static>> {
+fn render_tool_invocation_expanded(tool_name: &str, args: &str, result: &Option<(bool, String)>, _content: &str, is_file_op: bool, max_width: usize) -> Vec<Line<'static>> {
     let inner_width = max_width.saturating_sub(6); // 6 = "  " prefix + visual padding
     let mut lines = Vec::new();
 
@@ -608,6 +608,7 @@ fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, 
 ///
 /// This prevents content lines from exceeding the bubble's inner_width,
 /// which would push the right border │ off-screen.
+#[allow(dead_code)]
 fn truncate_span_to_width(content: &str, max_visual_width: usize) -> String {
     if max_visual_width <= 1 {
         return if max_visual_width == 1 { "…".to_string() } else { String::new() };
@@ -955,6 +956,7 @@ fn split_span_at_width(span: &Span<'static>, max_visual_width: usize) -> (Option
 /// If the content is JSON, pretty-print it with syntax highlighting.
 /// Otherwise, wrap plain text with the appropriate color.
 /// Empty/whitespace content shows a success indicator instead of blank output.
+#[allow(dead_code)]
 fn format_tool_output(content: &str, max_width: usize) -> Vec<Line<'static>> {
     // Handle empty or whitespace-only content (e.g., mkdir returns empty string)
     if content.trim().is_empty() {

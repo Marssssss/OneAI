@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oneai_core::{ContentBlock, InferenceStreamChunk};
-use oneai_core::error::Result;
 
 // ─── StreamEvent ────────────────────────────────────────────────────────────
 
@@ -84,6 +83,7 @@ struct ToolCallBuilder {
     /// Accumulated argument string.
     args_buffer: String,
     /// Whether the name has been fully received.
+    #[allow(dead_code)]
     name_complete: bool,
 }
 
@@ -284,6 +284,7 @@ impl IncrementalStreamParser {
     /// Finalize stream events for the end of streaming.
     /// This clears buffers and returns assembled content.
     /// Used for explicit finalize() calls (not during stream processing).
+    #[allow(dead_code)]
     fn finalize_stream(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 

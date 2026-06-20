@@ -26,7 +26,6 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
 use crate::ModelConfig;
 
 // ─── ProviderEntryConfig ──────────────────────────────────────────────────────
@@ -673,8 +672,6 @@ impl FallbackLog for InMemoryFallbackLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CloudProviderKind;
-    use crate::ProviderType;
 
     fn anthropic_config(key: &str) -> ModelConfig {
         ModelConfig::anthropic(key.to_string(), "claude-sonnet-4-6-20250514".to_string())

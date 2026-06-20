@@ -3,14 +3,8 @@
 //! This command starts the full Terminal User Interface (TUI) for interactive
 //! agent conversations. It's the primary way to use OneAI interactively.
 
-use std::sync::Arc;
-use oneai_core::ModelConfig;
-use oneai_app::AppBuilder;
-use oneai_tool::CalculatorTool;
-use oneai_domain::{DomainPack, coding_pack, research_pack};
 
 use crate::config::OneaiConfig;
-use crate::cmd_pack::get_builtin_pack;
 
 /// Launch the TUI chat interface.
 ///
@@ -56,7 +50,7 @@ pub fn cmd_chat(config: &OneaiConfig, domain_override: Option<&str>, model_overr
 /// Log level can be controlled via RUST_LOG environment variable (default: info).
 fn init_file_logging() {
     use std::path::PathBuf;
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::EnvFilter;
 
     // Create ~/.oneai/logs/ directory if it doesn't exist
     let log_dir: PathBuf = dirs::home_dir()

@@ -10,7 +10,7 @@
 //! respond to specific requests asynchronously.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use oneai_core::ApprovalResponse;
 use oneai_tool::ApprovalPendingItem;
@@ -40,7 +40,7 @@ impl JniApprovalBridge {
     /// stored internally keyed by a unique request ID.
     pub fn register_pending(&self, item: ApprovalPendingItem) -> String {
         let request_id = format!("{}_{}", item.request.tool_name, uuid::Uuid::new_v4());
-        let request_json = serde_json::to_string(&item.request).unwrap_or_default();
+        let _request_json = serde_json::to_string(&item.request).unwrap_or_default();
 
         let mut senders = self.pending_senders.lock().unwrap();
         senders.insert(request_id.clone(), item.response_tx);

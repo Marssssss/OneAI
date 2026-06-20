@@ -11,7 +11,6 @@
 //! - `RateLimitConfig`: Configuration for rate limits (global + per-provider overrides)
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};

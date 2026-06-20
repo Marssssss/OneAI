@@ -12,7 +12,7 @@ use oneai_core::error::Result;
 use oneai_core::traits::Tool;
 
 use crate::error::WasmError;
-use crate::runtime::{WasmRuntime, WasmStoreState};
+use crate::runtime::WasmRuntime;
 
 /// Pre-extracted metadata for a WASM tool.
 #[derive(Debug, Clone)]

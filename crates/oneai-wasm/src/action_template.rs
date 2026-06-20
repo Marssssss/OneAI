@@ -256,8 +256,8 @@ impl WasmActionTemplate {
     }
 
     /// Execute via WASM sandbox (attempt WASM, fallback on failure).
-    fn execute_wasm(&self, _args: serde_json::Value, runtime: &Arc<WasmRuntime>) -> std::result::Result<ToolOutput, crate::error::WasmError> {
-        let bytes = self.wasm_bytes()
+    fn execute_wasm(&self, _args: serde_json::Value, _runtime: &Arc<WasmRuntime>) -> std::result::Result<ToolOutput, crate::error::WasmError> {
+        let _bytes = self.wasm_bytes()
             .ok_or_else(|| crate::error::WasmError::ModuleNotFound(format!(
                 "No pre-compiled WASM bytes for template '{}'", self.kind.template_name()
             )))?;

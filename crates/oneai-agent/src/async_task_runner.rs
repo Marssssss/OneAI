@@ -27,13 +27,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use tokio::sync::{RwLock, Mutex};
 use tokio::task::JoinHandle;
 
 use oneai_core::error::Result;
 use oneai_core::budget::TokenBudget;
-use crate::sub_agent::{SubAgent, SubAgentSummary, SubAgentKind, SubAgentFactory};
+use crate::sub_agent::{SubAgentSummary, SubAgentKind, SubAgentFactory};
 
 // ─── Task Status ────────────────────────────────────────────────────────────
 
@@ -156,7 +155,7 @@ impl AsyncTaskRunner {
         // Create the sub-agent using the unified SubAgentFactory
         let sub_agent = self.factory.create(kind.clone(), self.default_budget.clone()).await?;
         let task_owned = task.to_string();
-        let kind_owned = kind.clone();
+        let _kind_owned = kind.clone();
         let id_clone = id.clone();
         let info_arc = self.info.clone();
 
@@ -236,7 +235,7 @@ impl AsyncTaskRunner {
         // Create the sub-agent with the specified budget
         let sub_agent = self.factory.create(kind.clone(), budget.clone()).await?;
         let task_owned = task.to_string();
-        let kind_owned = kind.clone();
+        let _kind_owned = kind.clone();
         let id_clone = id.clone();
         let info_arc = self.info.clone();
         let budget_total = budget.total;
@@ -440,6 +439,9 @@ impl AsyncTaskRunner {
 mod tests {
     use super::*;
     use oneai_core::budget::TokenBudget;
+    // Test-only imports (kept out of the lib build to avoid unused-import warnings):
+    use async_trait::async_trait;
+    use crate::sub_agent::{SubAgent, SubAgentSummary};
 
     // ─── Mock SubAgent ────────────────────────────────────────────────────────
 

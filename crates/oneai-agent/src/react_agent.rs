@@ -85,6 +85,7 @@ pub struct ReActAgent {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
 
     /// Output parser (3-layer defense).
+    #[allow(dead_code)]
     parser: Arc<dyn OutputParser>,
 
     /// Approval gate for high-risk tools.
@@ -329,7 +330,7 @@ impl ReActAgent {
             let mut stream = self.provider.infer_stream(request).await?;
 
             // Collect all chunks and assemble the response
-            let assembled_content: Vec<ContentBlock> = Vec::new();
+            let _assembled_content: Vec<ContentBlock> = Vec::new();
             let mut text_buffer = String::new();
             let mut tool_call_buffers: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, args_buffer)
             let mut current_tool_id = String::new();

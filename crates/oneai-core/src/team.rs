@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::budget::TokenBudget;
 use crate::error::Result;
 
 // ─── TeamStrategy ────────────────────────────────────────────────────────────

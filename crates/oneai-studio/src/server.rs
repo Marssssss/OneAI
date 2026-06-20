@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
 
-use axum::Router;
 use tower_http::cors::{CorsLayer, Any};
 
 use crate::state::StudioState;

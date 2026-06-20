@@ -11,8 +11,6 @@ use oneai_core::swarm::{
     SwarmConfig, SwarmPresets, SwarmRouting, SwarmResult,
 };
 
-#[allow(dead_code)]
-use oneai_core::swarm::SwarmTaskResult;
 
 /// List available swarm presets with brief descriptions.
 pub fn cmd_swarm_list() {

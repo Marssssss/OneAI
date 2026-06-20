@@ -543,8 +543,8 @@ impl ContextBudgetManager {
     /// 3. Reduces retrieved context to keyword-only if needed
     pub async fn compress(&self, conversation: Conversation) -> Result<Conversation> {
         // Step 1: Estimate token usage per source
-        let estimated = self.estimate_source_tokens(&conversation);
-        let allocated = self.allocation.allocate(self.budget.total);
+        let _estimated = self.estimate_source_tokens(&conversation);
+        let _allocated = self.allocation.allocate(self.budget.total);
 
         // Step 2: If tool results exceed their allocation, truncate long outputs
         // (Implementation: trim tool_result ContentBlocks that exceed a character limit)

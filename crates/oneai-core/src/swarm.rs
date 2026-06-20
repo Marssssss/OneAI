@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::team::SubAgentKindProxy;
 use crate::team::TokenBudgetProxy;
-use crate::budget::TokenBudget;
 use crate::error::Result;
 
 // ─── AgentCapability ───────────────────────────────────────────────────────────

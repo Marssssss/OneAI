@@ -9,11 +9,10 @@
 //! Platform-specific implementations may use SQLite or key-value stores
 //! instead of JSON files (Phase 6).
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use oneai_core::{AgentState, CheckpointInfo, GlobalState};
+use oneai_core::{AgentState, CheckpointInfo};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::StatePersistence;
 

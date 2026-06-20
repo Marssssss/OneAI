@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use oneai_core::{ContentBlock, Message, Role, ToolOutput};
+use oneai_core::{Role, ToolOutput};
 use oneai_core::budget::{TokenBudget, BudgetAllocation, ContextBudgetManager};
 
 use oneai_parser::ThreeLayerParser;
@@ -75,6 +75,7 @@ struct TestObserver {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // variants record agent-loop events for inspection in ad-hoc debugging
 enum TestEvent {
     IterationStart(usize, ParadigmKind),
     DirectAnswer(String),
@@ -564,8 +565,7 @@ async fn e2e_streaming_thinking() {
 
 #[tokio::test]
 async fn e2e_hooks_pre_tool_use_deny() {
-    use crate::hooks::{SafetyConstraintHook, HookRegistry};
-    use oneai_core::traits::LifecycleHook;
+    use crate::hooks::SafetyConstraintHook;
 
     let read_file = MockTool::read_file_mock();
     let shell_tool = MockTool::shell_mock();
@@ -628,7 +628,6 @@ async fn e2e_hooks_pre_tool_use_deny() {
 #[tokio::test]
 async fn e2e_hooks_audit_log() {
     use crate::hooks::AuditLogHook;
-    use oneai_core::traits::LifecycleHook;
 
     let read_file = MockTool::read_file_mock_with_content("test content");
     let audit_hook = Arc::new(AuditLogHook::new());
@@ -864,7 +863,7 @@ async fn e2e_scenario_9_parallel_sub_agent_delegation() {
 
 #[tokio::test]
 async fn e2e_scenario_10_sub_agent_structured_output() {
-    use crate::sub_agent::{SubAgentWrapper, SubAgentKind};
+    use crate::sub_agent::SubAgentKind;
     use crate::structured_output::validate_json_schema;
 
     // Create a sub-agent with structured output validation
@@ -908,8 +907,6 @@ async fn e2e_scenario_10_sub_agent_structured_output() {
 /// - Graph execution completes and converts back to AgentLoopResult
 #[tokio::test]
 async fn e2e_scenario_11_state_graph_react_loop() {
-    use crate::agent_loop::{AgentLoopGraphActionExecutor, ParadigmKind};
-
     // Build a simple react-loop StateGraph
     let mut graph = oneai_workflow::StateGraph::new("test-react-loop", "think");
 
@@ -974,7 +971,7 @@ async fn e2e_scenario_11_state_graph_react_loop() {
     };
 
     // Run with StateGraph
-    let result = agent_loop.run_with_state_graph(
+    let _result = agent_loop.run_with_state_graph(
         "What is the answer?",
         "test-react-loop",  // This won't match DomainPack → falls back to manual graph
         &observer,

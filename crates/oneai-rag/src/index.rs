@@ -13,7 +13,7 @@ use oneai_core::error::Result;
 use oneai_core::traits::VectorStore;
 
 use crate::document::{Chunk, Document, ChunkingStrategy};
-use crate::retrieval::{RetrievalResult, RetrievalQuery};
+use crate::retrieval::RetrievalResult;
 
 /// A chunk entry in the index with optional embedding.
 #[derive(Debug, Clone)]
@@ -207,7 +207,7 @@ impl DocumentIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Document, ChunkingStrategy};
+    use crate::document::Document;
 
     /// A simple in-memory vector store for testing.
     struct TestVectorStore {

@@ -18,7 +18,6 @@
 mod gate;
 mod jni_bridge;
 
-use std::sync::Arc;
 
 use oneai_core::RiskLevel;
 

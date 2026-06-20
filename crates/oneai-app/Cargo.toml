@@ -31,5 +31,10 @@ oneai-a2a = { workspace = true }
 oneai-wasm = { workspace = true }
 oneai-mcp = { workspace = true }
 
+[features]
+# OTEL tracing helpers (trace_otel / trace_otel_http / trace_otel_config).
+# Off by default; enable to compile those builder methods.
+otel = []
+
 [dev-dependencies]
 tempfile = "3"

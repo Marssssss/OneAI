@@ -42,16 +42,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oneai_core::{
-    ModelConfig, ModelPricingCatalog, ModelPricingEntry,
+    ModelConfig, ModelPricingCatalog,
     CircuitBreaker, RateLimiter, CostTracker, CostBudgetConfig,
-    SmartRouteConfig, SmartRouteDecision, SmartRouteFactor,
-    RoutingStrategy, RoutingTier, ModelQualityProfile,
+    SmartRouteConfig, SmartRouteDecision, SmartRouteFactor, RoutingTier, ModelQualityProfile,
     ProviderScore, SmartRoutingLog, InMemorySmartRoutingLog,
     ProviderPoolConfig, DegradationRule,
-    TokenCounter, ContextFitResult,
+    TokenCounter,
 };
-use oneai_core::error::Result;
-use oneai_core::traits::LlmProvider;
 
 use crate::ModelRouter;
 
@@ -71,6 +68,7 @@ pub struct SmartRouter {
     model_router: ModelRouter,
 
     /// Pricing catalog for cost scoring.
+    #[allow(dead_code)]
     pricing_catalog: ModelPricingCatalog,
 
     /// Quality profiles per model (for latency/quality scoring).
@@ -293,8 +291,8 @@ impl SmartRouter {
     /// scoring available provider.
     async fn route_by_scoring(
         &self,
-        task_description: &str,
-        paradigm: &str,
+        _task_description: &str,
+        _paradigm: &str,
         session_id: Option<&str>,
         conversation_tokens: Option<u64>,
         factors: &mut Vec<SmartRouteFactor>,
@@ -460,8 +458,8 @@ impl SmartRouter {
     /// with the smart router's recommendation.
     pub async fn route_for_pool(
         &self,
-        task_description: &str,
-        paradigm: &str,
+        _task_description: &str,
+        _paradigm: &str,
         pool_config: &ProviderPoolConfig,
         session_id: Option<&str>,
         conversation_tokens: Option<u64>,
@@ -854,6 +852,7 @@ impl SmartRouter {
     }
 
     /// Get a reference to the underlying ModelRouter's fallback config.
+    #[allow(dead_code)]
     fn fallback_config_ref(&self) -> &ModelConfig {
         self.model_router.fallback_config()
     }
@@ -867,7 +866,6 @@ mod tests {
     use oneai_core::CloudProviderKind;
     use oneai_core::ProviderType;
     use oneai_core::circuit_breaker::{ThresholdCircuitBreaker, CircuitBreakerConfig};
-    use regex::Regex;
 
     fn anthropic_fallback_config() -> ModelConfig {
         ModelConfig {
@@ -882,6 +880,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // retained for future routing-strategy coverage
     fn openai_fallback_config() -> ModelConfig {
         ModelConfig {
             provider_type: ProviderType::Cloud,
@@ -907,12 +906,14 @@ mod tests {
         SmartRouter::new(model_router, catalog, SmartRouteConfig::cost_optimized())
     }
 
+    #[allow(dead_code)] // retained for future routing-strategy coverage
     fn create_quality_router() -> SmartRouter {
         let model_router = ModelRouter::with_defaults(anthropic_fallback_config());
         let catalog = ModelPricingCatalog::with_known_models();
         SmartRouter::new(model_router, catalog, SmartRouteConfig::quality_optimized())
     }
 
+    #[allow(dead_code)] // retained for future routing-strategy coverage
     fn create_latency_router() -> SmartRouter {
         let model_router = ModelRouter::with_defaults(anthropic_fallback_config());
         let catalog = ModelPricingCatalog::with_known_models();

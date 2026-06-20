@@ -19,7 +19,7 @@ use std::sync::Arc;
 use oneai_core::traits::Tool;
 
 use crate::domain_pack::DomainPack;
-use crate::paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
+use crate::paradigm_strategy::SubAgentTypeDefinition;
 use crate::context_source::ContextSource;
 use crate::permission_profile::PermissionProfile;
 use crate::paradigm_strategy::ParadigmStrategy;
@@ -350,9 +350,8 @@ mod tests {
     use super::*;
     use oneai_core::PermissionLevel;
     use oneai_tool::CalculatorTool;
-    use crate::permission_profile::{PermissionProfile, DenyPattern};
+    use crate::permission_profile::PermissionProfile;
     use crate::compression_template::CompressionTemplate;
-    use crate::paradigm_strategy::{ParadigmStrategy, DomainParadigmKind};
 
     fn make_test_pack(name: &str) -> DomainPack {
         DomainPack {

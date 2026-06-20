@@ -14,7 +14,7 @@
 //! a simple C ABI callback is easy to wire up from any platform.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use oneai_core::ApprovalResponse;
 use oneai_tool::ApprovalPendingItem;
@@ -24,6 +24,7 @@ use oneai_tool::ApprovalPendingItem;
 /// These function pointer types define the C ABI that platform
 /// code must implement and register.
 pub type RequestCallback = extern "C" fn(request_json: *const std::ffi::c_char);
+#[allow(dead_code)]
 pub type ResponseCallback = extern "C" fn(response_json: *const std::ffi::c_char);
 
 /// Callback-based approval bridge shared by iOS and HarmonyOS.

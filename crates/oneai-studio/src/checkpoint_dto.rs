@@ -143,7 +143,6 @@ fn extract_step(description: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
 
     fn make_checkpoint_info(id: &str, session_id: &str, paradigm: &str, step: usize) -> CheckpointInfo {
         CheckpointInfo {

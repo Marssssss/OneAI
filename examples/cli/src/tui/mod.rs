@@ -1291,7 +1291,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 };
 
                 // Update the role to include the result
-                if let ChatRole::ToolInvocation { call_id, tool_name, args, result } = &msg.role {
+                if let ChatRole::ToolInvocation { call_id, tool_name, args, result: _ } = &msg.role {
                     msg.role = ChatRole::ToolInvocation {
                         call_id: call_id.clone(),
                         tool_name: tool_name.clone(),

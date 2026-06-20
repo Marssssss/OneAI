@@ -37,15 +37,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use tokio::sync::RwLock;
 
 use oneai_core::{
-    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk,
-    Message, ModelCapability, ModelConfig, Role, TokenUsage,
+    InferenceRequest, InferenceResponse, InferenceStreamChunk, ModelCapability, ModelConfig,
     CircuitBreaker, RateLimiter, CostTracker,
     FallbackEvent, FallbackReason, FallbackLog, InMemoryFallbackLog,
-    ProviderPoolConfig, ProviderEntryConfig, DegradationRule,
+    ProviderPoolConfig,
     ProviderPoolStatus, ProviderHealthStatus,
 };
 use oneai_core::error::{OneAIError, Result};
@@ -383,7 +382,7 @@ impl ProviderPool {
             }
 
             // Add remaining providers in priority order
-            for (idx, entry) in self.entries.iter().enumerate() {
+            for (idx, _entry) in self.entries.iter().enumerate() {
                 if !indices.contains(&idx) {
                     indices.push(idx);
                 }
@@ -479,7 +478,7 @@ impl ProviderPool {
 
                     // Record usage in cost tracker
                     if let Some(ct) = &self.cost_tracker {
-                        let cost = if let Some(catalog) = &self.config.degradation_rules.first() {
+                        let cost = if let Some(_catalog) = &self.config.degradation_rules.first() {
                             // Use pricing catalog if available (but we don't have it here directly)
                             0.0 // CostTracker handles this with its own pricing
                         } else {
@@ -787,6 +786,10 @@ impl LlmProvider for ProviderPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt; // test-only (boxed-stream .collect in tests)
+    // These core types are referenced only by the tests below; kept here (not at
+    // module scope) to avoid unused-import warnings in the non-test build.
+    use oneai_core::{ContentBlock, Message, Role, TokenUsage};
     use oneai_core::circuit_breaker::{ThresholdCircuitBreaker, CircuitBreakerConfig};
     use oneai_core::rate_limiter::{TokenWindowRateLimiter, RateLimitConfig};
 
@@ -837,6 +840,7 @@ mod tests {
             *self.should_fail.lock().unwrap() = fail;
         }
 
+        #[allow(dead_code)] // test-fixture accessor for ad-hoc pool diagnostics
         fn call_count(&self) -> usize {
             *self.call_count.lock().unwrap()
         }
@@ -1027,7 +1031,7 @@ mod tests {
         );
 
         // Primary succeeds — no fallback
-        let response = pool.infer(test_request()).await.unwrap();
+        let _response = pool.infer(test_request()).await.unwrap();
         assert_eq!(pool.active_provider_name(), "anthropic");
         assert_eq!(pool.fallback_log_count(), 0);
     }
@@ -1050,7 +1054,7 @@ mod tests {
         ).with_circuit_breaker(cb.clone());
 
         // First call — anthropic fails, circuit opens, fallback to openai
-        let response = pool.infer(test_request()).await.unwrap();
+        let _response = pool.infer(test_request()).await.unwrap();
         assert_eq!(pool.active_provider_name(), "openai");
 
         // Circuit should be open for anthropic
@@ -1078,14 +1082,14 @@ mod tests {
         ).with_rate_limiter(rl.clone());
 
         // First call — anthropic succeeds (rate limit allows 1 call)
-        let response1 = pool.infer(test_request()).await.unwrap();
+        let _response1 = pool.infer(test_request()).await.unwrap();
         assert_eq!(pool.active_provider_name(), "anthropic");
 
         // Record the call manually to exhaust the rate limit
         rl.record_call("anthropic").await.unwrap();
 
         // Second call — anthropic rate limited, fallback to openai
-        let response2 = pool.infer(test_request()).await.unwrap();
+        let _response2 = pool.infer(test_request()).await.unwrap();
         assert_eq!(pool.active_provider_name(), "openai");
     }
 
@@ -1165,7 +1169,7 @@ mod tests {
             ProviderPoolConfig::default(),
         );
 
-        let response = pool.infer(test_request()).await.unwrap();
+        let _response = pool.infer(test_request()).await.unwrap();
 
         // Should have 2 fallback events
         assert_eq!(pool.fallback_log_count(), 2);
@@ -1262,7 +1266,7 @@ mod tests {
         );
 
         // First call — anthropic fails (in cooldown for 10 seconds)
-        let response = pool.infer(test_request()).await.unwrap();
+        let _response = pool.infer(test_request()).await.unwrap();
         assert_eq!(pool.active_provider_name(), "openai");
 
         // Now primary should be in cooldown

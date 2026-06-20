@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use oneai_core::{ScheduledTask, TaskHandle};
-use oneai_core::error::{OneAIError, Result};
+use oneai_core::error::Result;
 use oneai_core::traits::TaskScheduler;
 
 /// In-memory task scheduler using tokio timers.

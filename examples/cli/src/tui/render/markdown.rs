@@ -18,7 +18,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthStr, UnicodeWidthChar};
+use unicode_width::UnicodeWidthStr;
 
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;

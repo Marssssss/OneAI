@@ -17,7 +17,6 @@
 //! For persistent cost tracking, use `SqliteCostTracker` from oneai-persistence.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

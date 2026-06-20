@@ -4,7 +4,7 @@
 //! generates an implicit error message, and re-feeds it to the model
 //! for self-correction. Up to `max_retries` attempts are made.
 
-use oneai_core::{ContentBlock, InferenceRequest, Message, OneAIError, ParsedOutput, ParsingLayer, Role};
+use oneai_core::{ContentBlock, InferenceRequest, Message, OneAIError, ParsedOutput, ParsingLayer};
 use oneai_core::error::ParserError;
 use oneai_core::traits::LlmProvider;
 
@@ -38,13 +38,13 @@ impl FallbackLoop {
         error_description: &str,
     ) -> std::result::Result<ParsedOutput, OneAIError> {
         let mut retries = 0;
-        let mut current_error = error_description.to_string();
+        let current_error = error_description.to_string();
 
         while retries < self.max_retries {
             retries += 1;
 
             // Create the self-correction prompt
-            let correction_message = Message::assistant(
+            let _correction_message = Message::assistant(
                 format!(
                     "You just output content with a format error: {}\n\
                      The raw output was: {}\n\

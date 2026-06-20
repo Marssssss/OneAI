@@ -270,7 +270,6 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
 
         // Verify context lines match
         let mut context_match = true;
-        let mut context_idx = 0;
         let mut line_idx = start_idx;
 
         for diff_line in &hunk.lines {
@@ -282,7 +281,6 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
                             break;
                         }
                         line_idx += 1;
-                        context_idx += 1;
                     } else {
                         context_match = false;
                         break;
@@ -403,6 +401,7 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
 
 /// Result of applying a single hunk.
 struct HunkApplyResult {
+    #[allow(dead_code)]
     hunk_index: usize,
     applied: bool,
     message: String,

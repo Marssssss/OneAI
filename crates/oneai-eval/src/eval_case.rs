@@ -264,14 +264,6 @@ mod expected_output_serde {
                 s.serialize_field("note", "Custom judges cannot be serialized")?;
                 s.end()
             }
-            // Handle unknown variants from #[non_exhaustive]
-            _ => {
-                use serde::ser::SerializeStruct;
-                let mut s = serializer.serialize_struct("ExpectedOutput", 2)?;
-                s.serialize_field("type", "unknown")?;
-                s.serialize_field("note", "Unknown variant")?;
-                s.end()
-            }
         }
     }
 
@@ -402,7 +394,7 @@ mod tests {
         }
 
         let contains_cs = ExpectedOutput::contains_case_sensitive(["A", "B"]);
-        if let ExpectedOutput::Contains { substrings, case_sensitive } = contains_cs {
+        if let ExpectedOutput::Contains { substrings: _, case_sensitive } = contains_cs {
             assert!(case_sensitive);
         } else {
             panic!("Expected Contains");

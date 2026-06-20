@@ -105,6 +105,7 @@ pub struct McpServerManager {
 }
 
 /// Information about a connected MCP server.
+#[allow(dead_code)]
 struct McpServerInfo {
     /// The server name.
     name: String,

@@ -411,6 +411,7 @@ mod tests {
     }
 
     /// A test hook that always denies.
+    #[allow(dead_code)] // test fixture retained for future hook-registry coverage
     struct AlwaysDenyHook;
 
     #[async_trait::async_trait]
@@ -425,6 +426,7 @@ mod tests {
     }
 
     /// A test hook that modifies args.
+    #[allow(dead_code)] // test fixture retained for future hook-registry coverage
     struct ModifyArgsHook;
 
     #[async_trait::async_trait]

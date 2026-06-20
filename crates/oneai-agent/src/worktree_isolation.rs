@@ -28,7 +28,6 @@
 //! the project directory to a temp location).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use oneai_core::error::Result;
 

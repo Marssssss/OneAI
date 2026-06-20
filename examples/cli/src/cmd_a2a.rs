@@ -4,9 +4,6 @@
 
 use std::sync::Arc;
 use oneai_a2a::{A2AClient, A2AServerHost, TaskStore, AgentCard};
-use oneai_tool::ToolRegistry;
-use oneai_core::traits::Tool;
-use oneai_tool::CalculatorTool;
 
 /// Start the A2A server (serve OneAI agent capabilities).
 ///

@@ -97,6 +97,7 @@ impl TokenUsage {
 
     /// Format token count for display (e.g., "1.2k" for 1200).
     /// If estimated, prefix with ~ (e.g., "~1.2k").
+    #[allow(dead_code)]
     pub fn format_display(&self) -> String {
         let count_str = if self.total >= 1000 {
             format!("{:.1}k", self.total as f64 / 1000.0)
@@ -980,7 +981,7 @@ impl App {
                 self.save_undo_state();
                 if self.input_cursor_pos > 0 {
                     let prev = prev_char_boundary(&self.input, self.input_cursor_pos);
-                    let char_len = self.input_cursor_pos - prev;
+                    let _char_len = self.input_cursor_pos - prev;
                     self.input.replace_range(prev..self.input_cursor_pos, "");
                     self.input_cursor_pos = prev;
                 }

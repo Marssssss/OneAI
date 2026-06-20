@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use crate::eval_case::{EvalCase, ExpectedOutput};
-use crate::eval_metric::EvalMetric;
 use crate::eval_suite::{EvalSuite, EvalSuiteBuilder};
 use crate::builtin_metrics::{ExactMatchMetric, ContainsMatchMetric, RegexMatchMetric, TrajectoryMetric};
 

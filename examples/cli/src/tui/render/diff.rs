@@ -12,7 +12,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthStr, UnicodeWidthChar};
+use unicode_width::UnicodeWidthStr;
 
 use super::super::theme::*;
 

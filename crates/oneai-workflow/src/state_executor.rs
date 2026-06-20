@@ -30,10 +30,10 @@ use std::sync::Arc;
 
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{ApprovalGate, LlmProvider, Tool};
-use oneai_core::{Conversation, InferenceRequest, InferenceResponse, Message, Role, ToolOutput};
+use oneai_core::{InferenceRequest, InferenceResponse, Message, Role};
 
 use crate::state_graph::{
-    StateGraph, GraphNode, GraphState, GraphEdge, NodeAction, EdgeCondition, GraphExecutionResult,
+    StateGraph, GraphState, GraphEdge, NodeAction, EdgeCondition, GraphExecutionResult,
 };
 
 // ─── Delegate Action Trait ────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
         state: &mut GraphState,
     ) -> Result<ActionResult> {
         // Extract LlmInfer fields
-        let (system_prompt_override, use_streaming, include_tool_definitions,
+        let (system_prompt_override, _use_streaming, include_tool_definitions,
              tool_filter_override, thinking_budget, temperature, max_tokens) = match action {
             NodeAction::LlmInfer {
                 system_prompt_override, use_streaming, include_tool_definitions,
@@ -253,7 +253,7 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
         state.conversation.add_message(response.message.clone());
 
         // Parse decision and store in state
-        let decision = self.parse_decision(&response, state).await?;
+        let _decision = self.parse_decision(&response, state).await?;
 
         Ok(ActionResult {
             output,
@@ -785,8 +785,9 @@ pub fn interpolate_graph_template(template: &str, variables: &HashMap<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state_graph::StateGraph;
+    use crate::state_graph::{StateGraph, GraphNode};
 
+    #[allow(dead_code)] // test fixture retained for future executor coverage
     fn make_simple_graph() -> StateGraph {
         // Simple linear graph: start → process → end
         let mut graph = StateGraph::new("test", "start");
@@ -983,7 +984,9 @@ mod tests {
     /// Create a test executor with mock dependencies (for condition testing only).
     /// Note: We can't test full execute() without a real provider,
     /// but we can test all the routing logic.
+    #[allow(dead_code)] // reserved for future executor-iteration tests
     struct TestStateGraphExecutor {
+        #[allow(dead_code)]
         max_iterations: usize,
     }
 

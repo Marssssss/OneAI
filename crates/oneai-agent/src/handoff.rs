@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::handoff::{
@@ -32,7 +31,7 @@ use oneai_core::types::{RiskLevel, ToolOutput};
 use oneai_core::budget::TokenBudget;
 use oneai_core::team::SubAgentKindProxy;
 
-use crate::sub_agent::{SubAgent, SubAgentFactory, SubAgentKind, SubAgentSummary};
+use crate::sub_agent::{SubAgentFactory, SubAgentKind};
 
 // ─── HandoffTool ───────────────────────────────────────────────────────────────
 
@@ -417,7 +416,8 @@ mod tests {
     use super::*;
     use oneai_core::handoff::HandoffConfig;
     use oneai_core::handoff::HandoffPresets;
-    use oneai_core::team::SubAgentKindProxy;
+    // Test-only imports (kept out of the lib build to avoid unused-import warnings):
+    use crate::sub_agent::{SubAgent, SubAgentSummary};
 
     // ─── Mock SubAgent ────────────────────────────────────────────────────────
 
@@ -713,7 +713,7 @@ mod tests {
             .with_target(HandoffTarget::new("coding", "Code"))
             .with_transfer_conversation(true);
 
-        let result = manager.execute_handoff(
+        let _result = manager.execute_handoff(
             "main", "coding", "Needs implementation",
             "Context info", &config, 0
         ).await.unwrap();
@@ -752,9 +752,8 @@ mod tests {
 
     #[test]
     fn test_extract_target_from_response() {
-        let factory = Arc::new(MockFactory);
-        let manager = HandoffManager::new(factory);
-
+        // `extract_target_from_response` is an associated function, so no manager
+        // instance is needed — only the config is exercised here.
         let config = HandoffConfig::new()
             .with_target(HandoffTarget::new("coding", "Code"))
             .with_target(HandoffTarget::new("research", "Research"));

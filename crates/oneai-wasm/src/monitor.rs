@@ -372,14 +372,14 @@ mod tests {
 
     #[test]
     fn test_monitor_new() {
-        let monitor = WasmResourceMonitor::new();
+        let _monitor = WasmResourceMonitor::new();
         // Monitor is created successfully
         assert!(true);
     }
 
     #[test]
     fn test_monitor_default() {
-        let monitor = WasmResourceMonitor::default();
+        let _monitor = WasmResourceMonitor::default();
         assert!(true);
     }
 

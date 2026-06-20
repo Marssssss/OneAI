@@ -18,7 +18,7 @@ use oneai_core::traits::{LlmProvider, MemoryStore, MemoryPersistence, EmbeddingS
 use crate::short_term::ShortTermMemorySync;
 use crate::long_term::LongTermMemory;
 use crate::compression::{ContextCompressor, CompressedResult};
-use crate::reflection::{MemoryReflection, MemoryReflectionConfig, EpisodicMemory};
+use crate::reflection::{MemoryReflection, EpisodicMemory};
 
 // ─── RecallStrategy ──────────────────────────────────────────────
 

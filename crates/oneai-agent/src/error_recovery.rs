@@ -283,7 +283,7 @@ impl RecoveryManager {
             RecoveryStrategy::Rollback { checkpoint_id } => {
                 Ok(RecoveryOutcome::RollbackTo { checkpoint_id: checkpoint_id.clone() })
             }
-            RecoveryStrategy::Assertion { check, on_fail } => {
+            RecoveryStrategy::Assertion { check, on_fail: _ } => {
                 if let Some(assertion) = self.assertions.get(check) {
                     let result = assertion.check(context).await?;
                     if result {
@@ -299,7 +299,7 @@ impl RecoveryManager {
                     Ok(RecoveryOutcome::AssertionNotFound { name: check.clone() })
                 }
             }
-            RecoveryStrategy::ExternalFeedback { validator, on_validation_fail } => {
+            RecoveryStrategy::ExternalFeedback { validator, on_validation_fail: _ } => {
                 if let Some(v) = self.validators.get(validator) {
                     let result = v.validate(context).await?;
                     if result.passed {

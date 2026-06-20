@@ -38,12 +38,10 @@
 //! - `ModelQualityProfile`: Per-model quality/latency/cost characteristics
 //! - `SmartRoutingLog`: Audit trail for routing decisions (like FallbackLog)
 
-use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
 
 // ─── RoutingStrategy ──────────────────────────────────────────────────────────
 
@@ -739,9 +737,13 @@ impl ModelQualityProfile {
     /// Uses approximate token counts: 1000 prompt + 500 completion tokens
     /// as a reference unit. Actual costs depend on real token usage.
     pub fn estimated_cost_per_call(&self) -> f64 {
-        // Use 1000 prompt + 500 completion as reference
-        (1000.0 / 1000.0) * self.cost_per_1k_prompt_usd
-            + (500.0 / 1000.0) * self.cost_per_1k_completion_usd
+        // Use 1000 prompt + 500 completion as reference, converting per-1k-token
+        // rates into the actual reference-token cost.
+        const REFERENCE_PROMPT_TOKENS: f64 = 1000.0;
+        const REFERENCE_COMPLETION_TOKENS: f64 = 500.0;
+        const TOKENS_PER_1K: f64 = 1000.0;
+        (REFERENCE_PROMPT_TOKENS / TOKENS_PER_1K) * self.cost_per_1k_prompt_usd
+            + (REFERENCE_COMPLETION_TOKENS / TOKENS_PER_1K) * self.cost_per_1k_completion_usd
     }
 
     /// Build default profiles for all known models.

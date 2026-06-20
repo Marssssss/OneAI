@@ -3,7 +3,6 @@
 use oneai_core::ProviderPoolConfig;
 use oneai_core::SmartRouteConfig;
 use oneai_core::RoutingStrategy;
-use oneai_core::RoutingTier;
 use oneai_core::ModelPricingCatalog;
 use oneai_provider::ModelRouter;
 use oneai_provider::SmartRouter;

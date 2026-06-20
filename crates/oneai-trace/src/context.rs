@@ -28,6 +28,7 @@ struct SharedTraceContext {
     spans: Mutex<HashMap<String, Span>>,
 
     /// The collector to route events to.
+    #[allow(dead_code)]
     collector: Arc<dyn TraceCollector>,
 
     /// Whether tracing is enabled (runtime toggle).

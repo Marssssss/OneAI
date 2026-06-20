@@ -22,13 +22,13 @@ use tokio::sync::RwLock;
 use oneai_core::{
     ContentBlock, Conversation, InferenceRequest, InferenceResponse,
     Message, Role, ToolDefinition, ToolOutput,
-    HookPoint, HookResult, HookContext, InterruptPoint, InterruptReason,
+    HookPoint, HookContext, InterruptPoint, InterruptReason,
     ResumeSignal, ResumeAction, StructuredOutputConfig,
 };
 use oneai_core::error::Result;
 use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool};
 
-use oneai_domain::{MergedDomainPack, ToolDecorator, DecoratedTool, PermissionAction};
+use oneai_domain::{MergedDomainPack, PermissionAction};
 
 use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 use crate::context_assembler::ContextAssembler;
@@ -1122,7 +1122,7 @@ impl AgentLoop {
                     };
                     let results = registry.run_hooks(HookPoint::PostInfer, hook_context).await;
                     let resolved = HookRegistry::resolve_results(&results);
-                    if let ResolvedHookAction::Modify { modified_args } = resolved {
+                    if let ResolvedHookAction::Modify { modified_args: _ } = resolved {
                         // PostInfer Modify: the modified_args may contain replacement content
                         // For now, we log it but don't replace the response (to keep backward compat)
                         tracing::info!("PostInfer hook modified response (logged but not applied for safety)");
@@ -2547,6 +2547,7 @@ impl AgentLoop {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
 
@@ -2557,7 +2558,7 @@ impl AgentLoop {
         //
         // When no paradigm config is active (initial state before any switch),
         // all tools are available (default ReAct behavior).
-        let tool_filter: Option<&[String]> = None; // Will be checked from LoopState in run_loop
+        let _tool_filter: Option<&[String]> = None; // Will be checked from LoopState in run_loop
 
         // Apply domain pack tool decorators if present
         if let Some(domain) = &self.domain_pack {
@@ -2811,6 +2812,7 @@ impl AgentLoop {
 /// pack decorators), and ToolCall nodes go through the full permission and
 /// hooks pipeline. This makes StateGraph execution truly integrated with
 /// the AgentLoop, not a separate disconnected system.
+#[allow(dead_code)]
 pub struct AgentLoopGraphActionExecutor {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
@@ -2894,7 +2896,7 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
         state.conversation.add_message(response.message.clone());
 
         // Parse decision and store in state
-        let decision = self.parse_decision(&response, state).await?;
+        let _decision = self.parse_decision(&response, state).await?;
 
         Ok(oneai_workflow::ActionResult {
             output,

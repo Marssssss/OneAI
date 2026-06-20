@@ -51,11 +51,13 @@ impl Language {
 #[derive(Debug, Clone)]
 struct Symbol {
     kind: SymKind,
+    #[allow(dead_code)]
     name: String,
     sig: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum SymKind {
     Fn, Struct, Enum, Class, Interface, Trait,
     Module, Import, Const, Type, Method, Field,

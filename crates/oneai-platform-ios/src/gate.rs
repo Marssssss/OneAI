@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use oneai_core::{ApprovalRequest, ApprovalResponse, RiskLevel};
 use oneai_core::platform::PlatformApprovalGate;
 use oneai_core::traits::ApprovalGate;
-use oneai_tool::{ChannelApprovalGateWithThreshold, ApprovalPendingItem};
+use oneai_tool::ChannelApprovalGateWithThreshold;
 
 use crate::callback_bridge::CallbackApprovalBridge;
 

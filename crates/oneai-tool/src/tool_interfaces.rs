@@ -857,7 +857,7 @@ impl Tool for FileListTool {
             });
         }
 
-        let mut entries = tokio::fs::read_dir(path).await;
+        let entries = tokio::fs::read_dir(path).await;
         match entries {
             Ok(mut read_dir) => {
                 let mut result = Vec::new();
@@ -1003,7 +1003,7 @@ impl Tool for GrepTool {
                 }
 
                 // Build glob pattern for file filtering
-                let glob_pattern = if file_pattern == "*" {
+                let _glob_pattern = if file_pattern == "*" {
                     "**/*".to_string()
                 } else {
                     format!("**/{}", file_pattern)
@@ -1032,7 +1032,7 @@ impl Tool for GrepTool {
 
                     // Check glob pattern match
                     let file_path_str = entry.path().to_string_lossy();
-                    let relative_path = entry.path().strip_prefix(search_path)
+                    let _relative_path = entry.path().strip_prefix(search_path)
                         .unwrap_or(entry.path())
                         .to_string_lossy();
 
@@ -1494,7 +1494,7 @@ impl Tool for NotebookEditTool {
 
                         if let Some(cell) = found {
                             // Update source — convert string to array of lines (ipynb format)
-                            let source_lines: Vec<serde_json::Value> = new_source.lines()
+                            let _source_lines: Vec<serde_json::Value> = new_source.lines()
                                 .map(|line| serde_json::Value::String(format!("{}\n", line)))
                                 .chain(std::iter::once(serde_json::Value::String(String::new())))
                                 .collect::<Vec<_>>()

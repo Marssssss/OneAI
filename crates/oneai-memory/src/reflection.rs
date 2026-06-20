@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use oneai_core::{Conversation, InferenceRequest, MemoryEntry, Message, Role};
+use oneai_core::{Conversation, InferenceRequest, MemoryEntry, Message};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
 

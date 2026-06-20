@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{ApprovalGate, LlmProvider, Tool};
-use oneai_core::{Conversation, InferenceRequest, Message, Role};
+use oneai_core::{Conversation, InferenceRequest, Message};
 
 use crate::dag::WorkflowDag;
 use crate::config::{WorkflowConfig, RetryPolicy};
@@ -254,7 +254,7 @@ impl WorkflowExecutor {
 
         // Execute each level
         for level_ids in &dag.levels {
-            let level_start = std::time::Instant::now();
+            let _level_start = std::time::Instant::now();
 
             // Check if any dependencies failed — skip if not continue_on_failure
             let mut skip_level = false;
@@ -415,12 +415,12 @@ async fn execute_step(
             }
             oneai_core::ApprovalResponse::Approved { modified_args } => {
                 // Use modified args if provided
-                if let Some(modified) = modified_args {
+                if let Some(_modified) = modified_args {
                     // Update step args with modified version
                     // (In a real implementation, we'd merge modified args into tool_args)
                 }
             }
-            oneai_core::ApprovalResponse::Modified { args } => {
+            oneai_core::ApprovalResponse::Modified { args: _ } => {
                 // Use modified args
             }
             oneai_core::ApprovalResponse::Observe { observation } => {

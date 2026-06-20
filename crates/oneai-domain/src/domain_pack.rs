@@ -28,7 +28,7 @@ use crate::permission_profile::PermissionProfile;
 use crate::paradigm_strategy::ParadigmStrategy;
 use crate::compression_template::CompressionTemplate;
 use crate::tool_decorator::ToolDecorator;
-use crate::paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
+use crate::paradigm_strategy::SubAgentTypeDefinition;
 
 // ─── DomainPack ────────────────────────────────────────────────────────────────
 
@@ -354,6 +354,7 @@ mod tests {
     use oneai_tool::CalculatorTool;
     use crate::permission_profile::PermissionProfile;
     use crate::compression_template::CompressionTemplate;
+    use crate::paradigm_strategy::SubAgentMergeStrategy;
 
     #[test]
     fn test_domain_pack_builder() {

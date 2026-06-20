@@ -108,7 +108,7 @@ impl ShortTermMemory {
 
 #[async_trait::async_trait]
 impl MemoryStore for ShortTermMemory {
-    async fn store(&self, entry: MemoryEntry) -> Result<()> {
+    async fn store(&self, _entry: MemoryEntry) -> Result<()> {
         // Note: MemoryStore requires &self, but push needs &mut self.
         // This is a limitation of the trait interface — in practice,
         // ShortTermMemory should be used via direct push() calls,
@@ -128,7 +128,7 @@ impl MemoryStore for ShortTermMemory {
         Ok(results)
     }
 
-    async fn compress(&self, threshold: usize) -> Result<Vec<MemoryEntry>> {
+    async fn compress(&self, _threshold: usize) -> Result<Vec<MemoryEntry>> {
         // For short-term memory, compression means evicting older entries
         // if the estimated token count exceeds the threshold.
         // This is typically handled by the ContextCompressor instead.
@@ -201,7 +201,11 @@ impl MemoryStore for ShortTermMemorySync {
     }
 
     async fn clear(&self) -> Result<()> {
-        self.inner.write().await.clear();
+        // The inner ShortTermMemory's `MemoryStore::clear` returns a must-use
+        // future; bind it explicitly to document that the trait impl is a
+        // no-op (it only logs), matching prior behavior. Actual clearing is
+        // done via the inherent `ShortTermMemory::clear(&mut self)`.
+        let _ = self.inner.write().await.clear();
         Ok(())
     }
 }

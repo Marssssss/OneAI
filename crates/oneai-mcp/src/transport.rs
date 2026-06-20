@@ -280,7 +280,7 @@ mod tests {
             crate::server::McpServerInfo::default(),
         ));
         let router = Arc::new(crate::router::McpRouter::new(handler));
-        let transport = McpStdioTransport::new(router);
+        let _transport = McpStdioTransport::new(router);
         // Just verify creation — actual run requires stdin/stdout
         assert!(true);
     }

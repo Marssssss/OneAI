@@ -10,6 +10,7 @@ use oneai_core::error::Result;
 /// descriptions are injected; previous skills auto-unload when topic changes.
 pub struct SkillSelector {
     /// Selection mode (keyword, vector, or hybrid).
+    #[allow(dead_code)]
     mode: SelectionMode,
     /// Number of top skills to select (default: 3).
     top_k: usize,

@@ -4,10 +4,8 @@
 //! scripting, CI pipelines, and batch processing. Output goes to stdout.
 
 use std::sync::Arc;
-use oneai_core::ModelConfig;
 use oneai_app::AppBuilder;
 use oneai_tool::CalculatorTool;
-use oneai_domain::{DomainPack, coding_pack, research_pack};
 
 use crate::config::OneaiConfig;
 use crate::cmd_pack::get_builtin_pack;

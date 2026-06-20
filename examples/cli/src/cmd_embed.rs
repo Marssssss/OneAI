@@ -8,7 +8,7 @@
 //!   oneai embed dimension         — Show embedding dimension for configured model
 
 use oneai_core::{EmbeddingModel, EmbeddingServiceType, EmbeddingConfig};
-use oneai_rag::{FastEmbedService, EmbeddingConfigExt};
+use oneai_rag::EmbeddingConfigExt;
 
 /// Generate an embedding for a single text string.
 pub fn cmd_embed_generate(text: &str, model: Option<&str>, service_type: Option<&str>, api_key: Option<&str>) {

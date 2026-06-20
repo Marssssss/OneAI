@@ -15,7 +15,6 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::platform::Platform;
 
 // ─── ScreenshotResult ───────────────────────────────────────────────────────
 
@@ -164,6 +163,7 @@ pub trait PlatformCapabilities: Send + Sync {
 
 /// Stub implementation for development/testing.
 pub struct StubPlatformCapabilities {
+    #[allow(dead_code)]
     platform_name: String,
 }
 

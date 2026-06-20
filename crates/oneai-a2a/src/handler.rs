@@ -9,9 +9,8 @@
 
 use std::sync::Arc;
 
-use crate::types::{AgentCard, Task, TaskState, Message, SendTaskParams, GetTaskParams, CancelTaskParams};
+use crate::types::{AgentCard, TaskState, Message, SendTaskParams, GetTaskParams, CancelTaskParams};
 use crate::task_store::TaskStore;
-use crate::transport::{JsonRpcRequest, METHOD_AGENT_GET_CARD, METHOD_TASKS_SEND, METHOD_TASKS_GET, METHOD_TASKS_CANCEL};
 
 /// A2A JSON-RPC request handler.
 ///
@@ -65,7 +64,7 @@ impl A2AHandler {
         };
 
         // Create the task
-        let task = match self.task_store.create_task(&send_params.id, send_params.message.clone()).await {
+        let _task = match self.task_store.create_task(&send_params.id, send_params.message.clone()).await {
             Ok(t) => t,
             Err(e) => {
                 return serde_json::json!({
@@ -80,7 +79,7 @@ impl A2AHandler {
         };
 
         // Transition to Working state
-        let task = match self.task_store.transition_task(&send_params.id, TaskState::Working).await {
+        let _task = match self.task_store.transition_task(&send_params.id, TaskState::Working).await {
             Ok(t) => t,
             Err(e) => {
                 return serde_json::json!({
@@ -228,7 +227,6 @@ impl A2AHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AgentCapabilities;
 
     fn create_handler() -> A2AHandler {
         let card = AgentCard::new("test-agent", "A test agent", "https://test.example.com");

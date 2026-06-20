@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::Conversation;
 use crate::ContentBlock;
-use crate::Message;
 
 // ─── TokenCounter trait ────────────────────────────────────────────────────
 
@@ -712,6 +711,9 @@ fn infer_max_output_for_tokenizer(model: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `Message` is only referenced from these tests; kept here (not at module
+    // scope) to avoid an unused-import warning in the non-test build.
+    use crate::Message;
 
     // ─── HeuristicTokenCounter tests ──────────────────────────────────
 

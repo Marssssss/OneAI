@@ -65,7 +65,6 @@ impl EvalMetric for ExactMatchMetric {
             ExpectedOutput::Custom { .. } => {
                 EvalScore::new(0.0, 1.0, "ExactMatch not applicable for Custom expected output", false)
             }
-            _ => EvalScore::new(0.0, 1.0, "ExactMatch not applicable for unknown expected output type", false),
         }
     }
 }
@@ -134,7 +133,6 @@ impl EvalMetric for ContainsMatchMetric {
             ExpectedOutput::Custom { .. } => {
                 EvalScore::new(0.0, 1.0, "ContainsMatch not applicable for Custom expected output", false)
             }
-            _ => EvalScore::new(0.0, 1.0, "ContainsMatch not applicable for unknown expected output type", false),
         }
     }
 }
@@ -187,7 +185,6 @@ impl EvalMetric for RegexMatchMetric {
             ExpectedOutput::Custom { .. } => {
                 EvalScore::new(0.0, 1.0, "RegexMatch not applicable for Custom expected output", false)
             }
-            _ => EvalScore::new(0.0, 1.0, "RegexMatch not applicable for unknown expected output type", false),
         }
     }
 }
@@ -264,7 +261,6 @@ impl EvalMetric for TrajectoryMetric {
             ExpectedOutput::Custom { .. } => {
                 EvalScore::new(0.0, 1.0, "Trajectory not applicable for Custom expected output", false)
             }
-            _ => EvalScore::new(0.0, 1.0, "Trajectory not applicable for unknown expected output type", false),
         }
     }
 }
@@ -426,7 +422,6 @@ impl EvalMetric for LlmJudgeMetric {
             ExpectedOutput::Custom { .. } => {
                 EvalScore::new(0.0, 1.0, "LlmJudge not applicable for Custom expected output", false)
             }
-            _ => EvalScore::new(0.0, 1.0, "LlmJudge not applicable for unknown expected output type", false),
         }
     }
 }

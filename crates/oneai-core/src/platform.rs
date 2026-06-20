@@ -40,6 +40,7 @@ pub trait PlatformApprovalGate: ApprovalGate {
 
 /// Stub implementation for development/testing — always auto-approves.
 pub struct StubPlatformApprovalGate {
+    #[allow(dead_code)]
     platform_name: String,
 }
 

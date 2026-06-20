@@ -162,6 +162,7 @@ fn resolve_team_config(name: &str) -> Option<TeamConfig> {
 }
 
 /// Format a team result for display.
+#[allow(dead_code)]
 pub fn format_team_result(result: &TeamResult) -> String {
     let mut output = String::new();
 

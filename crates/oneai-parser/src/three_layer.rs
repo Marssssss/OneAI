@@ -8,7 +8,7 @@ use crate::constrained::ConstrainedDecoder;
 use crate::fallback::FallbackLoop;
 use crate::fuzzy::FuzzyJsonRepair;
 use oneai_core::{
-    ContentBlock, InferenceRequest, OneAIError, ParsedOutput, ParsingLayer,
+    ContentBlock, OneAIError, ParsedOutput, ParsingLayer,
 };
 use oneai_core::error::ParserError;
 use oneai_core::traits::{LlmProvider, OutputParser};
@@ -137,7 +137,7 @@ impl OutputParser for ThreeLayerParser {
         // If constrained decoding was active (Layer 1), the output should already be correct.
         if self.constrained.is_available() {
             // Layer 1 succeeded — output is guaranteed correct at generation time
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_output) {
+            if let Ok(_val) = serde_json::from_str::<serde_json::Value>(raw_output) {
                 return Ok(ParsedOutput {
                     content: vec![ContentBlock::Text { text: raw_output.to_string() }],
                     parsing_layer: ParsingLayer::ConstrainedDecoding,
@@ -148,7 +148,7 @@ impl OutputParser for ThreeLayerParser {
 
         // Layer 2: Attempt fuzzy JSON repair
         match self.fuzzy.repair_and_parse(raw_output) {
-            Ok(val) => {
+            Ok(_val) => {
                 // Successfully repaired or directly parsed
                 // Check if the result contains tool calls
                 let tool_calls = self.parse_tool_calls(raw_output).unwrap_or_default();
@@ -171,7 +171,7 @@ impl OutputParser for ThreeLayerParser {
         }
 
         // Layer 3: Fallback self-correction
-        if let Some(provider) = &self.provider {
+        if let Some(_provider) = &self.provider {
             // We need an original request for self-correction — but we don't have one here.
             // The self-correction requires the original InferenceRequest context.
             // This is handled at the agent loop level, not in the parser directly.

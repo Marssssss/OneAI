@@ -11,11 +11,10 @@ use std::sync::Arc;
 
 use oneai_tool::ToolRegistry;
 use oneai_tool::CalculatorTool;
-use oneai_core::traits::Tool;
 
 use oneai_mcp::{
-    McpServerHost, McpServerInfo, McpPluginRegistry,
-    McpPluginEntry, McpPluginSource, McpServerConfigFile,
+    McpServerHost, McpPluginRegistry,
+    McpPluginEntry, McpPluginSource,
 };
 
 /// Run OneAI as an MCP server via Stdio transport.

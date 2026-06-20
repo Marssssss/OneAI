@@ -99,7 +99,7 @@ pub fn cmd_config_init() {
     }
 
     // Create default config
-    let config = OneaiConfig::default();
+    let _config = OneaiConfig::default();
 
     // Create default config — don't auto-fill sensitive values from env
     // (env vars will still be used as overrides when reading config)

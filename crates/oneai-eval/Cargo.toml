@@ -21,3 +21,10 @@ oneai-trace = { workspace = true }
 oneai-app = { workspace = true }
 oneai-domain = { workspace = true }
 oneai-agent = { workspace = true }
+
+[lints.rust]
+# `skip_serde` is a bare cfg used to exclude a non-serializable field
+# (ExpectedOutput::Custom.judge) from the serde-derived struct. It is never
+# enabled via --cfg; registering it silences "unexpected cfg" without changing
+# compilation behavior.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(skip_serde)'] }

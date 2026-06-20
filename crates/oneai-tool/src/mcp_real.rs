@@ -16,7 +16,7 @@ use oneai_core::{PermissionLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 // ─── McpFramingParser ─────────────────────────────────────────────────────────
@@ -936,6 +936,7 @@ pub struct McpToolWrapper {
     name: String,
     description: String,
     parameters_schema: serde_json::Value,
+    #[allow(dead_code)]
     server_name: String,
     /// Shared mutable connection — needed because call_tool reads/writes to the subprocess.
     connection: Arc<tokio::sync::Mutex<McpConnection>>,

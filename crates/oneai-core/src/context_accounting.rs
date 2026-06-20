@@ -10,11 +10,9 @@
 
 use crate::Conversation;
 use crate::ContentBlock;
-use crate::Message;
 use crate::Role;
 use crate::token_counter::HeuristicTokenCounter;
 use crate::token_counter::TokenCounter;
-use crate::token_counter::infer_context_window_for_tokenizer;
 
 // ─── ContextAccounting ────────────────────────────────────────────────────
 
@@ -264,6 +262,10 @@ fn format_token_k(count: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `Message` is only referenced from these tests (the lib build no longer
+    // imports it at module scope), so bring it in here to avoid an unused-import
+    // warning in the non-test build.
+    use crate::Message;
 
     #[test]
     fn test_context_accounting_empty_conversation() {

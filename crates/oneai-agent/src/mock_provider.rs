@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -506,6 +506,7 @@ impl LlmProvider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt; // test-only (boxed-stream .collect in tests)
 
     #[tokio::test]
     async fn test_mock_provider_direct_answer() {

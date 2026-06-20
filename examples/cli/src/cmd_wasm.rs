@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleRegistry, WasmResourceMonitor, WasmModuleSource, WasiConfig};
+use oneai_wasm::{WasmRuntime, WasmModuleRegistry, WasmResourceMonitor, WasmModuleSource};
 
 /// List all loaded WASM modules.
 pub fn cmd_wasm_list() {

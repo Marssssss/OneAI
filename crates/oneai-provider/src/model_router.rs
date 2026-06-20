@@ -21,7 +21,6 @@
 //!
 //! **Custom rules** can be added via YAML/TOML configuration or programmatically.
 
-use std::sync::Arc;
 use regex::Regex;
 use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
 use oneai_core::traits::LlmProvider;

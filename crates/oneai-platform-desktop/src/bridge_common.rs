@@ -83,8 +83,10 @@ impl DesktopApprovalBridge {
 
 // Helper for creating ApprovalResponse from dialog choices
 /// Helper for creating approval responses from native dialog choices.
+#[allow(dead_code)]
 pub struct DesktopApprovalDecision;
 
+#[allow(dead_code)]
 impl DesktopApprovalDecision {
     /// Approve the request (allow execution unchanged).
     pub fn approve() -> ApprovalResponse {

@@ -57,7 +57,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use oneai_core::PermissionLevel;
 use oneai_core::traits::Tool;

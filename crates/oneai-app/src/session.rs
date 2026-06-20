@@ -17,10 +17,8 @@ use oneai_rag::{DocumentIndex, assemble_context};
 use oneai_workflow::{WorkflowConfig, WorkflowExecutor, WorkflowResult, StateGraph, GraphExecutionResult, StateGraphExecutor, NoopDelegateFactory, render_dag_ascii, render_state_graph_ascii};
 use oneai_persistence::FilePersistence;
 use oneai_persistence::SqliteSessionStore;
-use oneai_core::traits::MemoryPersistence;
 use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
 
-use tokio::sync::Mutex;
 
 /// A record of a workflow execution in the session history.
 #[derive(Debug, Clone)]
@@ -69,6 +67,7 @@ pub struct AppSession {
 /// Shared resources for all sessions.
 struct AppResources {
     tool_executor: Arc<ToolExecutor>,
+    #[allow(dead_code)]
     tool_registry: Arc<oneai_tool::ToolRegistry>,
     approval_gate: Arc<dyn ApprovalGate>,
     memory_manager: Arc<MemoryManager>,
@@ -94,7 +93,7 @@ impl AppSession {
 
         // Start a SESSION span if tracing is enabled
         if let Some(ctx) = &trace_context {
-            let span_id = ctx.enter_span(SpanKind::SESSION, "session", None);
+            let _span_id = ctx.enter_span(SpanKind::SESSION, "session", None);
             ctx.set_attribute("session.id", serde_json::json!(session_id));
             ctx.set_attribute("session.platform", serde_json::json!(app.platform.name()));
             ctx.set_session_id(&session_id);
@@ -567,7 +566,7 @@ impl AppSession {
         // ─── Auto-save session to SQLite ──────────────────────────────
         // If SQLite persistence is enabled, save the conversation and STM
         // after each agent run. This enables session resume on restart.
-        if let Some(sqlite) = &self.app.sqlite_store {
+        if let Some(_sqlite) = &self.app.sqlite_store {
             if let Err(e) = self.app.memory_manager.save_session(&self.session_id, &self.conversation).await {
                 tracing::warn!("Failed to auto-save session '{}': {}", self.session_id, e);
             }

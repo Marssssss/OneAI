@@ -335,6 +335,7 @@ impl SandboxBackend for DockerBackend {
 /// When a real backend (Seatbelt, Docker) is available, it should be preferred.
 pub struct RegexBackend {
     /// Directory paths that commands are allowed to operate in.
+    #[allow(dead_code)]
     allowed_dirs: Vec<PathBuf>,
 
     /// Whether network access is allowed.
@@ -396,7 +397,7 @@ impl SandboxBackend for RegexBackend {
 ///
 /// This is used by ShellTool to automatically select the appropriate
 /// sandbox backend based on the platform.
-pub fn default_sandbox_backend(project_dir: &Path, allow_network: bool) -> Arc<dyn SandboxBackend> {
+pub fn default_sandbox_backend(project_dir: &Path, _allow_network: bool) -> Arc<dyn SandboxBackend> {
     if cfg!(target_os = "macos") {
         let seatbelt = SeatbeltBackend::coding_defaults(project_dir);
         if seatbelt.is_available() {

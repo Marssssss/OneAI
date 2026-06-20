@@ -7,7 +7,7 @@
 //!   oneai handoff run <t> <r> — Execute a handoff (demo mode)
 
 use oneai_core::handoff::{
-    HandoffConfig, HandoffPresets, HandoffTarget, HandoffResult,
+    HandoffConfig, HandoffPresets, HandoffResult,
 };
 
 /// List available handoff targets with brief descriptions.
@@ -135,6 +135,7 @@ fn resolve_handoff_config(name: &str) -> Option<HandoffConfig> {
 }
 
 /// Format a handoff result for display.
+#[allow(dead_code)]
 pub fn format_handoff_result(result: &HandoffResult) -> String {
     let mut output = String::new();
 

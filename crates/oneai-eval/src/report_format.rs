@@ -160,7 +160,7 @@ pub fn render_compact(report: &EvalReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval_metric::{EvalScore, MetricScore};
+    use crate::eval_metric::EvalScore;
 
     #[test]
     fn test_markdown_report() {

@@ -218,19 +218,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let yaml_path = tmp_dir.path().join("ONEAI.domain.yaml");
 
-        let yaml_content = r#"
-name: test-yaml
-description: "Test YAML domain"
-tools: [read_file, calculator]
-context_sources: [date]
-[permission_profile]
-auto_approve = ["read_file", "calculator"]
-require_confirmation = []
-deny_by_default = []
-system_prompt: "You are a test agent"
-"#;
-
-        // Note: YAML format needs nested objects for permission_profile
+        // YAML format needs nested objects for permission_profile
         let yaml_content = r#"
 name: test-yaml
 description: "Test YAML domain"

@@ -19,6 +19,11 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
+// Several submodules re-export identically-named types, which collides under
+// glob re-exports. The ambiguous names remain unresolvable via the glob
+// (callers use the fully-qualified path) — silence the lint rather than
+// fragment the public re-export surface.
+#![allow(ambiguous_glob_reexports)]
 
 pub mod scope_state;
 pub mod react_agent;

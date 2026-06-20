@@ -146,7 +146,7 @@ impl GeminiProvider {
                                     "text": text,
                                 }));
                             }
-                            ContentBlock::ToolCall { id, name, args } => {
+                            ContentBlock::ToolCall { id: _, name, args } => {
                                 // Gemini uses functionCall for tool calls
                                 let args_value = serde_json::from_str::<Value>(args)
                                     .unwrap_or(Value::Object(serde_json::Map::new()));

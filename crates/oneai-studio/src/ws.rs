@@ -7,7 +7,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 
-use crate::state::{StudioState, StudioEvent};
+use crate::state::StudioState;
 
 // ─── WebSocket Upgrade ──────────────────────────────────────────────
 
@@ -79,7 +79,9 @@ async fn handle_socket(socket: WebSocket, state: std::sync::Arc<StudioState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // `StudioEvent` is referenced only by these tests; kept here (not at module
+    // scope) to avoid an unused-import warning in the non-test build.
+    use crate::state::StudioEvent;
 
     #[test]
     fn test_studio_event_serialization_all_types() {

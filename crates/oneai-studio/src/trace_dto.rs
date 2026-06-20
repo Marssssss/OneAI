@@ -1,7 +1,7 @@
 //! Trace DTO — converts TraceTree/Span/Event data into JSON for the Studio frontend.
 
 use serde::{Deserialize, Serialize};
-use oneai_trace::{TraceTree, TraceMetrics, Span, TraceEvent};
+use oneai_trace::{TraceTree, Span, TraceEvent};
 
 // ─── TraceTreeView ───────────────────────────────────────────────────
 

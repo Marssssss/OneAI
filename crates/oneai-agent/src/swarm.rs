@@ -21,11 +21,11 @@ use oneai_core::swarm::{
     SwarmConfig, SwarmResult, SwarmRouting, SwarmTask, SwarmTaskResult,
     SwarmAgentEntry, SwarmCoordinationLog, InMemorySwarmCoordinationLog,
 };
-use oneai_core::team::{SubAgentKindProxy, TokenBudgetProxy};
+use oneai_core::team::SubAgentKindProxy;
 use oneai_core::budget::TokenBudget;
 use oneai_core::cost::CostTracker;
 use oneai_core::context_manager::ContextManager;
-use oneai_core::error::{OneAIError, Result};
+use oneai_core::error::Result;
 
 use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 
@@ -48,6 +48,7 @@ pub struct SwarmOrchestrator {
     factory: Arc<dyn SubAgentFactory>,
 
     /// Default budget for swarm execution.
+    #[allow(dead_code)]
     default_budget: TokenBudget,
 
     /// Context manager for trimming task context (optional).
@@ -618,8 +619,9 @@ impl SwarmOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_core::swarm::{SwarmConfig, SwarmRouting, SwarmTask, SwarmAgentEntry};
+    use oneai_core::swarm::{SwarmConfig, SwarmTask, SwarmAgentEntry};
     use oneai_core::team::SubAgentKindProxy;
+    use oneai_core::team::TokenBudgetProxy; // test-only
     use oneai_core::budget::TokenBudget;
     use async_trait::async_trait;
     use oneai_core::error::Result;
@@ -910,7 +912,7 @@ mod tests {
             .with_budget(TokenBudgetProxy::new(50_000))
             .with_quality_threshold(0.6);
 
-        let result = orchestrator.execute(&config, "Analyze code").await.unwrap();
+        let _result = orchestrator.execute(&config, "Analyze code").await.unwrap();
 
         // Check log events
         let events = log.events_for_swarm("logged_swarm").await;
@@ -926,7 +928,6 @@ mod tests {
 
     #[test]
     fn test_estimate_quality_completed() {
-        let factory = Arc::new(MockFactory);
         let orchestrator = SwarmOrchestrator::new(Arc::new(MockFactory));
 
         let summary = SubAgentSummary {
@@ -945,7 +946,6 @@ mod tests {
 
     #[test]
     fn test_estimate_quality_failed() {
-        let factory = Arc::new(MockFactory);
         let orchestrator = SwarmOrchestrator::new(Arc::new(MockFactory));
 
         let summary = SubAgentSummary {
@@ -965,7 +965,6 @@ mod tests {
 
     #[test]
     fn test_aggregate_empty() {
-        let factory = Arc::new(MockFactory);
         let orchestrator = SwarmOrchestrator::new(Arc::new(MockFactory));
 
         let aggregated = orchestrator.aggregate_results(&[]);
@@ -974,7 +973,6 @@ mod tests {
 
     #[test]
     fn test_aggregate_single() {
-        let factory = Arc::new(MockFactory);
         let orchestrator = SwarmOrchestrator::new(Arc::new(MockFactory));
 
         let results = vec![SwarmTaskResult {
@@ -998,7 +996,6 @@ mod tests {
 
     #[test]
     fn test_aggregate_multiple() {
-        let factory = Arc::new(MockFactory);
         let orchestrator = SwarmOrchestrator::new(Arc::new(MockFactory));
 
         let results = vec![

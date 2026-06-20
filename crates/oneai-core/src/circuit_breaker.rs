@@ -12,7 +12,6 @@
 //! - `CircuitBreakerConfig`: Configuration for failure thresholds and timing
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

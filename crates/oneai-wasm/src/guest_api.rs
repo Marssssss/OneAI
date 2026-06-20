@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use wasmtime::Linker;
 
 use crate::error::{WasmError, Result};
-use crate::runtime::{WasmHostState, WasmStoreState};
+use crate::runtime::WasmStoreState;
 
 /// Host function types available to WASM guests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,7 @@ pub struct WasmGuestApi {
     /// Which host functions are enabled.
     enabled_functions: Vec<WasmHostFunction>,
     /// Custom environment whitelist (extends the default whitelist).
+    #[allow(dead_code)]
     custom_env_vars: HashMap<String, String>,
 }
 

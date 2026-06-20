@@ -11,6 +11,7 @@ use oneai_tool::ApprovalPendingItem;
 
 /// C callback types for the approval bridge.
 pub type RequestCallback = extern "C" fn(request_json: *const std::ffi::c_char);
+#[allow(dead_code)]
 pub type ResponseCallback = extern "C" fn(response_json: *const std::ffi::c_char);
 
 /// Callback-based approval bridge for HarmonyOS.

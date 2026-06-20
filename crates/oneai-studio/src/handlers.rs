@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
-    response::{Html, IntoResponse},
+    response::Html,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ pub async fn get_session(
 /// Get the trace tree for a session.
 pub async fn get_session_trace(
     State(state): State<Arc<StudioState>>,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
 ) -> Json<Value> {
     let tree = state.trace_context().build_tree();
     let view = TraceTreeView::from_trace_tree(&tree);
@@ -53,7 +53,7 @@ pub async fn get_session_trace(
 /// Get trace metrics for a session.
 pub async fn get_session_metrics(
     State(state): State<Arc<StudioState>>,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
 ) -> Json<Value> {
     let tree = state.trace_context().build_tree();
     let view = TraceTreeView::from_trace_tree(&tree);
