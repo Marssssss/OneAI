@@ -1428,21 +1428,31 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.append_to_last_assistant(&text);
         }
         ObserverEvent::Thinking(text) => {
-            // Find the last Thinking message and append/replace content
-            if let Some(thinking_msg) = app.messages.iter_mut().rev()
-                .find(|m| m.role == ChatRole::Thinking)
-            {
-                if thinking_msg.content == "Processing your request..." {
-                    // Replace placeholder with real thinking content
-                    thinking_msg.content = text.clone();
-                } else {
-                    // Append thinking fragment (streamed in chunks)
-                    thinking_msg.content.push_str(&text);
+            // Scope thinking per-iteration: only append to an existing
+            // thinking bubble if it is still the TRAILING message (nothing has
+            // been appended after it this round). If an assistant answer or
+            // tool call already followed the last thinking block, a new
+            // iteration has started — create a fresh thinking bubble so each
+            // round of thinking stays attached to the answer it precedes,
+            // instead of all thinking accumulating into the first round's
+            // block at the top (which then scrolls off-screen).
+            let is_trailing_thinking = app.messages.last()
+                .map(|m| m.role == ChatRole::Thinking)
+                .unwrap_or(false);
+            if is_trailing_thinking {
+                if let Some(thinking_msg) = app.messages.last_mut() {
+                    if thinking_msg.content == "Processing your request..." {
+                        // Replace placeholder with real thinking content
+                        thinking_msg.content = text.clone();
+                    } else {
+                        // Append thinking fragment (streamed in chunks)
+                        thinking_msg.content.push_str(&text);
+                    }
+                    // Auto-expand thinking bubble when it has real content so user can see it
+                    app.collapsed_ids.remove(&thinking_msg.id);
                 }
-                // Auto-expand thinking bubble when it has real content so user can see it
-                app.collapsed_ids.remove(&thinking_msg.id);
             } else {
-                // No existing thinking bubble — create one with this content
+                // New round of thinking — create a fresh bubble (auto-scrolls to bottom)
                 app.add_message(ChatRole::Thinking, text.clone());
             }
             app.dirty = true;

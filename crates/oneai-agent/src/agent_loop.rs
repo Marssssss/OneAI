@@ -2505,12 +2505,14 @@ impl AgentLoop {
         // Finalize — get all assembled content blocks from the parser
         let content_blocks = parser.finalize();
 
-        // Extract thinking content for observer notification
-        for block in &content_blocks {
-            if let ContentBlock::Thinking { text } = block {
-                observer.on_thinking(text);
-            }
-        }
+        // NOTE: Do NOT re-notify the observer with thinking content here.
+        // During streaming, every ThinkingFragment already called
+        // observer.on_thinking() with the incremental delta, and the TUI
+        // appended those deltas into the thinking bubble. The content_blocks
+        // here carry the FULL assembled thinking snapshot (used to build the
+        // InferenceResponse below). Re-emitting it as an observer event would
+        // make the TUI append the entire thinking text a second time — the
+        // "thinking displays twice" bug.
 
         tracing::info!(
             "Streaming iteration completed: {} content blocks (text: {} chars, tool_calls: {}, thinking: {} chars)",
