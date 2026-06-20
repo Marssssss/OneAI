@@ -23,6 +23,7 @@ pub mod provider_factory;
 pub mod model_router;
 pub mod provider_pool;
 pub mod smart_router;
+pub mod retry;
 
 pub use openai::OpenAIProvider;
 pub use anthropic::AnthropicProvider;
@@ -32,6 +33,7 @@ pub use provider_factory::ProviderFactory;
 pub use model_router::{ModelRouter, RouteRule, RouteDecision, RouteProviderKind};
 pub use provider_pool::{ProviderPool, ProviderEntry};
 pub use smart_router::SmartRouter;
+pub use retry::ProviderRetryConfig;
 pub use oneai_core::TokenCounter;
 pub use oneai_core::HeuristicTokenCounter;
 pub use oneai_core::ContextManager;

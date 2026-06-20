@@ -13,20 +13,6 @@ use ratatui::widgets::ScrollbarState;
 use oneai_agent::ParadigmKind;
 use oneai_core::ApprovalRequest;
 
-/// Text selection state for mouse drag in chat area.
-///
-/// Tracks the start/end positions of a text selection drag within the chat viewport.
-/// The positions are stored as row indices relative to the chat area's top-left corner.
-/// Actual text content is extracted from message data on completion.
-#[derive(Debug, Clone, Default)]
-pub struct TextSelection {
-    /// Whether a text selection drag is currently active.
-    pub active: bool,
-    /// Row where selection started (relative to chat area top, 0-based).
-    pub start_row: u16,
-    /// Row where selection currently ends (updated during drag).
-    pub end_row: u16,
-}
 use oneai_skill::SkillRegistry;
 
 use super::input_mode::{InputMode, VimMode};
@@ -201,16 +187,17 @@ pub enum ChatRole {
     User,
     Assistant,
     System,
-    ToolCall {
+    /// A unified tool invocation message — merges ToolCall + ToolResult into
+    /// a single message. When the tool call starts, `result` is None.
+    /// When the result arrives, `result` is set with success + output content.
+    /// This eliminates the "two cards for one action" duplication problem.
+    ToolInvocation {
         call_id: String,
         tool_name: String,
         args: String,
-    },
-    ToolResult {
-        call_id: String,
-        success: bool,
-        /// Tool name — needed to detect file operations for special display.
-        tool_name: String,
+        /// The tool execution result — None when call is pending,
+        /// Some((success, output_content)) when result arrives.
+        result: Option<(bool, String)>,
     },
     Iteration,
     Error,
@@ -227,9 +214,13 @@ impl ChatRole {
             ChatRole::User => USER_COLOR,
             ChatRole::Assistant => ASSISTANT_COLOR,
             ChatRole::System => SYSTEM_COLOR,
-            ChatRole::ToolCall { .. } => TOOL_CALL_COLOR,
-            ChatRole::ToolResult { success, .. } => {
-                if *success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR }
+            ChatRole::ToolInvocation { result, .. } => {
+                match result {
+                    Some((success, _)) => {
+                        if *success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR }
+                    }
+                    None => TOOL_CALL_COLOR,
+                }
             }
             ChatRole::Iteration => ratatui::style::Color::DarkGray,
             ChatRole::Error => ERROR_COLOR,
@@ -246,9 +237,13 @@ impl ChatRole {
             ChatRole::User => USER_BORDER,
             ChatRole::Assistant => ASSISTANT_BORDER,
             ChatRole::System => ratatui::style::Color::DarkGray,
-            ChatRole::ToolCall { .. } => TOOL_CALL_BORDER,
-            ChatRole::ToolResult { success, .. } => {
-                if *success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR }
+            ChatRole::ToolInvocation { result, .. } => {
+                match result {
+                    Some((success, _)) => {
+                        if *success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR }
+                    }
+                    None => TOOL_CALL_BORDER,
+                }
             }
             ChatRole::Iteration => ratatui::style::Color::DarkGray,
             ChatRole::Error => ERROR_COLOR,
@@ -264,27 +259,26 @@ impl ChatRole {
             ChatRole::User => "💬",
             ChatRole::Assistant => "🤖",
             ChatRole::System => "⚡",
-            ChatRole::ToolCall { tool_name, .. } => {
-                // Use tool-specific emoji if known
-                match tool_name.as_str() {
-                    "calculator" => "🧮",
-                    "grep" | "search" => "🔍",
-                    "edit" | "file_edit" => "✏️",
-                    "glob" | "file_glob" => "📂",
-                    "shell" => "🖥️",
-                    _ => "🔧",
-                }
-            }
-            ChatRole::ToolResult { tool_name, .. } => {
-                // Use tool-specific emoji for result
-                match tool_name.as_str() {
-                    "read_file" | "file_read" | "read" => "📄",
-                    "edit_file" | "file_edit" | "edit" => "✏️",
-                    "file_write" | "write" => "📝",
-                    "shell" => "🖥️",
-                    "grep" | "search" => "🔍",
-                    "glob" => "📂",
-                    _ => "✅",
+            ChatRole::ToolInvocation { tool_name, result, .. } => {
+                // When result is pending, show tool-specific call icon
+                // When result arrived, show success/failure icon
+                match result {
+                    Some((success, _)) => {
+                        if *success { "✅" } else { "❌" }
+                    }
+                    None => {
+                        match tool_name.as_str() {
+                            "calculator" => "🧮",
+                            "grep" | "search" => "🔍",
+                            "edit_file" | "file_edit" => "✏️",
+                            "read_file" | "file_read" => "📄",
+                            "glob" | "file_glob" => "📂",
+                            "shell" => "🖥️",
+                            "list_directory" => "📂",
+                            "web_fetch" => "🌐",
+                            _ => "🔧",
+                        }
+                    }
                 }
             }
             ChatRole::Iteration => "──",
@@ -301,10 +295,7 @@ impl ChatRole {
             ChatRole::User => "User",
             ChatRole::Assistant => "Assistant",
             ChatRole::System => "System",
-            ChatRole::ToolCall { tool_name, .. } => tool_name.as_str(),
-            ChatRole::ToolResult { success, tool_name, .. } => {
-                if *success { tool_name.as_str() } else { "Error" }
-            }
+            ChatRole::ToolInvocation { tool_name, .. } => tool_name.as_str(),
             ChatRole::Iteration => "Iteration",
             ChatRole::Error => "Error",
             ChatRole::Approval => "Approval Required",
@@ -313,8 +304,19 @@ impl ChatRole {
     }
 
     /// Whether this role type should default to collapsed.
+    /// Tool invocations are collapsed ONLY when the result is long (>500 chars)
+    /// or when still pending (no result yet).
     pub fn default_collapsed(&self) -> bool {
-        matches!(self, ChatRole::ToolCall { .. } | ChatRole::Thinking)
+        match self {
+            ChatRole::ToolInvocation { result, .. } => {
+                match result {
+                    None => true, // Pending tool call — collapsed while executing
+                    Some((_, content)) => content.len() > 500, // Only collapse long results
+                }
+            }
+            ChatRole::Thinking => true,
+            _ => false,
+        }
     }
 }
 
@@ -572,16 +574,6 @@ pub struct App {
     /// Cached rendered lines per message (avoids re-parsing markdown every frame).
     pub render_cache: MessageRenderCache,
 
-    /// Text selection state for mouse drag in chat area.
-    /// When the user drags in the chat area (not on scrollbar), we track
-    /// the selected row range and copy the corresponding text on release.
-    pub text_selection: TextSelection,
-
-    /// Plain-text content of each rendered line in the chat viewport.
-    /// Built during render from message content — used to extract text
-    /// for clipboard copy on mouse selection. Indexed by absolute line number.
-    pub line_content: Vec<String>,
-
     /// Latest context accounting from the assembled inference request.
     /// Updated each iteration by `ContextAccountingUpdate` from the AgentLoop.
     /// The `/context` command reads this instead of recomputing from bare
@@ -655,8 +647,6 @@ impl App {
             stream_buffer: String::new(),
             last_stream_flush: std::time::Instant::now(),
             render_cache: MessageRenderCache::new(),
-            text_selection: TextSelection::default(),
-            line_content: Vec::new(),
             last_context_accounting: None,
         }
     }
@@ -686,16 +676,9 @@ impl App {
             self.user_scrolled = false;
         }
         let msg = ChatMessage::new(role, content);
-        // Auto-collapse tool calls and thinking messages
+        // Auto-collapse based on role's default_collapsed()
         if msg.role.default_collapsed() {
             self.collapsed_ids.insert(msg.id.clone());
-        }
-        // Auto-collapse tool results: file operations always, others when >200 chars
-        if let ChatRole::ToolResult { tool_name, .. } = &msg.role {
-            let is_file_op = is_file_operation_tool(tool_name);
-            if is_file_op || msg.content.len() > 200 {
-                self.collapsed_ids.insert(msg.id.clone());
-            }
         }
         self.messages.push(msg);
         self.scroll_to_bottom();

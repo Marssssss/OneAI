@@ -3,19 +3,8 @@
 //! Uses the Anthropic API for streaming and non-streaming inference.
 //! Claude uses a different API format than OpenAI (no "choices" array, direct message output).
 //!
-//! **Two API modes**:
-//! - **Messages API** (default): Classic Anthropic API where you manually manage
-//!   conversation history and tool result messages. Endpoint: `/messages`
-//! - **Responses API** (optional): Agent-oriented API where the server manages
-//!   conversation state. You reference previous responses by ID instead of
-//!   re-sending the entire conversation. Endpoint: `/responses`
-//!
-//!   The Responses API is designed for multi-turn agent workflows:
-//!   - Server-side conversation state (no need to re-send history)
-//!   - Automatic tool use handling (tool results are sent as "function_call_output")
-//!   - More natural multi-turn flow with response IDs
-//!
-//!   Configure via `ModelConfig.extra["api_mode"] = "responses"` (default: "messages")
+//! **Automatic retry**: 429 (rate limit) and 503/529 (service unavailable) errors
+//! are automatically retried with exponential backoff (default: 3 retries, 1s→2s→4s).
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -31,6 +20,8 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::retry::{ProviderRetryConfig, is_retryable_status, send_with_retry};
+
 /// API mode selection for Anthropic provider.
 #[derive(Debug, Clone, PartialEq)]
 enum ApiMode {
@@ -41,21 +32,41 @@ enum ApiMode {
 }
 
 /// Anthropic Claude LLM provider.
+///
+/// Includes automatic retry on transient API errors (429 rate limits,
+/// 503 service unavailable, 529 site overloaded) with exponential backoff.
 pub struct AnthropicProvider {
     config: ModelConfig,
     client: Client,
+    /// Retry configuration for transient API errors.
+    /// Default: 3 retries with exponential backoff (1s → 2s → 4s).
+    pub retry_config: ProviderRetryConfig,
 }
 
 impl AnthropicProvider {
     /// Create a new Anthropic provider with the given configuration.
     pub fn new(config: ModelConfig) -> Self {
         let client = Client::new();
-        Self { config, client }
+        Self {
+            config,
+            client,
+            retry_config: ProviderRetryConfig::default(),
+        }
     }
 
     /// Create with a custom HTTP client.
     pub fn with_client(config: ModelConfig, client: Client) -> Self {
-        Self { config, client }
+        Self {
+            config,
+            client,
+            retry_config: ProviderRetryConfig::default(),
+        }
+    }
+
+    /// Set the retry configuration (builder pattern).
+    pub fn retry_config(mut self, config: ProviderRetryConfig) -> Self {
+        self.retry_config = config;
+        self
     }
 
     /// Get the Anthropic Messages API endpoint URL.
@@ -465,19 +476,33 @@ impl AnthropicProvider {
         let body = self.to_anthropic_request(&req);
         let url = self.messages_url();
 
-        let response = self.client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-api-key", self.config.api_key.as_deref().unwrap_or(""))
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(
+            &self.retry_config,
+            || {
+                let url = url.clone();
+                let body = body.clone();
+                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Anthropic API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!("Anthropic API error {}: {}", status, text)));
         }
 
@@ -548,19 +573,33 @@ impl AnthropicProvider {
 
         let url = self.messages_url();
 
-        let response = self.client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-api-key", self.config.api_key.as_deref().unwrap_or(""))
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(
+            &self.retry_config,
+            || {
+                let url = url.clone();
+                let body = body.clone();
+                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Anthropic API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!("Anthropic API error {}: {}", status, text)));
         }
 
@@ -741,19 +780,33 @@ impl AnthropicProvider {
         let body = self.to_responses_request(&req);
         let url = self.responses_url();
 
-        let response = self.client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-api-key", self.config.api_key.as_deref().unwrap_or(""))
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(
+            &self.retry_config,
+            || {
+                let url = url.clone();
+                let body = body.clone();
+                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Anthropic API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!("Anthropic Responses API error {}: {}", status, text)));
         }
 
@@ -846,19 +899,33 @@ impl AnthropicProvider {
 
         let url = self.responses_url();
 
-        let response = self.client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-api-key", self.config.api_key.as_deref().unwrap_or(""))
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(
+            &self.retry_config,
+            || {
+                let url = url.clone();
+                let body = body.clone();
+                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "Anthropic API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!("Anthropic Responses API error {}: {}", status, text)));
         }
 

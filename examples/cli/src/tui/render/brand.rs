@@ -4,11 +4,18 @@
 //! centered in the terminal.
 //!
 //! - Width < 80: single-line text "O n e A I" with gradient colors + Bold
-//! - Width >= 80: 5-line ANSI block art for larger brand display
+//! - Width >= 80: 5-line block art for larger brand display
 //! - When thinking: spinner + "thinking..." appended to the right of the art
 //!
 //! All width calculations use **visual cell width** (via unicode-width),
 //! never byte length — `█` is 3 UTF-8 bytes but 1 terminal cell.
+//!
+//! **macOS compatibility**: Block art uses **background-colored spaces** instead
+//! of foreground `█` characters. On macOS Terminal.app (and some other terminals),
+//! `█` may not fill the entire cell width, creating visible gaps between adjacent
+//! cells. Background colors always fill the entire cell consistently on all platforms.
+//! Each "filled" cell is rendered as a space with bg=BRAND_COLOR, and each "empty"
+//! cell is a space with bg=BRAND_BG. This eliminates all gaps.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -34,56 +41,61 @@ const BRAND_CHARS: [(char, Color); 5] = [
 
 /// Block art per-character patterns for "OneAI".
 ///
-/// Each character is defined as 5 row strings. Characters are concatenated
-/// with a 1-space gap during rendering. All patterns are designed
-/// to be clearly legible at terminal font sizes.
+/// Each character is defined as 5 row patterns. Each pattern is a sequence
+/// of boolean values: true = filled (bg=BRAND_COLOR), false = empty (bg=BRAND_BG).
 ///
-/// Every row of every character is exactly **7 visual columns** wide.
-const BLOCK_ART_CHARS: [[&str; 5]; 5] = [
+/// Characters are concatenated directly (no gap) during rendering.
+/// All patterns are exactly **7 cells** wide.
+///
+/// Using boolean patterns + bg-colored spaces eliminates the `█` character
+/// which has rendering gaps on macOS Terminal.app.
+const BLOCK_ART_PATTERNS: [[[bool; 7]; 5]; 5] = [
     // O
     [
-        " ██████",
-        " ██  ██",
-        " ██  ██",
-        " ██  ██",
-        " ██████",
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
     ],
     // n
     [
-        " █████ ",
-        " ██ ██ ",
-        " ██ ██ ",
-        " ██ ██ ",
-        " ██ ██ ",
+        [false, true,  true,  true,  true,  true,  false],  //  █████
+        [false, true,  true,  false, true,  true,  false],  //  ██ ██
+        [false, true,  true,  false, true,  true,  false],  //  ██ ██
+        [false, true,  true,  false, true,  true,  false],  //  ██ ██
+        [false, true,  true,  false, true,  true,  false],  //  ██ ██
     ],
     // e
     [
-        " ██████",
-        " ██    ",
-        " ████  ",
-        " ██    ",
-        " ██████",
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, true,  true,  false, false, false, false],  //  ██
+        [false, true,  true,  true,  true,  false, false],  //  ████
+        [false, true,  true,  false, false, false, false],  //  ██
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
     ],
     // A
     [
-        "   ██  ",
-        "  ████ ",
-        " ██████",
-        " ██  ██",
-        " ██  ██",
+        [false, false, false, true,  true,  false, false],  //    ██
+        [false, false, true,  true,  true,  true,  false],  //   ████
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
     ],
     // I
     [
-        " ██████",
-        "   ██  ",
-        "   ██  ",
-        "   ██  ",
-        " ██████",
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, false, false, true,  true,  false, false],  //    ██
+        [false, false, false, true,  true,  false, false],  //    ██
+        [false, false, false, true,  true,  false, false],  //    ██
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
     ],
 ];
 
-/// Total visual width of the block art: 5 chars × 7 cols + 4 gaps × 1 col = 39.
-const BLOCK_ART_VISUAL_WIDTH: usize = 39;
+/// Total visual width of the block art: 5 chars × 7 cols = 35 (no gaps).
+/// Using bg-colored spaces eliminates the 1-space gap between characters
+/// that caused visible discontinuity on macOS.
+const BLOCK_ART_VISUAL_WIDTH: usize = 35;
 
 /// Draw the brand line at the top of the TUI.
 ///
@@ -107,12 +119,17 @@ fn span_visual_width(span: &Span) -> usize {
     span.content.width()
 }
 
-/// Draw the 5-line ANSI block art brand.
+/// Draw the 5-line block art brand using background-colored spaces.
 ///
-/// The block art is always 39 visual columns wide. It is centered uniformly
-/// across all 5 rows (same left-padding on every row). When thinking, the
-/// spinner + "thinking..." text appears to the **right** of the art on the
-/// middle row only, without affecting the art's own alignment.
+/// Instead of foreground `█` characters (which have rendering gaps on macOS),
+/// each cell is a space character with the appropriate background color:
+/// - "Filled" cells: ` ` with bg=BRAND_COLOR (per-character gradient)
+/// - "Empty" cells: ` ` with bg=BRAND_BG (dark background)
+///
+/// This ensures seamless rendering on all terminals, including macOS.
+///
+/// Characters are directly abutted (no gap between them), making the total
+/// visual width = 5 chars × 7 cols = 35.
 fn draw_block_art_brand(f: &mut Frame, rect: Rect, app: &App) {
     let layouts = Layout::default()
         .direction(Direction::Vertical)
@@ -126,8 +143,6 @@ fn draw_block_art_brand(f: &mut Frame, rect: Rect, app: &App) {
         .split(rect);
 
     // ── Compute consistent left-padding for the block art ──────────────
-    // Center the 39-col art within the rect; thinking text sits to the
-    // right on the middle row and does NOT shift the art itself.
     let art_padding = if rect.width as usize > BLOCK_ART_VISUAL_WIDTH {
         (rect.width as usize - BLOCK_ART_VISUAL_WIDTH) / 2
     } else {
@@ -159,16 +174,29 @@ fn draw_block_art_brand(f: &mut Frame, rect: Rect, app: &App) {
             ));
         }
 
-        // ── Block art row ──────────────────────────────────────────
+        // ── Block art row using bg-colored spaces ──────────────────
+        // Each character is 7 cells wide, directly abutted (no gap).
+        // "Filled" cells use bg=character_color, "empty" cells use bg=BRAND_BG.
+        // Consecutive cells with the same bg color are grouped into a single Span.
         for (char_idx, (_, color)) in BRAND_CHARS.iter().enumerate() {
-            let pattern = BLOCK_ART_CHARS[char_idx][row_idx];
-            spans.push(Span::styled(
-                pattern.to_string(),
-                Style::default().fg(*color).add_modifier(Modifier::BOLD).bg(BRAND_BG),
-            ));
-            // 1-space gap between characters (except after the last one)
-            if char_idx < BRAND_CHARS.len() - 1 {
-                spans.push(Span::styled(" ", Style::default().bg(BRAND_BG)));
+            let row_pattern = &BLOCK_ART_PATTERNS[char_idx][row_idx];
+
+            // Group consecutive cells with the same fill state into spans
+            let mut i = 0;
+            while i < row_pattern.len() {
+                let is_filled = row_pattern[i];
+                let mut count = 1;
+                while i + count < row_pattern.len() && row_pattern[i + count] == is_filled {
+                    count += 1;
+                }
+
+                let bg_color = if is_filled { *color } else { BRAND_BG };
+                spans.push(Span::styled(
+                    " ".repeat(count),
+                    Style::default().bg(bg_color),
+                ));
+
+                i += count;
             }
         }
 

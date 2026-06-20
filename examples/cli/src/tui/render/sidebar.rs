@@ -130,12 +130,12 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
     ))));
 
-    // Find which tool(s) are currently being called (by checking ToolCall messages)
+    // Find which tool(s) are currently being called (by checking ToolInvocation messages with pending result)
     let active_tools: Vec<String> = app.messages.iter()
         .rev()
-        .take_while(|m| matches!(m.role, ChatRole::ToolCall { .. } | ChatRole::Thinking))
+        .take_while(|m| matches!(m.role, ChatRole::ToolInvocation { result: None, .. } | ChatRole::Thinking))
         .filter_map(|m| {
-            if let ChatRole::ToolCall { tool_name, .. } = &m.role {
+            if let ChatRole::ToolInvocation { tool_name, result: None, .. } = &m.role {
                 Some(tool_name.clone())
             } else {
                 None

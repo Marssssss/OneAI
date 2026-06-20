@@ -47,9 +47,8 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
     // Invalidate entire cache on width change (terminal resize)
     app.render_cache.check_width_change(width);
 
-    // Build text lines and plain-text content map from messages using render cache
+    // Build text lines from messages using render cache
     let mut lines: Vec<Line> = Vec::new();
-    let mut plain_text_lines: Vec<String> = Vec::new(); // for clipboard copy
 
     for (i, msg) in app.messages.iter().enumerate() {
         let is_collapsed = app.collapsed_ids.contains(&msg.id);
@@ -81,14 +80,6 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
             rendered
         };
 
-        // Build plain-text content for each rendered line (for clipboard copy)
-        for line in &rendered {
-            let plain = line.spans.iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>();
-            plain_text_lines.push(plain);
-        }
-
         // If this message matches the search, add a highlight marker
         if is_search_match && app.search_mode {
             let mut highlighted = Vec::new();
@@ -105,37 +96,8 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
         }
     }
 
-    // Store plain-text content map for clipboard extraction
-    app.line_content = plain_text_lines;
-
-    // Apply text selection highlight
-    let scroll_y = app.chat_scroll_y;
-    let viewport_height = chat_rect.height as usize;
-    if app.text_selection.active && viewport_height > 0 {
-        let sel_start = app.text_selection.start_row.min(app.text_selection.end_row) as usize;
-        let sel_end = app.text_selection.end_row.max(app.text_selection.start_row) as usize;
-
-        // Convert viewport-relative selection rows to absolute line indices
-        let abs_start = scroll_y + sel_start;
-        let abs_end = scroll_y + sel_end;
-
-        // Apply highlight background to lines within selection range
-        for line_idx in abs_start..(abs_end + 1).min(lines.len()) {
-            if let Some(line) = lines.get_mut(line_idx) {
-                let highlighted_spans: Vec<Span> = line.spans.iter()
-                    .map(|s| {
-                        Span::styled(
-                            s.content.clone(),
-                            s.style.patch(Style::default().bg(SELECTED_BG)),
-                        )
-                    })
-                    .collect();
-                *line = Line::from(highlighted_spans);
-            }
-        }
-    }
-
     let content_height_usize = lines.len();
+    let viewport_height = chat_rect.height as usize;
 
     // Scroll architecture:
     // - chat_scroll_y: usize — lines scrolled from top (0=top, max=bottom)
@@ -152,8 +114,6 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
         max_scroll
     };
     app.chat_scroll_y = computed_scroll_y;
-    // Also re-clamp selection range after scroll adjustment
-    // (selection rows are viewport-relative, so they stay valid)
 
     // Store computed values for scrollbar drag calculation in event handler
     app.content_height = content_height_usize;
@@ -173,11 +133,16 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
         .viewport_content_length(viewport_height)
         .position(computed_scroll_y);
 
-    // Render scrollbar if content exceeds viewport
+    // Render scrollbar if content exceeds viewport.
+    // Use ┃ (heavy vertical bar) for thumb instead of default █.
+    // On macOS Terminal.app, █ may not fill the full cell width, creating
+    // visible gaps between consecutive thumb cells. ┃ renders consistently
+    // as a thick continuous vertical bar on all terminals.
     if content_height_usize > viewport_height {
         f.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_symbol("┃")
+                .track_symbol(Some("╎"))
                 .thumb_style(Style::default().fg(SCROLLBAR_THUMB))
                 .track_style(Style::default().fg(SCROLLBAR_TRACK)),
             chat_rect,

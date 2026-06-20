@@ -99,8 +99,11 @@ pub fn run_tui(
     let (app, session_state, approval_rx) = rt.block_on(async {
         // Use ChannelApprovalGateWithThreshold — Medium risk auto-approves,
         // High risk requires human approval via the TUI
+        // Use default_rate_limiter — pre-call throttle with common provider limits
+        // (prevents exceeding API rate limits; provider-level retry handles 429 after)
         let (builder, approval_rx) = AppBuilder::new()
             .default_parser()
+            .default_rate_limiter()
             .channel_approval_gate(16, oneai_core::RiskLevel::Medium);
 
         let mut builder = builder;
@@ -199,10 +202,9 @@ fn handle_key_event(
 
 /// Handle a single crossterm mouse event.
 ///
-/// Supports two interactions:
+/// Supports:
 /// 1. **Scroll wheel** — scrolls chat content up/down
-/// 2. **Left-click drag** — selects text in chat area; on release copies to clipboard
-/// 3. **Scrollbar drag/click** — drags scrollbar thumb or jumps to position
+/// 2. **Scrollbar drag/click** — drags scrollbar thumb or jumps to position
 fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) {
     let chat_rect = app.last_chat_rect;
     let is_in_chat = chat_rect.width > 0
@@ -225,7 +227,7 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
             app.dirty = true;
         }
 
-        // ── Left button down ─────────────────────────────────────────────────
+        // ── Left button down (scrollbar only) ────────────────────────────────
         crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
             if is_in_scrollbar {
                 // Scrollbar click — jump to position
@@ -240,18 +242,12 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                     app.user_scrolled = true;
                     app.dirty = true;
                 }
-            } else if is_in_chat {
-                // Start text selection in chat area
-                app.text_selection.active = true;
-                app.text_selection.start_row = mouse_event.row.saturating_sub(chat_rect.y);
-                app.text_selection.end_row = mouse_event.row.saturating_sub(chat_rect.y);
-                app.dirty = true;
             }
         }
 
-        // ── Left button drag ──────────────────────────────────────────────────
+        // ── Left button drag (scrollbar only) ────────────────────────────────
         crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-            if is_in_scrollbar && !app.text_selection.active {
+            if is_in_scrollbar {
                 // Scrollbar drag — map Y position to scroll offset
                 let y_offset = (mouse_event.row - chat_rect.y) as usize;
                 let track_height = chat_rect.height as usize;
@@ -264,115 +260,10 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                     app.user_scrolled = true;
                     app.dirty = true;
                 }
-            } else if app.text_selection.active {
-                // Update text selection end position
-                // Clamp to chat area rows, with auto-scroll at edges
-                let row_in_chat = if mouse_event.row < chat_rect.y {
-                    // Dragged above chat area — auto-scroll up
-                    app.chat_scroll_y = app.chat_scroll_y.saturating_sub(1);
-                    app.user_scrolled = true;
-                    0 // Selection extends to top of viewport
-                } else if mouse_event.row >= chat_rect.y + chat_rect.height {
-                    // Dragged below chat area — auto-scroll down
-                    app.chat_scroll_y = app.chat_scroll_y.saturating_add(1);
-                    app.user_scrolled = true;
-                    chat_rect.height.saturating_sub(1) // Selection extends to bottom
-                } else if is_in_chat {
-                    mouse_event.row.saturating_sub(chat_rect.y)
-                } else {
-                    // Outside chat horizontally — keep last known position
-                    app.text_selection.end_row
-                };
-                app.text_selection.end_row = row_in_chat;
-                app.dirty = true;
-            }
-        }
-
-        // ── Left button release → copy selected text ─────────────────────────
-        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-            if app.text_selection.active {
-                let text = extract_selected_text(app);
-                app.text_selection.active = false;
-                app.dirty = true;
-
-                if !text.is_empty() {
-                    let char_count = text.chars().count();
-                    let success = copy_to_clipboard(&text);
-                    if success {
-                        app.add_message(ChatRole::System, format!(
-                            "📋 Copied {} chars to clipboard",
-                            char_count
-                        ));
-                    } else {
-                        app.add_message(ChatRole::System, format!(
-                            "📋 Selected {} chars — clipboard copy failed (install pbcopy/xclip)",
-                            char_count
-                        ));
-                    }
-                }
             }
         }
 
         _ => {}
-    }
-}
-
-/// Extract the plain text content of the currently selected line range.
-///
-/// Maps the selection's start_row/end_row (viewport-relative) to absolute
-/// content line indices, then pulls text from `app.line_content`.
-fn extract_selected_text(app: &App) -> String {
-    let start = app.text_selection.start_row.min(app.text_selection.end_row) as usize;
-    let end = app.text_selection.end_row.max(app.text_selection.start_row) as usize;
-    let scroll_y = app.chat_scroll_y;
-    let viewport_height = app.last_chat_rect.height as usize;
-
-    // Convert viewport-relative rows to absolute content line indices
-    let abs_start = (scroll_y + start).min(app.line_content.len());
-    let abs_end = (scroll_y + end + 1).min(app.line_content.len()); // +1 for inclusive end
-
-    if abs_start >= abs_end {
-        return String::new();
-    }
-
-    // Clamp to viewport (don't select invisible lines)
-    let abs_start = abs_start.max(scroll_y);
-    let abs_end = abs_end.min(scroll_y + viewport_height);
-
-    app.line_content[abs_start..abs_end].join("\n")
-}
-
-/// Copy text to system clipboard using platform-native clipboard tool.
-///
-/// Uses `pbcopy` on macOS, `xclip` on Linux, `clip` on Windows.
-fn copy_to_clipboard(text: &str) -> bool {
-    use std::process::{Command, Stdio};
-
-    let (cmd, args) = if cfg!(target_os = "macos") {
-        ("pbcopy", &[] as &[&str])
-    } else if cfg!(target_os = "linux") {
-        ("xclip", &["-selection", "clipboard"] as &[&str])
-    } else if cfg!(target_os = "windows") {
-        ("clip", &[] as &[&str])
-    } else {
-        return false;
-    };
-
-    let mut child = Command::new(cmd)
-        .args(args)
-        .stdin(Stdio::piped())
-        .spawn();
-
-    match child {
-        Ok(mut child) => {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-            true
-        }
-        Err(_) => false,
     }
 }
 
@@ -904,17 +795,20 @@ fn handle_user_input_async(
                 match result {
                     Ok(output) => {
                         if output.success {
-                            app.add_message(ChatRole::ToolResult {
+                            app.add_message(ChatRole::ToolInvocation {
                                 call_id: String::new(),
-                                success: true,
                                 tool_name: tool_name.to_string(),
+                                args: String::new(),
+                                result: Some((true, format!("{}: {}", tool_name, output.content))),
                             }, format!("{}: {}", tool_name, output.content));
                         } else {
-                            app.add_message(ChatRole::ToolResult {
+                            let error_msg = output.error.as_deref().unwrap_or("unknown error").to_string();
+                            app.add_message(ChatRole::ToolInvocation {
                                 call_id: String::new(),
-                                success: false,
                                 tool_name: tool_name.to_string(),
-                            }, format!("{}: {}", tool_name, output.error.unwrap_or_default()));
+                                args: String::new(),
+                                result: Some((false, format!("{}: {}", tool_name, error_msg))),
+                            }, format!("{}: {}", tool_name, error_msg));
                         }
                     }
                     Err(e) => app.add_message(ChatRole::Error, format!("Error: {e}")),
@@ -1358,108 +1252,113 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             for call in calls {
                 let args_str = serde_json::to_string_pretty(&call.args)
                     .unwrap_or_else(|_| call.args.to_string());
+                // Add a unified ToolInvocation message — result is None (pending).
+                // When ToolResult arrives, we'll UPDATE this same message.
                 app.add_collapsed_message(
-                    ChatRole::ToolCall {
+                    ChatRole::ToolInvocation {
                         call_id: call.id.clone(),
                         tool_name: call.name.clone(),
                         args: args_str,
+                        result: None,
                     },
-                    format!("calling {}...", call.name),
+                    String::new(), // Content is empty until result arrives
                 );
             }
         }
-        ObserverEvent::ToolResult(_call_id, tool_name, output) => {
-            if output.success {
-                // Smart display based on tool type and output content:
-                // - File operations (read/write/edit): always show content with 3-line preview
-                // - Empty output (mkdir, etc.) → show success indicator for file ops, skip for others
-                // - Short output (pwd, ls, etc.) → show inline
-                // - Long output → show collapsed with preview
-                let is_file_op = is_file_operation_tool(&tool_name);
-                let content_trimmed = output.content.trim();
+        ObserverEvent::ToolResult(call_id, tool_name, output) => {
+            // Find the existing ToolInvocation message for this call_id and UPDATE it
+            // with the result. This merges ToolCall + ToolResult into one message.
+            let call_id_to_find = call_id.clone();
+            let found_msg = app.messages.iter_mut().rev().find(|m| {
+                if let ChatRole::ToolInvocation { call_id, result, .. } = &m.role {
+                    call_id == &call_id_to_find && result.is_none()
+                } else {
+                    false
+                }
+            });
 
-                if is_file_op {
-                    // File operations: always show a result card
-                    // - For read_file: show file content with 3-line preview
-                    // - For write/edit: show success + content preview from the output
-                    // Even if output is empty (e.g., write succeeded), show what was written
-                    if content_trimmed.is_empty() {
-                        // Write/edit succeeded — show success message with hint
+            if let Some(msg) = found_msg {
+                // Update the existing ToolInvocation message with result
+                let success = output.success;
+                let result_content = if output.success {
+                    if output.content.trim().is_empty() {
+                        "(completed successfully)".to_string()
+                    } else {
+                        output.content.clone()
+                    }
+                } else {
+                    format!("Error: {}", output.error.as_deref().unwrap_or("unknown error"))
+                };
+
+                // Update the role to include the result
+                if let ChatRole::ToolInvocation { call_id, tool_name, args, result } = &msg.role {
+                    msg.role = ChatRole::ToolInvocation {
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        args: args.clone(),
+                        result: Some((success, result_content.clone())),
+                    };
+                }
+                msg.content = result_content.clone();
+
+                // Decide collapsed state based on result length:
+                // Short results (≤500 chars) → EXPAND (visible by default)
+                // Long results (>500 chars) → keep collapsed (user can expand)
+                // Pending → was already collapsed; now decide based on content
+                let is_file_op = is_file_operation_tool(&tool_name);
+                if success && result_content.len() <= 500 && !is_file_op {
+                    // Short non-file results → show inline (expanded)
+                    app.collapsed_ids.remove(&msg.id);
+                } else if is_file_op && result_content.len() <= 2000 {
+                    // File operations with reasonable content → show expanded
+                    app.collapsed_ids.remove(&msg.id);
+                }
+                // Invalidate render cache since content changed
+                app.render_cache.invalidate(&msg.id);
+                app.dirty = true;
+            } else {
+                // No matching ToolInvocation message found — this can happen
+                // for /tool direct calls. Add a standalone result message.
+                if output.success {
+                    let result_content = if output.content.trim().is_empty() {
+                        format!("{} completed successfully", tool_name)
+                    } else {
+                        output.content.clone()
+                    };
+                    let is_file_op = is_file_operation_tool(&tool_name);
+                    let should_collapse = result_content.len() > 500 || is_file_op;
+                    if should_collapse {
                         app.add_collapsed_message(
-                            ChatRole::ToolResult {
-                                call_id: _call_id,
-                                success: true,
+                            ChatRole::ToolInvocation {
+                                call_id: call_id.clone(),
                                 tool_name: tool_name.clone(),
+                                args: String::new(),
+                                result: Some((true, result_content.clone())),
                             },
-                            format!("{} completed successfully", tool_name),
+                            result_content,
                         );
                     } else {
-                        // Read or edit with output — show content with 3-line preview
-                        let preview_lines: Vec<&str> = content_trimmed.lines().take(3).collect();
-                        let preview = preview_lines.join("\n");
-                        let total_lines = content_trimmed.lines().count();
-                        let preview_text = if total_lines > 3 {
-                            format!("{}: {} ▸({} more lines)", tool_name, preview, total_lines - 3)
-                        } else {
-                            format!("{}: {}", tool_name, preview)
-                        };
-                        app.add_collapsed_message(
-                            ChatRole::ToolResult {
-                                call_id: _call_id,
-                                success: true,
+                        app.add_message(
+                            ChatRole::ToolInvocation {
+                                call_id: call_id.clone(),
                                 tool_name: tool_name.clone(),
+                                args: String::new(),
+                                result: Some((true, result_content.clone())),
                             },
-                            preview_text,
+                            result_content,
                         );
-                        // Store full content in the message for expansion
-                        // The full content is already in output.content
-                        // We need to replace the preview with the full content when expanded
-                        if let Some(last_msg) = app.messages.last_mut() {
-                            // Store full content separately — we'll use it in rendering
-                            // The content field will hold the preview, and we need to store full content
-                            // Actually, let's store the full content in the message content
-                            // and handle the preview rendering in the renderer
-                            last_msg.content = content_trimmed.to_string();
-                        }
-                        // Invalidate cache since we changed content
-                        if let Some(last_msg) = app.messages.last() {
-                            app.render_cache.invalidate(&last_msg.id);
-                        }
                     }
-                } else if content_trimmed.is_empty() {
-                    // Non-file tool with empty output — silently skip
-                } else if output.content.len() > 200 {
-                    // Long output — collapsed with preview
-                    let preview: String = content_trimmed.chars().take(150).collect();
-                    app.add_collapsed_message(
-                        ChatRole::ToolResult {
-                            call_id: _call_id,
-                            success: true,
-                            tool_name: tool_name.clone(),
-                        },
-                        format!("{}: {}…", tool_name, preview),
-                    );
                 } else {
-                    // Short output — show inline
                     app.add_message(
-                        ChatRole::ToolResult {
-                            call_id: _call_id,
-                            success: true,
+                        ChatRole::ToolInvocation {
+                            call_id: call_id.clone(),
                             tool_name: tool_name.clone(),
+                            args: String::new(),
+                            result: Some((false, format!("Error: {}", output.error.as_deref().unwrap_or("unknown error")))),
                         },
-                        format!("{}: {}", tool_name, content_trimmed),
+                        format!("{}: {}", tool_name, output.error.as_deref().unwrap_or("unknown error")),
                     );
                 }
-            } else {
-                let err = output.error.as_deref().unwrap_or("unknown error");
-                app.add_message(
-                    ChatRole::ToolResult {
-                        call_id: _call_id,
-                        success: false,
-                        tool_name: tool_name.clone(),
-                    },
-                    format!("{}: {}", tool_name, err),
-                );
             }
         }
         ObserverEvent::Delegate(task, agent_type) => {
@@ -1854,7 +1753,7 @@ fn compact_conversation(app: &mut App) {
     let user_count = app.messages.iter().filter(|m| m.role == ChatRole::User).count();
     let assistant_count = app.messages.iter().filter(|m| m.role == ChatRole::Assistant).count();
     let tool_count = app.messages.iter()
-        .filter(|m| matches!(m.role, ChatRole::ToolCall { .. } | ChatRole::ToolResult { .. }))
+        .filter(|m| matches!(m.role, ChatRole::ToolInvocation { .. }))
         .count();
 
     // Generate summary

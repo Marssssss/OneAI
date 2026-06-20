@@ -223,15 +223,24 @@ impl Tool for ShellTool {
         This is a HIGH-RISK tool that requires explicit approval before execution. Commands run \
         within a sandbox that restricts filesystem access to allowed directories and blocks \
         dangerous operations (rm -rf /, mkfs, dd, chmod 777, etc.) by default.\n\n\
+        **CRITICAL: Always prefer specialized tools over shell commands**:\n\
+        - Use read_file instead of: cat, head, tail, less\n\
+        - Use edit_file instead of: sed, awk, perl -i, patch\n\
+        - Use file_write instead of: echo > file, tee, dd for writing\n\
+        - Use list_directory instead of: ls, find -type d\n\
+        - Use grep instead of: grep command, rg, ag\n\
+        - Use glob instead of: find, locate\n\n\
+        **When shell IS appropriate**:\n\
+        - Compilation/build: cargo build, npm run build, make\n\
+        - Testing: cargo test, npm test, pytest\n\
+        - Git operations: git status, git diff, git log, git commit\n\
+        - Package management: cargo add, npm install, pip install\n\
+        - Running scripts: python script.py, bash script.sh\n\
+        - System commands: uname, which, date, curl (for URLs not covered by web_fetch)\n\n\
         **Usage guidelines**:\n\
-        - Use for: compilation, testing, running scripts, git operations, package management\n\
         - Default timeout: 120 seconds (max: 600 seconds)\n\
         - Working directory: restricted to project directory\n\
-        - Output is truncated if exceeds size limit to prevent context overflow\n\n\
-        **Preferences**:\n\
-        - Prefer targeted commands over broad ones (e.g., 'cargo test specific_test' over 'cargo test')\n\
-        - For file reading, prefer read_file tool over 'cat' commands\n\
-        - For searching, prefer grep/glob tools over shell grep/find\n\
+        - Output is truncated if exceeds size limit to prevent context overflow\n\
         - Combine commands with && for sequential operations\n\
         - Use timeout parameter for long-running commands"
     }

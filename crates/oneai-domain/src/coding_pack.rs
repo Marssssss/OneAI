@@ -49,6 +49,20 @@ You are an intelligent coding assistant that can plan, execute, and reflect on \
 software development tasks. You have access to tools for reading, editing, searching, \
 and executing code in the project.
 
+**Tool Selection Rules (CRITICAL — always follow these):**
+
+Always prefer the most specific tool available over shell commands:
+- For reading files: use read_file (NOT shell cat/head/tail/less)
+- For editing files: use edit_file (NOT shell sed/awk/perl -i)
+- For creating files: use apply_patch or edit_file (NOT shell echo/tee)
+- For listing directories: use list_directory (NOT shell ls/find -type d)
+- For searching content: use grep (NOT shell grep/find)
+- For finding files: use glob (NOT shell find/locate)
+
+Use shell ONLY for: compilation, testing, git operations, package management, \
+running scripts, and commands that have no dedicated tool equivalent. \
+Shell is the LEAST preferred tool — always check if a specialized tool exists first.
+
 Key principles:
 1. **Read before edit**: Always read the relevant files before making changes. \
 Understand the existing code structure before modifying it.
@@ -171,50 +185,92 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
         ],
 
         // Layer 1 supplement: Tool decorators — coding-specific descriptions
+        // Each description follows the Anthropic/OpenAI recommended pattern:
+        // - Positive: what the tool does and when to use it
+        // - Negative: when NOT to use it, with explicit redirect to alternative
+        // - Preference: "RECOMMENDED" language signals the model to prefer this tool
         tool_decorators: vec![
             ToolDecorator::with_description(
                 "read_file",
                 "Read source code files. Supports offset+limit for large files \
                 to avoid overflowing the context window. Returns content with line numbers. \
-                For binary files, returns base64-encoded data."
+                For binary files, returns base64-encoded data.\n\n\
+                **RECOMMENDED** — always prefer read_file over shell for reading files:\n\
+                - Do NOT use shell cat → use read_file\n\
+                - Do NOT use shell head/tail → use read_file with offset+limit\n\
+                - Do NOT use shell less → use read_file\n\
+                - read_file returns structured line-numbered output, handles encoding, \
+                and respects the context window budget"
             ),
             ToolDecorator::with_description(
                 "edit_file",
                 "Perform precise code edits using exact string matching. The old_string \
                 must be unique in the file. This is a safe, targeted editing mechanism — \
-                avoid large rewrites when targeted edits suffice."
+                avoid large rewrites when targeted edits suffice.\n\n\
+                **RECOMMENDED** — always prefer edit_file over shell for editing files:\n\
+                - Do NOT use shell sed → use edit_file\n\
+                - Do NOT use shell awk → use edit_file\n\
+                - Do NOT use shell perl -i → use edit_file\n\
+                - edit_file ensures exact, atomic replacements with validation, \
+                unlike shell text manipulation which is error-prone and irreversible"
             ),
             ToolDecorator::with_description(
                 "apply_patch",
                 "Apply a unified diff patch to modify multiple files at once. Use for \
                 multi-file refactoring, batch edits, and applying review suggestions. \
                 The patch should be in standard unified diff format. Each file's changes \
-                are applied atomically — context mismatches skip that file with an error."
+                are applied atomically — context mismatches skip that file with an error.\n\n\
+                **RECOMMENDED** for multi-file changes — prefer apply_patch over shell patch command"
             ),
             ToolDecorator::with_description_and_permission(
                 "shell",
-                "Execute shell commands for compilation, testing, and running scripts. \
-                Commands are executed with a timeout (default 120s, max 600s). Dangerous \
-                commands (rm -rf, mkfs, etc.) are blocked by default. Use for: cargo build, \
-                cargo test, npm test, python scripts, git operations.",
+                "Execute shell commands. ONLY use shell for operations that have NO \
+                dedicated tool equivalent:\n\
+                - Compilation: cargo build, npm run build, make\n\
+                - Testing: cargo test, npm test, pytest\n\
+                - Git: git status, git diff, git log, git commit\n\
+                - Package management: cargo add, npm install, pip install\n\
+                - Running scripts: python script.py, bash script.sh\n\n\
+                **Do NOT use shell for file operations — use dedicated tools instead**:\n\
+                - Do NOT use cat → use read_file\n\
+                - Do NOT use sed/awk → use edit_file\n\
+                - Do NOT use echo > file → use edit_file or apply_patch\n\
+                - Do NOT use ls → use list_directory\n\
+                - Do NOT use grep → use grep tool\n\
+                - Do NOT use find → use glob\n\
+                - Do NOT use mkdir → use edit_file (creates files), list_directory checks dirs\n\n\
+                Commands run with timeout (default 120s, max 600s). Dangerous commands \
+                (rm -rf, mkfs, dd, chmod 777) are blocked. Output truncated at 100KB.",
                 PermissionLevel::Full
             ),
             ToolDecorator::with_description(
                 "grep",
                 "Search code content using regex patterns. Recursively searches the project \
                 directory for matching lines with file paths and line numbers. Use for: finding \
-                function definitions, usages, patterns across the codebase."
+                function definitions, usages, patterns across the codebase.\n\n\
+                **RECOMMENDED** — prefer this over shell grep:\n\
+                - Do NOT use shell grep → use this grep tool\n\
+                - Do NOT use shell rg/ag → use this grep tool\n\
+                - Native Rust implementation, no shell dependency, respects context limits"
             ),
             ToolDecorator::with_description(
                 "glob",
                 "Find files matching glob patterns (e.g., '**/*.rs', 'src/**/*.toml'). \
                 Faster than grep for file discovery. Use for: finding source files, config \
-                files, test files."
+                files, test files.\n\n\
+                **RECOMMENDED** — prefer this over shell find:\n\
+                - Do NOT use shell find → use glob\n\
+                - Do NOT use shell locate → use glob\n\
+                - Native Rust implementation, no shell dependency"
             ),
             ToolDecorator::with_description(
                 "list_directory",
                 "List directory contents showing files and subdirectories with sizes. \
-                Use for: exploring project structure, finding relevant directories."
+                Use for: exploring project structure, finding relevant directories.\n\n\
+                **RECOMMENDED** — prefer this over shell ls:\n\
+                - Do NOT use shell ls → use list_directory\n\
+                - Do NOT use shell find -type d → use list_directory\n\
+                - Returns structured output with file sizes, unlike raw ls output"
             ),
             ToolDecorator::with_description(
                 "environment",
@@ -225,7 +281,10 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 "web_fetch",
                 "Fetch content from a web URL and convert it to structured Markdown. \
                 Preserves headings, links, and other semantic elements. Use for: \
-                fetching documentation, API references, blog posts, and any web content."
+                fetching documentation, API references, blog posts, and any web content.\n\n\
+                **RECOMMENDED** — prefer this over shell curl for URL content:\n\
+                - Do NOT use shell curl → use web_fetch (returns structured content)\n\
+                - Only use shell curl when you need raw binary data or streaming"
             ),
         ],
 

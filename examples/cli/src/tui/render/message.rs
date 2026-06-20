@@ -3,8 +3,9 @@
 //! Each message type has a distinct visual style:
 //! - User: cyan bubble with border
 //! - Assistant: green bubble with markdown content
-//! - ToolCall: magenta card (collapsible)
-//! - ToolResult: blue/green or red card (collapsible for long content)
+//! - ToolInvocation: unified tool call+result card (Claude Code style)
+//!   - Collapsed: single line "🔧 shell · echo hello → ✅"
+//!   - Expanded: ── separator lines with args + result sections
 //! - System: gray, no bubble
 //! - Approval: yellow warning card
 //! - Thinking: gray with spinner
@@ -35,27 +36,12 @@ pub fn render_message_lines(msg: &ChatMessage, is_collapsed: bool, max_width: us
     match role {
         ChatRole::User => render_user_message(content, max_width),
         ChatRole::Assistant => render_assistant_message(content, max_width),
-        ChatRole::ToolCall { tool_name, args, .. } => {
-            if is_collapsed {
-                render_tool_call_collapsed(tool_name, args)
-            } else {
-                render_tool_call_expanded(tool_name, args, content, max_width)
-            }
-        }
-        ChatRole::ToolResult { success, tool_name, .. } => {
+        ChatRole::ToolInvocation { tool_name, args, result, .. } => {
             let is_file_op = super::super::app::is_file_operation_tool(tool_name);
             if is_collapsed {
-                if is_file_op {
-                    render_file_result_collapsed(content, *success, tool_name)
-                } else {
-                    render_tool_result_collapsed(content, *success)
-                }
+                render_tool_invocation_collapsed(tool_name, args, result, content)
             } else {
-                if is_file_op {
-                    render_file_result_expanded(content, *success, tool_name, max_width)
-                } else {
-                    render_tool_result_expanded(content, *success, max_width)
-                }
+                render_tool_invocation_expanded(tool_name, args, result, content, is_file_op, max_width)
             }
         }
         ChatRole::System => render_system_message(content),
@@ -149,43 +135,30 @@ fn render_assistant_message(content: &str, max_width: usize) -> Vec<Line<'static
         Span::styled("┐", Style::default().fg(ASSISTANT_BORDER)),
     ]));
 
-    // Content lines — from markdown renderer
-    // Total visual width: "│ " (2) + content (content_width) + padding + " │" (2) = inner_width + 4
-    // So padding = inner_width - content_width. If content_width > inner_width, padding = 0
-    // but the │ would be pushed off-screen. To prevent this, we truncate spans that
-    // would exceed inner_width, ensuring the │ is always visible.
+    // Content lines — from markdown renderer, wrapped to fit inner_width.
+    // Instead of truncating overflow (which hides content), we WRAP overflow
+    // onto continuation lines, each with │ borders. This ensures all content
+    // is visible regardless of terminal width.
     for content_line in content_lines {
-        let mut line_spans = vec![
-            Span::styled("│ ", Style::default().fg(ASSISTANT_BORDER)),
-        ];
-        // Reconstruct spans from the markdown line, truncating if total exceeds inner_width
-        let mut content_width = 0;
-        for span in content_line.spans {
-            let span_width = span.content.as_ref().width();
-            if content_width + span_width <= inner_width {
-                // Span fits within inner_width — include it entirely
+        let wrapped_line_groups = wrap_line_spans(content_line.spans, inner_width);
+        for wrapped_spans in wrapped_line_groups {
+            let mut line_spans = vec![
+                Span::styled("│ ", Style::default().fg(ASSISTANT_BORDER)),
+            ];
+            let mut content_width = 0;
+            for span in wrapped_spans {
+                let span_width = span.content.as_ref().width();
                 content_width += span_width;
                 line_spans.push(span);
-            } else {
-                // Span would exceed inner_width — truncate it to fit the remaining space
-                let remaining = inner_width.saturating_sub(content_width);
-                if remaining > 0 {
-                    let truncated = truncate_span_to_width(&span.content, remaining);
-                    let truncated_width = truncated.width();
-                    content_width += truncated_width;
-                    line_spans.push(Span::styled(truncated, span.style));
-                }
-                // No more room — stop adding spans
-                break;
             }
+            // Pad content to fill inner_width so the right border │ aligns
+            let padding = inner_width.saturating_sub(content_width);
+            if padding > 0 {
+                line_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)));
+            }
+            line_spans.push(Span::styled(" │", Style::default().fg(ASSISTANT_BORDER)));
+            lines.push(Line::from(line_spans));
         }
-        // Pad content to fill inner_width so the right border │ aligns
-        let padding = inner_width.saturating_sub(content_width);
-        if padding > 0 {
-            line_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)));
-        }
-        line_spans.push(Span::styled(" │", Style::default().fg(ASSISTANT_BORDER)));
-        lines.push(Line::from(line_spans));
     }
 
     // Bottom border: └──────────────┘  (1 + inner_width+2 + 1 = inner_width+4)
@@ -201,25 +174,195 @@ fn render_assistant_message(content: &str, max_width: usize) -> Vec<Line<'static
     lines
 }
 
-/// Render a collapsed ToolCall card (just tool name + args summary).
+/// Render a collapsed ToolInvocation (Claude Code style — single line).
 ///
-/// Shows a meaningful preview of the tool arguments:
-/// - For shell commands: shows the actual command
-/// - For file operations: shows the file path
-/// - For other tools: shows truncated JSON args (up to 120 chars)
-fn render_tool_call_collapsed(tool_name: &str, args: &str) -> Vec<Line<'static>> {
-    // Try to extract a meaningful preview from JSON args
+/// Shows a compact single-line format:
+/// - Pending (no result yet): `🔧 shell · echo hello ⏳`
+/// - Success: `🔧 shell · echo hello → ✅`
+/// - Failure: `🔧 shell · echo hello → ❌`
+///
+/// No box-drawing borders — clean and minimal like Claude Code.
+fn render_tool_invocation_collapsed(tool_name: &str, args: &str, result: &Option<(bool, String)>, content: &str) -> Vec<Line<'static>> {
     let args_preview = extract_tool_call_preview(tool_name, args);
-    vec![
-        Line::from(vec![
-            Span::styled("┌─ ", Style::default().fg(TOOL_CALL_BORDER)),
-            Span::styled("🔧 ", Style::default().fg(TOOL_CALL_COLOR)),
-            Span::styled(format!("{} ", tool_name), Style::default().fg(TOOL_CALL_COLOR).add_modifier(Modifier::BOLD)),
-            Span::styled(args_preview, Style::default().fg(ratatui::style::Color::DarkGray)),
-            Span::styled(" ── ▸┐", Style::default().fg(TOOL_CALL_BORDER)),
-        ]),
-        Line::from(Span::raw("")),
-    ]
+
+    match result {
+        None => {
+            // Pending — show spinner indicator
+            vec![
+                Line::from(vec![
+                    Span::styled("  🔧 ", Style::default().fg(TOOL_CALL_COLOR)),
+                    Span::styled(format!("{} ", tool_name), Style::default().fg(TOOL_CALL_COLOR).add_modifier(Modifier::BOLD)),
+                    Span::styled(args_preview, Style::default().fg(ratatui::style::Color::DarkGray)),
+                    Span::styled(" ⏳", Style::default().fg(TOOL_CALL_COLOR)),
+                ]),
+                Line::from(Span::raw("")),
+            ]
+        }
+        Some((success, _)) => {
+            let (status_icon, status_color) = if *success {
+                ("✅", TOOL_RESULT_SUCCESS_COLOR)
+            } else {
+                ("❌", TOOL_RESULT_FAILURE_COLOR)
+            };
+
+            // For completed tool calls, show a compact result preview
+            let result_preview = if content.is_empty() || content == "(completed successfully)" {
+                String::new()
+            } else {
+                // Show first line of result, truncated
+                let first_line = content.lines().next().unwrap_or("");
+                format!(" {}", truncate_str(first_line, 60))
+            };
+
+            vec![
+                Line::from(vec![
+                    Span::styled("  🔧 ", Style::default().fg(TOOL_CALL_COLOR)),
+                    Span::styled(format!("{} ", tool_name), Style::default().fg(TOOL_CALL_COLOR).add_modifier(Modifier::BOLD)),
+                    Span::styled(args_preview, Style::default().fg(ratatui::style::Color::DarkGray)),
+                    Span::styled(" → ", Style::default().fg(ratatui::style::Color::DarkGray)),
+                    Span::styled(status_icon, Style::default().fg(status_color)),
+                    Span::styled(result_preview, Style::default().fg(status_color)),
+                ]),
+                Line::from(Span::raw("")),
+            ]
+        }
+    }
+}
+
+/// Render an expanded ToolInvocation (Claude Code style — separator lines).
+///
+/// Format:
+/// ```
+/// ── 🔧 shell ────────────────────────
+///   command = echo hello
+/// ──── Result ────────────────────────
+///   hello
+/// ── ▼ collapse ──────────────────────
+/// ```
+///
+/// Uses ── horizontal separator lines (no ┌┐└┘ boxes) for a clean,
+/// readable display inspired by Claude Code's tool output format.
+fn render_tool_invocation_expanded(tool_name: &str, args: &str, result: &Option<(bool, String)>, content: &str, is_file_op: bool, max_width: usize) -> Vec<Line<'static>> {
+    let inner_width = max_width.saturating_sub(6); // 6 = "  " prefix + visual padding
+    let mut lines = Vec::new();
+
+    // Determine status color based on result
+    let (status_icon, status_color, border_color) = match result {
+        None => ("⏳", TOOL_CALL_COLOR, TOOL_CALL_BORDER),
+        Some((true, _)) => ("✅", TOOL_RESULT_SUCCESS_COLOR, TOOL_RESULT_SUCCESS_COLOR),
+        Some((false, _)) => ("❌", TOOL_RESULT_FAILURE_COLOR, TOOL_RESULT_FAILURE_COLOR),
+    };
+
+    // Top separator line: ── 🔧 tool_name · status ──────
+    let title_text = format!("{} {} ", status_icon, tool_name);
+    let title_visual_width = title_text.width();
+    let fill_len = inner_width.saturating_sub(title_visual_width);
+    lines.push(Line::from(vec![
+        Span::styled("── ", Style::default().fg(border_color)),
+        Span::styled(title_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        Span::styled("─".repeat(fill_len), Style::default().fg(border_color)),
+    ]));
+
+    // Args section — formatted key-value pairs
+    let args_display_lines = format_tool_args(tool_name, args, inner_width.saturating_sub(2));
+    for arg_line in args_display_lines {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
+            Span::styled(arg_line, Style::default().fg(TOOL_CALL_COLOR)),
+        ]));
+    }
+
+    // Result section (if result has arrived)
+    if let Some((success, result_content)) = result {
+        // Result separator: ──── Result ──────
+        let result_label = "─── Result ───";
+        lines.push(Line::from(vec![
+            Span::styled(result_label, Style::default().fg(ratatui::style::Color::DarkGray)),
+        ]));
+
+        if result_content.is_empty() || result_content == "(completed successfully)" {
+            // Empty result — show success indicator
+            let msg = if *success { "(completed successfully)" } else { "(failed — no output)" };
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
+                Span::styled(msg, Style::default().fg(status_color)),
+            ]));
+        } else if is_file_op {
+            // File operation — show with line numbers
+            let content_lines: Vec<&str> = result_content.lines().collect();
+            let total_lines = content_lines.len();
+            let line_num_width = if total_lines < 10 { 2 }
+                else if total_lines < 100 { 3 }
+                else { 4 };
+            let content_width = inner_width.saturating_sub(line_num_width + 4);
+
+            // Only show first 50 lines in expanded view for readability
+            let visible_lines = content_lines.iter().take(50);
+            for (i, line_text) in visible_lines.enumerate() {
+                let line_num = format!("{:>width$}", i + 1, width = line_num_width);
+                let wrapped = wrap_content(line_text, content_width);
+                for (j, wrapped_line) in wrapped.iter().enumerate() {
+                    let num_prefix = if j == 0 {
+                        format!("  {} │ ", line_num)
+                    } else {
+                        format!("  {} │ ", " ".repeat(line_num_width))
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(num_prefix, Style::default().fg(ratatui::style::Color::DarkGray)),
+                        Span::styled(wrapped_line.clone(), Style::default().fg(status_color)),
+                    ]));
+                }
+            }
+            if total_lines > 50 {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  ▸ {} more lines below", total_lines - 50), Style::default().fg(ratatui::style::Color::DarkGray)),
+                ]));
+            }
+        } else {
+            // Detect diff content and render appropriately
+            let is_diff = detect_diff_content(result_content);
+
+            if is_diff {
+                let diff_lines = render_diff_lines(result_content, inner_width.saturating_sub(2));
+                for diff_line in diff_lines {
+                    let mut line_spans = vec![
+                        Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
+                    ];
+                    for span in diff_line.spans {
+                        line_spans.push(span);
+                    }
+                    lines.push(Line::from(line_spans));
+                }
+            } else {
+                // Regular output — wrap and display
+                let wrapped = wrap_content(result_content, inner_width.saturating_sub(2));
+                for wrapped_line in wrapped {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
+                        Span::styled(wrapped_line, Style::default().fg(status_color)),
+                    ]));
+                }
+            }
+        }
+    } else {
+        // No result yet (still pending) — show spinner hint
+        lines.push(Line::from(vec![
+            Span::styled("  ⏳ executing...", Style::default().fg(TOOL_CALL_COLOR)),
+        ]));
+    }
+
+    // Bottom separator: ── ▼ collapse ──────
+    let collapse_hint = "── ▼ collapse ──";
+    let collapse_fill = inner_width.saturating_sub(collapse_hint.width());
+    lines.push(Line::from(vec![
+        Span::styled(collapse_hint, Style::default().fg(ratatui::style::Color::DarkGray)),
+        Span::styled("─".repeat(collapse_fill), Style::default().fg(ratatui::style::Color::DarkGray)),
+    ]));
+
+    // Blank line after the block
+    lines.push(Line::from(Span::raw("")));
+
+    lines
 }
 
 /// Extract a meaningful preview from tool call args.
@@ -263,84 +406,6 @@ fn extract_tool_call_preview(tool_name: &str, args: &str) -> String {
 
     // Not JSON — just truncate the raw args
     truncate_str(args, 120)
-}
-
-/// Render an expanded ToolCall card.
-///
-/// Shows the full tool name, arguments (with JSON formatting if applicable),
-/// and result content. Arguments are displayed with key-value highlighting
-/// for better readability.
-fn render_tool_call_expanded(tool_name: &str, args: &str, content: &str, max_width: usize) -> Vec<Line<'static>> {
-    let inner_width = max_width.saturating_sub(4);
-
-    let mut lines = Vec::new();
-
-    // Top border with tool name
-    let title_text = format!("🔧 {} ", tool_name);
-    let title_visual_width = title_text.width();
-    let fill_len = inner_width.saturating_sub(title_visual_width);
-    lines.push(Line::from(vec![
-        Span::styled("┌─ ", Style::default().fg(TOOL_CALL_BORDER)),
-        Span::styled(title_text, Style::default().fg(TOOL_CALL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled("─".repeat(fill_len), Style::default().fg(TOOL_CALL_BORDER)),
-        Span::styled("┐", Style::default().fg(TOOL_CALL_BORDER)),
-    ]));
-
-    // Args section — try to show as formatted key-value pairs for better readability
-    let args_display_lines = format_tool_args(tool_name, args, inner_width);
-    // Args label line
-    let args_label_width = "Args:".width();
-    let args_label_pad = inner_width.saturating_sub(args_label_width);
-    lines.push(Line::from(vec![
-        Span::styled("│ ", Style::default().fg(TOOL_CALL_BORDER)),
-        Span::styled("Args:", Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled(" ".repeat(args_label_pad), Style::default().fg(ratatui::style::Color::Reset)),
-        Span::styled(" │", Style::default().fg(TOOL_CALL_BORDER)),
-    ]));
-    for arg_line in args_display_lines {
-        let line_width = arg_line.width();
-        let padding = inner_width.saturating_sub(line_width);
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(TOOL_CALL_BORDER)),
-            Span::styled(arg_line, Style::default().fg(TOOL_CALL_COLOR)),
-            Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)),
-            Span::styled(" │", Style::default().fg(TOOL_CALL_BORDER)),
-        ]));
-    }
-
-    // Content section (result)
-    if !content.is_empty() {
-        let result_label = "─── Result ───";
-        let result_label_width = result_label.width();
-        let result_label_pad = inner_width.saturating_sub(result_label_width);
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(TOOL_CALL_BORDER)),
-            Span::styled(result_label, Style::default().fg(ratatui::style::Color::DarkGray)),
-            Span::styled(" ".repeat(result_label_pad), Style::default().fg(ratatui::style::Color::Reset)),
-            Span::styled(" │", Style::default().fg(TOOL_CALL_BORDER)),
-        ]));
-        let result_lines = wrap_content(content, inner_width);
-        for res_line in result_lines {
-            let line_width = res_line.width();
-            let padding = inner_width.saturating_sub(line_width);
-            lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(TOOL_CALL_BORDER)),
-                Span::styled(res_line, Style::default().fg(TOOL_CALL_COLOR)),
-                Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)),
-                Span::styled(" │", Style::default().fg(TOOL_CALL_BORDER)),
-            ]));
-        }
-    }
-
-    // Bottom border
-    lines.push(Line::from(vec![
-        Span::styled("└", Style::default().fg(TOOL_CALL_BORDER)),
-        Span::styled("─".repeat(inner_width + 2), Style::default().fg(TOOL_CALL_BORDER)),
-        Span::styled("┘", Style::default().fg(TOOL_CALL_BORDER)),
-    ]));
-    lines.push(Line::from(Span::raw("")));
-
-    lines
 }
 
 /// Format tool arguments for display.
@@ -420,257 +485,6 @@ fn value_to_display_string(val: &serde_json::Value) -> String {
             truncate_str(&compact, 200)
         }
     }
-}
-
-/// Render a collapsed ToolResult (success/failure indicator + preview).
-fn render_tool_result_collapsed(content: &str, success: bool) -> Vec<Line<'static>> {
-    let color = if success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR };
-    let border_color = if success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR };
-    let icon = if success { "✅" } else { "❌" };
-    let preview = truncate_str(content, 80);
-    vec![
-        Line::from(vec![
-            Span::styled("┌─ ", Style::default().fg(border_color)),
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled(preview, Style::default().fg(color)),
-            Span::styled(" ── ▸┐", Style::default().fg(border_color)),
-        ]),
-        Line::from(Span::raw("")),
-    ]
-}
-
-/// Render an expanded ToolResult.
-fn render_tool_result_expanded(content: &str, success: bool, max_width: usize) -> Vec<Line<'static>> {
-    let inner_width = max_width.saturating_sub(4);
-    let color = if success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR };
-    let border_color = color;
-    let icon = if success { "✅ Result" } else { "❌ Error" };
-
-    // Detect if content looks like a diff output
-    let is_diff = detect_diff_content(content);
-
-    let content_rendered = if is_diff {
-        // Use diff renderer for diff-like content
-        render_diff_lines(content, inner_width)
-    } else {
-        // Try to detect JSON output and format it nicely
-        let formatted = format_tool_output(content, inner_width);
-        formatted
-    };
-
-    let mut lines = Vec::new();
-
-    // Top border
-    // Structure: "┌─ " (3) + icon_span + "─"×fill_len + "┐" (1)
-    // Total = inner_width + 4, so fill_len = inner_width - icon_span_visual_width
-    let icon_str = format!("{} ", icon);
-    let icon_visual_width = icon_str.width();
-    let fill_len = inner_width.saturating_sub(icon_visual_width);
-    lines.push(Line::from(vec![
-        Span::styled("┌─ ", Style::default().fg(border_color)),
-        Span::styled(icon_str, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-        Span::styled("─".repeat(fill_len), Style::default().fg(border_color)),
-        Span::styled("┐", Style::default().fg(border_color)),
-    ]));
-
-    // Content lines — from rendered content (diff or plain)
-    // Total = "│ " (2) + content + padding + " │" (2) = inner_width + 4
-    // So padding = inner_width - content_width. Truncate spans that would exceed
-    // inner_width to prevent │ from being pushed off-screen (causing rendering artifacts).
-    for content_line in content_rendered {
-        let mut line_spans = vec![
-            Span::styled("│ ", Style::default().fg(border_color)),
-        ];
-        let mut content_width = 0;
-        for span in content_line.spans {
-            let span_width = span.content.as_ref().width();
-            if content_width + span_width <= inner_width {
-                content_width += span_width;
-                line_spans.push(span);
-            } else {
-                // Truncate span to fit remaining space
-                let remaining = inner_width.saturating_sub(content_width);
-                if remaining > 0 {
-                    let truncated = truncate_span_to_width(&span.content, remaining);
-                    let truncated_width = truncated.width();
-                    content_width += truncated_width;
-                    line_spans.push(Span::styled(truncated, span.style));
-                }
-                break;
-            }
-        }
-        let padding = inner_width.saturating_sub(content_width);
-        if padding > 0 {
-            line_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)));
-        }
-        line_spans.push(Span::styled(" │", Style::default().fg(border_color)));
-        lines.push(Line::from(line_spans));
-    }
-
-    // Bottom border: └──────────────┘  (1 + inner_width+2 + 1 = inner_width+4)
-    lines.push(Line::from(vec![
-        Span::styled("└", Style::default().fg(border_color)),
-        Span::styled("─".repeat(inner_width + 2), Style::default().fg(border_color)),
-        Span::styled("┘", Style::default().fg(border_color)),
-    ]));
-    lines.push(Line::from(Span::raw("")));
-
-    lines
-}
-
-/// Render a collapsed file operation result.
-///
-/// Shows a 3-line preview of the file content with a ▸ expand indicator.
-/// For write/edit operations with empty output, shows a success message.
-fn render_file_result_collapsed(content: &str, success: bool, tool_name: &str) -> Vec<Line<'static>> {
-    let color = if success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR };
-    let border_color = color;
-
-    if content.trim().is_empty() {
-        // Empty content (e.g., write/edit succeeded) — show success indicator
-        let icon = if success { "✅" } else { "❌" };
-        let label = format!("{} completed", tool_name);
-        vec![
-            Line::from(vec![
-                Span::styled("┌─ ", Style::default().fg(border_color)),
-                Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                Span::styled(label, Style::default().fg(color)),
-                Span::styled(" ── ▸┐", Style::default().fg(border_color)),
-            ]),
-            Line::from(Span::raw("")),
-        ]
-    } else {
-        // Show 3-line preview with expand indicator
-        let all_lines: Vec<&str> = content.lines().collect();
-        let preview_lines: Vec<&str> = all_lines.iter().take(3).copied().collect();
-        let total_lines = all_lines.len();
-        let more_count = total_lines.saturating_sub(3);
-
-        let icon = if success { "✅" } else { "❌" };
-
-        if total_lines <= 3 {
-            // Content fits in 3 lines — show all with expand hint
-            let preview_text = preview_lines.join(" │ ");
-            vec![
-                Line::from(vec![
-                    Span::styled("┌─ ", Style::default().fg(border_color)),
-                    Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                    Span::styled(truncate_str(&preview_text, 100), Style::default().fg(color)),
-                    Span::styled(" ── ▸┐", Style::default().fg(border_color)),
-                ]),
-                Line::from(Span::raw("")),
-            ]
-        } else {
-            // More lines available — show count
-            vec![
-                Line::from(vec![
-                    Span::styled("┌─ ", Style::default().fg(border_color)),
-                    Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                    Span::styled(truncate_str(&preview_lines.join(" │ "), 80), Style::default().fg(color)),
-                    Span::styled(format!(" ▸({} more lines)", more_count), Style::default().fg(ratatui::style::Color::DarkGray)),
-                    Span::styled("┐", Style::default().fg(border_color)),
-                ]),
-                Line::from(Span::raw("")),
-            ]
-        }
-    }
-}
-
-/// Render an expanded file operation result.
-///
-/// Shows the full file content in a card with line numbers.
-/// Content is displayed as code-like text with │ separators.
-fn render_file_result_expanded(content: &str, success: bool, tool_name: &str, max_width: usize) -> Vec<Line<'static>> {
-    let inner_width = max_width.saturating_sub(4);
-    let color = if success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR };
-    let border_color = color;
-
-    let mut lines = Vec::new();
-
-    // Top border with tool name and result indicator
-    let icon = if success { "✅" } else { "❌" };
-    let title_text = format!("{} {} ", icon, tool_name);
-    let title_visual_width = title_text.width();
-    let fill_len = inner_width.saturating_sub(title_visual_width);
-    lines.push(Line::from(vec![
-        Span::styled("┌─ ", Style::default().fg(border_color)),
-        Span::styled(title_text, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-        Span::styled("─".repeat(fill_len), Style::default().fg(border_color)),
-        Span::styled("┐", Style::default().fg(border_color)),
-    ]));
-
-    if content.trim().is_empty() {
-        // No content — show success indicator
-        let msg = "(completed successfully)";
-        let msg_width = msg.width();
-        let msg_pad = inner_width.saturating_sub(msg_width);
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(border_color)),
-            Span::styled(msg, Style::default().fg(color)),
-            Span::styled(" ".repeat(msg_pad), Style::default().fg(ratatui::style::Color::Reset)),
-            Span::styled(" │", Style::default().fg(border_color)),
-        ]));
-    } else {
-        // Show file content with line numbers
-        let content_lines: Vec<&str> = content.lines().collect();
-        let total_lines = content_lines.len();
-
-        // Calculate line number width (e.g., " 3" for up to 9 lines, "10" for up to 99)
-        let line_num_width = if total_lines < 10 { 2 }
-            else if total_lines < 100 { 3 }
-            else { 4 };
-
-        // Content width = inner_width - line_num_width - 2 (for " │" separator)
-        let content_width = inner_width.saturating_sub(line_num_width + 2);
-
-        for (i, line_text) in content_lines.iter().enumerate() {
-            let line_num = format!("{:>width$}", i + 1, width = line_num_width);
-            let wrapped = wrap_content(line_text, content_width);
-
-            for (j, wrapped_line) in wrapped.iter().enumerate() {
-                let mut line_spans = vec![
-                    Span::styled("│ ", Style::default().fg(border_color)),
-                ];
-                // Show line number only on first wrapped line
-                if j == 0 {
-                    line_spans.push(Span::styled(line_num.clone(), Style::default().fg(ratatui::style::Color::DarkGray)));
-                    line_spans.push(Span::styled(" │ ", Style::default().fg(ratatui::style::Color::DarkGray)));
-                } else {
-                    line_spans.push(Span::styled(" ".repeat(line_num_width), Style::default().fg(ratatui::style::Color::Reset)));
-                    line_spans.push(Span::styled(" │ ", Style::default().fg(ratatui::style::Color::DarkGray)));
-                }
-                let w_line_width = wrapped_line.width();
-                line_spans.push(Span::styled(wrapped_line.clone(), Style::default().fg(color)));
-                let padding = inner_width.saturating_sub(line_num_width + 2 + w_line_width + 2);
-                if padding > 0 {
-                    line_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)));
-                }
-                line_spans.push(Span::styled(" │", Style::default().fg(border_color)));
-                lines.push(Line::from(line_spans));
-            }
-        }
-    }
-
-    // Bottom border with collapse hint
-    let collapse_hint = "── ▼ collapse ──";
-    let hint_width = collapse_hint.width();
-    let hint_pad = inner_width.saturating_sub(hint_width);
-    lines.push(Line::from(vec![
-        Span::styled("│ ", Style::default().fg(border_color)),
-        Span::styled(collapse_hint, Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled(" ".repeat(hint_pad), Style::default().fg(ratatui::style::Color::Reset)),
-        Span::styled(" │", Style::default().fg(border_color)),
-    ]));
-
-    // Bottom border
-    lines.push(Line::from(vec![
-        Span::styled("└", Style::default().fg(border_color)),
-        Span::styled("─".repeat(inner_width + 2), Style::default().fg(border_color)),
-        Span::styled("┘", Style::default().fg(border_color)),
-    ]));
-    lines.push(Line::from(Span::raw("")));
-
-    lines
 }
 
 /// Render a System message (gray, no bubble).
@@ -920,6 +734,220 @@ fn detect_diff_content(content: &str) -> bool {
         .filter(|l| l.starts_with('+') && !l.starts_with("++") || l.starts_with('-') && !l.starts_with("--"))
         .count();
     diff_line_count >= 3
+}
+
+/// Wrap a line's spans into multiple groups, each group's total visual width ≤ max_width.
+///
+/// This replaces truncation with proper wrapping: when a Line from the markdown
+/// renderer exceeds the available width, overflow content is split onto continuation
+/// groups instead of being discarded. Each group will be rendered as a separate
+/// bordered line in the message bubble.
+///
+/// The wrapping algorithm:
+/// 1. Walk through spans, accumulating visual width
+/// 2. When the total width would exceed max_width:
+///    a. Try to break at the last space within the current span (word-wrap)
+///    b. If no space found, hard-break at the character boundary
+/// 3. Overflow content starts a new group, continuing until all content is distributed
+///
+/// Returns a list of Vec<Span> groups, each group fitting within max_width.
+fn wrap_line_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    if max_width <= 0 {
+        return vec![spans];
+    }
+
+    // Check if all spans fit within max_width — no wrapping needed
+    let total_width: usize = spans.iter().map(|s| s.content.as_ref().width()).sum();
+    if total_width <= max_width {
+        return vec![spans];
+    }
+
+    let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current_group: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0;
+
+    for span in spans {
+        let span_width = span.content.as_ref().width();
+
+        if current_width + span_width <= max_width {
+            // Span fits entirely in the current group
+            current_width += span_width;
+            current_group.push(span);
+            continue;
+        }
+
+        // Span would exceed max_width — need to split it
+        let remaining = max_width.saturating_sub(current_width);
+
+        if remaining > 0 {
+            // Fill the remaining space in the current group with part of this span
+            let (fit_part, overflow_part) = split_span_at_width(&span, remaining);
+            if let Some(fit) = fit_part {
+                current_width += fit.content.as_ref().width();
+                current_group.push(fit);
+            }
+
+            // Finalize current group and start a new one
+            if !current_group.is_empty() {
+                groups.push(current_group);
+                current_group = Vec::new();
+                current_width = 0;
+            }
+
+            // Process the overflow part — it may itself need to be split across multiple groups
+            if let Some(overflow) = overflow_part {
+                process_overflow_span(overflow, max_width, &mut groups, &mut current_group, &mut current_width);
+            }
+        } else {
+            // No remaining space — finalize current group (even if empty) and start fresh
+            if !current_group.is_empty() {
+                groups.push(current_group);
+                current_group = Vec::new();
+                current_width = 0;
+            }
+
+            // Process this entire span as overflow
+            process_overflow_span(span, max_width, &mut groups, &mut current_group, &mut current_width);
+        }
+    }
+
+    // Push any remaining content in the current group
+    if !current_group.is_empty() {
+        groups.push(current_group);
+    }
+
+    // Ensure we always have at least one group (even for empty input)
+    if groups.is_empty() {
+        groups.push(Vec::new());
+    }
+
+    groups
+}
+
+/// Process a span that may exceed max_width, splitting it across multiple groups.
+///
+/// Handles spans that are wider than max_width by repeatedly splitting
+/// at width boundaries until all content is distributed into groups.
+fn process_overflow_span(
+    span: Span<'static>,
+    max_width: usize,
+    groups: &mut Vec<Vec<Span<'static>>>,
+    current_group: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+) {
+    let span_width = span.content.as_ref().width();
+
+    if span_width <= max_width {
+        // Span fits in a new group
+        *current_width = span_width;
+        current_group.push(span);
+        return;
+    }
+
+    // Span exceeds max_width — split it repeatedly
+    let mut remaining_span = span;
+    while remaining_span.content.as_ref().width() > 0 {
+        let remaining_width = remaining_span.content.as_ref().width();
+
+        if remaining_width <= max_width {
+            // Final piece fits in the current group
+            *current_width = remaining_width;
+            current_group.push(remaining_span);
+            break;
+        }
+
+        // Split at max_width boundary
+        let (fit_part, overflow_part) = split_span_at_width(&remaining_span, max_width);
+
+        if let Some(fit) = fit_part {
+            // Finalize current group with the fit part
+            let mut complete_group = current_group.clone();
+            complete_group.push(fit);
+            groups.push(complete_group);
+            current_group.clear();
+            *current_width = 0;
+        } else {
+            // Can't fit anything — skip this span content (shouldn't happen with max_width > 0)
+            break;
+        }
+
+        if let Some(overflow) = overflow_part {
+            remaining_span = overflow;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Split a Span at a visual width boundary, returning (fit_part, overflow_part).
+///
+/// Tries to break at a space character within the span for word-wrap.
+/// If no suitable space is found, performs a hard character-boundary break.
+fn split_span_at_width(span: &Span<'static>, max_visual_width: usize) -> (Option<Span<'static>>, Option<Span<'static>>) {
+    if max_visual_width <= 0 {
+        return (None, Some(span.clone()));
+    }
+
+    let content = span.content.as_ref();
+    let content_width = content.width();
+
+    if content_width <= max_visual_width {
+        // Entire span fits — no split needed
+        return (Some(span.clone()), None);
+    }
+
+    // Try word-wrap: find the last space character that keeps the visual width ≤ max_visual_width
+    let mut best_space_byte_pos = None;
+    let mut total_width = 0;
+    for (byte_pos, ch) in content.char_indices() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if total_width + ch_width > max_visual_width {
+            break;
+        }
+        total_width += ch_width;
+        if ch == ' ' {
+            best_space_byte_pos = Some(byte_pos + ch.len_utf8()); // position after the space
+        }
+    }
+
+    // If we found a space within the width limit, break after it (word-wrap)
+    // But only if the result isn't just whitespace (i.e., the part before the space has content)
+    if let Some(space_pos) = best_space_byte_pos {
+        let fit_str = &content[..space_pos];
+        let overflow_str = &content[space_pos..];
+        // Only use word-wrap if the fit part is non-empty (not just spaces)
+        if !fit_str.trim().is_empty() {
+            return (
+                Some(Span::styled(fit_str.to_string(), span.style)),
+                Some(Span::styled(overflow_str.to_string(), span.style)),
+            );
+        }
+    }
+
+    // No suitable space found — hard break at character boundary
+    let mut total_width = 0;
+    let mut byte_pos = 0;
+    for (i, ch) in content.char_indices() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if total_width + ch_width > max_visual_width {
+            break;
+        }
+        total_width += ch_width;
+        byte_pos = i + ch.len_utf8();
+    }
+
+    if byte_pos == 0 {
+        // Can't fit even one character — put entire span in overflow
+        return (None, Some(span.clone()));
+    }
+
+    let fit_str = &content[..byte_pos];
+    let overflow_str = &content[byte_pos..];
+
+    (
+        Some(Span::styled(fit_str.to_string(), span.style)),
+        Some(Span::styled(overflow_str.to_string(), span.style)),
+    )
 }
 
 /// Format tool output content for display.

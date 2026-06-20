@@ -2,6 +2,10 @@
 //!
 //! Supports OpenAI, DeepSeek, 智谱, and other OpenAI-compatible APIs.
 //! Uses SSE (Server-Sent Events) for streaming responses.
+//!
+//! **Automatic retry**: 429 (rate limit) and 503/529 (service unavailable) errors
+//! are automatically retried with exponential backoff (default: 3 retries, 1s→2s→4s).
+//! This matches standard practice in OpenAI Python SDK and Anthropic SDK.
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -18,22 +22,52 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::retry::{ProviderRetryConfig, is_retryable_status, send_with_retry};
+
 /// OpenAI-compatible LLM provider.
+///
+/// Includes automatic retry on transient API errors (429 rate limits,
+/// 503 service unavailable, 529 site overloaded) with exponential backoff.
 pub struct OpenAIProvider {
     config: ModelConfig,
     client: Client,
+    /// Retry configuration for transient API errors.
+    /// Default: 3 retries with exponential backoff (1s → 2s → 4s).
+    pub retry_config: ProviderRetryConfig,
 }
 
 impl OpenAIProvider {
     /// Create a new OpenAI provider with the given configuration.
+    ///
+    /// Default retry config: 3 retries, exponential backoff (1s → 2s → 4s).
     pub fn new(config: ModelConfig) -> Self {
         let client = Client::new();
-        Self { config, client }
+        Self {
+            config,
+            client,
+            retry_config: ProviderRetryConfig::default(),
+        }
     }
 
     /// Create with a custom HTTP client.
     pub fn with_client(config: ModelConfig, client: Client) -> Self {
-        Self { config, client }
+        Self {
+            config,
+            client,
+            retry_config: ProviderRetryConfig::default(),
+        }
+    }
+
+    /// Create with custom retry configuration.
+    pub fn with_retry_config(config: ModelConfig, retry_config: ProviderRetryConfig) -> Self {
+        let client = Client::new();
+        Self { config, client, retry_config }
+    }
+
+    /// Set the retry configuration (builder pattern).
+    pub fn retry_config(mut self, config: ProviderRetryConfig) -> Self {
+        self.retry_config = config;
+        self
     }
 
     /// Get the chat completions endpoint URL.
@@ -213,19 +247,34 @@ impl LlmProvider for OpenAIProvider {
         // Log the full request body at debug level for complete format inspection
         tracing::debug!("OpenAI infer request body: {}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
 
-        let response = self.client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.config.api_key.as_deref().unwrap_or("")))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(
+            &self.retry_config,
+            || {
+                let url = url.clone();
+                let body = body.clone();
+                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
             tracing::error!("OpenAI API error {}: {}", status, text);
+            // Distinguish rate limit errors from other provider errors
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "OpenAI API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!("OpenAI API error {}: {}", status, text)));
         }
 
@@ -345,19 +394,34 @@ impl LlmProvider for OpenAIProvider {
         );
         tracing::debug!("OpenAI infer_stream request body: {}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
 
-        let response = self.client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.config.api_key.as_deref().unwrap_or("")))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OneAIError::Network(e.to_string()))?;
+        let response = send_with_retry(
+            &self.retry_config,
+            || {
+                let url = url.clone();
+                let body = body.clone();
+                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await
+        .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
             tracing::error!("OpenAI API stream error {}: {}", status, text);
+            // Distinguish rate limit errors from other provider errors
+            if is_retryable_status(status) {
+                return Err(OneAIError::RateLimit(format!(
+                    "OpenAI API rate limit error after {} retries: {} — {}",
+                    self.retry_config.max_retries, status, text
+                )));
+            }
             return Err(OneAIError::Provider(format!("OpenAI API error {}: {}", status, text)));
         }
 
@@ -558,6 +622,8 @@ mod tests {
             model_name: Some("gpt-4".to_string()),
             ..ModelConfig::default()
         })
+        // Tests use no_retry to avoid delays in unit tests
+        .retry_config(ProviderRetryConfig::no_retry())
     }
 
     /// Test: assistant message with tool calls AND text content.
