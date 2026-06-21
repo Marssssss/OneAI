@@ -32,6 +32,44 @@ pub struct PlanStep {
     /// Which previous step IDs this step depends on (if coupled).
     #[serde(default)]
     pub depends_on: Vec<String>,
+
+    /// Execution status of this step. Defaults to Pending when created by the
+    /// planner; mutated by the `task_update` tool during execution so the TUI
+    /// can render live progress.
+    #[serde(default)]
+    pub status: PlanStepStatus,
+
+    /// Present-continuous label shown in the spinner while the step is in
+    /// progress (e.g. "Running tests"). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+}
+
+/// Execution status of a plan step.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    /// Not started yet.
+    #[default]
+    Pending,
+    /// Currently being worked on.
+    InProgress,
+    /// Finished successfully.
+    Completed,
+    /// Failed or aborted.
+    Failed,
+}
+
+impl PlanStepStatus {
+    /// Icon for TUI display.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            PlanStepStatus::Pending => "○",
+            PlanStepStatus::InProgress => "◐",
+            PlanStepStatus::Completed => "●",
+            PlanStepStatus::Failed => "✗",
+        }
+    }
 }
 
 /// Result of a PlanAgent execution.
@@ -238,5 +276,7 @@ pub fn parse_plan_steps(raw: &str) -> Result<Vec<PlanStep>> {
         description: raw.to_string(),
         coupled: false,
         depends_on: vec![],
+        status: PlanStepStatus::default(),
+        active_form: None,
     }])
 }

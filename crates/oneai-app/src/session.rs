@@ -80,6 +80,12 @@ struct AppResources {
     provider: Option<Arc<dyn oneai_core::traits::LlmProvider>>,
     parser: Arc<dyn oneai_core::traits::OutputParser>,
     skill_selector: Arc<oneai_skill::SkillSelector>,
+    /// Shared skill registry — same `Arc` as on `App`, read by the AgentLoop
+    /// for the always-on skill menu and by the `skill` tool.
+    skill_registry: Arc<oneai_skill::SkillRegistry>,
+    /// Manually-activated skill (via `/skill <name>`). Shared mutable so the
+    /// TUI can set it between runs and the freshly-built AgentLoop reads it.
+    active_skill: Arc<tokio::sync::RwLock<Option<String>>>,
     domain_pack: Option<Arc<oneai_domain::MergedDomainPack>>,
     /// SQLite session store (for memory + conversation persistence).
     sqlite_store: Option<Arc<SqliteSessionStore>>,
@@ -114,6 +120,8 @@ impl AppSession {
                 provider: app.provider.clone(),
                 parser: app.parser.clone(),
                 skill_selector: app.skill_selector.clone(),
+                skill_registry: app.skill_registry.clone(),
+                active_skill: app.active_skill.clone(),
                 domain_pack: app.domain_pack.clone(),
                 sqlite_store: app.sqlite_store.clone(),
             }),
@@ -138,6 +146,23 @@ impl AppSession {
     /// Get the conversation.
     pub fn conversation(&self) -> &Conversation {
         &self.conversation
+    }
+
+    /// Get the shared skill registry (read by the AgentLoop and the `skill` tool).
+    pub fn skill_registry(&self) -> &Arc<oneai_skill::SkillRegistry> {
+        &self.app.skill_registry
+    }
+
+    /// Manually activate a skill by name (via `/skill <name>`). Its prompt will
+    /// be injected on every subsequent agent run. Pass `None` to deactivate.
+    pub async fn set_active_skill(&self, name: Option<String>) {
+        let mut guard = self.app.active_skill.write().await;
+        *guard = name;
+    }
+
+    /// Get the currently active skill name, if any.
+    pub async fn active_skill(&self) -> Option<String> {
+        self.app.active_skill.read().await.clone()
     }
 
     /// Send a user message and add it to memory.
@@ -421,11 +446,16 @@ impl AppSession {
         &mut self,
         task: &str,
         observer: &dyn AgentLoopObserver,
+        interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     ) -> Result<AgentLoopResult> {
         let provider = self.app.provider.as_ref()
             .ok_or(oneai_core::error::OneAIError::Provider(
                 "No LLM provider configured. Set ONEAI_API_KEY and ONEAI_BASE_URL environment variables.".to_string()
             ))?;
+
+        // Snapshot the manually-activated skill (set via `/skill <name>`) for
+        // this run — its prompt_template is injected every turn by the loop.
+        let active_skill = self.app.active_skill.read().await.clone();
 
         // Store user message in memory
         self.app.memory_manager.add(MemoryEntry {
@@ -520,6 +550,10 @@ impl AppSession {
                 config,
                 domain.clone(),
             )
+            .with_skill_registry(
+                self.app.skill_registry.clone(),
+                active_skill.clone(),
+            )
         } else {
             let config = AgentLoopConfig {
                 use_streaming: true,
@@ -552,10 +586,24 @@ impl AppSession {
                 None, // checkpoint manager — optional
                 config,
             )
+            .with_skill_registry(
+                self.app.skill_registry.clone(),
+                active_skill.clone(),
+            )
         };
 
+        // Register the running AgentLoop so the TUI can request an interrupt
+        // (Esc) without holding the session lock — the slot is a separate Arc.
+        // Cloning the AgentLoop is cheap (all Arc fields).
+        *interrupt_slot.lock().await = Some(agent_loop.clone());
+
         // Run with full conversation history (multi-turn)
-        let result = agent_loop.run_with_conversation(conversation, task, observer).await?;
+        let result = agent_loop.run_with_conversation(conversation, task, observer).await;
+
+        // Clear the interrupt slot now that the run is over.
+        *interrupt_slot.lock().await = None;
+
+        let result = result?;
 
         // Store assistant response in memory
         if !result.final_answer.is_empty() {
@@ -619,6 +667,8 @@ impl AppSession {
             fn on_checkpoint(&self, _: usize) {}
             fn on_complete(&self, _: &AgentLoopResult) {}
         }
-        self.run_agent(task, &SilentObserver).await
+        let throwaway_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        self.run_agent(task, &SilentObserver, throwaway_slot).await
     }
 }

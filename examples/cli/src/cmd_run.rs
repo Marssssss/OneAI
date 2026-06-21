@@ -50,12 +50,21 @@ pub fn cmd_run(
 
         let app = builder.build().await.expect("App build failed");
 
+        // Register built-in skills (domain + general) so the `skill` tool menu
+        // is populated and the model can invoke them.
+        let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
+        app.skill_registry.register_builtin(skills).await.unwrap();
+
         // Register domain tools
         let pack = domain_pack.unwrap();
         for tool in &pack.tools {
             app.register_tool(tool.clone()).await.unwrap();
         }
         app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+        // Register the `skill` tool (progressive disclosure Tier2/Tier3).
+        app.register_tool(Arc::new(oneai_agent::SkillTool::new(app.skill_registry.clone())))
+            .await
+            .unwrap();
 
         let mut session = app.create_session();
 

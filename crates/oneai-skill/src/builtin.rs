@@ -20,7 +20,7 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
     vec![
         SkillDescriptor {
             name: "project-planning".into(),
-            description: "Analyze project requirements and create implementation plan".into(),
+            description: "分析需求并制定实现计划/路线图。当用户要求规划、拆解、设计方案、列步骤、排期时调用 (Analyze requirements and create an implementation plan. Use when the user asks to plan, decompose, design, roadmap, or schedule a task.)".into(),
             prompt_template: PROJECT_PLANNING_PROMPT.into(),
             trigger_keywords: vec![
                 "plan".into(), "roadmap".into(), "architecture".into(),
@@ -110,7 +110,7 @@ pub fn research_skills() -> Vec<SkillDescriptor> {
     vec![
         SkillDescriptor {
             name: "deep-research".into(),
-            description: "Multi-source research with citation verification".into(),
+            description: "多来源深度研究并交叉验证引用。当用户要求研究、调研、深入分析、查证时调用 (Multi-source research with citation verification. Use when the user asks to research, investigate, survey, or deep-dive a topic.)".into(),
             prompt_template: DEEP_RESEARCH_PROMPT.into(),
             trigger_keywords: vec![
                 "research".into(), "investigate".into(), "survey".into(),
@@ -170,7 +170,7 @@ pub fn general_skills() -> Vec<SkillDescriptor> {
     vec![
         SkillDescriptor {
             name: "summarization".into(),
-            description: "Condense long content into key points".into(),
+            description: "将长内容凝练为要点/摘要。当用户要求总结、概括、提取要点、TL;DR 时调用 (Condense long content into key points. Use when the user asks to summarize, condense, or extract key points.)".into(),
             prompt_template: SUMMARIZATION_PROMPT.into(),
             trigger_keywords: vec![
                 "summarize".into(), "condense".into(), "brief".into(),
@@ -180,7 +180,7 @@ pub fn general_skills() -> Vec<SkillDescriptor> {
         },
         SkillDescriptor {
             name: "translation".into(),
-            description: "Translate content between languages".into(),
+            description: "在语言之间翻译内容。当用户要求翻译、转换语言、本地化时调用 (Translate content between languages. Use when the user asks to translate, localize, or convert text between languages.)".into(),
             prompt_template: TRANSLATION_PROMPT.into(),
             trigger_keywords: vec![
                 "translate".into(), "翻译".into(), "language".into(),
@@ -190,7 +190,7 @@ pub fn general_skills() -> Vec<SkillDescriptor> {
         },
         SkillDescriptor {
             name: "creative-writing".into(),
-            description: "Generate creative content (stories, poems, marketing)".into(),
+            description: "生成创意写作（故事/诗歌/文案/营销文案）。当用户要求写、创作、起草、润色、续写创意文本时调用 (Generate creative writing — stories, poems, marketing copy. Use when the user asks to write, compose, draft, polish, or continue creative text.)".into(),
             prompt_template: CREATIVE_WRITING_PROMPT.into(),
             trigger_keywords: vec![
                 "write".into(), "create".into(), "compose".into(),

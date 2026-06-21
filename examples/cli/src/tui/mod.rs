@@ -114,8 +114,14 @@ pub fn run_tui(
 
         let app = builder.build().await.expect("App build failed");
 
-        // Register domain-specific tools from the selected domain pack
+        // The skill registry is shared between the AgentLoop (always-on skill
+        // menu), the `skill` tool (on-demand prompt loading), and the TUI.
+        // Register built-in skills onto it FIRST so the SkillTool sees them.
         let domain_pack_name = domain_name.unwrap_or("coding");
+        let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
+        app.skill_registry.register_builtin(skills).await.unwrap();
+
+        // Register domain-specific tools from the selected domain pack
         let domain = crate::cmd_pack::get_builtin_pack(domain_pack_name, ".")
             .unwrap_or_else(|| {
                 // Try loading from installed packs or project directory
@@ -126,6 +132,11 @@ pub fn run_tui(
         }
         // Also register CalculatorTool as a general-purpose tool
         app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+        // Register the `skill` tool — gives the model a call path to load a
+        // skill's full prompt (progressive disclosure Tier2/Tier3).
+        app.register_tool(Arc::new(oneai_agent::SkillTool::new(app.skill_registry.clone())))
+            .await
+            .unwrap();
 
         let tool_names = app.tool_executor().list_tools().await;
         let session = app.create_session();
@@ -135,11 +146,14 @@ pub fn run_tui(
         let session_state = SessionState { app: app_arc.clone(), session };
         let session_state = Arc::new(tokio::sync::Mutex::new(session_state));
 
-        let mut tui_app = App::new(provider_info, model_name, tool_names, session_id);
+        let mut tui_app = App::new(
+            provider_info,
+            model_name,
+            tool_names,
+            session_id,
+            app_arc.skill_registry.clone(),
+        );
 
-        // Register built-in skills for the current domain
-        let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
-        tui_app.skill_registry.register_builtin(skills).await.unwrap();
         tui_app.skill_names = tui_app.skill_registry.skill_names().await;
         tui_app.current_domain = domain_pack_name.to_string();
 
@@ -149,8 +163,14 @@ pub fn run_tui(
     // Channel for observer events
     let (observer_tx, observer_rx) = tokio::sync::mpsc::unbounded_channel();
 
+    // Standalone interrupt slot — holds the running AgentLoop so the TUI can
+    // request an interrupt (Esc) WITHOUT the session lock (which is held for
+    // the whole run_agent). Independent Arc → no deadlock.
+    let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // Run the main loop
-    let result = run_main_loop(&mut terminal, app, session_state, observer_tx, observer_rx, &rt, approval_rx);
+    let result = run_main_loop(&mut terminal, app, session_state, observer_tx, observer_rx, &rt, approval_rx, interrupt_slot);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -167,9 +187,10 @@ fn dispatch_event(
     session_state: Arc<tokio::sync::Mutex<SessionState>>,
     observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
+    interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
 ) {
     match event {
-        Event::Key(key) => handle_key_event(app, key, session_state, observer_tx, rt),
+        Event::Key(key) => handle_key_event(app, key, session_state, observer_tx, rt, interrupt_slot),
         Event::Mouse(mouse) => handle_mouse_event(app, mouse),
         _ => {}
     }
@@ -200,6 +221,7 @@ fn handle_key_event(
     session_state: Arc<tokio::sync::Mutex<SessionState>>,
     observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
+    interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
 ) {
     // Shift+Tab / Shift+Tab — cycle interaction mode (Normal → Auto → Plan).
     // Handled globally so it works even while an approval card is shown.
@@ -215,15 +237,43 @@ fn handle_key_event(
         handle_approval_key(app, key);
         return;
     }
+    // Plan accept/reject gate (exit_plan_mode) — handled before input so the
+    // user can't type while a decision is pending.
+    if app.pending_plan.is_some() {
+        handle_plan_approval_key(app, key);
+        return;
+    }
     if app.search_mode {
         handle_search_key(app, key);
+        app.dirty = true;
+        return;
+    }
+    // Esc while the agent is running (and not in vim multi-line edit) →
+    // request an instant interrupt. The cancel token aborts the in-flight
+    // inference/stream; the loop pauses at the next boundary.
+    if app.is_thinking
+        && matches!(app.input_mode, input_mode::InputMode::SingleLine)
+        && key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Esc
+    {
+        rt.block_on(async {
+            if let Some(agent_loop) = interrupt_slot.lock().await.as_ref() {
+                agent_loop.request_interrupt(oneai_core::InterruptReason::Custom {
+                    reason: "User requested interrupt".to_string(),
+                });
+                app.add_message(
+                    ChatRole::System,
+                    "⏸ Interrupted — type additional context, then Enter to resume.",
+                );
+            }
+        });
         app.dirty = true;
         return;
     }
     let msg = app.handle_key_event(key);
     if let Some(user_input) = msg {
         if !app.is_thinking {
-            handle_user_input_async(app, session_state.clone(), user_input, observer_tx, rt);
+            handle_user_input_async(app, session_state.clone(), user_input, observer_tx, rt, interrupt_slot);
         }
     }
 }
@@ -351,6 +401,7 @@ fn run_main_loop(
     mut observer_rx: tokio::sync::mpsc::UnboundedReceiver<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
     mut approval_rx: tokio::sync::mpsc::Receiver<oneai_tool::ApprovalPendingItem>,
+    interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     while !app.should_quit {
         // Advance spinner frame only when thinking (spinner animation needs periodic redraw)
@@ -379,12 +430,12 @@ fn run_main_loop(
 
         if event::poll(poll_interval)? {
             let first_event = event::read()?;
-            dispatch_event(&mut app, first_event, session_state.clone(), &observer_tx, rt);
+            dispatch_event(&mut app, first_event, session_state.clone(), &observer_tx, rt, interrupt_slot.clone());
 
             // Drain all pending events (especially scroll events) in one frame
             while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
                 if let Ok(ev) = event::read() {
-                    dispatch_event(&mut app, ev, session_state.clone(), &observer_tx, rt);
+                    dispatch_event(&mut app, ev, session_state.clone(), &observer_tx, rt, interrupt_slot.clone());
                 } else {
                     break;
                 }
@@ -459,6 +510,7 @@ fn handle_user_input_async(
     input: String,
     observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
+    interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
 ) {
     let trimmed = input.trim();
 
@@ -614,6 +666,8 @@ fn handle_user_input_async(
                             // Switch skills to domain
                             app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain(name)).await.unwrap();
                             app.skill_names = app.skill_registry.skill_names().await;
+                            // Clear any active skill — the old domain's skill is gone.
+                            state.session.set_active_skill(None).await;
                         });
                         app.current_domain = name.to_string();
                         app.active_skill = None;
@@ -709,6 +763,10 @@ fn handle_user_input_async(
                 match sub_cmd {
                     "off" => {
                         if let Some(name) = app.active_skill.take() {
+                            // Sync to the shared session state read by run_agent.
+                            rt.block_on(async {
+                                session_state.lock().await.session.set_active_skill(None).await;
+                            });
                             app.add_message(ChatRole::System, format!("✅ Skill deactivated: {}", name));
                         } else {
                             app.add_message(ChatRole::System, "No active skill to deactivate.");
@@ -835,7 +893,7 @@ fn handle_user_input_async(
                     // /skill <name> — activate a skill by name
                     _ => {
                         let skill_name = sub_cmd;
-                        rt.block_on(async {
+                        let found = rt.block_on(async {
                             let skill = app.skill_registry.find_by_name(skill_name).await;
                             if let Some(s) = skill {
                                 app.active_skill = Some(s.name.clone());
@@ -843,10 +901,20 @@ fn handle_user_input_async(
                                     "✅ Skill activated: {}\nPrompt injected: \"{}\"\nThe agent will now prioritize this skill's approach.\nType /skill off to deactivate, or /skill <other> to switch.",
                                     s.name, s.prompt_template
                                 ));
+                                true
                             } else {
                                 app.add_message(ChatRole::Error, format!("Skill '{}' not found. Use /skills to see available skills.", skill_name));
+                                false
                             }
                         });
+                        // Sync the activated skill to the shared session state
+                        // (read by run_agent to inject the prompt each turn).
+                        if found {
+                            let name_to_set = app.active_skill.clone();
+                            rt.block_on(async {
+                                session_state.lock().await.session.set_active_skill(name_to_set).await;
+                            });
+                        }
                         app.dirty = true;
                         return;
                     }
@@ -934,7 +1002,7 @@ fn handle_user_input_async(
         let mut state = session_state.lock().await;
         let observer = TuiObserver::new(tx1);
 
-        let result = state.session.run_agent(&task, &observer).await;
+        let result = state.session.run_agent(&task, &observer, interrupt_slot.clone()).await;
 
         match result {
             Ok(agent_result) => {
@@ -1575,6 +1643,32 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             }
             app.dirty = true;
         }
+        ObserverEvent::PlanUpdate(plan) => {
+            // Live task list changed — update the persistent plan panel.
+            // Only log a system message when the plan is first created (the
+            // panel itself shows ongoing progress; per-status flips would spam
+            // the chat).
+            let was_none = app.plan_state.is_none();
+            app.plan_state = plan;
+            if was_none && app.plan_state.is_some() {
+                if let Some(ps) = &app.plan_state {
+                    app.add_message(ChatRole::System, format!(
+                        "📋 Plan created — {} steps tracked in the panel above.",
+                        ps.steps.len()
+                    ));
+                }
+            }
+            app.dirty = true;
+        }
+        ObserverEvent::PlanSubmitted { plan, steps, reply_tx } => {
+            // exit_plan_mode — surface the plan for accept/reject (Phase 3 gate).
+            // The AgentLoop is blocked awaiting `reply_tx`; the user's decision
+            // (handled in handle_plan_approval_key) sends it.
+            app.pending_plan = Some((plan, steps, Some(reply_tx)));
+            app.plan_approval_selected_index = 0;
+            app.is_thinking = false;
+            app.dirty = true;
+        }
         ObserverEvent::Error(msg) => {
             app.is_thinking = false;
             app.add_message(ChatRole::Error, msg);
@@ -1784,6 +1878,51 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
         if let Some(tx) = state.response_tx {
             let _ = tx.send(response);
         }
+    }
+}
+
+/// Handle keys while a plan (exit_plan_mode) is awaiting accept/reject.
+///
+/// ←/→ or Tab selects Accept/Reject; Enter confirms; Esc = reject. The
+/// decision is sent to the blocked AgentLoop via the oneshot.
+fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+    // 0 = Accept, 1 = Reject
+    let count = 2usize;
+    match (key.modifiers, key.code) {
+        (KeyModifiers::NONE, KeyCode::Left)
+        | (KeyModifiers::NONE, KeyCode::Tab)
+        | (KeyModifiers::NONE, KeyCode::Right) => {
+            app.plan_approval_selected_index = (app.plan_approval_selected_index + 1) % count;
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            let accepted = app.plan_approval_selected_index == 0;
+            if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
+                if let Some(tx) = reply_tx {
+                    let _ = tx.send(accepted);
+                }
+                if accepted {
+                    app.add_message(ChatRole::System, "✅ Plan accepted — execution starting.");
+                } else {
+                    app.add_message(ChatRole::System, "↩️ Plan rejected — revise and re-submit (exit_plan_mode).");
+                }
+            }
+            app.is_thinking = true; // loop resumes (was blocked on the gate)
+            app.dirty = true;
+        }
+        (_, KeyCode::Esc) => {
+            if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
+                if let Some(tx) = reply_tx {
+                    let _ = tx.send(false);
+                }
+                app.add_message(ChatRole::System, "↩️ Plan rejected (Esc) — revise and re-submit.");
+            }
+            app.dirty = true;
+        }
+        _ => {}
     }
 }
 

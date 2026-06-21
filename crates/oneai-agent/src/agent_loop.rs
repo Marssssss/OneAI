@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use oneai_core::{
     ContentBlock, Conversation, InferenceRequest, InferenceResponse,
@@ -103,6 +104,23 @@ pub trait AgentLoopObserver: Send + Sync {
 
     /// Called when the loop resumes from an interrupt with human feedback.
     fn on_resume(&self, _signal: &ResumeSignal) {}
+
+    /// Called when the plan state changes (task created/updated). The TUI uses
+    /// this to re-render the persistent plan panel. `None` means the plan was
+    /// cleared; `Some(plan)` is the current state (clone).
+    fn on_plan_update(&self, _plan: Option<&crate::plan_state::PlanState>) {}
+
+    /// Called when the model submits a plan via `exit_plan_mode`. The TUI shows
+    /// an accept/reject gate and signals the decision back via `reply`
+    /// (true = accept & execute, false = reject & keep planning). The loop
+    /// awaits `reply` before continuing — this is the plan-approval gate.
+    fn on_plan_submitted(
+        &self,
+        _plan: &str,
+        _steps: &[crate::plan_agent::PlanStep],
+        _reply: tokio::sync::oneshot::Sender<bool>,
+    ) {
+    }
 }
 
 // ─── AgentDecision ──────────────────────────────────────────────────────────
@@ -313,6 +331,10 @@ pub struct LoopState {
     /// The current pending interrupt (if the loop is paused).
     /// When set, the loop will break at the next iteration boundary.
     pub pending_interrupt: Option<InterruptPoint>,
+    /// Live plan state — the task list the model mutates via the `task_*`
+    /// control tools. None until a plan is created. Persists across iterations
+    /// and interrupts (agent-side state, not model output).
+    pub plan_state: Option<crate::plan_state::PlanState>,
 }
 
 impl LoopState {
@@ -333,6 +355,7 @@ impl LoopState {
             env_snapshot: None,
             interrupt_points: Vec::new(),
             pending_interrupt: None,
+            plan_state: None,
         }
     }
 
@@ -357,6 +380,7 @@ impl LoopState {
             env_snapshot: None,
             interrupt_points: Vec::new(),
             pending_interrupt: None,
+            plan_state: None,
         }
     }
 
@@ -584,6 +608,13 @@ pub struct AgentLoop {
     parser: Arc<dyn OutputParser>,
     approval_gate: Arc<dyn ApprovalGate>,
     skill_selector: Arc<oneai_skill::SkillSelector>,
+    /// Shared skill registry — used to inject the always-on skill menu (Tier1
+    /// progressive disclosure) into the system prompt each turn. The `skill`
+    /// tool reads the same registry to load a skill's full prompt on demand.
+    skill_registry: Arc<oneai_skill::SkillRegistry>,
+    /// Manually-activated skill name (via `/skill <name>`). When set, the
+    /// skill's full prompt_template is injected as a system message each turn.
+    active_skill: Option<String>,
     context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
     sub_agent_factory: Arc<dyn SubAgentFactory>,
     /// Optional async task runner for parallel sub-agent delegation.
@@ -600,6 +631,13 @@ pub struct AgentLoop {
     hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
     interrupt_requested: Arc<AtomicBool>,
     interrupt_reason: Arc<tokio::sync::Mutex<Option<InterruptReason>>>,
+    /// Cooperative cancellation token — fired by `request_interrupt` so an
+    /// in-flight `provider.infer` / stream / tool execution aborts immediately
+    /// (via `tokio::select!`) instead of waiting for the iteration boundary.
+    cancel_token: CancellationToken,
+    /// Live plan-mode flag (mirrors `config.plan_mode` at construction but is
+    /// mutable mid-run so `exit_plan_mode` acceptance can flip it off).
+    plan_mode_active: Arc<AtomicBool>,
     config: AgentLoopConfig,
     domain_pack: Option<Arc<MergedDomainPack>>,
 }
@@ -617,6 +655,8 @@ impl Clone for AgentLoop {
             parser: self.parser.clone(),
             approval_gate: self.approval_gate.clone(),
             skill_selector: self.skill_selector.clone(),
+            skill_registry: self.skill_registry.clone(),
+            active_skill: self.active_skill.clone(),
             context_budget: self.context_budget.clone(),
             sub_agent_factory: self.sub_agent_factory.clone(),
             async_task_runner: self.async_task_runner.clone(),
@@ -627,6 +667,8 @@ impl Clone for AgentLoop {
             hook_registry: self.hook_registry.clone(),
             interrupt_requested: self.interrupt_requested.clone(),
             interrupt_reason: self.interrupt_reason.clone(),
+            cancel_token: self.cancel_token.clone(),
+            plan_mode_active: self.plan_mode_active.clone(),
             config: self.config.clone(),
             domain_pack: self.domain_pack.clone(),
         }
@@ -634,6 +676,16 @@ impl Clone for AgentLoop {
 }
 
 impl AgentLoop {
+    /// Toggle plan mode at runtime (used by the `exit_plan_mode` gate).
+    pub fn set_plan_mode(&self, on: bool) {
+        self.plan_mode_active.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether plan mode is currently active.
+    fn plan_mode(&self) -> bool {
+        self.plan_mode_active.load(Ordering::Relaxed)
+    }
+
     /// Get the provider name for cost tracking.
     fn provider_name(&self) -> String {
         let config = self.provider.config();
@@ -670,6 +722,10 @@ impl AgentLoop {
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
+            cancel_token: CancellationToken::new(),
+            plan_mode_active: Arc::new(AtomicBool::new(config.plan_mode)),
+            skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
+            active_skill: None,
             config, domain_pack: None }
     }
 
@@ -695,8 +751,26 @@ impl AgentLoop {
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
+            cancel_token: CancellationToken::new(),
+            plan_mode_active: Arc::new(AtomicBool::new(config.plan_mode)),
+            skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
+            active_skill: None,
             config,
             domain_pack: Some(domain_pack) }
+    }
+
+    /// Attach the shared skill registry (for the always-on skill menu) and an
+    /// optionally manually-activated skill whose prompt is injected each turn.
+    /// Called by the session after construction so the giant `new`/`with_domain_pack`
+    /// signatures don't need new positional params.
+    pub fn with_skill_registry(
+        mut self,
+        registry: Arc<oneai_skill::SkillRegistry>,
+        active_skill: Option<String>,
+    ) -> Self {
+        self.skill_registry = registry;
+        self.active_skill = active_skill;
+        self
     }
 
     /// Enable parallel sub-agent delegation with the AsyncTaskRunner.
@@ -928,12 +1002,32 @@ impl AgentLoop {
                 state.conversation = self.context_budget.compress(assembled).await?;
             }
 
-            // 2. Skill injection
+            // 2. Skill progressive disclosure
+            //
+            // Replaces the old auto-selector: selected skills were never rendered
+            // into the prompt (a dead write). Now we inject, every turn:
+            //  - Tier1: a compact "Available skills" menu (name + description) so
+            //    the model knows what skills exist and can call the `skill` tool.
+            //  - Tier3: if a skill was manually activated via `/skill <name>`, its
+            //    full prompt_template is injected so the model follows it.
             if self.config.inject_skills {
-                let skills = self.skill_selector.select_skills(
-                    &state.original_task, &self.active_skill_descriptors()?,
-                ).await?;
-                state.active_skills = skills;
+                if let Some(menu) = self.build_skill_menu().await {
+                    state.conversation.add_message(Message::system(menu));
+                }
+                if let Some(name) = &self.active_skill {
+                    if let Some(skill) = self.skill_registry.find_by_name(name).await {
+                        state.active_skills = vec![skill.clone()];
+                        let inject = format!(
+                            "# Active skill: {}\n{}\n\n(Follow these instructions for this task.)",
+                            skill.name, skill.prompt_template
+                        );
+                        state.conversation.add_message(Message::system(inject));
+                    } else {
+                        // Activated skill no longer registered — clear to avoid
+                        // re-warning every turn.
+                        tracing::warn!("Active skill '{}' not in registry; clearing", name);
+                    }
+                }
             }
 
             // 3. Build inference request (with paradigm-aware tool definitions)
@@ -1023,7 +1117,15 @@ impl AgentLoop {
             let response_result = if self.config.use_streaming {
                 self.run_streaming_iteration_async(&request, observer).await
             } else {
-                self.provider.infer(request).await
+                // Wrap non-streaming inference in a cancel-aware select! so an
+                // interrupt aborts the in-flight request promptly.
+                tokio::select! {
+                    biased;
+                    _ = self.cancel_token.cancelled() => Err(oneai_core::error::OneAIError::Other(
+                        "Agent interrupted during inference.".to_string(),
+                    )),
+                    res = self.provider.infer(request) => res,
+                }
             };
 
             let response = match response_result {
@@ -1432,13 +1534,83 @@ impl AgentLoop {
                     // (the model's response with tool calls must precede tool results)
                     state.conversation.add_message(response.message.clone());
 
+                    // ─── Control-tool interception ───────────────────────────────
+                    // task_create/task_update/task_list/exit_plan_mode are handled
+                    // directly against LoopState.plan_state (per-run, agent-side
+                    // state). They bypass the tool registry, approval gate, and the
+                    // plan_mode block (so the model can call exit_plan_mode while
+                    // planning). Control results are collected here; regular tools
+                    // flow into `filtered_calls` below.
+                    let mut control_results: Vec<ToolCallResult> = Vec::new();
+                    let mut regular_calls: Vec<ToolCallRequest> = Vec::new();
+                    for call in filtered_calls.drain(..) {
+                        if !crate::plan_state::is_control_tool(&call.name) {
+                            regular_calls.push(call);
+                            continue;
+                        }
+                        // Compute the control-tool output FIRST (the exit_plan_mode
+                        // gate may block awaiting the user's accept/reject).
+                        let output = if call.name == crate::plan_state::TOOL_EXIT_PLAN_MODE {
+                            let plan_text = call.args.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let steps = crate::plan_state::extract_steps(&call.args);
+                            // Populate the tracked plan state from the submitted
+                            // steps so the panel shows them.
+                            {
+                                let mut ps = state.plan_state.take().unwrap_or_default();
+                                ps.set_steps(steps.clone());
+                                state.plan_state = Some(ps);
+                            }
+                            observer.on_plan_update(state.plan_state.as_ref());
+                            // Block on the user's accept/reject decision.
+                            let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                            observer.on_plan_submitted(&plan_text, &steps, tx);
+                            let accepted = rx.await.unwrap_or(false);
+                            if accepted {
+                                self.set_plan_mode(false);
+                                oneai_core::ToolOutput {
+                                    success: true,
+                                    content: "Plan approved — proceeding with execution. \
+                                        Use task_update to mark steps in_progress/completed as \
+                                        you work.".to_string(),
+                                    error: None,
+                                }
+                            } else {
+                                oneai_core::ToolOutput {
+                                    success: true,
+                                    content: "Plan rejected by the user. Stay in plan mode, \
+                                        revise the plan, then call exit_plan_mode again.".to_string(),
+                                    error: None,
+                                }
+                            }
+                        } else {
+                            crate::plan_state::apply_control_tool(
+                                &mut state.plan_state,
+                                &call.name,
+                                &call.args,
+                            )
+                        };
+                        // Now add the single tool_result message and notify the panel.
+                        state.conversation.add_message(Message::tool_result(
+                            call.id.clone(),
+                            output.content.clone(),
+                        ));
+                        observer.on_plan_update(state.plan_state.as_ref());
+                        control_results.push(ToolCallResult {
+                            call_id: call.id.clone(),
+                            tool_name: call.name.clone(),
+                            output,
+                        });
+                    }
+                    filtered_calls = regular_calls;
+
                     // Plan mode — block tool execution entirely. Instead of running
                     // the tools, inject a synthetic result telling the model it must
                     // produce a plan, not execute. The model then stops calling tools
                     // and emits its plan as the final answer.
-                    let results: Vec<ToolCallResult> = if self.config.plan_mode && !filtered_calls.is_empty() {
+                    let mut results: Vec<ToolCallResult> = if self.plan_mode() && !filtered_calls.is_empty() {
                         let plan_note = "Plan mode is active — tool execution is disabled. \
-                            Do not call tools; present a step-by-step plan in your final answer instead.";
+                            Do not call other tools; call `exit_plan_mode` with your plan, \
+                            or present a step-by-step plan in your final answer.";
                         filtered_calls.iter().map(|call| {
                             state.conversation.add_message(Message::tool_result(
                                 call.id.clone(),
@@ -1460,6 +1632,10 @@ impl AgentLoop {
                         // All calls were denied by hooks — no results to feed
                         Vec::new()
                     };
+                    // Merge control-tool results (already handled above) with
+                    // the regular tool results, preserving order roughly.
+                    control_results.extend(results);
+                    results = control_results;
                     for r in &results {
                         observer.on_tool_result(&r.call_id, &r.tool_name, &r.output);
 
@@ -1789,12 +1965,22 @@ impl AgentLoop {
     /// and resumes when the human provides guidance.
     pub fn request_interrupt(&self, reason: InterruptReason) {
         self.interrupt_requested.store(true, Ordering::Relaxed);
+        // Fire the cancellation token so any in-flight provider.infer / stream
+        // / tool execution wrapped in `tokio::select!` aborts immediately,
+        // rather than the user waiting for the current call to finish.
+        self.cancel_token.cancel();
         // Store the reason — use try_lock since this is a synchronous method.
         // If the lock is held by the async loop, we'll still set the AtomicBool flag,
         // and the loop will check it at the next iteration boundary.
         if let Ok(mut guard) = self.interrupt_reason.try_lock() {
             *guard = Some(reason);
         }
+    }
+
+    /// The cancellation token — used by `tokio::select!` branches around
+    /// inference/streaming/tool execution so they abort on `request_interrupt`.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 
     /// Resume the agent loop from an interrupt point.
@@ -2470,14 +2656,33 @@ impl AgentLoop {
     ) -> Result<InferenceResponse> {
         use futures::StreamExt;
 
-        let mut stream = self.provider.infer_stream(request.clone()).await?;
+        // Establish the stream (or abort immediately if already cancelled).
+        let mut stream = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                return Err(oneai_core::error::OneAIError::Other(
+                    "Agent interrupted during inference.".to_string(),
+                ));
+            }
+            res = self.provider.infer_stream(request.clone()) => res?,
+        };
 
         // Use the IncrementalStreamParser for proper incremental parsing
         let mut parser = IncrementalStreamParser::new();
         let mut usage = oneai_core::TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
         let mut model = String::new();
 
-        while let Some(chunk) = stream.next().await {
+        loop {
+            // Check for cancellation between chunks so a mid-stream interrupt
+            // aborts promptly instead of draining the whole stream.
+            let chunk = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => break,
+                c = stream.next() => match c {
+                    Some(c) => c,
+                    None => break,
+                },
+            };
             // Save chunk metadata before processing
             let is_final = chunk.is_final;
             let chunk_usage = chunk.usage.clone();
@@ -2697,7 +2902,7 @@ impl AgentLoop {
         sorted_tools.sort_by_key(|tool| tier_order(tool.name()));
 
         // Apply domain pack tool decorators if present
-        if let Some(domain) = &self.domain_pack {
+        let mut defs: Vec<ToolDefinition> = if let Some(domain) = &self.domain_pack {
             sorted_tools.iter().map(|tool| {
                 // Check if there's a decorator for this tool
                 let decorator = domain.find_decorator(tool.name());
@@ -2735,11 +2940,47 @@ impl AgentLoop {
                 description: tool.description().to_string(),
                 parameters_schema: tool.parameters_schema(),
             }).collect()
-        }
+        };
+
+        // Prepend the plan/task control tools (task_create/task_update/task_list/
+        // exit_plan_mode). These are intercepted by the loop, never dispatched
+        // to the tool registry — but the model must see their definitions to
+        // call them. In plan mode, only exit_plan_mode is exposed so the model
+        // is nudged to submit a plan rather than call execution tools.
+        let control_defs = if self.plan_mode() {
+            crate::plan_state::control_tool_definitions()
+                .into_iter()
+                .filter(|d| d.name == crate::plan_state::TOOL_EXIT_PLAN_MODE)
+                .collect::<Vec<_>>()
+        } else {
+            crate::plan_state::control_tool_definitions()
+        };
+        let mut all = control_defs;
+        all.append(&mut defs);
+        all
     }
 
-    fn active_skill_descriptors(&self) -> Result<Vec<oneai_core::SkillDescriptor>> {
-        Ok(Vec::new())
+    /// Build the Tier1 "Available skills" menu — a compact system message listing
+    /// every registered skill's name + description. Injected every turn so the
+    /// model can discover skills and invoke the `skill` tool. Returns None when
+    /// the registry is empty (no menu needed).
+    async fn build_skill_menu(&self) -> Option<String> {
+        let skills = self.skill_registry.list().await;
+        if skills.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::with_capacity(skills.len() + 2);
+        lines.push(
+            "# Available skills\n\
+             Invoke a skill by calling the `skill` tool with its exact name. \
+             The tool returns the skill's full instructions — follow them. \
+             Only call a skill when it is clearly relevant to the task."
+                .to_string(),
+        );
+        for skill in &skills {
+            lines.push(format!("- {}: {}", skill.name, skill.description));
+        }
+        Some(lines.join("\n"))
     }
 
     /// Select a recovery strategy based on the type of tool call failure.

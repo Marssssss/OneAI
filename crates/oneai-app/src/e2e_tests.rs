@@ -48,7 +48,7 @@ async fn e2e_app_session_direct_answer() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("What is the answer?", &SessionTestObserver).await.unwrap();
+    let result = session.run_agent("What is the answer?", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
 
     // Verify the loop completed (the exact answer depends on stream assembly)
     assert!(result.completed);
@@ -82,7 +82,7 @@ async fn e2e_app_session_tool_call_then_answer() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("Read /test.txt", &SessionTestObserver).await.unwrap();
+    let result = session.run_agent("Read /test.txt", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
 
     // Verify the loop completed through the full session → agent loop path
     assert!(result.completed);
@@ -105,7 +105,7 @@ async fn e2e_app_session_conversation_history() {
     let mut session = app.create_session();
 
     // Send a message and run agent
-    let result = session.run_agent("Describe the project", &SessionTestObserver).await.unwrap();
+    let result = session.run_agent("Describe the project", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
     assert!(result.completed);
 
     // Verify conversation has messages
@@ -129,7 +129,7 @@ async fn e2e_app_session_with_domain_pack() {
         .expect("Build with domain pack should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("Analyze the code", &SessionTestObserver).await.unwrap();
+    let result = session.run_agent("Analyze the code", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
 
     assert!(result.completed);
 }
@@ -159,7 +159,7 @@ async fn e2e_app_session_empty_response_retry() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("帮我创建一个临时目录", &SessionTestObserver).await.unwrap();
+    let result = session.run_agent("帮我创建一个临时目录", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
 
     // The retry mechanism should have kicked in, producing a non-empty answer
     assert!(result.completed);
@@ -187,7 +187,7 @@ async fn e2e_app_session_double_empty_response() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("Test empty response", &SessionTestObserver).await.unwrap();
+    let result = session.run_agent("Test empty response", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
 
     // The loop should still complete (gracefully), even with empty answer
     assert!(result.completed);

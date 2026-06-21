@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::text::Line;
@@ -475,8 +476,10 @@ pub struct App {
     /// Registered tool names.
     pub tool_names: Vec<String>,
 
-    /// Skill registry (manages all registered skills).
-    pub skill_registry: SkillRegistry,
+    /// Shared skill registry — the SAME `Arc` held by the oneai-app `App`, so
+    /// `/skill` mutations (register/remove/activate) are visible to the
+    /// AgentLoop and the `skill` tool without copying.
+    pub skill_registry: Arc<SkillRegistry>,
 
     /// Skill names for sidebar display (sorted alphabetically).
     /// Updated whenever skills are added/removed/switched.
@@ -626,10 +629,27 @@ pub struct App {
     /// just the bare conversation messages.
     /// None until the first agent iteration completes.
     pub last_context_accounting: Option<oneai_core::ContextAccounting>,
+
+    /// Live plan state — the task list the model mutates via the `task_*`
+    /// control tools. Rendered as a persistent panel above the chat area.
+    /// None when no plan exists.
+    pub plan_state: Option<oneai_agent::PlanState>,
+    /// A plan submitted via `exit_plan_mode`, awaiting the user's
+    /// accept/reject decision. While set, the TUI shows an accept/reject UI.
+    /// The oneshot sender returns the decision to the (blocked) AgentLoop.
+    pub pending_plan: Option<(String, Vec<oneai_agent::PlanStep>, Option<tokio::sync::oneshot::Sender<bool>>)>,
+    /// Selected option in the plan-approval UI (0=Accept, 1=Reject).
+    pub plan_approval_selected_index: usize,
 }
 
 impl App {
-    pub fn new(provider_info: String, model_name: String, tool_names: Vec<String>, session_id: String) -> Self {
+    pub fn new(
+        provider_info: String,
+        model_name: String,
+        tool_names: Vec<String>,
+        session_id: String,
+        skill_registry: Arc<SkillRegistry>,
+    ) -> Self {
         // Compute context window from model name before it's moved into the struct
         let context_window_size = oneai_core::token_counter::infer_context_window_for_tokenizer(model_name.as_str());
         let short_id = session_id[..8.min(session_id.len())].to_string();
@@ -650,7 +670,7 @@ impl App {
             messages: Vec::new(),
             scrollbar_state: ScrollbarState::default(),
             tool_names,
-            skill_registry: SkillRegistry::new(),
+            skill_registry,
             skill_names: Vec::new(),
             active_skill: None,
             provider_info,
@@ -694,6 +714,9 @@ impl App {
             last_stream_flush: std::time::Instant::now(),
             render_cache: MessageRenderCache::new(),
             last_context_accounting: None,
+            plan_state: None,
+            pending_plan: None,
+            plan_approval_selected_index: 0,
         }
     }
 

@@ -7,8 +7,17 @@ use oneai_core::{ApprovalRequest, ApprovalResponse, ContextAccounting};
 
 use super::app::TokenUsage;
 
+/// A snapshot of the live plan state, sent so the TUI can render the plan panel.
+pub type PlanStateSnapshot = oneai_agent::PlanState;
+
+/// A proposed step from `exit_plan_mode`, for the accept/reject gate.
+pub type ProposedStep = oneai_agent::PlanStep;
+
 /// Events sent from the observer to the TUI event loop.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone` — `PlanSubmitted` carries a oneshot reply sender that must be
+/// moved (not duplicated) into the TUI.
+#[derive(Debug)]
 pub enum ObserverEvent {
     IterationStart(usize, ParadigmKind),
     DirectAnswer(String),
@@ -32,6 +41,19 @@ pub enum ObserverEvent {
 
     /// Thinking/reasoning content fragment from extended thinking models.
     Thinking(String),
+
+    /// Plan state changed (task created/updated). Carries the current plan
+    /// snapshot (None = cleared). The TUI updates the persistent plan panel.
+    PlanUpdate(Option<PlanStateSnapshot>),
+    /// The model submitted a plan via `exit_plan_mode`. The TUI shows an
+    /// accept/reject gate and signals the decision back via `reply_tx`
+    /// (true = accept & execute, false = reject & re-plan). The AgentLoop
+    /// blocks on this response before continuing.
+    PlanSubmitted {
+        plan: String,
+        steps: Vec<ProposedStep>,
+        reply_tx: tokio::sync::oneshot::Sender<bool>,
+    },
 }
 
 /// TUI observer — receives AgentLoop events and updates the App state
@@ -116,5 +138,22 @@ impl AgentLoopObserver for TuiObserver {
 
     fn on_thinking(&self, text: &str) {
         let _ = self.tx.send(ObserverEvent::Thinking(text.to_string()));
+    }
+
+    fn on_plan_update(&self, plan: Option<&oneai_agent::PlanState>) {
+        let _ = self.tx.send(ObserverEvent::PlanUpdate(plan.cloned()));
+    }
+
+    fn on_plan_submitted(
+        &self,
+        plan: &str,
+        steps: &[oneai_agent::PlanStep],
+        reply: tokio::sync::oneshot::Sender<bool>,
+    ) {
+        let _ = self.tx.send(ObserverEvent::PlanSubmitted {
+            plan: plan.to_string(),
+            steps: steps.to_vec(),
+            reply_tx: reply,
+        });
     }
 }

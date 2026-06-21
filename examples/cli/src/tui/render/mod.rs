@@ -28,6 +28,7 @@ pub mod context_bar;
 pub mod input;
 pub mod markdown;
 pub mod message;
+pub mod plan;
 pub mod sidebar;
 pub mod spinner;
 pub mod approval;
@@ -93,22 +94,45 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let sidebar_rect = main_layout[0];
     let right_rect = main_layout[1];
 
-    // Right panel: chat | input
+    // Right panel: plan bar (optional) | chat | input
+    //
+    // The plan bar is a persistent checklist shown above the chat area whenever
+    // a task plan exists (created via task_create / exit_plan_mode). It tracks
+    // live progress as the model flips step statuses. When a plan is submitted
+    // via exit_plan_mode, a floating accept/reject popup overlays instead.
+    let plan_lines = plan::plan_panel_height(app);
     let panel_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),      // chat area
-            Constraint::Length(3),   // input box (2 lines + border)
-        ])
+        .constraints(if plan_lines > 0 {
+            vec![
+                Constraint::Length(plan_lines), // plan bar
+                Constraint::Min(0),             // chat area
+                Constraint::Length(3),           // input box (2 lines + border)
+            ]
+        } else {
+            vec![
+                Constraint::Length(0),           // no plan bar
+                Constraint::Min(0),             // chat area
+                Constraint::Length(3),           // input box (2 lines + border)
+            ]
+        })
         .split(right_rect);
 
     draw_sidebar(f, sidebar_rect, app);
-    chat::draw_chat(f, panel_layout[0], app);
-    input::draw_input(f, panel_layout[1], app);
+    if plan_lines > 0 {
+        plan::draw_plan_panel(f, panel_layout[0], app);
+    }
+    chat::draw_chat(f, panel_layout[1], app);
+    input::draw_input(f, panel_layout[2], app);
 
     // Draw command autocomplete popup (if active)
     if app.command_autocomplete && !app.input.is_empty() && app.input.starts_with('/') {
-        draw_command_popup(f, panel_layout[0], panel_layout[1], app);
+        draw_command_popup(f, panel_layout[1], panel_layout[2], app);
+    }
+
+    // Draw plan accept/reject popup (exit_plan_mode gate) if a plan is pending.
+    if app.pending_plan.is_some() {
+        plan::draw_plan_approval(f, total_size, app);
     }
 }
 

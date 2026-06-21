@@ -46,6 +46,8 @@ pub mod structured_output;
 pub mod team;
 pub mod handoff;
 pub mod swarm;
+pub mod skill_tool;
+pub mod plan_state;
 
 pub use scope_state::*;
 pub use react_agent::*;
@@ -68,6 +70,8 @@ pub use structured_output::*;
 pub use team::*;
 pub use handoff::*;
 pub use swarm::*;
+pub use skill_tool::*;
+pub use plan_state::*;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -145,6 +149,8 @@ mod tests {
             description: "Search for information".to_string(),
             coupled: false,
             depends_on: vec![],
+            status: PlanStepStatus::Pending,
+            active_form: None,
         };
 
         let json = serde_json::to_string(&step).unwrap();
@@ -159,6 +165,8 @@ mod tests {
             description: "Process results from step 1".to_string(),
             coupled: true,
             depends_on: vec!["step_1".to_string()],
+            status: PlanStepStatus::Pending,
+            active_form: None,
         };
 
         let json = serde_json::to_string(&step).unwrap();

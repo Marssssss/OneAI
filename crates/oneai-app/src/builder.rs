@@ -66,6 +66,10 @@ pub struct AppBuilder {
     rag_index: Option<Arc<DocumentIndex>>,
     /// Skill selector.
     skill_selector: Option<Arc<SkillSelector>>,
+    /// Skill registry — shared with the AgentLoop (for the skill menu / Tier1
+    /// progressive disclosure) and with the `skill` tool (Tier2/Tier3 on-demand
+    /// loading). Lives on `App` so the session-built AgentLoop can read it.
+    skill_registry: Arc<oneai_skill::SkillRegistry>,
     /// Persistence.
     persistence: Option<Arc<FilePersistence>>,
     /// Platform (detected or overridden).
@@ -151,6 +155,7 @@ impl AppBuilder {
             memory_manager: None,
             rag_index: None,
             skill_selector: None,
+            skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
             persistence: None,
             platform: None,
             trace_context: None,
@@ -271,6 +276,14 @@ impl AppBuilder {
     /// Set the skill selector.
     pub fn skill_selector(mut self, selector: Arc<SkillSelector>) -> Self {
         self.skill_selector = Some(selector);
+        self
+    }
+
+    /// Set the shared skill registry. The same `Arc` is handed to the AgentLoop
+    /// (for the always-on skill menu) and to the `skill` tool (for on-demand
+    /// loading of a skill's full prompt).
+    pub fn skill_registry(mut self, registry: Arc<oneai_skill::SkillRegistry>) -> Self {
+        self.skill_registry = registry;
         self
     }
 
@@ -1633,6 +1646,8 @@ impl AppBuilder {
             skill_selector: self.skill_selector.unwrap_or_else(|| {
                 Arc::new(SkillSelector::new())
             }),
+            skill_registry: self.skill_registry,
+            active_skill: Arc::new(tokio::sync::RwLock::new(None)),
             persistence: self.persistence,
             workflow_executor,
             platform,
@@ -1687,6 +1702,14 @@ pub struct App {
     pub rag_index: Option<Arc<DocumentIndex>>,
     /// Skill selector.
     pub skill_selector: Arc<SkillSelector>,
+    /// Shared skill registry — read by the AgentLoop (skill menu) and the
+    /// `skill` tool (on-demand prompt loading). Mutated via `/skill` commands
+    /// (register/remove/activate) and on domain switch.
+    pub skill_registry: Arc<oneai_skill::SkillRegistry>,
+    /// Manually-activated skill name (via `/skill <name>`). When set, its full
+    /// `prompt_template` is injected as a system message on every agent run.
+    /// Shared across the session so the TUI can change it between runs.
+    pub active_skill: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Persistence (optional).
     pub persistence: Option<Arc<FilePersistence>>,
     /// Workflow executor.
