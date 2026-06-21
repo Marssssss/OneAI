@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
 };
 
-use super::super::app::App;
+use super::super::app::{App, InteractionMode};
 use super::super::theme::*;
 
 /// Draw the context bar (shown only when sidebar is collapsed).
@@ -31,7 +31,7 @@ pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
     };
     let ctx_max_display = app.context_window_size / 1000;
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" ", Style::default().fg(CONTEXT_PROVIDER_COLOR)),
         Span::styled(app.provider_info.clone(), Style::default().fg(CONTEXT_PROVIDER_COLOR).add_modifier(Modifier::BOLD)),
         Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)),
@@ -40,9 +40,25 @@ pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
         Span::styled(format!("{}#{}", paradigm_display_name(&app.active_paradigm), app.current_iteration),
             Style::default().fg(CONTEXT_PARADIGM_COLOR)),
         Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled(format!("{}ctx{}/{}k {}${:.3}", ctx_prefix, ctx_display, ctx_max_display, cost_prefix, app.session_cost),
-            Style::default().fg(CONTEXT_COST_COLOR)),
-    ]);
+    ];
+
+    // Interaction mode indicator (only when not Normal, to avoid clutter).
+    match app.interaction_mode {
+        InteractionMode::AutoAccept => {
+            spans.push(Span::styled("⚡Auto", Style::default().fg(ACTIVE_PARADIGM_COLOR).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)));
+        }
+        InteractionMode::Plan => {
+            spans.push(Span::styled("📋Plan", Style::default().fg(ACTIVE_PARADIGM_COLOR).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)));
+        }
+        InteractionMode::Normal => {}
+    }
+
+    spans.push(Span::styled(format!("{}ctx{}/{}k {}${:.3}", ctx_prefix, ctx_display, ctx_max_display, cost_prefix, app.session_cost),
+        Style::default().fg(CONTEXT_COST_COLOR)));
+
+    let line = Line::from(spans);
 
     let paragraph = ratatui::widgets::Paragraph::new(line)
         .style(Style::default().bg(BRAND_BG));

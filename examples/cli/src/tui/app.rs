@@ -18,6 +18,37 @@ use oneai_skill::SkillRegistry;
 use super::input_mode::{InputMode, VimMode};
 use super::history::MessageHistory;
 
+// ─── Interaction Mode ──────────────────────────────────────────────────────
+
+/// TUI interaction mode, cycled with Shift+Tab (Claude Code style).
+///
+/// - Normal: high-risk tools require explicit approval.
+/// - AutoAccept: every tool call is approved silently (no per-call message).
+/// - Plan: tool execution is blocked entirely — the agent only produces a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionMode {
+    Normal,
+    AutoAccept,
+    Plan,
+}
+
+impl Default for InteractionMode {
+    fn default() -> Self {
+        InteractionMode::Normal
+    }
+}
+
+impl InteractionMode {
+    /// Cycle to the next mode: Normal → AutoAccept → Plan → Normal.
+    pub fn next(self) -> Self {
+        match self {
+            InteractionMode::Normal => InteractionMode::AutoAccept,
+            InteractionMode::AutoAccept => InteractionMode::Plan,
+            InteractionMode::Plan => InteractionMode::Normal,
+        }
+    }
+}
+
 // ─── Slash Commands ───────────────────────────────────────────────────────
 
 /// Supported slash commands for autocomplete.
@@ -70,6 +101,7 @@ impl App {
 }
 
 /// Check if a tool name is a file operation tool that should display content.
+#[allow(dead_code)]
 pub fn is_file_operation_tool(tool_name: &str) -> bool {
     matches!(tool_name,
         "read_file" | "file_read" | "read" |
@@ -305,14 +337,19 @@ impl ChatRole {
     }
 
     /// Whether this role type should default to collapsed.
-    /// Tool invocations are collapsed ONLY when the result is long (>500 chars)
-    /// or when still pending (no result yet).
+    ///
+    /// Tool invocations: collapsed while pending (no result yet), and collapsed
+    /// when the result exceeds `COLLAPSE_THRESHOLD` lines (so the default view
+    /// is a 5-line preview with an expand button). Short results render in full.
+    /// Thinking defaults to collapsed, but is auto-expanded on the first real
+    /// thinking fragment (see `process_observer_event`).
     pub fn default_collapsed(&self) -> bool {
+        use super::theme::COLLAPSE_THRESHOLD;
         match self {
             ChatRole::ToolInvocation { result, .. } => {
                 match result {
                     None => true, // Pending tool call — collapsed while executing
-                    Some((_, content)) => content.len() > 500, // Only collapse long results
+                    Some((_, content)) => content.lines().count() > COLLAPSE_THRESHOLD,
                 }
             }
             ChatRole::Thinking => true,
@@ -515,6 +552,12 @@ pub struct App {
     /// Session-level approval allowlist (tool names auto-approved).
     pub session_allowlist: HashSet<String>,
 
+    /// Current interaction mode (Normal / Auto-accept / Plan). Cycled with Shift+Tab.
+    pub interaction_mode: InteractionMode,
+
+    /// Whether the one-time mode-prompt tip has been shown on first submission.
+    pub mode_prompt_shown: bool,
+
     /// Vim mode (for multi-line input).
     #[allow(dead_code)]
     pub vim_mode: VimMode,
@@ -631,6 +674,8 @@ impl App {
             approval_pending: None,
             approval_selected_index: 0,
             session_allowlist: HashSet::new(),
+            interaction_mode: InteractionMode::default(),
+            mode_prompt_shown: false,
             vim_mode: VimMode::default(),
             spinner_frame: 0,
             chat_scroll_y: 0,

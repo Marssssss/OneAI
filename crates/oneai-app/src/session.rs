@@ -62,6 +62,9 @@ pub struct AppSession {
     trace_context: Option<TraceContext>,
     /// Workflow execution history for this session.
     workflow_history: Vec<WorkflowHistoryEntry>,
+    /// Plan mode flag — when true, the agent loop blocks tool execution and
+    /// only produces a plan. Set by the TUI before `run_agent`.
+    plan_mode: bool,
 }
 
 /// Shared resources for all sessions.
@@ -118,12 +121,18 @@ impl AppSession {
             session_id,
             trace_context,
             workflow_history: Vec::new(),
+            plan_mode: false,
         }
     }
 
     /// Get the session ID.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Enable/disable plan mode for subsequent `run_agent` calls.
+    pub fn set_plan_mode(&mut self, on: bool) {
+        self.plan_mode = on;
     }
 
     /// Get the conversation.
@@ -476,6 +485,7 @@ impl AppSession {
                     domain.system_prompt_template.clone()
                 },
                 use_streaming: true,
+                plan_mode: self.plan_mode,
                 ..AgentLoopConfig::default()
             };
             // Use the real ContextCompressor with the domain's CompressionTemplate,
@@ -513,6 +523,7 @@ impl AppSession {
         } else {
             let config = AgentLoopConfig {
                 use_streaming: true,
+                plan_mode: self.plan_mode,
                 ..AgentLoopConfig::default()
             };
             // No domain pack — use NoopCompressor as a fallback.

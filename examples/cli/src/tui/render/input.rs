@@ -12,9 +12,26 @@ use ratatui::{
     Frame,
 };
 
-use super::super::app::App;
+use super::super::app::{App, InteractionMode};
 use super::super::input_mode::{InputMode, VimMode};
 use super::super::theme::*;
+
+/// Build the interaction-mode badge shown persistently in the input hint line.
+///
+/// Always visible (regardless of sidebar state) so the user can see the current
+/// cycle mode without pressing Shift+Tab. Returns the badge spans + a separator.
+fn mode_badge_spans(app: &App) -> Vec<Span<'static>> {
+    let (label, color) = match app.interaction_mode {
+        InteractionMode::Normal => ("Normal", LABEL_DIM),
+        InteractionMode::AutoAccept => ("⚡Auto", ACTIVE_PARADIGM_COLOR),
+        InteractionMode::Plan => ("📋Plan", ACTIVE_PARADIGM_COLOR),
+    };
+    vec![
+        Span::styled("mode:", Style::default().fg(LABEL_DIM)),
+        Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(" │ ", Style::default().fg(LABEL_DIM)),
+    ]
+}
 
 /// Draw the input area.
 pub fn draw_input(f: &mut Frame, rect: Rect, app: &App) {
@@ -57,10 +74,12 @@ fn draw_singleline_input(f: &mut Frame, rect: Rect, app: &App) {
         Line::from(spans)
     };
 
-    let hint_line = Line::from(Span::styled(
-        "[Enter=send Esc=vim Ctrl+C=quit Tab=sidebar ←→=cursor]",
+    let mut hint_spans = mode_badge_spans(app);
+    hint_spans.push(Span::styled(
+        "[Enter=send Esc=vim Ctrl+C=quit Tab=sidebar ←→=cursor  Shift+Tab=mode]",
         Style::default().fg(INPUT_HINT_COLOR),
     ));
+    let hint_line = Line::from(hint_spans);
 
     let input_text = Text::from(vec![input_line, hint_line]);
 
@@ -103,7 +122,9 @@ fn draw_vim_input(f: &mut Frame, rect: Rect, app: &App, cursor_position: usize, 
     };
 
     let mut all_lines = display_lines;
-    all_lines.push(Line::from(Span::styled(hints, Style::default().fg(INPUT_HINT_COLOR))));
+    let mut vim_hint_spans = mode_badge_spans(app);
+    vim_hint_spans.push(Span::styled(hints, Style::default().fg(INPUT_HINT_COLOR)));
+    all_lines.push(Line::from(vim_hint_spans));
 
     let paragraph = Paragraph::new(Text::from(all_lines))
         .block(border_block);

@@ -27,7 +27,7 @@ use oneai_agent::ParadigmKind;
 use oneai_core::ApprovalResponse;
 use oneai_domain::coding_pack;
 
-use app::{App, ApprovalPendingState, ChatRole, TokenUsage, is_file_operation_tool};
+use app::{App, ApprovalPendingState, ChatRole, TokenUsage};
 use observer::{ObserverEvent, TuiObserver};
 use render::spinner::advance_frame;
 use session::SessionState;
@@ -175,6 +175,24 @@ fn dispatch_event(
     }
 }
 
+/// Cycle the interaction mode (Shift+Tab) and announce the new mode.
+fn cycle_interaction_mode(app: &mut App) {
+    app.interaction_mode = app.interaction_mode.next();
+    let hint = match app.interaction_mode {
+        app::InteractionMode::Normal => {
+            "⚡ Normal mode: approvals required for high-risk tools (Shift+Tab to switch)"
+        }
+        app::InteractionMode::AutoAccept => {
+            "⚡ Auto-accept mode: all tool calls approved silently (Shift+Tab to switch)"
+        }
+        app::InteractionMode::Plan => {
+            "⚡ Plan mode: tool execution disabled — agent will only produce a plan (Shift+Tab to switch)"
+        }
+    };
+    app.add_message(ChatRole::System, hint);
+    app.dirty = true;
+}
+
 /// Handle a single crossterm key event.
 fn handle_key_event(
     app: &mut App,
@@ -183,6 +201,16 @@ fn handle_key_event(
     observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
 ) {
+    // Shift+Tab / Shift+Tab — cycle interaction mode (Normal → Auto → Plan).
+    // Handled globally so it works even while an approval card is shown.
+    if key.kind == KeyEventKind::Press
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::BackTab | KeyCode::Tab)
+    {
+        cycle_interaction_mode(app);
+        return;
+    }
+
     if app.approval_pending.is_some() {
         handle_approval_key(app, key);
         return;
@@ -227,7 +255,7 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
             app.dirty = true;
         }
 
-        // ── Left button down (scrollbar only) ────────────────────────────────
+        // ── Left button down (scrollbar or chat-area collapse toggle) ──────
         crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
             if is_in_scrollbar {
                 // Scrollbar click — jump to position
@@ -240,6 +268,48 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                     app.chat_scroll_y = ((ratio * content_height as f64) as usize)
                         .min(content_height.saturating_sub(viewport_height));
                     app.user_scrolled = true;
+                    app.dirty = true;
+                }
+            } else if is_in_chat {
+                // Chat-area click — toggle collapse for the message under the cursor.
+                // Map the screen row to a content line, then walk messages (summing
+                // each message's rendered line count) to find which one was clicked.
+                let clicked_line = (mouse_event.row as usize)
+                    .saturating_sub(chat_rect.y as usize)
+                    .saturating_add(app.chat_scroll_y);
+
+                let mut line_cursor = 0usize;
+                let mut target: Option<String> = None;
+                for msg in app.messages.iter() {
+                    let msg_height = app.render_cache.entries.get(&msg.id)
+                        .map(|c| c.lines.len())
+                        .unwrap_or_else(|| {
+                            // Cache miss — render transiently just to count lines.
+                            let width = (chat_rect.width as usize).saturating_sub(1);
+                            let is_collapsed = app.collapsed_ids.contains(&msg.id);
+                            render::message::render_message_lines(
+                                msg, is_collapsed, width, app.spinner_frame, app.approval_selected_index,
+                            ).len().max(1)
+                        });
+
+                    if clicked_line < line_cursor + msg_height {
+                        // Click landed inside this message — toggle only if the
+                        // message's content is long enough to be collapsible
+                        // (> COLLAPSE_THRESHOLD wrapped lines). Short content
+                        // renders in full and is not foldable.
+                        let width = (chat_rect.width as usize).saturating_sub(1);
+                        let collapsible = render::message::message_is_collapsible(msg, width);
+                        if collapsible {
+                            target = Some(msg.id.clone());
+                        }
+                        break;
+                    }
+                    line_cursor += msg_height;
+                }
+                // Mutate after the immutable borrow over app.messages ends.
+                if let Some(id) = target {
+                    app.toggle_collapse(&id);
+                    app.render_cache.invalidate(&id);
                     app.dirty = true;
                 }
             }
@@ -333,8 +403,12 @@ fn run_main_loop(
             let perm_label = item.request.permission_level.map(|p| format!("{:?}", p))
                 .unwrap_or_else(|| format!("{:?}", item.request.risk_level));
 
+            // Auto-accept mode — silently approve every tool call (no message, no card).
+            if matches!(app.interaction_mode, app::InteractionMode::AutoAccept) {
+                let response = oneai_core::ApprovalResponse::Approved { modified_args: None };
+                let _ = item.response_tx.send(response);
             // Check if the tool is in the session allowlist
-            if app.session_allowlist.contains(&tool_name) {
+            } else if app.session_allowlist.contains(&tool_name) {
                 // Auto-approve for this session
                 let response = oneai_core::ApprovalResponse::Approved { modified_args: None };
                 let _ = item.response_tx.send(response);
@@ -837,6 +911,17 @@ fn handle_user_input_async(
 
     // Send to agent — run in a background task for async observer events
     app.add_message(ChatRole::User, trimmed.to_string());
+    // One-time tip on the first agent run: let the user know about mode switching.
+    if !app.mode_prompt_shown {
+        app.mode_prompt_shown = true;
+        app.add_message(ChatRole::System, "Tip: press Shift+Tab to cycle modes — Normal → Auto-accept (silent approval) → Plan (no tool execution).");
+    }
+    // Sync the interaction mode into the session before launching the agent loop
+    // (Plan mode blocks tool execution; Auto is handled at the approval layer).
+    let plan_mode = matches!(app.interaction_mode, app::InteractionMode::Plan);
+    rt.block_on(async {
+        session_state.lock().await.session.set_plan_mode(plan_mode);
+    });
     app.is_thinking = true;
     // Add a thinking bubble to show the agent is processing
     app.add_collapsed_message(ChatRole::Thinking, "Processing your request...");
@@ -1252,6 +1337,40 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             for call in calls {
                 let args_str = serde_json::to_string_pretty(&call.args)
                     .unwrap_or_else(|_| call.args.to_string());
+
+                // Dedup: in streaming mode the agent loop emits on_tool_calls
+                // twice for the same call — once during streaming (when the
+                // tool call is fully assembled) and again after the stream
+                // completes (agent_loop.rs). Without dedup we'd add TWO
+                // pending ToolInvocation cards; ToolResult only updates the
+                // last one, leaving a stale ⏳ "preparation" card next to the
+                // result card. Skip if a pending card for this call exists.
+                let call_id = call.id.clone();
+                let tool_name = call.name.clone();
+                let already_pending = app.messages.iter().any(|m| {
+                    if let ChatRole::ToolInvocation {
+                        call_id: cid, tool_name: tn, args, result, ..
+                    } = &m.role
+                    {
+                        if result.is_some() {
+                            return false;
+                        }
+                        // Match by call_id when the provider assigned one;
+                        // otherwise fall back to (tool_name, args) so empty-id
+                        // calls still dedup correctly.
+                        if !call_id.is_empty() {
+                            cid == &call_id
+                        } else {
+                            cid.is_empty() && tn == &tool_name && args == &args_str
+                        }
+                    } else {
+                        false
+                    }
+                });
+                if already_pending {
+                    continue;
+                }
+
                 // Add a unified ToolInvocation message — result is None (pending).
                 // When ToolResult arrives, we'll UPDATE this same message.
                 app.add_collapsed_message(
@@ -1301,16 +1420,12 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 }
                 msg.content = result_content.clone();
 
-                // Decide collapsed state based on result length:
-                // Short results (≤500 chars) → EXPAND (visible by default)
-                // Long results (>500 chars) → keep collapsed (user can expand)
-                // Pending → was already collapsed; now decide based on content
-                let is_file_op = is_file_operation_tool(&tool_name);
-                if success && result_content.len() <= 500 && !is_file_op {
-                    // Short non-file results → show inline (expanded)
-                    app.collapsed_ids.remove(&msg.id);
-                } else if is_file_op && result_content.len() <= 2000 {
-                    // File operations with reasonable content → show expanded
+                // Decide collapsed state from the result's line count:
+                // > COLLAPSE_THRESHOLD lines → collapsed (5-line preview + expand button)
+                // ≤ COLLAPSE_THRESHOLD lines → expanded (rendered in full, not collapsible)
+                if result_content.lines().count() > theme::COLLAPSE_THRESHOLD {
+                    app.collapsed_ids.insert(msg.id.clone());
+                } else {
                     app.collapsed_ids.remove(&msg.id);
                 }
                 // Invalidate render cache since content changed
@@ -1319,35 +1434,24 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             } else {
                 // No matching ToolInvocation message found — this can happen
                 // for /tool direct calls. Add a standalone result message.
+                // `add_message` consults `default_collapsed`, which collapses
+                // results longer than COLLAPSE_THRESHOLD lines (5-line preview)
+                // and renders shorter ones in full.
                 if output.success {
                     let result_content = if output.content.trim().is_empty() {
                         format!("{} completed successfully", tool_name)
                     } else {
                         output.content.clone()
                     };
-                    let is_file_op = is_file_operation_tool(&tool_name);
-                    let should_collapse = result_content.len() > 500 || is_file_op;
-                    if should_collapse {
-                        app.add_collapsed_message(
-                            ChatRole::ToolInvocation {
-                                call_id: call_id.clone(),
-                                tool_name: tool_name.clone(),
-                                args: String::new(),
-                                result: Some((true, result_content.clone())),
-                            },
-                            result_content,
-                        );
-                    } else {
-                        app.add_message(
-                            ChatRole::ToolInvocation {
-                                call_id: call_id.clone(),
-                                tool_name: tool_name.clone(),
-                                args: String::new(),
-                                result: Some((true, result_content.clone())),
-                            },
-                            result_content,
-                        );
-                    }
+                    app.add_message(
+                        ChatRole::ToolInvocation {
+                            call_id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            args: String::new(),
+                            result: Some((true, result_content.clone())),
+                        },
+                        result_content,
+                    );
                 } else {
                     app.add_message(
                         ChatRole::ToolInvocation {
@@ -1382,11 +1486,15 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // Flush any remaining buffered stream text before marking as done
             app.flush_stream_buffer();
             app.is_thinking = false;
-            // Remove placeholder thinking bubble if no real thinking content was received
-            // (model didn't use extended thinking, so the bubble is useless)
+            // Remove useless thinking bubbles: the "Processing your request..."
+            // placeholder (model never produced thinking) AND any empty thinking
+            // bubble (model emitted an empty Thinking block). Both leave blank
+            // cards that add clutter, so drop them on completion.
             app.messages.retain(|m| {
-                if m.role == ChatRole::Thinking && m.content == "Processing your request..." {
-                    false // remove placeholder
+                if m.role == ChatRole::Thinking
+                    && (m.content == "Processing your request..." || m.content.trim().is_empty())
+                {
+                    false // remove placeholder / empty thinking
                 } else {
                     true
                 }
@@ -1428,6 +1536,14 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.append_to_last_assistant(&text);
         }
         ObserverEvent::Thinking(text) => {
+            // Ignore empty/whitespace-only thinking fragments. Some providers
+            // (e.g. GLM/阿里百炼) emit an empty Thinking content block as a
+            // marker on rounds where the model produces no reasoning. Creating
+            // a bubble for it would leave a blank thinking card that never
+            // gets removed (it isn't the "Processing your request..." placeholder).
+            if text.trim().is_empty() {
+                return;
+            }
             // Scope thinking per-iteration: only append to an existing
             // thinking bubble if it is still the TRAILING message (nothing has
             // been appended after it this round). If an assistant answer or
@@ -1448,6 +1564,8 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                         // Append thinking fragment (streamed in chunks)
                         thinking_msg.content.push_str(&text);
                     }
+                    // Invalidate render cache since content changed
+                    app.render_cache.invalidate(&thinking_msg.id);
                     // Auto-expand thinking bubble when it has real content so user can see it
                     app.collapsed_ids.remove(&thinking_msg.id);
                 }

@@ -115,7 +115,7 @@ pub fn render_approval_card_inline(content: &str, max_width: usize, selected_ind
         let style = if is_selected {
             Style::default().fg(*color).add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
-            Style::default().fg(ratatui::style::Color::DarkGray)
+            Style::default().fg(LABEL_DIM)
         };
         // Add cursor bracket around selected option
         if is_selected {
@@ -150,7 +150,7 @@ pub fn render_approval_card_inline(content: &str, max_width: usize, selected_ind
     let hint_padding = inner_width.saturating_sub(hint.width());
     lines.push(Line::from(vec![
         Span::styled("│ ", Style::default().fg(APPROVAL_BORDER)),
-        Span::styled(hint, Style::default().fg(ratatui::style::Color::DarkGray)),
+        Span::styled(hint, Style::default().fg(LABEL_DIM)),
         Span::styled(" ".repeat(hint_padding), Style::default().fg(ratatui::style::Color::Reset)),
         Span::styled(" │", Style::default().fg(APPROVAL_BORDER)),
     ]));

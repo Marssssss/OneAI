@@ -507,6 +507,11 @@ pub struct AgentLoopConfig {
     /// paradigm switch, delegation, approval). When None, tracing is
     /// completely disabled (zero overhead).
     pub trace_context: Option<TraceContext>,
+    /// Plan mode — when true, tool execution is blocked entirely. Instead of
+    /// running tools, the loop injects a synthetic tool result telling the
+    /// model it must produce a step-by-step plan rather than executing. This
+    /// mirrors Claude Code's plan mode (read-only research/planning).
+    pub plan_mode: bool,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -528,6 +533,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("pricing_catalog", &self.pricing_catalog)
             .field("structured_output", &self.structured_output)
             .field("trace_context", &self.trace_context)
+            .field("plan_mode", &self.plan_mode)
             .finish()
     }
 }
@@ -565,6 +571,7 @@ impl Default for AgentLoopConfig {
             pricing_catalog: None,
             structured_output: None,
             trace_context: None,
+            plan_mode: false,
         }
     }
 }
@@ -1425,8 +1432,29 @@ impl AgentLoop {
                     // (the model's response with tool calls must precede tool results)
                     state.conversation.add_message(response.message.clone());
 
-                    // Now execute the filtered tool calls and feed results
-                    let results = if !filtered_calls.is_empty() {
+                    // Plan mode — block tool execution entirely. Instead of running
+                    // the tools, inject a synthetic result telling the model it must
+                    // produce a plan, not execute. The model then stops calling tools
+                    // and emits its plan as the final answer.
+                    let results: Vec<ToolCallResult> = if self.config.plan_mode && !filtered_calls.is_empty() {
+                        let plan_note = "Plan mode is active — tool execution is disabled. \
+                            Do not call tools; present a step-by-step plan in your final answer instead.";
+                        filtered_calls.iter().map(|call| {
+                            state.conversation.add_message(Message::tool_result(
+                                call.id.clone(),
+                                plan_note.to_string(),
+                            ));
+                            ToolCallResult {
+                                call_id: call.id.clone(),
+                                tool_name: call.name.clone(),
+                                output: oneai_core::ToolOutput {
+                                    success: true,
+                                    content: plan_note.to_string(),
+                                    error: None,
+                                },
+                            }
+                        }).collect()
+                    } else if !filtered_calls.is_empty() {
                         self.execute_tool_calls(filtered_calls).await?
                     } else {
                         // All calls were denied by hooks — no results to feed

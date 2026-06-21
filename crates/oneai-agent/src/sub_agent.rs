@@ -681,6 +681,7 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             pricing_catalog: None, // Sub-agents inherit pricing catalog from parent loop
             structured_output: None, // Sub-agents don't have structured output validation
             trace_context: None, // Sub-agents inherit trace from parent loop
+            plan_mode: false, // Sub-agents never run in plan mode
         };
 
         // Create a basic context assembler (no domain sources for sub-agents)
