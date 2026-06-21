@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation},
+    widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
     Frame,
 };
 
@@ -47,57 +47,60 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
     // Invalidate entire cache on width change (terminal resize)
     app.render_cache.check_width_change(width);
 
-    // Build text lines from messages using render cache
-    let mut lines: Vec<Line> = Vec::new();
+    let viewport_height = chat_rect.height as usize;
+
+    // ── Pass 1: ensure every message is rendered+cached and record each one's
+    //    line-count offset so we can compute the total content height and later
+    //    locate the visible window. This is O(messages) — it never clones the
+    //    cached lines, only reads `.len()`.
+    //
+    //    (The streaming/last-assistant message is re-rendered each frame since
+    //    its content mutates; everything else hits the cache.)
+    let mut seg_offsets: Vec<(usize, usize)> = Vec::with_capacity(app.messages.len());
+    let mut total_height = 0usize;
 
     for (i, msg) in app.messages.iter().enumerate() {
         let is_collapsed = app.collapsed_ids.contains(&msg.id);
-        let is_search_match = app.search_results.contains(&i);
         let is_streaming = app.is_thinking
             && i == app.messages.len() - 1
             && msg.role == ChatRole::Assistant;
-
         let hash = content_hash(&msg.content);
 
-        // Check if we can use cached lines
         let cached = app.render_cache.entries.get(&msg.id);
         let can_use_cache = !is_streaming
             && cached.is_some()
             && cached.unwrap().content_hash == hash
             && cached.unwrap().was_collapsed == is_collapsed;
 
-        let rendered = if can_use_cache {
-            // Use cached lines (clone them since we need owned Vec<Line>)
-            cached.unwrap().lines.clone()
-        } else {
-            // Re-render and cache the result
-            let rendered = render_message_lines(msg, is_collapsed, width, app.spinner_frame, app.approval_selected_index);
-            app.render_cache.entries.insert(msg.id.clone(), super::super::app::CachedMessage {
-                lines: rendered.clone(),
-                content_hash: hash,
-                was_collapsed: is_collapsed,
-            });
-            rendered
-        };
-
-        // If this message matches the search, add a highlight marker
-        if is_search_match && app.search_mode {
-            let mut highlighted = Vec::new();
-            for line in rendered {
-                let mut new_spans = vec![
-                    Span::styled("🔍 ", Style::default().fg(ratatui::style::Color::Yellow)),
-                ];
-                new_spans.extend(line.spans.into_iter());
-                highlighted.push(Line::from(new_spans));
-            }
-            lines.extend(highlighted);
-        } else {
-            lines.extend(rendered);
+        if !can_use_cache {
+            let rendered = render_message_lines(
+                msg,
+                is_collapsed,
+                width,
+                app.spinner_frame,
+                app.approval_selected_index,
+            );
+            app.render_cache.entries.insert(
+                msg.id.clone(),
+                super::super::app::CachedMessage {
+                    lines: rendered,
+                    content_hash: hash,
+                    was_collapsed: is_collapsed,
+                },
+            );
         }
+
+        let len = app
+            .render_cache
+            .entries
+            .get(&msg.id)
+            .map(|c| c.lines.len())
+            .unwrap_or(0);
+        seg_offsets.push((total_height, len));
+        total_height += len;
     }
 
-    let content_height_usize = lines.len();
-    let viewport_height = chat_rect.height as usize;
+    let content_height_usize = total_height;
 
     // Scroll architecture:
     // - chat_scroll_y: usize — lines scrolled from top (0=top, max=bottom)
@@ -119,10 +122,81 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
     app.content_height = content_height_usize;
     app.last_chat_rect = chat_rect;
 
+    // ── Pass 2: collect ONLY the lines inside the visible window.
+    //
+    //    This is the key performance fix for long histories / large model
+    //    outputs: instead of cloning the entire cached line set every frame and
+    //    letting `Paragraph::scroll` skip the off-screen rows (which still pays
+    //    the full clone + alloc cost), we slice to exactly the visible range.
+    //    Cost drops from O(total_lines) to O(visible_lines).
+    let visible_start = computed_scroll_y;
+    let visible_end = (computed_scroll_y + viewport_height).min(content_height_usize);
+
+    let mut lines: Vec<Line> =
+        Vec::with_capacity(visible_end.saturating_sub(visible_start) + 2);
+
+    if visible_end > visible_start {
+        for (i, msg) in app.messages.iter().enumerate() {
+            let (seg_start, seg_len) = seg_offsets[i];
+            if seg_len == 0 {
+                continue;
+            }
+            let seg_end = seg_start + seg_len;
+            // Skip messages entirely above or below the viewport.
+            if seg_end <= visible_start || seg_start >= visible_end {
+                continue;
+            }
+
+            let cached = match app.render_cache.entries.get(&msg.id) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Clamp the message's line range to the visible window.
+            let line_start = visible_start.saturating_sub(seg_start);
+            let line_end = visible_end.saturating_sub(seg_start).min(seg_len);
+            let visible_slice = &cached.lines[line_start..line_end];
+
+            // Search-match highlight is applied per visible line only.
+            let is_search_match = app.search_mode && app.search_results.contains(&i);
+            if is_search_match {
+                for line in visible_slice {
+                    let mut new_spans =
+                        vec![Span::styled("🔍 ", Style::default().fg(ratatui::style::Color::Yellow))];
+                    new_spans.extend(line.spans.iter().cloned());
+                    lines.push(Line::from(new_spans));
+                }
+            } else {
+                lines.extend(visible_slice.iter().cloned());
+            }
+        }
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────────
+    //
+    // `Clear` is essential for scroll correctness: ratatui's `Paragraph` only
+    // writes the graphemes each line actually contains — it does NOT clear the
+    // trailing cells beyond a line's content, and `buf.set_style` updates only
+    // the style, not the glyph. Because `Terminal::draw` diffs the new buffer
+    // against the previous frame and emits only changed cells, any cell the
+    // Paragraph didn't touch retains its previous-frame glyph.
+    //
+    // Many rendered lines are shorter than the viewport (blank separators,
+    // system/error rows, collapse hints, …). When scrolling, such a short line
+    // moves into a row previously held by a longer line, leaving the longer
+    // line's trailing glyphs on screen — the "scrolled-out content still shows
+    // in place" ghosting. Clearing the whole chat rect first guarantees every
+    // cell is reset to blank each frame, so the diff never sees stale glyphs.
+    //
+    // This is cheap: `Clear` writes to the in-memory buffer; the terminal only
+    // receives cells whose final value differs from the previous frame (which
+    // during a scroll is exactly the set of cells that genuinely changed).
+    f.render_widget(Clear, chat_rect);
+
     let text = Text::from(lines);
     let paragraph = Paragraph::new(text)
         .block(Block::default().borders(ratatui::widgets::Borders::NONE))
-        .scroll((computed_scroll_y as u16, 0));
+        .scroll((0, 0));
 
     f.render_widget(paragraph, chat_rect);
 
