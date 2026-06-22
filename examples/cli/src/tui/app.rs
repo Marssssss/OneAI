@@ -640,6 +640,10 @@ pub struct App {
     pub pending_plan: Option<(String, Vec<oneai_agent::PlanStep>, Option<tokio::sync::oneshot::Sender<bool>>)>,
     /// Selected option in the plan-approval UI (0=Accept, 1=Reject).
     pub plan_approval_selected_index: usize,
+    /// Vertical scroll offset of the plan-approval popup body.
+    /// Lets the user page through the full plan_text + steps that don't fit
+    /// the default compact window.
+    pub plan_approval_scroll: usize,
 }
 
 impl App {
@@ -717,6 +721,7 @@ impl App {
             plan_state: None,
             pending_plan: None,
             plan_approval_selected_index: 0,
+            plan_approval_scroll: 0,
         }
     }
 

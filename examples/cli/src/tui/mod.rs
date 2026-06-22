@@ -525,7 +525,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /context · /session · /paradigm · /domain · /compact · /wf · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /context · /session · /domain · /compact · /wf · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Shift+Tab=mode(Normal/Auto/Plan)\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
                 return;
             }
             "/tools" | "/t" => {
@@ -608,38 +608,6 @@ fn handle_user_input_async(
                     cost_est,
                     app.session_cost,
                 ));
-                return;
-            }
-            "/paradigm" => {
-                if parts.len() < 2 {
-                    app.add_message(ChatRole::System, format!(
-                        "Current paradigm: {}\nAvailable: ReAct, Plan, Reflect, Explore\nUsage: /paradigm <name>",
-                        paradigm_display_name(&app.active_paradigm),
-                    ));
-                    return;
-                }
-                let name = parts[1];
-                match name {
-                    "react" | "ReAct" => {
-                        app.active_paradigm = ParadigmKind::ReAct;
-                        app.add_message(ChatRole::System, "Switched to ReAct paradigm");
-                    }
-                    "plan" | "Plan" => {
-                        app.active_paradigm = ParadigmKind::Plan;
-                        app.add_message(ChatRole::System, "Switched to Plan paradigm");
-                    }
-                    "reflect" | "Reflect" => {
-                        app.active_paradigm = ParadigmKind::Reflect;
-                        app.add_message(ChatRole::System, "Switched to Reflect paradigm");
-                    }
-                    "explore" | "Explore" => {
-                        app.active_paradigm = ParadigmKind::Explore;
-                        app.add_message(ChatRole::System, "Switched to Explore paradigm");
-                    }
-                    _ => {
-                        app.add_message(ChatRole::Error, format!("Unknown paradigm: {}. Available: ReAct, Plan, Reflect, Explore", name));
-                    }
-                }
                 return;
             }
             "/domain" => {
@@ -1598,6 +1566,11 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 app.add_message(ChatRole::Error, msg_content);
             }
 
+            // The plan checklist belongs to this run. Now that the run is
+            // done, dismiss the persistent plan panel so it doesn't linger
+            // (a fresh run creates a new plan via task_create / exit_plan_mode).
+            app.plan_state = None;
+
             app.dirty = true; // Need redraw to stop spinner
         }
         ObserverEvent::StreamChunk(text) => {
@@ -1666,11 +1639,14 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // (handled in handle_plan_approval_key) sends it.
             app.pending_plan = Some((plan, steps, Some(reply_tx)));
             app.plan_approval_selected_index = 0;
+            app.plan_approval_scroll = 0;
             app.is_thinking = false;
             app.dirty = true;
         }
         ObserverEvent::Error(msg) => {
             app.is_thinking = false;
+            // Run ended (via error) — dismiss the plan panel too.
+            app.plan_state = None;
             app.add_message(ChatRole::Error, msg);
         }
         // ObserverEvent::ApprovalRequest comes from the observer trait,
@@ -1885,17 +1861,63 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
 ///
 /// ←/→ or Tab selects Accept/Reject; Enter confirms; Esc = reject. The
 /// decision is sent to the blocked AgentLoop via the oneshot.
+/// ↑↓/j/k/PageUp/PageDown/Home/End scroll the plan body so the user can read
+/// plans that overflow the compact default window.
 fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
     if key.kind != KeyEventKind::Press {
         return;
     }
     // 0 = Accept, 1 = Reject
     let count = 2usize;
+
+    // Scroll handling — only meaningful when there's a body to page through.
+    let scroll_max = |app: &App| -> usize {
+        let total = render::plan::build_plan_approval_lines(app).len();
+        let (_plan, steps, _tx) = match &app.pending_plan {
+            Some(p) => p,
+            None => return 0,
+        };
+        let steps_len = steps.len() as usize;
+        // Mirror draw_plan_approval's height cap (steps + 8, capped at 20) and
+        // subtract border + buttons row (3) for the visible body. The renderer
+        // clamps again, so this only needs to be a reasonable bound.
+        let est_visible = (steps_len + 8).min(20).saturating_sub(3);
+        total.saturating_sub(est_visible)
+    };
+
     match (key.modifiers, key.code) {
         (KeyModifiers::NONE, KeyCode::Left)
         | (KeyModifiers::NONE, KeyCode::Tab)
         | (KeyModifiers::NONE, KeyCode::Right) => {
             app.plan_approval_selected_index = (app.plan_approval_selected_index + 1) % count;
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::Up)
+        | (KeyModifiers::NONE, KeyCode::Char('j')) => {
+            app.plan_approval_scroll = app.plan_approval_scroll.saturating_sub(1);
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::Down)
+        | (KeyModifiers::NONE, KeyCode::Char('k')) => {
+            let max = scroll_max(app);
+            app.plan_approval_scroll = (app.plan_approval_scroll + 1).min(max);
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::PageUp) => {
+            app.plan_approval_scroll = app.plan_approval_scroll.saturating_sub(8);
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::PageDown) => {
+            let max = scroll_max(app);
+            app.plan_approval_scroll = (app.plan_approval_scroll + 8).min(max);
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::Home) => {
+            app.plan_approval_scroll = 0;
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::End) => {
+            app.plan_approval_scroll = scroll_max(app);
             app.dirty = true;
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
