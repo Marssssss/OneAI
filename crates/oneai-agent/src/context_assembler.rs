@@ -239,32 +239,20 @@ impl ContextAssembler {
                 }
             }
 
-            // Inject all context sources (full baseline)
+            // Inject all context sources as the full baseline.
+            // Refresh policies only gate *re*-injection on subsequent (incremental)
+            // epochs; on the baseline epoch every source with cached content is
+            // injected once, in priority order. (refresh_sources() populated the
+            // cache just before this call.)
             if !self.context_sources.is_empty() {
                 let mut sources: Vec<&Arc<dyn ContextSource>> = self.context_sources.iter().collect();
                 sources.sort_by_key(|s| s.priority());
 
                 for source in sources {
-                    use oneai_domain::context_source::RefreshPolicy;
-
-                    let should_load = match source.refresh_policy() {
-                        RefreshPolicy::EveryIteration => true,
-                        RefreshPolicy::OnceAtStart => !self.initial_load_done,
-                        RefreshPolicy::OnChange => {
-                            self.cached_context.contains_key(source.key())
-                        }
-                        RefreshPolicy::Periodic(_) => {
-                            self.cached_context.contains_key(source.key())
-                        }
-                        _ => true, // #[non_exhaustive] catch-all
-                    };
-
-                    if should_load {
-                        if let Some(content) = self.cached_context.get(source.key()) {
-                            if !content.is_empty() {
-                                let context_msg = format!("[Context: {}] {}", source.key(), content);
-                                conversation.add_message(oneai_core::Message::system(context_msg));
-                            }
+                    if let Some(content) = self.cached_context.get(source.key()) {
+                        if !content.is_empty() {
+                            let context_msg = format!("[Context: {}] {}", source.key(), content);
+                            conversation.add_message(oneai_core::Message::system(context_msg));
                         }
                     }
                 }
@@ -570,5 +558,141 @@ fn format_full_env_snapshot(snapshot: &EnvironmentSnapshot) -> String {
         String::new()
     } else {
         format!("[Environment baseline]: {}", parts.join("; "))
+    }
+}
+
+/// Build a runtime context block appended to the system prompt each session.
+///
+/// This guarantees the model always knows "today" (so it can reason about
+/// recency) and is explicitly told to reach for `web_search` / `web_fetch`
+/// when a question is time-sensitive, instead of answering from potentially
+/// stale training memory.
+///
+/// We append this to the system prompt directly (rather than relying solely on
+/// the `DateSource` context source) because: (1) the system prompt survives
+/// context compression better than an ad-hoc system message, and (2) it also
+/// carries the time-sensitive search guidance, which `DateSource` does not.
+pub fn runtime_context_block() -> String {
+    let now = chrono::Local::now();
+    format!(
+        "\n\n**Current date and time**: {} ({})\n\
+         \n**Time-sensitive questions (IMPORTANT)**: If the user asks about recent \
+         events, news, latest releases or library versions, current prices, live data, \
+         or any information that may have changed since your training, do NOT answer from \
+         memory — your knowledge has a cutoff. Call `web_search` first to discover current \
+         sources, then `web_fetch` to read the most promising results, and answer based on \
+         what you find. Only answer from your own knowledge when the topic is clearly stable \
+         and well within your training cutoff.",
+        now.format("%Y-%m-%d %H:%M:%S %:z"),
+        now.format("%A"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::LoopState;
+    use async_trait::async_trait;
+
+    /// A minimal context source for testing — returns a fixed string.
+    struct StubSource {
+        key: &'static str,
+        content: &'static str,
+    }
+
+    #[async_trait]
+    impl ContextSource for StubSource {
+        fn key(&self) -> &str { self.key }
+        async fn load(&self) -> Result<String> { Ok(self.content.to_string()) }
+        fn refresh_policy(&self) -> oneai_domain::context_source::RefreshPolicy {
+            // OnceAtStart is the policy most affected by the first-epoch bug —
+            // before the fix it was never injected at all.
+            oneai_domain::context_source::RefreshPolicy::OnceAtStart
+        }
+    }
+
+    fn env_snapshot() -> EnvironmentSnapshot {
+        EnvironmentSnapshot {
+            working_dir: PathBuf::from("/tmp/proj"),
+            platform: oneai_core::platform::Platform::Unknown,
+            available_tools: HashSet::from(["read_file".to_string()]),
+            git_status: Some("clean".to_string()),
+            modified_files: vec![],
+            created_files: vec![],
+            deleted_files: vec![],
+        }
+    }
+
+    /// Regression test for the Context Epoch first-epoch bug: the full baseline
+    /// (environment snapshot + all context sources, including OnceAtStart ones)
+    /// MUST be injected on the first assemble() call.
+    #[tokio::test]
+    async fn first_epoch_injects_full_baseline_and_sources() {
+        let sources: Vec<Arc<dyn ContextSource>> = vec![
+            Arc::new(StubSource { key: "stub", content: "STUB-BASELINE-CONTENT" }),
+        ];
+        let mut ca = ContextAssembler::with_context_sources(sources);
+
+        // Simulate the loop's ordering: refresh_sources -> set env_snapshot ->
+        // assemble -> update_snapshot. On the first call last_snapshot is None.
+        ca.refresh_sources().await.unwrap();
+        let mut state = LoopState::new("do something");
+        state.env_snapshot = Some(env_snapshot());
+
+        let conv = ca.assemble(&state).unwrap();
+        let text = conv.messages.iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Environment baseline is injected on first epoch.
+        assert!(text.contains("[Environment baseline]"), "env baseline missing on first epoch: {text}");
+        assert!(text.contains("/tmp/proj"), "working dir missing in env baseline: {text}");
+        // OnceAtStart context source is injected on first epoch (the bug dropped it).
+        assert!(text.contains("[Context: stub]"), "context source missing on first epoch: {text}");
+        assert!(text.contains("STUB-BASELINE-CONTENT"), "context source content missing: {text}");
+
+        // Record the snapshot AFTER assemble (mirrors the fixed loop ordering).
+        ca.update_snapshot(state.env_snapshot.clone().unwrap());
+
+        // Second epoch: incremental. OnceAtStart should NOT be re-injected,
+        // and with no env changes there is no diff message.
+        let mut state2 = LoopState::new("next turn");
+        state2.env_snapshot = Some(env_snapshot()); // identical snapshot -> empty diff
+        let conv2 = ca.assemble(&state2).unwrap();
+        let text2 = conv2.messages.iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text2.contains("STUB-BASELINE-CONTENT"),
+            "OnceAtStart source re-injected on incremental epoch: {text2}");
+    }
+
+    /// When the environment changes between epochs, the diff is injected.
+    #[tokio::test]
+    async fn incremental_epoch_injects_env_diff() {
+        let mut ca = ContextAssembler::new();
+        ca.refresh_sources().await.unwrap();
+        let mut s1 = LoopState::new("t1");
+        s1.env_snapshot = Some(env_snapshot());
+        let _ = ca.assemble(&s1).unwrap();
+        ca.update_snapshot(s1.env_snapshot.clone().unwrap());
+
+        // Second snapshot adds a tool -> diff should mention it.
+        let mut s2 = LoopState::new("t2");
+        let mut snap2 = env_snapshot();
+        snap2.available_tools.insert("web_search".to_string());
+        s2.env_snapshot = Some(snap2);
+        let conv = ca.assemble(&s2).unwrap();
+        let text = conv.messages.iter().map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("web_search") || text.contains("Added tools") || text.contains("Environment"),
+            "env diff not injected on change: {text}");
+    }
+
+    #[test]
+    fn runtime_context_block_has_date_and_search_guidance() {
+        let block = runtime_context_block();
+        assert!(block.contains("Current date and time"), "block: {block}");
+        assert!(block.contains("web_search"), "block should nudge web_search: {block}");
     }
 }

@@ -20,7 +20,7 @@ use oneai_core::PermissionLevel;
 use oneai_core::traits::Tool;
 use oneai_tool::{
     ShellTool, FileReadTool, FileEditTool, GrepTool, GlobTool,
-    FileListTool, NotebookEditTool, EnvironmentTool, WebFetchTool,
+    FileListTool, NotebookEditTool, EnvironmentTool, WebFetchTool, WebSearchTool,
     ApplyPatchTool,
 };
 
@@ -77,7 +77,13 @@ files you've modified and what decisions you've made.
 
 When you need to use a tool, output a tool call. When you have the final answer, \
 respond with just text without any tool calls. When a task is complex, you can \
-delegate it to a specialized sub-agent or switch to a planning paradigm.";
+delegate it to a specialized sub-agent or switch to a planning paradigm.
+
+**Current information**: Your knowledge has a training cutoff. For anything that may \
+have changed since then (recent news, latest library/framework versions, current \
+prices, live data, recent documentation), call `web_search` to find current sources \
+and `web_fetch` to read them — do not answer from memory. The current date/time is \
+appended to this prompt; use it to judge recency.";
 
 // ─── Coding Sub-Agent Type Definitions ─────────────────────────────────────────
 
@@ -182,6 +188,7 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
             Arc::new(NotebookEditTool::new()) as Arc<dyn Tool>,
             Arc::new(EnvironmentTool::new()) as Arc<dyn Tool>,
             Arc::new(WebFetchTool::new()) as Arc<dyn Tool>,
+            Arc::new(WebSearchTool::new()) as Arc<dyn Tool>,
         ],
 
         // Layer 1 supplement: Tool decorators — coding-specific descriptions
@@ -286,6 +293,18 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 - Do NOT use shell curl → use web_fetch (returns structured content)\n\
                 - Only use shell curl when you need raw binary data or streaming"
             ),
+            ToolDecorator::with_description(
+                "web_search",
+                "Search the web for current information. Returns titles, URLs, and \
+                snippets. Use this whenever a question is time-sensitive or may have \
+                changed since your training (recent news, latest releases/versions, \
+                current prices, live data, recent docs), then use web_fetch to read the \
+                most promising results.\n\n\
+                **RECOMMENDED** for fresh information:\n\
+                - For 'latest' / 'current' / 'recent' / 'new' questions → web_search first\n\
+                - Do NOT guess from memory for anything that may have changed\n\
+                - Combine web_search + web_fetch; cross-reference multiple results"
+            ),
         ],
 
         // Layer 2: Context sources — coding environment sensing
@@ -309,6 +328,8 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 "list_directory".to_string(),
                 "environment".to_string(),
                 "calculator".to_string(),
+                "web_search".to_string(),
+                "web_fetch".to_string(),
             ]),
             require_confirmation: HashSet::from([
                 "edit_file".to_string(),
@@ -818,8 +839,8 @@ mod tests {
         let pack = coding_pack("/tmp/test_project");
 
         assert_eq!(pack.name, "coding");
-        assert_eq!(pack.tools.len(), 10); // 9 original + ApplyPatchTool
-        assert_eq!(pack.tool_decorators.len(), 9); // 8 original + apply_patch
+        assert_eq!(pack.tools.len(), 11); // 9 original + ApplyPatchTool + WebSearchTool
+        assert_eq!(pack.tool_decorators.len(), 10); // 8 original + apply_patch + web_search
         assert_eq!(pack.context_sources.len(), 7); // 6 original + RepoMapSource
         assert!(!pack.system_prompt_template.is_empty());
     }

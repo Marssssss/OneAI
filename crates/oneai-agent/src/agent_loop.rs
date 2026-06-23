@@ -833,7 +833,15 @@ impl AgentLoop {
         let mut state = LoopState::new(task);
 
         if !state.conversation.messages.iter().any(|m| m.role == Role::System) {
-            state.conversation.add_message(Message::system(self.config.system_prompt.clone()));
+            // Append the runtime context block (current date/time + a nudge to use
+            // web_search for time-sensitive questions) so the model always knows
+            // "today" and reaches for search tools rather than stale memory.
+            let system_prompt = format!(
+                "{}{}",
+                self.config.system_prompt,
+                crate::context_assembler::runtime_context_block(),
+            );
+            state.conversation.add_message(Message::system(system_prompt));
         }
 
         self.run_loop(state, observer).await
@@ -853,7 +861,13 @@ impl AgentLoop {
         let mut state = LoopState::from_conversation(conversation, task);
 
         if !state.conversation.messages.iter().any(|m| m.role == Role::System) {
-            state.conversation.add_message(Message::system(self.config.system_prompt.clone()));
+            // See run_with_observer: append current date/time + search guidance.
+            let system_prompt = format!(
+                "{}{}",
+                self.config.system_prompt,
+                crate::context_assembler::runtime_context_block(),
+            );
+            state.conversation.add_message(Message::system(system_prompt));
         }
 
         self.run_loop(state, observer).await
@@ -982,6 +996,14 @@ impl AgentLoop {
             // but were never called from the loop. Now, each iteration takes a
             // snapshot, and the assembler injects the diff into context on the
             // next iteration (when last_snapshot differs from the current one).
+            //
+            // IMPORTANT ordering: we set `state.env_snapshot` here but do NOT yet
+            // store it as `last_snapshot`. assemble() (below) detects the first
+            // epoch via `last_snapshot.is_none()`; if we recorded the snapshot
+            // before assembling, the first epoch would never trigger and the full
+            // baseline (env snapshot + all context sources) would never be
+            // injected. We update_snapshot() *after* assemble so the next
+            // iteration diffs against this one.
             if self.config.detect_env_changes {
                 let tools_map = self.tools.read().await;
                 let tool_names: std::collections::HashSet<String> = tools_map.keys().cloned().collect();
@@ -989,15 +1011,18 @@ impl AgentLoop {
                     let ca = self.context_assembler.read().await;
                     ca.take_snapshot(&tool_names).await?
                 };
-                // Update the assembler's last_snapshot for next iteration's diff
-                {
-                    let mut ca = self.context_assembler.write().await;
-                    ca.update_snapshot(snapshot.clone());
-                }
                 state.env_snapshot = Some(snapshot);
             }
 
             let assembled = self.context_assembler.read().await.assemble(&state)?;
+
+            // 1c. Now record the snapshot as last_snapshot so the next iteration
+            // computes a diff against it (assemble above already saw None on the
+            // first iteration, so the baseline epoch was correctly detected).
+            if let Some(snapshot) = &state.env_snapshot {
+                let mut ca = self.context_assembler.write().await;
+                ca.update_snapshot(snapshot.clone());
+            }
             if self.context_budget.needs_compression(&assembled) {
                 state.conversation = self.context_budget.compress(assembled).await?;
             }
