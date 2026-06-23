@@ -10,3 +10,6 @@ Cargo.lock
 *.swo
 *~
 
+
+# macOS
+.DS_Store
