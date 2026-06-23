@@ -69,6 +69,26 @@ pub fn parse_instance_results(results: &str, instance_id: &str) -> Result<Sweben
     Err(format!("instance '{}' not found in harness results", instance_id))
 }
 
+/// Parse a per-instance `report.json` as written by the SWE-bench harness under
+/// `--modal true` (Modal/cloud mode).
+///
+/// That file is an object keyed by instance id, each value carrying the verdict:
+/// `{ "<instance_id>": { "resolved": true, "tests_status": {...}, ... } }`.
+/// (Non-modal / older harnesses write the `instance_results.jsonl` array form
+/// handled by `parse_instance_results` instead.)
+pub fn parse_instance_report(report_json: &str, instance_id: &str) -> Result<SwebenchVerdict, String> {
+    let value: serde_json::Value = serde_json::from_str(report_json)
+        .map_err(|e| format!("invalid harness report.json: {}", e))?;
+
+    let entry = value.get(instance_id).ok_or_else(|| {
+        format!("instance '{}' not found in harness report.json", instance_id)
+    })?;
+
+    let resolved = entry.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
+    let tests_status = entry.get("tests_status").cloned().unwrap_or(serde_json::Value::Null);
+    Ok(SwebenchVerdict { resolved, tests_status })
+}
+
 /// An `EvalJudge` backed by the external SWE-bench harness.
 ///
 /// Holds the per-instance metadata needed to invoke the harness. `judge()`
@@ -89,10 +109,14 @@ pub struct SwebenchJudge {
     pub python_path: String,
     /// Run the harness via Modal (`--modal true`) — avoids local docker.
     pub use_modal: bool,
-    /// Run id — the harness writes results under `evaluation_results/<run_id>/`.
+    /// Run id — the harness writes results keyed by this id.
     pub run_id: String,
     /// Dataset name (e.g. `princeton-nlp/SWE-bench_Lite`).
     pub dataset_name: String,
+    /// The `model_name_or_path` written into the prediction (also the harness's
+    /// per-model results subdir under `--modal true`). The per-instance report
+    /// lands at `logs/run_evaluation/<run_id>/<model_name>/<instance_id>/report.json`.
+    pub model_name: String,
     /// Directory to write the temp prediction file into.
     pub workspace_dir: PathBuf,
 }
@@ -107,17 +131,47 @@ impl SwebenchJudge {
         dataset_name: impl Into<String>,
         workspace_dir: PathBuf,
     ) -> Self {
+        Self::with_model_name(
+            instance_id, python_path, use_modal, run_id, dataset_name,
+            "oneai".to_string(), workspace_dir,
+        )
+    }
+
+    /// Like `new` but with an explicit `model_name` (controls the harness's
+    /// per-model results subdir and the `model_name_or_path` in the prediction).
+    pub fn with_model_name(
+        instance_id: impl Into<String>,
+        python_path: impl Into<String>,
+        use_modal: bool,
+        run_id: impl Into<String>,
+        dataset_name: impl Into<String>,
+        model_name: String,
+        workspace_dir: PathBuf,
+    ) -> Self {
         Self {
             instance_id: instance_id.into(),
             python_path: python_path.into(),
             use_modal,
             run_id: run_id.into(),
             dataset_name: dataset_name.into(),
+            model_name,
             workspace_dir,
         }
     }
 
-    /// Path where the harness writes per-instance results for this run.
+    /// Per-instance `report.json` written by the harness under `--modal true`:
+    /// `logs/run_evaluation/<run_id>/<model_name>/<instance_id>/report.json`.
+    /// (Relative to the harness's CWD — the CLI runs from the repo root.)
+    fn modal_report_path(&self) -> PathBuf {
+        PathBuf::from("logs/run_evaluation")
+            .join(&self.run_id)
+            .join(&self.model_name)
+            .join(&self.instance_id)
+            .join("report.json")
+    }
+
+    /// Per-run `instance_results.jsonl` written by the harness in non-modal mode:
+    /// `evaluation_results/<run_id>/instance_results.jsonl`.
     fn instance_results_path(&self) -> PathBuf {
         PathBuf::from(format!("evaluation_results/{}", self.run_id))
             .join("instance_results.jsonl")
@@ -184,19 +238,27 @@ impl EvalJudge for SwebenchJudge {
             ));
         }
 
-        // Read the per-instance results the harness produced.
-        let results_path = self.instance_results_path();
-        let results_text = match std::fs::read_to_string(&results_path) {
-            Ok(t) => t,
-            Err(e) => {
-                return EvalScore::zero(format!(
-                    "harness produced no instance_results ({}): {}",
-                    results_path.display(), e
-                ));
-            }
+        // Read the per-instance verdict the harness produced. Under `--modal
+        // true` it writes a keyed report.json per instance; in non-modal mode
+        // it writes a per-run instance_results.jsonl. Try the modal path
+        // first (it's the default), then fall back.
+        let verdict = if let Ok(report_text) = std::fs::read_to_string(self.modal_report_path()) {
+            parse_instance_report(&report_text, &self.instance_id)
+        } else {
+            let results_path = self.instance_results_path();
+            std::fs::read_to_string(&results_path)
+                .map_err(|e| {
+                    format!(
+                        "harness produced no results (tried {} and {}): {}",
+                        self.modal_report_path().display(),
+                        results_path.display(),
+                        e
+                    )
+                })
+                .and_then(|text| parse_instance_results(&text, &self.instance_id))
         };
 
-        match parse_instance_results(&results_text, &self.instance_id) {
+        match verdict {
             Ok(verdict) => {
                 let reason = if verdict.resolved {
                     format!("resolved: {}", summary_tests_status(&verdict.tests_status))
@@ -269,6 +331,41 @@ mod tests {
     fn test_parse_instance_results_empty() {
         let err = parse_instance_results("", "a").unwrap_err();
         assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn test_parse_instance_report_resolved() {
+        // The --modal form: object keyed by instance_id.
+        let report = r#"{
+            "astropy__astropy-12907": {
+                "patch_is_None": false,
+                "resolved": true,
+                "tests_status": {
+                    "FAIL_TO_PASS": {"success": ["t1", "t2"], "failure": []},
+                    "PASS_TO_PASS": {"success": ["t3"], "failure": []}
+                }
+            }
+        }"#;
+        let v = parse_instance_report(report, "astropy__astropy-12907").unwrap();
+        assert!(v.resolved);
+        assert_eq!(
+            summary_tests_status(&v.tests_status),
+            "FAIL_TO_PASS=2/2 pass, PASS_TO_PASS=1/1 pass"
+        );
+    }
+
+    #[test]
+    fn test_parse_instance_report_unresolved() {
+        let report = r#"{"x__y-1": {"resolved": false, "tests_status": {"FAIL_TO_PASS": {"success": [], "failure": ["t1"]}}}}"#;
+        let v = parse_instance_report(report, "x__y-1").unwrap();
+        assert!(!v.resolved);
+    }
+
+    #[test]
+    fn test_parse_instance_report_missing_instance() {
+        let report = r#"{"a": {"resolved": true, "tests_status": {}}}"#;
+        let err = parse_instance_report(report, "b").unwrap_err();
+        assert!(err.contains("not found"));
     }
 
     #[tokio::test]

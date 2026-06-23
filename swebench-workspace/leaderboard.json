@@ -1,0 +1,16 @@
+{
+  "instance_calls": 0,
+  "instance_cost": 0.0,
+  "cost": 0.0,
+  "resolved_count": 0,
+  "total_instances": 1,
+  "resolution_rate": 0.0,
+  "per_instance": [
+    {
+      "instance_id": "astropy__astropy-12907",
+      "api_calls": 0,
+      "cost": 0.0,
+      "resolved": false
+    }
+  ]
+}
