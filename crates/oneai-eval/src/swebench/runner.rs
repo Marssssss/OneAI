@@ -507,6 +507,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_runner_domain_pack_wires_cost_and_trace() {
+        // Regression guard for the domain-pack branch of session.rs: the
+        // swebench CLI builds the App with a CodingPack (domain_pack set), which
+        // takes the `if let Some(domain)` config branch. That branch previously
+        // omitted cost_tracker AND trace_context from AgentLoopConfig (the
+        // no-domain else branch had them) → the real swebench run reported
+        // cost $0 / tokens 0+0 AND infer=0ms×0 even though api_calls counted.
+        // This test mirrors the CLI's app construction (domain_pack + cost +
+        // trace) so the domain branch is actually exercised.
+        if !skip_if_no_git() {
+            eprintln!("skipping: git not installed");
+            return;
+        }
+        let (repo_path, base_commit) = make_fixture_repo();
+
+        let provider: std::sync::Arc<dyn oneai_core::traits::LlmProvider> =
+            std::sync::Arc::new(oneai_agent::mock_provider::MockProvider::always_answers(
+                "I would fix this but I'm a mock.",
+            ));
+
+        let project_dir = std::env::temp_dir()
+            .to_string_lossy()
+            .into_owned();
+        let coding_pack = oneai_domain::coding_pack(&project_dir);
+
+        let workspace = std::env::temp_dir().join(format!(
+            "oneai_swebench_dom_{}",
+            std::sync::atomic::AtomicU64::new(0)
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+
+        let app = oneai_app::AppBuilder::new()
+            .provider(provider)
+            .auto_approval_gate()
+            .default_parser()
+            .default_cost_tracker()
+            .trace_in_memory()
+            .domain_pack(coding_pack)
+            .build()
+            .await
+            .expect("app build");
+
+        let config = SwebenchRunnerConfig {
+            workspace_dir: workspace.clone(),
+            python_path: "/nonexistent/python".into(),
+            use_modal: true,
+            dataset_name: "princeton-nlp/SWE-bench_Lite".into(),
+            max_instances: 0,
+            run_id: "oneai-test".into(),
+        };
+        let runner = SwebenchRunner::new(app, config);
+
+        let instance = SwebenchInstance {
+            instance_id: "fixture__dom-1".into(),
+            repo: repo_path.to_string_lossy().into_owned(),
+            base_commit,
+            problem_statement: "bug: f returns wrong value".into(),
+            test_patch: String::new(),
+            fail_to_pass: String::new(),
+            pass_to_pass: String::new(),
+            version: "1.0".into(),
+        };
+
+        let report = runner.run(&[instance]).await.expect("run ok");
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&repo_path);
+
+        let r = &report.results[0];
+        assert!(r.error.is_none(), "unexpected error: {:?}", r.error);
+
+        // 成本 axis wired through the domain branch.
+        assert!(r.api_calls > 0, "domain branch should record api_calls");
+        assert!(r.prompt_tokens > 0, "domain branch should record tokens");
+
+        // 效率 axis: the domain branch must hand trace_context to the loop so
+        // LLM spans land in the tree (previously infer=0ms×0 in real runs).
+        let timing = r.metadata.get("timing").expect("timing metadata present");
+        let tb: TimingBreakdown =
+            serde_json::from_str(timing).expect("timing JSON parses");
+        assert!(tb.inference_calls >= 1,
+            "domain branch should produce ≥1 LLM span, got {}", tb.inference_calls);
+    }
+
+    #[tokio::test]
     async fn test_runner_missing_provider_errors() {
         // Build an App with NO provider → instance marked as error, not panic.
         let app = oneai_app::AppBuilder::new()
