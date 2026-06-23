@@ -18,7 +18,7 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 ratatui = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["bracketed-paste"] }
 oneai-core = { workspace = true }
 oneai-app = { workspace = true }
 oneai-tool = { workspace = true }

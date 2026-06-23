@@ -888,6 +888,35 @@ impl App {
     }
 
     /// Handle a key event. Returns Some(user_input) if a message should be sent.
+    /// Insert pasted text at the cursor without submitting.
+    ///
+    /// Bracketed-paste content arrives as a single `Event::Paste(String)` once
+    /// `EnableBracketedPaste` is active. Previously, multi-line pastes were split
+    /// into a keystream where every newline triggered `Enter` → send, so only
+    /// the first line went out for inference. This inserts the entire pasted
+    /// string at the cursor (in either SingleLine or vim mode) and never
+    /// submits — the user reviews then presses Enter.
+    pub fn handle_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.save_undo_state();
+        match self.input_mode {
+            InputMode::SingleLine => {
+                self.input.insert_str(self.input_cursor_pos, text);
+                self.input_cursor_pos += text.len();
+            }
+            InputMode::MultiLineVim { cursor_position, mode } => {
+                self.input.insert_str(cursor_position, text);
+                self.input_mode = InputMode::MultiLineVim {
+                    cursor_position: cursor_position + text.len(),
+                    mode,
+                };
+            }
+        }
+        self.dirty = true;
+    }
+
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Option<String> {
         // Only handle key press events (ignore release/repeat)
         if key.kind != KeyEventKind::Press {

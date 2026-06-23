@@ -45,49 +45,85 @@ pub fn draw_input(f: &mut Frame, rect: Rect, app: &App) {
 
 /// Draw single-line input mode with cursor indicator.
 fn draw_singleline_input(f: &mut Frame, rect: Rect, app: &App) {
-    let input_line = if app.is_thinking {
-        Line::from(vec![
-            Span::styled("oneai> ", Style::default().fg(INPUT_PROMPT_COLOR).add_modifier(Modifier::BOLD)),
-            Span::styled("waiting for response...", Style::default().fg(INPUT_TEXT_COLOR)),
-        ])
+    let prompt_style = Style::default().fg(INPUT_PROMPT_COLOR).add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(INPUT_TEXT_COLOR);
+    let cursor_style = Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK);
+    let prompt = "oneai> ";
+    // continuation lines indent to align under the prompt ("oneai> " = 7 cols)
+    let cont_indent = "       ";
+
+    let mut input_lines: Vec<Line> = Vec::new();
+
+    if app.is_thinking {
+        input_lines.push(Line::from(vec![
+            Span::styled(prompt, prompt_style),
+            Span::styled("waiting for response...", text_style),
+        ]));
     } else {
-        // Split text at cursor position for mid-line cursor display
-        let cursor_pos = app.input_cursor_pos.min(app.input.len());
-        let before_cursor = &app.input[..cursor_pos];
-        let after_cursor = &app.input[cursor_pos..];
-        // The character under/after cursor (highlighted in insert style)
-        let cursor_char = after_cursor.chars().next();
-        let mut spans = vec![
-            Span::styled("oneai> ", Style::default().fg(INPUT_PROMPT_COLOR).add_modifier(Modifier::BOLD)),
-            Span::styled(before_cursor, Style::default().fg(INPUT_TEXT_COLOR)),
-        ];
-        if let Some(ch) = cursor_char {
-            // Show blinking cursor before the character
-            spans.push(Span::styled("█", Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK)));
-            // Show the character after cursor
-            let remaining_after_char = &after_cursor[ch.len_utf8()..];
-            spans.push(Span::styled(format!("{}{}", ch, remaining_after_char), Style::default().fg(INPUT_TEXT_COLOR)));
-        } else {
-            // Cursor is at the end — show blinking block
-            spans.push(Span::styled("█", Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK)));
+        // Multi-line input is now possible (Ctrl+Enter, or bracketed-paste of
+        // text containing newlines). A single `Line` whose span text holds '\n'
+        // is NOT split by ratatui — the embedded newline leaks below the input
+        // box into the sidebar. Split the input into one `Line` per '\n' and
+        // place the cursor block on the visual line that holds input_cursor_pos.
+        let input = &app.input;
+        let cursor_pos = app.input_cursor_pos.min(input.len());
+
+        // byte offset where each visual line starts (splitting on '\n')
+        let mut line_starts: Vec<usize> = vec![0];
+        for (i, b) in input.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
         }
-        Line::from(spans)
-    };
+        // which visual line holds the cursor, and the byte column within it
+        let cursor_line = input[..cursor_pos].bytes().filter(|&b| b == b'\n').count();
+        let line_start = line_starts[cursor_line];
+        let col = cursor_pos - line_start;
+
+        for li in 0..line_starts.len() {
+            let start = line_starts[li];
+            let end = if li + 1 < line_starts.len() {
+                line_starts[li + 1] - 1 // exclude the '\n'
+            } else {
+                input.len()
+            };
+            let line_content = &input[start..end];
+            let prefix = if li == 0 { prompt } else { cont_indent };
+            let mut spans: Vec<Span> = vec![Span::styled(prefix, prompt_style)];
+
+            if li == cursor_line {
+                let split = col.min(line_content.len());
+                let before = &line_content[..split];
+                let rest = &line_content[split..];
+                if !before.is_empty() {
+                    spans.push(Span::styled(before, text_style));
+                }
+                if let Some(ch) = rest.chars().next() {
+                    spans.push(Span::styled("█", cursor_style));
+                    let remaining = &rest[ch.len_utf8()..];
+                    spans.push(Span::styled(format!("{}{}", ch, remaining), text_style));
+                } else {
+                    spans.push(Span::styled("█", cursor_style));
+                }
+            } else {
+                spans.push(Span::styled(line_content, text_style));
+            }
+            input_lines.push(Line::from(spans));
+        }
+    }
 
     let mut hint_spans = mode_badge_spans(app);
     hint_spans.push(Span::styled(
         "[Enter=send Esc=vim Ctrl+C=quit Tab=sidebar ←→=cursor  Shift+Tab=mode]",
         Style::default().fg(INPUT_HINT_COLOR),
     ));
-    let hint_line = Line::from(hint_spans);
-
-    let input_text = Text::from(vec![input_line, hint_line]);
+    input_lines.push(Line::from(hint_spans));
 
     let input_block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(INPUT_BORDER));
 
-    let paragraph = Paragraph::new(input_text)
+    let paragraph = Paragraph::new(Text::from(input_lines))
         .block(input_block);
 
     f.render_widget(paragraph, rect);

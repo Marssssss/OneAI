@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -60,6 +60,7 @@ pub fn run_tui(
             // Try to restore terminal state before printing the panic
             let _ = disable_raw_mode();
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+            let _ = std::io::stdout().execute(DisableBracketedPaste);
             let _ = std::io::stdout().execute(LeaveAlternateScreen);
             // Call the original hook to print the panic message
             hook(panic_info);
@@ -71,6 +72,10 @@ pub fn run_tui(
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    // Bracketed paste: pasted text arrives as one Event::Paste instead of a
+    // stream of keystrokes. Without it, multi-line pastes submit on the first
+    // newline (each Enter triggers send). Pair with DisableBracketedPaste on exit.
+    std::io::stdout().execute(EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -175,6 +180,7 @@ pub fn run_tui(
     // Restore terminal
     disable_raw_mode()?;
     crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
+    let _ = std::io::stdout().execute(DisableBracketedPaste);
     std::io::stdout().execute(LeaveAlternateScreen)?;
 
     result
@@ -192,6 +198,10 @@ fn dispatch_event(
     match event {
         Event::Key(key) => handle_key_event(app, key, session_state, observer_tx, rt, interrupt_slot),
         Event::Mouse(mouse) => handle_mouse_event(app, mouse),
+        // Bracketed paste: insert the whole pasted string at the cursor without
+        // submitting. Without this arm, paste falls into the `_` catch-all and is
+        // dropped (but bracketed paste already prevents the keystream-split bug).
+        Event::Paste(text) => app.handle_paste(&text),
         _ => {}
     }
 }
