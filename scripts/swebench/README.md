@@ -92,7 +92,7 @@ patch means the agent didn't edit anything.
 ### 4. Judge it with SWE-bench
 
 ```bash
-python -m swebench.harness.run_evaluation \
+python3 -m swebench.harness.run_evaluation \
     --dataset_name princeton-nlp/SWE-bench_Lite \
     --predictions_path predictions.jsonl \
     --max_workers 1 \
