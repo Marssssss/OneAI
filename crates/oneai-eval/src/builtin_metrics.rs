@@ -426,6 +426,52 @@ impl EvalMetric for LlmJudgeMetric {
     }
 }
 
+// ─── CustomJudgeMetric ────────────────────────────────────────────────────
+
+/// Metric that delegates scoring to an `ExpectedOutput::Custom` judge.
+///
+/// `ExpectedOutput::Custom` carries an `EvalJudge` trait object, but without a
+/// metric to dispatch to it the variant was previously dead code. This metric
+/// completes that wiring: for `Custom` cases it calls `judge.judge(input,
+/// actual)` and returns the judge's `EvalScore` unchanged. For all other
+/// `ExpectedOutput` variants it returns a "not applicable" zero score (mirrors
+/// the other built-in metrics' behavior for non-matching variants).
+///
+/// This is the metric SWE-bench's external judge rides on — each instance's
+/// `EvalCase` carries a `SwebenchJudge` via the `Custom` variant, and this
+/// metric invokes it so the `resolved` verdict becomes an `EvalScore`.
+pub struct CustomJudgeMetric;
+
+#[async_trait]
+impl EvalMetric for CustomJudgeMetric {
+    fn name(&self) -> &str { "custom_judge" }
+
+    fn description(&self) -> &str {
+        "Delegates scoring to a user-supplied EvalJudge via ExpectedOutput::Custom"
+    }
+
+    async fn score(&self, input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore {
+        match expected {
+            ExpectedOutput::Custom { judge } => judge.judge(input, actual).await,
+            ExpectedOutput::Exact { .. } => {
+                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Exact expected output", false)
+            }
+            ExpectedOutput::Contains { .. } => {
+                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Contains expected output", false)
+            }
+            ExpectedOutput::Regex { .. } => {
+                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Regex expected output", false)
+            }
+            ExpectedOutput::LlmJudge { .. } => {
+                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for LlmJudge expected output", false)
+            }
+            ExpectedOutput::Trajectory { .. } => {
+                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Trajectory expected output", false)
+            }
+        }
+    }
+}
+
 // ─── CompositeMetric ─────────────────────────────────────────────────────
 
 /// A metric that combines multiple sub-metrics with weighted averaging.
@@ -507,6 +553,7 @@ impl EvalMetric for CompositeMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval_metric::EvalJudge;
 
     #[tokio::test]
     async fn test_exact_match_pass() {
@@ -671,5 +718,35 @@ mod tests {
         ).await;
         assert!(!score.passed);
         assert!(score.reason.contains("No LLM provider"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_judge_dispatches() {
+        // A tiny judge: passes if the actual output contains "ok".
+        struct OkJudge;
+        #[async_trait]
+        impl EvalJudge for OkJudge {
+            async fn judge(&self, _input: &str, actual: &str) -> EvalScore {
+                EvalScore::from_bool(actual.contains("ok"), "checked 'ok'")
+            }
+        }
+
+        let metric = CustomJudgeMetric;
+        let expected = ExpectedOutput::Custom { judge: Arc::new(OkJudge) };
+
+        let pass = metric.score("in", "looks ok to me", &expected).await;
+        assert!(pass.passed);
+        assert_eq!(pass.value, 1.0);
+
+        let fail = metric.score("in", "nope", &expected).await;
+        assert!(!fail.passed);
+    }
+
+    #[tokio::test]
+    async fn test_custom_judge_not_applicable() {
+        let metric = CustomJudgeMetric;
+        let score = metric.score("in", "out", &ExpectedOutput::exact("x")).await;
+        assert!(!score.passed);
+        assert!(score.reason.contains("not applicable"));
     }
 }

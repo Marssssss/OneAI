@@ -55,6 +55,12 @@ pub struct EvalResult {
     #[serde(default)]
     pub completion_tokens: u64,
 
+    /// Free-form per-result metadata (e.g. SWE-bench `patch` / `tests_status` /
+    /// `base_commit`). Backward-compatible key-value store so domain-specific
+    /// runners can stash side data without adding typed fields here.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+
     /// Error that occurred during execution (if any).
     #[serde(default)]
     pub error: Option<String>,
@@ -74,6 +80,7 @@ impl EvalResult {
             api_calls: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            metadata: HashMap::new(),
             error: None,
         }
     }
@@ -102,6 +109,17 @@ impl EvalResult {
             metric_name: metric_name.into(),
             score,
         });
+    }
+
+    /// Set a metadata key-value pair (e.g. `patch`, `resolved`, `tests_status`).
+    pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.metadata.insert(key.into(), value.into());
+    }
+
+    /// Whether a named metric passed (false if no such metric exists).
+    pub fn metric_passed(&self, metric_name: &str) -> bool {
+        self.scores.iter()
+            .any(|ms| ms.metric_name == metric_name && ms.score.passed)
     }
 }
 
@@ -313,6 +331,7 @@ mod tests {
         assert_eq!(result.api_calls, 0);
         assert_eq!(result.prompt_tokens, 0);
         assert_eq!(result.completion_tokens, 0);
+        assert!(result.metadata.is_empty());
     }
 
     #[test]

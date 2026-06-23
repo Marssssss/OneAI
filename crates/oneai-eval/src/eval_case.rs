@@ -11,8 +11,11 @@
 //! unit tests and fuzzy LLM-based quality assessments.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+
+use crate::eval_metric::EvalJudge;
 
 
 // ─── EvalCase ────────────────────────────────────────────────────────────
@@ -99,7 +102,7 @@ impl EvalCase {
 ///
 /// The `#[non_exhaustive]` annotation ensures new evaluation strategies can be
 /// added in future versions without breaking downstream code.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum ExpectedOutput {
     /// Exact string match — the output must equal this string exactly.
@@ -149,10 +152,13 @@ pub enum ExpectedOutput {
     /// Custom evaluation — uses a user-defined `EvalJudge` implementation.
     ///
     /// This variant is NOT serializable. It's for programmatic use only.
-    /// For serializable configs, use one of the other variants.
+    /// For serializable configs, use one of the other variants. The custom
+    /// serde impl (`expected_output_serde`) emits a placeholder for this
+    /// variant and deserializes it back as an empty `Exact` — no serde
+    /// attribute is needed on the field (one was previously present and
+    /// incorrectly compiled the field out via `#[cfg]`).
     Custom {
         /// The custom judge implementation.
-        #[cfg(skip_serde)] // This field is handled manually in serde
         judge: Arc<dyn EvalJudge>,
     },
 }
@@ -196,6 +202,37 @@ impl ExpectedOutput {
         Self::Trajectory {
             expected_tools: expected_tools.into_iter().map(Into::into).collect(),
             max_iterations,
+        }
+    }
+}
+
+// ─── Debug impl for ExpectedOutput ────────────────────────────────────────
+
+// Manual (rather than `#[derive(Debug)]`) because the `Custom` variant holds an
+// `Arc<dyn EvalJudge>` and `EvalJudge` deliberately has no `Debug` supertrait —
+// adding one would be a breaking change for external implementors under the
+// v0.2.0 API-stability commitment. We render `Custom` opaquely instead.
+impl std::fmt::Debug for ExpectedOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExpectedOutput::Exact { answer } => f.debug_struct("Exact").field("answer", answer).finish(),
+            ExpectedOutput::Contains { substrings, case_sensitive } => f
+                .debug_struct("Contains")
+                .field("substrings", substrings)
+                .field("case_sensitive", case_sensitive)
+                .finish(),
+            ExpectedOutput::Regex { pattern } => f.debug_struct("Regex").field("pattern", pattern).finish(),
+            ExpectedOutput::LlmJudge { rubric, min_score } => f
+                .debug_struct("LlmJudge")
+                .field("rubric", rubric)
+                .field("min_score", min_score)
+                .finish(),
+            ExpectedOutput::Trajectory { expected_tools, max_iterations } => f
+                .debug_struct("Trajectory")
+                .field("expected_tools", expected_tools)
+                .field("max_iterations", max_iterations)
+                .finish(),
+            ExpectedOutput::Custom { .. } => f.debug_struct("Custom").finish_non_exhaustive(),
         }
     }
 }

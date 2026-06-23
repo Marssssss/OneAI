@@ -32,8 +32,13 @@ two glue scripts.
 
 | Script | What it does |
 |---|---|
+| `export_dataset.py` | Export a SWE-bench split (Lite/Verified) to a local JSONL — the `--dataset` file `oneai eval swebench` consumes. Requires `pip install datasets`. |
 | `fetch_instance.py` | Pull a Lite instance's `repo` / `base_commit` / `problem_statement` from HuggingFace. Prints the `git clone`+`checkout` commands and the issue text to paste into the TUI. |
 | `make_prediction.py` | Turn the agent's `git diff` (or a saved patch file) into the SWE-bench JSONL. |
+
+`export_dataset.py` is the phase-2 bridge: it materializes the dataset locally
+so the Rust runner does no dataset-server networking. `fetch_instance.py` /
+`make_prediction.py` remain the phase-1 manual single-instance tools.
 
 Both are standalone Python — phase 1 deliberately stays outside the Rust
 workspace. Phase 2 will fold instance loading + prediction export into

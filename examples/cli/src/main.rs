@@ -245,6 +245,40 @@ enum EvalAction {
         /// Suite name
         name: String,
     },
+    /// Run SWE-bench instances (能力×成本×效率 three-axis eval).
+    ///
+    /// Clones each instance's repo at base_commit, drives the agent on the
+    /// problem statement, captures `git diff` as the patch, and judges it via
+    /// the external SWE-bench harness (Python subprocess).
+    Swebench {
+        /// Path to a SWE-bench JSONL dataset (instance rows).
+        #[arg(long)]
+        dataset: String,
+        /// Comma-separated instance ids to run (default: all in the dataset).
+        #[arg(long)]
+        instances: Option<String>,
+        /// Workspace dir for cloned repos + artifacts (default ./swebench-workspace).
+        #[arg(long, default_value = "./swebench-workspace")]
+        workspace: String,
+        /// Python interpreter with `swebench` installed (default ~/.venvs/swebench/bin/python).
+        #[arg(long)]
+        python: Option<String>,
+        /// Run the judge harness via Modal (default true; set false for local docker).
+        #[arg(long, default_value_t = true)]
+        modal: bool,
+        /// Dataset name passed to the harness (e.g. princeton-nlp/SWE-bench_Lite).
+        #[arg(long, default_value = "princeton-nlp/SWE-bench_Lite")]
+        dataset_name: String,
+        /// Cap on number of instances to run (0 = no cap).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        /// Output format (markdown, json, compact).
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        /// Run id for the SWE-bench harness (results land in evaluation_results/<run_id>/).
+        #[arg(long, default_value = "oneai")]
+        run_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -649,6 +683,30 @@ fn main() {
                 EvalAction::Score { name } => {
                     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
                     rt.block_on(cmd_eval::cmd_eval_score(&name));
+                }
+                EvalAction::Swebench {
+                    dataset,
+                    instances,
+                    workspace,
+                    python,
+                    modal,
+                    dataset_name,
+                    limit,
+                    format,
+                    run_id,
+                } => {
+                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                    rt.block_on(cmd_eval::cmd_eval_swebench(
+                        &dataset,
+                        instances.as_deref(),
+                        &workspace,
+                        python.as_deref(),
+                        modal,
+                        &dataset_name,
+                        limit,
+                        &format,
+                        &run_id,
+                    ));
                 }
             }
         }

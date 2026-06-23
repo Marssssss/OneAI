@@ -50,6 +50,7 @@ pub mod eval_runner;
 pub mod builtin_metrics;
 pub mod builtin_suites;
 pub mod report_format;
+pub mod swebench;
 
 pub use eval_case::*;
 pub use eval_metric::*;

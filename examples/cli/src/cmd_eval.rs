@@ -11,6 +11,10 @@ use oneai_eval::{
     EvalRunner, ScoreOnlyRunner,
     SuiteRegistry,
     builtin_suites,
+    swebench::{
+        load_instances_filtered, render_swebench_leaderboard, write_prediction_jsonl,
+        SwebenchRunner, SwebenchRunnerConfig,
+    },
 };
 
 use crate::config::OneaiConfig;
@@ -114,4 +118,140 @@ pub async fn cmd_eval_score(suite_name: &str) {
     let report = ScoreOnlyRunner::score(&cases, &metrics, &suite.name).await;
 
     println!("{}", report.to_markdown());
+}
+
+/// Run SWE-bench instances — the three-axis eval (resolved × cost × efficiency).
+///
+/// Loads instances from a local JSONL dataset, clones each repo at base_commit,
+/// drives the agent on the problem statement, captures `git diff` as the patch,
+/// and judges it via the external SWE-bench harness. Writes the prediction
+/// JSONL + leaderboard JSON into the workspace alongside the report.
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_eval_swebench(
+    dataset: &str,
+    instances: Option<&str>,
+    workspace: &str,
+    python: Option<&str>,
+    modal: bool,
+    dataset_name: &str,
+    limit: usize,
+    format: &str,
+    run_id: &str,
+) {
+    // Load instances (optionally filtered by id list).
+    let ids: Vec<String> = instances
+        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+        .unwrap_or_default();
+    let dataset_path = std::path::Path::new(dataset);
+    let all_instances = load_instances_filtered(dataset_path, &ids);
+    if all_instances.is_empty() {
+        eprintln!(
+            "No instances loaded from '{}' (filter: {:?}). \
+             Download the SWE-bench dataset JSONL or use scripts/swebench/fetch_instance.py.",
+            dataset, ids,
+        );
+        std::process::exit(1);
+    }
+    let runnable = all_instances.iter().filter(|i| i.is_runnable()).count();
+    println!(
+        "SWE-bench: loaded {} instances ({} runnable) from {}",
+        all_instances.len(),
+        runnable,
+        dataset_path.display(),
+    );
+
+    // Build the provider — required (real agent = real cost).
+    let config = OneaiConfig::load_or_default();
+    let provider_config = config.to_model_config_with_overrides(None);
+    if provider_config.is_none() {
+        eprintln!("Error: No LLM provider configured for SWE-bench eval.");
+        eprintln!("Set ONEAI_API_KEY or configure ~/.oneai/config.toml");
+        std::process::exit(1);
+    }
+    let model_config = provider_config.unwrap();
+    let provider = oneai_provider::ProviderFactory::create(model_config);
+
+    // CodingPack gives read_file/edit_file/grep/glob/shell — what the agent
+    // needs to navigate + edit a real repo. Cost tracker + trace wire the
+    // 成本 / 效率 axes; auto-approval so the run is unattended.
+    let project_dir = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .to_string_lossy()
+        .into_owned();
+    let coding_pack = oneai_domain::coding_pack(&project_dir);
+
+    let app = oneai_app::AppBuilder::new()
+        .provider(Arc::from(provider))
+        .auto_approval_gate()
+        .default_parser()
+        .default_cost_tracker()
+        .trace_in_memory()
+        .domain_pack(coding_pack)
+        .build()
+        .await
+        .expect("App build should succeed");
+
+    let python_path = python
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{}/.venvs/swebench/bin/python", home)
+        });
+
+    let runner_config = SwebenchRunnerConfig {
+        workspace_dir: std::path::PathBuf::from(workspace),
+        python_path,
+        use_modal: modal,
+        dataset_name: dataset_name.to_string(),
+        max_instances: limit,
+        run_id: run_id.to_string(),
+    };
+
+    println!(
+        "Workspace: {} | python: {} | modal: {} | dataset: {} | run_id: {}",
+        runner_config.workspace_dir.display(),
+        runner_config.python_path,
+        runner_config.use_modal,
+        runner_config.dataset_name,
+        runner_config.run_id,
+    );
+
+    let runner = SwebenchRunner::new(app, runner_config);
+    let report = runner
+        .run(&all_instances)
+        .await
+        .expect("SWE-bench run should succeed");
+
+    // Write artifacts into the workspace.
+    let ws = std::path::Path::new(workspace);
+    let _ = std::fs::create_dir_all(ws);
+    let predictions_path = ws.join("predictions.jsonl");
+    let leaderboard_path = ws.join("leaderboard.json");
+    match write_prediction_jsonl(&report, &predictions_path) {
+        Ok(n) => println!("Wrote {} prediction(s) → {}", n, predictions_path.display()),
+        Err(e) => eprintln!("Warning: could not write predictions: {}", e),
+    }
+    let leaderboard = render_swebench_leaderboard(&report);
+    match serde_json::to_string_pretty(&leaderboard) {
+        Ok(json) => {
+            let _ = std::fs::write(&leaderboard_path, json);
+            println!(
+                "Leaderboard: {}/{} resolved ({:.1}%) | cost ${:.4} | {} api calls → {}",
+                leaderboard.resolved_count,
+                leaderboard.total_instances,
+                leaderboard.resolution_rate * 100.0,
+                leaderboard.instance_cost,
+                leaderboard.instance_calls,
+                leaderboard_path.display(),
+            );
+        }
+        Err(e) => eprintln!("Warning: could not serialize leaderboard: {}", e),
+    }
+
+    // Report.
+    match format {
+        "json" => println!("{}", report.to_json().unwrap()),
+        "compact" => println!("{}", oneai_eval::render_compact(&report)),
+        "markdown" | _ => println!("{}", report.to_markdown()),
+    }
 }
