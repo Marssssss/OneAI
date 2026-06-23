@@ -19,6 +19,13 @@ Cargo.lock
 # Add additional cloned repo dirs here as needed.
 astropy/
 predictions*.jsonl
+*.prediction.jsonl
 oneai.*.json
 evaluation_results/
 logs/
+# Eval workspace: cloned repos (each is its own git repo — must never be
+# tracked, or they land as corrupt embedded gitlinks) + per-run artifacts.
+swebench-workspace/
+# Downloaded dataset (export_dataset.py output — 300 rows, regenerable).
+swe_bench_lite.jsonl
+swe_bench_verified.jsonl
