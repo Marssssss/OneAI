@@ -47,6 +47,14 @@ pub struct EvalResult {
     #[serde(default)]
     pub api_calls: u64,
 
+    /// How many of the API calls had **estimated** (client-side) token counts
+    /// rather than provider-reported usage. Non-zero means the provider returned
+    /// no usage in (streaming) responses and the loop counted tokens locally —
+    /// so cost/tokens for those calls are approximations. Surfaced so reports
+    /// can flag that part of the cost axis is estimated.
+    #[serde(default)]
+    pub estimated_calls: u64,
+
     /// Prompt tokens consumed by this case.
     #[serde(default)]
     pub prompt_tokens: u64,
@@ -78,6 +86,7 @@ impl EvalResult {
             duration_ms: 0,
             cost_usd: 0.0,
             api_calls: 0,
+            estimated_calls: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
             metadata: HashMap::new(),

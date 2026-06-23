@@ -99,6 +99,15 @@ pub struct UsageRecord {
     /// When this call occurred.
     pub timestamp: DateTime<Utc>,
 
+    /// Whether the token counts are **client-side estimates** rather than the
+    /// provider's reported usage. This is `true` when the provider returned no
+    /// usage in its (streaming) response — common for OpenAI-compatible
+    /// providers that don't send `stream_options` (e.g. GLM). In that case the
+    /// loop falls back to counting tokens locally with the `TokenCounter`, and
+    /// marks the record so reports can distinguish real usage from estimates.
+    #[serde(default)]
+    pub is_estimated: bool,
+
     /// Additional metadata (e.g., embedding cost, tool call type).
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -122,6 +131,7 @@ impl UsageRecord {
             completion_tokens,
             cost_usd,
             timestamp: Utc::now(),
+            is_estimated: false,
             metadata: HashMap::new(),
         }
     }
@@ -149,6 +159,7 @@ impl UsageRecord {
             completion_tokens,
             cost_usd,
             timestamp,
+            is_estimated: false,
             metadata,
         }
     }
@@ -174,6 +185,17 @@ impl UsageRecord {
         self.metadata.insert(key.into(), value.into());
         self
     }
+
+    /// Mark this record's token counts as client-side estimates (and supply the
+    /// estimated token/cost values). Used when the provider returned no usage
+    /// and the loop counted tokens locally.
+    pub fn estimated(mut self, prompt_tokens: u32, completion_tokens: u32, cost_usd: f64) -> Self {
+        self.prompt_tokens = prompt_tokens;
+        self.completion_tokens = completion_tokens;
+        self.cost_usd = cost_usd;
+        self.is_estimated = true;
+        self
+    }
 }
 
 // ─── CostSummary ─────────────────────────────────────────────────────────────
@@ -197,6 +219,11 @@ pub struct CostSummary {
     /// Number of inference calls.
     pub call_count: u64,
 
+    /// Number of calls whose token counts are client-side estimates (provider
+    /// returned no usage). Lets reports flag that part of the cost is estimated.
+    #[serde(default)]
+    pub estimated_call_count: u64,
+
     /// Average cost per call in USD.
     pub avg_cost_per_call: f64,
 
@@ -216,6 +243,7 @@ impl CostSummary {
             completion_tokens: 0,
             total_cost_usd: 0.0,
             call_count: 0,
+            estimated_call_count: 0,
             avg_cost_per_call: 0.0,
             first_call: Utc::now(),
             last_call: Utc::now(),
@@ -233,6 +261,7 @@ impl CostSummary {
         let completion_tokens = records.iter().map(|r| r.completion_tokens as u64).sum();
         let total_cost_usd = records.iter().map(|r| r.cost_usd).sum();
         let call_count = records.len() as u64;
+        let estimated_call_count = records.iter().filter(|r| r.is_estimated).count() as u64;
         let avg_cost_per_call = if call_count > 0 { total_cost_usd / call_count as f64 } else { 0.0 };
         let first_call = records.iter().map(|r| r.timestamp).min().unwrap_or(Utc::now());
         let last_call = records.iter().map(|r| r.timestamp).max().unwrap_or(Utc::now());
@@ -243,6 +272,7 @@ impl CostSummary {
             completion_tokens,
             total_cost_usd,
             call_count,
+            estimated_call_count,
             avg_cost_per_call,
             first_call,
             last_call,
@@ -256,6 +286,9 @@ impl CostSummary {
         self.completion_tokens += record.completion_tokens as u64;
         self.total_cost_usd += record.cost_usd;
         self.call_count += 1;
+        if record.is_estimated {
+            self.estimated_call_count += 1;
+        }
         self.avg_cost_per_call = self.total_cost_usd / self.call_count as f64;
         self.last_call = record.timestamp;
         if self.call_count == 1 {
@@ -1047,8 +1080,43 @@ mod tests {
     }
 
     #[test]
-    fn test_model_pricing_catalog_claude_pricing() {
-        let catalog = ModelPricingCatalog::with_known_models();
+    fn test_usage_record_estimated_flag_and_serde_backcompat() {
+        // is_estimated defaults false on the plain constructor.
+        let r = UsageRecord::new("s", "gpt-4o", "openai", 100, 50, 0.01);
+        assert!(!r.is_estimated);
+
+        // estimated() builder sets the flag + overrides counts/cost.
+        let e = UsageRecord::new("s", "gpt-4o", "openai", 0, 0, 0.0)
+            .estimated(120, 60, 0.02);
+        assert!(e.is_estimated);
+        assert_eq!(e.prompt_tokens, 120);
+        assert_eq!(e.completion_tokens, 60);
+
+        // Backward-compat: a serialized record WITHOUT is_estimated (old format)
+        // must still deserialize (field defaults via #[serde(default)]).
+        let old_json = r#"{"session_id":"s","model":"gpt-4o","provider":"openai","prompt_tokens":100,"completion_tokens":50,"cost_usd":0.01,"timestamp":"2026-06-23T00:00:00Z","metadata":{}}"#;
+        let parsed: UsageRecord = serde_json::from_str(old_json).expect("old record deserializes");
+        assert!(!parsed.is_estimated, "missing field defaults to false");
+        assert_eq!(parsed.prompt_tokens, 100);
+    }
+
+    #[test]
+    fn test_cost_summary_counts_estimated_calls() {
+        let records = vec![
+            UsageRecord::new("s", "m", "p", 100, 50, 0.1),
+            UsageRecord::new("s", "m", "p", 0, 0, 0.0).estimated(200, 100, 0.2),
+            UsageRecord::new("s", "m", "p", 0, 0, 0.0).estimated(300, 150, 0.3),
+        ];
+        let summary = CostSummary::from_records(&records);
+        assert_eq!(summary.call_count, 3);
+        assert_eq!(summary.estimated_call_count, 2);
+        // Estimated counts are included in the totals.
+        assert_eq!(summary.prompt_tokens, 100 + 200 + 300);
+        assert_eq!(summary.completion_tokens, 50 + 100 + 150);
+    }
+
+    #[test]
+    fn test_model_pricing_catalog_claude_pricing() {        let catalog = ModelPricingCatalog::with_known_models();
 
         // Claude Opus 4: $15/1K prompt, $75/1K completion
         let opus_cost = catalog.compute_cost("claude-opus-4", 1000, 1000);

@@ -185,6 +185,7 @@ pub async fn cmd_eval_swebench(
         .auto_approval_gate()
         .default_parser()
         .default_cost_tracker()
+        .default_token_counter()
         .trace_in_memory()
         .domain_pack(coding_pack)
         .build()

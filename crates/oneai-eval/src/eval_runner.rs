@@ -227,6 +227,7 @@ impl EvalRunner {
             if let Ok(summary) = ct.session_cost(&session_id).await {
                 result.cost_usd = summary.total_cost_usd;
                 result.api_calls = summary.call_count;
+                result.estimated_calls = summary.estimated_call_count;
                 result.prompt_tokens = summary.prompt_tokens;
                 result.completion_tokens = summary.completion_tokens;
             }

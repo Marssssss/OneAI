@@ -118,9 +118,15 @@ pub fn render_markdown(report: &EvalReport) -> String {
         md.push_str(&format!("- **Output**: {}\n", output_preview));
         md.push_str(&format!("- **Duration**: {}ms\n", result.duration_ms));
         if result.api_calls > 0 {
+            let est_note = if result.estimated_calls > 0 {
+                format!(" ({} calls estimated)", result.estimated_calls)
+            } else {
+                String::new()
+            };
             md.push_str(&format!(
-                "- **Cost**: ${:.4} | API calls: {} | tokens: {}+{}\n",
-                result.cost_usd, result.api_calls, result.prompt_tokens, result.completion_tokens,
+                "- **Cost**: ${:.4} | API calls: {}{} | tokens: {}+{}\n",
+                result.cost_usd, result.api_calls, est_note,
+                result.prompt_tokens, result.completion_tokens,
             ));
         }
         // Timing breakdown — present when the runner stamped a `timing` JSON

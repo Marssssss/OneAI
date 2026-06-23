@@ -518,6 +518,12 @@ pub struct AgentLoopConfig {
     /// Circuit breaker — provider failover on repeated failures.
     /// When set, the loop skips calls to providers with open circuits.
     pub circuit_breaker: Option<Arc<dyn oneai_core::CircuitBreaker>>,
+    /// Token counter — client-side token estimation. When the provider returns
+    /// no usage in its (streaming) response, the loop falls back to counting
+    /// tokens locally with this counter so the cost axis (tokens/cost) isn't
+    /// silently zero. Matches the litellm/aider pattern: API usage authoritative
+    /// when present, client-side estimate otherwise.
+    pub token_counter: Option<Arc<dyn oneai_core::TokenCounter>>,
     /// Model pricing catalog — per-model cost computation.
     /// When set, cost tracking uses this catalog for accurate pricing.
     /// When None, uses the `pricing` field (backward-compatible).
@@ -554,6 +560,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("cost_tracker", &self.cost_tracker.as_ref().map(|_| "Arc<dyn CostTracker>"))
             .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
             .field("circuit_breaker", &self.circuit_breaker.as_ref().map(|_| "Arc<dyn CircuitBreaker>"))
+            .field("token_counter", &self.token_counter.as_ref().map(|_| "Arc<dyn TokenCounter>"))
             .field("pricing_catalog", &self.pricing_catalog)
             .field("structured_output", &self.structured_output)
             .field("trace_context", &self.trace_context)
@@ -592,6 +599,7 @@ impl Default for AgentLoopConfig {
             cost_tracker: None,
             rate_limiter: None,
             circuit_breaker: None,
+            token_counter: None,
             pricing_catalog: None,
             structured_output: None,
             trace_context: None,
@@ -1271,14 +1279,41 @@ impl AgentLoop {
             // 4b. Notify observer of token usage and cost
             observer.on_token_usage(response.usage.prompt_tokens, response.usage.completion_tokens);
 
+            // Resolve the token counts to record. Providers usually report usage
+            // in their response (Anthropic streaming via message_delta, OpenAI with
+            // stream_options). But some OpenAI-compatible providers (e.g. GLM) send
+            // no usage in streaming — `response.usage` is all-zero. In that case,
+            // fall back to counting tokens client-side with the TokenCounter so the
+            // 成本 axis (tokens/cost) isn't silently zero (litellm/aider pattern).
+            let provider_usage = response.usage.clone();
+            let usage_is_missing = provider_usage.prompt_tokens == 0
+                && provider_usage.completion_tokens == 0;
+            let (prompt_tokens, completion_tokens, is_estimated) = if usage_is_missing {
+                if let Some(tc) = &self.config.token_counter {
+                    let p = tc.count_conversation_tokens(&state.conversation, &response.model);
+                    // Completion: sum text across content blocks (text + thinking +
+                    // tool-call args). text_content() covers Text/Thinking; add tool
+                    // call args explicitly since those are billed as completion tokens.
+                    let mut c = tc.count_tokens(&response.message.text_content(), &response.model);
+                    for block in &response.message.content {
+                        if let oneai_core::ContentBlock::ToolCall { args, .. } = block {
+                            c += tc.count_tokens(args, &response.model);
+                        }
+                    }
+                    (p, c, true)
+                } else {
+                    // No counter configured — record zeros (preserves prior behavior).
+                    (0, 0, false)
+                }
+            } else {
+                (provider_usage.prompt_tokens, provider_usage.completion_tokens, false)
+            };
+
             // Use pricing catalog if available, otherwise fall back to ModelPricing
             let iteration_cost = if let Some(catalog) = &self.config.pricing_catalog {
-                catalog.compute_cost(&response.model, response.usage.prompt_tokens, response.usage.completion_tokens)
+                catalog.compute_cost(&response.model, prompt_tokens, completion_tokens)
             } else {
-                self.config.pricing.compute_cost(
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                )
+                self.config.pricing.compute_cost(prompt_tokens, completion_tokens)
             };
             cumulative_cost += iteration_cost;
             observer.on_cost_update(cumulative_cost);
@@ -1287,14 +1322,17 @@ impl AgentLoop {
             if let Some(cost_tracker) = &self.config.cost_tracker {
                 let session_id = state.conversation.id.clone();
                 let provider_name = self.provider_name();
-                let record = oneai_core::UsageRecord::new(
+                let mut record = oneai_core::UsageRecord::new(
                     session_id,
                     response.model.clone(),
                     provider_name,
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
+                    prompt_tokens,
+                    completion_tokens,
                     iteration_cost,
                 );
+                if is_estimated {
+                    record.is_estimated = true;
+                }
                 let _ = cost_tracker.record_usage(record).await;
             }
 

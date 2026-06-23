@@ -291,6 +291,7 @@ impl SwebenchRunner {
             if let Ok(summary) = ct.session_cost(&session_id).await {
                 result.cost_usd = summary.total_cost_usd;
                 result.api_calls = summary.call_count;
+                result.estimated_calls = summary.estimated_call_count;
                 result.prompt_tokens = summary.prompt_tokens;
                 result.completion_tokens = summary.completion_tokens;
             }
@@ -588,6 +589,94 @@ mod tests {
             serde_json::from_str(timing).expect("timing JSON parses");
         assert!(tb.inference_calls >= 1,
             "domain branch should produce ≥1 LLM span, got {}", tb.inference_calls);
+    }
+
+    #[tokio::test]
+    async fn test_runner_estimates_tokens_when_provider_omits_usage() {
+        // The GLM-style case: provider streaming returns NO usage (all-zero),
+        // so naive accounting records tokens=0+0. With a TokenCounter wired in,
+        // the loop must fall back to counting locally and mark the record
+        // estimated. Mirrors cmd_eval_swebench's app construction (domain_pack
+        // + cost + token_counter + trace).
+        if !skip_if_no_git() {
+            eprintln!("skipping: git not installed");
+            return;
+        }
+        let (repo_path, base_commit) = make_fixture_repo();
+
+        // Direct answer with ZERO usage — simulates a streaming provider that
+        // never sends a usage chunk.
+        let zero_usage = oneai_core::TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        };
+        let provider: std::sync::Arc<dyn oneai_core::traits::LlmProvider> =
+            std::sync::Arc::new(oneai_agent::mock_provider::MockProvider::from_script(
+                vec![oneai_agent::mock_provider::ScriptedResponse::custom(
+                    vec![oneai_core::ContentBlock::Text {
+                        text: "I would fix this but I'm a mock.".to_string(),
+                    }],
+                    zero_usage,
+                )],
+            ));
+
+        let project_dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let coding_pack = oneai_domain::coding_pack(&project_dir);
+
+        static EST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let workspace = std::env::temp_dir().join(format!(
+            "oneai_swebench_est_{}",
+            EST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+
+        let app = oneai_app::AppBuilder::new()
+            .provider(provider)
+            .auto_approval_gate()
+            .default_parser()
+            .default_cost_tracker()
+            .default_token_counter()
+            .trace_in_memory()
+            .domain_pack(coding_pack)
+            .build()
+            .await
+            .expect("app build");
+
+        let config = SwebenchRunnerConfig {
+            workspace_dir: workspace.clone(),
+            python_path: "/nonexistent/python".into(),
+            use_modal: true,
+            dataset_name: "princeton-nlp/SWE-bench_Lite".into(),
+            max_instances: 0,
+            run_id: "oneai-test".into(),
+        };
+        let runner = SwebenchRunner::new(app, config);
+
+        let instance = SwebenchInstance {
+            instance_id: "fixture__est-1".into(),
+            repo: repo_path.to_string_lossy().into_owned(),
+            base_commit,
+            problem_statement: "bug: f returns wrong value".into(),
+            test_patch: String::new(),
+            fail_to_pass: String::new(),
+            pass_to_pass: String::new(),
+            version: "1.0".into(),
+        };
+
+        let report = runner.run(&[instance]).await.expect("run ok");
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&repo_path);
+
+        let r = &report.results[0];
+        assert!(r.error.is_none(), "unexpected error: {:?}", r.error);
+        // Provider gave no usage → loop counted locally → non-zero tokens,
+        // and the call is flagged estimated.
+        assert!(r.api_calls > 0, "api_calls should be recorded");
+        assert_eq!(r.estimated_calls, r.api_calls,
+            "all calls should be estimated when provider omits usage, got {}/{}",
+            r.estimated_calls, r.api_calls);
+        assert!(r.prompt_tokens > 0, "prompt_tokens should be estimated > 0, got {}", r.prompt_tokens);
+        assert!(r.completion_tokens > 0, "completion_tokens should be estimated > 0, got {}", r.completion_tokens);
     }
 
     #[tokio::test]

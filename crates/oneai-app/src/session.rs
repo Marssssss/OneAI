@@ -96,6 +96,9 @@ struct AppResources {
     rate_limiter: Option<Arc<dyn oneai_core::RateLimiter>>,
     /// Circuit breaker — propagated into the AgentLoop.
     circuit_breaker: Option<Arc<dyn oneai_core::CircuitBreaker>>,
+    /// Token counter — propagated into the AgentLoop for client-side token
+    /// estimation when the provider returns no usage (streaming fallback).
+    token_counter: Option<Arc<dyn oneai_core::TokenCounter>>,
     /// Model pricing catalog — propagated into the AgentLoop for accurate cost.
     pricing_catalog: Option<oneai_core::ModelPricingCatalog>,
 }
@@ -136,6 +139,7 @@ impl AppSession {
                 cost_tracker: app.cost_tracker.clone(),
                 rate_limiter: app.rate_limiter.clone(),
                 circuit_breaker: app.circuit_breaker.clone(),
+                token_counter: app.token_counter.clone(),
                 pricing_catalog: app.pricing_catalog.clone(),
             }),
             conversation,
@@ -528,6 +532,7 @@ impl AppSession {
         let rate_limiter = self.app.rate_limiter.clone();
         let circuit_breaker = self.app.circuit_breaker.clone();
         let pricing_catalog = self.app.pricing_catalog.clone();
+        let token_counter = self.app.token_counter.clone();
 
         // Build the AgentLoop from session resources
         let agent_loop = if let Some(domain) = &self.app.domain_pack {
@@ -543,6 +548,7 @@ impl AppSession {
                 rate_limiter,
                 circuit_breaker,
                 pricing_catalog,
+                token_counter,
                 // Hand the loop the SAME trace context the session holds (Arc-backed,
                 // cheap clone) so its per-iteration/inference/tool spans land in the
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
@@ -594,6 +600,7 @@ impl AppSession {
                 rate_limiter,
                 circuit_breaker,
                 pricing_catalog,
+                token_counter,
                 // Hand the loop the SAME trace context the session holds (Arc-backed,
                 // cheap clone) so its per-iteration/inference/tool spans land in the
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
