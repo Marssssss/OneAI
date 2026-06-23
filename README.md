@@ -383,7 +383,7 @@ OneAI 接入 [SWE-bench Lite](https://www.swebench.com/)（300 实例）做 codi
 
 ```bash
 # 1) 导出数据集 JSONL 到本地（Rust 端不做 HF 网络，靠这个脚本落地）
-pip install datasets
+python3 -m pip install datasets
 python3 scripts/swebench/export_dataset.py
 # → 生成 swe_bench_lite.jsonl（300 行）
 

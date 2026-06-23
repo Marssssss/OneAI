@@ -25,7 +25,7 @@ Usage:
     # Export only specific instance ids (handy for a focused smoke run).
     python3 export_dataset.py --instances astropy__astropy-12907,django__django-11099
 
-Requires:  pip install datasets
+Requires:  python3 -m pip install datasets
 """
 
 import argparse
@@ -39,7 +39,7 @@ def load_rows(dataset: str, split: str) -> list:
     except ImportError:
         sys.exit(
             "error: the `datasets` package is required. Install it with:\n"
-            "  pip install datasets"
+            "  python3 -m pip install datasets"
         )
     try:
         ds = load_dataset(dataset, split=split)
