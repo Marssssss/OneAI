@@ -61,7 +61,9 @@ pub fn render_markdown(report: &EvalReport) -> String {
         report.summary.pass_rate * 100.0));
     md.push_str(&format!("| Avg score | {:.2} |\n", report.summary.avg_score));
     md.push_str(&format!("| Avg duration | {}ms |\n", report.summary.avg_duration_ms));
-    md.push_str(&format!("| Total tokens | {} |\n\n", report.summary.total_tokens));
+    md.push_str(&format!("| Total tokens | {} |\n", report.summary.total_tokens));
+    md.push_str(&format!("| Total cost | ${:.4} |\n", report.summary.total_cost_usd));
+    md.push_str(&format!("| Total API calls | {} |\n\n", report.summary.total_api_calls));
 
     // Overall status
     if report.all_passed() {
@@ -115,6 +117,12 @@ pub fn render_markdown(report: &EvalReport) -> String {
         };
         md.push_str(&format!("- **Output**: {}\n", output_preview));
         md.push_str(&format!("- **Duration**: {}ms\n", result.duration_ms));
+        if result.api_calls > 0 {
+            md.push_str(&format!(
+                "- **Cost**: ${:.4} | API calls: {} | tokens: {}+{}\n",
+                result.cost_usd, result.api_calls, result.prompt_tokens, result.completion_tokens,
+            ));
+        }
 
         let status_icon = if result.passed() { "✓ PASSED" } else { "✗ FAILED" };
         md.push_str(&format!("- **Status**: {}\n", status_icon));

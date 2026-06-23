@@ -34,7 +34,6 @@ use crate::eval_case::{EvalCase, ExpectedOutput};
 use crate::eval_metric::EvalMetric;
 use crate::eval_result::{EvalResult, EvalReport};
 use crate::eval_suite::EvalSuite;
-
 // ─── EvalRunnerConfig ────────────────────────────────────────────────────
 
 /// Configuration for the EvalRunner.
@@ -149,7 +148,7 @@ impl EvalRunner {
     /// This is the core loop:
     /// 1. Create session with tracing enabled
     /// 2. Run the agent (or skip if no provider)
-    /// 3. Collect output + trace metrics
+    /// 3. Collect output + trace metrics + cost
     /// 4. Apply each metric
     /// 5. Return the result
     async fn run_case(
@@ -161,15 +160,13 @@ impl EvalRunner {
         let mut result = EvalResult::new(&case.id, &case.input, "");
 
         // Run the agent if a provider is configured
-        let actual_output = if self.app.has_provider() {
-            self.run_agent_for_case(case).await
+        if self.app.has_provider() {
+            self.run_agent_for_case(case, &mut result).await;
         } else {
             // No provider — can't run the agent, mark as error
             result.error = Some("No LLM provider configured".to_string());
-            String::new()
-        };
+        }
 
-        result.actual_output = actual_output;
         result.duration_ms = start.elapsed().as_millis() as u64;
 
         // Apply each metric to score the output
@@ -181,34 +178,57 @@ impl EvalRunner {
         result
     }
 
-    /// Run the agent loop for a single case and collect the output + trace.
+    /// Run the agent loop for a single case and collect output + telemetry.
     ///
-    /// Creates a fresh session with in-memory tracing, runs the agent,
-    /// and collects both the output and the TraceMetrics.
-    async fn run_agent_for_case(&self, case: &EvalCase) -> String {
-        // Create a session with tracing
+    /// Creates a fresh session with in-memory tracing, runs the agent, then
+    /// writes the final answer, trace metrics, and per-case cost into `result`.
+    ///
+    /// Cost isolation: the session id is new per case, and we clear any prior
+    /// records for it before running so concurrent/sequential cases don't bleed
+    /// cost into each other. A single `session_cost` call yields cost + api_calls
+    /// + token breakdown (the CostSummary aggregates the UsageRecords the
+    /// AgentLoop already records after each inference).
+    async fn run_agent_for_case(&self, case: &EvalCase, result: &mut EvalResult) {
         let mut session = self.app.create_session();
+        let session_id = session.session_id().to_string();
 
-        // Run the agent silently (no observer callbacks)
+        // Isolate this case's cost accounting.
+        if let Some(ct) = &self.app.cost_tracker {
+            let _ = ct.clear_session(&session_id).await;
+        }
+
         let agent_result = session.run_agent_silent(&case.input).await;
 
         match agent_result {
             Ok(loop_result) => {
-                // Collect trace metrics if available
+                result.actual_output = loop_result.final_answer;
+
+                // Collect trace metrics (previously computed then discarded —
+                // the TODO flagged during the eval audit). Now wired into the
+                // result, feeding the efficiency axis (tokens, tool_calls,
+                // iterations, retries, latency).
                 if self.config.collect_traces {
                     if let Some(ctx) = session.trace_context() {
                         let tree = ctx.build_tree();
-                        let _trace_metrics = TraceMetrics::compute_from_tree(&tree.root_span);
-                        // We need to update result.trace_metrics, but result is
-                        // created in run_case. We'll handle this by returning
-                        // the trace metrics alongside the output.
-                        // For simplicity, we just return the output here.
+                        result.trace_metrics = TraceMetrics::compute_from_tree(&tree.root_span);
                     }
                 }
-                loop_result.final_answer
             }
             Err(e) => {
-                format!("ERROR: {}", e)
+                // Preserve historical behavior: embed the error in the output
+                // so metrics can still score it. (We do not set result.error
+                // here — that path is reserved for "no provider".)
+                result.actual_output = format!("ERROR: {}", e);
+            }
+        }
+
+        // Collect the cost axis: cost_usd + api_calls + token breakdown.
+        if let Some(ct) = &self.app.cost_tracker {
+            if let Ok(summary) = ct.session_cost(&session_id).await {
+                result.cost_usd = summary.total_cost_usd;
+                result.api_calls = summary.call_count;
+                result.prompt_tokens = summary.prompt_tokens;
+                result.completion_tokens = summary.completion_tokens;
             }
         }
     }
