@@ -1881,9 +1881,17 @@ impl Tool for WebFetchTool {
                         // Convert HTML to Markdown using html2text
                         let markdown = html2text::from_read(html.as_bytes(), 200);
 
-                        // Truncate if exceeds max content size
+                        // Truncate if exceeds max content size.
+                        // NOTE: slice on byte index only — must land on a UTF-8
+                        // char boundary or String slicing panics (it did, on
+                        // binary/multibyte responses). Walk back to the nearest
+                        // boundary before slicing.
                         let content = if markdown.len() > self.max_content_bytes {
-                            let mut truncated = markdown[..self.max_content_bytes].to_string();
+                            let mut end = self.max_content_bytes;
+                            while end > 0 && !markdown.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            let mut truncated = markdown[..end].to_string();
                             truncated.push_str("\n... [content truncated due to size limit]");
                             truncated
                         } else {
