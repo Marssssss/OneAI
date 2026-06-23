@@ -307,12 +307,21 @@ mod tests {
     /// return (repo_path, base_commit_sha). Used to exercise clone+checkout+diff
     /// without touching the network.
     fn make_fixture_repo() -> (std::path::PathBuf, String) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // Combine a process-global counter with the nanos timestamp: the counter
+        // guarantees uniqueness across concurrent test threads even when the
+        // system clock's nanos resolution is too coarse to distinguish them
+        // (observed on macOS — caused an intermittent "does not appear to be a
+        // git repository" clone failure when two fixtures collided on a path).
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "oneai_swebench_fixture_{}",
+            "oneai_swebench_fixture_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
+            id,
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -413,6 +422,14 @@ mod tests {
         assert_eq!(r.metadata.get("patch").map(|s| s.as_str()), Some(""));
         assert!(!r.metric_passed(SWEBENCH_RESOLVED_METRIC));
         assert_eq!(r.metadata.get("resolved"), Some(&"false".to_string()));
+
+        // 成本 axis: the loop records usage into the app's cost tracker (the
+        // mock direct_answer reports 100 prompt / 50 completion tokens and runs
+        // one inference). Regression guard for the AppSession→AgentLoopConfig
+        // propagation: previously cost_tracker was None and these stayed at 0.
+        assert!(r.api_calls > 0, "api_calls should be recorded, got {}", r.api_calls);
+        assert!(r.prompt_tokens > 0, "prompt_tokens should be recorded, got {}", r.prompt_tokens);
+        assert!(r.completion_tokens > 0, "completion_tokens should be recorded, got {}", r.completion_tokens);
     }
 
     #[tokio::test]

@@ -89,6 +89,15 @@ struct AppResources {
     domain_pack: Option<Arc<oneai_domain::MergedDomainPack>>,
     /// SQLite session store (for memory + conversation persistence).
     sqlite_store: Option<Arc<SqliteSessionStore>>,
+    /// Cost tracker — propagated into the AgentLoop so the loop records per-call
+    /// usage. Without this the 成本 axis (cost/api_calls/tokens) stays at 0.
+    cost_tracker: Option<Arc<dyn oneai_core::CostTracker>>,
+    /// Rate limiter — propagated into the AgentLoop.
+    rate_limiter: Option<Arc<dyn oneai_core::RateLimiter>>,
+    /// Circuit breaker — propagated into the AgentLoop.
+    circuit_breaker: Option<Arc<dyn oneai_core::CircuitBreaker>>,
+    /// Model pricing catalog — propagated into the AgentLoop for accurate cost.
+    pricing_catalog: Option<oneai_core::ModelPricingCatalog>,
 }
 
 impl AppSession {
@@ -124,6 +133,10 @@ impl AppSession {
                 active_skill: app.active_skill.clone(),
                 domain_pack: app.domain_pack.clone(),
                 sqlite_store: app.sqlite_store.clone(),
+                cost_tracker: app.cost_tracker.clone(),
+                rate_limiter: app.rate_limiter.clone(),
+                circuit_breaker: app.circuit_breaker.clone(),
+                pricing_catalog: app.pricing_catalog.clone(),
             }),
             conversation,
             session_id,
@@ -506,6 +519,16 @@ impl AppSession {
             oneai_agent::ContextAssembler::new()
         };
 
+        // Propagate cost/rate/circuit/pricing from the App into the loop
+        // config. Without this, the loop builds `..AgentLoopConfig::default()`
+        // (cost_tracker = None) and never records usage — the 成本 axis (cost,
+        // api_calls, tokens) silently stays at 0 even though the app holds a
+        // configured tracker.
+        let cost_tracker = self.app.cost_tracker.clone();
+        let rate_limiter = self.app.rate_limiter.clone();
+        let circuit_breaker = self.app.circuit_breaker.clone();
+        let pricing_catalog = self.app.pricing_catalog.clone();
+
         // Build the AgentLoop from session resources
         let agent_loop = if let Some(domain) = &self.app.domain_pack {
             let config = AgentLoopConfig {
@@ -516,6 +539,10 @@ impl AppSession {
                 },
                 use_streaming: true,
                 plan_mode: self.plan_mode,
+                cost_tracker,
+                rate_limiter,
+                circuit_breaker,
+                pricing_catalog,
                 ..AgentLoopConfig::default()
             };
             // Use the real ContextCompressor with the domain's CompressionTemplate,
@@ -558,6 +585,10 @@ impl AppSession {
             let config = AgentLoopConfig {
                 use_streaming: true,
                 plan_mode: self.plan_mode,
+                cost_tracker,
+                rate_limiter,
+                circuit_breaker,
+                pricing_catalog,
                 ..AgentLoopConfig::default()
             };
             // No domain pack — use NoopCompressor as a fallback.
