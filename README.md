@@ -382,22 +382,23 @@ OneAI 接入 [SWE-bench Lite](https://www.swebench.com/)（300 实例）做 codi
 ### 前置准备
 
 ```bash
-# 1) 导出数据集 JSONL 到本地（Rust 端不做 HF 网络，靠这个脚本落地）
-python3 -m pip install datasets
-python3 scripts/swebench/export_dataset.py
-# → 生成 swe_bench_lite.jsonl（300 行）
-
-# 2) 准备判定器 venv（外部 Python harness，走 Modal 免本地 docker）
+# 1) 建 venv 并装 datasets + swebench + modal（一个 venv 两用：导数据 + 判定）
+#    macOS Homebrew Python 受 PEP 668 限制不能系统级装包，必须走 venv
 python3 -m venv ~/.venvs/swebench
-~/.venvs/swebench/bin/pip install swebench modal httpx[socks]
+~/.venvs/swebench/bin/pip install datasets swebench modal httpx[socks]
 ~/.venvs/swebench/bin/modal token new        # 登录 Modal
+
+# 2) 用该 venv 的 python 导出数据集 JSONL 到本地（Rust 端不做 HF 网络）
+~/.venvs/swebench/bin/python scripts/swebench/export_dataset.py
+# → 生成 swe_bench_lite.jsonl（300 行）
 
 # 3) LLM Provider（agent 真调 API = 真花钱）
 export ONEAI_API_KEY=sk-...
 ```
 
-> 也可用 Verified（500 实例）：`--dataset princeton-nlp/SWE-bench_Verified --out swe_bench_verified.jsonl`。
+> 也可用 Verified（500 实例）：`export_dataset.py --dataset princeton-nlp/SWE-bench_Verified --out swe_bench_verified.jsonl`。
 > `scripts/swebench/` 另有 `fetch_instance.py`（拉单个实例元数据）和 `make_prediction.py`（手工 git diff→JSONL），是阶段一的手工通路，阶段二已被下面的 CLI 命令替代。
+> 判定器默认找 `~/.venvs/swebench/bin/python`（即上面建的 venv），用 `--python <path>` 可覆盖。
 
 ### 测试某一个实例（先这样冒烟，确认闭环）
 

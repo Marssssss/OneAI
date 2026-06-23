@@ -38,8 +38,10 @@ def load_rows(dataset: str, split: str) -> list:
         from datasets import load_dataset
     except ImportError:
         sys.exit(
-            "error: the `datasets` package is required. Install it with:\n"
-            "  python3 -m pip install datasets"
+            "error: the `datasets` package is required. In a venv:\n"
+            "  python3 -m venv ~/.venvs/swebench\n"
+            "  ~/.venvs/swebench/bin/pip install datasets\n"
+            "  ~/.venvs/swebench/bin/python " + __file__
         )
     try:
         ds = load_dataset(dataset, split=split)
