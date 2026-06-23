@@ -114,6 +114,7 @@ impl SwebenchRunner {
         }
 
         // 1. clone + checkout
+        let t_clone = Instant::now();
         let clone_dir = self.clone_instance(instance);
         let clone_dir = match clone_dir {
             Ok(p) => p,
@@ -123,11 +124,13 @@ impl SwebenchRunner {
                 return result;
             }
         };
+        result.set_metadata("dur_clone_ms", &t_clone.elapsed().as_millis().to_string());
 
         // 2 + 3. drive the agent + collect cost/trace (mirrors EvalRunner.run_agent_for_case)
         self.drive_agent(instance, &clone_dir, &mut result).await;
 
         // 4. collect the patch via `git diff`
+        let t_diff = Instant::now();
         let patch = match collect_git_diff(&clone_dir) {
             Ok(p) => p,
             Err(e) => {
@@ -136,6 +139,7 @@ impl SwebenchRunner {
                 return result;
             }
         };
+        result.set_metadata("dur_diff_ms", &t_diff.elapsed().as_millis().to_string());
         result.actual_output = patch.clone();
         result.set_metadata("patch", &patch);
 
@@ -149,7 +153,9 @@ impl SwebenchRunner {
             &self.config.dataset_name,
             self.config.workspace_dir.clone(),
         );
+        let t_judge = Instant::now();
         let score = judge.judge(&instance.problem_statement, &patch).await;
+        result.set_metadata("dur_judge_ms", &t_judge.elapsed().as_millis().to_string());
         result.set_metadata(
             "resolved",
             if score.passed { "true" } else { "false" },
@@ -251,7 +257,10 @@ impl SwebenchRunner {
             let _ = ct.clear_session(&session_id).await;
         }
 
+        let t_agent = Instant::now();
         let agent_result = session.run_agent_silent(&prompt).await;
+        let dur_agent_ms = t_agent.elapsed().as_millis();
+        result.set_metadata("dur_agent_ms", &dur_agent_ms.to_string());
         match agent_result {
             Ok(loop_result) => {
                 // The agent's textual answer isn't the SWE-bench output (the
@@ -262,6 +271,14 @@ impl SwebenchRunner {
                 if let Some(ctx) = session.trace_context() {
                     let tree = ctx.build_tree();
                     result.trace_metrics = TraceMetrics::compute_from_tree(&tree.root_span);
+                    // 效率 axis detail: split the agent's wall-clock into
+                    // inference vs tool vs overhead, straight from the span tree.
+                    // (Only available now that trace_context is wired into the
+                    // loop — previously the tree held only the SESSION span.)
+                    let tb = trace_timing_breakdown(&tree.root_span, dur_agent_ms);
+                    if let Ok(json) = serde_json::to_string(&tb) {
+                        result.set_metadata("timing", &json);
+                    }
                 }
             }
             Err(e) => {
@@ -278,6 +295,46 @@ impl SwebenchRunner {
                 result.completion_tokens = summary.completion_tokens;
             }
         }
+    }
+}
+
+/// Per-instance timing breakdown — wall-clock split of the run + a
+/// trace-derived decomposition of the agent's time.
+///
+/// `dur_agent_ms` is the measured wall-clock of the whole agent drive.
+/// `inference_ms` / `tool_ms` are summed from the trace span tree (LLM and
+/// TOOL spans respectively); `overhead_ms` is the agent time not attributable
+/// to either (context assembly, parsing, compression, etc.). Stamped into
+/// `EvalResult.metadata["timing"]` as JSON for the report + leaderboard.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TimingBreakdown {
+    inference_ms: u64,
+    inference_calls: usize,
+    tool_ms: u64,
+    tool_calls: usize,
+    overhead_ms: u64,
+    dur_agent_ms: u64,
+}
+
+/// Sum LLM/TOOL span durations from the trace tree to decompose agent time.
+fn trace_timing_breakdown(root: &oneai_trace::Span, dur_agent_ms: u128) -> TimingBreakdown {
+    use oneai_trace::SpanKind;
+    let sum_kind = |kind: SpanKind| -> (u64, usize) {
+        let spans = root.spans_by_kind(kind);
+        let total: u64 = spans.iter().filter_map(|s| s.duration_ms).sum();
+        (total, spans.len())
+    };
+    let (inference_ms, inference_calls) = sum_kind(SpanKind::LLM);
+    let (tool_ms, tool_calls) = sum_kind(SpanKind::TOOL);
+    let attributed = inference_ms + tool_ms;
+    let overhead_ms = dur_agent_ms.saturating_sub(attributed as u128) as u64;
+    TimingBreakdown {
+        inference_ms,
+        inference_calls,
+        tool_ms,
+        tool_calls,
+        overhead_ms,
+        dur_agent_ms: dur_agent_ms as u64,
     }
 }
 
@@ -430,6 +487,23 @@ mod tests {
         assert!(r.api_calls > 0, "api_calls should be recorded, got {}", r.api_calls);
         assert!(r.prompt_tokens > 0, "prompt_tokens should be recorded, got {}", r.prompt_tokens);
         assert!(r.completion_tokens > 0, "completion_tokens should be recorded, got {}", r.completion_tokens);
+
+        // 效率 axis: phase wall-clock keys are stamped for every phase...
+        for key in ["dur_clone_ms", "dur_agent_ms", "dur_diff_ms", "dur_judge_ms"] {
+            assert!(r.metadata.contains_key(key), "missing timing key {}", key);
+        }
+        // ...and the trace-derived decomposition is populated now that
+        // trace_context is wired into the loop. The mock runs one direct_answer
+        // inference → at least one LLM span recorded.
+        let timing = r.metadata.get("timing").expect("timing metadata present");
+        let tb: TimingBreakdown =
+            serde_json::from_str(timing).expect("timing JSON parses");
+        assert!(tb.inference_calls >= 1, "expected ≥1 inference span, got {}", tb.inference_calls);
+        assert!(tb.dur_agent_ms > 0, "agent wall-clock should be > 0");
+        // The trace tree now holds LLM spans (inference_calls >= 1 above) — i.e.
+        // trace_context is wired into the loop. We do NOT assert on
+        // avg_inference_latency_ms here because the mock provider returns
+        // instantly (<1ms), so span durations are 0ms; real runs have seconds.
     }
 
     #[tokio::test]

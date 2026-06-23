@@ -123,6 +123,12 @@ pub fn render_markdown(report: &EvalReport) -> String {
                 result.cost_usd, result.api_calls, result.prompt_tokens, result.completion_tokens,
             ));
         }
+        // Timing breakdown — present when the runner stamped a `timing` JSON
+        // into metadata (SWE-bench). Decomposes the run into phase wall-clock
+        // and the agent's inference/tool/overhead split.
+        if let Some(timing) = render_timing_breakdown(result) {
+            md.push_str(&timing);
+        }
 
         let status_icon = if result.passed() { "✓ PASSED" } else { "✗ FAILED" };
         md.push_str(&format!("- **Status**: {}\n", status_icon));
@@ -146,6 +152,54 @@ pub fn render_markdown(report: &EvalReport) -> String {
     }
 
     md
+}
+
+/// Render the per-case timing breakdown (SWE-bench) from metadata, if present.
+///
+/// Reads the phase wall-clock keys (`dur_clone_ms`/`dur_agent_ms`/`dur_diff_ms`/
+/// `dur_judge_ms`) and the `timing` JSON (inference/tool/overhead split) the
+/// SwebenchRunner stamps. Returns `None` when no timing metadata exists (e.g.
+/// non-SWE-bench suites), so the report stays unchanged for those.
+fn render_timing_breakdown(result: &crate::eval_result::EvalResult) -> Option<String> {
+    let has_phases = ["dur_clone_ms", "dur_agent_ms", "dur_diff_ms", "dur_judge_ms"]
+        .iter()
+        .any(|k| result.metadata.contains_key(*k));
+    if !has_phases {
+        return None;
+    }
+    let mut out = String::from("- **Timing**: ");
+    let mut parts: Vec<String> = Vec::new();
+    for (key, label) in [
+        ("dur_clone_ms", "clone"),
+        ("dur_agent_ms", "agent"),
+        ("dur_diff_ms", "diff"),
+        ("dur_judge_ms", "judge"),
+    ] {
+        if let Some(v) = result.metadata.get(key) {
+            parts.push(format!("{}={}ms", label, v));
+        }
+    }
+    out.push_str(&parts.join(" "));
+
+    // Agent-internal decomposition from the trace span tree.
+    if let Some(timing_json) = result.metadata.get("timing") {
+        #[derive(serde::Deserialize)]
+        struct T {
+            inference_ms: u64,
+            inference_calls: usize,
+            tool_ms: u64,
+            tool_calls: usize,
+            overhead_ms: u64,
+        }
+        if let Ok(t) = serde_json::from_str::<T>(timing_json) {
+            out.push_str(&format!(
+                " | agent: infer={}ms×{} tool={}ms×{} overhead={}ms",
+                t.inference_ms, t.inference_calls, t.tool_ms, t.tool_calls, t.overhead_ms,
+            ));
+        }
+    }
+    out.push('\n');
+    Some(out)
 }
 
 // ─── Compact Summary ─────────────────────────────────────────────────────
@@ -218,6 +272,38 @@ mod tests {
 
         assert!(md.contains("✗ ERROR"));
         assert!(md.contains("Provider unavailable"));
+    }
+
+    #[test]
+    fn test_timing_breakdown_rendered_for_swebench() {
+        // A result with SWE-bench timing metadata → timing line is rendered.
+        let mut r = crate::eval_result::EvalResult::new("astropy__x-1", "fix bug", "diff --git");
+        r.add_score("swebench_resolved", EvalScore::perfect("resolved"));
+        r.set_metadata("dur_clone_ms", "1200");
+        r.set_metadata("dur_agent_ms", "800000");
+        r.set_metadata("dur_diff_ms", "30");
+        r.set_metadata("dur_judge_ms", "380000");
+        r.set_metadata(
+            "timing",
+            r#"{"inference_ms":420000,"inference_calls":7,"tool_ms":180000,"tool_calls":12,"overhead_ms":200000,"dur_agent_ms":800000}"#,
+        );
+        let md = render_markdown(&EvalReport::new("swebench", vec![r]));
+        assert!(md.contains("- **Timing**:"), "timing line present");
+        assert!(md.contains("clone=1200ms"));
+        assert!(md.contains("judge=380000ms"));
+        assert!(md.contains("infer=420000ms×7"));
+        assert!(md.contains("tool=180000ms×12"));
+        assert!(md.contains("overhead=200000ms"));
+    }
+
+    #[test]
+    fn test_no_timing_breakdown_for_plain_suites() {
+        // A plain result (no SWE-bench timing metadata) → no timing line.
+        let mut r = crate::eval_result::EvalResult::new("c1", "q", "a");
+        r.add_score("exact", EvalScore::perfect("OK"));
+        r.duration_ms = 100;
+        let md = render_markdown(&EvalReport::new("plain", vec![r]));
+        assert!(!md.contains("**Timing**"));
     }
 
     #[test]

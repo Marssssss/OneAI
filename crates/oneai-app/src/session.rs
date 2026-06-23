@@ -589,6 +589,11 @@ impl AppSession {
                 rate_limiter,
                 circuit_breaker,
                 pricing_catalog,
+                // Hand the loop the SAME trace context the session holds (Arc-backed,
+                // cheap clone) so its per-iteration/inference/tool spans land in the
+                // tree compute_from_tree reads. Without this the 效率 axis (per-call
+                // latency, tool_call_count, avg_iterations) is all zeros.
+                trace_context: self.trace_context.clone(),
                 ..AgentLoopConfig::default()
             };
             // No domain pack — use NoopCompressor as a fallback.
