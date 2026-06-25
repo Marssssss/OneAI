@@ -1,7 +1,8 @@
 //! CLI token subcommand — token counting, context window profiles, and fit checking.
 
-use oneai_core::{HeuristicTokenCounter, TokenCounter, ModelTokenizerProfile, ProviderTokenizerType};
+use oneai_core::{HeuristicTokenCounter, TokenCounter, ProviderTokenizerType};
 use oneai_core::{ContextManager, ContextTrimmingStrategy};
+use oneai_core::model_context::{builtin_lookup, BUILTIN_MODEL_CONTEXT, ModelContextResolver};
 use std::sync::Arc;
 
 /// Count tokens in a text string for a specific model.
@@ -49,15 +50,21 @@ pub fn run_token_context(model: &str) -> i32 {
     let profile = counter.profile_for_model(model);
     let tokenizer_type = ProviderTokenizerType::from_model_name(model);
 
+    // Use the 3-layer resolver for the window number + source (no provider
+    // attached here, so L2 probe is skipped — only L1/L3 layers are reachable).
+    let resolver = ModelContextResolver::empty();
+    let (context_window, source) = resolver.resolve_with_source(model);
+
     println!("╔══════════════════════════════════════════════════╗");
     println!("║        OneAI Context Window Profile              ║");
     println!("╚══════════════════════════════════════════════════╝");
     println!();
 
-    println!("  Model: {}", profile.model_name);
+    println!("  Model: {}", model);
     println!("  Tokenizer: {}", tokenizer_type.name());
-    println!("  Context window: {}K tokens", profile.context_window_tokens / 1000);
+    println!("  Context window: {}K tokens", context_window / 1000);
     println!("  Max output: {} tokens", profile.max_output_tokens);
+    println!("  Source: {}", source.label());
     println!("  Chars/token (English): {:.1}", profile.chars_per_token_english);
     println!("  Chars/token (CJK): {:.1}", profile.chars_per_token_cjk);
     println!("  Message overhead: {} tokens", profile.message_overhead_tokens);
@@ -68,33 +75,31 @@ pub fn run_token_context(model: &str) -> i32 {
     0
 }
 
-/// List all known tokenizer profiles.
+/// List all entries in the built-in static model library (L3 fallback).
 pub fn run_token_models() -> i32 {
-    let profiles = ModelTokenizerProfile::default_profiles();
-
     println!("╔══════════════════════════════════════════════════╗");
-    println!("║        OneAI Tokenizer Profiles                  ║");
+    println!("║        OneAI Built-in Model Context Library     ║");
     println!("╚══════════════════════════════════════════════════╝");
     println!();
+    println!("  3-layer resolution: user config > provider probe > this library");
+    println!();
 
-    println!("  {:<25} {:<15} {:>10} {:>10} {:>8} {:>8}",
-        "Model", "Tokenizer", "Context(K)", "MaxOut", "CPT(EN)", "CPT(CJK)");
-    println!("  {}{}{}{}{}{}",
-        "─".repeat(25), "─".repeat(15), "─".repeat(10), "─".repeat(10), "─".repeat(8), "─".repeat(8));
+    println!("  {:<12} {:<22} {:>14} {:>12}",
+        "Provider", "Model pattern", "Context(K)", "MaxOut");
+    println!("  {}{}{}{}",
+        "─".repeat(12), "─".repeat(22), "─".repeat(14), "─".repeat(12));
 
-    for profile in &profiles {
-        println!("  {:<25} {:<15} {:>10} {:>10} {:>8.1} {:>8.1}",
-            profile.model_name,
-            profile.tokenizer_type.name().split('(').next().unwrap_or("").trim(),
-            profile.context_window_tokens / 1000,
-            profile.max_output_tokens,
-            profile.chars_per_token_english,
-            profile.chars_per_token_cjk,
+    for entry in BUILTIN_MODEL_CONTEXT.iter() {
+        println!("  {:<12} {:<22} {:>14} {:>12}",
+            entry.provider,
+            entry.model_id,
+            entry.context_window / 1000,
+            entry.max_output_tokens,
         );
     }
 
     println!();
-    println!("  Total profiles: {}", profiles.len());
+    println!("  Total entries: {}", BUILTIN_MODEL_CONTEXT.len());
     println!();
     0
 }
@@ -161,6 +166,55 @@ pub fn run_token_estimate(model: Option<&str>) -> i32 {
     println!("  Context window: {}K tokens", context_window / 1000);
     println!("  {}", fit.summary());
 
+    println!();
+    0
+}
+
+/// Probe a provider's model-metadata endpoint for the context window (L2),
+/// showing the full 3-layer resolution and which layer won.
+///
+/// Requires a configured provider (config file or `ONEAI_API_KEY`/`ONEAI_BASE_URL`/
+/// `ONEAI_MODEL` env vars). Without one, only the L1/L3 layers are shown.
+pub async fn run_token_probe(model: Option<&str>, config: &crate::config::OneaiConfig) -> i32 {
+    println!("╔══════════════════════════════════════════════════╗");
+    println!("║        OneAI Context Window Probe (3-layer)      ║");
+    println!("╚══════════════════════════════════════════════════╝");
+    println!();
+
+    // Build a ModelConfig from CLI config + --model override.
+    let model_config = config.to_model_config_with_overrides(model);
+    let model_name = model
+        .map(|s| s.to_string())
+        .or_else(|| model_config.as_ref().and_then(|c| c.model_name.clone()))
+        .unwrap_or_else(|| config.provider.model.clone());
+
+    println!("  Model: {}", model_name);
+
+    // Layer candidates (sync, no provider needed).
+    let resolver = ModelContextResolver::empty();
+    let l1_env = std::env::var("ONEAI_CONTEXT_WINDOW").ok().and_then(|s| s.parse::<u32>().ok());
+    let l3_builtin = builtin_lookup(&model_name).map(|e| e.context_window);
+
+    println!();
+    println!("  Layer candidates:");
+    println!("    L1 env override   : {}", l1_env.map(|v| format!("{}K", v / 1000)).unwrap_or_else(|| "—".to_string()));
+    println!("    L2 provider probe : {}", if model_config.is_some() { "pending (will query)" } else { "skipped (no provider configured)" });
+    println!("    L3 builtin library: {}", l3_builtin.map(|v| format!("{}K", v / 1000)).unwrap_or_else(|| "—".to_string()));
+
+    // If a provider is configured, perform the live L2 probe.
+    let (resolved, source) = if let Some(mc) = model_config {
+        let provider = oneai_provider::ProviderFactory::create(mc);
+        let provider = Arc::from(provider);
+        let r = ModelContextResolver::empty();
+        r.resolve_with_source_with_provider(&model_name, &provider).await
+    } else {
+        // No provider — resolve via L1/L3 only.
+        resolver.resolve_with_source(&model_name)
+    };
+
+    println!();
+    println!("  ✓ Resolved context window: {}K tokens", resolved / 1000);
+    println!("    Source: {}", source.label());
     println!();
     0
 }

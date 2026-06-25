@@ -45,6 +45,21 @@ pub trait LlmProvider: Send + Sync {
 
     /// Get the model configuration.
     fn config(&self) -> &ModelConfig;
+
+    /// Probe the provider's own model-metadata endpoint for the context window.
+    ///
+    /// This is the L2 dynamic-detection layer of OneAI's 3-layer context-window
+    /// resolution (user config > provider probe > built-in library). Implementations
+    /// query endpoints like Ollama `/api/show`, Anthropic `/v1/models/{id}`, or
+    /// Gemini `models.get` and return the discovered window size in tokens.
+    ///
+    /// The default returns `None` so the resolver falls through to the built-in
+    /// static library. Probing must be best-effort — network/auth failures
+    /// return `None` rather than erroring, so inference is never blocked by a
+    /// metadata-endpoint outage.
+    async fn probe_context_window(&self) -> Option<u32> {
+        None
+    }
 }
 
 // ─── Tool ─────────────────────────────────────────────────────────────────────

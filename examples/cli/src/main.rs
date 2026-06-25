@@ -556,6 +556,13 @@ enum TokenAction {
         #[arg(long)]
         model: String,
     },
+    /// Probe the provider's model-metadata endpoint for the context window
+    /// (L2), showing the full 3-layer resolution and which layer won.
+    Probe {
+        /// Model to probe (defaults to the configured model)
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -835,6 +842,10 @@ fn main() {
                 }
                 TokenAction::Fits { text, model } => {
                     cmd_token::run_token_fits(&text, &model);
+                }
+                TokenAction::Probe { model } => {
+                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                    rt.block_on(cmd_token::run_token_probe(model.as_deref(), &config));
                 }
             }
         }

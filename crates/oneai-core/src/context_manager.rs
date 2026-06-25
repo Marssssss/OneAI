@@ -28,6 +28,7 @@ use crate::Conversation;
 use crate::ContentBlock;
 use crate::Message;
 use crate::Role;
+use crate::model_context::ModelContextResolver;
 use crate::token_counter::{TokenCounter, ContextFitResult, HeuristicTokenCounter, ModelTokenizerProfile};
 use crate::error::Result;
 
@@ -373,6 +374,11 @@ pub struct ContextManager {
 
     /// Whether to auto-trim conversations before inference.
     auto_trim: bool,
+
+    /// Optional 3-layer resolver — when set, the context-window number in
+    /// `profile_for_model` is sourced from it (L1 user > L2 probe > L3 builtin)
+    /// instead of the static profile map.
+    resolver: Option<Arc<ModelContextResolver>>,
 }
 
 impl ContextManager {
@@ -390,6 +396,7 @@ impl ContextManager {
             default_strategy,
             profiles,
             auto_trim: true,
+            resolver: None,
         }
     }
 
@@ -404,6 +411,7 @@ impl ContextManager {
             default_strategy: config.default_strategy,
             profiles,
             auto_trim: config.auto_trim,
+            resolver: None,
         }
     }
 
@@ -413,15 +421,40 @@ impl ContextManager {
         Self::new(counter, ContextTrimmingStrategy::default())
     }
 
+    /// Attach a 3-layer `ModelContextResolver` so context-window numbers come
+    /// from L1 user overrides / L2 provider probes / L3 built-in library rather
+    /// than the static profile map.
+    pub fn with_resolver(mut self, resolver: Arc<ModelContextResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// The attached resolver, if any.
+    pub fn resolver(&self) -> Option<&Arc<ModelContextResolver>> {
+        self.resolver.as_ref()
+    }
+
     /// Add a custom context window profile for a model.
     pub fn add_profile(&mut self, profile: ContextWindowProfile) {
         self.profiles.insert(profile.model_name.clone(), profile);
     }
 
     /// Get the profile for a model, or create one from defaults.
+    ///
+    /// When a `ModelContextResolver` is attached, the context-window and
+    /// max-output numbers are sourced from it (3-layer resolution), overriding
+    /// the static profile's stored values.
     pub fn profile_for_model(&self, model: &str) -> ContextWindowProfile {
-        self.profiles.get(model).cloned()
-            .unwrap_or_else(|| ContextWindowProfile::from_model_name(model))
+        let mut profile = self.profiles.get(model).cloned()
+            .unwrap_or_else(|| ContextWindowProfile::from_model_name(model));
+        if let Some(resolver) = &self.resolver {
+            let resolved = resolver.resolve_cached(model);
+            if resolved > 0 {
+                profile.context_window_tokens = resolved;
+            }
+            // max_output stays as inferred — the resolver only owns the window.
+        }
+        profile
     }
 
     /// Check if a conversation fits within a model's context window.

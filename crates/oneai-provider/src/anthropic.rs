@@ -465,6 +465,32 @@ impl LlmProvider for AnthropicProvider {
         ModelCapability::claude_class()
     }
 
+    /// L2 probe: query Anthropic's `/v1/models/{id}` for the model's context window.
+    ///
+    /// Anthropic's Models API returns `{"id":..., "context_window": 200000, ...}`.
+    /// Best-effort: any network/parse/auth failure returns `None`.
+    async fn probe_context_window(&self) -> Option<u32> {
+        let model = self.config.model_name.as_deref()?;
+        let api_key = self.config.api_key.as_deref()?;
+        let base = self.config.resolved_url();
+        let url = format!("{}/models/{}", base.trim_end_matches('/'), model);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: Value = resp.json().await.ok()?;
+        parse_anthropic_context_window(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
     }
@@ -1062,5 +1088,40 @@ impl AnthropicProvider {
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+}
+// ─── Anthropic /v1/models context-window parser ──────────────────────────────
+
+/// Parse the context-window size from an Anthropic `/v1/models/{id}` response.
+///
+/// Response shape: `{"id":"claude-opus-4-8","display_name":"...","context_window":200000}`.
+pub fn parse_anthropic_context_window(json: &Value) -> Option<u32> {
+    let n = json.get("context_window")?.as_u64()?;
+    if n > 0 {
+        Some(n.min(u32::MAX as u64) as u32)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_anthropic_context_window() {
+        let resp = json!({
+            "id": "claude-opus-4-8",
+            "display_name": "Claude Opus 4.8",
+            "context_window": 200000,
+        });
+        assert_eq!(parse_anthropic_context_window(&resp), Some(200_000));
+    }
+
+    #[test]
+    fn test_parse_anthropic_missing_field() {
+        let resp = json!({ "id": "claude-opus-4-8" });
+        assert_eq!(parse_anthropic_context_window(&resp), None);
     }
 }

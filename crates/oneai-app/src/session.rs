@@ -101,6 +101,11 @@ struct AppResources {
     token_counter: Option<Arc<dyn oneai_core::TokenCounter>>,
     /// Model pricing catalog — propagated into the AgentLoop for accurate cost.
     pricing_catalog: Option<oneai_core::ModelPricingCatalog>,
+    /// 3-layer model context resolver — used by `warm_model_context` to probe
+    /// the provider for context-window sizes and cache them for the sync path.
+    model_context_resolver: Option<Arc<oneai_core::ModelContextResolver>>,
+    /// Whether to probe the provider for context windows at warm-up.
+    probe_context_windows: bool,
 }
 
 impl AppSession {
@@ -141,6 +146,8 @@ impl AppSession {
                 circuit_breaker: app.circuit_breaker.clone(),
                 token_counter: app.token_counter.clone(),
                 pricing_catalog: app.pricing_catalog.clone(),
+                model_context_resolver: app.model_context_resolver.clone(),
+                probe_context_windows: app.probe_context_windows,
             }),
             conversation,
             session_id,
@@ -180,6 +187,44 @@ impl AppSession {
     /// Get the currently active skill name, if any.
     pub async fn active_skill(&self) -> Option<String> {
         self.app.active_skill.read().await.clone()
+    }
+
+    /// Get the LLM provider, if configured.
+    pub fn provider(&self) -> Option<&Arc<dyn oneai_core::traits::LlmProvider>> {
+        self.app.provider.as_ref()
+    }
+
+    /// Get the 3-layer model context resolver, if configured.
+    pub fn model_context_resolver(&self) -> Option<&Arc<oneai_core::ModelContextResolver>> {
+        self.app.model_context_resolver.as_ref()
+    }
+
+    /// Whether provider context-window probing is enabled at warm-up.
+    pub fn probe_context_windows(&self) -> bool {
+        self.app.probe_context_windows
+    }
+
+    /// Warm the model-context resolver by probing the provider for the
+    /// configured model's context window (L2), caching the result so the sync
+    /// `TokenCounter::context_window_size` path reads it without re-probing.
+    ///
+    /// Mirrors opencode's "probe at session start, read cache thereafter" pattern.
+    /// Safe to call when no provider/resolver is configured (no-op). Best-effort:
+    /// probe failures silently fall through to the built-in library.
+    pub async fn warm_model_context(&self) {
+        if !self.app.probe_context_windows {
+            return;
+        }
+        let (Some(resolver), Some(provider)) =
+            (self.app.model_context_resolver.as_ref(), self.app.provider.as_ref())
+        else {
+            return;
+        };
+        let Some(model) = provider.config().model_name.as_deref() else {
+            return;
+        };
+        // resolve_with_provider probes (L2) on cache miss and seeds the cache.
+        let _ = resolver.resolve_with_provider(model, provider).await;
     }
 
     /// Send a user message and add it to memory.

@@ -477,7 +477,66 @@ impl LlmProvider for GeminiProvider {
         }
     }
 
+    /// L2 probe: query Gemini's `models.get` for the model's input token limit.
+    ///
+    /// Endpoint: `GET {base}/models/{id}?key={api_key}`. Response includes
+    /// `inputTokenLimit` (the context window). Best-effort: any failure → `None`.
+    async fn probe_context_window(&self) -> Option<u32> {
+        let model = self.config.model_name.as_deref()?;
+        let api_key = self.config.api_key.as_deref().unwrap_or("");
+        let base = self.config.resolved_url();
+        let url = format!("{}/models/{}", base.trim_end_matches('/'), model);
+
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("key", api_key)])
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: Value = resp.json().await.ok()?;
+        parse_gemini_context_window(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+}
+
+/// Parse the context-window size from a Gemini `models.get` response.
+///
+/// Response shape: `{"name":"models/gemini-2.5-pro","inputTokenLimit":1048576,"outputTokenLimit":8192,...}`.
+pub fn parse_gemini_context_window(json: &Value) -> Option<u32> {
+    let n = json.get("inputTokenLimit")?.as_u64()?;
+    if n > 0 {
+        Some(n.min(u32::MAX as u64) as u32)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_gemini_context_window() {
+        let resp = json!({
+            "name": "models/gemini-2.5-pro",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 8192,
+        });
+        assert_eq!(parse_gemini_context_window(&resp), Some(1_048_576));
+    }
+
+    #[test]
+    fn test_parse_gemini_missing_field() {
+        let resp = json!({ "name": "models/gemini-2.5-pro" });
+        assert_eq!(parse_gemini_context_window(&resp), None);
     }
 }

@@ -260,8 +260,102 @@ impl LlmProvider for OllamaProvider {
         }
     }
 
+    /// L2 probe: query Ollama's `/api/show` for the model's context length.
+    ///
+    /// Ollama returns a `model_info` object whose keys are architecture-scoped
+    /// (`llama.context_length`, `qwen2.context_length`, `gemma.context_length`,
+    /// `command_r.context_length`, …). Different model families use different
+    /// key prefixes, so we scan for any key ending in `.context_length`.
+    ///
+    /// Best-effort: any network/parse failure returns `None` so the resolver
+    /// falls through to the built-in library without blocking inference.
+    async fn probe_context_window(&self) -> Option<u32> {
+        let model = self.config.model_name.as_deref()?;
+        let base = self.config.resolved_url();
+        let url = format!("{}/api/show", base.trim_end_matches('/'));
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({ "model": model }))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: Value = resp.json().await.ok()?;
+        parse_ollama_context_window(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+}
+
+// ─── Ollama /api/show context-length parser ─────────────────────────────────
+
+/// Parse the context-window size from an Ollama `/api/show` response.
+///
+/// Scans the `model_info` object for any key ending in `context_length`
+/// (e.g. `llama.context_length`, `qwen2.context_length`, `gemma.context_length`)
+/// and returns the first non-zero value found. Returns `None` if absent.
+pub fn parse_ollama_context_window(json: &Value) -> Option<u32> {
+    let model_info = json.get("model_info")?;
+    let obj = model_info.as_object()?;
+    for (key, val) in obj {
+        if key.ends_with("context_length") {
+            if let Some(n) = val.as_u64() {
+                if n > 0 {
+                    // Ollama reports context_length as a number; cap at u32 max.
+                    return Some(n.min(u32::MAX as u64) as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_ollama_llama_context() {
+        let resp = json!({
+            "model_info": {
+                "general.architecture": "llama",
+                "llama.context_length": 8192,
+                "llama.embedding_length": 4096,
+            }
+        });
+        assert_eq!(parse_ollama_context_window(&resp), Some(8192));
+    }
+
+    #[test]
+    fn test_parse_ollama_qwen_context() {
+        let resp = json!({
+            "model_info": {
+                "general.architecture": "qwen2",
+                "qwen2.context_length": 32768,
+            }
+        });
+        assert_eq!(parse_ollama_context_window(&resp), Some(32768));
+    }
+
+    #[test]
+    fn test_parse_ollama_missing_model_info() {
+        let resp = json!({ "license": "mit" });
+        assert_eq!(parse_ollama_context_window(&resp), None);
+    }
+
+    #[test]
+    fn test_parse_ollama_no_context_length_key() {
+        let resp = json!({ "model_info": { "general.architecture": "llama" } });
+        assert_eq!(parse_ollama_context_window(&resp), None);
     }
 }
 

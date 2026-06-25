@@ -132,6 +132,14 @@ pub struct AppBuilder {
     context_manager: Option<Arc<ContextManager>>,
     /// Context manager config (optional — for auto-creating context manager).
     context_manager_config: Option<ContextManagerConfig>,
+    /// Model context resolver (optional — 3-layer context-window resolution:
+    /// user config > provider probe > built-in library). When set, attached to
+    /// the token counter and context manager as the source of truth for window sizes.
+    model_context_resolver: Option<Arc<oneai_core::ModelContextResolver>>,
+    /// Whether to probe the provider for context windows at warm-up (default true).
+    /// Only effective when a provider is configured and `model_context_resolver`
+    /// is enabled (auto-created when any token/context component is configured).
+    probe_context_windows: bool,
     /// Team coordinator (optional — enables multi-agent team coordination).
     team_coordinator: Option<Arc<oneai_agent::TeamCoordinator>>,
     /// Handoff manager (optional — enables agent handoff-as-tool-call protocol).
@@ -187,6 +195,8 @@ impl AppBuilder {
             token_counter: None,
             context_manager: None,
             context_manager_config: None,
+            model_context_resolver: None,
+            probe_context_windows: true,
             team_coordinator: None,
             handoff_manager: None,
             handoff_config: None,
@@ -1038,6 +1048,25 @@ impl AppBuilder {
         self.context_manager_config(ContextManagerConfig::default())
     }
 
+    // ─── Model Context Resolver (3-layer window resolution) ──────────────────
+
+    /// Attach a custom 3-layer `ModelContextResolver` as the source of truth for
+    /// model context-window sizes (L1 user config > L2 provider probe > L3
+    /// built-in library). When set, it is attached to the token counter and
+    /// context manager at build time.
+    pub fn model_context_resolver(mut self, resolver: Arc<oneai_core::ModelContextResolver>) -> Self {
+        self.model_context_resolver = Some(resolver);
+        self
+    }
+
+    /// Toggle whether the provider's model-metadata endpoint is probed for the
+    /// context window at warm-up (default `true`). Disable to skip network IO
+    /// entirely and rely on L1 overrides + the built-in library.
+    pub fn probe_context_windows(mut self, enabled: bool) -> Self {
+        self.probe_context_windows = enabled;
+        self
+    }
+
     // ─── Team Coordinator ─────────────────────────────────────────────────────
 
     /// Set a custom team coordinator for multi-agent team coordination.
@@ -1537,11 +1566,45 @@ impl AppBuilder {
             })
         });
 
+        // Resolve model context resolver: explicit, or auto-create when any
+        // token/context component is configured, so the expanded built-in
+        // library (L3) + L1 overrides take effect even without explicit setup.
+        // Seeded with L1 user-profiles from context_manager_config.profiles.
+        // L1 provider-extras (ModelConfig.extra["context_window"]) are added
+        // after the provider is resolved below.
+        let resolved_resolver: Option<Arc<oneai_core::ModelContextResolver>> =
+            self.model_context_resolver.clone().or_else(|| {
+                if self.context_manager_config.is_some()
+                    || self.context_manager.is_some()
+                    || self.token_counter.is_some()
+                {
+                    let mut profiles = std::collections::HashMap::new();
+                    if let Some(cfg) = &self.context_manager_config {
+                        for p in &cfg.profiles {
+                            if p.context_window_tokens > 0 {
+                                profiles.insert(p.model_name.clone(), p.context_window_tokens);
+                            }
+                        }
+                    }
+                    Some(Arc::new(oneai_core::ModelContextResolver::new(
+                        profiles,
+                        std::collections::HashMap::new(),
+                    )))
+                } else {
+                    None
+                }
+            });
+
         // Resolve token counter: use explicitly set counter, or create default
         let resolved_token_counter = self.token_counter.or_else(|| {
             if self.context_manager_config.is_some() || self.context_manager.is_some() {
-                // Auto-create if context manager is configured
-                Some(Arc::new(oneai_core::HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>)
+                // Auto-create if context manager is configured, attaching the
+                // resolver so context_window_size consults the 3-layer path.
+                let mut counter = oneai_core::HeuristicTokenCounter::new();
+                if let Some(r) = &resolved_resolver {
+                    counter = counter.with_resolver(r.clone());
+                }
+                Some(Arc::new(counter) as Arc<dyn TokenCounter>)
             } else {
                 None
             }
@@ -1553,7 +1616,13 @@ impl AppBuilder {
                 let tc = resolved_token_counter.clone().unwrap_or_else(|| {
                     Arc::new(oneai_core::HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>
                 });
-                Arc::new(ContextManager::from_config(config, tc))
+                let cm = ContextManager::from_config(config, tc);
+                let cm = if let Some(r) = &resolved_resolver {
+                    cm.with_resolver(r.clone())
+                } else {
+                    cm
+                };
+                Arc::new(cm)
             })
         });
 
@@ -1628,6 +1697,19 @@ impl AppBuilder {
             provider_pool.clone().map(|pool| pool as Arc<dyn LlmProvider>)
         });
 
+        // Seed L1 provider-extras from the resolved provider's ModelConfig.extra
+        // (the highest-priority per-model user override channel besides the env var).
+        if let (Some(resolver), Some(provider)) = (&resolved_resolver, &provider) {
+            let cfg = provider.config();
+            if let Some(model) = cfg.model_name.as_deref() {
+                if let Some(cw) = cfg.extra.get("context_window") {
+                    if let Ok(v) = cw.parse::<u32>() {
+                        resolver.add_provider_extra(model.to_string(), v);
+                    }
+                }
+            }
+        }
+
         // Resolve pricing catalog: use explicitly set catalog, or default
         let pricing_catalog = self.pricing_catalog.or_else(|| {
             Some(ModelPricingCatalog::with_known_models())
@@ -1671,6 +1753,8 @@ impl AppBuilder {
             smart_router: resolved_smart_router,
             token_counter: resolved_token_counter,
             context_manager: resolved_context_manager,
+            model_context_resolver: resolved_resolver,
+            probe_context_windows: self.probe_context_windows,
             team_coordinator: self.team_coordinator,
             handoff_manager: self.handoff_manager,
             swarm_orchestrator: self.swarm_orchestrator,
@@ -1756,6 +1840,10 @@ pub struct App {
     pub token_counter: Option<Arc<dyn TokenCounter>>,
     /// Context manager for model-aware context trimming.
     pub context_manager: Option<Arc<ContextManager>>,
+    /// 3-layer model context resolver (L1 user > L2 provider probe > L3 builtin).
+    pub model_context_resolver: Option<Arc<oneai_core::ModelContextResolver>>,
+    /// Whether to probe the provider for context windows at warm-up.
+    pub probe_context_windows: bool,
     /// Team coordinator for multi-agent team coordination.
     pub team_coordinator: Option<Arc<oneai_agent::TeamCoordinator>>,
     /// Handoff manager for agent handoff-as-tool-call protocol.

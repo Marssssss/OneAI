@@ -22,11 +22,13 @@
 //! that the simple heuristic ignores.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::Conversation;
 use crate::ContentBlock;
+use crate::model_context::ModelContextResolver;
 
 // ─── TokenCounter trait ────────────────────────────────────────────────────
 
@@ -476,6 +478,12 @@ pub struct HeuristicTokenCounter {
 
     /// Default profile for unknown models.
     default_profile: ModelTokenizerProfile,
+
+    /// Optional 3-layer context-window resolver (L1 user > L2 provider probe >
+    /// L3 builtin library). When set, `context_window_size` delegates to it so
+    /// the window number reflects user overrides / live provider probes /
+    /// the expanded built-in library rather than the legacy name heuristic.
+    resolver: Option<Arc<ModelContextResolver>>,
 }
 
 impl HeuristicTokenCounter {
@@ -487,7 +495,7 @@ impl HeuristicTokenCounter {
         let profiles = Self::default_profiles_map();
         let default_profile = ModelTokenizerProfile::from_model_name("default");
 
-        Self { profiles, default_profile }
+        Self { profiles, default_profile, resolver: None }
     }
 
     /// Create with only default profile (no model-specific profiles).
@@ -496,6 +504,7 @@ impl HeuristicTokenCounter {
         Self {
             profiles: HashMap::new(),
             default_profile,
+            resolver: None,
         }
     }
 
@@ -505,7 +514,22 @@ impl HeuristicTokenCounter {
             .map(|p| (p.model_name.clone(), p))
             .collect();
         let default_profile = ModelTokenizerProfile::from_model_name("default");
-        Self { profiles: map, default_profile }
+        Self { profiles: map, default_profile, resolver: None }
+    }
+
+    /// Attach a 3-layer `ModelContextResolver` as the source of truth for
+    /// context-window sizes. When set, `context_window_size` delegates to it
+    /// so the window number reflects user overrides / live provider probes /
+    /// the expanded built-in library rather than the legacy name heuristic.
+    /// The resolver's own L1 user-profile map is populated at construction
+    /// time (by `AppBuilder`), so no seeding is done here.
+    pub fn with_resolver(self, resolver: Arc<ModelContextResolver>) -> Self {
+        Self { resolver: Some(resolver), ..self }
+    }
+
+    /// The attached resolver, if any.
+    pub fn resolver(&self) -> Option<&Arc<ModelContextResolver>> {
+        self.resolver.as_ref()
     }
 
     /// Add a custom model profile.
@@ -603,6 +627,14 @@ impl TokenCounter for HeuristicTokenCounter {
     }
 
     fn context_window_size(&self, model: &str) -> u32 {
+        // If a 3-layer resolver is attached, it is the single source of truth:
+        // L1 user override → L2 probe cache → L3 builtin library / heuristic.
+        // This path never issues network IO (probe results are pre-cached by
+        // the async warm-up / agent-loop path).
+        if let Some(resolver) = &self.resolver {
+            return resolver.resolve_cached(model);
+        }
+
         let profile = self.profile_for_model(model);
         // For known models in the profiles map, use the stored value.
         // For unknown models (which get the default profile), dynamically infer
@@ -782,6 +814,8 @@ mod tests {
 
     #[test]
     fn test_heuristic_token_counter_context_window_size() {
+        // Serialized — unknown-model path reads ONEAI_CONTEXT_WINDOW internally.
+        let _g = crate::model_context::ENV_TEST_MUTEX.lock().unwrap();
         // Most basic test first
         let lower = "gemini-2.5-pro".to_lowercase();
         assert!(lower.contains("gemini"), "lowercase must contain 'gemini': {}", lower);
@@ -803,6 +837,8 @@ mod tests {
 
     #[test]
     fn test_infer_context_window_glm_models() {
+        // Serialized — infer_context_window_for_tokenizer reads ONEAI_CONTEXT_WINDOW.
+        let _g = crate::model_context::ENV_TEST_MUTEX.lock().unwrap();
         assert_eq!(infer_context_window_for_tokenizer("glm-5.1"), 203_000);
         assert_eq!(infer_context_window_for_tokenizer("glm-5.1-plus"), 203_000);
         assert_eq!(infer_context_window_for_tokenizer("glm-4"), 128_000);
@@ -811,6 +847,9 @@ mod tests {
 
     #[test]
     fn test_infer_context_window_env_override() {
+        // Serialized — ONEAI_CONTEXT_WINDOW is process-global and shared with
+        // model_context::tests (see ENV_TEST_MUTEX).
+        let _g = crate::model_context::ENV_TEST_MUTEX.lock().unwrap();
         // ONEAI_CONTEXT_WINDOW env var overrides all model inference
         // Use a unique value to avoid collision with parallel tests
         std::env::set_var("ONEAI_CONTEXT_WINDOW", "999999");
@@ -973,6 +1012,8 @@ mod tests {
 
     #[test]
     fn test_heuristic_token_counter_fallback_to_default() {
+        // Serialized — unknown-model path reads ONEAI_CONTEXT_WINDOW internally.
+        let _g = crate::model_context::ENV_TEST_MUTEX.lock().unwrap();
         let counter = HeuristicTokenCounter::new();
 
         // Unknown model falls back to default (Generic type)

@@ -603,8 +603,77 @@ impl LlmProvider for OpenAIProvider {
         }
     }
 
+    /// L2 probe: query the OpenAI-compatible `/v1/models/{id}` endpoint.
+    ///
+    /// Note: OpenAI's own `/v1/models` does not document a context-window field,
+    /// so this usually returns `None` for OpenAI proper and the resolver falls
+    /// through to the built-in library. Some OpenAI-compatible gateways
+    /// (vLLM, LM Studio, …) do report `context_window` / `context_length` /
+    /// `max_model_context`, which we pick up. Best-effort: any failure → `None`.
+    async fn probe_context_window(&self) -> Option<u32> {
+        let model = self.config.model_name.as_deref()?;
+        let api_key = self.config.api_key.as_deref().unwrap_or("");
+        let base = self.config.resolved_url();
+        let url = format!("{}/models/{}", base.trim_end_matches('/'), model);
+
+        let mut req = self
+            .client
+            .get(&url)
+            .header("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(5));
+        if !api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: Value = resp.json().await.ok()?;
+        parse_openai_context_window(&json)
+    }
+
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+}
+
+/// Parse a context-window size from an OpenAI-compatible `/v1/models/{id}` response.
+///
+/// OpenAI proper omits this; compatible gateways expose it under varying keys:
+/// `context_window`, `context_length`, `max_model_context`, `max_context_length`.
+pub fn parse_openai_context_window(json: &Value) -> Option<u32> {
+    for key in ["context_window", "context_length", "max_model_context", "max_context_length"] {
+        if let Some(n) = json.get(key).and_then(Value::as_u64) {
+            if n > 0 {
+                return Some(n.min(u32::MAX as u64) as u32);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_openai_context_window_vllm() {
+        let resp = json!({ "id": "qwen2.5-7b", "context_length": 32768 });
+        assert_eq!(parse_openai_context_window(&resp), Some(32_768));
+    }
+
+    #[test]
+    fn test_parse_openai_context_window_lmstudio() {
+        let resp = json!({ "id": "llama3.3", "max_context_length": 131072 });
+        assert_eq!(parse_openai_context_window(&resp), Some(131_072));
+    }
+
+    #[test]
+    fn test_parse_openai_no_context_field() {
+        // OpenAI proper — no context-window key.
+        let resp = json!({ "id": "gpt-4o", "object": "model", "owned_by": "openai" });
+        assert_eq!(parse_openai_context_window(&resp), None);
     }
 }
 
