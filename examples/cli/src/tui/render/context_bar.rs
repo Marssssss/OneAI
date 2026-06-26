@@ -55,6 +55,20 @@ pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
         InteractionMode::Normal => {}
     }
 
+    // Work timer: bright while running, dim (retained) after completion.
+    if let Some(dur) = app.work_timer.display() {
+        let color = if app.work_timer.is_running() {
+            THINKING_COLOR
+        } else {
+            ratatui::style::Color::DarkGray
+        };
+        spans.push(Span::styled(
+            format!("⏱{}", super::format_work_duration(dur)),
+            Style::default().fg(color),
+        ));
+        spans.push(Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)));
+    }
+
     spans.push(Span::styled(format!("{}ctx{}/{}k {}${:.3}", ctx_prefix, ctx_display, ctx_max_display, cost_prefix, app.session_cost),
         Style::default().fg(CONTEXT_COST_COLOR)));
 

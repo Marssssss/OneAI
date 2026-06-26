@@ -724,7 +724,7 @@ fn handle_user_input_async(
 
                 // Immediate feedback: clear input is already done by handle_singleline_key;
                 // show a progress line + start the spinner so the user knows work started.
-                app.is_thinking = true;
+                app.start_thinking();
                 let mode_hint = if no_llm { " (heuristic)" } else { " + LLM synthesis" };
                 app.add_message(ChatRole::System, format!(
                     "⏳ Generating {} (probing project{})…",
@@ -1058,7 +1058,7 @@ fn handle_user_input_async(
     rt.block_on(async {
         session_state.lock().await.session.set_plan_mode(plan_mode);
     });
-    app.is_thinking = true;
+    app.start_thinking();
     // Add a thinking bubble to show the agent is processing
     app.add_collapsed_message(ChatRole::Thinking, "Processing your request...");
 
@@ -1621,7 +1621,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
         ObserverEvent::Complete(result) => {
             // Flush any remaining buffered stream text before marking as done
             app.flush_stream_buffer();
-            app.is_thinking = false;
+            app.stop_thinking(); // stop timer; last run duration retained for dim display
             // Remove useless thinking bubbles: the "Processing your request..."
             // placeholder (model never produced thinking) AND any empty thinking
             // bubble (model emitted an empty Thinking block). Both leave blank
@@ -1740,11 +1740,15 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.pending_plan = Some((plan, steps, Some(reply_tx)));
             app.plan_approval_selected_index = 0;
             app.plan_approval_scroll = 0;
+            // Flip is_thinking off (stop spinner / show approval UI) but do NOT
+            // stop the work timer — the run is paused for an approval decision,
+            // not finished. Wall-clock "time on this problem" keeps running
+            // across the pause, consistent with the Esc-interrupt semantics.
             app.is_thinking = false;
             app.dirty = true;
         }
         ObserverEvent::Error(msg) => {
-            app.is_thinking = false;
+            app.stop_thinking(); // run ended via error; retain duration for dim display
             // Run ended (via error) — dismiss the plan panel too.
             app.plan_state = None;
             app.add_message(ChatRole::Error, msg);
@@ -1752,7 +1756,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
         ObserverEvent::InitResult(msg) => {
             // `/init` background generation finished — re-enable input and show
             // the result. (No plan/agent-loop state to clear.)
-            app.is_thinking = false;
+            app.stop_thinking();
             app.add_message(ChatRole::System, msg);
         }
         // ObserverEvent::ApprovalRequest comes from the observer trait,
@@ -2039,6 +2043,9 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                 }
             }
             app.is_thinking = true; // loop resumes (was blocked on the gate)
+            // Note: work_timer is NOT restarted here — it kept running across the
+            // plan-approval pause (PlanSubmitted only flips is_thinking, not the
+            // timer), so wall-clock "time on this problem" stays continuous.
             app.dirty = true;
         }
         (_, KeyCode::Esc) => {

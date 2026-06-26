@@ -47,6 +47,19 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         Style::default().fg(CONTEXT_PARADIGM_COLOR),
     ))));
 
+    // Work timer: bright while running, dim (retained) after completion.
+    if let Some(dur) = app.work_timer.display() {
+        let color = if app.work_timer.is_running() {
+            THINKING_COLOR
+        } else {
+            ratatui::style::Color::DarkGray
+        };
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!(" ⏱ {}", super::format_work_duration(dur)),
+            Style::default().fg(color),
+        ))));
+    }
+
     // Context occupancy line — the only token display in the sidebar
     let ctx_used = app.context_tokens;
     let ctx_max = app.context_window_size;

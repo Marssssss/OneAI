@@ -50,6 +50,46 @@ impl InteractionMode {
     }
 }
 
+// ─── Work Timer ────────────────────────────────────────────────────────────
+
+/// 整轮工作耗时计时器。
+///
+/// `start` 在 agent 开始思考（`is_thinking` 置 true）时记录；`last` 保留最近一次
+/// 完成耗时，用于完成后暗色显示"这次花了多久"。新一轮提交时 `start_run` 清空
+/// `last`。所有调用都在主循环线程，故 `Instant` 无需同步原语。
+#[derive(Default, Clone)]
+pub struct WorkTimer {
+    /// `Some` 表示正在工作中。
+    pub start: Option<std::time::Instant>,
+    /// 最近一次完成耗时（完成后保留，新一轮开始时清空）。
+    pub last: Option<std::time::Duration>,
+}
+
+impl WorkTimer {
+    /// 开始一轮工作：记录起点，清空上一次保留值。
+    pub fn start_run(&mut self) {
+        self.start = Some(std::time::Instant::now());
+        self.last = None;
+    }
+
+    /// 结束一轮工作：把 elapsed 存入 `last`，清空 `start`。
+    pub fn stop_run(&mut self) {
+        if let Some(t) = self.start.take() {
+            self.last = Some(t.elapsed());
+        }
+    }
+
+    /// 显示用时长：工作中返回实时 elapsed，否则返回最近一次 `last`。
+    pub fn display(&self) -> Option<std::time::Duration> {
+        self.start.map(|t| t.elapsed()).or(self.last)
+    }
+
+    /// 是否正在工作（用于选择亮/暗色）。
+    pub fn is_running(&self) -> bool {
+        self.start.is_some()
+    }
+}
+
 // ─── Slash Commands ───────────────────────────────────────────────────────
 
 /// Supported slash commands for autocomplete.
@@ -513,6 +553,10 @@ pub struct App {
     /// Whether an agent response is in progress.
     pub is_thinking: bool,
 
+    /// 整轮工作耗时计时器。与 `is_thinking` 同步：`start_thinking`/`stop_thinking`
+    /// helper 同时维护两者，渲染层用 `work_timer.display()` 显示实时或最近耗时。
+    pub work_timer: WorkTimer,
+
     // ─── Enhanced fields ──────────────────────────────────────────────────
 
     /// Current input mode (single-line or multi-line vim).
@@ -685,6 +729,7 @@ impl App {
             current_domain: "coding".to_string(),
             context_window_size,
             is_thinking: false,
+            work_timer: WorkTimer::default(),
 
             input_mode: InputMode::default(),
             active_paradigm: ParadigmKind::ReAct,
@@ -745,6 +790,20 @@ impl App {
     ///
     /// For User messages, this resets user_scrolled to re-enable auto-scroll.
     /// For other message types (system, tool, etc.), auto-scroll behavior is preserved.
+    /// Mark the agent as started thinking and (re)start the work timer.
+    /// Use this instead of `self.is_thinking = true;` so the timer stays in sync.
+    pub fn start_thinking(&mut self) {
+        self.is_thinking = true;
+        self.work_timer.start_run();
+    }
+
+    /// Mark the agent as stopped thinking and stop the work timer (retaining
+    /// the last run's duration in `work_timer.last` for dim post-completion display).
+    pub fn stop_thinking(&mut self) {
+        self.is_thinking = false;
+        self.work_timer.stop_run();
+    }
+
     pub fn add_message(&mut self, role: ChatRole, content: impl Into<String>) {
         // Reset user_scrolled on new user message to re-enable auto-scroll
         if role == ChatRole::User {

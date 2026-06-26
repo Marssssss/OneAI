@@ -5,7 +5,7 @@
 //!
 //! - Width < 80: single-line text "O n e A I" with gradient colors + Bold
 //! - Width >= 80: 5-line block art for larger brand display
-//! - When thinking: spinner + "thinking..." appended to the right of the art
+//! - When thinking: spinner + "thinking <elapsed>" appended to the right of the art
 //!
 //! All width calculations use **visual cell width** (via unicode-width),
 //! never byte length — `█` is 3 UTF-8 bytes but 1 terminal cell.
@@ -102,7 +102,7 @@ const BLOCK_ART_VISUAL_WIDTH: usize = 35;
 /// Renders "O n e A I" centered with gradient colors.
 /// When width >= 80 AND height >= 30, uses 5-line block art.
 /// Otherwise, uses single-line text with gradient.
-/// When thinking, appends spinner + "thinking..." on the right.
+/// When thinking, appends spinner + "thinking <elapsed>" on the right.
 pub fn draw_brand(f: &mut Frame, rect: Rect, app: &App) {
     // Only use block art when terminal is large enough (both wide and tall)
     let use_block_art = rect.width >= 80 && f.area().height >= 30;
@@ -152,10 +152,15 @@ fn draw_block_art_brand(f: &mut Frame, rect: Rect, app: &App) {
     // ── Build thinking spans (used only on row 2) ─────────────────────
     let thinking_spans: Vec<Span> = if app.is_thinking {
         let spinner = spinner_char(app.spinner_frame);
+        let dur = app
+            .work_timer
+            .display()
+            .map(super::format_work_duration)
+            .unwrap_or_default();
         vec![
             Span::styled("  ", Style::default().bg(BRAND_BG)), // gap
             Span::styled(
-                format!("{} thinking...", spinner),
+                format!("{} thinking {}", spinner, dur),
                 Style::default().fg(THINKING_COLOR).bg(BRAND_BG),
             ),
         ]
@@ -248,9 +253,14 @@ fn draw_text_brand(f: &mut Frame, rect: Rect, app: &App) {
     // Add thinking indicator on the right if thinking
     if app.is_thinking {
         let spinner = spinner_char(app.spinner_frame);
+        let dur = app
+            .work_timer
+            .display()
+            .map(super::format_work_duration)
+            .unwrap_or_default();
         brand_spans.push(Span::raw("  "));
         brand_spans.push(Span::styled(
-            format!("{} thinking...", spinner),
+            format!("{} thinking {}", spinner, dur),
             Style::default().fg(THINKING_COLOR),
         ));
     }

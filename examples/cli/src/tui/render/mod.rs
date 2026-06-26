@@ -144,10 +144,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// Format a work duration as a compact stopwatch string.
+///
+/// - `< 60s`  → `"12s"`
+/// - `< 1h`   → `"1:23"`
+/// - `>= 1h`  → `"1:02:03"`
+///
+/// Used by the brand line, context bar, and sidebar to show how long the
+/// current (or most recent) agent run has been working.
+pub fn format_work_duration(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{}s", s)
+    } else if s < 3600 {
+        format!("{}:{:02}", s / 60, s % 60)
+    } else {
+        format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+    }
+}
+
 /// Draw the sidebar (delegates to sidebar module).
 fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
-    sidebar::draw_sidebar(f, rect, app);
-}
+    sidebar::draw_sidebar(f, rect, app);}
 
 /// Draw command autocomplete popup.
 ///
