@@ -36,6 +36,14 @@ pub mod diff;
 
 /// Draw the full TUI layout.
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // 全屏清屏：ratatui 差分渲染只写 widget 显式覆盖的 cell，行尾超出内容、
+    // 以及未被任何 widget 覆盖的 cell 都会保留上一帧字形。sidebar/input/
+    // context_bar 等区域渲染的是不填满宽度、内容又快速变化（流式 cost/token、
+    // 打字）的行，行变短时尾部无人重写 → 上一帧尾字残留（ghosting）。
+    // 在每帧绘制前先全屏 Clear，保证所有 cell 重置为空白，从根上消除整类残留。
+    // 廉价：仅写内存 buffer，差分后只有真正变化的 cell 才发往终端。
+    f.render_widget(Clear, f.area());
+
     let total_size = f.area();
 
     // Determine brand line height: 5 lines for block art (large terminal), 1 line for text
