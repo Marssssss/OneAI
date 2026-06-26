@@ -54,6 +54,10 @@ pub enum ObserverEvent {
         steps: Vec<ProposedStep>,
         reply_tx: tokio::sync::oneshot::Sender<bool>,
     },
+
+    /// `/init` finished (background project-info generation). The payload is a
+    /// pre-formatted result/error message to display. Always clears `is_thinking`.
+    InitResult(String),
 }
 
 /// TUI observer — receives AgentLoop events and updates the App state

@@ -79,7 +79,7 @@ You're dropped into the interactive agent. Type a task and watch the full pipeli
 | Mouse drag | Select & copy text · wheel to scroll |
 | `Esc` | Vim mode / quit |
 
-**In-chat slash commands** (type `/help` for the full list): `/skills` `/skill` `/tools` `/cost` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/clear` `/quit`.
+**In-chat slash commands** (type `/help` for the full list): `/skills` `/skill` `/tools` `/cost` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`.
 
 ### 3. Non-interactive single-shot
 
@@ -106,6 +106,7 @@ oneai session list / resume <id>     # persisted sessions (SQLite)
 oneai wasm list / run <name>         # WASM-sandboxed modules
 oneai embed generate "text"          # vector embeddings
 oneai a2a serve                       # expose the agent over the A2A protocol
+oneai init [--format oneai|agents|claude] [--force] [--no-llm]  # generate a project-instruction file (LLM-synthesized when a provider is configured, else heuristic)
 ```
 
 ### 5. Minimal Rust program

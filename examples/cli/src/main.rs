@@ -48,6 +48,8 @@
 //!   oneai config show   — Show current configuration
 //!   oneai config init   — Create default config file
 //!   oneai version       — Version information
+//!   oneai init [--format oneai|agents|claude] [--path <dir>] [--force] [--no-llm]
+//!                      — Generate project-instruction file (ONEAI.md/AGENTS.md/CLAUDE.md)
 //!   oneai handoff list  — List available handoff targets
 //!   oneai handoff targets <p> — Show handoff target descriptions
 //!   oneai handoff config [<p>] — Show handoff configuration
@@ -64,6 +66,7 @@ mod cmd_run;
 mod cmd_pack;
 mod cmd_eval;
 mod cmd_config;
+mod cmd_init;
 mod cmd_version;
 mod cmd_studio;
 mod cmd_mcp;
@@ -198,6 +201,26 @@ enum Commands {
     },
     /// Show version information
     Version,
+    /// Generate a project-instruction file (ONEAI.md / AGENTS.md / CLAUDE.md)
+    ///
+    /// Analyzes the current project heuristically (build system, commands,
+    /// structure, dependencies, conventions, git context) and writes a markdown
+    /// file that is auto-loaded into agent context. Mirrors Claude Code's /init
+    /// and OpenCode's /init.
+    Init {
+        /// Output format: oneai (ONEAI.md), agents (AGENTS.md), claude (CLAUDE.md)
+        #[arg(long, default_value = "oneai")]
+        format: String,
+        /// Target project directory (default: current directory)
+        #[arg(long)]
+        path: Option<String>,
+        /// Overwrite an existing instruction file
+        #[arg(long)]
+        force: bool,
+        /// Skip LLM synthesis; write a deterministic heuristic doc instead
+        #[arg(long)]
+        no_llm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -882,6 +905,9 @@ fn main() {
         }
         Some(Commands::Version) => {
             cmd_version::cmd_version();
+        }
+        Some(Commands::Init { format, path, force, no_llm }) => {
+            cmd_init::cmd_init(&config, Some(&format), path.as_deref(), force, no_llm);
         }
     }
 }

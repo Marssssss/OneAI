@@ -69,6 +69,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/compact", "Compact conversation context"),
     ("/wf",      "Workflow commands: list, run, define, show, graph"),
     ("/new",     "Create a new session"),
+    ("/init",    "Generate project-instruction file (ONEAI.md/AGENTS.md/CLAUDE.md)"),
     ("/tool",    "Directly call a tool with JSON args"),
     ("/quit",    "Exit the TUI"),
     ("/q",       "Shortcut for /quit"),

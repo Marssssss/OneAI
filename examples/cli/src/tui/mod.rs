@@ -535,7 +535,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /context · /session · /domain · /compact · /wf · /tool · /new · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Shift+Tab=mode(Normal/Auto/Plan)\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Shift+Tab=mode(Normal/Auto/Plan)\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
                 return;
             }
             "/tools" | "/t" => {
@@ -684,6 +684,96 @@ fn handle_user_input_async(
                 app.last_context_accounting = None;
                 app.add_new_session(new_session_id);
                 app.add_message(ChatRole::System, "New session created. Previous sessions preserved in sidebar.");
+                return;
+            }
+            "/init" => {
+                // /init [oneai|agents|claude] [--force] [--no-llm]
+                // Generates a project-instruction file via LLM synthesis when a
+                // provider is configured (deep codebase probe → concise, actionable
+                // doc), falling back to a heuristic composer otherwise. The file is
+                // picked up automatically by ProjectInstructionsSource.
+                //
+                // Runs in a background task (like /agent runs) so the TUI stays
+                // responsive: input clears immediately and a progress line + spinner
+                // show while the probe/LLM call runs. The result lands as an
+                // ObserverEvent::InitResult.
+                let args: Vec<&str> = trimmed.split_whitespace().skip(1).collect();
+                let mut force = false;
+                let mut no_llm = false;
+                let mut format: Option<&str> = None;
+                for a in &args {
+                    match *a {
+                        "--force" | "-f" => force = true,
+                        "--no-llm" => no_llm = true,
+                        other if !other.starts_with('-') && format.is_none() => {
+                            format = Some(*a);
+                        }
+                        _ => {}
+                    }
+                }
+                let fmt = format
+                    .and_then(|s| oneai_domain::project_info::ProjectInfoFormat::from_name(s).ok())
+                    .unwrap_or_default();
+                let opts = oneai_domain::project_info::ProjectInfoOptions {
+                    format: fmt,
+                    force,
+                    ..Default::default()
+                };
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let dir = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+
+                // Immediate feedback: clear input is already done by handle_singleline_key;
+                // show a progress line + start the spinner so the user knows work started.
+                app.is_thinking = true;
+                let mode_hint = if no_llm { " (heuristic)" } else { " + LLM synthesis" };
+                app.add_message(ChatRole::System, format!(
+                    "⏳ Generating {} (probing project{})…",
+                    opts.format.filename(), mode_hint
+                ));
+                app.dirty = true;
+
+                let session_state_cl = session_state.clone();
+                let tx = observer_tx.clone();
+                let format_label = opts.format.label().to_string();
+                rt.spawn(async move {
+                    // Grab the provider (cloned Arc) under a short lock, if available.
+                    let provider: Option<Arc<dyn oneai_core::traits::LlmProvider>> = if no_llm {
+                        None
+                    } else {
+                        session_state_cl.lock().await.session.provider().cloned()
+                    };
+
+                    let result = match &provider {
+                        Some(p) => {
+                            oneai_domain::project_info::generate_project_info_with_llm(&dir, &opts, &**p).await
+                        }
+                        None => oneai_domain::project_info::generate_project_info(&dir, &opts).await,
+                    };
+
+                    let msg = match &result {
+                        Ok(r) if r.skipped => format!(
+                            "⊘ {} already exists — left untouched.\nRe-run `/init --force` to overwrite, or edit it directly.",
+                            r.path.display()
+                        ),
+                        Ok(r) => {
+                            let verb = if r.overwritten { "Overwrote" } else { "Created" };
+                            let mode = if r.llm_generated { "LLM-synthesized" } else { "heuristic" };
+                            if !r.llm_generated && provider.is_some() {
+                                format!(
+                                    "✅ {} {} ({})\n⚠  LLM synthesis failed — wrote a heuristic doc instead. Check ONEAI_API_KEY or use --no-llm.\nFormat: {} — loaded into agent context on next session.",
+                                    verb, r.path.display(), mode, format_label
+                                )
+                            } else {
+                                format!(
+                                    "✅ {} {} ({})\nFormat: {} — loaded into agent context on next session.\nEdit it to add project conventions & constraints.",
+                                    verb, r.path.display(), mode, format_label
+                                )
+                            }
+                        }
+                        Err(e) => format!("✗ /init failed: {}", e),
+                    };
+                    let _ = tx.send(ObserverEvent::InitResult(msg));
+                });
                 return;
             }
             "/compact" => {
@@ -1658,6 +1748,12 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // Run ended (via error) — dismiss the plan panel too.
             app.plan_state = None;
             app.add_message(ChatRole::Error, msg);
+        }
+        ObserverEvent::InitResult(msg) => {
+            // `/init` background generation finished — re-enable input and show
+            // the result. (No plan/agent-loop state to clear.)
+            app.is_thinking = false;
+            app.add_message(ChatRole::System, msg);
         }
         // ObserverEvent::ApprovalRequest comes from the observer trait,
         // but actual approval flow uses ChannelApprovalGateWithThreshold

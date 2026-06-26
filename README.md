@@ -79,7 +79,7 @@ cargo run -p oneai-cli-demo
 | 鼠标拖拽 | 选中文本复制 · 滚轮滚动 |
 | `Esc` | Vim 模式 / 退出 |
 
-**对话内斜杠命令**（输入 `/help` 查看完整列表）：`/skills` `/skill` `/tools` `/cost` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/clear` `/quit`。
+**对话内斜杠命令**（输入 `/help` 查看完整列表）：`/skills` `/skill` `/tools` `/cost` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`。
 
 ### 3. 非交互单次推理
 
@@ -107,6 +107,7 @@ oneai session list / resume <id>     # 持久化会话（SQLite）
 oneai wasm list / run <name>         # WASM 沙箱模块
 oneai embed generate "text"          # 生成向量 embedding
 oneai a2a serve                       # 通过 A2A 协议暴露 Agent
+oneai init [--format oneai|agents|claude] [--force] [--no-llm]  # 生成项目指令文件（已配置 LLM 时由模型综合生成，否则启发式）
 ```
 
 ### 5. 最简 Rust 程序

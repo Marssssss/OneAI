@@ -51,6 +51,7 @@ pub mod research_pack;
 pub mod builtin_sources;
 pub mod config_parser;
 pub mod repo_map;
+pub mod project_info;
 pub mod market;
 pub mod spec;
 pub mod validator;
