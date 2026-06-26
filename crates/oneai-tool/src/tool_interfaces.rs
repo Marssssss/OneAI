@@ -352,9 +352,16 @@ impl Tool for ShellTool {
                     format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr)
                 };
 
-                // Truncate output if exceeds max size
+                // Truncate output if exceeds max size. Slice on a byte index
+                // only — must land on a UTF-8 char boundary or String slicing
+                // panics (it does on multibyte/CJK output). Walk back to the
+                // nearest boundary before slicing.
                 let truncated_content = if content.len() > self.max_output_bytes {
-                    let mut truncated = content[..self.max_output_bytes].to_string();
+                    let mut end = self.max_output_bytes;
+                    while end > 0 && !content.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    let mut truncated = content[..end].to_string();
                     truncated.push_str("\n... [output truncated due to size limit]");
                     truncated
                 } else {
