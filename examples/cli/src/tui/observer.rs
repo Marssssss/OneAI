@@ -58,6 +58,17 @@ pub enum ObserverEvent {
     /// `/init` finished (background project-info generation). The payload is a
     /// pre-formatted result/error message to display. Always clears `is_thinking`.
     InitResult(String),
+
+    /// `/compact` finished (background LLM summarization). `summary` is empty
+    /// when the conversation was too short to compress. Always clears
+    /// `is_thinking`.
+    CompactResult {
+        summary: String,
+        removed_count: usize,
+        /// Retained recent turns `(role, text)` — user/assistant only — for the
+        /// TUI to re-render after clearing its display list.
+        retained: Vec<(String, String)>,
+    },
 }
 
 /// TUI observer — receives AgentLoop events and updates the App state

@@ -777,17 +777,51 @@ fn handle_user_input_async(
                 return;
             }
             "/compact" => {
-                // Compact conversation — preserve key messages, generate summary
-                compact_conversation(app);
-                // Also trigger backend session context compression
-                rt.block_on(async {
-                    session_state.lock().await.reset_session();
+                // Compact conversation in place via LLM summarization.
+                //
+                // Mirrors /init's async pattern: the LLM summary call takes
+                // seconds, so we run it in a background task with a progress
+                // line + spinner and deliver the result via
+                // ObserverEvent::CompactResult. Unlike the old implementation,
+                // we do NOT reset the session — the summary is injected into
+                // the *backend* Conversation (AppSession::compact) so the model
+                // sees it on the next run, and work continues in the same
+                // session (same session_id, no new sidebar entry).
+                let has_provider = rt.block_on(async {
+                    session_state.lock().await.app.has_provider()
                 });
-                let new_session_id = rt.block_on(async {
-                    session_state.lock().await.session.session_id().to_string()
+                if !has_provider {
+                    app.add_message(ChatRole::Error, "No LLM provider configured. Cannot /compact — set ONEAI_API_KEY and ONEAI_BASE_URL.");
+                    return;
+                }
+
+                app.start_thinking();
+                app.add_message(ChatRole::System, "⏳ Compacting conversation (LLM summary)…");
+                app.dirty = true;
+
+                let session_state_cl = session_state.clone();
+                let tx = observer_tx.clone();
+                rt.spawn(async move {
+                    let outcome = session_state_cl.lock().await
+                        .session.compact(2).await;
+                    let msg = match &outcome {
+                        // Empty summary ⇒ conversation was too short; send an
+                        // empty payload so the handler shows the "too short"
+                        // notice (the backend was left untouched by compact()).
+                        Ok(o) if o.summary.is_empty() => ObserverEvent::CompactResult {
+                            summary: String::new(),
+                            removed_count: 0,
+                            retained: Vec::new(),
+                        },
+                        Ok(o) => ObserverEvent::CompactResult {
+                            summary: o.summary.clone(),
+                            removed_count: o.removed_count,
+                            retained: o.retained.clone(),
+                        },
+                        Err(e) => ObserverEvent::Error(format!("✗ /compact failed: {}", e)),
+                    };
+                    let _ = tx.send(msg);
                 });
-                app.add_new_session(new_session_id);
-                app.add_message(ChatRole::System, "Conversation context compacted. Key messages preserved. New session created.");
                 return;
             }
             "/skills" => {
@@ -1759,6 +1793,43 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.stop_thinking();
             app.add_message(ChatRole::System, msg);
         }
+        ObserverEvent::CompactResult { summary, removed_count, retained } => {
+            // `/compact` background summarization finished. The backend
+            // Conversation was already replaced in place by AppSession::compact
+            // (summary system message + retained recent turns) — the model sees
+            // it on the next run. Here we just refresh the display to match:
+            // clear the rich display list, show the summary, then re-append the
+            // retained turns for visual continuity. Same session continues —
+            // no new sidebar entry, no session reset.
+            app.stop_thinking();
+            app.render_cache.invalidate_all();
+            app.messages.clear();
+            if summary.is_empty() {
+                app.add_message(ChatRole::System,
+                    "Conversation too short to compact — nothing to summarize.");
+            } else {
+                app.add_message(ChatRole::System, format!(
+                    "📋 Conversation compacted: {} older messages summarized into the \
+                     session context. Work continues in this session — the summary is \
+                     visible to the model.\n\n--- Summary ---\n{}",
+                    removed_count, summary));
+                // Re-append retained recent turns (user/assistant only) in order.
+                for (role, text) in &retained {
+                    match role.as_str() {
+                        "user" => app.add_message(ChatRole::User, text.clone()),
+                        _ => app.add_message(ChatRole::Assistant, text.clone()),
+                    }
+                }
+            }
+            // Cumulative session_cost / token_usage are preserved (they track
+            // total spend, which compaction shouldn't erase). Only clear the
+            // current-window occupancy — the next inference refreshes it via
+            // ContextAccountingUpdate / TokenUsageUpdate.
+            app.context_tokens = 0;
+            app.context_tokens_is_estimated = false;
+            app.last_context_accounting = None;
+            app.dirty = true;
+        }
         // ObserverEvent::ApprovalRequest comes from the observer trait,
         // but actual approval flow uses ChannelApprovalGateWithThreshold
         // which sends ApprovalPendingItem directly. This is just an informational
@@ -2130,63 +2201,4 @@ fn update_search_results(app: &mut App) {
             app.search_results.push(i);
         }
     }
-}
-
-/// Compact conversation — preserve key messages and generate a summary.
-///
-/// Strategy:
-/// 1. Keep the last User message (most recent question)
-/// 2. Keep the last Assistant message (most recent answer)
-/// 3. Generate a summary line of the conversation context
-/// 4. Drop all intermediate tool calls, tool results, iteration markers
-/// 5. Reset token/cost counters (new session)
-fn compact_conversation(app: &mut App) {
-    // Extract key messages to preserve
-    let last_user = app.messages.iter().rev()
-        .find(|m| m.role == ChatRole::User)
-        .map(|m| m.content.clone());
-
-    let last_assistant = app.messages.iter().rev()
-        .find(|m| m.role == ChatRole::Assistant)
-        .map(|m| m.content.clone());
-
-    // Count message types for summary
-    let total_messages = app.messages.len();
-    let user_count = app.messages.iter().filter(|m| m.role == ChatRole::User).count();
-    let assistant_count = app.messages.iter().filter(|m| m.role == ChatRole::Assistant).count();
-    let tool_count = app.messages.iter()
-        .filter(|m| matches!(m.role, ChatRole::ToolInvocation { .. }))
-        .count();
-
-    // Generate summary
-    let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
-    let summary = format!(
-        "📊 Context summary: {} messages ({} user, {} assistant, {} tool calls). Context: {}{} tokens, Cost: ${:.4}",
-        total_messages, user_count, assistant_count, tool_count,
-        ctx_est, app.context_tokens, app.session_cost
-    );
-
-    // Build compacted messages — no longer needed since we directly modify app
-
-    // Add summary as system message
-    app.messages.clear();
-    app.render_cache.invalidate_all();
-    app.add_message(ChatRole::System, summary);
-
-    // Preserve last user message
-    if let Some(user_msg) = last_user {
-        app.add_message(ChatRole::User, user_msg);
-    }
-
-    // Preserve last assistant answer
-    if let Some(assistant_msg) = last_assistant {
-        app.add_message(ChatRole::Assistant, assistant_msg);
-    }
-
-    // Reset counters for new session
-    app.token_usage = TokenUsage::new();
-    app.context_tokens = 0;
-    app.context_tokens_is_estimated = false;
-    app.session_cost = 0.0;
-    app.current_iteration = 0;
 }

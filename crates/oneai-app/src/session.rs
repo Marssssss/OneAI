@@ -44,6 +44,23 @@ pub enum WorkflowKind {
     StateGraph,
 }
 
+/// Outcome of an explicit `/compact` run.
+///
+/// `compact()` summarizes older turns via the LLM and replaces the session's
+/// backend `Conversation` in place (summary system message + retained recent
+/// turns). This struct carries what the TUI needs to refresh its display.
+#[derive(Debug, Clone, Default)]
+pub struct CompactOutcome {
+    /// The LLM-generated structured summary. Empty when the conversation was
+    /// too short to summarize (`messages <= keep_recent_turns`).
+    pub summary: String,
+    /// How many older messages were folded into the summary.
+    pub removed_count: usize,
+    /// Retained recent turns (`(role, text)`) — user/assistant only, in order —
+    /// for the TUI to re-render after clearing its display list.
+    pub retained: Vec<(String, String)>,
+}
+
 use oneai_agent::{AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult,
     ParadigmKind, ToolCallRequest, SubAgentKind};
 
@@ -763,5 +780,76 @@ impl AppSession {
         let throwaway_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
             Arc::new(tokio::sync::Mutex::new(None));
         self.run_agent(task, &SilentObserver, throwaway_slot).await
+    }
+
+    /// Compact the conversation in place — the manual `/compact` entry point.
+    ///
+    /// Unlike the AgentLoop's budget-triggered auto-compression (which fires at
+    /// ~80% of the token budget), this always summarizes: it folds the older
+    /// turns into a single LLM-generated summary (using the domain's
+    /// `CompressionTemplate` when available — CodingPack's is already a
+    /// Claude-Code-style structured template) and keeps the last
+    /// `keep_recent_turns` messages intact. The summary is injected as a system
+    /// message at the head of the *backend* `Conversation`, so the model
+    /// actually sees it on the next `run_agent` — context is preserved, not
+    /// dropped. The session id and sidebar entry stay the same (no reset).
+    ///
+    /// Returns the summary text, the count of folded messages, and the retained
+    /// recent turns for display. `summary` is empty when the conversation was
+    /// too short to summarize.
+    pub async fn compact(&mut self, keep_recent_turns: usize) -> Result<CompactOutcome> {
+        let provider = self.app.provider.as_ref()
+            .ok_or_else(|| oneai_core::error::OneAIError::Provider(
+                "No LLM provider configured. Cannot /compact.".to_string()
+            ))?;
+
+        // Build the compressor mirroring run_agent's wiring, but with a zero
+        // threshold so /compact always compresses regardless of budget.
+        let compressor = if let Some(domain) = &self.app.domain_pack {
+            oneai_memory::ContextCompressor::with_template(
+                0,
+                keep_recent_turns,
+                provider.clone(),
+                domain.compression_template.clone(),
+            )
+        } else {
+            oneai_memory::ContextCompressor::new(0, keep_recent_turns, provider.clone())
+        };
+
+        let result = compressor.compress(&self.conversation).await?;
+        let summary = result.summary.unwrap_or_default();
+        let removed_count = result.removed_entries.len();
+        let had_summary = !summary.is_empty();
+
+        // Replace the backend conversation in place: summary system message
+        // followed by the retained recent turns. This is the core fix — the
+        // summary now lives in the conversation the model sees, not just the
+        // TUI display.
+        self.conversation = result.compressed_conversation;
+
+        // Persist the compacted conversation, mirroring run_agent's auto-save.
+        if self.app.sqlite_store.is_some() {
+            if let Err(e) = self.app.memory_manager
+                .save_session(&self.session_id, &self.conversation).await
+            {
+                tracing::warn!("Failed to persist compacted session '{}': {}", self.session_id, e);
+            }
+        }
+
+        // Collect retained recent turns for the TUI to re-render. When a summary
+        // was produced, ContextCompressor prepends it as a leading system
+        // message — skip it. When the conversation was too short to summarize,
+        // the conversation is returned unchanged (no leading summary), so skip
+        // nothing.
+        let retained: Vec<(String, String)> = self.conversation.messages.iter()
+            .skip(if had_summary { 1 } else { 0 })
+            .filter_map(|m| match m.role {
+                oneai_core::Role::User => Some(("user".to_string(), m.text_content())),
+                oneai_core::Role::Assistant => Some(("assistant".to_string(), m.text_content())),
+                _ => None,
+            })
+            .collect();
+
+        Ok(CompactOutcome { summary, removed_count, retained })
     }
 }

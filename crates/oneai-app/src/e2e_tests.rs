@@ -194,3 +194,80 @@ async fn e2e_app_session_double_empty_response() {
     // The final answer is empty, but the loop didn't crash
     assert!(result.iterations >= 1);
 }
+
+// ─── /compact tests ───────────────────────────────────────────────────────
+
+/// `/compact` summarizes older turns and injects the summary into the backend
+/// Conversation in place, keeping the last `keep_recent_turns` messages intact.
+#[tokio::test]
+async fn e2e_app_session_compact_summarizes_and_injects_summary() {
+    // The MockProvider answers every infer call with this fixed text — that
+    // becomes the LLM summary the ContextCompressor requests.
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("mock summary text"));
+
+    let app = AppBuilder::new()
+        .provider(provider)
+        .auto_approval_gate()
+        .default_parser()
+        .build()
+        .await
+        .expect("Build should succeed");
+
+    let mut session = app.create_session();
+
+    // Seed a 6-message conversation: q1/a1/q2/a2/q3/a3
+    session.send_user_message("q1").await.unwrap();
+    session.add_assistant_message("a1").await.unwrap();
+    session.send_user_message("q2").await.unwrap();
+    session.add_assistant_message("a2").await.unwrap();
+    session.send_user_message("q3").await.unwrap();
+    session.add_assistant_message("a3").await.unwrap();
+    assert_eq!(session.conversation().messages.len(), 6);
+
+    // keep_recent_turns=2 → fold the first 4 messages into a summary, keep [q3,a3].
+    let outcome = session.compact(2).await.expect("compact should succeed");
+
+    // Summary was produced and reported.
+    assert_eq!(outcome.summary, "mock summary text");
+    assert_eq!(outcome.removed_count, 4);
+    // Retained recent turns are the last user/assistant pair, in order.
+    assert_eq!(outcome.retained.len(), 2);
+    assert_eq!(outcome.retained[0], ("user".to_string(), "q3".to_string()));
+    assert_eq!(outcome.retained[1], ("assistant".to_string(), "a3".to_string()));
+
+    // The backend conversation now leads with the summary system message
+    // (the core fix: the model sees the summary on the next run), followed by
+    // the retained recent turns.
+    let msgs = &session.conversation().messages;
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[0].role, oneai_core::Role::System);
+    assert!(msgs[0].text_content().contains("[Previous conversation summary]"));
+    assert!(msgs[0].text_content().contains("mock summary text"));
+    assert_eq!(msgs[1].text_content(), "q3");
+    assert_eq!(msgs[2].text_content(), "a3");
+}
+
+/// `/compact` on a conversation shorter than `keep_recent_turns` is a no-op:
+/// no summary is produced and the backend conversation is left unchanged.
+#[tokio::test]
+async fn e2e_app_session_compact_too_short_is_noop() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("unused"));
+    let app = AppBuilder::new()
+        .provider(provider)
+        .auto_approval_gate()
+        .default_parser()
+        .build()
+        .await
+        .expect("Build should succeed");
+
+    let mut session = app.create_session();
+    session.send_user_message("only message").await.unwrap();
+    assert_eq!(session.conversation().messages.len(), 1);
+
+    let outcome = session.compact(2).await.expect("compact should succeed");
+    assert!(outcome.summary.is_empty());
+    assert_eq!(outcome.removed_count, 0);
+    // Conversation untouched — no leading summary system message was prepended.
+    assert_eq!(session.conversation().messages.len(), 1);
+    assert_eq!(session.conversation().messages[0].text_content(), "only message");
+}
