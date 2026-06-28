@@ -5,6 +5,8 @@ use tokio::sync::RwLock;
 use oneai_core::SkillDescriptor;
 use oneai_core::error::Result;
 
+use crate::discovery::discover_skills;
+
 /// Registry for managing skills.
 pub struct SkillRegistry {
     skills: RwLock<HashMap<String, SkillDescriptor>>,
@@ -90,6 +92,23 @@ impl SkillRegistry {
         self.clear().await;
         self.register_builtin(skills).await?;
         Ok(())
+    }
+
+    // ─── Convention-directory discovery ────────────────────────────────────
+
+    /// Discover skills from the convention directories (`.claude/skills/`,
+    /// `.agents/skills/`, `.opencode/skills/`, `.oneai/skills/` — project
+    /// walked up to the git root + global under home) and register them.
+    ///
+    /// Project-level skills override global ones on name clash. Existing
+    /// registry entries with the same name are overwritten. Called by
+    /// `AppBuilder::build()` so discovered skills are available every session.
+    pub async fn load_discovered(&self) {
+        for skill in discover_skills() {
+            if let Err(e) = self.register(skill.clone()).await {
+                tracing::warn!("failed to register discovered skill {}: {e}", skill.name);
+            }
+        }
     }
 }
 

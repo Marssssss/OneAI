@@ -643,6 +643,10 @@ fn handle_user_input_async(
                             app.tool_names = state.app.tool_executor().list_tools().await;
                             // Switch skills to domain
                             app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain(name)).await.unwrap();
+                            // Re-discover user skills from convention dirs (replace_all
+                            // clears them); discovered skills are user-owned and survive
+                            // domain switches.
+                            app.skill_registry.load_discovered().await;
                             app.skill_names = app.skill_registry.skill_names().await;
                             // Clear any active skill — the old domain's skill is gone.
                             state.session.set_active_skill(None).await;
@@ -829,7 +833,7 @@ fn handle_user_input_async(
                 rt.block_on(async {
                     let skills = app.skill_registry.list().await;
                     if skills.is_empty() {
-                        app.add_message(ChatRole::System, "No skills registered. Switch domain with /domain or add skills with /skill add <name> <description>");
+                        app.add_message(ChatRole::System, "No skills registered. Switch domain with /domain, or drop a <name>/SKILL.md into .claude/skills/ (or .agents/skills/).");
                     } else {
                         let mut lines = vec![format!("🎯 Available Skills ({})\n", skills.len())];
                         for skill in &skills {
@@ -857,7 +861,7 @@ fn handle_user_input_async(
             "/skill" => {
                 // Skill sub-command dispatch: add, remove, info, search, off, <name>
                 if parts.len() < 2 {
-                    app.add_message(ChatRole::System, "Skill commands:\n  /skill <name>        — Activate a skill\n  /skill off            — Deactivate current skill\n  /skill add <name> <desc> — Register a custom skill\n  /skill remove <name>  — Remove a skill\n  /skill info <name>    — Show skill details\n  /skill search <query> — Find relevant skills");
+                    app.add_message(ChatRole::System, "Skill commands:\n  /skill <name>        — Activate a skill\n  /skill off            — Deactivate current skill\n  /skill add <name> <desc> — Register a custom skill (in-memory, this session)\n  /skill remove <name>  — Remove a skill (this session)\n  /skill info <name>    — Show skill details\n  /skill search <query> — Find relevant skills\n\nSkills are also auto-discovered from convention dirs:\n  .claude/skills/  ·  .agents/skills/  ·  .opencode/skills/  ·  .oneai/skills/\n  (project, walked up to git root) + the same under ~/ for global.\nThe built-in skill-creator is always available.");
                     return;
                 }
                 let sub_cmd = parts[1];
@@ -932,7 +936,7 @@ fn handle_user_input_async(
                             app.skill_registry.remove(skill_name).await.unwrap();
                             app.skill_names = app.skill_registry.skill_names().await;
                             if existed.is_some() {
-                                app.add_message(ChatRole::System, format!("✅ Skill removed: {}", skill_name));
+                                app.add_message(ChatRole::System, format!("✅ Skill removed: {} (this session; re-discovered on restart if it lives in a convention dir)", skill_name));
                             } else {
                                 app.add_message(ChatRole::Error, format!("Skill '{}' not found.", skill_name));
                             }

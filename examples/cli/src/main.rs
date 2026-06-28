@@ -64,6 +64,7 @@ mod config;
 mod cmd_chat;
 mod cmd_run;
 mod cmd_pack;
+mod cmd_skill;
 mod cmd_eval;
 mod cmd_config;
 mod cmd_init;
@@ -133,6 +134,11 @@ enum Commands {
     Pack {
         #[command(subcommand)]
         action: PackAction,
+    },
+    /// Manage skills — list/show skills discovered from convention directories
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
     },
     /// Run evaluation suites
     Eval {
@@ -247,6 +253,18 @@ enum PackAction {
     /// Check an installed pack against the specification
     Check {
         /// Pack name to check
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// List skills discovered from convention directories
+    /// (.claude/skills · .agents/skills · .opencode/skills · .oneai/skills)
+    List,
+    /// Show details of a discovered skill
+    Show {
+        /// Skill name
         name: String,
     },
 }
@@ -701,6 +719,12 @@ fn main() {
                 PackAction::Validate { path } => cmd_pack::cmd_pack_validate(&path),
                 PackAction::Spec => cmd_pack::cmd_pack_spec(),
                 PackAction::Check { name } => cmd_pack::cmd_pack_check(&name),
+            }
+        }
+        Some(Commands::Skill { action }) => {
+            match action {
+                SkillAction::List => cmd_skill::cmd_skill_list(),
+                SkillAction::Show { name } => cmd_skill::cmd_skill_show(&name),
             }
         }
         Some(Commands::Eval { action }) => {

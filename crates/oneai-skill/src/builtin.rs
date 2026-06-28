@@ -10,6 +10,28 @@
 
 use oneai_core::SkillDescriptor;
 
+/// The Anthropic `skill-creator` skill, bundled so OneAI can create and
+/// iterate on skills out of the box. Source: ModelScope `@anthropics/skill-creator`
+/// (Apache-2.0, see `builtin_skills/skill-creator/LICENSE.txt`).
+const SKILL_CREATOR_PROMPT: &str = include_str!("builtin_skills/skill-creator/SKILL.md");
+
+/// The built-in `skill-creator` skill — lets the agent author, evaluate, and
+/// improve skills. Included in every domain so the capability is always on.
+pub fn skill_creator_skill() -> SkillDescriptor {
+    SkillDescriptor {
+        name: "skill-creator".into(),
+        description: "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an existing skill, run evals test a skill, benchmark skill performance, or optimize a skill description for better triggering. (内置 skill-creator，开箱即用)".into(),
+        prompt_template: SKILL_CREATOR_PROMPT.into(),
+        trigger_keywords: vec![
+            "skill".into(), "create skill".into(), "author skill".into(),
+            "eval".into(), "benchmark".into(), "improve skill".into(),
+            "skill-creator".into(),
+        ],
+        embedding: None,
+    }
+}
+
+
 // ─── Coding Domain Skills ────────────────────────────────────────────────────
 
 /// Built-in skills for the coding domain (8 skills).
@@ -167,7 +189,9 @@ pub fn research_skills() -> Vec<SkillDescriptor> {
 ///
 /// Available across all domains as universal capabilities.
 pub fn general_skills() -> Vec<SkillDescriptor> {
-    vec![
+    let skills = vec![
+        // skill-creator is always on — OneAI ships with skill-authoring capability.
+        skill_creator_skill(),
         SkillDescriptor {
             name: "summarization".into(),
             description: "将长内容凝练为要点/摘要。当用户要求总结、概括、提取要点、TL;DR 时调用 (Condense long content into key points. Use when the user asks to summarize, condense, or extract key points.)".into(),
@@ -198,7 +222,8 @@ pub fn general_skills() -> Vec<SkillDescriptor> {
             ],
             embedding: None,
         },
-    ]
+    ];
+    skills
 }
 
 /// Get skills for a specific domain name.
@@ -221,6 +246,7 @@ pub fn skills_for_domain(domain: &str) -> Vec<SkillDescriptor> {
 /// Used in TUI rendering for visual identification.
 pub fn skill_icon(name: &str) -> &str {
     match name {
+        "skill-creator" => "🛠️",
         "project-planning" => "📋",
         "code-review" => "🔍",
         "debug-analysis" => "🐛",
@@ -522,3 +548,26 @@ Creative formats supported:
 - Social media content (concise, impactful)
 
 Always match the requested tone and format, and provide options for revision";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_creator_is_always_on() {
+        // skill-creator must be available in every domain (开箱即用).
+        for domain in ["coding", "research", "general", "unknown"] {
+            let skills = skills_for_domain(domain);
+            let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+            assert!(names.contains(&"skill-creator"), "domain {domain:?} missing skill-creator: {names:?}");
+        }
+    }
+
+    #[test]
+    fn skill_creator_prompt_is_substantial() {
+        // The bundled SKILL.md must have real content (not empty / failed include).
+        let s = skill_creator_skill();
+        assert!(s.prompt_template.len() > 1000, "skill-creator prompt too short: {}", s.prompt_template.len());
+        assert!(s.prompt_template.contains("Skill Creator"), "skill-creator prompt missing title");
+    }
+}

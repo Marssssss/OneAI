@@ -16,9 +16,11 @@
 
 
 pub mod builtin;
+pub mod discovery;
 pub mod registry;
 pub mod selector;
 
 pub use builtin::*;
+pub use discovery::*;
 pub use registry::*;
 pub use selector::*;

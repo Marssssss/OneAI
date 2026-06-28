@@ -1717,6 +1717,13 @@ impl AppBuilder {
 
         let platform = self.platform.unwrap_or(Platform::current());
 
+        // Discover skills from convention directories (.claude/skills/,
+        // .agents/skills/, .opencode/skills/, .oneai/skills/ — project walked
+        // up to the git root + global under home) so ecosystem skills are
+        // available every session. Domain builtin skills are registered on top
+        // by the caller (CLI/TUI) and add rather than replace these.
+        self.skill_registry.load_discovered().await;
+
         Ok(App {
             provider,
             tool_registry: self.tool_registry,
