@@ -537,6 +537,12 @@ impl AppSession {
         let active_skill = self.app.active_skill.read().await.clone();
 
         // Store user message in memory
+        // P5: set the per-run session id on the memory manager so fact
+        // extraction / self-managed tools namespace facts to this session.
+        self.app.memory_manager.set_session_id(self.session_id.clone()).await;
+        // Load durable facts (cross-session habits + this session's episodic)
+        // into the archival tier. Idempotent (upsert-deduped), so safe per turn.
+        self.app.memory_manager.load_persisted_facts().await;
         self.app.memory_manager.add(MemoryEntry {
             id: format!("msg_{}", uuid::Uuid::new_v4()),
             content: task.to_string(),
@@ -548,7 +554,11 @@ impl AppSession {
             ]),
         }).await?;
 
-        // Retrieve relevant memories for context injection
+        // Retrieve relevant memories for context injection.
+        // P4: recall is routed through the CoreMemorySource (an anti-compression
+        // ContextSource injected every iteration) instead of a one-shot system
+        // message that could be summarized away. The core block also carries
+        // the agent's curated core-memory facts.
         let memory_query = MemoryQuery {
             text: task.to_string(),
             embedding: None,
@@ -556,33 +566,37 @@ impl AppSession {
             metadata_filters: std::collections::HashMap::new(),
         };
         let memory_results = self.app.memory_manager.retrieve(&memory_query, 5).await?;
-        let memory_context = if memory_results.is_empty() {
+        let recall_text = if memory_results.is_empty() {
             String::new()
         } else {
-            let lines = memory_results.iter()
+            memory_results.iter()
                 .map(|e| {
                     let role = e.metadata.get("role").map(|s| s.as_str()).unwrap_or("memory");
-                    format!("[{}] {}", role, e.content)
+                    format!("- [{}] {}", role, e.content)
                 })
-                .collect::<Vec<_>>();
-            format!("Previous conversation context:\n{}", lines.join("\n"))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
 
-        // Build conversation with history + memory context
-        let mut conversation = self.conversation.clone();
+        // Build the core memory source and populate its recall for this turn.
+        let core_memory_source = std::sync::Arc::new(
+            oneai_memory::CoreMemorySource::new(self.app.memory_manager.core_memory().clone())
+        );
+        core_memory_source.set_recall_text(recall_text).await;
 
-        // Inject memory context as a system message (if we have prior memories)
-        if !memory_context.is_empty() && !conversation.messages.iter().any(|m| {
-            m.role == oneai_core::Role::System && m.text_content().contains("Previous conversation context")
-        }) {
-            conversation.add_message(Message::system(memory_context));
-        }
+        // Build conversation with history (memory is now injected via the
+        // CoreMemorySource each iteration, not as a one-shot system message).
+        let conversation = self.conversation.clone();
 
-        // Build context assembler (with domain sources if available)
+        // Build context assembler (core source first, then domain sources).
         let context_assembler = if let Some(domain) = &self.app.domain_pack {
-            oneai_agent::ContextAssembler::with_context_sources(domain.context_sources.clone())
+            let mut sources = vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
+            sources.extend(domain.context_sources.clone());
+            oneai_agent::ContextAssembler::with_context_sources(sources)
         } else {
-            oneai_agent::ContextAssembler::new()
+            oneai_agent::ContextAssembler::with_context_sources(
+                vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>]
+            )
         };
 
         // Propagate cost/rate/circuit/pricing from the App into the loop
@@ -620,12 +634,22 @@ impl AppSession {
             };
             // Use the real ContextCompressor with the domain's CompressionTemplate,
             // so that compression preserves domain-critical information.
+            // P3: also wire compression-coupled fact extraction — discarded
+            // (summarized-away) turns are extracted per the domain's
+            // MemoryProfile schema and conflict-resolved into the archival
+            // tier, so compressed-out information is not lost.
             let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> =
                 Arc::new(oneai_memory::ContextCompressor::with_template(
                     80000,  // threshold_tokens — trigger compression at 80% of budget
                     6,      // keep_recent_turns
                     provider.clone(),
                     domain.compression_template.clone(),
+                )
+                .with_fact_extraction(
+                    domain.memory_profile.extraction_schema.clone(),
+                    self.app.memory_manager.fact_archive().clone(),
+                    self.app.memory_manager.user_id().await,
+                    self.session_id.clone(),
                 ));
             AgentLoop::with_domain_pack(
                 provider.clone(),

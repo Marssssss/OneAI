@@ -838,6 +838,186 @@ pub struct TimeRange {
     pub end: chrono::DateTime<chrono::Utc>,
 }
 
+// ─── Memory recall strategy (canonical home) ─────────────────────────────────
+
+/// Strategy for recalling memories from LTM/archival into context.
+///
+/// Different strategies are suited for different scenarios:
+/// - KeywordFirst: works without embeddings (faster, simpler)
+/// - SemanticFirst: requires embeddings (more relevant, deeper)
+/// - Hybrid: combines both (best coverage, aligned with HybridScorer)
+///
+/// This is the canonical definition; `oneai-memory` re-exports it so the
+/// domain-level `MemoryProfile` and the runtime `MemoryManager` share one type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallStrategy {
+    /// Keyword search first, then semantic if available.
+    KeywordFirst,
+    /// Semantic (embedding) search first, then keyword as fallback.
+    SemanticFirst,
+    /// Both keyword and semantic search, merge and deduplicate.
+    Hybrid,
+}
+
+impl Default for RecallStrategy {
+    fn default() -> Self {
+        Self::Hybrid
+    }
+}
+
+// ─── Memory facts & domain memory profile types ──────────────────────────────
+//
+// These types back the DomainPack "MemoryProfile" layer — a declarative,
+// domain-scoped memory policy (what to extract as durable facts, how to
+// recall them, what counts as a cross-session user habit). They live in
+// `oneai-core` so both `oneai-domain` (declarative profile) and
+// `oneai-memory` (runtime tiers) depend on the same definitions.
+
+/// A category label for an atomic memory fact, scoped by a DomainPack's
+/// extraction schema.
+///
+/// Examples:
+/// - Coding: `user_tooling_pref`, `decision`, `open_task`, `critical_file`
+/// - Research: `source`, `claim`, `open_question`, `user_interest`
+///
+/// Fact types that also appear in a profile's `habit_fact_types` are persisted
+/// under the **user** namespace and recalled across sessions ("越用越好用").
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FactType(pub String);
+
+impl FactType {
+    /// Create a fact type from any string-like input.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The category label as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for FactType {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for FactType {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl std::fmt::Display for FactType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Scope at which a memory fact is persisted and recalled.
+///
+/// `User` facts (e.g. preferences, habits) survive across sessions for the
+/// same user; `Session` facts (e.g. episodic context) are scoped to one
+/// conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemoryScope {
+    /// Cross-session, per-user (habits/preferences).
+    User,
+    /// Per-session (episodic / working context).
+    Session,
+}
+
+/// Domain-level recall configuration, carried by `MemoryProfile`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecallConfig {
+    /// Which recall strategy to use (keyword / semantic / hybrid).
+    pub strategy: RecallStrategy,
+    /// Maximum number of facts to recall per turn.
+    pub top_k: usize,
+    /// Whether to apply time-decay weighting during recall.
+    pub time_decay: bool,
+}
+
+impl Default for RecallConfig {
+    fn default() -> Self {
+        Self {
+            strategy: RecallStrategy::Hybrid,
+            top_k: 5,
+            time_decay: true,
+        }
+    }
+}
+
+/// An atomic memory fact — the unit of long-term / archival memory.
+///
+/// Extracted from conversation by the (compression-coupled) `FactExtractor`,
+/// or explicitly stored by the agent via self-managed memory tools. Facts are
+/// conflict-resolved by `(user_id, subject, predicate)`: a contradicting new
+/// fact **updates** the existing one (bumping `version` and `updated_at`)
+/// rather than appending a duplicate — the Mem0-style invariant that keeps
+/// archival memory from drifting into contradiction over long use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryFact {
+    /// Unique identifier.
+    pub id: String,
+
+    /// Owning user (cross-session habit namespace). Empty string when unset.
+    #[serde(default)]
+    pub user_id: String,
+
+    /// Owning session (episodic namespace). Empty string when unset.
+    #[serde(default)]
+    pub session_id: String,
+
+    /// Category from the DomainPack's extraction schema.
+    pub fact_type: FactType,
+
+    /// What the fact is about (e.g. "user.package_manager", "auth.module").
+    pub subject: String,
+
+    /// The relationship/assertion (e.g. "prefers", "decided_to", "status_is").
+    pub predicate: String,
+
+    /// The fact's value/content (e.g. "pnpm", "use JWT", "in_progress").
+    pub content: String,
+
+    /// Optional embedding for semantic recall.
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+
+    /// Arbitrary metadata (source turn, confidence, etc.).
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+
+    /// When the fact was first recorded.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+
+    /// When the fact was last updated (== created_at on first write).
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+
+    /// Monotonic version counter, incremented on each conflict-resolved update.
+    #[serde(default = "default_version")]
+    pub version: u32,
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+impl MemoryFact {
+    /// The (user_id, subject, predicate) key used for conflict resolution.
+    ///
+    /// Two facts with the same key are the "same fact"; a new value updates
+    /// rather than duplicates.
+    pub fn conflict_key(&self) -> (&str, &str, &str) {
+        (&self.user_id, &self.subject, &self.predicate)
+    }
+}
+
 // ─── SkillDescriptor ──────────────────────────────────────────────────────────
 
 /// Description of a SKILL that can be dynamically injected into agent context.

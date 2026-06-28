@@ -45,6 +45,15 @@ pub struct CompressedResult {
     pub compressed_conversation: Conversation,
     /// The generated summary (if compression was performed).
     pub summary: Option<String>,
+    /// The original messages that were summarized/truncated away during
+    /// compression.
+    ///
+    /// Carrying these (rather than dropping them on the trait boundary) is the
+    /// seam for the "压缩即丢失" closure: the compression-coupled
+    /// `FactExtractor` runs over these to extract durable facts into the
+    /// archival tier, so information compressed out of context is not lost.
+    /// Empty when no compression occurred.
+    pub discarded_messages: Vec<Message>,
 }
 
 /// No-op compressor — does nothing, returns the conversation unchanged.
@@ -61,9 +70,9 @@ impl ContextCompressorTrait for NoopCompressor {
         // Rough estimate: ~4 chars per token
         conversation.messages.iter()
             .map(|m| m.content.iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.len()),
-                    _ => Some(50), // rough estimate for non-text blocks
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    _ => 50, // rough estimate for non-text blocks
                 })
                 .sum::<usize>())
             .sum::<usize>() / 4
@@ -71,9 +80,9 @@ impl ContextCompressorTrait for NoopCompressor {
 
     fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
         msg.content.iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.len()),
-                _ => Some(50),
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.len(),
+                _ => 50,
             })
             .sum::<usize>() / 4
     }
@@ -82,6 +91,7 @@ impl ContextCompressorTrait for NoopCompressor {
         Ok(CompressedResult {
             compressed_conversation: conversation.clone(),
             summary: None,
+            discarded_messages: Vec::new(),
         })
     }
 }
@@ -157,9 +167,9 @@ impl ContextCompressorTrait for TruncationCompressor {
         // Same heuristic as NoopCompressor: ~4 chars per token
         conversation.messages.iter()
             .map(|m| m.content.iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.len()),
-                    _ => Some(50),
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    _ => 50,
                 })
                 .sum::<usize>())
             .sum::<usize>() / 4
@@ -167,9 +177,9 @@ impl ContextCompressorTrait for TruncationCompressor {
 
     fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
         msg.content.iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.len()),
-                _ => Some(50),
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.len(),
+                _ => 50,
             })
             .sum::<usize>() / 4
     }
@@ -182,6 +192,7 @@ impl ContextCompressorTrait for TruncationCompressor {
             return Ok(CompressedResult {
                 compressed_conversation: conversation.clone(),
                 summary: None,
+                discarded_messages: Vec::new(),
             });
         }
 
@@ -190,6 +201,9 @@ impl ContextCompressorTrait for TruncationCompressor {
 
         // Collect info about what was truncated for the summary
         let mut truncated_count = 0;
+        // Original older (non-system, non-recent) messages — surfaced for
+        // fact extraction so compressed-away content isn't lost.
+        let mut discarded: Vec<Message> = Vec::new();
 
         // Process messages in order
         for (idx, msg) in conversation.messages.iter().enumerate() {
@@ -240,6 +254,7 @@ impl ContextCompressorTrait for TruncationCompressor {
             } else {
                 // Older message — truncate to summary
                 truncated_count += 1;
+                discarded.push(msg.clone());
                 let text = msg.text_content();
                 if text.len() > self.max_summary_chars {
                     let summary = format!(
@@ -284,6 +299,7 @@ impl ContextCompressorTrait for TruncationCompressor {
         Ok(CompressedResult {
             compressed_conversation: compressed,
             summary,
+            discarded_messages: discarded,
         })
     }
 }

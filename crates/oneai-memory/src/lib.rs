@@ -22,6 +22,11 @@ pub mod hybrid_scorer;
 pub mod vector_store;
 pub mod manager;
 pub mod reflection;
+pub mod fact_store;
+pub mod core_memory;
+pub mod fact_extraction;
+pub mod core_memory_source;
+pub mod memory_tools;
 
 pub use short_term::*;
 pub use long_term::*;
@@ -30,6 +35,11 @@ pub use hybrid_scorer::*;
 pub use vector_store::*;
 pub use manager::*;
 pub use reflection::{MemoryReflection, MemoryReflectionConfig, EpisodicMemory};
+pub use fact_store::{MemoryFactStore, UpsertOutcome};
+pub use core_memory::CoreMemory;
+pub use fact_extraction::FactExtractor;
+pub use core_memory_source::CoreMemorySource;
+pub use memory_tools::{MemorySearchTool, CoreMemoryEditTool, ArchivalInsertTool};
 
 #[cfg(test)]
 mod tests {

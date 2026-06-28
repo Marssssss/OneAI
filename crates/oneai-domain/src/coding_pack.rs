@@ -413,6 +413,9 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
             ]),
         },
 
+        // Layer 7: Memory profile — coding memory policy
+        memory_profile: crate::memory_profile::MemoryProfile::coding(),
+
         // System prompt
         system_prompt_template: CODING_SYSTEM_PROMPT.to_string(),
 

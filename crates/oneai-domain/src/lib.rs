@@ -56,6 +56,7 @@ pub mod market;
 pub mod spec;
 pub mod validator;
 pub mod spec_file;
+pub mod memory_profile;
 
 pub use domain_pack::*;
 pub use paradigm_strategy::{SubAgentTypeDefinition, SubAgentMergeStrategy};
@@ -74,3 +75,4 @@ pub use market::*;
 pub use spec::*;
 pub use validator::{ValidationSeverity, ValidationIssue, ValidationResult, DomainPackValidator};
 pub use spec_file::DomainPackSpecFile;
+pub use memory_profile::*;

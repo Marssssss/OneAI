@@ -19,6 +19,7 @@ pub fn cmd_run(
     config: &OneaiConfig,
     domain_override: Option<&str>,
     model_override: Option<&str>,
+    user: Option<&str>,
 ) {
     tracing_subscriber::fmt::init();
 
@@ -47,6 +48,11 @@ pub fn cmd_run(
             .provider(Arc::from(provider))
             .auto_approval_gate()
             .default_parser();
+        let builder = if let Some(uid) = user {
+            builder.user_id(uid)
+        } else {
+            builder
+        };
 
         let app = builder.build().await.expect("App build failed");
 

@@ -484,6 +484,22 @@ pub trait MemoryPersistence: Send + Sync {
 
     /// Delete a conversation and its associated STM entries by ID.
     async fn delete_conversation(&self, id: &str) -> Result<()>;
+
+    // ─── MemoryFact persistence (core/archival tiers) ──────────────────────
+    //
+    // These back the DomainPack MemoryProfile layer's durable facts. Default
+    // impls are no-ops so existing backends keep compiling; the SQLite backend
+    // overrides them to persist facts across restarts ("越用越好用").
+
+    /// Upsert a fact (conflict-resolved by user_id+subject+predicate).
+    async fn store_fact(&self, _fact: &MemoryFact) -> Result<()> {
+        Ok(()) // no-op default
+    }
+
+    /// Load all facts for a user (cross-session habits) and/or session.
+    async fn load_facts(&self, _user_id: &str, _session_id: &str) -> Result<Vec<MemoryFact>> {
+        Ok(Vec::new()) // no-op default
+    }
 }
 
 // ─── SessionInfo ────────────────────────────────────────────────────────────

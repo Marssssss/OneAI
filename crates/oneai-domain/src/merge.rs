@@ -25,6 +25,7 @@ use crate::permission_profile::PermissionProfile;
 use crate::paradigm_strategy::ParadigmStrategy;
 use crate::compression_template::CompressionTemplate;
 use crate::tool_decorator::ToolDecorator;
+use crate::memory_profile::MemoryProfile;
 
 // ─── MergedDomainPack ──────────────────────────────────────────────────────────
 
@@ -63,6 +64,10 @@ pub struct MergedDomainPack {
 
     /// Compression template from the primary pack (first pack in the list).
     pub compression_template: CompressionTemplate,
+
+    /// Merged memory profile (extraction schema unioned, recall from primary,
+    /// core budget = min, tools = OR). See [`MemoryProfile::merge`].
+    pub memory_profile: MemoryProfile,
 
     /// Merged system prompt (concatenated with section headers).
     pub system_prompt_template: String,
@@ -108,6 +113,7 @@ impl MergedDomainPack {
                 permission_profile: pack.permission_profile.clone(),
                 paradigm_strategies: pack.paradigm_strategies.clone(),
                 compression_template: pack.compression_template.clone(),
+                memory_profile: pack.memory_profile.clone(),
                 system_prompt_template: pack.system_prompt_template.clone(),
                 workflows: pack.workflows.clone(),
                 state_graphs: pack.state_graphs.clone(),
@@ -181,6 +187,14 @@ impl MergedDomainPack {
         // CompressionTemplate: use primary pack (first)
         let compression_template = packs[0].compression_template.clone();
 
+        // MemoryProfile: merge across packs (union schema/habits, primary
+        // recall, min core budget, OR tools) — folds like permission_profile.
+        let memory_profile = packs.iter()
+            .skip(1)
+            .fold(packs[0].memory_profile.clone(), |acc, pack| {
+                MemoryProfile::merge(&acc, &pack.memory_profile)
+            });
+
         // System prompt: concatenate with section headers
         let system_prompt_template = if packs.len() == 1 {
             packs[0].system_prompt_template.clone()
@@ -232,6 +246,7 @@ impl MergedDomainPack {
             permission_profile,
             paradigm_strategies,
             compression_template,
+            memory_profile,
             system_prompt_template,
             workflows,
             state_graphs,
@@ -253,6 +268,7 @@ impl MergedDomainPack {
             permission_profile: PermissionProfile::default(),
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::default(),
+            memory_profile: MemoryProfile::default(),
             system_prompt_template: String::new(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
@@ -337,6 +353,7 @@ impl MergedDomainPack {
             permission_profile: self.permission_profile.clone(),
             paradigm_strategies: self.paradigm_strategies.clone(),
             compression_template: self.compression_template.clone(),
+            memory_profile: self.memory_profile.clone(),
             system_prompt_template: self.system_prompt_template.clone(),
             workflows: self.workflows.clone(),
             state_graphs: self.state_graphs.clone(),
@@ -363,6 +380,7 @@ mod tests {
             permission_profile: PermissionProfile::new(name),
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new(name),
+            memory_profile: MemoryProfile::default(),
             system_prompt_template: format!("You are a {} agent.", name),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
@@ -397,6 +415,7 @@ mod tests {
             },
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new("coding"),
+            memory_profile: MemoryProfile::default(),
             system_prompt_template: "You are a coding agent.".to_string(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
@@ -419,6 +438,7 @@ mod tests {
             },
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new("research"),
+            memory_profile: MemoryProfile::default(),
             system_prompt_template: "You are a research agent.".to_string(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),

@@ -29,6 +29,7 @@ use crate::paradigm_strategy::ParadigmStrategy;
 use crate::compression_template::CompressionTemplate;
 use crate::tool_decorator::ToolDecorator;
 use crate::paradigm_strategy::SubAgentTypeDefinition;
+use crate::memory_profile::MemoryProfile;
 
 // ─── DomainPack ────────────────────────────────────────────────────────────────
 
@@ -93,6 +94,14 @@ pub struct DomainPack {
     /// what information is preserved and how the summary is structured.
     /// Different domains have different preservation priorities.
     pub compression_template: CompressionTemplate,
+
+    /// Domain-specific memory profile (layer 7).
+    ///
+    /// Declares what to extract as durable facts, how to recall them, the core
+    /// memory budget, whether self-managed memory tools are exposed, and which
+    /// fact types persist across sessions as user habits. See
+    /// [`crate::memory_profile::MemoryProfile`].
+    pub memory_profile: MemoryProfile,
 
     /// Domain system prompt template.
     ///
@@ -169,6 +178,7 @@ impl std::fmt::Debug for DomainPack {
             .field("permission_profile", &self.permission_profile)
             .field("paradigm_strategies", &self.paradigm_strategies)
             .field("compression_template", &self.compression_template)
+            .field("memory_profile", &self.memory_profile)
             .field("system_prompt_template", &self.system_prompt_template)
             .field("workflows_count", &self.workflows.len())
             .field("state_graphs_count", &self.state_graphs.len())
@@ -191,6 +201,7 @@ pub struct DomainPackBuilder {
     permission_profile: PermissionProfile,
     paradigm_strategies: Vec<ParadigmStrategy>,
     compression_template: CompressionTemplate,
+    memory_profile: MemoryProfile,
     system_prompt_template: String,
     workflows: Vec<oneai_workflow::WorkflowConfig>,
     state_graphs: Vec<oneai_workflow::StateGraph>,
@@ -209,6 +220,7 @@ impl DomainPackBuilder {
             permission_profile: PermissionProfile::default(),
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::default(),
+            memory_profile: MemoryProfile::default(),
             system_prompt_template: String::new(),
             workflows: Vec::new(),
             state_graphs: Vec::new(),
@@ -282,6 +294,12 @@ impl DomainPackBuilder {
         self
     }
 
+    /// Set the memory profile (layer 7).
+    pub fn memory_profile(mut self, profile: MemoryProfile) -> Self {
+        self.memory_profile = profile;
+        self
+    }
+
     /// Set the system prompt template.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt_template = prompt.into();
@@ -340,6 +358,7 @@ impl DomainPackBuilder {
             permission_profile: self.permission_profile,
             paradigm_strategies: self.paradigm_strategies,
             compression_template: self.compression_template,
+            memory_profile: self.memory_profile,
             system_prompt_template: self.system_prompt_template,
             workflows: self.workflows,
             state_graphs: self.state_graphs,

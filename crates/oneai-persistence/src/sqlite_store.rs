@@ -22,9 +22,10 @@
 //! - One database file for all tables (shared with `SqliteCheckpointBackend`)
 
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 use async_trait::async_trait;
-use oneai_core::{Conversation, MemoryEntry, SessionInfo};
+use oneai_core::{Conversation, MemoryEntry, MemoryFact, SessionInfo};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::MemoryPersistence;
 
@@ -101,7 +102,25 @@ impl SqliteSessionStore {
                 embedding_json TEXT,
                 metadata_json TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_ltm_timestamp ON ltm_entries(timestamp);"
+            CREATE INDEX IF NOT EXISTS idx_ltm_timestamp ON ltm_entries(timestamp);
+
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                fact_type TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                content TEXT NOT NULL,
+                embedding_json TEXT,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_key ON memories(user_id, subject, predicate);
+            CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+            CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);"
         ).map_err(|e| OneAIError::Persistence(
             format!("Failed to create session store schema: {}", e)
         ))?;
@@ -569,6 +588,83 @@ impl MemoryPersistence for SqliteSessionStore {
         tracing::debug!("Deleted conversation '{}' and its STM entries", id);
         Ok(())
     }
+
+    // ─── MemoryFact persistence ──────────────────────────────────────────────
+
+    async fn store_fact(&self, fact: &MemoryFact) -> Result<()> {
+        let conn = self.open_connection()?;
+        let embedding_json = fact.embedding.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+        let metadata_json = serde_json::to_string(&fact.metadata).unwrap_or_else(|_| "{}".to_string());
+        let created = fact.created_at.to_rfc3339();
+        let updated = fact.updated_at.to_rfc3339();
+
+        // Conflict-resolved upsert: same (user_id, subject, predicate) → update
+        // content/embedding/metadata/fact_type/updated_at and bump version,
+        // preserving the original id/created_at. Mirrors the in-memory
+        // MemoryFactStore's Mem0 invariant so persistence and runtime agree.
+        conn.execute(
+            "INSERT INTO memories (id, user_id, session_id, fact_type, subject, predicate, \
+             content, embedding_json, metadata_json, created_at, updated_at, version) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+             ON CONFLICT(user_id, subject, predicate) DO UPDATE SET \
+             content = excluded.content, \
+             embedding_json = excluded.embedding_json, \
+             metadata_json = excluded.metadata_json, \
+             fact_type = excluded.fact_type, \
+             updated_at = excluded.updated_at, \
+             version = memories.version + 1",
+            rusqlite::params![
+                fact.id, fact.user_id, fact.session_id, fact.fact_type.as_str(),
+                fact.subject, fact.predicate, fact.content, embedding_json, metadata_json,
+                created, updated, fact.version,
+            ],
+        ).map_err(|e| OneAIError::Persistence(format!("Failed to store fact: {}", e)))?;
+        Ok(())
+    }
+
+    async fn load_facts(&self, user_id: &str, session_id: &str) -> Result<Vec<MemoryFact>> {
+        let conn = self.open_connection()?;
+        // Empty session_id → all facts for the user (cross-session habits);
+        // otherwise scope to that session.
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, session_id, fact_type, subject, predicate, content, \
+             embedding_json, metadata_json, created_at, updated_at, version \
+             FROM memories WHERE user_id = ?1 AND (?2 = '' OR session_id = ?2)"
+        ).map_err(|e| OneAIError::Persistence(format!("Failed to prepare fact query: {}", e)))?;
+
+        let rows = stmt.query_map(rusqlite::params![user_id, session_id], |row| {
+            let embedding_json: Option<String> = row.get(7)?;
+            let metadata_json: String = row.get(8)?;
+            let embedding = embedding_json
+                .and_then(|s| serde_json::from_str::<Vec<f32>>(&s).ok());
+            let metadata: HashMap<String, String> = serde_json::from_str(&metadata_json)
+                .unwrap_or_default();
+            let created = chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+                .map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
+            let updated = chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                .map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
+            Ok(MemoryFact {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                session_id: row.get(2)?,
+                fact_type: oneai_core::FactType::new(row.get::<_, String>(3)?),
+                subject: row.get(4)?,
+                predicate: row.get(5)?,
+                content: row.get(6)?,
+                embedding,
+                metadata,
+                created_at: created,
+                updated_at: updated,
+                version: row.get(11)?,
+            })
+        }).map_err(|e| OneAIError::Persistence(format!("Failed to query facts: {}", e)))?;
+
+        let mut facts = Vec::new();
+        for row in rows {
+            facts.push(row.map_err(|e| OneAIError::Persistence(format!("Failed to read fact row: {}", e)))?);
+        }
+        Ok(facts)
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -889,5 +985,64 @@ mod tests {
         let json = serialize_metadata(&metadata);
         let parsed = deserialize_metadata(&json);
         assert_eq!(parsed, metadata);
+    }
+}
+
+#[cfg(test)]
+mod fact_tests {
+    use super::*;
+    use oneai_core::{FactType, MemoryFact};
+
+    fn fact(id: &str, user: &str, sess: &str, subject: &str, content: &str, version: u32) -> MemoryFact {
+        MemoryFact {
+            id: id.to_string(),
+            user_id: user.to_string(),
+            session_id: sess.to_string(),
+            fact_type: FactType::new("user_tooling_pref"),
+            subject: subject.to_string(),
+            predicate: "prefers".to_string(),
+            content: content.to_string(),
+            embedding: None,
+            metadata: HashMap::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version,
+        }
+    }
+
+    fn tmp_store() -> SqliteSessionStore {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("oneai_fact_test_{}.db", uuid::Uuid::new_v4()));
+        SqliteSessionStore::new(path)
+    }
+
+    #[tokio::test]
+    async fn store_fact_upserts_on_conflict() {
+        let s = tmp_store();
+        s.store_fact(&fact("f1", "alice", "s1", "user.pm", "npm", 1)).await.unwrap();
+        // Same key, new content → update, version bump (version field is ignored
+        // on update path; DB bumps memories.version).
+        s.store_fact(&fact("f1b", "alice", "s1", "user.pm", "pnpm", 1)).await.unwrap();
+        let loaded = s.load_facts("alice", "s1").await.unwrap();
+        assert_eq!(loaded.len(), 1); // not duplicated
+        assert_eq!(loaded[0].content, "pnpm");
+        assert_eq!(loaded[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn load_facts_cross_session_for_user() {
+        let s = tmp_store();
+        s.store_fact(&fact("f1", "alice", "s1", "user.pm", "pnpm", 1)).await.unwrap();
+        s.store_fact(&fact("f2", "alice", "s2", "user.runner", "vitest", 1)).await.unwrap();
+        s.store_fact(&fact("f3", "bob", "s1", "user.pm", "npm", 1)).await.unwrap();
+        // Empty session → all of alice's facts across sessions.
+        let alice_all = s.load_facts("alice", "").await.unwrap();
+        assert_eq!(alice_all.len(), 2);
+        // Scoped to s1 only.
+        let alice_s1 = s.load_facts("alice", "s1").await.unwrap();
+        assert_eq!(alice_s1.len(), 1);
+        assert_eq!(alice_s1[0].content, "pnpm");
+        // Bob is separate.
+        assert_eq!(s.load_facts("bob", "").await.unwrap().len(), 1);
     }
 }

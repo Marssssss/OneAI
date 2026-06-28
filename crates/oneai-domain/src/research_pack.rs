@@ -336,6 +336,9 @@ pub fn research_pack(project_dir: &str) -> DomainPack {
             ]),
         },
 
+        // Layer 7: Memory profile — research memory policy
+        memory_profile: crate::memory_profile::MemoryProfile::research(),
+
         // System prompt
         system_prompt_template: RESEARCH_SYSTEM_PROMPT.to_string(),
 

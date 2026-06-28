@@ -62,6 +62,7 @@ fn general_pack(_project_dir: &str) -> DomainPack {
             },
         ],
         compression_template: compression,
+        memory_profile: oneai_domain::MemoryProfile::default(),
         system_prompt_template: "You are a helpful general-purpose assistant. You have access to basic tools like a calculator. Answer questions directly and concisely.".to_string(),
         workflows: vec![],
         state_graphs: vec![],

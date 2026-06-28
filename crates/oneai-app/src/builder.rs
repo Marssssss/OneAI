@@ -78,6 +78,9 @@ pub struct AppBuilder {
     trace_context: Option<TraceContext>,
     /// Domain packs (optional — for domain-specific configuration).
     domain_packs: Vec<DomainPack>,
+    /// Owning user id (optional — namespaces cross-session habits/preferences
+    /// in the memory tiers, enabling "越用越好用").
+    user_id: Option<String>,
     /// A2A client (optional — for inter-agent communication).
     a2a_client: Option<Arc<A2AClient>>,
     /// WASM runtime (optional — for WASM sandbox execution).
@@ -168,6 +171,7 @@ impl AppBuilder {
             platform: None,
             trace_context: None,
             domain_packs: Vec::new(),
+            user_id: None,
             a2a_client: None,
             wasm_runtime: None,
             wasm_module_registry: None,
@@ -468,6 +472,14 @@ impl AppBuilder {
     /// ```
     pub fn domain_packs(mut self, packs: Vec<DomainPack>) -> Self {
         self.domain_packs.extend(packs);
+        self
+    }
+
+    /// Set the owning user id — namespaces cross-session habits/preferences in
+    /// the memory tiers. Facts with this user id are recalled across sessions
+    /// (the "越用越好用" engine). Optional; when unset, memory is session-scoped.
+    pub fn user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
         self
     }
 
@@ -1534,6 +1546,26 @@ impl AppBuilder {
                 Arc::new(MemoryManager::new())
             })
         };
+
+        // P5: namespace memory by user id (cross-session habits) and register
+        // self-managed memory tools when the active domain opts in.
+        if let Some(uid) = &self.user_id {
+            memory_manager.set_user_id(uid.clone()).await;
+        }
+        if let Some(domain) = &merged_domain_pack {
+            if domain.memory_profile.enable_memory_tools {
+                let mm = memory_manager.clone();
+                self.tool_registry
+                    .register(Arc::new(oneai_memory::MemorySearchTool::new(mm.clone())) as Arc<dyn Tool>)
+                    .await?;
+                self.tool_registry
+                    .register(Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone())) as Arc<dyn Tool>)
+                    .await?;
+                self.tool_registry
+                    .register(Arc::new(oneai_memory::ArchivalInsertTool::new(mm)) as Arc<dyn Tool>)
+                    .await?;
+            }
+        }
 
         // Resolve cost tracker: use explicitly set tracker, or auto-create from budget config
         let cost_tracker = self.cost_tracker.or_else(|| {

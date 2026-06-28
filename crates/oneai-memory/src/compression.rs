@@ -32,6 +32,15 @@ pub struct ContextCompressor {
     summarizer: Arc<dyn LlmProvider>,
     /// Domain-specific compression template (optional).
     compression_template: Option<oneai_domain::CompressionTemplate>,
+    /// Optional fact extractor — runs over `discarded_messages` on each
+    /// compression, turning summarized-away turns into durable archival facts
+    /// (the "压缩即丢失" closure). None → discarded turns are not extracted.
+    fact_extractor: Option<Arc<crate::fact_extraction::FactExtractor>>,
+    /// Archival sink for extracted facts. Required when `fact_extractor` is set.
+    archive: Option<Arc<crate::fact_store::MemoryFactStore>>,
+    /// Namespace context for extracted facts.
+    user_id: String,
+    session_id: String,
 }
 
 impl ContextCompressor {
@@ -42,6 +51,10 @@ impl ContextCompressor {
             keep_recent_turns,
             summarizer,
             compression_template: None,
+            fact_extractor: None,
+            archive: None,
+            user_id: String::new(),
+            session_id: String::new(),
         }
     }
 
@@ -57,7 +70,32 @@ impl ContextCompressor {
             keep_recent_turns,
             summarizer,
             compression_template: Some(template),
+            fact_extractor: None,
+            archive: None,
+            user_id: String::new(),
+            session_id: String::new(),
         }
+    }
+
+    /// Enable compression-coupled fact extraction: on each compression, the
+    /// discarded (summarized-away) turns are run through a `FactExtractor`
+    /// guided by `schema`, and the resulting facts are conflict-resolved into
+    /// `archive`. Reuses this compressor's LLM provider for extraction.
+    pub fn with_fact_extraction(
+        mut self,
+        schema: Vec<oneai_core::FactType>,
+        archive: Arc<crate::fact_store::MemoryFactStore>,
+        user_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.fact_extractor = Some(Arc::new(crate::fact_extraction::FactExtractor::new(
+            self.summarizer.clone(),
+            schema,
+        )));
+        self.archive = Some(archive);
+        self.user_id = user_id.into();
+        self.session_id = session_id.into();
+        self
     }
 
     /// Get the token threshold.
@@ -107,6 +145,7 @@ impl ContextCompressor {
                 compressed_conversation: conversation.clone(),
                 summary: None,
                 removed_entries: Vec::new(),
+                discarded_messages: Vec::new(),
             });
         }
 
@@ -204,11 +243,46 @@ impl ContextCompressor {
             })
             .collect();
 
+        // Compression-coupled fact extraction: turn the discarded (summarized-away)
+        // turns into durable archival facts before they're lost. Fail-safe.
+        self.extract_and_archive(older_messages).await;
+
         Ok(CompressedResult {
             compressed_conversation: compressed,
             summary: Some(summary_text),
             removed_entries,
+            discarded_messages: older_messages.to_vec(),
         })
+    }
+
+    /// Run the compression-coupled fact extractor over discarded messages and
+    /// archive the results. Fail-safe: extraction errors are logged and never
+    /// propagate — a bad extraction must not break the compression path.
+    async fn extract_and_archive(&self, discarded: &[Message]) {
+        if discarded.is_empty() {
+            return;
+        }
+        let (extractor, archive) = match (&self.fact_extractor, &self.archive) {
+            (Some(ext), Some(arch)) => (ext.clone(), arch.clone()),
+            _ => return, // extraction not configured
+        };
+        match extractor.extract(discarded, &self.user_id, &self.session_id).await {
+            Ok(facts) => {
+                if !facts.is_empty() {
+                    tracing::debug!(
+                        fact_count = facts.len(),
+                        "archived facts extracted from {} discarded messages",
+                        discarded.len()
+                    );
+                    for fact in facts {
+                        archive.upsert(fact).await;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("fact extraction failed (compression proceeds, facts not archived): {}", e);
+            }
+        }
     }
 }
 
@@ -238,6 +312,7 @@ impl ContextCompressorTrait for ContextCompressor {
         Ok(CoreCompressedResult {
             compressed_conversation: result.compressed_conversation,
             summary: result.summary,
+            discarded_messages: result.discarded_messages,
         })
     }
 }
@@ -253,4 +328,95 @@ pub struct CompressedResult {
 
     /// Entries that were removed during compression (for long-term memory storage).
     pub removed_entries: Vec<MemoryEntry>,
+
+    /// The original messages that were summarized away (the "older" segment).
+    ///
+    /// Fed to the optional `FactExtractor` so compressed-away content becomes
+    /// durable archival facts instead of being lost.
+    pub discarded_messages: Vec<Message>,
+}
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+    use oneai_core::{FactType, InferenceRequest, InferenceResponse, Message, ModelCapability, ModelConfig, ProviderType, Role, TokenUsage};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Mock provider: returns a fact JSON when the prompt looks like an
+    /// extraction request, otherwise returns a short summary.
+    struct DualMockProvider;
+    #[async_trait::async_trait]
+    impl LlmProvider for DualMockProvider {
+        async fn infer(&self, req: InferenceRequest) -> Result<InferenceResponse> {
+            let user_text = req.conversation.messages.iter()
+                .filter(|m| m.role == Role::System)
+                .map(|m| m.text_content())
+                .collect::<Vec<_>>().join(" ");
+            let body = if user_text.contains("memory extractor") {
+                r#"[{"fact_type":"user_tooling_pref","subject":"user.package_manager","predicate":"prefers","content":"pnpm"}]"#.to_string()
+            } else {
+                "summarized: user prefers pnpm.".to_string()
+            };
+            Ok(InferenceResponse {
+                message: Message::assistant(body),
+                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                model: "dual-mock".to_string(),
+                metadata: HashMap::new(),
+            })
+        }
+        async fn infer_stream(
+            &self, _req: InferenceRequest,
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>> {
+            Err(oneai_core::error::OneAIError::Provider("no stream".into()))
+        }
+        fn capabilities(&self) -> ModelCapability {
+            ModelCapability { supports_multimodal: false, supports_streaming: false, supports_tools: false, context_window_size: 4096, max_output_tokens: 512 }
+        }
+        fn config(&self) -> &ModelConfig {
+            static CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
+            CONFIG.get_or_init(|| ModelConfig { provider_type: ProviderType::Local, cloud_kind: None, api_key: None, base_url: None, port: None, model_name: Some("dual-mock".into()), model_path: None, ..Default::default() })
+        }
+    }
+
+    fn long_conversation() -> Conversation {
+        // Enough turns to exceed keep_recent_turns so compression discards some.
+        let mut conv = Conversation::new();
+        conv.add_message(Message::user("I use pnpm for package management."));
+        for i in 0..12 {
+            conv.add_message(Message::assistant(format!("ack {}", i)));
+            conv.add_message(Message::user(format!("turn {}", i)));
+        }
+        conv
+    }
+
+    #[tokio::test]
+    async fn compression_archives_extracted_facts_from_discarded_turns() {
+        let archive = Arc::new(crate::fact_store::MemoryFactStore::new());
+        let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider))
+            .with_fact_extraction(
+                vec![FactType::new("user_tooling_pref")],
+                archive.clone(),
+                "alice",
+                "s1",
+            );
+
+        let result = compressor.compress(&long_conversation()).await.unwrap();
+        // The discarded segment was non-empty and carried out.
+        assert!(!result.discarded_messages.is_empty());
+        // And its content was extracted + archived (not lost).
+        let facts = archive.all().await;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].subject, "user.package_manager");
+        assert_eq!(facts[0].content, "pnpm");
+        assert_eq!(facts[0].user_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn compression_without_extraction_does_not_archive() {
+        let archive = Arc::new(crate::fact_store::MemoryFactStore::new());
+        // No with_fact_extraction → no archival side-effect.
+        let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider));
+        let _ = compressor.compress(&long_conversation()).await.unwrap();
+        assert!(archive.all().await.is_empty());
+    }
 }

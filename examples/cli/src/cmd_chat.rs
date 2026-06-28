@@ -13,7 +13,7 @@ use crate::config::OneaiConfig;
 /// 2. Build App with provider + DomainPack + approval gate
 /// 3. Register domain tools
 /// 4. Launch TUI (delegates to tui::run_tui)
-pub fn cmd_chat(config: &OneaiConfig, domain_override: Option<&str>, model_override: Option<&str>) {
+pub fn cmd_chat(config: &OneaiConfig, domain_override: Option<&str>, model_override: Option<&str>, user: Option<&str>) {
     // Initialize tracing to a log file — since the TUI takes over the terminal,
     // stderr/stdout logs can't be read from the TUI. Instead, all tracing output
     // goes to ~/.oneai/logs/oneai.log (with rolling file appender).
@@ -35,7 +35,7 @@ pub fn cmd_chat(config: &OneaiConfig, domain_override: Option<&str>, model_overr
     let domain_name = config.default_domain_pack(domain_override);
 
     // Launch TUI
-    if let Err(e) = crate::tui::run_tui(provider_config, Some(&domain_name)) {
+    if let Err(e) = crate::tui::run_tui(provider_config, Some(&domain_name), user) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

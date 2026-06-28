@@ -51,6 +51,7 @@ pub mod theme;
 pub fn run_tui(
     provider_config: Option<ModelConfig>,
     domain_name: Option<&str>,
+    user: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Setup panic hook to restore terminal state if we crash
     let original_hook = Arc::new(std::panic::take_hook());
@@ -115,6 +116,9 @@ pub fn run_tui(
         if let Some(config) = provider_config {
             let provider = ProviderFactory::create(config);
             builder = builder.provider(Arc::from(provider));
+        }
+        if let Some(uid) = user {
+            builder = builder.user_id(uid);
         }
 
         let app = builder.build().await.expect("App build failed");

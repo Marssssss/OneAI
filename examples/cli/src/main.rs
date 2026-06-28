@@ -74,6 +74,7 @@ mod cmd_mcp;
 mod cmd_a2a;
 mod cmd_wasm;
 mod cmd_session;
+mod cmd_memory;
 mod cmd_embed;
 mod cmd_cost;
 mod cmd_provider;
@@ -109,6 +110,9 @@ enum Commands {
         /// Model to use (overrides config and env)
         #[arg(long)]
         model: Option<String>,
+        /// User id — namespaces cross-session memory/habits ("越用越好用")
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Run a single-shot inference and output to stdout
     Run {
@@ -120,6 +124,9 @@ enum Commands {
         /// Model to use
         #[arg(long)]
         model: Option<String>,
+        /// User id — namespaces cross-session memory/habits
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Launch Studio Web UI for visualizing agent execution
     Studio {
@@ -169,6 +176,11 @@ enum Commands {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+    /// Manage long-term memory — search/list durable facts (cross-session habits)
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
     },
     /// Embedding service — generate vector embeddings for text
     Embed {
@@ -455,6 +467,29 @@ enum SessionAction {
 }
 
 #[derive(Subcommand)]
+enum MemoryAction {
+    /// Search durable facts by keyword
+    Search {
+        /// Keyword query
+        query: String,
+        /// User id whose facts to search (defaults to "default")
+        #[arg(long, default_value = "default")]
+        user: String,
+        /// Max facts to return
+        #[arg(long, default_value_t = 10)]
+        top_k: usize,
+    },
+    /// List durable facts for a user (cross-session) and/or session
+    List {
+        #[arg(long, default_value = "default")]
+        user: String,
+        /// Scope to a session id (omit for all of the user's facts)
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum EmbedAction {
     /// Generate an embedding for a text string
     Generate {
@@ -700,13 +735,13 @@ fn main() {
     match cli.command {
         None => {
             // Default: launch TUI (same as "oneai chat" with no options)
-            cmd_chat::cmd_chat(&config, None, None);
+            cmd_chat::cmd_chat(&config, None, None, None);
         }
-        Some(Commands::Chat { domain, model }) => {
-            cmd_chat::cmd_chat(&config, domain.as_deref(), model.as_deref());
+        Some(Commands::Chat { domain, model, user }) => {
+            cmd_chat::cmd_chat(&config, domain.as_deref(), model.as_deref(), user.as_deref());
         }
-        Some(Commands::Run { prompt, domain, model }) => {
-            cmd_run::cmd_run(&prompt, &config, domain.as_deref(), model.as_deref());
+        Some(Commands::Run { prompt, domain, model, user }) => {
+            cmd_run::cmd_run(&prompt, &config, domain.as_deref(), model.as_deref(), user.as_deref());
         }
         Some(Commands::Studio { port, domain }) => {
             cmd_studio::cmd_studio(port, domain.as_deref());
@@ -823,6 +858,16 @@ fn main() {
                 SessionAction::Resume { id } => cmd_session::cmd_session_resume(&id),
                 SessionAction::Delete { id } => cmd_session::cmd_session_delete(&id),
                 SessionAction::Info { id } => cmd_session::cmd_session_info(&id),
+            }
+        }
+        Some(Commands::Memory { action }) => {
+            match action {
+                MemoryAction::Search { query, user, top_k } => {
+                    cmd_memory::cmd_memory_search(&query, &user, top_k);
+                }
+                MemoryAction::List { user, session } => {
+                    cmd_memory::cmd_memory_list(&user, session.as_deref());
+                }
             }
         }
         Some(Commands::Embed { action }) => {

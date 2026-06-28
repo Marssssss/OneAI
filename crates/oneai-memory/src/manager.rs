@@ -20,32 +20,11 @@ use crate::long_term::LongTermMemory;
 use crate::compression::{ContextCompressor, CompressedResult};
 use crate::reflection::{MemoryReflection, EpisodicMemory};
 
-// ─── RecallStrategy ──────────────────────────────────────────────
-
-/// Strategy for recalling memories from LTM into STM context.
-///
-/// Different strategies are suited for different scenarios:
-/// - KeywordFirst: works without embeddings (faster, simpler)
-/// - SemanticFirst: requires embeddings (more relevant, deeper)
-/// - Hybrid: combines both (best coverage, aligned with HybridScorer)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecallStrategy {
-    /// Keyword search first, then semantic if available.
-    /// Best for scenarios without embeddings.
-    KeywordFirst,
-    /// Semantic (embedding) search first, then keyword as fallback.
-    /// Best for scenarios with embeddings.
-    SemanticFirst,
-    /// Both keyword and semantic search, merge and deduplicate.
-    /// Best for hybrid scenarios (aligned with HybridScorer).
-    Hybrid,
-}
-
-impl Default for RecallStrategy {
-    fn default() -> Self {
-        Self::Hybrid
-    }
-}
+// `RecallStrategy` is defined canonically in `oneai-core` so that the
+// domain-level `MemoryProfile` and this runtime manager share one type.
+// Re-export it here to preserve the historical `oneai_memory::RecallStrategy`
+// path and keep the unqualified `RecallStrategy::` references below resolving.
+pub use oneai_core::RecallStrategy;
 
 // ─── MemoryInjectionConfig ──────────────────────────────────────
 
@@ -134,6 +113,24 @@ pub struct MemoryManager {
     /// during `add()` and `inject_ltm_context()`, enabling true semantic
     /// search in LTM. Without this, memory search is limited to keyword matching.
     embedding_service: Option<Arc<dyn EmbeddingService>>,
+
+    /// Core memory tier — always-in-context curated facts (Letta-style core).
+    /// Surfaced each turn via `CoreMemorySource` (P4) and self-managed via
+    /// memory tools (P5). Owned here so the compressor's extraction sink and
+    /// the injection source share one instance.
+    core_memory: Arc<crate::core_memory::CoreMemory>,
+
+    /// Archival fact tier — the full `MemoryFact` base recalled on demand.
+    /// Fed by `FactExtractor` on compression (P3, the "压缩即丢失" closure)
+    /// and by the agent's `archival_memory_insert` tool (P5).
+    fact_archive: Arc<crate::fact_store::MemoryFactStore>,
+
+    /// Owning user id (cross-session habit namespace). Interior-mutable so it
+    /// can be set after Arc construction (via AppBuilder).
+    user_id: tokio::sync::RwLock<String>,
+    /// Per-session id (episodic namespace). Interior-mutable so it can be
+    /// updated each run through the shared `Arc<MemoryManager>`.
+    session_id: tokio::sync::RwLock<String>,
 }
 
 impl MemoryManager {
@@ -152,6 +149,10 @@ impl MemoryManager {
             config: MemoryManagerConfig::default(),
             persistence: None,
             embedding_service: None,
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -166,6 +167,10 @@ impl MemoryManager {
             config,
             persistence: None,
             embedding_service: None,
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -187,6 +192,10 @@ impl MemoryManager {
             config,
             persistence: None,
             embedding_service: None,
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -214,6 +223,10 @@ impl MemoryManager {
             config,
             persistence: None,
             embedding_service: None,
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -231,6 +244,10 @@ impl MemoryManager {
             config,
             persistence: Some(persistence),
             embedding_service: None,
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -260,6 +277,10 @@ impl MemoryManager {
             config,
             persistence: Some(persistence),
             embedding_service: None,
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -290,6 +311,10 @@ impl MemoryManager {
             config,
             persistence: None,
             embedding_service: Some(embedding_service),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -318,6 +343,10 @@ impl MemoryManager {
             config,
             persistence: None,
             embedding_service: Some(embedding_service),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -349,6 +378,10 @@ impl MemoryManager {
             config,
             persistence: Some(persistence),
             embedding_service: Some(embedding_service),
+            core_memory: Arc::new(crate::core_memory::CoreMemory::new(2048)),
+            fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
+            user_id: tokio::sync::RwLock::new(String::new()),
+            session_id: tokio::sync::RwLock::new(String::new()),
         }
     }
 
@@ -701,6 +734,91 @@ impl MemoryManager {
     /// the MemoryManager is created (e.g., via AppBuilder).
     pub fn set_embedding_service(&mut self, service: Arc<dyn EmbeddingService>) {
         self.embedding_service = Some(service);
+    }
+
+    // ─── Fact tiers (core / archival) ─────────────────────────────────
+
+    /// The core memory tier (always-in-context curated facts).
+    pub fn core_memory(&self) -> &Arc<crate::core_memory::CoreMemory> {
+        &self.core_memory
+    }
+
+    /// The archival fact tier (full `MemoryFact` base, recalled on demand).
+    ///
+    /// This is the sink for `FactExtractor` output on compression — the
+    /// "压缩即丢失" closure: discarded turns become conflict-resolved facts
+    /// here rather than being lost.
+    pub fn fact_archive(&self) -> &Arc<crate::fact_store::MemoryFactStore> {
+        &self.fact_archive
+    }
+
+    /// The owning user id (cross-session habit namespace). Empty if unset.
+    pub async fn user_id(&self) -> String {
+        self.user_id.read().await.clone()
+    }
+
+    /// Set the owning user id (for runtime configuration via AppBuilder).
+    /// Takes `&self` — interior mutability lets it work through the shared
+    /// `Arc<MemoryManager>` after construction.
+    pub async fn set_user_id(&self, user_id: impl Into<String>) {
+        *self.user_id.write().await = user_id.into();
+    }
+
+    /// The current session id (episodic namespace). Set per run.
+    pub async fn session_id(&self) -> String {
+        self.session_id.read().await.clone()
+    }
+
+    /// Set the current session id (called by AppSession before each run).
+    /// Takes `&self` — interior mutability lets it work through the shared
+    /// `Arc<MemoryManager>`.
+    pub async fn set_session_id(&self, session_id: impl Into<String>) {
+        *self.session_id.write().await = session_id.into();
+    }
+
+    /// Archive a batch of facts into the archival tier with Mem0-style
+    /// conflict resolution (same-key facts update rather than duplicate).
+    ///
+    /// Called by the compression-coupled `FactExtractor` path and by the
+    /// agent's `archival_memory_insert` tool (P5). When a persistence backend
+    /// is configured, facts are also durably stored so they survive restart.
+    pub async fn archive_facts(&self, facts: Vec<oneai_core::MemoryFact>) {
+        for fact in &facts {
+            self.fact_archive.upsert(fact.clone()).await;
+            if let Some(p) = &self.persistence {
+                if let Err(e) = p.store_fact(fact).await {
+                    tracing::warn!("Failed to persist fact: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Load durable facts from persistence into the archival tier on resume.
+    ///
+    /// Loads cross-session user facts (habits) plus this session's episodic
+    /// facts, so the agent starts with its accumulated memory. No-op without a
+    /// persistence backend.
+    pub async fn load_persisted_facts(&self) {
+        let p = match &self.persistence {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let user_id = self.user_id().await;
+        let session_id = self.session_id().await;
+        // Cross-session habits (all user facts) — empty session scope.
+        if let Ok(habits) = p.load_facts(&user_id, "").await {
+            for f in habits {
+                self.fact_archive.upsert(f).await;
+            }
+        }
+        // This session's episodic facts.
+        if !session_id.is_empty() {
+            if let Ok(episodic) = p.load_facts(&user_id, &session_id).await {
+                for f in episodic {
+                    self.fact_archive.upsert(f).await;
+                }
+            }
+        }
     }
 
     // ─── Session Persistence ──────────────────────────────────────────

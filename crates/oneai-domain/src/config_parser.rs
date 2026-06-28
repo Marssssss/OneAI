@@ -259,6 +259,7 @@ pub fn resolve_config(config: &DomainPackConfig, project_dir: &str) -> DomainPac
         permission_profile,
         paradigm_strategies,
         compression_template,
+        memory_profile: crate::memory_profile::MemoryProfile::default(),
         system_prompt_template: config.system_prompt.clone(),
         workflows: Vec::new(),
         state_graphs: Vec::new(),
