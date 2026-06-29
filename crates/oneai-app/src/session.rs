@@ -123,6 +123,9 @@ struct AppResources {
     model_context_resolver: Option<Arc<oneai_core::ModelContextResolver>>,
     /// Whether to probe the provider for context windows at warm-up.
     probe_context_windows: bool,
+    /// Sampling / generation params — propagated into the AgentLoopConfig
+    /// of every agent run.
+    generation_config: oneai_core::GenerationConfig,
 }
 
 impl AppSession {
@@ -165,6 +168,7 @@ impl AppSession {
                 pricing_catalog: app.pricing_catalog.clone(),
                 model_context_resolver: app.model_context_resolver.clone(),
                 probe_context_windows: app.probe_context_windows,
+                generation_config: app.generation_config.clone(),
             }),
             conversation,
             session_id,
@@ -584,7 +588,7 @@ impl AppSession {
 
         // Build the AgentLoop from session resources
         let agent_loop = if let Some(domain) = &self.app.domain_pack {
-            let config = AgentLoopConfig {
+            let mut config = AgentLoopConfig {
                 system_prompt: if domain.system_prompt_template.is_empty() {
                     AgentLoopConfig::default().system_prompt
                 } else {
@@ -604,6 +608,9 @@ impl AppSession {
                 trace_context: self.trace_context.clone(),
                 ..AgentLoopConfig::default()
             };
+            // Apply user-configured generation params (temperature/top_p/
+            // max_tokens/thinking_budget/stop_sequences) on top of the defaults.
+            config.apply_generation_config(&self.app.generation_config);
             // Use the real ContextCompressor with the domain's CompressionTemplate,
             // so that compression preserves domain-critical information.
             // P3: also wire compression-coupled fact extraction — discarded
@@ -657,7 +664,7 @@ impl AppSession {
                 active_skill.clone(),
             )
         } else {
-            let config = AgentLoopConfig {
+            let mut config = AgentLoopConfig {
                 use_streaming: true,
                 plan_mode: self.plan_mode,
                 cost_tracker,
@@ -672,6 +679,8 @@ impl AppSession {
                 trace_context: self.trace_context.clone(),
                 ..AgentLoopConfig::default()
             };
+            // Apply user-configured generation params on top of the defaults.
+            config.apply_generation_config(&self.app.generation_config);
             // No domain pack — still use a real ContextCompressor with a
             // generic summarization prompt and default fact extraction (B3/C3),
             // so compression-coupled fact extraction and discarded archival

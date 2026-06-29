@@ -150,12 +150,13 @@ impl ReActAgent {
             iterations += 1;
             tracing::info!("ReAct iteration {}/{}", iterations, self.config.max_iterations);
 
-            // Build inference request
+            // Build inference request. Temperature falls back to 0.3 when unset
+            // (provider API default of 1.0 is too random for tool-use).
             let request = InferenceRequest {
                 conversation: conv.clone(),
                 tools: tool_defs.clone(),
                 max_tokens: self.config.max_tokens,
-                temperature: self.config.temperature,
+                temperature: self.config.temperature.or(Some(0.3)),
                 top_p: None,
                 stop_sequences: vec![],
                 constrained_output: None,
@@ -318,7 +319,7 @@ impl ReActAgent {
                 conversation: conv.clone(),
                 tools: tool_defs.clone(),
                 max_tokens: self.config.max_tokens,
-                temperature: self.config.temperature,
+                temperature: self.config.temperature.or(Some(0.3)),
                 top_p: None,
                 stop_sequences: vec![],
                 constrained_output: None,

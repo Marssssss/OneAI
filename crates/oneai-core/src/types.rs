@@ -523,6 +523,91 @@ pub struct InferenceRequest {
     pub metadata: HashMap<String, String>,
 }
 
+// ─── GenerationConfig ─────────────────────────────────────────────────────────
+
+/// Sampling / generation parameters for LLM inference.
+///
+/// Holds the per-run knobs that control the model's output: temperature,
+/// top-p, max_tokens, thinking budget, and stop sequences. All fields are
+/// `Option` (stop_sequences defaults to empty) — when left `None`, the agent
+/// loop applies a **scenario-appropriate built-in default** at the call site
+/// (e.g. deterministic temperature for planning, moderate temperature for the
+/// agentic tool-use loop) rather than letting the provider API's own default
+/// leak through. Provider API defaults are frequently inappropriate for agents:
+/// OpenAI and Anthropic both default `temperature` to 1.0, which is too random
+/// for reliable tool-use / coding, and `thinking_budget` is Anthropic-specific
+/// (it silently inflates `max_tokens` and is ignored by other providers).
+///
+/// Set a field to `Some(value)` to override the scenario default explicitly;
+/// leave it `None` to inherit the scenario default.
+///
+/// Exposed via `AppBuilder::generation_config` / `temperature` / `top_p` /
+/// `max_tokens` / `thinking_budget` / `stop_sequences`, then propagated into
+/// the `AgentLoopConfig` that drives every inference call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GenerationConfig {
+    /// Sampling temperature (0.0 = deterministic, 1.0 = creative).
+    #[serde(default)]
+    pub temperature: Option<f32>,
+
+    /// Top-p (nucleus) sampling mass.
+    #[serde(default)]
+    pub top_p: Option<f32>,
+
+    /// Maximum tokens to generate. `None` defers to the provider's model-aware
+    /// default (providers know their own model ceilings; safer than a fixed
+    /// agent-side cap that may exceed a model's max and error).
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+
+    /// Token budget for extended thinking / reasoning.
+    /// Anthropic maps this to `thinking.budget_tokens` (and bumps `max_tokens`
+    /// to `budget + floor`); other providers ignore it. `None` = thinking off.
+    #[serde(default)]
+    pub thinking_budget: Option<u32>,
+
+    /// Stop sequences — generation halts when any is emitted.
+    #[serde(default)]
+    pub stop_sequences: Vec<String>,
+}
+
+impl GenerationConfig {
+    /// Create an empty config (all fields inherit scenario defaults).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the sampling temperature.
+    pub fn temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set the top-p (nucleus) mass.
+    pub fn top_p(mut self, top_p: f32) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
+    /// Set the maximum output tokens.
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set the extended-thinking token budget (`None` disables thinking).
+    pub fn thinking_budget(mut self, budget: Option<u32>) -> Self {
+        self.thinking_budget = budget;
+        self
+    }
+
+    /// Set the stop sequences.
+    pub fn stop_sequences(mut self, stop_sequences: Vec<String>) -> Self {
+        self.stop_sequences = stop_sequences;
+        self
+    }
+}
+
 // ─── InferenceResponse ────────────────────────────────────────────────────────
 
 /// A complete (non-streaming) inference response.
@@ -1409,5 +1494,42 @@ impl GraphDecision {
     /// Check if this decision involves delegation.
     pub fn is_delegation(&self) -> bool {
         matches!(self, Self::Delegate { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_config_builder_and_default() {
+        let empty = GenerationConfig::new();
+        assert_eq!(empty.temperature, None);
+        assert_eq!(empty.top_p, None);
+        assert_eq!(empty.max_tokens, None);
+        assert_eq!(empty.thinking_budget, None);
+        assert!(empty.stop_sequences.is_empty());
+
+        let cfg = GenerationConfig::new()
+            .temperature(0.3)
+            .top_p(0.95)
+            .max_tokens(4096)
+            .thinking_budget(Some(12000))
+            .stop_sequences(vec!["<stop>".to_string()]);
+        assert_eq!(cfg.temperature, Some(0.3));
+        assert_eq!(cfg.top_p, Some(0.95));
+        assert_eq!(cfg.max_tokens, Some(4096));
+        assert_eq!(cfg.thinking_budget, Some(12000));
+        assert_eq!(cfg.stop_sequences, vec!["<stop>".to_string()]);
+    }
+
+    #[test]
+    fn generation_config_round_trips_through_serde() {
+        let cfg = GenerationConfig::new().temperature(0.7).max_tokens(2048);
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: GenerationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.temperature, Some(0.7));
+        assert_eq!(back.max_tokens, Some(2048));
+        assert_eq!(back.top_p, None);
     }
 }

@@ -153,6 +153,11 @@ pub struct AppBuilder {
     swarm_orchestrator: Option<Arc<oneai_agent::SwarmOrchestrator>>,
     /// Swarm config (optional — for auto-creating swarm orchestrator at build time).
     swarm_config: Option<oneai_core::SwarmConfig>,
+    /// Sampling / generation parameters (temperature, top_p, max_tokens,
+    /// thinking_budget, stop_sequences). Propagated into the `AgentLoopConfig`
+    /// that drives every inference call. Each `Some` field overrides the
+    /// agent-loop's scenario default; `None` fields inherit it.
+    generation_config: oneai_core::GenerationConfig,
 }
 
 impl AppBuilder {
@@ -206,12 +211,69 @@ impl AppBuilder {
             handoff_config: None,
             swarm_orchestrator: None,
             swarm_config: None,
+            generation_config: oneai_core::GenerationConfig::new(),
         }
     }
 
     /// Set the LLM provider.
     pub fn provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    /// Set the full sampling / generation configuration in one call.
+    ///
+    /// Replaces any previously-set individual parameter. Each `Some` field
+    /// overrides the agent-loop's scenario default at inference time; `None`
+    /// fields inherit it (e.g. temperature defaults to 0.3 for the agentic
+    /// loop, thinking defaults to off).
+    ///
+    /// ```ignore
+    /// AppBuilder::new()
+    ///     .generation_config(GenerationConfig::new()
+    ///         .temperature(0.2)
+    ///         .max_tokens(8192)
+    ///         .thinking_budget(Some(20000)))
+    /// ```
+    pub fn generation_config(mut self, config: oneai_core::GenerationConfig) -> Self {
+        self.generation_config = config;
+        self
+    }
+
+    /// Set the sampling temperature (0.0 = deterministic, 1.0 = creative).
+    /// When unset, the agentic loop defaults to 0.3.
+    pub fn temperature(mut self, temperature: f32) -> Self {
+        self.generation_config.temperature = Some(temperature);
+        self
+    }
+
+    /// Set the top-p (nucleus) sampling mass. When unset, the provider's own
+    /// default (1.0 = no nucleus filtering) is used.
+    pub fn top_p(mut self, top_p: f32) -> Self {
+        self.generation_config.top_p = Some(top_p);
+        self
+    }
+
+    /// Set the maximum output tokens. When unset, the provider applies its
+    /// model-aware default (safer than a fixed agent-side cap that may exceed
+    /// a model's ceiling and error).
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.generation_config.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set the extended-thinking token budget. `None` disables thinking (the
+    /// default); `Some(n)` enables it with an n-token budget. Thinking is
+    /// Anthropic-specific (mapped to `thinking.budget_tokens` and inflates
+    /// `max_tokens`); other providers ignore it.
+    pub fn thinking_budget(mut self, budget: Option<u32>) -> Self {
+        self.generation_config.thinking_budget = budget;
+        self
+    }
+
+    /// Set stop sequences — generation halts when any is emitted.
+    pub fn stop_sequences(mut self, stop_sequences: Vec<String>) -> Self {
+        self.generation_config.stop_sequences = stop_sequences;
         self
     }
 
@@ -1779,6 +1841,7 @@ impl AppBuilder {
             team_coordinator: self.team_coordinator,
             handoff_manager: self.handoff_manager,
             swarm_orchestrator: self.swarm_orchestrator,
+            generation_config: self.generation_config,
         })
     }
 }
@@ -1871,6 +1934,10 @@ pub struct App {
     pub handoff_manager: Option<Arc<oneai_agent::HandoffManager>>,
     /// Swarm orchestrator for dynamic agent pool orchestration.
     pub swarm_orchestrator: Option<Arc<oneai_agent::SwarmOrchestrator>>,
+    /// Sampling / generation parameters — propagated into the `AgentLoopConfig`
+    /// of every agent run (main loop, workflow nodes, sub-agents inherit via
+    /// the parent). See `AppBuilder::generation_config`.
+    pub generation_config: oneai_core::GenerationConfig,
 }
 
 impl App {

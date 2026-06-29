@@ -35,7 +35,12 @@ pub fn cmd_chat(config: &OneaiConfig, domain_override: Option<&str>, model_overr
     let domain_name = config.default_domain_pack(domain_override);
 
     // Launch TUI
-    if let Err(e) = crate::tui::run_tui(provider_config, Some(&domain_name), user) {
+    if let Err(e) = crate::tui::run_tui(
+        provider_config,
+        Some(&domain_name),
+        user,
+        &config.generation,
+    ) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

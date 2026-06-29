@@ -668,8 +668,10 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             system_prompt,
             use_streaming: false,
             temperature: Some(0.3), // Lower temperature for focused sub-agent tasks
+            top_p: None,
             max_tokens: Some(budget.total),
             thinking_budget: None,
+            stop_sequences: Vec::new(),
             hard_max_iterations: Some(50),
             auto_checkpoint: false,
             inject_skills: false, // Sub-agents don't need skill injection

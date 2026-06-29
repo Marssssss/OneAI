@@ -19,6 +19,11 @@ pub struct OneaiConfig {
     /// UI configuration.
     #[serde(default)]
     pub ui: UiConfig,
+    /// Sampling / generation parameters (temperature, top_p, max_tokens,
+    /// thinking_budget, stop_sequences). All fields optional — unset fields
+    /// inherit the agent-loop's scenario default.
+    #[serde(default)]
+    pub generation: oneai_core::GenerationConfig,
 }
 
 /// LLM provider configuration.
@@ -95,6 +100,7 @@ impl Default for OneaiConfig {
             provider: ProviderConfig::default(),
             domain: DomainConfig::default(),
             ui: UiConfig::default(),
+            generation: oneai_core::GenerationConfig::new(),
         }
     }
 }

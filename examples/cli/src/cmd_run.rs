@@ -47,7 +47,8 @@ pub fn cmd_run(
         let builder = AppBuilder::new()
             .provider(Arc::from(provider))
             .auto_approval_gate()
-            .default_parser();
+            .default_parser()
+            .generation_config(config.generation.clone());
         let builder = if let Some(uid) = user {
             builder.user_id(uid)
         } else {

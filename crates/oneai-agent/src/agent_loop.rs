@@ -499,10 +499,17 @@ pub struct AgentLoopConfig {
     pub system_prompt: String,
     pub use_streaming: bool,
     pub temperature: Option<f32>,
+    /// Top-p (nucleus) sampling mass. `None` lets the provider use its own
+    /// default (1.0 = no nucleus filtering, the safe baseline).
+    pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
     /// Token budget for extended thinking/reasoning (Anthropic budget_tokens, etc).
-    /// None = thinking disabled; Some(N) = enable thinking with N token budget.
+    /// `None` = thinking **disabled** (the default — thinking is opt-in, since it
+    /// is Anthropic-specific, costs tokens, and silently inflates `max_tokens`).
+    /// `Some(N)` = enable thinking with an N-token budget.
     pub thinking_budget: Option<u32>,
+    /// Stop sequences — generation halts when any is emitted.
+    pub stop_sequences: Vec<String>,
     pub hard_max_iterations: Option<usize>,
     pub auto_checkpoint: bool,
     pub inject_skills: bool,
@@ -550,8 +557,10 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("system_prompt", &self.system_prompt)
             .field("use_streaming", &self.use_streaming)
             .field("temperature", &self.temperature)
+            .field("top_p", &self.top_p)
             .field("max_tokens", &self.max_tokens)
             .field("thinking_budget", &self.thinking_budget)
+            .field("stop_sequences", &self.stop_sequences)
             .field("hard_max_iterations", &self.hard_max_iterations)
             .field("auto_checkpoint", &self.auto_checkpoint)
             .field("inject_skills", &self.inject_skills)
@@ -589,8 +598,13 @@ impl Default for AgentLoopConfig {
                 .to_string(),
             use_streaming: false,
             temperature: None,
+            top_p: None,
             max_tokens: None,
-            thinking_budget: Some(10000),
+            // Thinking is opt-in: it is Anthropic-specific, costs tokens, and
+            // silently inflates max_tokens. Enable via GenerationConfig /
+            // AgentLoopConfig::thinking_budget when wanted.
+            thinking_budget: None,
+            stop_sequences: Vec::new(),
             hard_max_iterations: Some(200), // Safety guard: None = only budget constraint, Some(N) = budget + iteration limit
             auto_checkpoint: true,
             inject_skills: true,
@@ -604,6 +618,32 @@ impl Default for AgentLoopConfig {
             structured_output: None,
             trace_context: None,
             plan_mode: false,
+        }
+    }
+}
+
+impl AgentLoopConfig {
+    /// Apply user-configured [`GenerationConfig`] on top of this config.
+    ///
+    /// Each `Some` field in `cfg` overrides the corresponding field here;
+    /// `None` fields are left untouched (so the scenario default set elsewhere
+    /// — e.g. via `..AgentLoopConfig::default()` or a paradigm agent — wins).
+    /// `stop_sequences` replaces when non-empty.
+    pub fn apply_generation_config(&mut self, cfg: &oneai_core::GenerationConfig) {
+        if let Some(t) = cfg.temperature {
+            self.temperature = Some(t);
+        }
+        if let Some(p) = cfg.top_p {
+            self.top_p = Some(p);
+        }
+        if let Some(m) = cfg.max_tokens {
+            self.max_tokens = Some(m);
+        }
+        // thinking_budget is authoritative even when None (user explicitly
+        // disabling thinking), so assign directly rather than Option::or.
+        self.thinking_budget = cfg.thinking_budget;
+        if !cfg.stop_sequences.is_empty() {
+            self.stop_sequences = cfg.stop_sequences.clone();
         }
     }
 }
@@ -1064,6 +1104,13 @@ impl AgentLoop {
             }
 
             // 3. Build inference request (with paradigm-aware tool definitions)
+            //
+            // Scenario defaults for the agentic tool-use loop: when the user has
+            // not configured a value, temperature falls back to 0.3 (the provider
+            // API default of 1.0 is too random for reliable tool-use / coding),
+            // and max_tokens/top_p defer to the provider (it knows its own model
+            // ceiling — a fixed agent-side cap can exceed a model's max and error).
+            // thinking_budget is opt-in (None here unless the user enabled it).
             let tool_defs = self.build_tool_definitions_for_paradigm(
                 state.active_paradigm_config.as_ref()
             ).await;
@@ -1071,9 +1118,9 @@ impl AgentLoop {
                 conversation: state.conversation.clone(),
                 tools: tool_defs,
                 max_tokens: self.config.max_tokens,
-                temperature: self.config.temperature,
-                top_p: None,
-                stop_sequences: vec![],
+                temperature: self.config.temperature.or(Some(0.3)),
+                top_p: self.config.top_p,
+                stop_sequences: self.config.stop_sequences.clone(),
                 constrained_output: None,
                 thinking_budget: self.config.thinking_budget,
                 metadata: HashMap::new(),
@@ -1404,9 +1451,9 @@ impl AgentLoop {
                     conversation: state.conversation.clone(),
                     tools: retry_tool_defs,
                     max_tokens: self.config.max_tokens,
-                    temperature: self.config.temperature,
-                    top_p: None,
-                    stop_sequences: vec![],
+                    temperature: self.config.temperature.or(Some(0.3)),
+                    top_p: self.config.top_p,
+                    stop_sequences: self.config.stop_sequences.clone(),
                     constrained_output: None,
                     thinking_budget: self.config.thinking_budget,
                     metadata: HashMap::new(),
@@ -3207,16 +3254,21 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
             vec![]
         };
 
-        // Build inference request
+        // Build inference request.
+        //
+        // Layering: action-level override > AgentLoopConfig (user-configured
+        // GenerationConfig) > scenario builtin. The builtin temperature 0.3
+        // avoids the provider API default of 1.0 (too random for tool-use);
+        // max_tokens 4096 bounds a single workflow node's output.
         let request = InferenceRequest {
             conversation,
             tools: tool_defs,
-            max_tokens: max_tokens.or(Some(4096)),
-            temperature: temperature.or(Some(0.3)),
-            top_p: None,
-            stop_sequences: vec![],
+            max_tokens: max_tokens.or(self.config.max_tokens).or(Some(4096)),
+            temperature: temperature.or(self.config.temperature).or(Some(0.3)),
+            top_p: self.config.top_p,
+            stop_sequences: self.config.stop_sequences.clone(),
             constrained_output: None,
-            thinking_budget,
+            thinking_budget: thinking_budget.or(self.config.thinking_budget),
             metadata: HashMap::new(),
         };
 

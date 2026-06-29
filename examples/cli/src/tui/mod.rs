@@ -52,6 +52,7 @@ pub fn run_tui(
     provider_config: Option<ModelConfig>,
     domain_name: Option<&str>,
     user: Option<&str>,
+    generation: &oneai_core::GenerationConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Setup panic hook to restore terminal state if we crash
     let original_hook = Arc::new(std::panic::take_hook());
@@ -112,7 +113,7 @@ pub fn run_tui(
             .default_rate_limiter()
             .channel_approval_gate(16, oneai_core::RiskLevel::Medium);
 
-        let mut builder = builder;
+        let mut builder = builder.generation_config(generation.clone());
         if let Some(config) = provider_config {
             let provider = ProviderFactory::create(config);
             builder = builder.provider(Arc::from(provider));

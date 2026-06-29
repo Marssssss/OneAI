@@ -237,6 +237,55 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_loop_config_generation_defaults() {
+        // Thinking is opt-in: the default must NOT force extended thinking on
+        // (it is Anthropic-specific, costs tokens, and inflates max_tokens).
+        // Temperature/top_p/max_tokens are None so the scenario default at the
+        // call site (0.3 for the agentic loop) applies.
+        let config = AgentLoopConfig::default();
+        assert_eq!(config.thinking_budget, None, "thinking must be off by default");
+        assert_eq!(config.temperature, None);
+        assert_eq!(config.top_p, None);
+        assert_eq!(config.max_tokens, None);
+        assert!(config.stop_sequences.is_empty());
+    }
+
+    #[test]
+    fn test_apply_generation_config_overrides() {
+        let mut config = AgentLoopConfig::default();
+        let gen = oneai_core::GenerationConfig::new()
+            .temperature(0.2)
+            .top_p(0.9)
+            .max_tokens(8192)
+            .thinking_budget(Some(20000))
+            .stop_sequences(vec!["END".to_string()]);
+        config.apply_generation_config(&gen);
+        assert_eq!(config.temperature, Some(0.2));
+        assert_eq!(config.top_p, Some(0.9));
+        assert_eq!(config.max_tokens, Some(8192));
+        assert_eq!(config.thinking_budget, Some(20000));
+        assert_eq!(config.stop_sequences, vec!["END".to_string()]);
+    }
+
+    #[test]
+    fn test_apply_generation_config_none_inherits_and_disables_thinking() {
+        // None fields inherit the existing scenario default; thinking_budget
+        // is authoritative even when None (explicitly disabling thinking).
+        let mut config = AgentLoopConfig {
+            temperature: Some(0.3),
+            max_tokens: Some(4096),
+            thinking_budget: Some(10000),
+            ..AgentLoopConfig::default()
+        };
+        let gen = oneai_core::GenerationConfig::new(); // all None
+        config.apply_generation_config(&gen);
+        assert_eq!(config.temperature, Some(0.3)); // inherited
+        assert_eq!(config.max_tokens, Some(4096)); // inherited
+        assert_eq!(config.thinking_budget, None); // authoritatively disabled
+        assert_eq!(config.top_p, None); // inherited
+    }
+
+    #[test]
     fn test_parallel_step_result() {
         let result = ParallelStepResult {
             step_id: "step_1".to_string(),
