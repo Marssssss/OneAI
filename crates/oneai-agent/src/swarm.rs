@@ -8,10 +8,9 @@
 //! 5. Failed tasks are retried with alternative agents
 //! 6. All results are aggregated into a final SwarmResult
 //!
-//! The orchestrator supports 4 routing strategies:
+//! The orchestrator supports 3 routing strategies:
 //! - **BestFit**: Highest quality agent for the task category
 //! - **LoadBalanced**: Distribute across agents, considering current load
-//! - **CostOptimized**: Cheapest agent that meets quality threshold
 //! - **Fastest**: Agent with highest speed score
 
 use std::collections::HashSet;
@@ -23,7 +22,7 @@ use oneai_core::swarm::{
 };
 use oneai_core::team::SubAgentKindProxy;
 use oneai_core::budget::TokenBudget;
-use oneai_core::cost::CostTracker;
+use oneai_core::usage::UsageTracker;
 use oneai_core::context_manager::ContextManager;
 use oneai_core::error::Result;
 
@@ -41,7 +40,7 @@ use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 /// 5. Retries failed tasks with alternative agents
 /// 6. Aggregates all results into a final SwarmResult
 ///
-/// The orchestrator tracks budget, cost, and logs all coordination events
+/// The orchestrator tracks token usage and logs all coordination events
 /// through the SwarmCoordinationLog trait.
 pub struct SwarmOrchestrator {
     /// The sub-agent factory for creating swarm agents.
@@ -54,8 +53,8 @@ pub struct SwarmOrchestrator {
     /// Context manager for trimming task context (optional).
     context_manager: Option<Arc<ContextManager>>,
 
-    /// Cost tracker for recording swarm costs (optional).
-    cost_tracker: Option<Arc<dyn CostTracker>>,
+    /// Usage tracker for recording swarm usage (optional).
+    usage_tracker: Option<Arc<dyn UsageTracker>>,
 
     /// Coordination log for recording swarm events.
     log: Arc<dyn SwarmCoordinationLog>,
@@ -68,7 +67,7 @@ impl SwarmOrchestrator {
             factory,
             default_budget: TokenBudget::new(100_000),
             context_manager: None,
-            cost_tracker: None,
+            usage_tracker: None,
             log: Arc::new(InMemorySwarmCoordinationLog::new()),
         }
     }
@@ -79,7 +78,7 @@ impl SwarmOrchestrator {
             factory,
             default_budget: budget,
             context_manager: None,
-            cost_tracker: None,
+            usage_tracker: None,
             log: Arc::new(InMemorySwarmCoordinationLog::new()),
         }
     }
@@ -89,14 +88,14 @@ impl SwarmOrchestrator {
         factory: Arc<dyn SubAgentFactory>,
         budget: TokenBudget,
         context_manager: Option<Arc<ContextManager>>,
-        cost_tracker: Option<Arc<dyn CostTracker>>,
+        usage_tracker: Option<Arc<dyn UsageTracker>>,
         log: Arc<dyn SwarmCoordinationLog>,
     ) -> Self {
         Self {
             factory,
             default_budget: budget,
             context_manager,
-            cost_tracker,
+            usage_tracker,
             log,
         }
     }
@@ -106,9 +105,9 @@ impl SwarmOrchestrator {
         self.context_manager = Some(manager);
     }
 
-    /// Set the cost tracker.
-    pub fn set_cost_tracker(&mut self, tracker: Arc<dyn CostTracker>) {
-        self.cost_tracker = Some(tracker);
+    /// Set the usage tracker.
+    pub fn set_usage_tracker(&mut self, tracker: Arc<dyn UsageTracker>) {
+        self.usage_tracker = Some(tracker);
     }
 
     /// Get the coordination log.
@@ -138,7 +137,7 @@ impl SwarmOrchestrator {
         let result = self.execute_subtasks(config, &subtasks).await?;
 
         // Log swarm complete
-        self.log.log_swarm_complete(&config.id, result.total_tokens, result.total_cost).await;
+        self.log.log_swarm_complete(&config.id, result.total_tokens).await;
 
         Ok(result)
     }
@@ -235,7 +234,6 @@ impl SwarmOrchestrator {
         let mut task_results: Vec<SwarmTaskResult> = Vec::new();
         let mut completed_ids: HashSet<String> = HashSet::new();
         let mut total_tokens = 0u32;
-        let mut total_cost = 0.0;
         let mut active_agents: Vec<String> = Vec::new();
         let mut accumulated_context = String::new();
 
@@ -294,7 +292,7 @@ impl SwarmOrchestrator {
 
                             self.log.log_task_complete(
                                 &config.id, &task.id, &agent_name,
-                                summary.tokens_used, 0.0, summary.completed, quality_score
+                                summary.tokens_used, summary.completed, quality_score
                             ).await;
 
                             // Validate result quality
@@ -324,12 +322,10 @@ impl SwarmOrchestrator {
                                 completed: summary.completed,
                                 quality_score,
                                 tokens_used: summary.tokens_used,
-                                cost: 0.0,
                                 retry_count,
                             });
 
                             total_tokens += summary.tokens_used;
-                            total_cost += 0.0;
 
                             if !active_agents.contains(&agent_name) {
                                 active_agents.push(agent_name.clone());
@@ -350,7 +346,6 @@ impl SwarmOrchestrator {
                                 completed: false,
                                 quality_score: 0.0,
                                 tokens_used: 0,
-                                cost: 0.0,
                                 retry_count: 0,
                             });
 
@@ -371,7 +366,6 @@ impl SwarmOrchestrator {
                         completed: false,
                         quality_score: 0.0,
                         tokens_used: 0,
-                        cost: 0.0,
                         retry_count: 0,
                     });
 
@@ -393,7 +387,6 @@ impl SwarmOrchestrator {
             final_answer,
             task_results,
             total_tokens,
-            total_cost,
             active_agents,
         })
     }
@@ -405,8 +398,7 @@ impl SwarmOrchestrator {
     /// The routing considers:
     /// - Agent capabilities (quality/speed scores per category)
     /// - Current agent load (for LoadBalanced routing)
-    /// - Cost per agent (for CostOptimized routing)
-    /// - Quality threshold (for CostOptimized routing)
+    /// - Quality threshold (for BestFit routing)
     fn route_task(&self, task: &SwarmTask, config: &SwarmConfig) -> String {
         // Find agents that can handle this category
         let capable_agents: Vec<&SwarmAgentEntry> = config.agents.iter()
@@ -438,20 +430,6 @@ impl SwarmOrchestrator {
                     .min_by_key(|a| a.current_load)
                     .map(|a| a.name.clone())
                     .unwrap_or_default()
-            }
-            SwarmRouting::CostOptimized => {
-                // Route to cheapest agent that meets quality threshold
-                capable_agents.iter()
-                    .filter(|a| a.capability.quality_for(&task.category) >= config.quality_threshold)
-                    .min_by_key(|a| (a.capability.cost_per_1k * 1000.0) as u64)
-                    .map(|a| a.name.clone())
-                    .unwrap_or_else(|| {
-                        // Fallback: if no agent meets threshold, use cheapest anyway
-                        capable_agents.iter()
-                            .min_by_key(|a| (a.capability.cost_per_1k * 1000.0) as u64)
-                            .map(|a| a.name.clone())
-                            .unwrap_or_default()
-                    })
             }
             SwarmRouting::Fastest => {
                 // Route to agent with highest speed score for this category
@@ -730,22 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn test_route_cost_optimized() {
-        let factory = Arc::new(MockFactory);
-        let orchestrator = SwarmOrchestrator::new(factory);
-
-        let config = SwarmConfig::cost_optimized("test_route")
-            .with_agent(SwarmAgentEntry::coder())     // cost_per_1k = 0.03
-            .with_agent(SwarmAgentEntry::planner())    // cost_per_1k = 0.02
-            .with_quality_threshold(0.7);
-
-        let task = SwarmTask::new("t1", "Plan the project", "planning");
-        let agent = orchestrator.route_task(&task, &config);
-        // Planner handles "planning" and is cheaper (0.02 vs coder which doesn't handle planning)
-        assert_eq!(agent, "planner");
-    }
-
-    #[test]
     fn test_route_no_capable_agent() {
         let factory = Arc::new(MockFactory);
         let orchestrator = SwarmOrchestrator::new(factory);
@@ -815,23 +777,6 @@ mod tests {
         assert!(result.task_results.len() >= 1);
     }
 
-    #[tokio::test]
-    async fn test_execute_cost_optimized_swarm() {
-        let factory = Arc::new(MockFactory);
-        let orchestrator = SwarmOrchestrator::new(factory);
-
-        let config = SwarmConfig::cost_optimized("test_exec")
-            .with_agent(SwarmAgentEntry::planner())
-            .with_agent(SwarmAgentEntry::researcher())
-            .with_budget(TokenBudgetProxy::new(50_000))
-            .with_quality_threshold(0.6);
-
-        let result = orchestrator.execute(&config, "Plan a project").await.unwrap();
-
-        assert!(!result.final_answer.is_empty());
-        assert!(result.task_results.len() >= 1);
-    }
-
     // ─── Validation Tests ──────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -866,17 +811,6 @@ mod tests {
 
         let config = oneai_core::swarm::SwarmPresets::fast_research_swarm();
         let result = orchestrator.execute(&config, "Research the latest Rust frameworks").await.unwrap();
-
-        assert!(!result.final_answer.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_preset_budget_code() {
-        let factory = Arc::new(MockFactory);
-        let orchestrator = SwarmOrchestrator::new(factory);
-
-        let config = oneai_core::swarm::SwarmPresets::budget_code_swarm();
-        let result = orchestrator.execute(&config, "Implement a simple utility").await.unwrap();
 
         assert!(!result.final_answer.is_empty());
     }
@@ -986,7 +920,6 @@ mod tests {
             completed: true,
             quality_score: 0.85,
             tokens_used: 2000,
-            cost: 0.02,
             retry_count: 0,
         }];
 
@@ -1010,7 +943,6 @@ mod tests {
                 completed: true,
                 quality_score: 0.85,
                 tokens_used: 2000,
-                cost: 0.02,
                 retry_count: 0,
             },
             SwarmTaskResult {
@@ -1024,7 +956,6 @@ mod tests {
                 completed: true,
                 quality_score: 0.9,
                 tokens_used: 3000,
-                cost: 0.03,
                 retry_count: 0,
             },
         ];

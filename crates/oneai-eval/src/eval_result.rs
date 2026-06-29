@@ -38,20 +38,15 @@ pub struct EvalResult {
     /// Duration of the evaluation run in milliseconds.
     pub duration_ms: u64,
 
-    /// Estimated USD cost of this case (from CostTracker + ModelPricingCatalog).
-    /// 0.0 when no cost tracker is configured.
-    #[serde(default)]
-    pub cost_usd: f64,
-
-    /// Number of LLM API calls made for this case (= CostSummary.call_count).
+    /// Number of LLM API calls made for this case (= UsageSummary.call_count).
     #[serde(default)]
     pub api_calls: u64,
 
     /// How many of the API calls had **estimated** (client-side) token counts
     /// rather than provider-reported usage. Non-zero means the provider returned
     /// no usage in (streaming) responses and the loop counted tokens locally —
-    /// so cost/tokens for those calls are approximations. Surfaced so reports
-    /// can flag that part of the cost axis is estimated.
+    /// so tokens for those calls are approximations. Surfaced so reports
+    /// can flag that part of the usage axis is estimated.
     #[serde(default)]
     pub estimated_calls: u64,
 
@@ -84,7 +79,6 @@ impl EvalResult {
             scores: Vec::new(),
             trace_metrics: TraceMetrics::default(),
             duration_ms: 0,
-            cost_usd: 0.0,
             api_calls: 0,
             estimated_calls: 0,
             prompt_tokens: 0,
@@ -201,14 +195,6 @@ pub struct EvalSummary {
     /// Total token consumption across all cases.
     pub total_tokens: u64,
 
-    /// Total estimated USD cost across all cases.
-    #[serde(default)]
-    pub total_cost_usd: f64,
-
-    /// Average USD cost per case.
-    #[serde(default)]
-    pub avg_cost_usd: f64,
-
     /// Total LLM API calls across all cases.
     #[serde(default)]
     pub total_api_calls: u64,
@@ -230,8 +216,6 @@ impl EvalSummary {
 
         let total_tokens: u64 = results.iter().map(|r| r.trace_metrics.total_tokens).sum();
 
-        let total_cost_usd: f64 = results.iter().map(|r| r.cost_usd).sum();
-        let avg_cost_usd = if total_cases > 0 { total_cost_usd / total_cases as f64 } else { 0.0 };
         let total_api_calls: u64 = results.iter().map(|r| r.api_calls).sum();
 
         // Compute per-metric summaries
@@ -255,8 +239,6 @@ impl EvalSummary {
             avg_score,
             avg_duration_ms,
             total_tokens,
-            total_cost_usd,
-            avg_cost_usd,
             total_api_calls,
             metric_summaries,
         }
@@ -335,8 +317,7 @@ mod tests {
         assert_eq!(result.actual_output, "4");
         assert!(result.scores.is_empty());
         assert!(!result.has_error());
-        // New cost fields default to zero (no cost tracker wired).
-        assert_eq!(result.cost_usd, 0.0);
+        // Usage fields default to zero (no usage tracker wired).
         assert_eq!(result.api_calls, 0);
         assert_eq!(result.prompt_tokens, 0);
         assert_eq!(result.completion_tokens, 0);
@@ -344,26 +325,22 @@ mod tests {
     }
 
     #[test]
-    fn test_summary_aggregates_cost_and_api_calls() {
+    fn test_summary_aggregates_usage_and_api_calls() {
         let mut r1 = EvalResult::new("c1", "in", "out");
-        r1.cost_usd = 0.10;
         r1.api_calls = 3;
         r1.prompt_tokens = 100;
         r1.completion_tokens = 50;
         r1.add_score("m", EvalScore::perfect("ok"));
 
         let mut r2 = EvalResult::new("c2", "in", "out");
-        r2.cost_usd = 0.30;
         r2.api_calls = 7;
         r2.prompt_tokens = 200;
         r2.completion_tokens = 100;
         r2.add_score("m", EvalScore::perfect("ok"));
 
-        let report = EvalReport::new("costed_suite", vec![r1, r2]);
+        let report = EvalReport::new("usage_suite", vec![r1, r2]);
         let s = &report.summary;
         assert_eq!(s.total_cases, 2);
-        assert!((s.total_cost_usd - 0.40).abs() < 1e-9);
-        assert!((s.avg_cost_usd - 0.20).abs() < 1e-9);
         assert_eq!(s.total_api_calls, 10);
     }
 

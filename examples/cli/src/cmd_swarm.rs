@@ -19,7 +19,6 @@ pub fn cmd_swarm_list() {
     let presets = [
         ("code_analysis", "Code Analysis Swarm", "BestFit routing, 4 agents (coder, researcher, reviewer, planner)"),
         ("fast_research", "Fast Research Swarm", "Fastest routing, 3 agents (researcher, planner, reviewer)"),
-        ("budget_code", "Budget Code Swarm", "CostOptimized routing, 4 agents — cheapest quality-acceptable agent"),
         ("balanced_dev", "Balanced Dev Swarm", "LoadBalanced routing, 4 agents — distributes evenly"),
     ];
 
@@ -29,7 +28,7 @@ pub fn cmd_swarm_list() {
         println!();
     }
 
-    println!("Routing strategies: best-fit, load-balanced, cost-optimized, fastest");
+    println!("Routing strategies: best-fit, load-balanced, fastest");
     println!("Usage: oneai swarm run <task> [--routing best-fit] [--preset code_analysis]");
 }
 
@@ -68,7 +67,7 @@ pub fn cmd_swarm_config(preset: &str) {
             }
         }
         None => {
-            println!("Unknown preset: '{}'. Available presets: code_analysis, fast_research, budget_code, balanced_dev", preset);
+            println!("Unknown preset: '{}'. Available presets: code_analysis, fast_research, balanced_dev", preset);
         }
     }
 }
@@ -86,7 +85,6 @@ pub fn cmd_swarm_agents(preset: &str) {
                 println!("    Quality scores: {}", format_scores(&agent.capability.quality_scores));
                 println!("    Speed scores: {}", format_scores(&agent.capability.speed_scores));
                 println!("    Max concurrent: {}", agent.capability.max_concurrent);
-                println!("    Cost per 1k tokens: ${:.3}", agent.capability.cost_per_1k);
                 if let Some(prompt) = &agent.system_prompt_override {
                     println!("    System prompt: {}...", prompt.chars().take(80).collect::<String>());
                 }
@@ -97,7 +95,7 @@ pub fn cmd_swarm_agents(preset: &str) {
             println!("Quality threshold: {}", config.quality_threshold);
         }
         None => {
-            println!("Unknown preset: '{}'. Available presets: code_analysis, fast_research, budget_code, balanced_dev", preset);
+            println!("Unknown preset: '{}'. Available presets: code_analysis, fast_research, balanced_dev", preset);
         }
     }
 }
@@ -157,7 +155,6 @@ fn resolve_swarm_config(name: &str) -> Option<SwarmConfig> {
     match name {
         "code_analysis" | "analysis" => Some(SwarmPresets::code_analysis_swarm()),
         "fast_research" | "research" => Some(SwarmPresets::fast_research_swarm()),
-        "budget_code" | "budget" => Some(SwarmPresets::budget_code_swarm()),
         "balanced_dev" | "balanced" => Some(SwarmPresets::balanced_dev_swarm()),
         _ => None,
     }
@@ -189,8 +186,8 @@ pub fn format_swarm_result(result: &SwarmResult) -> String {
             output.push_str(&format!("    {}\n", task.result_text.chars().take(100).collect::<String>()));
         }
         output.push_str(&format!(
-            "\nActive agents: {}\nTotal: {} tokens, ${:.4} cost\n",
-            result.active_agents.join(", "), result.total_tokens, result.total_cost
+            "\nActive agents: {}\nTotal: {} tokens\n",
+            result.active_agents.join(", "), result.total_tokens
         ));
     } else {
         output.push_str("No tasks completed successfully.\n");

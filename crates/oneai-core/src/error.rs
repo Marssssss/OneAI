@@ -82,9 +82,9 @@ pub enum OneAIError {
     #[error("Eval error: {0}")]
     Eval(String),
 
-    /// Cost & usage management errors (budget exceeded, cost tracking failures, etc.).
-    #[error("Cost error: {0}")]
-    Cost(String),
+    /// Usage tracking errors (usage recording/retrieval failures, etc.).
+    #[error("Usage error: {0}")]
+    Usage(String),
 
     /// Rate limiting errors (rate limit exceeded, limiter configuration errors, etc.).
     #[error("Rate limit error: {0}")]

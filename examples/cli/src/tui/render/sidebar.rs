@@ -83,9 +83,9 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         ),
     ])));
 
-    let cost_prefix = if app.session_cost_is_estimated { "~" } else { "" };
+    let tok_prefix = if app.token_usage.is_estimated { "~" } else { "" };
     items.push(ListItem::new(Line::from(Span::styled(
-        format!(" 💰 {}${:.3}", cost_prefix, app.session_cost),
+        format!(" 🪙 {}{} tokens", tok_prefix, format_token_count(app.token_usage.total)),
         Style::default().fg(CONTEXT_COST_COLOR),
     ))));
 
@@ -254,21 +254,25 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         ))));
     }
 
-    // ── Cost section ─────────────────────────────────────────────────────
+    // ── Usage section ─────────────────────────────────────────────────────
     items.push(ListItem::new(Line::from(Span::styled(
         " ──────────",
         Style::default().fg(SIDEBAR_BORDER),
     ))));
 
     items.push(ListItem::new(Line::from(Span::styled(
-        " 💰 Cost",
+        " 🪙 Usage",
         Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
     ))));
 
-    let cost_prefix = if app.session_cost_is_estimated { "~" } else { "" };
+    let tok_prefix = if app.token_usage.is_estimated { "~" } else { "" };
     items.push(ListItem::new(Line::from(Span::styled(
-        format!("  {}${:.4}", cost_prefix, app.session_cost),
+        format!("  {}{} tokens", tok_prefix, format_token_count(app.token_usage.total)),
         Style::default().fg(CONTEXT_COST_COLOR),
+    ))));
+    items.push(ListItem::new(Line::from(Span::styled(
+        format!("  ↳ {} prompt + {} completion", app.token_usage.prompt, app.token_usage.completion),
+        Style::default().fg(ratatui::style::Color::DarkGray),
     ))));
 
     // Context usage progress bar — visual representation of ctx occupancy

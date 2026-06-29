@@ -101,7 +101,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/skills",  "List all available skills"),
     ("/skill",   "Activate, add, remove, or search skills (use /skill <name>)"),
     ("/clear",   "Clear conversation and create new session"),
-    ("/cost",    "Show session cost and context usage"),
+    ("/usage",   "Show session token usage and context"),
     ("/context", "Show detailed context window usage breakdown"),
     ("/session", "Show session details"),
     ("/paradigm", "Switch agent paradigm (ReAct/Plan/Reflect/Explore)"),
@@ -579,12 +579,6 @@ pub struct App {
     /// Whether context_tokens is estimated (from character count) rather than API-reported.
     pub context_tokens_is_estimated: bool,
 
-    /// Whether session_cost is estimated (from token estimation) rather than API-reported.
-    pub session_cost_is_estimated: bool,
-
-    /// Cumulative session cost.
-    pub session_cost: f64,
-
     /// IDs of messages that are currently collapsed.
     pub collapsed_ids: HashSet<String>,
 
@@ -737,8 +731,6 @@ impl App {
             token_usage: TokenUsage::new(),
             context_tokens: 0,
             context_tokens_is_estimated: false,
-            session_cost: 0.0,
-            session_cost_is_estimated: false,
             collapsed_ids: HashSet::new(),
             message_history: MessageHistory::new(),
             approval_pending: None,
@@ -778,12 +770,6 @@ impl App {
             .map(|m| m.content.len())
             .sum();
         (total_chars / 4) as u32
-    }
-
-    /// Estimate cost from estimated token count.
-    /// Uses rough pricing: $0.003/1k prompt tokens, $0.015/1k completion tokens.
-    pub fn estimate_cost_from_tokens(prompt: u32, completion: u32) -> f64 {
-        (prompt as f64 / 1000.0) * 0.003 + (completion as f64 / 1000.0) * 0.015
     }
 
     /// Add a chat message and auto-scroll to bottom.

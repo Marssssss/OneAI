@@ -1,11 +1,11 @@
-//! SQLite-backed cost tracker — persistent cost & usage tracking across restarts.
+//! SQLite-backed usage tracker — persistent token-usage tracking across restarts.
 //!
-//! The `SqliteCostTracker` provides a persistent cost tracking backend
+//! The `SqliteUsageTracker` provides a persistent usage tracking backend
 //! using the same SQLite database as `SqliteSessionStore`. This enables:
-//! - Per-session cost tracking that survives restarts
-//! - Global cost aggregation across all sessions
-//! - Budget enforcement with persistent state
-//! - Cost export (JSON/CSV) for analysis
+//! - Per-session usage tracking that survives restarts
+//! - Global usage aggregation across all sessions
+//! - Per-model usage breakdowns
+//! - Usage export (JSON/CSV) for analysis
 //!
 //! Uses a `usage_records` table in the same database file, sharing
 //! the connection and schema auto-creation pattern with the session store.
@@ -14,14 +14,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use oneai_core::cost::{CostBudgetConfig, CostSummary, CostTracker, BudgetStatus, UsageRecord};
 use oneai_core::error::{OneAIError, Result};
+use oneai_core::usage::{UsageRecord, UsageSummary, UsageTracker};
 
-// ─── SqliteCostTracker ───────────────────────────────────────────────────────
+// ─── SqliteUsageTracker ──────────────────────────────────────────────────────
 
-/// SQLite-backed cost tracker — persistent cost tracking across restarts.
+/// SQLite-backed usage tracker — persistent usage tracking across restarts.
 ///
-/// Uses a `usage_records` table to store per-inference-call usage data.
+/// Uses a `usage_records` table to store per-inference-call token-usage data.
 /// Can share the same database file as `SqliteSessionStore` or use
 /// a separate database file.
 ///
@@ -29,40 +29,28 @@ use oneai_core::error::{OneAIError, Result};
 /// ```ignore
 /// // Share the same database as SqliteSessionStore
 /// let store = SqliteSessionStore::with_defaults();
-/// let cost_tracker = SqliteCostTracker::from_store(&store);
+/// let usage_tracker = SqliteUsageTracker::from_store(&store);
 ///
 /// // Or use a separate database
-/// let cost_tracker = SqliteCostTracker::new("/path/to/costs.db");
+/// let usage_tracker = SqliteUsageTracker::new("/path/to/usage.db");
 /// ```
-pub struct SqliteCostTracker {
+pub struct SqliteUsageTracker {
     /// Path to the SQLite database file.
     db_path: PathBuf,
-
-    /// Budget configuration.
-    budget_config: CostBudgetConfig,
 }
 
-impl SqliteCostTracker {
-    /// Create a new SQLite cost tracker with the given database path.
+impl SqliteUsageTracker {
+    /// Create a new SQLite usage tracker with the given database path.
     ///
     /// The database file will be created if it doesn't exist.
     /// The `usage_records` table is auto-created on first use.
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: db_path.into(),
-            budget_config: CostBudgetConfig::unlimited(),
         }
     }
 
-    /// Create with a specific budget configuration.
-    pub fn with_budget(db_path: impl Into<PathBuf>, budget_config: CostBudgetConfig) -> Self {
-        Self {
-            db_path: db_path.into(),
-            budget_config,
-        }
-    }
-
-    /// Create a cost tracker sharing the same database as a SqliteSessionStore.
+    /// Create a usage tracker sharing the same database as a SqliteSessionStore.
     ///
     /// This uses the same database file, adding the `usage_records` table
     /// alongside the existing session/STM/LTM tables.
@@ -95,7 +83,6 @@ impl SqliteCostTracker {
                 provider TEXT NOT NULL,
                 prompt_tokens INTEGER NOT NULL,
                 completion_tokens INTEGER NOT NULL,
-                cost_usd REAL NOT NULL,
                 timestamp TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}'
             );
@@ -117,12 +104,12 @@ impl SqliteCostTracker {
             .unwrap_or_else(|_| "{}".to_string());
 
         conn.execute(
-            "INSERT INTO usage_records (id, session_id, model, provider, prompt_tokens, completion_tokens, cost_usd, timestamp, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO usage_records (id, session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![id, record.session_id, record.model, record.provider,
-                record.prompt_tokens, record.completion_tokens, record.cost_usd,
+                record.prompt_tokens, record.completion_tokens,
                 timestamp, metadata_json],
-        ).map_err(|e| OneAIError::Cost(
+        ).map_err(|e| OneAIError::Usage(
             format!("Failed to insert usage record: {}", e)
         ))?;
 
@@ -132,9 +119,9 @@ impl SqliteCostTracker {
     /// Load usage records from the database for a specific session.
     fn load_session_records(&self, conn: &rusqlite::Connection, session_id: &str) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
         let mut stmt = conn.prepare(
-            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, cost_usd, timestamp, metadata_json
+            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json
              FROM usage_records WHERE session_id = ?1 ORDER BY timestamp ASC"
-        ).map_err(|e| OneAIError::Cost(
+        ).map_err(|e| OneAIError::Usage(
             format!("Failed to prepare query: {}", e)
         ))?;
 
@@ -144,9 +131,8 @@ impl SqliteCostTracker {
             let provider: String = row.get(2)?;
             let prompt_tokens: u32 = row.get(3)?;
             let completion_tokens: u32 = row.get(4)?;
-            let cost_usd: f64 = row.get(5)?;
-            let timestamp_str: String = row.get(6)?;
-            let metadata_json: String = row.get(7)?;
+            let timestamp_str: String = row.get(5)?;
+            let metadata_json: String = row.get(6)?;
 
             let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -161,13 +147,12 @@ impl SqliteCostTracker {
                 provider,
                 prompt_tokens,
                 completion_tokens,
-                cost_usd,
                 timestamp,
                 metadata,
             );
 
             Ok(record)
-        }).map_err(|e| OneAIError::Cost(
+        }).map_err(|e| OneAIError::Usage(
             format!("Failed to query usage records: {}", e)
         ))?
         .filter_map(|r| r.ok())
@@ -179,9 +164,9 @@ impl SqliteCostTracker {
     /// Load all usage records from the database.
     fn load_all_records(&self, conn: &rusqlite::Connection) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
         let mut stmt = conn.prepare(
-            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, cost_usd, timestamp, metadata_json
+            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json
              FROM usage_records ORDER BY timestamp ASC"
-        ).map_err(|e| OneAIError::Cost(
+        ).map_err(|e| OneAIError::Usage(
             format!("Failed to prepare query: {}", e)
         ))?;
 
@@ -191,9 +176,8 @@ impl SqliteCostTracker {
             let provider: String = row.get(2)?;
             let prompt_tokens: u32 = row.get(3)?;
             let completion_tokens: u32 = row.get(4)?;
-            let cost_usd: f64 = row.get(5)?;
-            let timestamp_str: String = row.get(6)?;
-            let metadata_json: String = row.get(7)?;
+            let timestamp_str: String = row.get(5)?;
+            let metadata_json: String = row.get(6)?;
 
             let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -208,13 +192,12 @@ impl SqliteCostTracker {
                 provider,
                 prompt_tokens,
                 completion_tokens,
-                cost_usd,
                 timestamp,
                 metadata,
             );
 
             Ok(record)
-        }).map_err(|e| OneAIError::Cost(
+        }).map_err(|e| OneAIError::Usage(
             format!("Failed to query usage records: {}", e)
         ))?
         .filter_map(|r| r.ok())
@@ -230,33 +213,26 @@ impl SqliteCostTracker {
 }
 
 #[async_trait]
-impl CostTracker for SqliteCostTracker {
+impl UsageTracker for SqliteUsageTracker {
     async fn record_usage(&self, record: UsageRecord) -> Result<()> {
         let conn = self.open_connection()?;
         self.insert_record(&conn, &record)?;
         Ok(())
     }
 
-    async fn session_cost(&self, session_id: &str) -> Result<CostSummary> {
+    async fn session_usage(&self, session_id: &str) -> Result<UsageSummary> {
         let conn = self.open_connection()?;
         let records = self.load_session_records(&conn, session_id)?;
-        Ok(CostSummary::from_records(&records))
+        Ok(UsageSummary::from_records(&records))
     }
 
-    async fn global_cost(&self) -> Result<CostSummary> {
+    async fn global_usage(&self) -> Result<UsageSummary> {
         let conn = self.open_connection()?;
         let records = self.load_all_records(&conn)?;
-        Ok(CostSummary::from_records(&records))
+        Ok(UsageSummary::from_records(&records))
     }
 
-    async fn check_budget(&self, session_id: &str) -> Result<BudgetStatus> {
-        let conn = self.open_connection()?;
-        let records = self.load_session_records(&conn, session_id)?;
-        let summary = CostSummary::from_records(&records);
-        Ok(self.budget_config.compute_status(&summary))
-    }
-
-    async fn cost_by_model(&self, session_id: &str) -> Result<HashMap<String, CostSummary>> {
+    async fn usage_by_model(&self, session_id: &str) -> Result<HashMap<String, UsageSummary>> {
         let conn = self.open_connection()?;
         let records = self.load_session_records(&conn, session_id)?;
 
@@ -266,11 +242,11 @@ impl CostTracker for SqliteCostTracker {
         }
 
         Ok(by_model.into_iter()
-            .map(|(model, records)| (model, CostSummary::from_records(&records)))
+            .map(|(model, records)| (model, UsageSummary::from_records(&records)))
             .collect())
     }
 
-    async fn cost_by_model_global(&self) -> Result<HashMap<String, CostSummary>> {
+    async fn usage_by_model_global(&self) -> Result<HashMap<String, UsageSummary>> {
         let conn = self.open_connection()?;
         let records = self.load_all_records(&conn)?;
 
@@ -280,7 +256,7 @@ impl CostTracker for SqliteCostTracker {
         }
 
         Ok(by_model.into_iter()
-            .map(|(model, records)| (model, CostSummary::from_records(&records)))
+            .map(|(model, records)| (model, UsageSummary::from_records(&records)))
             .collect())
     }
 
@@ -299,8 +275,8 @@ impl CostTracker for SqliteCostTracker {
         conn.execute(
             "DELETE FROM usage_records WHERE session_id = ?1",
             rusqlite::params![session_id],
-        ).map_err(|e| OneAIError::Cost(
-            format!("Failed to clear session cost data: {}", e)
+        ).map_err(|e| OneAIError::Usage(
+            format!("Failed to clear session usage data: {}", e)
         ))?;
         Ok(())
     }
@@ -308,8 +284,8 @@ impl CostTracker for SqliteCostTracker {
     async fn clear_all(&self) -> Result<()> {
         let conn = self.open_connection()?;
         conn.execute("DELETE FROM usage_records", [])
-            .map_err(|e| OneAIError::Cost(
-                format!("Failed to clear all cost data: {}", e)
+            .map_err(|e| OneAIError::Usage(
+                format!("Failed to clear all usage data: {}", e)
             ))?;
         Ok(())
     }
@@ -321,88 +297,71 @@ impl CostTracker for SqliteCostTracker {
 mod tests {
     use super::*;
 
-    fn make_tracker() -> (SqliteCostTracker, tempfile::TempDir) {
+    fn make_tracker() -> (SqliteUsageTracker, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let tracker = SqliteCostTracker::new(tmp.path().join("test_costs.db"));
+        let tracker = SqliteUsageTracker::new(tmp.path().join("test_usage.db"));
         (tracker, tmp)
     }
 
     #[tokio::test]
-    async fn test_sqlite_cost_tracker_record_and_session_cost() {
+    async fn test_sqlite_usage_tracker_record_and_session_usage() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100, 1.5)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
 
-        let session_cost = tracker.session_cost("sess1").await.unwrap();
-        assert_eq!(session_cost.call_count, 2);
-        assert!((session_cost.total_cost_usd - 2.0).abs() < 0.01);
-        assert_eq!(session_cost.total_tokens, 450);
+        let session_usage = tracker.session_usage("sess1").await.unwrap();
+        assert_eq!(session_usage.call_count, 2);
+        assert_eq!(session_usage.total_tokens, 450);
     }
 
     #[tokio::test]
-    async fn test_sqlite_cost_tracker_global_cost() {
+    async fn test_sqlite_usage_tracker_global_usage() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50)).await.unwrap();
 
-        let global = tracker.global_cost().await.unwrap();
+        let global = tracker.global_usage().await.unwrap();
         assert_eq!(global.call_count, 2);
-        assert!((global.total_cost_usd - 1.0).abs() < 0.01);
+        assert_eq!(global.total_tokens, 300);
     }
 
     #[tokio::test]
-    async fn test_sqlite_cost_tracker_budget_check() {
-        let tmp = tempfile::tempdir().unwrap();
-        let budget = CostBudgetConfig::with_cost_limit(1.0);
-        let tracker = SqliteCostTracker::with_budget(tmp.path().join("test_budget.db"), budget);
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
-
-        let status = tracker.check_budget("sess1").await.unwrap();
-        assert!(!status.budget_exceeded);
-
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50, 0.6)).await.unwrap();
-
-        let status = tracker.check_budget("sess1").await.unwrap();
-        assert!(status.budget_exceeded);
-    }
-
-    #[tokio::test]
-    async fn test_sqlite_cost_tracker_per_model_breakdown() {
+    async fn test_sqlite_usage_tracker_per_model_breakdown() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100, 1.5)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
 
-        let by_model = tracker.cost_by_model("sess1").await.unwrap();
+        let by_model = tracker.usage_by_model("sess1").await.unwrap();
         assert_eq!(by_model.len(), 2);
         assert!(by_model.contains_key("gpt-4o"));
         assert!(by_model.contains_key("claude-sonnet-4"));
     }
 
     #[tokio::test]
-    async fn test_sqlite_cost_tracker_clear() {
+    async fn test_sqlite_usage_tracker_clear() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50)).await.unwrap();
 
         tracker.clear_session("sess1").await.unwrap();
-        let sess1 = tracker.session_cost("sess1").await.unwrap();
+        let sess1 = tracker.session_usage("sess1").await.unwrap();
         assert_eq!(sess1.call_count, 0);
 
         tracker.clear_all().await.unwrap();
-        let global = tracker.global_cost().await.unwrap();
+        let global = tracker.global_usage().await.unwrap();
         assert_eq!(global.call_count, 0);
     }
 
     #[tokio::test]
-    async fn test_sqlite_cost_tracker_session_records() {
+    async fn test_sqlite_usage_tracker_session_records() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50, 0.5)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100, 1.5)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
 
         let records = tracker.session_records("sess1").await.unwrap();
         assert_eq!(records.len(), 2);

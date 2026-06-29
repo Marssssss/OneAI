@@ -2,8 +2,9 @@
 //!
 //! Core types, traits, and abstractions for the OneAI Agent framework.
 //! New: budget management, PermissionLevel, platform capabilities, MemoryPersistence,
-//! cost & usage management, rate limiting, circuit breaker, provider pool (fallback),
-//! smart model router (cost/latency/quality routing), token counting & context management,
+//! usage tracking (token-only — no USD cost/budget), rate limiting, circuit breaker,
+//! provider pool (fallback), smart model router (latency/quality routing), token
+//! counting & context management,
 //! team coordination (multi-agent team strategies), handoff protocol (agent handoff-as-tool-call),
 //! swarm orchestration (dynamic agent pools with capability-driven routing).
 
@@ -25,7 +26,7 @@ pub mod error;
 pub mod platform;
 pub mod budget;
 pub mod platform_capabilities;
-pub mod cost;
+pub mod usage;
 pub mod rate_limiter;
 pub mod circuit_breaker;
 pub mod provider_pool;
@@ -44,7 +45,7 @@ pub use error::*;
 pub use platform::*;
 pub use budget::*;
 pub use platform_capabilities::*;
-pub use cost::*;
+pub use usage::*;
 pub use rate_limiter::*;
 pub use circuit_breaker::*;
 pub use provider_pool::*;

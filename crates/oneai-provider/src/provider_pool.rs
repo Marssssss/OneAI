@@ -42,7 +42,7 @@ use tokio::sync::RwLock;
 
 use oneai_core::{
     InferenceRequest, InferenceResponse, InferenceStreamChunk, ModelCapability, ModelConfig,
-    CircuitBreaker, RateLimiter, CostTracker,
+    CircuitBreaker, RateLimiter, UsageTracker,
     FallbackEvent, FallbackReason, FallbackLog, InMemoryFallbackLog,
     ProviderPoolConfig,
     ProviderPoolStatus, ProviderHealthStatus,
@@ -57,9 +57,9 @@ use crate::SmartRouter;
 /// A single provider entry in the fallback pool.
 ///
 /// Wraps an `Arc<dyn LlmProvider>` with metadata for circuit breaker,
-/// rate limiter, and cost tracking integration.
+/// rate limiter, and usage tracking integration.
 pub struct ProviderEntry {
-    /// Provider name for circuit breaker / rate limiter / cost tracking.
+    /// Provider name for circuit breaker / rate limiter / usage tracking.
     name: String,
 
     /// The LLM provider instance.
@@ -144,7 +144,7 @@ impl ProviderEntry {
 /// primary provider fails or the circuit breaker opens, the pool
 /// automatically tries the next provider in the chain.
 ///
-/// Integrates with CircuitBreaker, RateLimiter, CostTracker, and FallbackLog
+/// Integrates with CircuitBreaker, RateLimiter, UsageTracker, and FallbackLog
 /// for full production-grade resilience.
 pub struct ProviderPool {
     /// Ordered provider entries (primary first).
@@ -159,10 +159,10 @@ pub struct ProviderPool {
     /// Rate limiter — respect per-provider rate limits.
     rate_limiter: Option<Arc<dyn RateLimiter>>,
 
-    /// Cost tracker — record usage for whichever provider succeeded.
-    cost_tracker: Option<Arc<dyn CostTracker>>,
+    /// Usage tracker — record usage for whichever provider succeeded.
+    usage_tracker: Option<Arc<dyn UsageTracker>>,
 
-    /// Smart router — intelligent primary selection based on cost/latency/quality.
+    /// Smart router — intelligent primary selection based on latency/quality.
     /// When present, the pool uses the router to determine which provider to try
     /// first (instead of always trying the primary). If that provider fails,
     /// fallback continues as usual.
@@ -187,7 +187,7 @@ impl ProviderPool {
             config,
             circuit_breaker: None,
             rate_limiter: None,
-            cost_tracker: None,
+            usage_tracker: None,
             smart_router: None,
             active_index: AtomicU32::new(0),
             fallback_log: Arc::new(InMemoryFallbackLog::new()),
@@ -228,9 +228,9 @@ impl ProviderPool {
         self
     }
 
-    /// Set the cost tracker for usage recording.
-    pub fn with_cost_tracker(mut self, ct: Arc<dyn CostTracker>) -> Self {
-        self.cost_tracker = Some(ct);
+    /// Set the usage tracker for usage recording.
+    pub fn with_usage_tracker(mut self, ct: Arc<dyn UsageTracker>) -> Self {
+        self.usage_tracker = Some(ct);
         self
     }
 
@@ -239,8 +239,8 @@ impl ProviderPool {
     /// When a smart router is attached, the pool uses it to determine
     /// which provider to try first for each inference call. Instead of
     /// always trying the primary provider, the pool starts with the
-    /// smart router's recommendation (which considers cost, latency,
-    /// quality, health, budget, and context constraints).
+    /// smart router's recommendation (which considers latency, quality,
+    /// health, and context constraints).
     ///
     /// If the smart router's chosen provider fails, fallback continues
     /// as usual (trying next providers in priority order).
@@ -353,7 +353,7 @@ impl ProviderPool {
     /// Iterates through providers in priority order (or smart router order
     /// if a smart router is attached), skipping providers that are in cooldown,
     /// have open circuits, or are rate-limited.
-    /// On success, records success in circuit breaker and cost tracker.
+    /// On success, records success in circuit breaker and usage tracker.
     /// On failure, records failure and logs a FallbackEvent.
     async fn infer_with_fallback(&self, request: InferenceRequest) -> Result<InferenceResponse> {
         let max_attempts = self.config.max_fallbacks.min(self.entries.len());
@@ -476,21 +476,14 @@ impl ProviderPool {
                     // Clear cooldown
                     entry.clear_cooldown().await;
 
-                    // Record usage in cost tracker
-                    if let Some(ct) = &self.cost_tracker {
-                        let cost = if let Some(_catalog) = &self.config.degradation_rules.first() {
-                            // Use pricing catalog if available (but we don't have it here directly)
-                            0.0 // CostTracker handles this with its own pricing
-                        } else {
-                            0.0
-                        };
+                    // Record usage in usage tracker
+                    if let Some(ct) = &self.usage_tracker {
                         let record = oneai_core::UsageRecord::new(
                             request.conversation.id.clone(),
                             response.model.clone(),
                             entry.name.clone(),
                             response.usage.prompt_tokens,
                             response.usage.completion_tokens,
-                            cost,
                         );
                         let _ = ct.record_usage(record).await;
                     }

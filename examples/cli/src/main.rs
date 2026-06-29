@@ -34,11 +34,9 @@
 //!   oneai session resume <id> — Resume a saved session
 //!   oneai session delete <id> — Delete a session
 //!   oneai session info <id>   — Show session details
-//!   oneai cost report          — Show global cost summary
-//!   oneai cost session <id>    — Show per-session cost details
-//!   oneai cost budget <max>    — Set session budget limit (USD)
-//!   oneai cost models          — List pricing for known models
-//!   oneai cost export [--format]— Export usage records (json/csv)
+//!   oneai usage report          — Show global usage summary
+//!   oneai usage session <id>    — Show per-session usage details
+//!   oneai usage export [--format]— Export usage records (json/csv)
 //!   oneai provider status      — Show provider pool status and health
 //!   oneai provider fallback-log — Show recent fallback events
 //!   oneai provider test        — Test all providers connectivity
@@ -76,7 +74,7 @@ mod cmd_wasm;
 mod cmd_session;
 mod cmd_memory;
 mod cmd_embed;
-mod cmd_cost;
+mod cmd_usage;
 mod cmd_provider;
 mod cmd_token;
 mod cmd_team;
@@ -187,10 +185,10 @@ enum Commands {
         #[command(subcommand)]
         action: EmbedAction,
     },
-    /// Cost & usage management — track LLM inference costs, budgets, and model pricing
-    Cost {
+    /// Usage management — track LLM inference token usage (prompt/completion/total/calls)
+    Usage {
         #[command(subcommand)]
-        action: CostAction,
+        action: UsageAction,
     },
     /// Provider pool management — multi-provider fallback status and health
     Provider {
@@ -548,21 +546,14 @@ enum EmbedAction {
 }
 
 #[derive(Subcommand)]
-enum CostAction {
-    /// Show global cost summary (total tokens, cost, by-model breakdown)
+enum UsageAction {
+    /// Show global usage summary (total tokens, calls, by-model breakdown)
     Report,
-    /// Show per-session cost details
+    /// Show per-session usage details
     Session {
         /// Session ID to inspect
         id: String,
     },
-    /// Set session budget limit in USD (e.g., 5.0 = $5 max)
-    Budget {
-        /// Maximum cost in USD (e.g., 5.0)
-        max_usd: String,
-    },
-    /// List pricing for known models
-    Models,
     /// Export usage records (json or csv format)
     Export {
         /// Export format: json or csv (default: json)
@@ -703,7 +694,7 @@ enum SwarmAction {
     Routing,
     /// Show swarm configuration details for a preset
     Config {
-        /// Preset name (code_analysis, fast_research, budget_code, balanced_dev)
+        /// Preset name (code_analysis, fast_research, balanced_dev)
         preset: String,
     },
     /// Show agents and capabilities in a swarm preset
@@ -887,13 +878,11 @@ fn main() {
                 }
             }
         }
-        Some(Commands::Cost { action }) => {
+        Some(Commands::Usage { action }) => {
             match action {
-                CostAction::Report => cmd_cost::cmd_cost_report(),
-                CostAction::Session { id } => cmd_cost::cmd_cost_session(&id),
-                CostAction::Budget { max_usd } => cmd_cost::cmd_cost_budget(&max_usd),
-                CostAction::Models => cmd_cost::cmd_cost_models(),
-                CostAction::Export { format } => cmd_cost::cmd_cost_export(&format),
+                UsageAction::Report => cmd_usage::cmd_usage_report(),
+                UsageAction::Session { id } => cmd_usage::cmd_usage_session(&id),
+                UsageAction::Export { format } => cmd_usage::cmd_usage_export(&format),
             }
         }
         Some(Commands::Provider { action }) => {

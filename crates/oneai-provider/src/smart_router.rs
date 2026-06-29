@@ -1,15 +1,18 @@
-//! Smart Model Router — production-grade cost/latency/quality routing.
+//! Smart Model Router — production-grade latency/quality routing.
 //!
 //! The `SmartRouter` extends the basic `ModelRouter` (regex-based) with
-//! multi-factor routing that considers cost, latency, quality, provider health,
-//! rate limits, budget constraints, and context window limits.
+//! multi-factor routing that considers latency, quality, provider health,
+//! rate limits, and context window limits.
+//!
+//! (USD cost scoring and budget-aware routing were removed — OneAI no longer
+//! tracks dollar amounts.)
 //!
 //! **Routing algorithm**:
 //! 1. Evaluate regex rules (existing ModelRouter, backward compatible)
-//! 2. Validate regex result against runtime constraints (circuit, rate, budget, context)
+//! 2. Validate regex result against runtime constraints (circuit, rate, context)
 //! 3. If regex result fails validation, or strategy overrides regex:
-//!    - Score all available providers on cost/latency/quality dimensions
-//!    - Weight scores by the configured strategy (CostOptimized/LatencyOptimized/etc.)
+//!    - Score all available providers on latency/quality dimensions
+//!    - Weight scores by the configured strategy (LatencyOptimized/etc.)
 //!    - Pick the highest-scoring available provider
 //! 4. Return `SmartRouteDecision` with full rationale
 //!
@@ -23,27 +26,21 @@
 //! ```ignore
 //! let router = SmartRouter::new(
 //!     ModelRouter::with_defaults(fallback_config),
-//!     ModelPricingCatalog::with_known_models(),
 //!     SmartRouteConfig::balanced(),
 //! );
 //!
 //! // Before each inference, evaluate the route:
-//! let decision = router.route("Implement auth module", "react", None);
+//! let decision = router.route("Implement auth module", "react", None, None).await;
 //! // decision.model = "claude-sonnet-4-6-20250514" (balanced model)
-//! // decision.reason = "Multi-factor scoring: anthropic (score=0.61)"
-//! // decision.factors = [BudgetRemaining(5.0, false), ScoringResult(...)]
-//!
-//! // With budget constraints:
-//! let decision = router.route("Implement auth module", "react", Some(0.5));
-//! // decision.model = "claude-haiku-4-5-20251001" (cheap model, budget is low)
+//! // decision.reason = "Multi-factor scoring: anthropic (score=0.66)"
 //! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use oneai_core::{
-    ModelConfig, ModelPricingCatalog,
-    CircuitBreaker, RateLimiter, CostTracker, CostBudgetConfig,
+    ModelConfig,
+    CircuitBreaker, RateLimiter,
     SmartRouteConfig, SmartRouteDecision, SmartRouteFactor, RoutingTier, ModelQualityProfile,
     ProviderScore, SmartRoutingLog, InMemorySmartRoutingLog,
     ProviderPoolConfig, DegradationRule,
@@ -54,7 +51,7 @@ use crate::ModelRouter;
 
 // ─── SmartRouter ──────────────────────────────────────────────────────────────
 
-/// Production-grade model router — considers cost, latency, quality, health, budget, context.
+/// Production-grade model router — considers latency, quality, health, context.
 ///
 /// Wraps the existing `ModelRouter` (regex-based) and extends it with
 /// multi-factor scoring. When `regex_first_pass` is enabled in the config,
@@ -67,10 +64,6 @@ pub struct SmartRouter {
     /// The underlying regex-based ModelRouter (for backward compat).
     model_router: ModelRouter,
 
-    /// Pricing catalog for cost scoring.
-    #[allow(dead_code)]
-    pricing_catalog: ModelPricingCatalog,
-
     /// Quality profiles per model (for latency/quality scoring).
     quality_profiles: HashMap<String, ModelQualityProfile>,
 
@@ -82,12 +75,6 @@ pub struct SmartRouter {
 
     /// Rate limiter — for rate limit validation.
     rate_limiter: Option<Arc<dyn RateLimiter>>,
-
-    /// Cost tracker — for budget validation.
-    cost_tracker: Option<Arc<dyn CostTracker>>,
-
-    /// Budget config — for budget limit computation.
-    budget_config: Option<CostBudgetConfig>,
 
     /// Routing decision log — audit trail for observability.
     routing_log: Arc<dyn SmartRoutingLog>,
@@ -102,14 +89,12 @@ impl SmartRouter {
     /// Create a new SmartRouter with the given components.
     ///
     /// The `model_router` provides regex-based first-pass routing.
-    /// The `pricing_catalog` provides cost data for scoring.
     /// The `config` defines the routing strategy and constraints.
     pub fn new(
         model_router: ModelRouter,
-        pricing_catalog: ModelPricingCatalog,
         config: SmartRouteConfig,
     ) -> Self {
-        // Build quality profiles from default profiles + pricing catalog
+        // Build quality profiles from default profiles
         let mut quality_profiles = HashMap::new();
         for profile in ModelQualityProfile::default_profiles() {
             quality_profiles.insert(profile.model_name.clone(), profile);
@@ -117,13 +102,10 @@ impl SmartRouter {
 
         Self {
             model_router,
-            pricing_catalog,
             quality_profiles,
             config,
             circuit_breaker: None,
             rate_limiter: None,
-            cost_tracker: None,
-            budget_config: None,
             routing_log: Arc::new(InMemorySmartRoutingLog::new()),
             token_counter: None,
         }
@@ -141,18 +123,6 @@ impl SmartRouter {
         self
     }
 
-    /// Create with a cost tracker for budget validation.
-    pub fn with_cost_tracker(mut self, ct: Arc<dyn CostTracker>) -> Self {
-        self.cost_tracker = Some(ct);
-        self
-    }
-
-    /// Create with a budget config for budget limits.
-    pub fn with_budget_config(mut self, bc: CostBudgetConfig) -> Self {
-        self.budget_config = Some(bc);
-        self
-    }
-
     /// Create with a token counter for accurate context window validation.
     ///
     /// When set, the smart router uses the TokenCounter for checking if a
@@ -163,7 +133,7 @@ impl SmartRouter {
     /// **Usage**:
     /// ```ignore
     /// let token_counter = Arc::new(HeuristicTokenCounter::new());
-    /// let router = SmartRouter::new(model_router, catalog, config)
+    /// let router = SmartRouter::new(model_router, config)
     ///     .with_token_counter(token_counter);
     /// ```
     pub fn with_token_counter(mut self, tc: Arc<dyn TokenCounter>) -> Self {
@@ -209,7 +179,6 @@ impl SmartRouter {
     /// 3. If regex fails or strategy overrides, does multi-factor scoring
     /// 4. Returns a `SmartRouteDecision` with full rationale
     ///
-    /// `session_id` is used for budget checks (if budget_aware is enabled).
     /// `conversation_tokens` is used for context overflow checks (if context_aware is enabled).
     pub async fn route(
         &self,
@@ -249,7 +218,6 @@ impl SmartRouter {
                     tier,
                     regex_decision.matched_rule,
                 )
-                    .with_estimated_cost(profile.map_or(0.0, |p| p.estimated_cost_per_call()))
                     .with_estimated_latency(profile.map_or(0, |p| p.estimated_latency_ms))
                     .with_max_tokens(regex_decision.max_tokens.unwrap_or(0));
 
@@ -286,14 +254,14 @@ impl SmartRouter {
 
     /// Route using multi-factor scoring — the core algorithm.
     ///
-    /// Scores all available providers/models on cost, latency, and quality
+    /// Scores all available providers/models on latency and quality
     /// dimensions, weighted by the configured strategy. Picks the highest-
     /// scoring available provider.
     async fn route_by_scoring(
         &self,
         _task_description: &str,
         _paradigm: &str,
-        session_id: Option<&str>,
+        _session_id: Option<&str>,
         conversation_tokens: Option<u64>,
         factors: &mut Vec<SmartRouteFactor>,
     ) -> SmartRouteDecision {
@@ -301,24 +269,6 @@ impl SmartRouter {
         // We score based on the quality profiles (which include all known models)
         let candidates = ModelQualityProfile::default_profiles();
         let strategy = &self.config.strategy;
-
-        // Compute budget remaining (if budget-aware)
-        let budget_remaining = if self.config.budget_aware && session_id.is_some() && self.cost_tracker.is_some() {
-            let session_id_str = session_id.unwrap();
-            match self.cost_tracker.as_ref().unwrap().check_budget(session_id_str).await {
-                Ok(status) => {
-                    let is_low = status.remaining_usd < self.config.min_budget_for_expensive;
-                    factors.push(SmartRouteFactor::BudgetRemaining {
-                        remaining_usd: status.remaining_usd,
-                        is_low,
-                    });
-                    status.remaining_usd
-                },
-                Err(_) => f64::INFINITY, // If budget check fails, assume unlimited
-            }
-        } else {
-            f64::INFINITY // No budget tracking
-        };
 
         // Score each candidate
         let mut scores: Vec<ProviderScore> = Vec::new();
@@ -328,7 +278,6 @@ impl SmartRouter {
                 &candidate.provider_family,
                 &candidate.model_name,
                 conversation_tokens,
-                budget_remaining,
                 factors,
             ).await;
 
@@ -342,7 +291,6 @@ impl SmartRouter {
             }
 
             // Compute scores for each dimension
-            let cost_score = self.compute_cost_score(candidate, budget_remaining);
             let latency_score = self.compute_latency_score(candidate);
             let quality_score = candidate.quality_score; // From tier
 
@@ -350,7 +298,6 @@ impl SmartRouter {
                 candidate.provider_family.clone(),
                 candidate.model_name.clone(),
                 candidate.tier,
-                cost_score,
                 latency_score,
                 quality_score,
                 strategy,
@@ -359,7 +306,6 @@ impl SmartRouter {
             factors.push(SmartRouteFactor::ScoringResult {
                 provider: candidate.provider_family.clone(),
                 total_score: score.total_score,
-                cost_score: score.cost_score,
                 latency_score: score.latency_score,
                 quality_score: score.quality_score,
             });
@@ -390,12 +336,10 @@ impl SmartRouter {
                     &fallback_provider,
                     fallback_model,
                     conversation_tokens,
-                    budget_remaining,
                     factors,
                 ).await;
 
                 if is_available {
-                    let cost_score = self.compute_cost_score(profile, budget_remaining);
                     let latency_score = self.compute_latency_score(profile);
                     let quality_score = profile.quality_score;
 
@@ -403,7 +347,6 @@ impl SmartRouter {
                         fallback_provider.clone(),
                         fallback_model.to_string(),
                         tier,
-                        cost_score,
                         latency_score,
                         quality_score,
                         strategy,
@@ -428,8 +371,6 @@ impl SmartRouter {
                     *strategy,
                     factors.clone(),
                     scores,
-                ).with_estimated_cost(
-                    profile.map_or(0.0, |p| p.estimated_cost_per_call())
                 ).with_estimated_latency(
                     profile.map_or(0, |p| p.estimated_latency_ms)
                 )
@@ -443,7 +384,7 @@ impl SmartRouter {
                     RoutingTier::from_model_name(fallback_model),
                     *strategy,
                     "No available providers — using fallback",
-                ).with_estimated_cost(0.0)
+                )
             },
         }
     }
@@ -461,29 +402,12 @@ impl SmartRouter {
         _task_description: &str,
         _paradigm: &str,
         pool_config: &ProviderPoolConfig,
-        session_id: Option<&str>,
+        _session_id: Option<&str>,
         conversation_tokens: Option<u64>,
     ) -> SmartRouteDecision {
         // Score pool entries as candidates
         let mut factors = Vec::new();
         let strategy = &self.config.strategy;
-
-        // Compute budget remaining
-        let budget_remaining = if self.config.budget_aware && session_id.is_some() && self.cost_tracker.is_some() {
-            match self.cost_tracker.as_ref().unwrap().check_budget(session_id.unwrap()).await {
-                Ok(status) => {
-                    let is_low = status.remaining_usd < self.config.min_budget_for_expensive;
-                    factors.push(SmartRouteFactor::BudgetRemaining {
-                        remaining_usd: status.remaining_usd,
-                        is_low,
-                    });
-                    status.remaining_usd
-                },
-                Err(_) => f64::INFINITY,
-            }
-        } else {
-            f64::INFINITY
-        };
 
         // Score each pool entry
         let mut scores: Vec<ProviderScore> = Vec::new();
@@ -500,7 +424,6 @@ impl SmartRouter {
                 provider_name,
                 model_name,
                 conversation_tokens,
-                budget_remaining,
                 &mut factors,
             ).await;
 
@@ -513,7 +436,6 @@ impl SmartRouter {
                 continue;
             }
 
-            let cost_score = profile.map_or(0.5, |p| self.compute_cost_score(p, budget_remaining));
             let latency_score = profile.map_or(0.5, |p| self.compute_latency_score(p));
             let quality_score = tier.quality_score();
 
@@ -521,7 +443,6 @@ impl SmartRouter {
                 provider_name.clone(),
                 model_name.to_string(),
                 tier,
-                cost_score,
                 latency_score,
                 quality_score,
                 strategy,
@@ -544,8 +465,6 @@ impl SmartRouter {
                     *strategy,
                     factors,
                     scores,
-                ).with_estimated_cost(
-                    profile.map_or(0.0, |p| p.estimated_cost_per_call())
                 ).with_estimated_latency(
                     profile.map_or(0, |p| p.estimated_latency_ms)
                 )
@@ -574,7 +493,7 @@ impl SmartRouter {
     /// This is used when the primary provider's model fails and the pool
     /// needs to downgrade within the same provider family before cross-provider
     /// fallback. The smart router validates each degradation step against
-    /// runtime constraints (budget, context, etc.).
+    /// runtime constraints (context, etc.).
     pub async fn route_for_degradation(
         &self,
         current_model: &str,
@@ -613,33 +532,6 @@ impl SmartRouter {
 
     // ─── Scoring helpers ─────────────────────────────────────────────────
 
-    /// Compute cost score for a model profile.
-    ///
-    /// Higher score = cheaper relative to budget.
-    /// 0.0 = would exceed budget.
-    /// 1.0 = free model.
-    fn compute_cost_score(&self, profile: &ModelQualityProfile, budget_remaining: f64) -> f64 {
-        if profile.cost_per_1k_prompt_usd == 0.0 && profile.cost_per_1k_completion_usd == 0.0 {
-            return 1.0; // Free models get maximum cost score
-        }
-
-        let estimated_cost = profile.estimated_cost_per_call();
-
-        if budget_remaining.is_infinite() || budget_remaining <= 0.0 {
-            // No budget tracking or budget exceeded — score based on relative cost
-            // Use a reference cost of $10 (rough Opus-level cost per call)
-            return 1.0 - (estimated_cost / 10.0).min(1.0);
-        }
-
-        if estimated_cost >= budget_remaining {
-            return 0.0; // Would exceed budget
-        }
-
-        // Score inversely proportional to cost relative to budget
-        // Lower cost = higher score
-        1.0 - (estimated_cost / budget_remaining).min(1.0)
-    }
-
     /// Compute latency score for a model profile.
     ///
     /// Higher score = faster.
@@ -657,13 +549,13 @@ impl SmartRouter {
 
     /// Validate a route against runtime constraints.
     ///
-    /// Checks: circuit breaker (health), rate limiter, budget, context window.
+    /// Checks: circuit breaker (health), rate limiter, context window.
     /// Returns true if the route passes all checks.
     async fn validate_route(
         &self,
         provider: &str,
         model: &str,
-        session_id: Option<&str>,
+        _session_id: Option<&str>,
         conversation_tokens: Option<u64>,
         factors: &mut Vec<SmartRouteFactor>,
     ) -> bool {
@@ -703,31 +595,6 @@ impl SmartRouter {
             }
         }
 
-        // ── Check budget ─────────────────────────────────────────────
-        if self.config.budget_aware && session_id.is_some() && self.cost_tracker.is_some() {
-            let status = self.cost_tracker.as_ref().unwrap()
-                .check_budget(session_id.unwrap()).await
-                .unwrap_or(oneai_core::BudgetStatus::unlimited(0));
-
-            let is_low = status.remaining_usd < self.config.min_budget_for_expensive;
-            factors.push(SmartRouteFactor::BudgetRemaining {
-                remaining_usd: status.remaining_usd,
-                is_low,
-            });
-
-            // If budget is low, check if this model is expensive
-            if is_low {
-                let tier = RoutingTier::from_model_name(model);
-                if tier == RoutingTier::Powerful {
-                    factors.push(SmartRouteFactor::QualityRequirement {
-                        required_tier: RoutingTier::Balanced, // Should downgrade
-                        actual_tier: tier,
-                    });
-                    return false; // Skip expensive models when budget is low
-                }
-            }
-        }
-
         // ── Check context window ────────────────────────────────────
         if self.config.context_aware && conversation_tokens.is_some() {
             let tokens = conversation_tokens.unwrap();
@@ -760,7 +627,6 @@ impl SmartRouter {
         provider: &str,
         model: &str,
         conversation_tokens: Option<u64>,
-        budget_remaining: f64,
         factors: &mut Vec<SmartRouteFactor>,
     ) -> bool {
         // Circuit breaker
@@ -788,18 +654,6 @@ impl SmartRouter {
                     }
                 },
                 Err(_) => {}, // Assume OK
-            }
-        }
-
-        // Budget — skip expensive models when budget is low
-        if self.config.budget_aware && budget_remaining < self.config.min_budget_for_expensive {
-            let tier = RoutingTier::from_model_name(model);
-            if tier == RoutingTier::Powerful {
-                factors.push(SmartRouteFactor::BudgetRemaining {
-                    remaining_usd: budget_remaining,
-                    is_low: true,
-                });
-                return false;
             }
         }
 
@@ -896,28 +750,19 @@ mod tests {
 
     fn create_balanced_router() -> SmartRouter {
         let model_router = ModelRouter::with_defaults(anthropic_fallback_config());
-        let catalog = ModelPricingCatalog::with_known_models();
-        SmartRouter::new(model_router, catalog, SmartRouteConfig::balanced())
-    }
-
-    fn create_cost_router() -> SmartRouter {
-        let model_router = ModelRouter::with_defaults(anthropic_fallback_config());
-        let catalog = ModelPricingCatalog::with_known_models();
-        SmartRouter::new(model_router, catalog, SmartRouteConfig::cost_optimized())
+        SmartRouter::new(model_router, SmartRouteConfig::balanced())
     }
 
     #[allow(dead_code)] // retained for future routing-strategy coverage
     fn create_quality_router() -> SmartRouter {
         let model_router = ModelRouter::with_defaults(anthropic_fallback_config());
-        let catalog = ModelPricingCatalog::with_known_models();
-        SmartRouter::new(model_router, catalog, SmartRouteConfig::quality_optimized())
+        SmartRouter::new(model_router, SmartRouteConfig::quality_optimized())
     }
 
     #[allow(dead_code)] // retained for future routing-strategy coverage
     fn create_latency_router() -> SmartRouter {
         let model_router = ModelRouter::with_defaults(anthropic_fallback_config());
-        let catalog = ModelPricingCatalog::with_known_models();
-        SmartRouter::new(model_router, catalog, SmartRouteConfig::latency_optimized())
+        SmartRouter::new(model_router, SmartRouteConfig::latency_optimized())
     }
 
     // ─── Basic routing tests ────────────────────────────────────────────
@@ -952,28 +797,13 @@ mod tests {
         assert!(decision.model.contains("opus") || decision.tier == RoutingTier::Powerful);
     }
 
-    // ─── Cost-optimized routing tests ──────────────────────────────────
-
-    #[tokio::test]
-    async fn test_cost_optimized_prefers_cheap() {
-        let router = create_cost_router();
-        let decision = router.route("Implement auth module", "react", None, None).await;
-
-        // Cost-optimized should prefer cheaper models
-        // Regex first-pass may match "implement" → balanced, but if validation fails
-        // or strategy overrides, cost optimization should prefer cheap models
-        // Since regex_first_pass is enabled, the regex result is used if it passes
-        assert!(!decision.model.is_empty());
-    }
-
     // ─── Scoring tests ──────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_scoring_all_providers() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()), // No regex rules → scoring
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::balanced().without_budget_awareness().without_health_awareness().without_rate_awareness().without_context_awareness(),
+            SmartRouteConfig::balanced().without_health_awareness().without_rate_awareness().without_context_awareness(),
         );
 
         let decision = router.route("any task", "react", None, None).await;
@@ -988,8 +818,7 @@ mod tests {
     async fn test_scoring_quality_optimized() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::quality_optimized().without_budget_awareness().without_health_awareness().without_rate_awareness().without_context_awareness(),
+            SmartRouteConfig::quality_optimized().without_health_awareness().without_rate_awareness().without_context_awareness(),
         );
 
         let decision = router.route("any task", "react", None, None).await;
@@ -997,7 +826,6 @@ mod tests {
         // Quality-optimized should pick the most powerful model
         assert!(!decision.from_regex);
         // Opus should have the highest quality score (1.0)
-        // With quality_weight=0.8, Opus should win
         let opus_scores = decision.all_scores.iter()
             .filter(|s| s.model_name.contains("opus") || s.model_name.contains("o3-pro"))
             .collect::<Vec<_>>();
@@ -1005,86 +833,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scoring_cost_optimized_no_regex() {
-        let router = SmartRouter::new(
-            ModelRouter::new(vec![], anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::cost_optimized().without_budget_awareness().without_health_awareness().without_rate_awareness().without_context_awareness(),
-        );
-
-        let decision = router.route("any task", "react", None, None).await;
-
-        // Cost-optimized should pick the cheapest model
-        assert!(!decision.from_regex);
-        // Haiku/mini should have highest cost score
-        let cheap_scores = decision.all_scores.iter()
-            .filter(|s| s.tier == RoutingTier::Cheap)
-            .collect::<Vec<_>>();
-        assert!(!cheap_scores.is_empty());
-
-        // Free models (Ollama) should have cost_score = 1.0
-        let free_scores = cheap_scores.iter()
-            .filter(|s| s.cost_score == 1.0)
-            .collect::<Vec<_>>();
-        assert!(!free_scores.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_scoring_latency_optimized_no_regex() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::latency_optimized().without_budget_awareness().without_health_awareness().without_rate_awareness().without_context_awareness(),
+            SmartRouteConfig::latency_optimized().without_health_awareness().without_rate_awareness().without_context_awareness(),
         );
 
         let decision = router.route("any task", "react", None, None).await;
 
         // Latency-optimized should prefer fast models
-        // Cheap models have latency_score ≈ 0.95 (1500ms / 10000ms)
+        // Cheap models have latency_score ≈ 0.85 (1500ms / 10000ms)
         // Balanced models have latency_score ≈ 0.65 (3500ms / 10000ms)
         // Powerful models have latency_score ≈ 0.0 (15000ms / 10000ms)
         assert!(!decision.from_regex);
-    }
-
-    // ─── Budget-aware routing tests ──────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_budget_low_skips_expensive_models() {
-        let tracker = Arc::new(oneai_core::InMemoryCostTracker::with_budget(
-            CostBudgetConfig::with_cost_limit(1.0),
-        ));
-        // Record enough to push budget close to limit
-        tracker.record_usage(oneai_core::UsageRecord::new("sess1", "gpt-4o", "openai", 1000, 500, 0.8)).await.unwrap();
-
-        let router = SmartRouter::new(
-            ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::balanced(),
-        ).with_cost_tracker(tracker.clone())
-          .with_budget_config(CostBudgetConfig::with_cost_limit(1.0));
-
-        let decision = router.route("Design a system architecture", "plan", Some("sess1"), None).await;
-
-        // Budget is low (~0.2 remaining) → should skip Opus (Powerful)
-        // The regex rule matches "architecture" → Opus, but validation fails
-        // So scoring should pick a cheaper model
-        assert!(decision.model.is_empty() || decision.tier != RoutingTier::Powerful || !decision.from_regex);
-    }
-
-    #[tokio::test]
-    async fn test_budget_high_allows_expensive_models() {
-        let tracker = Arc::new(oneai_core::InMemoryCostTracker::new());
-
-        let router = SmartRouter::new(
-            ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::balanced(),
-        ).with_cost_tracker(tracker);
-
-        let decision = router.route("Design a system architecture", "plan", Some("sess1"), None).await;
-
-        // Budget is unlimited → should allow Opus
-        assert!(decision.model.contains("opus") || decision.from_regex);
     }
 
     // ─── Circuit breaker routing tests ──────────────────────────────────
@@ -1099,15 +860,12 @@ mod tests {
 
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::balanced().without_budget_awareness().without_rate_awareness().without_context_awareness(),
+            SmartRouteConfig::balanced().without_rate_awareness().without_context_awareness(),
         ).with_circuit_breaker(cb);
 
         let decision = router.route("What is the capital?", "react", None, None).await;
 
         // Should not use anthropic (circuit is open)
-        // If regex matched "What is" → haiku (anthropic), but circuit is open
-        // So should fall through to scoring and pick a non-anthropic provider
         // Decision should have CircuitOpen factor for anthropic
         let circuit_factors = decision.factors.iter()
             .filter(|f| matches!(f, SmartRouteFactor::CircuitOpen { provider, was_open: true } if provider == "anthropic"))
@@ -1121,8 +879,7 @@ mod tests {
     async fn test_context_overflow_skips_small_window_models() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::balanced().without_budget_awareness().without_health_awareness().without_rate_awareness(),
+            SmartRouteConfig::balanced().without_health_awareness().without_rate_awareness(),
         );
 
         // 150K tokens — should overflow models with 128K context at 0.8 threshold
@@ -1140,8 +897,7 @@ mod tests {
     async fn test_context_within_window_allows_model() {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
-            SmartRouteConfig::balanced().without_budget_awareness().without_health_awareness().without_rate_awareness(),
+            SmartRouteConfig::balanced().without_health_awareness().without_rate_awareness(),
         );
 
         // 50K tokens — should be fine for all models (50K < 128K * 0.8)
@@ -1174,26 +930,6 @@ mod tests {
 
         assert!(!decision.model.is_empty());
         assert!(decision.all_scores.len() > 0);
-    }
-
-    #[tokio::test]
-    async fn test_route_for_pool_cost_optimized() {
-        let router = create_cost_router();
-        let pool_config = ProviderPoolConfig::anthropic_primary(
-            Some("sk-ant-test".to_string()),
-            Some("sk-test".to_string()),
-        );
-
-        let decision = router.route_for_pool(
-            "Implement auth module",
-            "react",
-            &pool_config,
-            None,
-            None,
-        ).await;
-
-        // Cost-optimized should prefer cheaper models in pool
-        assert!(!decision.model.is_empty());
     }
 
     // ─── Degradation routing tests ─────────────────────────────────────
@@ -1238,7 +974,6 @@ mod tests {
     async fn test_regex_only_mode() {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
             SmartRouteConfig::regex_only(), // Disable all smart factors
         );
 
@@ -1246,7 +981,7 @@ mod tests {
 
         // Should use regex rule without any validation
         assert!(decision.from_regex);
-        // No budget/health/rate factors should be present
+        // No health/rate factors should be present
         let smart_factors = decision.factors.iter()
             .filter(|f| !matches!(f, SmartRouteFactor::RegexMatch { .. }))
             .collect::<Vec<_>>();
@@ -1270,35 +1005,13 @@ mod tests {
     // ─── Scoring computation tests ──────────────────────────────────────
 
     #[test]
-    fn test_cost_score_free_model() {
-        let router = create_balanced_router();
-        let profile = ModelQualityProfile::new(
-            "qwen2.5:0.5b", "ollama", RoutingTier::Cheap, 0.0, 0.0,
-        );
-        let score = router.compute_cost_score(&profile, f64::INFINITY);
-        assert_eq!(score, 1.0); // Free models get max cost score
-    }
-
-    #[test]
-    fn test_cost_score_budget_exceeded() {
-        let router = create_balanced_router();
-        let profile = ModelQualityProfile::new(
-            "claude-opus-4-8", "anthropic", RoutingTier::Powerful, 15.0, 75.0,
-        );
-        // Budget is $10 but estimated cost is $52.5 → would exceed
-        let score = router.compute_cost_score(&profile, 10.0);
-        assert_eq!(score, 0.0); // Would exceed budget → 0
-    }
-
-    #[test]
     fn test_latency_score_within_tolerance() {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
             SmartRouteConfig::balanced().with_max_latency(10000),
         );
         let profile = ModelQualityProfile::new(
-            "claude-haiku-4-5-20251001", "anthropic", RoutingTier::Cheap, 0.80, 4.0,
+            "claude-haiku-4-5-20251001", "anthropic", RoutingTier::Cheap,
         );
         // Haiku has estimated_latency 1500ms, max_tolerance 10000ms
         let score = router.compute_latency_score(&profile);
@@ -1309,11 +1022,10 @@ mod tests {
     fn test_latency_score_exceeds_tolerance() {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
             SmartRouteConfig::latency_optimized(), // max_latency = 10000ms
         );
         let profile = ModelQualityProfile::new(
-            "claude-opus-4-8", "anthropic", RoutingTier::Powerful, 15.0, 75.0,
+            "claude-opus-4-8", "anthropic", RoutingTier::Powerful,
         );
         // Opus has estimated_latency 15000ms > max_latency 10000ms
         let score = router.compute_latency_score(&profile);
@@ -1329,7 +1041,6 @@ mod tests {
         let tc = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
             SmartRouteConfig::balanced(),
         ).with_token_counter(tc);
 
@@ -1342,7 +1053,6 @@ mod tests {
         // Without token counter, should use heuristic from ModelQualityProfile
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
             SmartRouteConfig::balanced(),
         );
 
@@ -1360,7 +1070,6 @@ mod tests {
         let tc = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
             SmartRouteConfig::balanced(),
         ).with_token_counter(tc.clone());
 
@@ -1389,7 +1098,6 @@ mod tests {
         let tc = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            ModelPricingCatalog::with_known_models(),
             SmartRouteConfig::balanced(),
         ).with_token_counter(tc.clone());
 

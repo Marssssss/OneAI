@@ -183,17 +183,17 @@ impl EvalRunner {
     /// Creates a fresh session with in-memory tracing, runs the agent, then
     /// writes the final answer, trace metrics, and per-case cost into `result`.
     ///
-    /// Cost isolation: the session id is new per case, and we clear any prior
+    /// Usage isolation: the session id is new per case, and we clear any prior
     /// records for it before running so concurrent/sequential cases don't bleed
-    /// cost into each other. A single `session_cost` call yields cost + api_calls
-    /// + token breakdown (the CostSummary aggregates the UsageRecords the
+    /// usage into each other. A single `session_usage` call yields api_calls
+    /// + token breakdown (the UsageSummary aggregates the UsageRecords the
     /// AgentLoop already records after each inference).
     async fn run_agent_for_case(&self, case: &EvalCase, result: &mut EvalResult) {
         let mut session = self.app.create_session();
         let session_id = session.session_id().to_string();
 
-        // Isolate this case's cost accounting.
-        if let Some(ct) = &self.app.cost_tracker {
+        // Isolate this case's usage accounting.
+        if let Some(ct) = &self.app.usage_tracker {
             let _ = ct.clear_session(&session_id).await;
         }
 
@@ -222,10 +222,9 @@ impl EvalRunner {
             }
         }
 
-        // Collect the cost axis: cost_usd + api_calls + token breakdown.
-        if let Some(ct) = &self.app.cost_tracker {
-            if let Ok(summary) = ct.session_cost(&session_id).await {
-                result.cost_usd = summary.total_cost_usd;
+        // Collect the usage axis: api_calls + token breakdown.
+        if let Some(ct) = &self.app.usage_tracker {
+            if let Ok(summary) = ct.session_usage(&session_id).await {
                 result.api_calls = summary.call_count;
                 result.estimated_calls = summary.estimated_call_count;
                 result.prompt_tokens = summary.prompt_tokens;

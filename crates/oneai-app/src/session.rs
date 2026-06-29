@@ -106,9 +106,9 @@ struct AppResources {
     domain_pack: Option<Arc<oneai_domain::MergedDomainPack>>,
     /// SQLite session store (for memory + conversation persistence).
     sqlite_store: Option<Arc<SqliteSessionStore>>,
-    /// Cost tracker — propagated into the AgentLoop so the loop records per-call
-    /// usage. Without this the 成本 axis (cost/api_calls/tokens) stays at 0.
-    cost_tracker: Option<Arc<dyn oneai_core::CostTracker>>,
+    /// Usage tracker — propagated into the AgentLoop so the loop records per-call
+    /// token usage. Without this the usage axis (api_calls/tokens) stays at 0.
+    usage_tracker: Option<Arc<dyn oneai_core::UsageTracker>>,
     /// Rate limiter — propagated into the AgentLoop.
     rate_limiter: Option<Arc<dyn oneai_core::RateLimiter>>,
     /// Circuit breaker — propagated into the AgentLoop.
@@ -116,8 +116,6 @@ struct AppResources {
     /// Token counter — propagated into the AgentLoop for client-side token
     /// estimation when the provider returns no usage (streaming fallback).
     token_counter: Option<Arc<dyn oneai_core::TokenCounter>>,
-    /// Model pricing catalog — propagated into the AgentLoop for accurate cost.
-    pricing_catalog: Option<oneai_core::ModelPricingCatalog>,
     /// 3-layer model context resolver — used by `warm_model_context` to probe
     /// the provider for context-window sizes and cache them for the sync path.
     model_context_resolver: Option<Arc<oneai_core::ModelContextResolver>>,
@@ -161,11 +159,10 @@ impl AppSession {
                 active_skill: app.active_skill.clone(),
                 domain_pack: app.domain_pack.clone(),
                 sqlite_store: app.sqlite_store.clone(),
-                cost_tracker: app.cost_tracker.clone(),
+                usage_tracker: app.usage_tracker.clone(),
                 rate_limiter: app.rate_limiter.clone(),
                 circuit_breaker: app.circuit_breaker.clone(),
                 token_counter: app.token_counter.clone(),
-                pricing_catalog: app.pricing_catalog.clone(),
                 model_context_resolver: app.model_context_resolver.clone(),
                 probe_context_windows: app.probe_context_windows,
                 generation_config: app.generation_config.clone(),
@@ -575,15 +572,14 @@ impl AppSession {
             )
         };
 
-        // Propagate cost/rate/circuit/pricing from the App into the loop
+        // Propagate usage/rate/circuit from the App into the loop
         // config. Without this, the loop builds `..AgentLoopConfig::default()`
-        // (cost_tracker = None) and never records usage — the 成本 axis (cost,
-        // api_calls, tokens) silently stays at 0 even though the app holds a
+        // (usage_tracker = None) and never records usage — the usage axis
+        // (api_calls, tokens) silently stays at 0 even though the app holds a
         // configured tracker.
-        let cost_tracker = self.app.cost_tracker.clone();
+        let usage_tracker = self.app.usage_tracker.clone();
         let rate_limiter = self.app.rate_limiter.clone();
         let circuit_breaker = self.app.circuit_breaker.clone();
-        let pricing_catalog = self.app.pricing_catalog.clone();
         let token_counter = self.app.token_counter.clone();
 
         // Build the AgentLoop from session resources
@@ -596,10 +592,9 @@ impl AppSession {
                 },
                 use_streaming: true,
                 plan_mode: self.plan_mode,
-                cost_tracker,
+                usage_tracker,
                 rate_limiter,
                 circuit_breaker,
-                pricing_catalog,
                 token_counter,
                 // Hand the loop the SAME trace context the session holds (Arc-backed,
                 // cheap clone) so its per-iteration/inference/tool spans land in the
@@ -667,10 +662,9 @@ impl AppSession {
             let mut config = AgentLoopConfig {
                 use_streaming: true,
                 plan_mode: self.plan_mode,
-                cost_tracker,
+                usage_tracker,
                 rate_limiter,
                 circuit_breaker,
-                pricing_catalog,
                 token_counter,
                 // Hand the loop the SAME trace context the session holds (Arc-backed,
                 // cheap clone) so its per-iteration/inference/tool spans land in the

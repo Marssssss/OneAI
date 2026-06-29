@@ -304,13 +304,6 @@ impl OtelMetricsProvider {
         let denials = self.approval_denial_count.load(Ordering::Relaxed);
         if total == 0 { 0.0 } else { denials as f64 / total as f64 }
     }
-
-    /// Compute estimated cost (rough GPT-4 pricing: $0.03/1K prompt + $0.06/1K completion).
-    pub fn estimated_cost_usd(&self) -> f64 {
-        let prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
-        let completion = self.total_completion_tokens.load(Ordering::Relaxed);
-        (prompt as f64 / 1000.0) * 0.03 + (completion as f64 / 1000.0) * 0.06
-    }
 }
 
 impl Default for OtelMetricsProvider {
@@ -418,17 +411,6 @@ mod tests {
         assert_eq!(snapshot.ltm_entry_count, 20);
         assert_eq!(snapshot.memory_reflection_count, 1);
         assert_eq!(snapshot.ltm_recall_count, 2);
-    }
-
-    #[test]
-    fn test_metrics_estimated_cost() {
-        let provider = OtelMetricsProvider::new();
-
-        provider.record_tokens(10000, 5000);
-
-        let cost = provider.estimated_cost_usd();
-        // 10000 prompt * $0.03/1K = $0.30 + 5000 completion * $0.06/1K = $0.30 = $0.60
-        assert!((cost - 0.60).abs() < 0.01);
     }
 
     #[test]

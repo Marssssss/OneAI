@@ -50,8 +50,7 @@ use crate::error::Result;
 /// let capability = AgentCapability::new()
 ///     .with_category("code", 0.9, 0.7)   // High quality, moderate speed
 ///     .with_category("review", 0.85, 0.8) // Good quality, fast
-///     .with_max_concurrent(2)
-///     .with_cost_per_1k(0.03);
+///     .with_max_concurrent(2);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCapability {
@@ -59,7 +58,7 @@ pub struct AgentCapability {
     pub categories: Vec<String>,
 
     /// Quality score per category (0.0–1.0).
-    /// Higher = better output quality. Used by BestFit and CostOptimized routing.
+    /// Higher = better output quality. Used by BestFit routing.
     pub quality_scores: HashMap<String, f64>,
 
     /// Speed score per category (0.0–1.0, where 1.0 = fastest).
@@ -69,10 +68,6 @@ pub struct AgentCapability {
     /// Maximum concurrent tasks this agent can handle.
     /// Used by LoadBalanced routing to avoid overloading agents.
     pub max_concurrent: usize,
-
-    /// Cost per 1000 tokens for this agent.
-    /// Used by CostOptimized routing to minimize total cost.
-    pub cost_per_1k: f64,
 }
 
 impl AgentCapability {
@@ -83,7 +78,6 @@ impl AgentCapability {
             quality_scores: HashMap::new(),
             speed_scores: HashMap::new(),
             max_concurrent: 1,
-            cost_per_1k: 0.0,
         }
     }
 
@@ -94,7 +88,6 @@ impl AgentCapability {
             quality_scores: HashMap::from([(category.to_string(), quality)]),
             speed_scores: HashMap::from([(category.to_string(), speed)]),
             max_concurrent: 1,
-            cost_per_1k: 0.0,
         }
     }
 
@@ -109,12 +102,6 @@ impl AgentCapability {
     /// Set maximum concurrent tasks.
     pub fn with_max_concurrent(mut self, max: usize) -> Self {
         self.max_concurrent = max;
-        self
-    }
-
-    /// Set cost per 1000 tokens.
-    pub fn with_cost_per_1k(mut self, cost: f64) -> Self {
-        self.cost_per_1k = cost;
         self
     }
 
@@ -222,7 +209,6 @@ impl Default for AgentCapability {
 /// Different strategies optimize for different goals:
 /// - **BestFit**: Highest quality for the task category
 /// - **LoadBalanced**: Distribute across agents, considering current load
-/// - **CostOptimized**: Cheapest agent that meets quality threshold
 /// - **Fastest**: Agent with highest speed score
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -235,10 +221,6 @@ pub enum SwarmRouting {
     /// Like a call center: distribute calls to available operators.
     LoadBalanced,
 
-    /// Cost-optimized — assign to the cheapest agent that meets quality threshold.
-    /// Like budget shopping: find the best value for the price.
-    CostOptimized,
-
     /// Fastest — assign to the agent with highest speed score.
     /// Like express delivery: get results as quickly as possible.
     Fastest,
@@ -250,7 +232,6 @@ impl SwarmRouting {
         match self {
             Self::BestFit => "best-fit",
             Self::LoadBalanced => "load-balanced",
-            Self::CostOptimized => "cost-optimized",
             Self::Fastest => "fastest",
         }
     }
@@ -260,7 +241,6 @@ impl SwarmRouting {
         match self {
             Self::BestFit => "Highest quality — assign to the agent with best quality score for the category",
             Self::LoadBalanced => "Balanced load — distribute across agents to avoid overloading",
-            Self::CostOptimized => "Lowest cost — assign to cheapest agent that meets quality threshold",
             Self::Fastest => "Fastest result — assign to agent with highest speed score",
         }
     }
@@ -271,7 +251,6 @@ impl SwarmRouting {
         match s.to_lowercase().as_str() {
             "best-fit" | "bestfit" | "best" => Some(Self::BestFit),
             "load-balanced" | "loadbalanced" | "load" | "balanced" => Some(Self::LoadBalanced),
-            "cost-optimized" | "costoptimized" | "cost" | "cheap" => Some(Self::CostOptimized),
             "fastest" | "fast" | "speed" => Some(Self::Fastest),
             _ => None,
         }
@@ -279,7 +258,7 @@ impl SwarmRouting {
 
     /// All available routing strategies.
     pub fn all() -> Vec<Self> {
-        vec![Self::BestFit, Self::LoadBalanced, Self::CostOptimized, Self::Fastest]
+        vec![Self::BestFit, Self::LoadBalanced, Self::Fastest]
     }
 }
 
@@ -361,11 +340,6 @@ impl SwarmConfig {
     /// Create a load-balanced swarm.
     pub fn load_balanced(id: &str) -> Self {
         Self::new(id, SwarmRouting::LoadBalanced)
-    }
-
-    /// Create a cost-optimized swarm.
-    pub fn cost_optimized(id: &str) -> Self {
-        Self::new(id, SwarmRouting::CostOptimized)
     }
 
     /// Create a fastest swarm.
@@ -524,8 +498,7 @@ impl SwarmAgentEntry {
     pub fn coder() -> Self {
         Self::new("coder",
             AgentCapability::single_category("code", 0.9, 0.7)
-                .with_category("debug", 0.85, 0.75)
-                .with_cost_per_1k(0.03),
+                .with_category("debug", 0.85, 0.75),
             SubAgentKindProxy::code(),
         )
     }
@@ -534,8 +507,7 @@ impl SwarmAgentEntry {
     pub fn researcher() -> Self {
         Self::new("researcher",
             AgentCapability::single_category("research", 0.85, 0.8)
-                .with_category("analysis", 0.8, 0.7)
-                .with_cost_per_1k(0.02),
+                .with_category("analysis", 0.8, 0.7),
             SubAgentKindProxy::explore(),
         )
     }
@@ -544,8 +516,7 @@ impl SwarmAgentEntry {
     pub fn reviewer() -> Self {
         Self::new("reviewer",
             AgentCapability::single_category("review", 0.88, 0.85)
-                .with_category("security", 0.82, 0.7)
-                .with_cost_per_1k(0.025),
+                .with_category("security", 0.82, 0.7),
             SubAgentKindProxy::review(),
         )
     }
@@ -554,8 +525,7 @@ impl SwarmAgentEntry {
     pub fn planner() -> Self {
         Self::new("planner",
             AgentCapability::single_category("planning", 0.85, 0.9)
-                .with_category("design", 0.8, 0.75)
-                .with_cost_per_1k(0.02),
+                .with_category("design", 0.8, 0.75),
             SubAgentKindProxy::plan(),
         )
     }
@@ -673,9 +643,6 @@ pub struct SwarmResult {
     /// Total tokens used.
     pub total_tokens: u32,
 
-    /// Total cost.
-    pub total_cost: f64,
-
     /// Agents that participated in the swarm execution.
     pub active_agents: Vec<String>,
 }
@@ -687,7 +654,6 @@ impl SwarmResult {
             final_answer: String::new(),
             task_results: Vec::new(),
             total_tokens: 0,
-            total_cost: 0.0,
             active_agents: Vec::new(),
         }
     }
@@ -757,9 +723,6 @@ pub struct SwarmTaskResult {
     /// Tokens used by this task.
     pub tokens_used: u32,
 
-    /// Cost incurred by this task.
-    pub cost: f64,
-
     /// How many retries were attempted for this task.
     pub retry_count: usize,
 }
@@ -793,7 +756,6 @@ pub trait SwarmCoordinationLog: Send + Sync {
         task_id: &str,
         agent_name: &str,
         tokens_used: u32,
-        cost: f64,
         completed: bool,
         quality_score: f64,
     );
@@ -819,7 +781,7 @@ pub trait SwarmCoordinationLog: Send + Sync {
     );
 
     /// Log swarm execution completion.
-    async fn log_swarm_complete(&self, swarm_id: &str, total_tokens: u32, total_cost: f64);
+    async fn log_swarm_complete(&self, swarm_id: &str, total_tokens: u32);
 
     /// Get recent swarm coordination events.
     async fn recent_events(&self, limit: usize) -> Vec<SwarmCoordinationEvent>;
@@ -953,7 +915,6 @@ impl SwarmCoordinationLog for InMemorySwarmCoordinationLog {
         task_id: &str,
         agent_name: &str,
         tokens_used: u32,
-        cost: f64,
         completed: bool,
         quality_score: f64,
     ) {
@@ -966,7 +927,6 @@ impl SwarmCoordinationLog for InMemorySwarmCoordinationLog {
             timestamp: Utc::now(),
             details: HashMap::from([
                 ("tokens_used".to_string(), tokens_used.to_string()),
-                ("cost".to_string(), format!("{:.4}", cost)),
                 ("completed".to_string(), completed.to_string()),
                 ("quality_score".to_string(), format!("{:.2}", quality_score)),
             ]),
@@ -1018,7 +978,7 @@ impl SwarmCoordinationLog for InMemorySwarmCoordinationLog {
         });
     }
 
-    async fn log_swarm_complete(&self, swarm_id: &str, total_tokens: u32, total_cost: f64) {
+    async fn log_swarm_complete(&self, swarm_id: &str, total_tokens: u32) {
         let mut events = self.events.write().await;
         events.push(SwarmCoordinationEvent {
             swarm_id: swarm_id.to_string(),
@@ -1028,7 +988,6 @@ impl SwarmCoordinationLog for InMemorySwarmCoordinationLog {
             timestamp: Utc::now(),
             details: HashMap::from([
                 ("total_tokens".to_string(), total_tokens.to_string()),
-                ("total_cost".to_string(), format!("{:.4}", total_cost)),
             ]),
         });
     }
@@ -1084,20 +1043,6 @@ impl SwarmPresets {
             .with_quality_threshold(0.6)
             .with_max_retries(1)
             .with_budget(TokenBudgetProxy::new(60_000))
-    }
-
-    /// Budget code swarm — CostOptimized routing for cost-sensitive tasks.
-    ///
-    /// Routes to the cheapest agent that meets quality threshold.
-    pub fn budget_code_swarm() -> SwarmConfig {
-        SwarmConfig::cost_optimized("budget_code")
-            .with_agent(SwarmAgentEntry::planner())  // Cheapest (0.02/1k)
-            .with_agent(SwarmAgentEntry::researcher())  // Also cheap (0.02/1k)
-            .with_agent(SwarmAgentEntry::reviewer())  // Moderate (0.025/1k)
-            .with_agent(SwarmAgentEntry::coder())  // Most expensive (0.03/1k)
-            .with_quality_threshold(0.75)
-            .with_max_retries(2)
-            .with_budget(TokenBudgetProxy::new(80_000))
     }
 
     /// Balanced dev swarm — LoadBalanced routing for general development.
@@ -1195,7 +1140,6 @@ mod tests {
     fn test_swarm_routing_names() {
         assert_eq!(SwarmRouting::BestFit.name(), "best-fit");
         assert_eq!(SwarmRouting::LoadBalanced.name(), "load-balanced");
-        assert_eq!(SwarmRouting::CostOptimized.name(), "cost-optimized");
         assert_eq!(SwarmRouting::Fastest.name(), "fastest");
     }
 
@@ -1204,14 +1148,13 @@ mod tests {
         assert_eq!(SwarmRouting::from_str_opt("best-fit"), Some(SwarmRouting::BestFit));
         assert_eq!(SwarmRouting::from_str_opt("best"), Some(SwarmRouting::BestFit));
         assert_eq!(SwarmRouting::from_str_opt("load"), Some(SwarmRouting::LoadBalanced));
-        assert_eq!(SwarmRouting::from_str_opt("cost"), Some(SwarmRouting::CostOptimized));
         assert_eq!(SwarmRouting::from_str_opt("fast"), Some(SwarmRouting::Fastest));
         assert_eq!(SwarmRouting::from_str_opt("unknown"), None);
     }
 
     #[test]
     fn test_swarm_routing_all() {
-        assert_eq!(SwarmRouting::all().len(), 4);
+        assert_eq!(SwarmRouting::all().len(), 3);
     }
 
     #[test]
@@ -1345,11 +1288,9 @@ mod tests {
                 completed: true,
                 quality_score: 0.85,
                 tokens_used: 3000,
-                cost: 0.03,
                 retry_count: 0,
             }],
             total_tokens: 3000,
-            total_cost: 0.03,
             active_agents: vec!["coder".to_string()],
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -1365,9 +1306,9 @@ mod tests {
         log.log_swarm_start("test_swarm", SwarmRouting::BestFit, "Analyze codebase").await;
         log.log_task_routed("test_swarm", "t1", "coder", "code").await;
         log.log_task_start("test_swarm", "t1", "coder").await;
-        log.log_task_complete("test_swarm", "t1", "coder", 3000, 0.03, true, 0.85).await;
+        log.log_task_complete("test_swarm", "t1", "coder", 3000, true, 0.85).await;
         log.log_result_validation("test_swarm", "t1", 0.85, 0.7, true).await;
-        log.log_swarm_complete("test_swarm", 3000, 0.03).await;
+        log.log_swarm_complete("test_swarm", 3000).await;
 
         assert_eq!(log.event_count().await, 6);
 
@@ -1403,15 +1344,6 @@ mod tests {
     }
 
     #[test]
-    fn test_presets_budget_code() {
-        let config = SwarmPresets::budget_code_swarm();
-        assert_eq!(config.id, "budget_code");
-        assert_eq!(config.routing, SwarmRouting::CostOptimized);
-        assert_eq!(config.agent_count(), 4);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
     fn test_presets_balanced_dev() {
         let config = SwarmPresets::balanced_dev_swarm();
         assert_eq!(config.id, "balanced_dev");
@@ -1443,7 +1375,6 @@ mod tests {
             completed: true,
             quality_score: 0.85,
             tokens_used: 3000,
-            cost: 0.03,
             retry_count: 0,
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -1468,7 +1399,6 @@ mod tests {
                     completed: true,
                     quality_score: 0.85,
                     tokens_used: 1000,
-                    cost: 0.01,
                     retry_count: 0,
                 },
                 SwarmTaskResult {
@@ -1482,12 +1412,10 @@ mod tests {
                     completed: false,
                     quality_score: 0.3,
                     tokens_used: 500,
-                    cost: 0.005,
                     retry_count: 1,
                 },
             ],
             total_tokens: 1500,
-            total_cost: 0.015,
             active_agents: vec!["coder".to_string(), "researcher".to_string()],
         };
         assert!(result.has_successful_results());

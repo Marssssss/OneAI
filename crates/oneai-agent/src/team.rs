@@ -22,7 +22,7 @@ use oneai_core::team::{
     SubAgentKindProxy,
 };
 use oneai_core::budget::TokenBudget;
-use oneai_core::cost::CostTracker;
+use oneai_core::usage::UsageTracker;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::context_manager::ContextManager;
 
@@ -44,7 +44,7 @@ use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 /// 3. Executes them according to the strategy
 /// 4. Synthesizes results into a final TeamResult
 /// 5. Logs all coordination events
-/// 6. Tracks budget and cost
+/// 6. Tracks token usage
 pub struct TeamCoordinator {
     /// The sub-agent factory for creating team members.
     factory: Arc<dyn SubAgentFactory>,
@@ -55,8 +55,8 @@ pub struct TeamCoordinator {
     /// Context manager for trimming agent outputs (optional).
     context_manager: Option<Arc<ContextManager>>,
 
-    /// Cost tracker for recording team costs (optional).
-    cost_tracker: Option<Arc<dyn CostTracker>>,
+    /// Usage tracker for recording team usage (optional).
+    usage_tracker: Option<Arc<dyn UsageTracker>>,
 
     /// Coordination log for recording team events.
     log: Arc<dyn TeamCoordinationLog>,
@@ -69,7 +69,7 @@ impl TeamCoordinator {
             factory,
             default_budget: TokenBudget::new(100_000),
             context_manager: None,
-            cost_tracker: None,
+            usage_tracker: None,
             log: Arc::new(InMemoryTeamCoordinationLog::new()),
         }
     }
@@ -80,7 +80,7 @@ impl TeamCoordinator {
             factory,
             default_budget: budget,
             context_manager: None,
-            cost_tracker: None,
+            usage_tracker: None,
             log: Arc::new(InMemoryTeamCoordinationLog::new()),
         }
     }
@@ -90,14 +90,14 @@ impl TeamCoordinator {
         factory: Arc<dyn SubAgentFactory>,
         budget: TokenBudget,
         context_manager: Option<Arc<ContextManager>>,
-        cost_tracker: Option<Arc<dyn CostTracker>>,
+        usage_tracker: Option<Arc<dyn UsageTracker>>,
         log: Arc<dyn TeamCoordinationLog>,
     ) -> Self {
         Self {
             factory,
             default_budget: budget,
             context_manager,
-            cost_tracker,
+            usage_tracker,
             log,
         }
     }
@@ -107,9 +107,9 @@ impl TeamCoordinator {
         self.context_manager = Some(manager);
     }
 
-    /// Set the cost tracker.
-    pub fn set_cost_tracker(&mut self, tracker: Arc<dyn CostTracker>) {
-        self.cost_tracker = Some(tracker);
+    /// Set the usage tracker.
+    pub fn set_usage_tracker(&mut self, tracker: Arc<dyn UsageTracker>) {
+        self.usage_tracker = Some(tracker);
     }
 
     /// Get the coordination log.
@@ -145,7 +145,7 @@ impl TeamCoordinator {
         };
 
         // Log team complete
-        self.log.log_team_complete(&config.id, result.total_tokens, result.total_cost).await;
+        self.log.log_team_complete(&config.id, result.total_tokens).await;
 
         Ok(result)
     }
@@ -186,13 +186,11 @@ impl TeamCoordinator {
 
         // Aggregate statistics
         let total_tokens = agent_results.iter().map(|r| r.tokens_used).sum();
-        let total_cost = agent_results.iter().map(|r| r.cost).sum();
 
         Ok(TeamResult {
             final_answer,
             agent_results,
             total_tokens,
-            total_cost,
             strategy: TeamStrategy::Coordinate,
             team_id: config.id.clone(),
         })
@@ -231,8 +229,7 @@ impl TeamCoordinator {
 
         self.log.log_agent_complete(
             &config.id, &router_role.name, router_role.agent_kind.name(),
-            router_summary.tokens_used, 0.0, router_summary.completed
-        ).await;
+            router_summary.tokens_used, router_summary.completed).await;
 
         // Determine which specialist to route to
         let target_name = self.extract_route_target(&router_summary.summary, &config.roles[1..]);
@@ -250,8 +247,7 @@ impl TeamCoordinator {
 
             self.log.log_agent_complete(
                 &config.id, &target_role.name, target_role.agent_kind.name(),
-                target_summary.tokens_used, 0.0, target_summary.completed
-            ).await;
+                target_summary.tokens_used, target_summary.completed).await;
 
             let final_answer = target_summary.summary.clone();
 
@@ -262,7 +258,6 @@ impl TeamCoordinator {
                     self.make_result_entry(&target_role, &target_summary),
                 ],
                 total_tokens: router_summary.tokens_used + target_summary.tokens_used,
-                total_cost: 0.0,
                 strategy: TeamStrategy::Route,
                 team_id: config.id.clone(),
             })
@@ -272,7 +267,6 @@ impl TeamCoordinator {
                 final_answer: router_summary.summary.clone(),
                 agent_results: vec![self.make_result_entry(&router_role, &router_summary)],
                 total_tokens: router_summary.tokens_used,
-                total_cost: 0.0,
                 strategy: TeamStrategy::Route,
                 team_id: config.id.clone(),
             })
@@ -293,7 +287,6 @@ impl TeamCoordinator {
         let mut agent_results: Vec<AgentResultEntry> = Vec::new();
         let mut accumulated_context = String::new();
         let mut total_tokens = 0u32;
-        let mut total_cost = 0.0;
 
         // Run agents in sequence
         for role in &config.roles {
@@ -317,7 +310,7 @@ impl TeamCoordinator {
 
             self.log.log_agent_complete(
                 &config.id, &role.name, role.agent_kind.name(),
-                summary.tokens_used, 0.0, summary.completed
+                summary.tokens_used, summary.completed
             ).await;
 
             // Accumulate context for next agent
@@ -332,7 +325,6 @@ impl TeamCoordinator {
             }
 
             total_tokens += summary.tokens_used;
-            total_cost += 0.0;
 
             agent_results.push(self.make_result_entry(role, &summary));
 
@@ -356,7 +348,6 @@ impl TeamCoordinator {
             final_answer,
             agent_results,
             total_tokens,
-            total_cost,
             strategy: TeamStrategy::Collaborate,
             team_id: config.id.clone(),
         })
@@ -384,7 +375,6 @@ impl TeamCoordinator {
         let mut debater_results: Vec<AgentResultEntry> = Vec::new();
         let mut arguments = String::new();
         let mut total_tokens = 0u32;
-        let mut total_cost = 0.0;
 
         for (i, role) in debater_roles.iter().enumerate() {
             self.log.log_agent_start(&config.id, &role.name, role.agent_kind.name()).await;
@@ -413,7 +403,7 @@ impl TeamCoordinator {
 
             self.log.log_agent_complete(
                 &config.id, &role.name, role.agent_kind.name(),
-                summary.tokens_used, 0.0, summary.completed
+                summary.tokens_used, summary.completed
             ).await;
 
             if summary.completed {
@@ -421,7 +411,6 @@ impl TeamCoordinator {
             }
 
             total_tokens += summary.tokens_used;
-            total_cost += 0.0;
 
             debater_results.push(self.make_result_entry(role, &summary));
         }
@@ -444,11 +433,10 @@ impl TeamCoordinator {
 
         self.log.log_agent_complete(
             &config.id, &judge_role.name, judge_role.agent_kind.name(),
-            judge_summary.tokens_used, 0.0, judge_summary.completed
+            judge_summary.tokens_used, judge_summary.completed
         ).await;
 
         total_tokens += judge_summary.tokens_used;
-        total_cost += 0.0;
 
         let final_answer = judge_summary.summary.clone();
 
@@ -463,7 +451,6 @@ impl TeamCoordinator {
             final_answer,
             agent_results: all_results,
             total_tokens,
-            total_cost,
             strategy: TeamStrategy::Debate,
             team_id: config.id.clone(),
         })
@@ -537,8 +524,7 @@ impl TeamCoordinator {
 
             self.log.log_agent_complete(
                 team_id, &role_name, role_kind.name(),
-                summary.tokens_used, 0.0, summary.completed
-            ).await;
+                summary.tokens_used, summary.completed).await;
 
             // Create the result entry manually since we need role info
             let entry = AgentResultEntry {
@@ -548,7 +534,6 @@ impl TeamCoordinator {
                 key_findings: summary.key_findings.clone(),
                 completed: summary.completed,
                 tokens_used: summary.tokens_used,
-                cost: 0.0,
             };
 
             results.push(entry);
@@ -588,8 +573,7 @@ impl TeamCoordinator {
         self.log.log_agent_start(team_id, "coordinator", "plan").await;
         self.log.log_agent_complete(
             team_id, "coordinator", "plan",
-            summary.tokens_used, 0.0, summary.completed
-        ).await;
+            summary.tokens_used, summary.completed).await;
 
         Ok(summary.summary)
     }
@@ -647,7 +631,6 @@ impl TeamCoordinator {
             key_findings: summary.key_findings.clone(),
             completed: summary.completed,
             tokens_used: summary.tokens_used,
-            cost: 0.0,
         }
     }
 }
@@ -966,7 +949,6 @@ mod tests {
             key_findings: vec![],
             completed: true,
             tokens_used: 1000,
-            cost: 0.0,
         }];
 
         let synthesized = coordinator.synthesize_template(&results);
@@ -985,7 +967,6 @@ mod tests {
                 key_findings: vec![],
                 completed: true,
                 tokens_used: 1000,
-                cost: 0.0,
             },
             AgentResultEntry {
                 role: "reviewer".into(),
@@ -994,7 +975,6 @@ mod tests {
                 key_findings: vec![],
                 completed: true,
                 tokens_used: 1000,
-                cost: 0.0,
             },
         ];
 
@@ -1078,7 +1058,6 @@ mod tests {
                     key_findings: vec![],
                     completed: true,
                     tokens_used: 1000,
-                    cost: 0.01,
                 },
                 AgentResultEntry {
                     role: "a2".into(),
@@ -1087,11 +1066,9 @@ mod tests {
                     key_findings: vec![],
                     completed: false,
                     tokens_used: 500,
-                    cost: 0.005,
                 },
             ],
             total_tokens: 1500,
-            total_cost: 0.015,
             strategy: TeamStrategy::Coordinate,
             team_id: "test".into(),
         };

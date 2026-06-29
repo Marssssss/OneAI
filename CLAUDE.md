@@ -26,10 +26,10 @@ Git commit messages must end with `Co-Authored-By: glm-5.2` (the model actually 
 
 ## Architecture: how the pieces wire together
 
-The integration point is **`oneai-app`'s `AppBuilder`** (`crates/oneai-app/src/builder.rs`). Every subsystem (provider, tools, memory, RAG, skills, parser, persistence, trace, domain packs, WASM, MCP, A2A, SmartRouter, cost/usage) is optional and plugged in via builder methods, then assembled into an `App` → `AppSession`. **The LLM provider is optional** — tool-only or workflow-only usage needs no provider. When changing how a subsystem is constructed or wired, this builder is the single place to update.
+The integration point is **`oneai-app`'s `AppBuilder`** (`crates/oneai-app/src/builder.rs`). Every subsystem (provider, tools, memory, RAG, skills, parser, persistence, trace, domain packs, WASM, MCP, A2A, SmartRouter, usage) is optional and plugged in via builder methods, then assembled into an `App` → `AppSession`. **The LLM provider is optional** — tool-only or workflow-only usage needs no provider. When changing how a subsystem is constructed or wired, this builder is the single place to update.
 
 Dependency layering (lower crates must not depend on higher ones):
-- `oneai-core` — foundation: `ContentBlock`/`Message`/`Conversation`, `PermissionLevel`, `Budget`, `ContextBudgetManager`, `PlatformCapabilities`, and all core traits (`LlmProvider`, `Tool`, `ApprovalGate`, `OutputParser`, `EmbeddingService`, `CostTracker`, `RateLimiter`, `CircuitBreaker`, `TokenCounter`).
+- `oneai-core` — foundation: `ContentBlock`/`Message`/`Conversation`, `PermissionLevel`, `Budget`, `ContextBudgetManager`, `PlatformCapabilities`, and all core traits (`LlmProvider`, `Tool`, `ApprovalGate`, `OutputParser`, `EmbeddingService`, `UsageTracker`, `RateLimiter`, `CircuitBreaker`, `TokenCounter`).
 - `oneai-provider` (LLM impls: OpenAI/Anthropic/Ollama, `ProviderPool`, `SmartRouter`), `oneai-parser` (3-layer output defense), `oneai-memory`, `oneai-tool`, `oneai-skill`, `oneai-rag`, `oneai-workflow`, `oneai-domain`, `oneai-trace`, `oneai-persistence`, `oneai-a2a`, `oneai-wasm`, `oneai-eval`, `oneai-studio`, `oneai-mcp` — feature crates depending on core.
 - `oneai-agent` — depends on the feature crates; owns `AgentLoop` and paradigms.
 - `oneai-app` — top of the stack; depends on everything, wires it via `AppBuilder`.
@@ -45,6 +45,6 @@ Dependency layering (lower crates must not depend on higher ones):
 
 ## TUI (examples/cli)
 
-The interactive demo (`examples/cli`, bin `oneai-cli`) is a ratatui+crossterm TUI exercising the full pipeline. It has many clap subcommands (provider/team/swarm/handoff/cost/route/token/embed/session/mcp/a2a/wasm/pack/eval/studio/...) mirroring subsystem features — useful as a working example of how to drive any given subsystem from `AppBuilder`. When implementing a new subsystem feature, add both an `AppBuilder` method and a CLI subcommand for parity with the existing pattern.
+The interactive demo (`examples/cli`, bin `oneai-cli`) is a ratatui+crossterm TUI exercising the full pipeline. It has many clap subcommands (provider/team/swarm/handoff/usage/route/token/embed/session/mcp/a2a/wasm/pack/eval/studio/...) mirroring subsystem features — useful as a working example of how to drive any given subsystem from `AppBuilder`. When implementing a new subsystem feature, add both an `AppBuilder` method and a CLI subcommand for parity with the existing pattern.
 
 Recent TUI work fixed: scroll ghosting (Clear widget), long-history scroll lag (viewport virtualization in `draw_chat`), and added `InteractionMode` (Normal/Auto/Plan via Shift+Tab) where Plan mode blocks tool execution. Preserve these when touching TUI rendering.

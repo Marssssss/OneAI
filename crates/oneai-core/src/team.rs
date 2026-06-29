@@ -460,7 +460,7 @@ impl TeamConfig {
 /// Result of a team execution.
 ///
 /// Contains the team's final answer (synthesized from all agent results),
-/// individual results from each agent, token usage, and cost information.
+/// individual results from each agent, and token usage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamResult {
     /// The team's final answer.
@@ -477,9 +477,6 @@ pub struct TeamResult {
     /// Total tokens used by the team (sum of all agent tokens).
     pub total_tokens: u32,
 
-    /// Total cost incurred by the team (sum of all agent costs).
-    pub total_cost: f64,
-
     /// The strategy that was used.
     pub strategy: TeamStrategy,
 
@@ -494,7 +491,6 @@ impl TeamResult {
             final_answer: String::new(),
             agent_results: Vec::new(),
             total_tokens: 0,
-            total_cost: 0.0,
             strategy,
             team_id: team_id.to_string(),
         }
@@ -545,9 +541,6 @@ pub struct AgentResultEntry {
 
     /// Tokens used by this agent.
     pub tokens_used: u32,
-
-    /// Cost incurred by this agent.
-    pub cost: f64,
 }
 
 // ─── TeamCoordinationLog trait ───────────────────────────────────────────────
@@ -558,7 +551,7 @@ pub struct AgentResultEntry {
 /// - When a team execution starts
 /// - When each agent starts/completes
 /// - When results are synthesized
-/// - Budget and cost tracking per agent
+/// - Token usage per agent
 ///
 /// Implementations can persist logs to memory, SQLite, or external services.
 #[async_trait]
@@ -576,7 +569,6 @@ pub trait TeamCoordinationLog: Send + Sync {
         role: &str,
         agent_kind: &str,
         tokens_used: u32,
-        cost: f64,
         completed: bool,
     );
 
@@ -589,7 +581,7 @@ pub trait TeamCoordinationLog: Send + Sync {
     );
 
     /// Log a team execution completion.
-    async fn log_team_complete(&self, team_id: &str, total_tokens: u32, total_cost: f64);
+    async fn log_team_complete(&self, team_id: &str, total_tokens: u32);
 
     /// Get recent team coordination events.
     async fn recent_events(&self, limit: usize) -> Vec<TeamCoordinationEvent>;
@@ -706,7 +698,6 @@ impl TeamCoordinationLog for InMemoryTeamCoordinationLog {
         role: &str,
         agent_kind: &str,
         tokens_used: u32,
-        cost: f64,
         completed: bool,
     ) {
         let mut events = self.events.write().await;
@@ -718,7 +709,6 @@ impl TeamCoordinationLog for InMemoryTeamCoordinationLog {
             timestamp: Utc::now(),
             details: HashMap::from([
                 ("tokens_used".to_string(), tokens_used.to_string()),
-                ("cost".to_string(), format!("{:.4}", cost)),
                 ("completed".to_string(), completed.to_string()),
             ]),
         });
@@ -739,7 +729,7 @@ impl TeamCoordinationLog for InMemoryTeamCoordinationLog {
         });
     }
 
-    async fn log_team_complete(&self, team_id: &str, total_tokens: u32, total_cost: f64) {
+    async fn log_team_complete(&self, team_id: &str, total_tokens: u32) {
         let mut events = self.events.write().await;
         events.push(TeamCoordinationEvent {
             team_id: team_id.to_string(),
@@ -749,7 +739,6 @@ impl TeamCoordinationLog for InMemoryTeamCoordinationLog {
             timestamp: Utc::now(),
             details: HashMap::from([
                 ("total_tokens".to_string(), total_tokens.to_string()),
-                ("total_cost".to_string(), format!("{:.4}", total_cost)),
             ]),
         });
     }
@@ -1131,10 +1120,8 @@ mod tests {
                 key_findings: vec!["Issue 1".into()],
                 completed: true,
                 tokens_used: 5000,
-                cost: 0.05,
             }],
             total_tokens: 5000,
-            total_cost: 0.05,
             strategy: TeamStrategy::Coordinate,
             team_id: "test".into(),
         };
@@ -1185,9 +1172,9 @@ mod tests {
 
         log.log_team_start("test_team", TeamStrategy::Coordinate, "Review this code").await;
         log.log_agent_start("test_team", "analyst", "explore").await;
-        log.log_agent_complete("test_team", "analyst", "explore", 5000, 0.05, true).await;
+        log.log_agent_complete("test_team", "analyst", "explore", 5000, true).await;
         log.log_synthesis("test_team", TeamStrategy::Coordinate, 200).await;
-        log.log_team_complete("test_team", 5000, 0.05).await;
+        log.log_team_complete("test_team", 5000).await;
 
         assert_eq!(log.event_count().await, 5);
 
@@ -1207,7 +1194,6 @@ mod tests {
             key_findings: vec!["Issue A".into(), "Issue B".into()],
             completed: true,
             tokens_used: 3000,
-            cost: 0.03,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AgentResultEntry = serde_json::from_str(&json).unwrap();

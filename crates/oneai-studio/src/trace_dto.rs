@@ -80,7 +80,6 @@ pub struct EventView {
 pub struct MetricsView {
     pub success_rate: f64,
     pub total_tokens: u64,
-    pub estimated_cost_usd: f64,
     pub avg_inference_latency_ms: f64,
     pub tool_call_count: usize,
     pub tool_success_rate: f64,
@@ -113,7 +112,6 @@ impl TraceTreeView {
             metrics: MetricsView {
                 success_rate: tree.metrics.success_rate,
                 total_tokens: tree.metrics.total_tokens,
-                estimated_cost_usd: tree.metrics.estimated_cost_usd,
                 avg_inference_latency_ms: tree.metrics.avg_inference_latency_ms,
                 tool_call_count: tree.metrics.tool_call_count,
                 tool_success_rate: tree.metrics.tool_success_rate,
@@ -237,7 +235,6 @@ mod tests {
         let view = MetricsView {
             success_rate: metrics.success_rate,
             total_tokens: metrics.total_tokens,
-            estimated_cost_usd: metrics.estimated_cost_usd,
             avg_inference_latency_ms: metrics.avg_inference_latency_ms,
             tool_call_count: metrics.tool_call_count,
             tool_success_rate: metrics.tool_success_rate,

@@ -363,9 +363,6 @@ pub struct HandoffResult {
     /// Total tokens used across the handoff chain.
     pub total_tokens: u32,
 
-    /// Total cost across the handoff chain.
-    pub total_cost: f64,
-
     /// Whether conversation history was transferred at each handoff.
     pub conversation_transferred: bool,
 
@@ -380,7 +377,6 @@ impl HandoffResult {
             final_answer: String::new(),
             chain: Vec::new(),
             total_tokens: 0,
-            total_cost: 0.0,
             conversation_transferred: false,
             handoff_count: 0,
         }
@@ -422,9 +418,6 @@ pub struct HandoffChainEntry {
 
     /// Tokens used by the from_agent before handoff.
     pub tokens_used: u32,
-
-    /// Cost incurred by the from_agent.
-    pub cost: f64,
 }
 
 // ─── HandoffLog trait ──────────────────────────────────────────────────────────
@@ -779,10 +772,8 @@ mod tests {
                 reason: "Needs code implementation".into(),
                 partial_output: "Analyzing requirements...".into(),
                 tokens_used: 5000,
-                cost: 0.05,
             }],
             total_tokens: 5000,
-            total_cost: 0.05,
             conversation_transferred: true,
             handoff_count: 1,
         };
@@ -800,7 +791,6 @@ mod tests {
             reason: "Needs exploration".into(),
             partial_output: "Starting research...".into(),
             tokens_used: 3000,
-            cost: 0.03,
         };
         assert_eq!(entry.from_agent, "main");
         assert_eq!(entry.to_agent, "research");
@@ -817,7 +807,6 @@ mod tests {
                     reason: "Research needed".into(),
                     partial_output: "".into(),
                     tokens_used: 3000,
-                    cost: 0.03,
                 },
                 HandoffChainEntry {
                     from_agent: "research".into(),
@@ -825,11 +814,9 @@ mod tests {
                     reason: "Ready to implement".into(),
                     partial_output: "Found 3 files".into(),
                     tokens_used: 5000,
-                    cost: 0.05,
                 },
             ],
             total_tokens: 8000,
-            total_cost: 0.08,
             conversation_transferred: true,
             handoff_count: 2,
         };

@@ -3,7 +3,6 @@
 use oneai_core::ProviderPoolConfig;
 use oneai_core::SmartRouteConfig;
 use oneai_core::RoutingStrategy;
-use oneai_core::ModelPricingCatalog;
 use oneai_provider::ModelRouter;
 use oneai_provider::SmartRouter;
 use oneai_core::ModelConfig;
@@ -159,7 +158,6 @@ pub fn run_route_dry_run(task: &str, strategy: &str) -> i32 {
 
     // Parse strategy
     let routing_strategy = match strategy.to_lowercase().as_str() {
-        "cost" | "cost-optimized" => RoutingStrategy::CostOptimized,
         "latency" | "latency-optimized" => RoutingStrategy::LatencyOptimized,
         "quality" | "quality-optimized" => RoutingStrategy::QualityOptimized,
         "balanced" => RoutingStrategy::Balanced,
@@ -170,11 +168,10 @@ pub fn run_route_dry_run(task: &str, strategy: &str) -> i32 {
     };
 
     println!("  Task: \"{}\"", task);
-    println!("  Strategy: {} (weights: cost={}, latency={}, quality={})",
+    println!("  Strategy: {} (weights: latency={}, quality={})",
         routing_strategy.name(),
         routing_strategy.weights().0,
         routing_strategy.weights().1,
-        routing_strategy.weights().2,
     );
     println!();
 
@@ -193,13 +190,11 @@ pub fn run_route_dry_run(task: &str, strategy: &str) -> i32 {
         extra: HashMap::new(),
     };
     let model_router = ModelRouter::with_defaults(fallback_config);
-    let catalog = ModelPricingCatalog::with_known_models();
 
-    // Run the smart router (no budget/health/rate constraints in dry run)
+    // Run the smart router (no health/rate constraints in dry run)
     let router = SmartRouter::new(
         model_router,
-        catalog,
-        smart_config.without_budget_awareness().without_health_awareness().without_rate_awareness(),
+        smart_config.without_health_awareness().without_rate_awareness(),
     );
 
     // Use tokio runtime for async routing
@@ -213,9 +208,6 @@ pub fn run_route_dry_run(task: &str, strategy: &str) -> i32 {
     println!("  Source:       {}", if decision.from_regex { "regex rule" } else { "multi-factor scoring" });
     println!("  Quality:      {:.2}", decision.quality_score);
     println!("  Total Score:  {:.2}", decision.total_score);
-    if decision.estimated_cost_usd > 0.0 {
-        println!("  Est. Cost:    ${:.4}", decision.estimated_cost_usd);
-    }
     if decision.estimated_latency_ms > 0 {
         println!("  Est. Latency: ~{}ms", decision.estimated_latency_ms);
     }
@@ -273,10 +265,9 @@ pub fn run_route_config() -> i32 {
 
     println!("  Available Strategies:");
     println!("  ─────────────────────────────────────────────────────");
-    println!("    • Balanced (default)     — cost=0.30, latency=0.30, quality=0.40");
-    println!("    • Cost Optimized         — cost=0.70, latency=0.10, quality=0.20");
-    println!("    • Latency Optimized      — cost=0.10, latency=0.70, quality=0.20");
-    println!("    • Quality Optimized      — cost=0.10, latency=0.10, quality=0.80");
+    println!("    • Balanced (default)     — latency=0.40, quality=0.60");
+    println!("    • Latency Optimized      — latency=0.80, quality=0.20");
+    println!("    • Quality Optimized      — latency=0.20, quality=0.80");
     println!("    • Custom                 — user-defined weights");
     println!();
 
@@ -289,7 +280,6 @@ pub fn run_route_config() -> i32 {
 
     println!("  Runtime Constraints (when enabled):");
     println!("  ─────────────────────────────────────────────────────");
-    println!("    • Budget awareness    — skip expensive models when budget is low");
     println!("    • Health awareness    — skip providers with open circuit breakers");
     println!("    • Rate awareness      — skip providers that are rate-limited");
     println!("    • Context awareness   — skip models whose context window would overflow");
@@ -299,7 +289,7 @@ pub fn run_route_config() -> i32 {
     println!("  💡 Configure in code:");
     println!("    AppBuilder::new()");
     println!("      .default_provider_pool_anthropic()");
-    println!("      .default_smart_router_cost_optimized()  // or balanced/latency/quality");
+    println!("      .default_smart_router_balanced()  // or latency/quality");
     println!("      .build()");
 
     0

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use oneai_core::error::Result;
 use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool, EmbeddingService};
 use oneai_core::EmbeddingConfig;
-use oneai_core::cost::{CostTracker, InMemoryCostTracker, ModelPricingCatalog, CostBudgetConfig};
+use oneai_core::usage::{UsageTracker, InMemoryUsageTracker};
 use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
 use oneai_core::circuit_breaker::{CircuitBreaker, ThresholdCircuitBreaker, CircuitBreakerConfig};
 use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
@@ -107,16 +107,12 @@ pub struct AppBuilder {
     embedding_service: Option<Arc<dyn EmbeddingService>>,
     /// Embedding config (optional — for lazy embedding service creation).
     embedding_config: Option<EmbeddingConfig>,
-    /// Cost tracker (optional — enables cost tracking for LLM inference calls).
-    cost_tracker: Option<Arc<dyn CostTracker>>,
+    /// Usage tracker (optional — enables token-usage tracking for LLM inference calls).
+    usage_tracker: Option<Arc<dyn UsageTracker>>,
     /// Rate limiter (optional — prevents exceeding provider API rate limits).
     rate_limiter: Option<Arc<dyn RateLimiter>>,
     /// Circuit breaker (optional — enables provider failover on repeated failures).
     circuit_breaker: Option<Arc<dyn CircuitBreaker>>,
-    /// Model pricing catalog (optional — per-model cost computation).
-    pricing_catalog: Option<ModelPricingCatalog>,
-    /// Cost budget config (optional — session budget limits).
-    cost_budget: Option<CostBudgetConfig>,
     /// Rate limit config (optional — for auto-creating rate limiter).
     rate_limit_config: Option<RateLimitConfig>,
     /// Circuit breaker config (optional — for auto-creating circuit breaker).
@@ -125,7 +121,7 @@ pub struct AppBuilder {
     provider_pool: Option<Arc<ProviderPool>>,
     /// Provider pool config (optional — for auto-creating provider pool).
     provider_pool_config: Option<ProviderPoolConfig>,
-    /// Smart router (optional — enables intelligent model selection based on cost/latency/quality).
+    /// Smart router (optional — enables intelligent model selection based on latency/quality).
     smart_router: Option<Arc<SmartRouter>>,
     /// Smart route config (optional — for auto-creating smart router).
     smart_route_config: Option<SmartRouteConfig>,
@@ -190,11 +186,9 @@ impl AppBuilder {
             checkpoint_backend: None,
             embedding_service: None,
             embedding_config: None,
-            cost_tracker: None,
+            usage_tracker: None,
             rate_limiter: None,
             circuit_breaker: None,
-            pricing_catalog: None,
-            cost_budget: None,
             rate_limit_config: None,
             circuit_breaker_config: None,
             provider_pool: None,
@@ -722,30 +716,30 @@ impl AppBuilder {
 
     // ─── Cost & Usage Management ────────────────────────────────────────────
 
-    /// Set a custom cost tracker.
+    /// Set a custom usage tracker.
     ///
     /// **Usage**:
     /// ```ignore
-    /// let cost_tracker = Arc::new(InMemoryCostTracker::new());
+    /// let usage_tracker = Arc::new(InMemoryUsageTracker::new());
     /// let app = AppBuilder::new()
     ///     .provider(provider)
-    ///     .cost_tracker(cost_tracker)  // ← enable cost tracking
+    ///     .usage_tracker(usage_tracker)  // ← enable usage tracking
     ///     .build()?;
     /// ```
-    pub fn cost_tracker(mut self, tracker: Arc<dyn CostTracker>) -> Self {
-        self.cost_tracker = Some(tracker);
+    pub fn usage_tracker(mut self, tracker: Arc<dyn UsageTracker>) -> Self {
+        self.usage_tracker = Some(tracker);
         self
     }
 
-    /// Use the default in-memory cost tracker (no persistence).
+    /// Use the default in-memory usage tracker (no persistence).
     ///
-    /// Suitable for single-process sessions. For persistent cost tracking,
-    /// use `.sqlite_cost_tracker()` instead.
-    pub fn default_cost_tracker(self) -> Self {
-        self.cost_tracker(Arc::new(InMemoryCostTracker::new()))
+    /// Suitable for single-process sessions. For persistent usage tracking,
+    /// use `.sqlite_usage_tracker()` instead.
+    pub fn default_usage_tracker(self) -> Self {
+        self.usage_tracker(Arc::new(InMemoryUsageTracker::new()))
     }
 
-    /// Use a SQLite-backed cost tracker (persistent across restarts).
+    /// Use a SQLite-backed usage tracker (persistent across restarts).
     ///
     /// Shares the same database as `SqliteSessionStore` if configured,
     /// otherwise creates a new database at `~/.oneai/oneai.db`.
@@ -755,48 +749,17 @@ impl AppBuilder {
     /// let app = AppBuilder::new()
     ///     .provider(provider)
     ///     .sqlite_persistence()       // ← session persistence
-    ///     .sqlite_cost_tracker()      // ← cost persistence
+    ///     .sqlite_usage_tracker()     // ← usage persistence
     ///     .build()?;
     /// ```
-    pub fn sqlite_cost_tracker(mut self) -> Self {
+    pub fn sqlite_usage_tracker(mut self) -> Self {
         let tracker = if let Some(store) = &self.sqlite_store {
-            Arc::new(oneai_persistence::SqliteCostTracker::from_store(store))
+            Arc::new(oneai_persistence::SqliteUsageTracker::from_store(store))
         } else {
-            Arc::new(oneai_persistence::SqliteCostTracker::with_defaults())
+            Arc::new(oneai_persistence::SqliteUsageTracker::with_defaults())
         };
-        self.cost_tracker = Some(tracker);
+        self.usage_tracker = Some(tracker);
         self
-    }
-
-    /// Set session budget limits (cost, tokens, or call count).
-    ///
-    /// When any limit is exceeded, the AgentLoop terminates the session.
-    ///
-    /// **Usage**:
-    /// ```ignore
-    /// let app = AppBuilder::new()
-    ///     .provider(provider)
-    ///     .cost_budget(CostBudgetConfig::with_cost_limit(5.0))  // ← $5 max
-    ///     .build()?;
-    /// ```
-    pub fn cost_budget(mut self, config: CostBudgetConfig) -> Self {
-        self.cost_budget = Some(config);
-        self
-    }
-
-    /// Set a custom model pricing catalog.
-    ///
-    /// The pricing catalog provides per-model cost computation.
-    /// By default, uses `ModelPricingCatalog::with_known_models()`
-    /// which includes pricing for GPT-4o, Claude, Gemini, DeepSeek, etc.
-    pub fn pricing_catalog(mut self, catalog: ModelPricingCatalog) -> Self {
-        self.pricing_catalog = Some(catalog);
-        self
-    }
-
-    /// Use the default model pricing catalog (known models + fallback).
-    pub fn default_pricing_catalog(self) -> Self {
-        self.pricing_catalog(ModelPricingCatalog::with_known_models())
     }
 
     /// Set a custom rate limiter.
@@ -875,7 +838,7 @@ impl AppBuilder {
     ///         ProviderEntry::new("ollama", ollama_provider, 2),
     ///     ],
     ///     ProviderPoolConfig::default(),
-    /// ).with_circuit_breaker(cb).with_rate_limiter(rl).with_cost_tracker(ct);
+    /// ).with_circuit_breaker(cb).with_rate_limiter(rl).with_usage_tracker(ct);
     ///
     /// let app = AppBuilder::new()
     ///     .provider_pool(Arc::new(pool))  // ← enable multi-provider fallback
@@ -889,7 +852,7 @@ impl AppBuilder {
     /// Configure provider pool settings (for auto-creation at build time).
     ///
     /// The pool is created at build time using the given configuration.
-    /// If a circuit breaker, rate limiter, or cost tracker are also
+    /// If a circuit breaker, rate limiter, or usage tracker are also
     /// configured, they are automatically wired into the pool.
     ///
     /// **Usage**:
@@ -903,7 +866,7 @@ impl AppBuilder {
     ///     .provider_pool_config(config)  // ← configure pool
     ///     .default_circuit_breaker()     // ← wire into pool
     ///     .default_rate_limiter()        // ← wire into pool
-    ///     .default_cost_tracker()        // ← wire into pool
+    ///     .default_usage_tracker()        // ← wire into pool
     ///     .build()?;
     /// ```
     pub fn provider_pool_config(mut self, config: ProviderPoolConfig) -> Self {
@@ -958,7 +921,6 @@ impl AppBuilder {
     /// ```ignore
     /// let router = SmartRouter::new(
     ///     ModelRouter::with_defaults(config),
-    ///     ModelPricingCatalog::with_known_models(),
     ///     SmartRouteConfig::balanced(),
     /// );
     ///
@@ -976,13 +938,13 @@ impl AppBuilder {
     ///
     /// If a smart router is not explicitly set, but a smart route config is
     /// provided, a SmartRouter is auto-created at build time using the
-    /// configured ModelRouter defaults and ModelPricingCatalog.
+    /// configured ModelRouter defaults.
     ///
     /// **Usage**:
     /// ```ignore
     /// let app = AppBuilder::new()
     ///     .default_provider_pool_anthropic()
-    ///     .smart_route_config(SmartRouteConfig::cost_optimized())  // ← cost-first routing
+    ///     .smart_route_config(SmartRouteConfig::latency_optimized())  // ← latency-first routing
     ///     .build()?;
     /// ```
     pub fn smart_route_config(mut self, config: SmartRouteConfig) -> Self {
@@ -992,18 +954,10 @@ impl AppBuilder {
 
     /// Use balanced smart routing (default).
     ///
-    /// Balances cost, latency, and quality equally. Uses regex rules
+    /// Balances latency and quality. Uses regex rules
     /// as first-pass, then multi-factor scoring if regex fails validation.
     pub fn default_smart_router_balanced(self) -> Self {
         self.smart_route_config(SmartRouteConfig::balanced())
-    }
-
-    /// Use cost-optimized smart routing.
-    ///
-    /// Minimizes cost above all else. Cheaper models are preferred,
-    /// expensive models are avoided when budget is low.
-    pub fn default_smart_router_cost_optimized(self) -> Self {
-        self.smart_route_config(SmartRouteConfig::cost_optimized())
     }
 
     /// Use latency-optimized smart routing.
@@ -1280,14 +1234,6 @@ impl AppBuilder {
     /// Fastest routing, quality threshold 0.6, and 60k token budget.
     pub fn default_swarm_fast_research(self) -> Self {
         self.swarm_config(oneai_core::SwarmPresets::fast_research_swarm())
-    }
-
-    /// Use the default budget code swarm (CostOptimized routing with 4 agents).
-    ///
-    /// Creates a SwarmConfig with 4 agents, CostOptimized routing,
-    /// quality threshold 0.75, and 80k token budget.
-    pub fn default_swarm_budget_code(self) -> Self {
-        self.swarm_config(oneai_core::SwarmPresets::budget_code_swarm())
     }
 
     /// Use the default balanced dev swarm (LoadBalanced routing with 4 agents).
@@ -1611,18 +1557,12 @@ impl AppBuilder {
             }
         }
 
-        // Resolve cost tracker: use explicitly set tracker, or auto-create from budget config
-        let cost_tracker = self.cost_tracker.or_else(|| {
-            if self.cost_budget.is_some() || self.sqlite_store.is_some() {
-                // Auto-create if budget is set or persistence is available
-                if let Some(store) = &self.sqlite_store {
-                    Some(Arc::new(oneai_persistence::SqliteCostTracker::from_store(store))
-                        as Arc<dyn CostTracker>)
-                } else {
-                    Some(Arc::new(InMemoryCostTracker::with_budget(
-                        self.cost_budget.clone().unwrap_or_default()
-                    )) as Arc<dyn CostTracker>)
-                }
+        // Resolve usage tracker: use explicitly set tracker, or auto-create from persistence
+        let usage_tracker = self.usage_tracker.or_else(|| {
+            if let Some(store) = &self.sqlite_store {
+                // Auto-create persistent tracker if persistence is available
+                Some(Arc::new(oneai_persistence::SqliteUsageTracker::from_store(store))
+                    as Arc<dyn UsageTracker>)
             } else {
                 None
             }
@@ -1703,8 +1643,8 @@ impl AppBuilder {
         });
 
         // Resolve smart router: use explicitly set router, or auto-create from config
-        // The smart router uses ModelRouter defaults + ModelPricingCatalog
-        // It needs circuit breaker, rate limiter, and cost tracker to be already resolved
+        // The smart router uses ModelRouter defaults.
+        // It needs circuit breaker and rate limiter to be already resolved
         let resolved_smart_router = self.smart_router.or_else(|| {
             self.smart_route_config.map(|config| {
                 // Create a default ModelRouter for the smart router's regex first-pass
@@ -1720,20 +1660,13 @@ impl AppBuilder {
                     extra: std::collections::HashMap::new(),
                 };
                 let model_router = oneai_provider::ModelRouter::with_defaults(fallback_config);
-                let catalog = ModelPricingCatalog::with_known_models();
 
-                let mut router = SmartRouter::new(model_router, catalog, config);
+                let mut router = SmartRouter::new(model_router, config);
                 if let Some(cb) = &circuit_breaker {
                     router = router.with_circuit_breaker(cb.clone());
                 }
                 if let Some(rl) = &rate_limiter {
                     router = router.with_rate_limiter(rl.clone());
-                }
-                if let Some(ct) = &cost_tracker {
-                    router = router.with_cost_tracker(ct.clone());
-                }
-                if let Some(bc) = &self.cost_budget {
-                    router = router.with_budget_config(bc.clone());
                 }
                 // Wire TokenCounter into SmartRouter if configured
                 if let Some(tc) = &resolved_token_counter {
@@ -1748,7 +1681,7 @@ impl AppBuilder {
         let provider_pool = self.provider_pool.or_else(|| {
             self.provider_pool_config.map(|config| {
                 let pool = ProviderPool::from_config(config);
-                // Wire circuit breaker, rate limiter, cost tracker into the pool
+                // Wire circuit breaker, rate limiter, usage tracker into the pool
                 let mut pool = pool;
                 if let Some(cb) = &circuit_breaker {
                     pool = pool.with_circuit_breaker(cb.clone());
@@ -1756,8 +1689,8 @@ impl AppBuilder {
                 if let Some(rl) = &rate_limiter {
                     pool = pool.with_rate_limiter(rl.clone());
                 }
-                if let Some(ct) = &cost_tracker {
-                    pool = pool.with_cost_tracker(ct.clone());
+                if let Some(ct) = &usage_tracker {
+                    pool = pool.with_usage_tracker(ct.clone());
                 }
                 // Wire smart router into the pool if configured
                 if let Some(sr) = &resolved_smart_router {
@@ -1787,10 +1720,6 @@ impl AppBuilder {
         }
 
         // Resolve pricing catalog: use explicitly set catalog, or default
-        let pricing_catalog = self.pricing_catalog.or_else(|| {
-            Some(ModelPricingCatalog::with_known_models())
-        });
-
         let platform = self.platform.unwrap_or(Platform::current());
 
         // Discover skills from convention directories (.claude/skills/,
@@ -1828,10 +1757,9 @@ impl AppBuilder {
             a2a_server_host,
             sqlite_store: self.sqlite_store,
             embedding_service,
-            cost_tracker,
+            usage_tracker,
             rate_limiter,
             circuit_breaker,
-            pricing_catalog,
             provider_pool,
             smart_router: resolved_smart_router,
             token_counter: resolved_token_counter,
@@ -1908,14 +1836,12 @@ pub struct App {
     pub sqlite_store: Option<Arc<SqliteSessionStore>>,
     /// Embedding service (optional — for auto-embedding RAG and memory search).
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
-    /// Cost tracker (optional — for tracking LLM inference costs).
-    pub cost_tracker: Option<Arc<dyn CostTracker>>,
+    /// Usage tracker (optional — for tracking LLM inference token usage).
+    pub usage_tracker: Option<Arc<dyn UsageTracker>>,
     /// Rate limiter (optional — for provider API rate limiting).
     pub rate_limiter: Option<Arc<dyn RateLimiter>>,
     /// Circuit breaker (optional — for provider failover).
     pub circuit_breaker: Option<Arc<dyn CircuitBreaker>>,
-    /// Model pricing catalog (optional — for per-model cost computation).
-    pub pricing_catalog: Option<ModelPricingCatalog>,
     /// Provider pool (optional — for multi-provider fallback orchestration).
     pub provider_pool: Option<Arc<ProviderPool>>,
     /// Smart router for intelligent model selection.
@@ -2051,9 +1977,9 @@ impl App {
         self.embedding_service.as_ref()
     }
 
-    /// Get the cost tracker (for cost tracking and budget enforcement).
-    pub fn cost_tracker(&self) -> Option<&Arc<dyn CostTracker>> {
-        self.cost_tracker.as_ref()
+    /// Get the usage tracker (for token-usage tracking).
+    pub fn usage_tracker(&self) -> Option<&Arc<dyn UsageTracker>> {
+        self.usage_tracker.as_ref()
     }
 
     /// Get the rate limiter (for provider API rate limiting).
@@ -2064,11 +1990,6 @@ impl App {
     /// Get the circuit breaker (for provider failover).
     pub fn circuit_breaker(&self) -> Option<&Arc<dyn CircuitBreaker>> {
         self.circuit_breaker.as_ref()
-    }
-
-    /// Get the model pricing catalog (for per-model cost computation).
-    pub fn pricing_catalog(&self) -> Option<&ModelPricingCatalog> {
-        self.pricing_catalog.as_ref()
     }
 
     /// Get the provider pool (for multi-provider fallback orchestration).

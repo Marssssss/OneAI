@@ -36,7 +36,6 @@ pub enum ObserverEvent {
     ApprovalRequest(ApprovalRequest),
     ApprovalResponse(ApprovalResponse),
     TokenUsageUpdate(TokenUsage),
-    CostUpdate(f64),
     ContextAccountingUpdate(ContextAccounting),
 
     /// Thinking/reasoning content fragment from extended thinking models.
@@ -141,10 +140,6 @@ impl AgentLoopObserver for TuiObserver {
         };
         // Accumulate into session total
         let _ = self.tx.send(ObserverEvent::TokenUsageUpdate(usage));
-    }
-
-    fn on_cost_update(&self, cost: f64) {
-        let _ = self.tx.send(ObserverEvent::CostUpdate(cost));
     }
 
     fn on_context_accounting(&self, accounting: &oneai_core::ContextAccounting) {

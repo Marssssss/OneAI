@@ -151,8 +151,8 @@ pub fn format_handoff_result(result: &HandoffResult) -> String {
             ));
         }
         output.push_str(&format!(
-            "\nTotal: {} handoffs, {} tokens, ${:.4} cost\n",
-            result.handoff_count, result.total_tokens, result.total_cost
+            "\nTotal: {} handoffs, {} tokens\n",
+            result.handoff_count, result.total_tokens
         ));
     } else {
         output.push_str("No handoffs occurred — single agent handled the task.\n");

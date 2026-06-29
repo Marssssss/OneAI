@@ -89,9 +89,6 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Called after each inference with token usage stats.
     fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {}
 
-    /// Called when cost updates (cumulative session cost).
-    fn on_cost_update(&self, _cost: f64) {}
-
     /// Called after assembling the context for each iteration, with a breakdown
     /// of how the context window is occupied. This includes the full assembled
     /// conversation (system prompt, tool defs, context sources, messages),
@@ -464,36 +461,6 @@ pub struct AgentLoopResult {
 
 // ─── AgentLoopConfig ────────────────────────────────────────────────────────
 
-/// Pricing configuration per 1K tokens (in USD).
-///
-/// Allows the AgentLoop to compute session cost after each inference
-/// and notify the observer via `on_cost_update`.
-#[derive(Debug, Clone, Copy)]
-pub struct ModelPricing {
-    /// Cost per 1K prompt tokens (USD).
-    pub prompt_per_1k: f64,
-    /// Cost per 1K completion tokens (USD).
-    pub completion_per_1k: f64,
-}
-
-impl Default for ModelPricing {
-    /// Default pricing: rough GPT-4 rates ($0.03/1K prompt, $0.06/1K completion).
-    fn default() -> Self {
-        Self {
-            prompt_per_1k: 0.03,
-            completion_per_1k: 0.06,
-        }
-    }
-}
-
-impl ModelPricing {
-    /// Compute cost for a given token usage.
-    pub fn compute_cost(&self, prompt_tokens: u32, completion_tokens: u32) -> f64 {
-        (prompt_tokens as f64 / 1000.0) * self.prompt_per_1k
-            + (completion_tokens as f64 / 1000.0) * self.completion_per_1k
-    }
-}
-
 #[derive(Clone)]
 pub struct AgentLoopConfig {
     pub system_prompt: String,
@@ -514,11 +481,9 @@ pub struct AgentLoopConfig {
     pub auto_checkpoint: bool,
     pub inject_skills: bool,
     pub detect_env_changes: bool,
-    /// Pricing configuration for cost tracking.
-    pub pricing: ModelPricing,
-    /// Cost tracker — records usage after each inference call.
-    /// When set, the loop automatically records token usage and cost.
-    pub cost_tracker: Option<Arc<dyn oneai_core::CostTracker>>,
+    /// Usage tracker — records token usage after each inference call.
+    /// When set, the loop automatically records token usage (no USD cost).
+    pub usage_tracker: Option<Arc<dyn oneai_core::UsageTracker>>,
     /// Rate limiter — checks rate before each provider call.
     /// When set, the loop waits if the rate limit is exceeded.
     pub rate_limiter: Option<Arc<dyn oneai_core::RateLimiter>>,
@@ -527,14 +492,10 @@ pub struct AgentLoopConfig {
     pub circuit_breaker: Option<Arc<dyn oneai_core::CircuitBreaker>>,
     /// Token counter — client-side token estimation. When the provider returns
     /// no usage in its (streaming) response, the loop falls back to counting
-    /// tokens locally with this counter so the cost axis (tokens/cost) isn't
+    /// tokens locally with this counter so the usage axis (tokens) isn't
     /// silently zero. Matches the litellm/aider pattern: API usage authoritative
     /// when present, client-side estimate otherwise.
     pub token_counter: Option<Arc<dyn oneai_core::TokenCounter>>,
-    /// Model pricing catalog — per-model cost computation.
-    /// When set, cost tracking uses this catalog for accurate pricing.
-    /// When None, uses the `pricing` field (backward-compatible).
-    pub pricing_catalog: Option<oneai_core::ModelPricingCatalog>,
     /// Structured output configuration — when set, the model's final
     /// answer is validated against a JSON Schema. If validation fails,
     /// the model is re-prompted with the error for self-correction (ModelRetry).
@@ -565,12 +526,10 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("auto_checkpoint", &self.auto_checkpoint)
             .field("inject_skills", &self.inject_skills)
             .field("detect_env_changes", &self.detect_env_changes)
-            .field("pricing", &self.pricing)
-            .field("cost_tracker", &self.cost_tracker.as_ref().map(|_| "Arc<dyn CostTracker>"))
+            .field("usage_tracker", &self.usage_tracker.as_ref().map(|_| "Arc<dyn UsageTracker>"))
             .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
             .field("circuit_breaker", &self.circuit_breaker.as_ref().map(|_| "Arc<dyn CircuitBreaker>"))
             .field("token_counter", &self.token_counter.as_ref().map(|_| "Arc<dyn TokenCounter>"))
-            .field("pricing_catalog", &self.pricing_catalog)
             .field("structured_output", &self.structured_output)
             .field("trace_context", &self.trace_context)
             .field("plan_mode", &self.plan_mode)
@@ -609,12 +568,10 @@ impl Default for AgentLoopConfig {
             auto_checkpoint: true,
             inject_skills: true,
             detect_env_changes: true,
-            pricing: ModelPricing::default(),
-            cost_tracker: None,
+            usage_tracker: None,
             rate_limiter: None,
             circuit_breaker: None,
             token_counter: None,
-            pricing_catalog: None,
             structured_output: None,
             trace_context: None,
             plan_mode: false,
@@ -928,8 +885,6 @@ impl AgentLoop {
         observer: &dyn AgentLoopObserver,
     ) -> Result<AgentLoopResult> {
 
-        // Track cumulative session cost
-        let mut cumulative_cost: f64 = 0.0;
         // Track structured output retry count (separate from iteration count)
         let mut structured_retry_count: usize = 0;
         // Track consecutive rate limit errors — after too many, terminate the loop
@@ -1010,18 +965,6 @@ impl AgentLoop {
                 }
             }
 
-            // ─── Budget enforcement check ─────────────────────────────────────
-            if let Some(cost_tracker) = &self.config.cost_tracker {
-                let budget_status = cost_tracker.check_budget(&state.conversation.id).await.unwrap_or(oneai_core::BudgetStatus::unlimited(state.iterations as u64));
-                if budget_status.budget_exceeded {
-                    tracing::warn!("Budget exceeded for session {} — terminating loop",
-                        state.conversation.id);
-                    observer.on_cost_update(cumulative_cost);
-                    let result = state.into_result();
-                    observer.on_complete(&result);
-                    return Ok(result);
-                }
-            }
             observer.on_iteration_start(state.iterations, state.active_paradigm);
 
             // ─── Trace: log iteration event ──────────────────────────
@@ -1356,17 +1299,8 @@ impl AgentLoop {
                 (provider_usage.prompt_tokens, provider_usage.completion_tokens, false)
             };
 
-            // Use pricing catalog if available, otherwise fall back to ModelPricing
-            let iteration_cost = if let Some(catalog) = &self.config.pricing_catalog {
-                catalog.compute_cost(&response.model, prompt_tokens, completion_tokens)
-            } else {
-                self.config.pricing.compute_cost(prompt_tokens, completion_tokens)
-            };
-            cumulative_cost += iteration_cost;
-            observer.on_cost_update(cumulative_cost);
-
-            // 4c. Record usage in cost tracker (if configured)
-            if let Some(cost_tracker) = &self.config.cost_tracker {
+            // 4c. Record usage in usage tracker (if configured)
+            if let Some(usage_tracker) = &self.config.usage_tracker {
                 let session_id = state.conversation.id.clone();
                 let provider_name = self.provider_name();
                 let mut record = oneai_core::UsageRecord::new(
@@ -1375,12 +1309,11 @@ impl AgentLoop {
                     provider_name,
                     prompt_tokens,
                     completion_tokens,
-                    iteration_cost,
                 );
                 if is_estimated {
                     record.is_estimated = true;
                 }
-                let _ = cost_tracker.record_usage(record).await;
+                let _ = usage_tracker.record_usage(record).await;
             }
 
             // 4d. Record circuit breaker success (if configured)
@@ -1468,16 +1401,18 @@ impl AgentLoop {
 
                 // Notify observer of retry token usage
                 observer.on_token_usage(retry_response.usage.prompt_tokens, retry_response.usage.completion_tokens);
-                let retry_cost = if let Some(catalog) = &self.config.pricing_catalog {
-                    catalog.compute_cost(&retry_response.model, retry_response.usage.prompt_tokens, retry_response.usage.completion_tokens)
-                } else {
-                    self.config.pricing.compute_cost(
+
+                // Record retry usage in usage tracker (if configured)
+                if let Some(usage_tracker) = &self.config.usage_tracker {
+                    let record = oneai_core::UsageRecord::new(
+                        state.conversation.id.clone(),
+                        retry_response.model.clone(),
+                        self.provider_name(),
                         retry_response.usage.prompt_tokens,
                         retry_response.usage.completion_tokens,
-                    )
-                };
-                cumulative_cost += retry_cost;
-                observer.on_cost_update(cumulative_cost);
+                    );
+                    let _ = usage_tracker.record_usage(record).await;
+                }
 
                 decision = self.parse_decision(&retry_response)?;
 

@@ -184,7 +184,7 @@ pub async fn cmd_eval_swebench(
         .provider(Arc::from(provider))
         .auto_approval_gate()
         .default_parser()
-        .default_cost_tracker()
+        .default_usage_tracker()
         .default_token_counter()
         .trace_in_memory()
         .domain_pack(coding_pack)
@@ -237,11 +237,10 @@ pub async fn cmd_eval_swebench(
         Ok(json) => {
             let _ = std::fs::write(&leaderboard_path, json);
             println!(
-                "Leaderboard: {}/{} resolved ({:.1}%) | cost ${:.4} | {} api calls → {}",
+                "Leaderboard: {}/{} resolved ({:.1}%) | {} api calls → {}",
                 leaderboard.resolved_count,
                 leaderboard.total_instances,
                 leaderboard.resolution_rate * 100.0,
-                leaderboard.instance_cost,
                 leaderboard.instance_calls,
                 leaderboard_path.display(),
             );

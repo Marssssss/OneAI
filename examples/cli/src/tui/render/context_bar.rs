@@ -17,10 +17,10 @@ use super::super::theme::*;
 /// Draw the context bar (shown only when sidebar is collapsed).
 ///
 /// Displays a compact info line below the brand line:
-/// `阿里百炼·qwen-plus | a3f2 | ReAct#3 | ctx 0.6k/128k $0.003`
+/// `阿里百炼·qwen-plus | a3f2 | ReAct#3 | ctx 0.6k/128k 🪙1.2k`
 #[allow(dead_code)]
 pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
-    let cost_prefix = if app.session_cost_is_estimated { "~" } else { "" };
+    let tok_prefix = if app.token_usage.is_estimated { "~" } else { "" };
     let ctx_prefix = if app.context_tokens_is_estimated { "~" } else { "" };
     let ctx_display = if app.context_tokens >= 1000 {
         format!("{:.1}k", app.context_tokens as f64 / 1000.0)
@@ -69,7 +69,7 @@ pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
         spans.push(Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)));
     }
 
-    spans.push(Span::styled(format!("{}ctx{}/{}k {}${:.3}", ctx_prefix, ctx_display, ctx_max_display, cost_prefix, app.session_cost),
+    spans.push(Span::styled(format!("{}ctx{}/{}k 🪙{}{}tok", ctx_prefix, ctx_display, ctx_max_display, tok_prefix, app.token_usage.total),
         Style::default().fg(CONTEXT_COST_COLOR)));
 
     let line = Line::from(spans);

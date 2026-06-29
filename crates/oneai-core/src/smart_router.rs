@@ -1,28 +1,29 @@
-//! Smart Model Router — production-grade cost/latency/quality routing.
+//! Smart Model Router — production-grade latency/quality routing.
 //!
 //! The current `ModelRouter` (regex-based) is purely keyword-driven: it matches
 //! task description patterns against routing rules to select a model tier. This
 //! works for simple cases but fails in production scenarios where:
 //!
-//! 1. Budget constraints matter — "we have $2 left, route to Haiku not Opus"
-//! 2. Latency matters — "user needs fast response, prefer Gemini Flash"
-//! 3. Provider health matters — "Anthropic circuit is open, skip to OpenAI"
-//! 4. Rate limits matter — "Anthropic rate limit hit, use Ollama instead"
-//! 5. Context windows matter — "conversation is 180K tokens, use 200K model"
+//! 1. Latency matters — "user needs fast response, prefer Gemini Flash"
+//! 2. Provider health matters — "Anthropic circuit is open, skip to OpenAI"
+//! 3. Rate limits matter — "Anthropic rate limit hit, use Ollama instead"
+//! 4. Context windows matter — "conversation is 180K tokens, use 200K model"
 //!
 //! The `SmartRouter` upgrades from regex-only routing to **multi-factor routing**:
-//! - Cost scoring (from ModelPricingCatalog + budget remaining)
 //! - Latency scoring (from estimated response times per model)
 //! - Quality scoring (from model tier: Cheap/Balanced/Powerful)
 //! - Health scoring (from CircuitBreaker state)
 //! - Rate scoring (from RateLimiter status)
 //!
+//! (USD cost scoring and budget-aware routing were removed — OneAI no longer
+//! tracks dollar amounts. Termination is governed by `TokenBudget`.)
+//!
 //! The routing algorithm:
 //! 1. Evaluate regex rules (existing ModelRouter, backward compatible)
-//! 2. Validate regex result against runtime constraints (circuit, rate, budget, context)
+//! 2. Validate regex result against runtime constraints (circuit, rate, context)
 //! 3. If regex result fails validation, or strategy overrides regex:
-//!    - Score all available providers on cost/latency/quality dimensions
-//!    - Weight scores by the configured strategy (CostOptimized/LatencyOptimized/etc.)
+//!    - Score all available providers on latency/quality dimensions
+//!    - Weight scores by the configured strategy (LatencyOptimized/etc.)
 //!    - Pick the highest-scoring available provider
 //! 4. Return `SmartRouteDecision` with full rationale
 //!
@@ -30,12 +31,12 @@
 //! because it depends on concrete provider implementations and the ModelRouter.
 //!
 //! Key concepts:
-//! - `RoutingStrategy`: Which dimension to prioritize (cost, latency, quality, balanced)
+//! - `RoutingStrategy`: Which dimension to prioritize (latency, quality, balanced)
 //! - `SmartRouteConfig`: Configuration for the smart router (strategy, weights, thresholds)
 //! - `SmartRouteDecision`: Full routing decision with rationale and factor analysis
 //! - `SmartRouteFactor`: What factors influenced the routing decision
-//! - `RoutingTier`: Cost/capability tier classification (Cheap, Balanced, Powerful)
-//! - `ModelQualityProfile`: Per-model quality/latency/cost characteristics
+//! - `RoutingTier`: Capability tier classification (Cheap, Balanced, Powerful)
+//! - `ModelQualityProfile`: Per-model quality/latency characteristics
 //! - `SmartRoutingLog`: Audit trail for routing decisions (like FallbackLog)
 
 
@@ -47,39 +48,33 @@ use serde::{Deserialize, Serialize};
 
 /// Which dimension to prioritize when routing model selection.
 ///
-/// Each strategy defines different weight ratios for the three scoring dimensions:
-/// cost, latency, and quality. The weights determine which providers/models
+/// Each strategy defines different weight ratios for the two scoring dimensions:
+/// latency and quality. The weights determine which providers/models
 /// are preferred under that strategy.
 ///
-/// | Strategy | Cost Wt | Latency Wt | Quality Wt |
-/// |----------|---------|------------|------------|
-/// | CostOptimized | 0.70 | 0.10 | 0.20 |
-/// | LatencyOptimized | 0.10 | 0.70 | 0.20 |
-/// | QualityOptimized | 0.10 | 0.10 | 0.80 |
-/// | Balanced | 0.30 | 0.30 | 0.40 |
-/// | Custom | user-defined | user-defined | user-defined |
+/// | Strategy | Latency Wt | Quality Wt |
+/// |----------|------------|------------|
+/// | LatencyOptimized | 0.80 | 0.20 |
+/// | QualityOptimized | 0.20 | 0.80 |
+/// | Balanced | 0.40 | 0.60 |
+/// | Custom | user-defined | user-defined |
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RoutingStrategy {
-    /// Minimize cost — prefer cheaper models (Haiku, gpt-4o-mini, Gemini Flash).
-    /// Weight: Cost=0.70, Latency=0.10, Quality=0.20
-    CostOptimized,
-
     /// Minimize latency — prefer faster models (Haiku, Gemini Flash, gpt-4o-mini).
-    /// Weight: Cost=0.10, Latency=0.70, Quality=0.20
+    /// Weight: Latency=0.80, Quality=0.20
     LatencyOptimized,
 
     /// Maximize quality — prefer powerful models (Opus, o3-pro, Gemini Pro).
-    /// Weight: Cost=0.10, Latency=0.10, Quality=0.80
+    /// Weight: Latency=0.20, Quality=0.80
     QualityOptimized,
 
-    /// Balance all dimensions — moderate cost, latency, and quality.
-    /// Weight: Cost=0.30, Latency=0.30, Quality=0.40
+    /// Balance both dimensions — moderate latency and quality.
+    /// Weight: Latency=0.40, Quality=0.60
     Balanced,
 
     /// Custom weights — user-defined weight ratios.
     Custom {
-        cost_weight: f64,
         latency_weight: f64,
         quality_weight: f64,
     },
@@ -88,23 +83,21 @@ pub enum RoutingStrategy {
 impl RoutingStrategy {
     /// Get the weight ratios for this strategy.
     ///
-    /// Returns (cost_weight, latency_weight, quality_weight).
+    /// Returns (latency_weight, quality_weight).
     /// Weights always sum to 1.0.
-    pub fn weights(&self) -> (f64, f64, f64) {
+    pub fn weights(&self) -> (f64, f64) {
         match self {
-            Self::CostOptimized => (0.70, 0.10, 0.20),
-            Self::LatencyOptimized => (0.10, 0.70, 0.20),
-            Self::QualityOptimized => (0.10, 0.10, 0.80),
-            Self::Balanced => (0.30, 0.30, 0.40),
-            Self::Custom { cost_weight, latency_weight, quality_weight } =>
-                (*cost_weight, *latency_weight, *quality_weight),
+            Self::LatencyOptimized => (0.80, 0.20),
+            Self::QualityOptimized => (0.20, 0.80),
+            Self::Balanced => (0.40, 0.60),
+            Self::Custom { latency_weight, quality_weight } =>
+                (*latency_weight, *quality_weight),
         }
     }
 
     /// Human-readable name of this strategy.
     pub fn name(&self) -> &str {
         match self {
-            Self::CostOptimized => "Cost Optimized",
             Self::LatencyOptimized => "Latency Optimized",
             Self::QualityOptimized => "Quality Optimized",
             Self::Balanced => "Balanced",
@@ -115,11 +108,11 @@ impl RoutingStrategy {
     /// Create a custom strategy with validated weights.
     ///
     /// Weights must be in [0.0, 1.0] and must sum to approximately 1.0.
-    pub fn custom(cost_weight: f64, latency_weight: f64, quality_weight: f64) -> Self {
-        let total = cost_weight + latency_weight + quality_weight;
+    pub fn custom(latency_weight: f64, quality_weight: f64) -> Self {
+        let total = latency_weight + quality_weight;
         assert!(total > 0.99 && total < 1.01,
             "Custom strategy weights must sum to 1.0 (got {})", total);
-        Self::Custom { cost_weight, latency_weight, quality_weight }
+        Self::Custom { latency_weight, quality_weight }
     }
 }
 
@@ -136,17 +129,17 @@ impl Default for RoutingStrategy {
 /// Defines the routing strategy, dimension weights, and various constraints
 /// that the router considers when making routing decisions.
 ///
-/// The smart router evaluates multiple factors (cost, latency, quality,
-/// circuit breaker, rate limiter, budget, context window) and produces
+/// The smart router evaluates multiple factors (latency, quality,
+/// circuit breaker, rate limiter, context window) and produces
 /// a weighted scoring that determines which provider/model to use.
 ///
 /// **Usage**:
 /// ```ignore
 /// let config = SmartRouteConfig::balanced();
 /// // or:
-/// let config = SmartRouteConfig::cost_optimized();
+/// let config = SmartRouteConfig::latency_optimized();
 /// // or:
-/// let config = SmartRouteConfig::custom(RoutingStrategy::custom(0.5, 0.2, 0.3));
+/// let config = SmartRouteConfig::custom(RoutingStrategy::custom(0.5, 0.5));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -154,12 +147,6 @@ pub struct SmartRouteConfig {
     /// The routing strategy — which dimension to prioritize.
     #[serde(default)]
     pub strategy: RoutingStrategy,
-
-    /// Whether to consider budget remaining when routing.
-    /// When true, the router checks CostTracker budget and avoids
-    /// expensive models when budget is low.
-    #[serde(default = "default_true")]
-    pub budget_aware: bool,
 
     /// Whether to consider provider health (circuit breaker) when routing.
     /// When true, the router skips providers with open circuits.
@@ -190,13 +177,6 @@ pub struct SmartRouteConfig {
     #[serde(default = "default_max_latency_ms")]
     pub max_latency_ms: u64,
 
-    /// Minimum budget remaining (in USD) to allow routing to expensive models.
-    /// If the session budget remaining is below this threshold, the router
-    /// will avoid routing to powerful/expensive models regardless of strategy.
-    /// Default: 1.0 USD.
-    #[serde(default = "default_min_budget_usd")]
-    pub min_budget_for_expensive: f64,
-
     /// Conversation token count threshold for context overflow.
     /// If the conversation token count exceeds this percentage of a model's
     /// context window, the model is skipped.
@@ -207,7 +187,6 @@ pub struct SmartRouteConfig {
 
 fn default_true() -> bool { true }
 fn default_max_latency_ms() -> u64 { 30000 }
-fn default_min_budget_usd() -> f64 { 1.0 }
 fn default_context_threshold() -> f64 { 0.8 }
 
 impl Default for SmartRouteConfig {
@@ -221,28 +200,11 @@ impl SmartRouteConfig {
     pub fn balanced() -> Self {
         Self {
             strategy: RoutingStrategy::Balanced,
-            budget_aware: true,
             health_aware: true,
             rate_aware: true,
             context_aware: true,
             regex_first_pass: true,
             max_latency_ms: 30000,
-            min_budget_for_expensive: 1.0,
-            context_overflow_threshold: 0.8,
-        }
-    }
-
-    /// Create a cost-optimized config — minimizes cost above all else.
-    pub fn cost_optimized() -> Self {
-        Self {
-            strategy: RoutingStrategy::CostOptimized,
-            budget_aware: true,
-            health_aware: true,
-            rate_aware: true,
-            context_aware: true,
-            regex_first_pass: true,
-            max_latency_ms: 60000, // More tolerant of latency for cost savings
-            min_budget_for_expensive: 2.0, // Higher threshold — avoid expensive models sooner
             context_overflow_threshold: 0.8,
         }
     }
@@ -251,13 +213,11 @@ impl SmartRouteConfig {
     pub fn latency_optimized() -> Self {
         Self {
             strategy: RoutingStrategy::LatencyOptimized,
-            budget_aware: true,
             health_aware: true,
             rate_aware: true,
             context_aware: true,
             regex_first_pass: true,
             max_latency_ms: 10000, // Only accept fast models
-            min_budget_for_expensive: 0.5, // Allow expensive models if they're fast
             context_overflow_threshold: 0.8,
         }
     }
@@ -266,13 +226,11 @@ impl SmartRouteConfig {
     pub fn quality_optimized() -> Self {
         Self {
             strategy: RoutingStrategy::QualityOptimized,
-            budget_aware: true,
             health_aware: true,
             rate_aware: true,
             context_aware: true,
             regex_first_pass: true,
             max_latency_ms: 60000, // Accept slower responses for higher quality
-            min_budget_for_expensive: 0.5, // Allow expensive models for quality
             context_overflow_threshold: 0.8,
         }
     }
@@ -281,13 +239,11 @@ impl SmartRouteConfig {
     pub fn with_strategy(strategy: RoutingStrategy) -> Self {
         Self {
             strategy,
-            budget_aware: true,
             health_aware: true,
             rate_aware: true,
             context_aware: true,
             regex_first_pass: true,
             max_latency_ms: 30000,
-            min_budget_for_expensive: 1.0,
             context_overflow_threshold: 0.8,
         }
     }
@@ -299,13 +255,11 @@ impl SmartRouteConfig {
     pub fn regex_only() -> Self {
         Self {
             strategy: RoutingStrategy::Balanced,
-            budget_aware: false,
             health_aware: false,
             rate_aware: false,
             context_aware: false,
             regex_first_pass: true,
             max_latency_ms: u64::MAX,
-            min_budget_for_expensive: 0.0,
             context_overflow_threshold: 1.0,
         }
     }
@@ -316,21 +270,9 @@ impl SmartRouteConfig {
         self
     }
 
-    /// Set custom min budget for expensive models.
-    pub fn with_min_budget_for_expensive(mut self, usd: f64) -> Self {
-        self.min_budget_for_expensive = usd;
-        self
-    }
-
     /// Set custom context overflow threshold.
     pub fn with_context_threshold(mut self, threshold: f64) -> Self {
         self.context_overflow_threshold = threshold;
-        self
-    }
-
-    /// Disable budget awareness.
-    pub fn without_budget_awareness(mut self) -> Self {
-        self.budget_aware = false;
         self
     }
 
@@ -355,10 +297,10 @@ impl SmartRouteConfig {
 
 // ─── RoutingTier ───────────────────────────────────────────────────────────────
 
-/// Cost/capability tier classification for models.
+/// Capability tier classification for models.
 ///
-/// Models are classified into three tiers based on their cost and capability:
-/// - **Cheap**: fast, low-cost — for simple/explore tasks (Haiku, gpt-4o-mini, Gemini Flash)
+/// Models are classified into three tiers based on their capability/size:
+/// - **Cheap**: small, fast — for simple/explore tasks (Haiku, gpt-4o-mini, Gemini Flash)
 /// - **Balanced**: mid-range — for implement/debug tasks (Sonnet, gpt-4o, Gemini 2.5-flash)
 /// - **Powerful**: high-capability — for architect/research tasks (Opus, o3-pro, Gemini Pro)
 ///
@@ -367,7 +309,7 @@ impl SmartRouteConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RoutingTier {
-    /// Cheap/fast model — for simple tasks and exploration.
+    /// Small/fast model — for simple tasks and exploration.
     Cheap,
     /// Balanced model — for implementation and debugging.
     Balanced,
@@ -425,13 +367,6 @@ impl RoutingTier {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum SmartRouteFactor {
-    /// Budget remaining influenced the decision.
-    /// Includes the remaining budget in USD and whether it was low.
-    BudgetRemaining {
-        remaining_usd: f64,
-        is_low: bool,
-    },
-
     /// Circuit breaker state influenced the decision.
     /// Includes the provider name and whether the circuit was open.
     CircuitOpen {
@@ -485,7 +420,6 @@ pub enum SmartRouteFactor {
     ScoringResult {
         provider: String,
         total_score: f64,
-        cost_score: f64,
         latency_score: f64,
         quality_score: f64,
     },
@@ -495,8 +429,6 @@ impl SmartRouteFactor {
     /// Human-readable description of this factor.
     pub fn description(&self) -> String {
         match self {
-            Self::BudgetRemaining { remaining_usd, is_low } =>
-                format!("Budget: ${:.2} remaining ({})", remaining_usd, if *is_low { "LOW" } else { "OK" }),
             Self::CircuitOpen { provider, was_open } =>
                 format!("Circuit {}: {}", provider, if *was_open { "OPEN — skip" } else { "closed — OK" }),
             Self::RateLimited { provider, was_exceeded } =>
@@ -513,9 +445,9 @@ impl SmartRouteFactor {
                 format!("User override: {} / {}", requested_provider, requested_model),
             Self::RegexMatch { rule_description, matched } =>
                 format!("Regex rule: {} ({})", rule_description, if *matched { "matched" } else { "no match" }),
-            Self::ScoringResult { provider, total_score, cost_score, latency_score, quality_score } =>
-                format!("Score: {} = {:.2} (cost={:.2}, latency={:.2}, quality={:.2})",
-                    provider, total_score, cost_score, latency_score, quality_score),
+            Self::ScoringResult { provider, total_score, latency_score, quality_score } =>
+                format!("Score: {} = {:.2} (latency={:.2}, quality={:.2})",
+                    provider, total_score, latency_score, quality_score),
         }
     }
 }
@@ -524,7 +456,7 @@ impl SmartRouteFactor {
 
 /// Score result for a single provider in multi-factor routing.
 ///
-/// Each provider is scored on three dimensions (cost, latency, quality),
+/// Each provider is scored on two dimensions (latency, quality),
 /// then the scores are weighted by the routing strategy to produce a total score.
 /// The provider with the highest total score wins the routing decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,10 +471,6 @@ pub struct ProviderScore {
     /// Routing tier (Cheap/Balanced/Powerful).
     pub tier: RoutingTier,
 
-    /// Cost dimension score (0.0 to 1.0).
-    /// Higher = cheaper relative to budget. 0.0 = would exceed budget.
-    pub cost_score: f64,
-
     /// Latency dimension score (0.0 to 1.0).
     /// Higher = faster. 0.0 = exceeds latency tolerance.
     pub latency_score: f64,
@@ -552,7 +480,7 @@ pub struct ProviderScore {
     pub quality_score: f64,
 
     /// Total weighted score (0.0 to 1.0).
-    /// `cost_score * cost_weight + latency_score * latency_weight + quality_score * quality_weight`.
+    /// `latency_score * latency_weight + quality_score * quality_weight`.
     pub total_score: f64,
 
     /// Whether this provider is available (not circuit-open, not rate-limited, not context-overflow).
@@ -568,19 +496,17 @@ impl ProviderScore {
         provider_name: impl Into<String>,
         model_name: impl Into<String>,
         tier: RoutingTier,
-        cost_score: f64,
         latency_score: f64,
         quality_score: f64,
         strategy: &RoutingStrategy,
     ) -> Self {
-        let (cw, lw, qw) = strategy.weights();
-        let total_score = cost_score * cw + latency_score * lw + quality_score * qw;
+        let (lw, qw) = strategy.weights();
+        let total_score = latency_score * lw + quality_score * qw;
 
         Self {
             provider_name: provider_name.into(),
             model_name: model_name.into(),
             tier,
-            cost_score,
             latency_score,
             quality_score,
             total_score,
@@ -599,7 +525,6 @@ impl ProviderScore {
             provider_name: provider_name.into(),
             model_name: model_name.into(),
             tier: RoutingTier::Balanced,
-            cost_score: 0.0,
             latency_score: 0.0,
             quality_score: 0.0,
             total_score: 0.0,
@@ -613,17 +538,17 @@ impl ProviderScore {
         if !self.is_available {
             format!("{} — SKIPPED: {}", self.provider_name, self.skip_reason.as_deref().unwrap_or("unknown"))
         } else {
-            format!("{} ({}) — total={:.2} [cost={:.2}, latency={:.2}, quality={:.2}]",
-                self.provider_name, self.tier.name(), self.total_score, self.cost_score, self.latency_score, self.quality_score)
+            format!("{} ({}) — total={:.2} [latency={:.2}, quality={:.2}]",
+                self.provider_name, self.tier.name(), self.total_score, self.latency_score, self.quality_score)
         }
     }
 }
 
 // ─── ModelQualityProfile ──────────────────────────────────────────────────────
 
-/// Per-model quality/latency/cost characteristics for routing scoring.
+/// Per-model quality/latency characteristics for routing scoring.
 ///
-/// Derived from ModelPricingCatalog (cost data) and ModelCapability (context window).
+/// Derived from `ModelCapability` (context window) and tier classification.
 /// Estimated latency values are based on typical observed response times for
 /// each model tier — these are approximate and should be calibrated with
 /// real-world measurements.
@@ -655,12 +580,6 @@ pub struct ModelQualityProfile {
     /// Maximum output tokens.
     pub max_output_tokens: u32,
 
-    /// Cost per 1K prompt tokens (USD) — from ModelPricingCatalog.
-    pub cost_per_1k_prompt_usd: f64,
-
-    /// Cost per 1K completion tokens (USD) — from ModelPricingCatalog.
-    pub cost_per_1k_completion_usd: f64,
-
     /// Quality score (from tier: Cheap=0.3, Balanced=0.7, Powerful=1.0).
     pub quality_score: f64,
 }
@@ -674,8 +593,6 @@ impl ModelQualityProfile {
         model_name: impl Into<String>,
         provider_family: impl Into<String>,
         tier: RoutingTier,
-        cost_per_1k_prompt_usd: f64,
-        cost_per_1k_completion_usd: f64,
     ) -> Self {
         let model_str = model_name.into();
         let quality_score = tier.quality_score();
@@ -698,8 +615,6 @@ impl ModelQualityProfile {
             estimated_latency_ms,
             context_window_tokens,
             max_output_tokens,
-            cost_per_1k_prompt_usd,
-            cost_per_1k_completion_usd,
             quality_score,
         }
     }
@@ -732,42 +647,28 @@ impl ModelQualityProfile {
         }
     }
 
-    /// Estimate the cost of an inference call for this model.
-    ///
-    /// Uses approximate token counts: 1000 prompt + 500 completion tokens
-    /// as a reference unit. Actual costs depend on real token usage.
-    pub fn estimated_cost_per_call(&self) -> f64 {
-        // Use 1000 prompt + 500 completion as reference, converting per-1k-token
-        // rates into the actual reference-token cost.
-        const REFERENCE_PROMPT_TOKENS: f64 = 1000.0;
-        const REFERENCE_COMPLETION_TOKENS: f64 = 500.0;
-        const TOKENS_PER_1K: f64 = 1000.0;
-        (REFERENCE_PROMPT_TOKENS / TOKENS_PER_1K) * self.cost_per_1k_prompt_usd
-            + (REFERENCE_COMPLETION_TOKENS / TOKENS_PER_1K) * self.cost_per_1k_completion_usd
-    }
-
     /// Build default profiles for all known models.
     ///
-    /// These profiles provide baseline quality/latency/cost data for
+    /// These profiles provide baseline quality/latency data for
     /// the smart router. Custom profiles can be added via `add_profile()`.
     pub fn default_profiles() -> Vec<Self> {
         vec![
             // Anthropic family
-            Self::new("claude-haiku-4-5-20251001", "anthropic", RoutingTier::Cheap, 0.80, 4.0),
-            Self::new("claude-sonnet-4-6-20250514", "anthropic", RoutingTier::Balanced, 3.0, 15.0),
-            Self::new("claude-opus-4-8", "anthropic", RoutingTier::Powerful, 15.0, 75.0),
+            Self::new("claude-haiku-4-5-20251001", "anthropic", RoutingTier::Cheap),
+            Self::new("claude-sonnet-4-6-20250514", "anthropic", RoutingTier::Balanced),
+            Self::new("claude-opus-4-8", "anthropic", RoutingTier::Powerful),
             // OpenAI family
-            Self::new("gpt-4o-mini", "openai", RoutingTier::Cheap, 0.15, 0.60),
-            Self::new("gpt-4o", "openai", RoutingTier::Balanced, 2.50, 10.00),
-            Self::new("o3-pro", "openai", RoutingTier::Powerful, 10.0, 40.0),
+            Self::new("gpt-4o-mini", "openai", RoutingTier::Cheap),
+            Self::new("gpt-4o", "openai", RoutingTier::Balanced),
+            Self::new("o3-pro", "openai", RoutingTier::Powerful),
             // Gemini family
-            Self::new("gemini-2.0-flash", "google", RoutingTier::Cheap, 0.10, 0.40),
-            Self::new("gemini-2.5-flash", "google", RoutingTier::Balanced, 0.15, 0.60),
-            Self::new("gemini-2.5-pro", "google", RoutingTier::Powerful, 1.25, 10.0),
+            Self::new("gemini-2.0-flash", "google", RoutingTier::Cheap),
+            Self::new("gemini-2.5-flash", "google", RoutingTier::Balanced),
+            Self::new("gemini-2.5-pro", "google", RoutingTier::Powerful),
             // Ollama family
-            Self::new("qwen2.5:0.5b", "ollama", RoutingTier::Cheap, 0.0, 0.0),
-            Self::new("qwen2.5:7b", "ollama", RoutingTier::Balanced, 0.0, 0.0),
-            Self::new("deepseek-r1:14b", "ollama", RoutingTier::Powerful, 0.0, 0.0),
+            Self::new("qwen2.5:0.5b", "ollama", RoutingTier::Cheap),
+            Self::new("qwen2.5:7b", "ollama", RoutingTier::Balanced),
+            Self::new("deepseek-r1:14b", "ollama", RoutingTier::Powerful),
         ]
     }
 }
@@ -777,11 +678,11 @@ impl ModelQualityProfile {
 /// Full routing decision from the smart router — includes rationale and factor analysis.
 ///
 /// Unlike the simple `RouteDecision` (which only has model, provider, reason),
-/// `SmartRouteDecision` includes detailed scoring data, cost/latency estimates,
+/// `SmartRouteDecision` includes detailed scoring data, latency estimates,
 /// and which factors were considered in making the decision.
 ///
 /// This provides full observability into routing decisions — useful for
-/// debugging, cost optimization, and performance tuning.
+/// debugging and performance tuning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SmartRouteDecision {
@@ -799,9 +700,6 @@ pub struct SmartRouteDecision {
 
     /// The routing strategy used.
     pub strategy: RoutingStrategy,
-
-    /// Estimated cost for this inference call (USD).
-    pub estimated_cost_usd: f64,
 
     /// Estimated latency for this inference call (milliseconds).
     pub estimated_latency_ms: u64,
@@ -843,7 +741,6 @@ impl SmartRouteDecision {
             max_tokens: None,
             tier,
             strategy,
-            estimated_cost_usd: 0.0,
             estimated_latency_ms: 0,
             quality_score: tier.quality_score(),
             total_score: 0.0,
@@ -868,7 +765,6 @@ impl SmartRouteDecision {
             max_tokens: None,
             tier,
             strategy: RoutingStrategy::Balanced, // Regex doesn't know strategy
-            estimated_cost_usd: 0.0,
             estimated_latency_ms: 0,
             quality_score: tier.quality_score(),
             total_score: 0.0,
@@ -896,7 +792,6 @@ impl SmartRouteDecision {
             max_tokens: None,
             tier: best_score.tier,
             strategy,
-            estimated_cost_usd: 0.0,
             estimated_latency_ms: 0,
             quality_score: best_score.quality_score,
             total_score: best_score.total_score,
@@ -907,12 +802,6 @@ impl SmartRouteDecision {
             all_scores,
             timestamp: Utc::now(),
         }
-    }
-
-    /// Set estimated cost.
-    pub fn with_estimated_cost(mut self, cost_usd: f64) -> Self {
-        self.estimated_cost_usd = cost_usd;
-        self
     }
 
     /// Set estimated latency.
@@ -937,13 +826,12 @@ impl SmartRouteDecision {
     pub fn summary(&self) -> String {
         let source = if self.from_regex { "regex" } else { "scoring" };
         format!(
-            "[{}] {} → {} (tier={}, strategy={}, cost≈${:.4}, latency≈{}ms, score={:.2})",
+            "[{}] {} → {} (tier={}, strategy={}, latency≈{}ms, score={:.2})",
             source,
             self.provider,
             self.model,
             self.tier.name(),
             self.strategy.name(),
-            self.estimated_cost_usd,
             self.estimated_latency_ms,
             self.total_score,
         )
@@ -1045,25 +933,23 @@ mod tests {
 
     #[test]
     fn test_routing_strategy_weights() {
-        assert_eq!(RoutingStrategy::CostOptimized.weights(), (0.70, 0.10, 0.20));
-        assert_eq!(RoutingStrategy::LatencyOptimized.weights(), (0.10, 0.70, 0.20));
-        assert_eq!(RoutingStrategy::QualityOptimized.weights(), (0.10, 0.10, 0.80));
-        assert_eq!(RoutingStrategy::Balanced.weights(), (0.30, 0.30, 0.40));
+        assert_eq!(RoutingStrategy::LatencyOptimized.weights(), (0.80, 0.20));
+        assert_eq!(RoutingStrategy::QualityOptimized.weights(), (0.20, 0.80));
+        assert_eq!(RoutingStrategy::Balanced.weights(), (0.40, 0.60));
     }
 
     #[test]
     fn test_routing_strategy_custom() {
-        let custom = RoutingStrategy::custom(0.5, 0.3, 0.2);
-        assert_eq!(custom.weights(), (0.5, 0.3, 0.2));
+        let custom = RoutingStrategy::custom(0.5, 0.5);
+        assert_eq!(custom.weights(), (0.5, 0.5));
     }
 
     #[test]
     fn test_routing_strategy_names() {
-        assert_eq!(RoutingStrategy::CostOptimized.name(), "Cost Optimized");
         assert_eq!(RoutingStrategy::LatencyOptimized.name(), "Latency Optimized");
         assert_eq!(RoutingStrategy::QualityOptimized.name(), "Quality Optimized");
         assert_eq!(RoutingStrategy::Balanced.name(), "Balanced");
-        assert_eq!(RoutingStrategy::Custom { cost_weight: 0.5, latency_weight: 0.3, quality_weight: 0.2 }.name(), "Custom");
+        assert_eq!(RoutingStrategy::Custom { latency_weight: 0.5, quality_weight: 0.5 }.name(), "Custom");
     }
 
     #[test]
@@ -1098,22 +984,12 @@ mod tests {
     fn test_smart_route_config_balanced() {
         let config = SmartRouteConfig::balanced();
         assert_eq!(config.strategy, RoutingStrategy::Balanced);
-        assert!(config.budget_aware);
         assert!(config.health_aware);
         assert!(config.rate_aware);
         assert!(config.context_aware);
         assert!(config.regex_first_pass);
         assert_eq!(config.max_latency_ms, 30000);
-        assert_eq!(config.min_budget_for_expensive, 1.0);
         assert_eq!(config.context_overflow_threshold, 0.8);
-    }
-
-    #[test]
-    fn test_smart_route_config_cost_optimized() {
-        let config = SmartRouteConfig::cost_optimized();
-        assert_eq!(config.strategy, RoutingStrategy::CostOptimized);
-        assert_eq!(config.max_latency_ms, 60000);
-        assert_eq!(config.min_budget_for_expensive, 2.0);
     }
 
     #[test]
@@ -1126,7 +1002,6 @@ mod tests {
     #[test]
     fn test_smart_route_config_regex_only() {
         let config = SmartRouteConfig::regex_only();
-        assert!(!config.budget_aware);
         assert!(!config.health_aware);
         assert!(!config.rate_aware);
         assert!(!config.context_aware);
@@ -1137,30 +1012,21 @@ mod tests {
     fn test_smart_route_config_custom_modifiers() {
         let config = SmartRouteConfig::balanced()
             .with_max_latency(5000)
-            .with_min_budget_for_expensive(0.5)
-            .with_context_threshold(0.9)
-            .without_budget_awareness();
+            .with_context_threshold(0.9);
         assert_eq!(config.max_latency_ms, 5000);
-        assert_eq!(config.min_budget_for_expensive, 0.5);
         assert_eq!(config.context_overflow_threshold, 0.9);
-        assert!(!config.budget_aware);
     }
 
     // ─── SmartRouteFactor tests ──────────────────────────────────────────
 
     #[test]
     fn test_smart_route_factor_descriptions() {
-        let budget = SmartRouteFactor::BudgetRemaining { remaining_usd: 1.5, is_low: false };
-        assert!(budget.description().contains("$1.50"));
-        assert!(budget.description().contains("OK"));
-
         let circuit = SmartRouteFactor::CircuitOpen { provider: "anthropic".to_string(), was_open: true };
         assert!(circuit.description().contains("OPEN"));
 
         let scoring = SmartRouteFactor::ScoringResult {
             provider: "anthropic".to_string(),
             total_score: 0.85,
-            cost_score: 0.3,
             latency_score: 0.2,
             quality_score: 0.8,
         };
@@ -1174,11 +1040,11 @@ mod tests {
         let score = ProviderScore::new(
             "anthropic", "claude-sonnet-4-6-20250514",
             RoutingTier::Balanced,
-            0.5, 0.6, 0.7,
+            0.6, 0.7,
             &RoutingStrategy::Balanced,
         );
-        // Total = 0.5*0.3 + 0.6*0.3 + 0.7*0.4 = 0.15 + 0.18 + 0.28 = 0.61
-        assert!((score.total_score - 0.61).abs() < 0.01);
+        // Total = 0.6*0.4 + 0.7*0.6 = 0.24 + 0.42 = 0.66
+        assert!((score.total_score - 0.66).abs() < 0.01);
         assert!(score.is_available);
         assert!(score.skip_reason.is_none());
     }
@@ -1197,22 +1063,13 @@ mod tests {
     fn test_model_quality_profile_creation() {
         let profile = ModelQualityProfile::new(
             "claude-sonnet-4-6-20250514", "anthropic",
-            RoutingTier::Balanced, 3.0, 15.0,
+            RoutingTier::Balanced,
         );
         assert_eq!(profile.model_name, "claude-sonnet-4-6-20250514");
         assert_eq!(profile.tier, RoutingTier::Balanced);
         assert_eq!(profile.quality_score, 0.7);
         assert_eq!(profile.estimated_latency_ms, 3500);
         assert_eq!(profile.context_window_tokens, 200_000);
-    }
-
-    #[test]
-    fn test_model_quality_profile_estimated_cost() {
-        let profile = ModelQualityProfile::new(
-            "gpt-4o", "openai", RoutingTier::Balanced, 2.50, 10.00,
-        );
-        // Estimated: (1000/1000)*2.50 + (500/1000)*10.00 = 2.50 + 5.00 = 7.50
-        assert!((profile.estimated_cost_per_call() - 7.50).abs() < 0.01);
     }
 
     #[test]
@@ -1261,7 +1118,7 @@ mod tests {
     fn test_smart_route_decision_from_scoring() {
         let best = ProviderScore::new(
             "anthropic", "claude-sonnet-4-6-20250514",
-            RoutingTier::Balanced, 0.5, 0.6, 0.7,
+            RoutingTier::Balanced, 0.6, 0.7,
             &RoutingStrategy::Balanced,
         );
         let all_scores = vec![best.clone()];
@@ -1271,7 +1128,6 @@ mod tests {
             vec![SmartRouteFactor::ScoringResult {
                 provider: "anthropic".to_string(),
                 total_score: best.total_score,
-                cost_score: best.cost_score,
                 latency_score: best.latency_score,
                 quality_score: best.quality_score,
             }],
@@ -1279,22 +1135,20 @@ mod tests {
         );
         assert!(!decision.from_regex);
         assert_eq!(decision.model, "claude-sonnet-4-6-20250514");
-        assert!((decision.total_score - 0.61).abs() < 0.01);
+        assert!((decision.total_score - 0.66).abs() < 0.01);
     }
 
     #[test]
     fn test_smart_route_decision_modifiers() {
         let decision = SmartRouteDecision::new(
             "gpt-4o", "openai",
-            RoutingTier::Balanced, RoutingStrategy::CostOptimized,
-            "Cost routing",
+            RoutingTier::Balanced, RoutingStrategy::LatencyOptimized,
+            "Latency routing",
         )
-            .with_estimated_cost(0.005)
             .with_estimated_latency(3500)
             .with_max_tokens(4096)
-            .with_factor(SmartRouteFactor::BudgetRemaining { remaining_usd: 5.0, is_low: false });
+            .with_factor(SmartRouteFactor::CircuitOpen { provider: "openai".to_string(), was_open: false });
 
-        assert!((decision.estimated_cost_usd - 0.005).abs() < 0.001);
         assert_eq!(decision.estimated_latency_ms, 3500);
         assert_eq!(decision.max_tokens, Some(4096));
         assert_eq!(decision.factors.len(), 1);

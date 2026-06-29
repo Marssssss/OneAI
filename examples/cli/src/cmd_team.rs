@@ -183,8 +183,8 @@ pub fn format_team_result(result: &TeamResult) -> String {
     }
 
     output.push_str(&format!(
-        "\nTotal: {} tokens, ${:.4} cost\n",
-        result.total_tokens, result.total_cost
+        "\nTotal: {} tokens\n",
+        result.total_tokens
     ));
 
     output

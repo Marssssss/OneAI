@@ -334,7 +334,6 @@ pub async fn restore_checkpoint(
                 iteration: 0,
                 running: false,
                 total_tokens: 0,
-                estimated_cost: 0.0,
             };
             state.register_session(session).await;
 

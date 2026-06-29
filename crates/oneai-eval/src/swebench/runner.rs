@@ -10,7 +10,7 @@
 //! 4. **judge** the patch via the external `SwebenchJudge` → the `resolved`
 //!    verdict becomes the `swebench_resolved` metric score.
 //!
-//! Cost + trace (the 成本 / 效率 axes) flow through unchanged via the same
+//! Usage + trace (the usage / efficiency axes) flow through unchanged via the same
 //! per-case collection pattern as `eval_runner.rs::run_agent_for_case`. The
 //! agent's working directory isn't changed on the `App` — file tools target
 //! the clone by absolute path, named in the prompt.
@@ -62,7 +62,7 @@ impl Default for SwebenchRunnerConfig {
 
 /// The SWE-bench evaluation runner.
 ///
-/// Holds a fully-configured `App` (provider + CodingPack + cost tracker +
+/// Holds a fully-configured `App` (provider + CodingPack + usage tracker +
 /// tracing + auto-approval gate) and drives it instance-by-instance.
 pub struct SwebenchRunner {
     app: Arc<oneai_app::App>,
@@ -126,7 +126,7 @@ impl SwebenchRunner {
         };
         result.set_metadata("dur_clone_ms", &t_clone.elapsed().as_millis().to_string());
 
-        // 2 + 3. drive the agent + collect cost/trace (mirrors EvalRunner.run_agent_for_case)
+        // 2 + 3. drive the agent + collect usage/trace (mirrors EvalRunner.run_agent_for_case)
         self.drive_agent(instance, &clone_dir, &mut result).await;
 
         // 4. collect the patch via `git diff`
@@ -232,7 +232,7 @@ impl SwebenchRunner {
     }
 
     /// Run the agent on the instance's problem statement, writing the final
-    /// answer, trace metrics, and cost into `result`.
+    /// answer, trace metrics, and usage into `result`.
     async fn drive_agent(
         &self,
         instance: &SwebenchInstance,
@@ -252,8 +252,8 @@ impl SwebenchRunner {
         let mut session = self.app.create_session();
         let session_id = session.session_id().to_string();
 
-        // Isolate this case's cost accounting.
-        if let Some(ct) = &self.app.cost_tracker {
+        // Isolate this case's usage accounting.
+        if let Some(ct) = &self.app.usage_tracker {
             let _ = ct.clear_session(&session_id).await;
         }
 
@@ -286,10 +286,9 @@ impl SwebenchRunner {
             }
         }
 
-        // Collect the 成本 axis: cost_usd + api_calls + token breakdown.
-        if let Some(ct) = &self.app.cost_tracker {
-            if let Ok(summary) = ct.session_cost(&session_id).await {
-                result.cost_usd = summary.total_cost_usd;
+        // Collect the usage axis: api_calls + token breakdown.
+        if let Some(ct) = &self.app.usage_tracker {
+            if let Ok(summary) = ct.session_usage(&session_id).await {
                 result.api_calls = summary.call_count;
                 result.estimated_calls = summary.estimated_call_count;
                 result.prompt_tokens = summary.prompt_tokens;
@@ -442,7 +441,7 @@ mod tests {
             .provider(provider)
             .auto_approval_gate()
             .default_parser()
-            .default_cost_tracker()
+            .default_usage_tracker()
             .trace_in_memory()
             .build()
             .await
@@ -481,10 +480,10 @@ mod tests {
         assert!(!r.metric_passed(SWEBENCH_RESOLVED_METRIC));
         assert_eq!(r.metadata.get("resolved"), Some(&"false".to_string()));
 
-        // 成本 axis: the loop records usage into the app's cost tracker (the
+        // usage axis: the loop records usage into the app's usage tracker (the
         // mock direct_answer reports 100 prompt / 50 completion tokens and runs
         // one inference). Regression guard for the AppSession→AgentLoopConfig
-        // propagation: previously cost_tracker was None and these stayed at 0.
+        // propagation: previously usage_tracker was None and these stayed at 0.
         assert!(r.api_calls > 0, "api_calls should be recorded, got {}", r.api_calls);
         assert!(r.prompt_tokens > 0, "prompt_tokens should be recorded, got {}", r.prompt_tokens);
         assert!(r.completion_tokens > 0, "completion_tokens should be recorded, got {}", r.completion_tokens);
@@ -508,14 +507,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runner_domain_pack_wires_cost_and_trace() {
+    async fn test_runner_domain_pack_wires_usage_and_trace() {
         // Regression guard for the domain-pack branch of session.rs: the
         // swebench CLI builds the App with a CodingPack (domain_pack set), which
         // takes the `if let Some(domain)` config branch. That branch previously
-        // omitted cost_tracker AND trace_context from AgentLoopConfig (the
+        // omitted usage_tracker AND trace_context from AgentLoopConfig (the
         // no-domain else branch had them) → the real swebench run reported
-        // cost $0 / tokens 0+0 AND infer=0ms×0 even though api_calls counted.
-        // This test mirrors the CLI's app construction (domain_pack + cost +
+        // tokens 0+0 AND infer=0ms×0 even though api_calls counted.
+        // This test mirrors the CLI's app construction (domain_pack + usage +
         // trace) so the domain branch is actually exercised.
         if !skip_if_no_git() {
             eprintln!("skipping: git not installed");
@@ -543,7 +542,7 @@ mod tests {
             .provider(provider)
             .auto_approval_gate()
             .default_parser()
-            .default_cost_tracker()
+            .default_usage_tracker()
             .trace_in_memory()
             .domain_pack(coding_pack)
             .build()
@@ -597,7 +596,7 @@ mod tests {
         // so naive accounting records tokens=0+0. With a TokenCounter wired in,
         // the loop must fall back to counting locally and mark the record
         // estimated. Mirrors cmd_eval_swebench's app construction (domain_pack
-        // + cost + token_counter + trace).
+        // + usage + token_counter + trace).
         if !skip_if_no_git() {
             eprintln!("skipping: git not installed");
             return;
@@ -634,7 +633,7 @@ mod tests {
             .provider(provider)
             .auto_approval_gate()
             .default_parser()
-            .default_cost_tracker()
+            .default_usage_tracker()
             .default_token_counter()
             .trace_in_memory()
             .domain_pack(coding_pack)

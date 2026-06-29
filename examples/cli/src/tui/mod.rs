@@ -540,7 +540,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /cost · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Shift+Tab=mode(Normal/Auto/Plan)\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /usage · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Shift+Tab=mode(Normal/Auto/Plan)\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
                 return;
             }
             "/tools" | "/t" => {
@@ -563,8 +563,6 @@ fn handle_user_input_async(
                 app.token_usage = TokenUsage::new();
                 app.context_tokens = 0;
                 app.context_tokens_is_estimated = false;
-                app.session_cost = 0.0;
-                app.session_cost_is_estimated = false;
                 app.current_iteration = 0;
                 app.last_context_accounting = None;
                 // Create a new session entry in the sidebar
@@ -572,12 +570,14 @@ fn handle_user_input_async(
                 app.add_message(ChatRole::System, "Conversation cleared.");
                 return;
             }
-            "/cost" => {
+            "/usage" => {
                 let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
+                let tok_est = if app.token_usage.is_estimated { "~" } else { "" };
                 app.add_message(ChatRole::System, format!(
-                    "Session cost: {}${:.4}\nContext: {}{} / {}k tokens",
-                    if app.session_cost_is_estimated { "~" } else { "" },
-                    app.session_cost, ctx_est, app.context_tokens, app.context_window_size / 1000
+                    "Session usage: {}{} tokens ({}prompt {}+ completion {})\nContext: {}{} / {}k tokens",
+                    tok_est, app.token_usage.total, tok_est,
+                    app.token_usage.prompt, app.token_usage.completion,
+                    ctx_est, app.context_tokens, app.context_window_size / 1000
                 ));
                 return;
             }
@@ -610,9 +610,9 @@ fn handle_user_input_async(
             }
             "/session" => {
                 let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
-                let cost_est = if app.session_cost_is_estimated { "~" } else { "" };
+                let tok_est = if app.token_usage.is_estimated { "~" } else { "" };
                 app.add_message(ChatRole::System, format!(
-                    "Session ID: {}\nProvider: {}\nParadigm: {}#{}\nContext: {}{} / {}k\nCost: {}${:.4}",
+                    "Session ID: {}\nProvider: {}\nParadigm: {}#{}\nContext: {}{} / {}k\nUsage: {}{} tokens ({}+{} prompt/completion)",
                     app.session_id,
                     app.provider_info,
                     paradigm_display_name(&app.active_paradigm),
@@ -620,8 +620,10 @@ fn handle_user_input_async(
                     ctx_est,
                     app.context_tokens,
                     app.context_window_size / 1000,
-                    cost_est,
-                    app.session_cost,
+                    tok_est,
+                    app.token_usage.total,
+                    app.token_usage.prompt,
+                    app.token_usage.completion,
                 ));
                 return;
             }
@@ -687,8 +689,6 @@ fn handle_user_input_async(
                 app.token_usage = TokenUsage::new();
                 app.context_tokens = 0;
                 app.context_tokens_is_estimated = false;
-                app.session_cost = 0.0;
-                app.session_cost_is_estimated = false;
                 app.current_iteration = 0;
                 app.last_context_accounting = None;
                 app.add_new_session(new_session_id);
@@ -1830,8 +1830,8 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                     }
                 }
             }
-            // Cumulative session_cost / token_usage are preserved (they track
-            // total spend, which compaction shouldn't erase). Only clear the
+            // Cumulative token_usage is preserved (it tracks total spend,
+            // which compaction shouldn't erase). Only clear the
             // current-window occupancy — the next inference refreshes it via
             // ContextAccountingUpdate / TokenUsageUpdate.
             app.context_tokens = 0;
@@ -1858,7 +1858,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.dirty = true;
         }
         ObserverEvent::TokenUsageUpdate(usage) => {
-            // Accumulate raw usage for cost tracking (some providers report real data, others 0)
+            // Accumulate raw usage (some providers report real data, others 0)
             let iter_prompt = if usage.prompt > 0 { usage.prompt }
                 else if !app.messages.is_empty() { app.estimate_tokens_from_messages() * 3 / 4 }
                 else { 0 };
@@ -1872,14 +1872,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.token_usage.total += iter_total;
             app.token_usage.is_estimated = usage.prompt == 0 && usage.completion == 0;
 
-            // Estimate cost when we don't have real data
-            if app.token_usage.is_estimated && iter_total > 0 {
-                app.session_cost = App::estimate_cost_from_tokens(
-                    app.token_usage.prompt, app.token_usage.completion
-                );
-                app.session_cost_is_estimated = true;
-            }
-
             // Use real API prompt_tokens as context size when available.
             // This is the Claude Code approach — exact data from the API
             // overrides the heuristic estimate from ContextAccountingUpdate.
@@ -1889,14 +1881,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 app.context_tokens_is_estimated = false;
             }
 
-            app.dirty = true; // Sidebar needs update
-        }
-        ObserverEvent::CostUpdate(cost) => {
-            // cost is the cumulative session cost from the agent
-            if cost > 0.0 {
-                app.session_cost = cost;
-                app.session_cost_is_estimated = false;
-            }
             app.dirty = true; // Sidebar needs update
         }
         ObserverEvent::ContextAccountingUpdate(accounting) => {

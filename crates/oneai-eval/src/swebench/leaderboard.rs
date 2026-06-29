@@ -1,11 +1,13 @@
 //! SWE-bench leaderboard serialization + prediction export (Step 4).
 //!
-//! The swebench.com leaderboard submission schema is an aggregate cost block
-//! plus a per-instance block. The comparable quantities are `$` and `api_calls`
-//! (universal boundary quantities); `resolved` comes from the harness. We
-//! export exactly those — internal quantities like step count / tool calls
-//! stay in `TraceMetrics` for internal optimization and are NOT emitted, since
-//! the leaderboard doesn't standardize them (see [[swe-bench-eval-three-axis]]).
+//! The swebench.com leaderboard submission schema is an aggregate usage block
+//! plus a per-instance block. The comparable quantity is `api_calls`;
+//! `resolved` comes from the harness. We export exactly those — internal
+//! quantities like step count / tool calls stay in `TraceMetrics` for internal
+//! optimization and are NOT emitted, since the leaderboard doesn't standardize
+//! them (see [[swe-bench-eval-three-axis]].
+//!
+//! (USD cost fields were removed — OneAI no longer tracks dollar amounts.)
 //!
 //! This is a module-level function rather than an `EvalReport` method to keep
 //! the SWE-bench schema out of the generic report type.
@@ -19,7 +21,6 @@ use crate::eval_result::EvalReport;
 pub struct LeaderboardInstance {
     pub instance_id: String,
     pub api_calls: u64,
-    pub cost: f64,
     pub resolved: bool,
 }
 
@@ -29,10 +30,6 @@ pub struct LeaderboardInstance {
 pub struct SwebenchLeaderboard {
     /// Total API calls across all instances (= leaderboard `instance_calls`).
     pub instance_calls: u64,
-    /// Total cost across all instances (USD).
-    pub instance_cost: f64,
-    /// Aggregate cost (USD) — mirrors `instance_cost` for the `cost` field.
-    pub cost: f64,
     /// Number of instances resolved.
     pub resolved_count: usize,
     /// Total instances evaluated.
@@ -49,8 +46,8 @@ pub const SWEBENCH_RESOLVED_METRIC: &str = "swebench_resolved";
 /// Build a leaderboard record from a completed `EvalReport`.
 ///
 /// `resolved` per instance is read from the `swebench_resolved` metric score
-/// (falling back to `result.passed()` if absent). Cost + api_calls come from
-/// the cost axis fields populated in Step 1+2.
+/// (falling back to `result.passed()` if absent). `api_calls` come from the
+/// usage axis fields populated in Step 1+2.
 pub fn render_swebench_leaderboard(report: &EvalReport) -> SwebenchLeaderboard {
     let per_instance: Vec<LeaderboardInstance> = report
         .results
@@ -58,13 +55,11 @@ pub fn render_swebench_leaderboard(report: &EvalReport) -> SwebenchLeaderboard {
         .map(|r| LeaderboardInstance {
             instance_id: r.case_id.clone(),
             api_calls: r.api_calls,
-            cost: r.cost_usd,
             resolved: r.metric_passed(SWEBENCH_RESOLVED_METRIC) || r.passed(),
         })
         .collect();
 
     let instance_calls: u64 = per_instance.iter().map(|i| i.api_calls).sum();
-    let instance_cost: f64 = per_instance.iter().map(|i| i.cost).sum();
     let resolved_count = per_instance.iter().filter(|i| i.resolved).count();
     let total_instances = per_instance.len();
     let resolution_rate = if total_instances > 0 {
@@ -75,8 +70,6 @@ pub fn render_swebench_leaderboard(report: &EvalReport) -> SwebenchLeaderboard {
 
     SwebenchLeaderboard {
         instance_calls,
-        instance_cost,
-        cost: instance_cost,
         resolved_count,
         total_instances,
         resolution_rate,
@@ -119,9 +112,8 @@ mod tests {
     use crate::eval_metric::EvalScore;
     use crate::eval_result::EvalResult;
 
-    fn result(id: &str, resolved: bool, cost: f64, calls: u64, patch: &str) -> EvalResult {
+    fn result(id: &str, resolved: bool, calls: u64, patch: &str) -> EvalResult {
         let mut r = EvalResult::new(id, "issue", patch);
-        r.cost_usd = cost;
         r.api_calls = calls;
         r.add_score(SWEBENCH_RESOLVED_METRIC, EvalScore::from_bool(resolved, "verdict"));
         r.set_metadata("patch", patch);
@@ -131,8 +123,8 @@ mod tests {
     #[test]
     fn test_render_leaderboard_aggregates() {
         let report = EvalReport::new("swebench", vec![
-            result("a", true, 0.10, 3, "diff a"),
-            result("b", false, 0.30, 7, "diff b"),
+            result("a", true, 3, "diff a"),
+            result("b", false, 7, "diff b"),
         ]);
         let lb = render_swebench_leaderboard(&report);
 
@@ -140,8 +132,6 @@ mod tests {
         assert_eq!(lb.resolved_count, 1);
         assert!((lb.resolution_rate - 0.5).abs() < 1e-9);
         assert_eq!(lb.instance_calls, 10);
-        assert!((lb.instance_cost - 0.40).abs() < 1e-9);
-        assert!((lb.cost - 0.40).abs() < 1e-9);
         assert!(lb.per_instance[0].resolved);
         assert!(!lb.per_instance[1].resolved);
         assert_eq!(lb.per_instance[0].instance_id, "a");
@@ -158,8 +148,8 @@ mod tests {
     #[test]
     fn test_write_prediction_jsonl_roundtrip() {
         let report = EvalReport::new("swebench", vec![
-            result("a", true, 0.1, 1, "diff a"),
-            result("b", false, 0.2, 2, ""), // no patch — skipped
+            result("a", true, 1, "diff a"),
+            result("b", false, 2, ""), // no patch — skipped
         ]);
         let dir = std::env::temp_dir().join(format!(
             "oneai_swebench_pred_{}",

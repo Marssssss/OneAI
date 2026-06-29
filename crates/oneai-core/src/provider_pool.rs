@@ -289,9 +289,6 @@ pub enum FallbackReason {
     /// Request timed out waiting for the provider.
     Timeout,
 
-    /// Budget exceeded — session cost limit reached.
-    BudgetExceeded,
-
     /// Model degradation — downgraded within same provider family.
     ModelDegradation {
         from_model: String,
@@ -305,9 +302,9 @@ impl FallbackReason {
         matches!(self, Self::CircuitOpen | Self::ProviderError(_) | Self::Timeout)
     }
 
-    /// Whether this fallback was triggered by a policy (rate/budget).
+    /// Whether this fallback was triggered by a policy (rate limit).
     pub fn is_policy_trigger(&self) -> bool {
-        matches!(self, Self::RateLimitExceeded | Self::BudgetExceeded)
+        matches!(self, Self::RateLimitExceeded)
     }
 
     /// Human-readable description of the reason.
@@ -317,7 +314,6 @@ impl FallbackReason {
             Self::RateLimitExceeded => "Rate limit exceeded".to_string(),
             Self::ProviderError(e) => format!("Provider error: {}", e),
             Self::Timeout => "Request timed out".to_string(),
-            Self::BudgetExceeded => "Budget exceeded".to_string(),
             Self::ModelDegradation { from_model, to_model } =>
                 format!("Model degradation: {} → {}", from_model, to_model),
         }
@@ -810,9 +806,6 @@ mod tests {
 
         let error = FallbackReason::ProviderError("timeout".to_string());
         assert!(error.is_provider_failure());
-
-        let budget = FallbackReason::BudgetExceeded;
-        assert!(budget.is_policy_trigger());
 
         let degradation = FallbackReason::ModelDegradation {
             from_model: "opus".to_string(),

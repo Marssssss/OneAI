@@ -62,7 +62,6 @@ pub fn render_markdown(report: &EvalReport) -> String {
     md.push_str(&format!("| Avg score | {:.2} |\n", report.summary.avg_score));
     md.push_str(&format!("| Avg duration | {}ms |\n", report.summary.avg_duration_ms));
     md.push_str(&format!("| Total tokens | {} |\n", report.summary.total_tokens));
-    md.push_str(&format!("| Total cost | ${:.4} |\n", report.summary.total_cost_usd));
     md.push_str(&format!("| Total API calls | {} |\n\n", report.summary.total_api_calls));
 
     // Overall status
@@ -124,8 +123,8 @@ pub fn render_markdown(report: &EvalReport) -> String {
                 String::new()
             };
             md.push_str(&format!(
-                "- **Cost**: ${:.4} | API calls: {}{} | tokens: {}+{}\n",
-                result.cost_usd, result.api_calls, est_note,
+                "- API calls: {}{} | tokens: {}+{}\n",
+                result.api_calls, est_note,
                 result.prompt_tokens, result.completion_tokens,
             ));
         }

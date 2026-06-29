@@ -94,8 +94,6 @@ pub struct SessionView {
     pub running: bool,
     /// Total tokens used.
     pub total_tokens: u64,
-    /// Estimated cost in USD.
-    pub estimated_cost: f64,
 }
 
 // ─── SessionUpdate ───────────────────────────────────────────────────
@@ -107,7 +105,6 @@ pub enum SessionUpdate {
     Iteration(usize),
     Running(bool),
     Tokens(u64),
-    Cost(f64),
 }
 
 // ─── StudioState ─────────────────────────────────────────────────────
@@ -205,7 +202,6 @@ impl StudioState {
                 SessionUpdate::Iteration(i) => session.iteration = i,
                 SessionUpdate::Running(r) => session.running = r,
                 SessionUpdate::Tokens(t) => session.total_tokens = t,
-                SessionUpdate::Cost(c) => session.estimated_cost = c,
             }
         }
     }
@@ -326,14 +322,6 @@ impl AgentLoopObserver for StudioState {
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
             }),
-        });
-    }
-
-    fn on_cost_update(&self, cost: f64) {
-        self.broadcast(StudioEvent::TraceEvent {
-            kind: "CostUpdate".to_string(),
-            name: "session.cost".to_string(),
-            attributes: serde_json::json!({ "estimated_cost_usd": cost }),
         });
     }
 
@@ -461,7 +449,6 @@ mod tests {
             iteration: 0,
             running: true,
             total_tokens: 0,
-            estimated_cost: 0.0,
         }));
 
         let sessions = rt.block_on(state.list_sessions());
@@ -480,7 +467,6 @@ mod tests {
             iteration: 0,
             running: true,
             total_tokens: 0,
-            estimated_cost: 0.0,
         }));
 
         rt.block_on(state.update_session("sess_1", SessionUpdate::Iteration(5)));

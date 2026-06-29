@@ -283,7 +283,6 @@ impl HandoffManager {
             reason: reason.to_string(),
             partial_output: conversation_context.chars().take(200).collect(),
             tokens_used: summary.tokens_used,
-            cost: 0.0,
         };
 
         // Build the result
@@ -291,7 +290,6 @@ impl HandoffManager {
             final_answer: summary.summary.clone(),
             chain: vec![chain_entry],
             total_tokens: summary.tokens_used,
-            total_cost: 0.0,
             conversation_transferred: config.transfer_conversation,
             handoff_count: 1,
         };

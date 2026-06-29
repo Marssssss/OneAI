@@ -28,10 +28,6 @@ pub struct TraceMetrics {
     /// Total LLM token usage (prompt + completion tokens).
     pub total_tokens: u64,
 
-    /// Total cost estimate in USD (based on model pricing).
-    /// Uses rough pricing: GPT-4 = $0.03/1K prompt + $0.06/1K completion
-    pub estimated_cost_usd: f64,
-
     /// Average latency per inference call (ms).
     pub avg_inference_latency_ms: f64,
 
@@ -71,7 +67,6 @@ impl Default for TraceMetrics {
         Self {
             success_rate: 0.0,
             total_tokens: 0,
-            estimated_cost_usd: 0.0,
             avg_inference_latency_ms: 0.0,
             tool_call_count: 0,
             tool_success_rate: 0.0,
@@ -125,9 +120,6 @@ impl TraceMetrics {
                 .count();
             metrics.tool_success_rate = successful as f64 / metrics.tool_call_count as f64;
         }
-
-        // Estimated cost (rough GPT-4 pricing)
-        metrics.estimated_cost_usd = (metrics.total_tokens as f64 / 1000.0) * 0.03;
 
         metrics
     }
@@ -202,7 +194,6 @@ impl TraceMetrics {
         Self {
             success_rate: successful_sessions / total_sessions,
             total_tokens: metrics_list.iter().map(|m| m.total_tokens).sum(),
-            estimated_cost_usd: metrics_list.iter().map(|m| m.estimated_cost_usd).sum(),
             avg_inference_latency_ms: metrics_list.iter().map(|m| m.avg_inference_latency_ms).sum::<f64>() / total_sessions,
             tool_call_count: metrics_list.iter().map(|m| m.tool_call_count).sum(),
             tool_success_rate: metrics_list.iter().map(|m| m.tool_success_rate * m.tool_call_count as f64).sum::<f64>()
