@@ -150,18 +150,15 @@ impl MemoryFactory {
         oneai_memory::MemoryManager::new()
     }
 
-    /// Create a memory manager with custom window size.
+    /// Create a memory manager with a custom compression threshold.
     #[uniffi::method]
     pub fn create_memory_manager_with_config(
         &self,
-        window_size: u32,
         threshold_tokens: u32,
     ) -> oneai_memory::MemoryManager {
         let config = oneai_memory::MemoryManagerConfig {
-            stm_window_size: window_size as usize,
             compression_threshold_tokens: threshold_tokens as usize,
-            compression_keep_recent_turns: 6,
-            evict_to_ltm: true,
+            ..Default::default()
         };
         oneai_memory::MemoryManager::with_config(config)
     }
@@ -259,7 +256,7 @@ mod tests {
     fn test_memory_factory() {
         let factory = MemoryFactory::new();
         let _default = factory.create_memory_manager();
-        let _custom = factory.create_memory_manager_with_config(10, 2000);
+        let _custom = factory.create_memory_manager_with_config(2000);
     }
 
     #[test]

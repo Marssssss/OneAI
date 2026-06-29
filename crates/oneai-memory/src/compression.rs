@@ -154,7 +154,13 @@ impl ContextCompressor {
         let older_messages = &conversation.messages[..split_point];
         let recent_messages = &conversation.messages[split_point..];
 
-        // Build the text to summarize
+        // Build the text to summarize.
+        //
+        // B4: cap each older message's contribution so a runaway tool_result
+        // (long shell/file output) doesn't bloat the summarization prompt or
+        // get summarized away wholesale. The capped view keeps a head + pointer
+        // to `memory_search` for the full output —无损截断 before summary.
+        const MAX_OLDER_MSG_CHARS: usize = 2000;
         let older_text = older_messages.iter()
             .map(|msg| {
                 let role = match msg.role {
@@ -164,7 +170,14 @@ impl ContextCompressor {
                     Role::Tool => "Tool",
                     _ => "User", // #[non_exhaustive] catch-all
                 };
-                format!("[{}]: {}", role, msg.text_content())
+                let text = msg.text_content();
+                let body = if text.chars().count() > MAX_OLDER_MSG_CHARS {
+                    let head: String = text.chars().take(MAX_OLDER_MSG_CHARS).collect();
+                    format!("{}\n[...content truncated — use memory_search for the full output]", head)
+                } else {
+                    text
+                };
+                format!("[{}]: {}", role, body)
             })
             .collect::<Vec<_>>()
             .join("\n");

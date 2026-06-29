@@ -1,5 +1,13 @@
 //! Long-term memory — embedded vector store + content store + hybrid scoring.
 //!
+//! **Legacy / read-only回溯 layer (M2).** As of the memory rework, the
+//! canonical long-term memory is the `MemoryFact`-based `fact_archive`
+//! (Mem0-style, three-factor recall), and raw-transcript回溯 is served by
+//! persisted conversation snapshots (`save_conversation`/`load_conversation`).
+//! The `MemoryManager` no longer writes to or recalls from this
+//! `MemoryEntry`-based `LongTermMemory` in the production path — it is
+//! retained for backward compatibility and direct low-level use only.
+//!
 //! The EmbeddedVectorStore is a lightweight in-memory vector store
 //! using brute-force cosine similarity search. Suitable for mobile
 //! deployment with no external dependencies.

@@ -113,6 +113,7 @@ mod tests {
             content: content.to_string(),
             embedding: None,
             metadata: HashMap::new(),
+            importance: 0.5,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version: 1,

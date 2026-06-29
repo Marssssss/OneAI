@@ -23,7 +23,7 @@ use chrono::Utc;
 use crate::manager::MemoryManager;
 
 /// Helper: build a `MemoryFact` from tool args, namespaced by the manager.
-async fn build_fact(mm: &MemoryManager, fact_type: String, subject: String, predicate: String, content: String) -> MemoryFact {
+async fn build_fact(mm: &MemoryManager, fact_type: String, subject: String, predicate: String, content: String, importance: f32) -> MemoryFact {
     MemoryFact {
         id: format!("fact_{}", uuid::Uuid::new_v4()),
         user_id: mm.user_id().await,
@@ -34,9 +34,31 @@ async fn build_fact(mm: &MemoryManager, fact_type: String, subject: String, pred
         content,
         embedding: None,
         metadata: std::collections::HashMap::new(),
+        importance: importance.clamp(0.0, 1.0),
         created_at: Utc::now(),
         updated_at: Utc::now(),
         version: 1,
+    }
+}
+
+/// Read the optional `importance` field (0.0–1.0) from tool args, defaulting to
+/// the per-type baseline so the agent can override salience when it matters.
+fn read_importance(args: &serde_json::Value, fact_type: &str) -> f32 {
+    args.get("importance")
+        .and_then(|v| v.as_f64())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .map(|v| v as f32)
+        .unwrap_or_else(|| default_tool_importance(fact_type))
+}
+
+/// Per-type default importance for agent-curated facts (mirrors the
+/// FactExtractor's `default_importance_for_type`).
+fn default_tool_importance(fact_type: &str) -> f32 {
+    match fact_type {
+        "decision" | "episodic" => 0.85,
+        "critical_file" => 0.75,
+        "open_task" | "user_tooling_pref" | "user_interest" => 0.65,
+        _ => 0.5,
     }
 }
 
@@ -80,16 +102,66 @@ impl Tool for MemorySearchTool {
         if query.is_empty() {
             return Ok(ToolOutput { success: false, content: String::new(), error: Some("query is required".into()) });
         }
-        let facts = self.mm.fact_archive().search_keyword(query, top_k).await;
-        let content = if facts.is_empty() {
-            "No matching memories found.".to_string()
-        } else {
-            facts.iter()
+
+        // Canonical path: three-factor search over the archival fact tier.
+        let facts = self.mm.fact_archive().search_hybrid(None, query, top_k, true).await;
+
+        if !facts.is_empty() {
+            let content = facts.iter()
                 .map(|f| format!("- [{}] {} {}: {}", f.fact_type, f.subject, f.predicate, f.content))
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n");
+            return Ok(ToolOutput { success: true, content, error: None });
+        }
+
+        // Fallback (R2): raw-transcript回溯. When no fact matches, search the
+        // persisted conversation snapshot for the current session — this is the
+        // on-demand ground-truth path for纠错核实 / 条件分支回溯 / 审计. Only
+        // reachable when facts are insufficient (常态不自动召回原文).
+        let snapshot_hits = self.search_conversation_snapshot(query, top_k).await;
+        let content = if snapshot_hits.is_empty() {
+            "No matching memories found.".to_string()
+        } else {
+            let mut out = String::from("[Raw transcript recall — no structured fact matched]\n");
+            out.push_str(&snapshot_hits.join("\n"));
+            out
         };
         Ok(ToolOutput { success: true, content, error: None })
+    }
+}
+
+impl MemorySearchTool {
+    /// Keyword-filter the current session's persisted conversation snapshot.
+    ///
+    /// Returns matching message excerpts (role + text). Empty when there is no
+    /// persistence backend or no saved conversation for this session.
+    async fn search_conversation_snapshot(&self, query: &str, top_k: usize) -> Vec<String> {
+        let Some(p) = self.mm.persistence() else { return Vec::new() };
+        let session_id = self.mm.session_id().await;
+        if session_id.is_empty() { return Vec::new(); }
+        let conv = match p.load_conversation(&session_id).await {
+            Ok(Some(c)) => c,
+            _ => return Vec::new(),
+        };
+        conv.messages.iter()
+            .filter_map(|m| {
+                let text = m.text_content();
+                if oneai_core::keyword_matches(&text, query) {
+                    let role = match m.role {
+                        oneai_core::Role::User => "user",
+                        oneai_core::Role::Assistant => "assistant",
+                        oneai_core::Role::Tool => "tool",
+                        _ => "system",
+                    };
+                    // Cap each excerpt so a single huge message can't dominate.
+                    let body: String = text.chars().take(1000).collect();
+                    Some(format!("- [{}] {}", role, body))
+                } else {
+                    None
+                }
+            })
+            .take(top_k)
+            .collect()
     }
 }
 
@@ -116,7 +188,12 @@ impl Tool for CoreMemoryEditTool {
         "Add or update a fact in your always-on core memory (the facts you see \
         every turn). If a fact with the same subject+predicate already exists, \
         it is updated with the new value. Use this to record durable user \
-        preferences, key decisions, and current task state."
+        preferences, key decisions, and current task state. IMPORTANT \
+        (constraint sedimentation): persistent constraints — package manager \
+        to use, modules never to touch, token/step budgets, coding standards \
+        — should be written here so they stay salient every turn and do NOT \
+        depend on being recalled from history (long context degrades \
+        attention to early constraints)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -126,7 +203,8 @@ impl Tool for CoreMemoryEditTool {
                 "fact_type": { "type": "string", "description": "Category (e.g. user_tooling_pref, decision, open_task)" },
                 "subject": { "type": "string", "description": "What the fact is about, e.g. 'user.package_manager'" },
                 "predicate": { "type": "string", "description": "The assertion, e.g. 'prefers', 'decided_to', 'status_is'" },
-                "content": { "type": "string", "description": "The fact's value, e.g. 'pnpm'" }
+                "content": { "type": "string", "description": "The fact's value, e.g. 'pnpm'" },
+                "importance": { "type": "number", "description": "Optional salience 0.0–1.0 for recall ranking; omit to use the per-type default" }
             },
             "required": ["fact_type", "subject", "predicate", "content"]
         })
@@ -143,7 +221,8 @@ impl Tool for CoreMemoryEditTool {
         if subject.is_empty() || predicate.is_empty() || content.is_empty() {
             return Ok(ToolOutput { success: false, content: String::new(), error: Some("subject, predicate, and content are required".into()) });
         }
-        let fact = build_fact(&self.mm, fact_type, subject, predicate, content).await;
+        let importance = read_importance(&args, &fact_type);
+        let fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
         let outcome = self.mm.core_memory().upsert(fact).await;
         // Enforce the core budget — evicted facts go to archival (paging).
         let evicted = self.mm.core_memory().enforce_budget().await;
@@ -186,7 +265,8 @@ impl Tool for ArchivalInsertTool {
                 "fact_type": { "type": "string", "description": "Category (e.g. decision, source, claim)" },
                 "subject": { "type": "string", "description": "What the fact is about" },
                 "predicate": { "type": "string", "description": "The assertion" },
-                "content": { "type": "string", "description": "The fact's value" }
+                "content": { "type": "string", "description": "The fact's value" },
+                "importance": { "type": "number", "description": "Optional salience 0.0–1.0 for recall ranking; omit to use the per-type default" }
             },
             "required": ["fact_type", "subject", "predicate", "content"]
         })
@@ -203,7 +283,8 @@ impl Tool for ArchivalInsertTool {
         if subject.is_empty() || predicate.is_empty() || content.is_empty() {
             return Ok(ToolOutput { success: false, content: String::new(), error: Some("subject, predicate, and content are required".into()) });
         }
-        let fact = build_fact(&self.mm, fact_type, subject, predicate, content).await;
+        let importance = read_importance(&args, &fact_type);
+        let fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
         self.mm.archive_facts(vec![fact]).await;
         Ok(ToolOutput { success: true, content: "Fact archived.".to_string(), error: None })
     }

@@ -116,7 +116,8 @@ impl SqliteSessionStore {
                 metadata_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                version INTEGER NOT NULL DEFAULT 1
+                version INTEGER NOT NULL DEFAULT 1,
+                importance REAL NOT NULL DEFAULT 0.5
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_key ON memories(user_id, subject, predicate);
             CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
@@ -124,6 +125,15 @@ impl SqliteSessionStore {
         ).map_err(|e| OneAIError::Persistence(
             format!("Failed to create session store schema: {}", e)
         ))?;
+
+        // Best-effort migration for databases created before the `importance`
+        // column existed. `ALTER TABLE ... ADD COLUMN` errors if the column is
+        // already present; ignore that specific case so both fresh and legacy
+        // databases end up with the column.
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5",
+            [],
+        );
 
         Ok(conn)
     }
@@ -604,19 +614,20 @@ impl MemoryPersistence for SqliteSessionStore {
         // MemoryFactStore's Mem0 invariant so persistence and runtime agree.
         conn.execute(
             "INSERT INTO memories (id, user_id, session_id, fact_type, subject, predicate, \
-             content, embedding_json, metadata_json, created_at, updated_at, version) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+             content, embedding_json, metadata_json, created_at, updated_at, version, importance) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
              ON CONFLICT(user_id, subject, predicate) DO UPDATE SET \
              content = excluded.content, \
              embedding_json = excluded.embedding_json, \
              metadata_json = excluded.metadata_json, \
              fact_type = excluded.fact_type, \
              updated_at = excluded.updated_at, \
-             version = memories.version + 1",
+             version = memories.version + 1, \
+             importance = excluded.importance",
             rusqlite::params![
                 fact.id, fact.user_id, fact.session_id, fact.fact_type.as_str(),
                 fact.subject, fact.predicate, fact.content, embedding_json, metadata_json,
-                created, updated, fact.version,
+                created, updated, fact.version, fact.importance,
             ],
         ).map_err(|e| OneAIError::Persistence(format!("Failed to store fact: {}", e)))?;
         Ok(())
@@ -628,7 +639,7 @@ impl MemoryPersistence for SqliteSessionStore {
         // otherwise scope to that session.
         let mut stmt = conn.prepare(
             "SELECT id, user_id, session_id, fact_type, subject, predicate, content, \
-             embedding_json, metadata_json, created_at, updated_at, version \
+             embedding_json, metadata_json, created_at, updated_at, version, importance \
              FROM memories WHERE user_id = ?1 AND (?2 = '' OR session_id = ?2)"
         ).map_err(|e| OneAIError::Persistence(format!("Failed to prepare fact query: {}", e)))?;
 
@@ -653,6 +664,7 @@ impl MemoryPersistence for SqliteSessionStore {
                 content: row.get(6)?,
                 embedding,
                 metadata,
+                importance: row.get::<_, f64>(12)? as f32,
                 created_at: created,
                 updated_at: updated,
                 version: row.get(11)?,
@@ -1004,6 +1016,7 @@ mod fact_tests {
             content: content.to_string(),
             embedding: None,
             metadata: HashMap::new(),
+            importance: 0.5,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version,

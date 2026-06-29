@@ -502,6 +502,28 @@ pub trait MemoryPersistence: Send + Sync {
     }
 }
 
+// ─── DiscardedSink ──────────────────────────────────────────────────────────
+
+/// Sink for messages discarded during context compression.
+///
+/// The "压缩即不丢" closure: when `ContextBudgetManager::compress` summarizes
+/// away older turns, the discarded `Message`s are handed to this sink before
+/// being dropped from the live conversation. A typical implementation persists
+/// them as a turn-scoped conversation snapshot (via `MemoryPersistence::
+/// save_conversation`) so they remain available for resume, audit, and on-demand
+/// `memory_search` fallback — raw transcript is not lost even though it leaves
+/// the working context.
+///
+/// Compression-coupled fact extraction (turning discarded turns into durable
+/// `MemoryFact`s) runs *inside* the compressor; this sink is the complementary
+/// raw-transcript archive. Failures must not propagate — a bad sink must not
+/// break the compression path.
+#[async_trait]
+pub trait DiscardedSink: Send + Sync {
+    /// Archive a batch of discarded messages, scoped to `session_id`.
+    async fn archive_discarded(&self, session_id: &str, discarded: Vec<Message>) -> Result<()>;
+}
+
 // ─── SessionInfo ────────────────────────────────────────────────────────────
 
 /// Metadata about a saved conversation session.

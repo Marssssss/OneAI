@@ -127,6 +127,7 @@ mod tests {
             content: content.to_string(),
             embedding: None,
             metadata: HashMap::new(),
+            importance: 0.5,
             created_at: updated,
             updated_at: updated,
             version: 1,

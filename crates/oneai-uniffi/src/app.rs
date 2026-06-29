@@ -153,9 +153,32 @@ mod tests {
         let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();
-        session.send_user_message("Rust is a programming language".to_string()).await.unwrap();
+
+        // Working memory is single-sourced on the Conversation (M1); the
+        // canonical long-term memory is the fact_archive. Insert a fact and
+        // verify retrieve_memory recalls it (recall_facts → fact_archive).
+        let fact = oneai_core::MemoryFact {
+            id: "f1".to_string(),
+            user_id: String::new(),
+            session_id: String::new(),
+            fact_type: oneai_core::FactType::new("decision"),
+            subject: "lang".to_string(),
+            predicate: "is".to_string(),
+            content: "Rust is a programming language".to_string(),
+            embedding: None,
+            metadata: std::collections::HashMap::new(),
+            importance: 0.5,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+        };
+        {
+            let inner = session.inner.lock().unwrap();
+            inner.memory_manager().archive_facts(vec![fact]).await;
+        }
 
         let results = session.retrieve_memory("programming".to_string(), 5).await.unwrap();
         assert!(!results.is_empty());
+        assert!(results.contains("Rust"));
     }
 }

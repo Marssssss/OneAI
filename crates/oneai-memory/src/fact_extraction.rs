@@ -32,6 +32,9 @@ struct RawFact {
     subject: String,
     predicate: String,
     content: String,
+    /// Optional salience override in [0.0, 1.0]; falls back to the per-type default.
+    #[serde(default)]
+    importance: Option<f32>,
 }
 
 impl FactExtractor {
@@ -91,8 +94,11 @@ impl FactExtractor {
             Output ONLY a JSON array (no prose, no code fences) of objects with fields \
             \"fact_type\" (one of the schema above), \"subject\" (what the fact is about, \
             e.g. \"user.package_manager\" or \"auth.module\"), \"predicate\" (the assertion, \
-            e.g. \"prefers\", \"decided_to\", \"status_is\"), and \"content\" (the value). \
-            If there are no extractable facts, output [].\n\nConversation segment:\n{}",
+            e.g. \"prefers\", \"decided_to\", \"status_is\"), \"content\" (the value), and an \
+            optional \"importance\" (float 0.0–1.0, how salient this fact is for future \
+            recall; omit to use the per-type default). Decisions and key outcomes should \
+            rate high; incidental observations low. If there are no extractable facts, \
+            output [].\n\nConversation segment:\n{}",
             schema_list, segment
         );
 
@@ -132,21 +138,43 @@ fn parse_facts(text: &str, schema: &[FactType], user_id: &str, session_id: &str)
             // Keep only facts whose type is in the schema (defense against drift).
             schema.iter().any(|s| s.as_str() == r.fact_type.as_str())
         })
-        .map(|r| MemoryFact {
-            id: format!("fact_{}", uuid::Uuid::new_v4()),
-            user_id: user_id.to_string(),
-            session_id: session_id.to_string(),
-            fact_type: FactType::new(r.fact_type),
-            subject: r.subject,
-            predicate: r.predicate,
-            content: r.content,
-            embedding: None,
-            metadata: std::collections::HashMap::new(),
-            created_at: now,
-            updated_at: now,
-            version: 1,
+        .map(|r| {
+            let fact_type = FactType::new(r.fact_type.clone());
+            let importance = r.importance
+                .filter(|v| (0.0..=1.0).contains(v))
+                .unwrap_or_else(|| default_importance_for_type(fact_type.as_str()));
+            MemoryFact {
+                id: format!("fact_{}", uuid::Uuid::new_v4()),
+                user_id: user_id.to_string(),
+                session_id: session_id.to_string(),
+                fact_type,
+                subject: r.subject,
+                predicate: r.predicate,
+                content: r.content,
+                embedding: None,
+                metadata: std::collections::HashMap::new(),
+                importance,
+                created_at: now,
+                updated_at: now,
+                version: 1,
+            }
         })
         .collect()
+}
+
+/// Per-category default importance (salience) for extracted facts.
+///
+/// Decisions and episodics are the highest-salience memories (they shape
+/// future reasoning); open tasks and user tooling prefs are medium; anything
+/// else defaults to the baseline. The agent can revise these via the
+/// self-managed memory tools.
+fn default_importance_for_type(fact_type: &str) -> f32 {
+    match fact_type {
+        "decision" | "episodic" => 0.85,
+        "critical_file" => 0.75,
+        "open_task" | "user_tooling_pref" | "user_interest" => 0.65,
+        _ => 0.5,
+    }
 }
 
 /// Extract the first `[...]` JSON-array span from a possibly-noisy LLM response.

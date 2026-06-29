@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use oneai_core::{Conversation, GlobalState, Message, MemoryEntry, MemoryQuery};
+use oneai_core::{Conversation, GlobalState, Message, MemoryEntry};
 use oneai_core::error::Result;
 use oneai_core::traits::ApprovalGate;
 use oneai_core::traits::StatePersistence;
@@ -256,17 +256,9 @@ impl AppSession {
         }
 
         self.conversation.add_message(Message::user(content.clone()));
-
-        self.app.memory_manager.add(MemoryEntry {
-            id: format!("msg_{}", uuid::Uuid::new_v4()),
-            content,
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: std::collections::HashMap::from([
-                ("role".to_string(), "user".to_string()),
-                ("session_id".to_string(), self.session_id.clone()),
-            ]),
-        }).await?;
+        // Working memory is single-sourced on the Conversation (M1) — no
+        // parallel STM write. Long-term memory is the canonical fact_archive,
+        // written by FactExtractor on compression, not by every message.
 
         Ok(())
     }
@@ -275,17 +267,7 @@ impl AppSession {
     pub async fn add_assistant_message(&mut self, text: impl Into<String>) -> Result<()> {
         let content = text.into();
         self.conversation.add_message(Message::assistant(content.clone()));
-
-        self.app.memory_manager.add(MemoryEntry {
-            id: format!("resp_{}", uuid::Uuid::new_v4()),
-            content,
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: std::collections::HashMap::from([
-                ("role".to_string(), "assistant".to_string()),
-                ("session_id".to_string(), self.session_id.clone()),
-            ]),
-        }).await?;
+        // Working memory single-source (M1): no STM double-write.
 
         Ok(())
     }
@@ -326,6 +308,11 @@ impl AppSession {
     }
 
     /// Retrieve relevant context from memory.
+    ///
+    /// Returns canonical archival facts (recall_facts) mapped back to
+    /// `MemoryEntry` form for API/FFI compatibility. The canonical long-term
+    /// memory is the `fact_archive` (Mem0 layer); the legacy STM/LTM
+    /// `MemoryEntry` stores are no longer the recall target.
     pub async fn retrieve_memory(&self, query: &str, top_k: usize) -> Result<Vec<MemoryEntry>> {
         // Log MemoryRetrieve event if tracing
         if let Some(ctx) = &self.trace_context {
@@ -335,13 +322,18 @@ impl AppSession {
             ]));
         }
 
-        let memory_query = MemoryQuery {
-            text: query.to_string(),
-            embedding: None,
-            time_range: None,
-            metadata_filters: std::collections::HashMap::new(),
-        };
-        self.app.memory_manager.retrieve(&memory_query, top_k).await
+        let facts = self.app.memory_manager.recall_facts(query, top_k).await?;
+        Ok(facts.into_iter().map(|f| MemoryEntry {
+            id: f.id,
+            content: format!("{} {}: {}", f.subject, f.predicate, f.content),
+            timestamp: f.updated_at,
+            embedding: f.embedding,
+            metadata: std::collections::HashMap::from([
+                ("role".to_string(), "memory".to_string()),
+                ("fact_type".to_string(), f.fact_type.as_str().to_string()),
+                ("session_id".to_string(), f.session_id),
+            ]),
+        }).collect())
     }
 
     /// Retrieve relevant context from RAG (keyword-based).
@@ -543,46 +535,26 @@ impl AppSession {
         // Load durable facts (cross-session habits + this session's episodic)
         // into the archival tier. Idempotent (upsert-deduped), so safe per turn.
         self.app.memory_manager.load_persisted_facts().await;
-        self.app.memory_manager.add(MemoryEntry {
-            id: format!("msg_{}", uuid::Uuid::new_v4()),
-            content: task.to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: std::collections::HashMap::from([
-                ("role".to_string(), "user".to_string()),
-                ("session_id".to_string(), self.session_id.clone()),
-            ]),
-        }).await?;
+        // Working memory is single-sourced on the Conversation (M1): the user
+        // task is added to the conversation by the agent loop; no parallel STM
+        // write here. Canonical long-term memory lives in fact_archive.
 
-        // Retrieve relevant memories for context injection.
-        // P4: recall is routed through the CoreMemorySource (an anti-compression
-        // ContextSource injected every iteration) instead of a one-shot system
-        // message that could be summarized away. The core block also carries
-        // the agent's curated core-memory facts.
-        let memory_query = MemoryQuery {
-            text: task.to_string(),
-            embedding: None,
-            time_range: None,
-            metadata_filters: std::collections::HashMap::new(),
-        };
-        let memory_results = self.app.memory_manager.retrieve(&memory_query, 5).await?;
-        let recall_text = if memory_results.is_empty() {
-            String::new()
-        } else {
-            memory_results.iter()
-                .map(|e| {
-                    let role = e.metadata.get("role").map(|s| s.as_str()).unwrap_or("memory");
-                    format!("- [{}] {}", role, e.content)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        // Recall relevant facts from the canonical archival tier for this turn
+        // (R1). Recall is routed through the CoreMemorySource (an
+        // anti-compression ContextSource injected every iteration) instead of a
+        // one-shot system message that could be summarized away. The core
+        // block also carries the agent's curated core-memory facts.
+        let recall_top_k = self.app.domain_pack.as_ref()
+            .map(|d| d.memory_profile.recall.top_k)
+            .unwrap_or(5);
+        let recalled_facts = self.app.memory_manager
+            .recall_facts(task, recall_top_k).await?;
 
         // Build the core memory source and populate its recall for this turn.
         let core_memory_source = std::sync::Arc::new(
             oneai_memory::CoreMemorySource::new(self.app.memory_manager.core_memory().clone())
         );
-        core_memory_source.set_recall_text(recall_text).await;
+        core_memory_source.set_recall(recalled_facts).await;
 
         // Build conversation with history (memory is now injected via the
         // CoreMemorySource each iteration, not as a one-shot system message).
@@ -661,6 +633,12 @@ impl AppSession {
                     oneai_core::budget::TokenBudget::new(100000),
                     oneai_core::budget::BudgetAllocation::default(),
                     compressor,
+                )
+                .with_discarded_sink(
+                    Arc::new(oneai_memory::ArchivalDiscardedSink::new(
+                        self.app.memory_manager.clone(),
+                    )),
+                    self.session_id.clone(),
                 )),
                 Arc::new(oneai_agent::DefaultSubAgentFactory::new(
                     provider.clone(),
@@ -694,10 +672,29 @@ impl AppSession {
                 trace_context: self.trace_context.clone(),
                 ..AgentLoopConfig::default()
             };
-            // No domain pack — use NoopCompressor as a fallback.
-            // Without a domain's CompressionTemplate, real compression would use
-            // a generic prompt, which is less useful. The NoopCompressor ensures
-            // the loop still works without a provider for tool-only/workflow-only usage.
+            // No domain pack — still use a real ContextCompressor with a
+            // generic summarization prompt and default fact extraction (B3/C3),
+            // so compression-coupled fact extraction and discarded archival
+            // work even without a domain's MemoryProfile. (Previously this
+            // used NoopCompressor: zero compression, zero extraction, and raw
+            // discarded transcript was silently lost.)
+            let default_schema = vec![
+                oneai_core::FactType::new("user_tooling_pref"),
+                oneai_core::FactType::new("decision"),
+                oneai_core::FactType::new("open_task"),
+            ];
+            let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> =
+                Arc::new(oneai_memory::ContextCompressor::new(
+                    80000, // threshold_tokens
+                    6,     // keep_recent_turns
+                    provider.clone(),
+                )
+                .with_fact_extraction(
+                    default_schema,
+                    self.app.memory_manager.fact_archive().clone(),
+                    self.app.memory_manager.user_id().await,
+                    self.session_id.clone(),
+                ));
             AgentLoop::new(
                 provider.clone(),
                 self.app.tool_executor.tools_map(),
@@ -707,7 +704,13 @@ impl AppSession {
                 Arc::new(oneai_core::budget::ContextBudgetManager::new(
                     oneai_core::budget::TokenBudget::new(100000),
                     oneai_core::budget::BudgetAllocation::default(),
-                    Arc::new(oneai_core::budget::NoopCompressor),
+                    compressor,
+                )
+                .with_discarded_sink(
+                    Arc::new(oneai_memory::ArchivalDiscardedSink::new(
+                        self.app.memory_manager.clone(),
+                    )),
+                    self.session_id.clone(),
                 )),
                 Arc::new(oneai_agent::DefaultSubAgentFactory::new(
                     provider.clone(),
@@ -739,19 +742,9 @@ impl AppSession {
 
         let result = result?;
 
-        // Store assistant response in memory
-        if !result.final_answer.is_empty() {
-            self.app.memory_manager.add(MemoryEntry {
-                id: format!("resp_{}", uuid::Uuid::new_v4()),
-                content: result.final_answer.clone(),
-                timestamp: chrono::Utc::now(),
-                embedding: None,
-                metadata: std::collections::HashMap::from([
-                    ("role".to_string(), "assistant".to_string()),
-                    ("session_id".to_string(), self.session_id.clone()),
-                ]),
-            }).await?;
-        }
+        // The assistant's final answer is already part of the loop's
+        // conversation (merged below), so working memory captures it without a
+        // parallel STM write (M1 single-source).
 
         // Merge the loop's conversation back into the session
         self.conversation = result.conversation.clone();
@@ -773,7 +766,10 @@ impl AppSession {
         if let Some(reflection) = self.app.memory_manager.reflection() {
             let config = reflection.config();
             if config.auto_reflect {
-                let episodic = self.app.memory_manager.reflect(&self.session_id).await?;
+                // Reflect over the live conversation (M1 single source) and
+                // store the episodic as a canonical archival fact + persist.
+                let episodic = self.app.memory_manager
+                    .reflect(&self.session_id, &self.conversation).await?;
                 if let Some(episodic) = episodic {
                     tracing::info!(
                         "Memory reflection completed for session {}: {} insights, {} decisions",
@@ -836,14 +832,38 @@ impl AppSession {
                 provider.clone(),
                 domain.compression_template.clone(),
             )
+            .with_fact_extraction(
+                domain.memory_profile.extraction_schema.clone(),
+                self.app.memory_manager.fact_archive().clone(),
+                self.app.memory_manager.user_id().await,
+                self.session_id.clone(),
+            )
         } else {
             oneai_memory::ContextCompressor::new(0, keep_recent_turns, provider.clone())
+            .with_fact_extraction(
+                vec![
+                    oneai_core::FactType::new("user_tooling_pref"),
+                    oneai_core::FactType::new("decision"),
+                    oneai_core::FactType::new("open_task"),
+                ],
+                self.app.memory_manager.fact_archive().clone(),
+                self.app.memory_manager.user_id().await,
+                self.session_id.clone(),
+            )
         };
 
         let result = compressor.compress(&self.conversation).await?;
         let summary = result.summary.unwrap_or_default();
         let removed_count = result.removed_entries.len();
         let had_summary = !summary.is_empty();
+
+        // Archive the discarded raw transcript (C2 "压缩即不丢") before it
+        // leaves the live conversation — fact extraction already ran inside
+        // the compressor; this persists the raw segment as a snapshot.
+        self.app.memory_manager
+            .archive_discarded_snapshot(&self.session_id, result.discarded_messages.clone())
+            .await
+            .ok(); // non-critical: a failed snapshot must not break /compact
 
         // Replace the backend conversation in place: summary system message
         // followed by the retained recent turns. This is the core fix — the

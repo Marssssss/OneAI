@@ -993,6 +993,15 @@ pub struct MemoryFact {
     #[serde(default)]
     pub metadata: HashMap<String, String>,
 
+    /// Salience/importance score in `[0.0, 1.0]` used by the three-factor
+    /// recall scorer (recency + importance + relevance, à la Generative
+    /// Agents). Higher = more likely to be recalled. Defaults to `0.5`;
+    /// `FactExtractor` assigns per-category defaults (decisions/episodics
+    /// higher, open tasks medium) and the agent can revise it via the
+    /// self-managed memory tools.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
+
     /// When the fact was first recorded.
     pub created_at: chrono::DateTime<chrono::Utc>,
 
@@ -1006,6 +1015,11 @@ pub struct MemoryFact {
 
 fn default_version() -> u32 {
     1
+}
+
+/// Default importance for a fact lacking an explicit salience (see `MemoryFact`).
+fn default_importance() -> f32 {
+    0.5
 }
 
 impl MemoryFact {

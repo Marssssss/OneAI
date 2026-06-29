@@ -149,6 +149,77 @@ impl MemoryFactStore {
         results.truncate(top_k);
         results
     }
+
+    /// Three-factor hybrid search (Generative Agents): relevance + recency +
+    /// importance.
+    ///
+    /// `relevance` is cosine similarity when both query and fact have
+    /// embeddings, else a fixed keyword-match score. `recency` is exponential
+    /// decay over `updated_at` (disabled when `time_decay` is false).
+    /// `importance` is the fact's salience field. The weighted sum ranks
+    /// results; top_k are returned.
+    pub async fn search_hybrid(
+        &self,
+        query_embedding: Option<&[f32]>,
+        query_text: &str,
+        top_k: usize,
+        time_decay: bool,
+    ) -> Vec<MemoryFact> {
+        let now = chrono::Utc::now();
+        let facts = self.facts.read().await;
+        let mut scored: Vec<(f32, MemoryFact)> = facts
+            .values()
+            .filter_map(|f| {
+                let relevance = match query_embedding {
+                    Some(emb) => f
+                        .embedding
+                        .as_ref()
+                        .map(|fe| cosine(emb, fe))
+                        .unwrap_or(0.0),
+                    None => {
+                        if oneai_core::keyword_matches(&f.content, query_text)
+                            || oneai_core::keyword_matches(&f.subject, query_text)
+                            || oneai_core::keyword_matches(&f.predicate, query_text)
+                        {
+                            0.6
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                // Exclude non-matches: a zero-relevance fact (no keyword hit
+                // or orthogonal embedding) should not surface just because
+                // recency/importance give it a non-zero score.
+                if relevance <= 0.0 {
+                    return None;
+                }
+                let recency = if time_decay { temporal_score_fact(&f.updated_at, &now) } else { 0.5 };
+                let importance = f.importance;
+                let score = 0.5 * relevance + 0.3 * recency + 0.2 * importance;
+                Some((score, f.clone()))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(_, f)| f).take(top_k).collect()
+    }
+}
+
+/// Exponential recency decay over a fact's `updated_at`, in `[0.0, 1.0]`.
+///
+/// Mirrors `long_term::EmbeddedVectorStore::temporal_score` but operates on
+/// fact timestamps (the canonical layer), so the three-factor scorer in
+/// `search_hybrid` can apply Generative-Agents-style recency weighting.
+fn temporal_score_fact(
+    entry_time: &chrono::DateTime<chrono::Utc>,
+    reference_time: &chrono::DateTime<chrono::Utc>,
+) -> f32 {
+    let diff = reference_time.timestamp() - entry_time.timestamp();
+    if diff <= 0 {
+        return 1.0;
+    }
+    let half_life: f64 = 3600.0; // 1-hour half-life
+    let decay = std::cmp::min(diff, 365 * 24 * 3600) as f64;
+    0.5_f64.powf(decay / half_life) as f32
 }
 
 impl Default for MemoryFactStore {
@@ -192,6 +263,7 @@ mod tests {
             content: content.to_string(),
             embedding: None,
             metadata: HashMap::new(),
+            importance: 0.5,
             created_at: now(),
             updated_at: now(),
             version: 1,
@@ -255,5 +327,35 @@ mod tests {
         let results = store.search_keyword("pnpm", 5).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "pnpm");
+    }
+
+    #[tokio::test]
+    async fn search_hybrid_keyword_matches() {
+        let store = MemoryFactStore::new();
+        store.upsert(make_fact("alice", "user.package_manager", "prefers", "pnpm")).await;
+        store.upsert(make_fact("alice", "user.test_runner", "prefers", "vitest")).await;
+        // No query embedding → keyword relevance path.
+        let results = store.search_hybrid(None, "pnpm", 5, true).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "pnpm");
+    }
+
+    #[tokio::test]
+    async fn search_hybrid_ranks_higher_importance_first() {
+        // Three-factor scorer: a higher-importance fact outranks a lower one
+        // when relevance is comparable (both keyword-match the query).
+        let store = MemoryFactStore::new();
+        let mut low = make_fact("alice", "auth.module", "decided_to", "jwt");
+        low.importance = 0.2;
+        let mut high = make_fact("alice", "auth.scheme", "decided_to", "jwt");
+        high.importance = 0.95;
+        store.upsert(low).await;
+        store.upsert(high).await;
+
+        let results = store.search_hybrid(None, "jwt", 5, false).await;
+        assert_eq!(results.len(), 2);
+        // time_decay disabled → importance is the differentiator; high first.
+        assert_eq!(results[0].subject, "auth.scheme");
+        assert_eq!(results[1].subject, "auth.module");
     }
 }

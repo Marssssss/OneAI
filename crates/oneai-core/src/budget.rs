@@ -19,6 +19,7 @@ use crate::error::Result;
 use crate::ContentBlock;
 use crate::Message;
 use crate::Role;
+use crate::traits::DiscardedSink;
 
 // ─── ContextCompressor trait (defined in core for dependency inversion) ────
 
@@ -496,6 +497,18 @@ pub struct ContextBudgetManager {
 
     /// The model name used for token counting (needed by TokenCounter).
     model_name: Option<String>,
+
+    /// Sink for messages discarded during compression (the "压缩即不丢"
+    /// closure). When set, `compress` hands the discarded `Message`s to this
+    /// sink before returning the compressed conversation, so raw transcript
+    /// can be archived (conversation snapshot) for resume / audit / on-demand
+    /// recall instead of being dropped. Fact extraction runs inside the
+    /// compressor; this is the complementary raw-transcript archive.
+    discarded_sink: Option<Arc<dyn DiscardedSink>>,
+
+    /// Session id used to scope discarded snapshots. Set by the caller that
+    /// wires the sink (the session knows its id).
+    session_id: Option<String>,
 }
 
 impl ContextBudgetManager {
@@ -506,7 +519,7 @@ impl ContextBudgetManager {
         compressor: Arc<dyn ContextCompressorTrait>,
     ) -> Self {
         assert!(allocation.validate(), "BudgetAllocation fractions must sum to ~1.0");
-        Self { budget, allocation, compressor, token_counter: None, model_name: None }
+        Self { budget, allocation, compressor, token_counter: None, model_name: None, discarded_sink: None, session_id: None }
     }
 
     /// Create with default allocation based on a model's context window.
@@ -539,6 +552,19 @@ impl ContextBudgetManager {
         self
     }
 
+    /// Attach a `DiscardedSink` so messages compressed out of the live
+    /// conversation are archived (raw transcript) instead of dropped.
+    /// The `session_id` scopes the archived snapshots.
+    pub fn with_discarded_sink(
+        mut self,
+        sink: Arc<dyn DiscardedSink>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.discarded_sink = Some(sink);
+        self.session_id = Some(session_id.into());
+        self
+    }
+
     /// Check if a conversation needs compression (total tokens exceed budget).
     pub fn needs_compression(&self, conversation: &Conversation) -> bool {
         let estimated_tokens = if let (Some(tc), Some(model)) = (&self.token_counter, &self.model_name) {
@@ -557,17 +583,39 @@ impl ContextBudgetManager {
     /// 1. Trims tool results that exceed the tool_results budget
     /// 2. Compresses older conversation turns into a summary
     /// 3. Reduces retrieved context to keyword-only if needed
+    ///
+    /// Messages discarded (summarized away) by the compressor are handed to
+    /// the optional `DiscardedSink` before returning, so raw transcript is
+    /// archived rather than lost (the "压缩即不丢" closure).
     pub async fn compress(&self, conversation: Conversation) -> Result<Conversation> {
-        // Step 1: Estimate token usage per source
-        let _estimated = self.estimate_source_tokens(&conversation);
-        let _allocated = self.allocation.allocate(self.budget.total);
+        // Step 1: Estimate token usage per source — drives whether Step 2 fires.
+        let estimate = self.estimate_source_tokens(&conversation);
+        let allocated = self.allocation.allocate(self.budget.total);
 
-        // Step 2: If tool results exceed their allocation, truncate long outputs
-        // (Implementation: trim tool_result ContentBlocks that exceed a character limit)
+        // Step 2: If tool results exceed their allocation, truncate long
+        // tool_result ContentBlocks in-place before summarization. This is the
+        //无损截断 tier — the model keeps a capped view, and the pointer tells
+        // it to reach for `memory_search` for the full output.
+        let conversation = if estimate.tool_results as u32 > allocated.tool_results {
+            truncate_tool_results(conversation, allocated.tool_results)
+        } else {
+            conversation
+        };
 
-        // Step 3: If older turns exceed their allocation, compress to summary
-        let compressed = self.compressor.compress(&conversation).await?;
-        Ok(compressed.compressed_conversation)
+        // Step 3: Compress older turns into a summary (compressor-specific).
+        let result = self.compressor.compress(&conversation).await?;
+
+        // Archive discarded raw transcript before it leaves the live context.
+        if let Some(sink) = &self.discarded_sink {
+            if !result.discarded_messages.is_empty() {
+                let session_id = self.session_id.as_deref().unwrap_or("");
+                if let Err(e) = sink.archive_discarded(session_id, result.discarded_messages.clone()).await {
+                    tracing::warn!("discarded-sink archive failed (compression proceeds): {}", e);
+                }
+            }
+        }
+
+        Ok(result.compressed_conversation)
     }
 
     /// Get the current token budget.
@@ -617,4 +665,104 @@ pub struct BudgetSourceEstimate {
     pub system_prompt: usize,
     pub recent_turns: usize,
     pub tool_results: usize,
+}
+
+// ─── tool_result truncation (B4 Step 2) ─────────────────────────────────────
+
+/// In-place无损 truncation of oversized `ToolResult` blocks.
+///
+/// When the estimated tool-result tokens exceed the `tool_results` budget
+/// allocation, each `ContentBlock::ToolResult` is capped to a per-block char
+/// limit (the budget converted to chars, distributed across blocks) and
+/// suffixed with a pointer telling the model to recover the full output via
+/// `memory_search` rather than carrying it in context. Other blocks are left
+/// untouched. This is the "无损截断" tier that runs *before* summarization, so
+/// long shell/file outputs stop being summarized away wholesale.
+pub(crate) fn truncate_tool_results(conversation: Conversation, tool_results_token_budget: u32) -> Conversation {
+    // Roughly 4 chars per token; cap each block at the full budget in chars
+    // (a single runaway output shouldn't eat the whole window silently, but
+    // per-block proportional capping is overkill here — the summary step still
+    // bounds older turns).
+    let max_chars = (tool_results_token_budget as usize).saturating_mul(4).max(1);
+
+    let mut out = Conversation::with_id(conversation.id.clone());
+    out.metadata = conversation.metadata.clone();
+    for msg in conversation.messages {
+        let truncated_content: Vec<ContentBlock> = msg.content.into_iter().map(|block| {
+            match block {
+                ContentBlock::ToolResult { call_id, content } => {
+                    if content.chars().count() > max_chars {
+                        let cut: String = content.chars().take(max_chars).collect();
+                        ContentBlock::ToolResult {
+                            call_id,
+                            content: format!("{}\n[...output truncated — use memory_search for the full output]", cut),
+                        }
+                    } else {
+                        ContentBlock::ToolResult { call_id, content }
+                    }
+                }
+                other => other,
+            }
+        }).collect();
+        out.add_message(Message {
+            role: msg.role,
+            content: truncated_content,
+            metadata: msg.metadata,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_tool_results_caps_oversized_output_with_pointer() {
+        // B4 Step 2: a runaway tool_result is capped and gets a memory_search
+        // pointer rather than being summarized away wholesale.
+        let long_output = "x".repeat(50_000);
+        let mut conv = Conversation::with_id("c1".into());
+        conv.add_message(Message::user("run it"));
+        conv.add_message(Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "call_1".to_string(),
+                content: long_output,
+            }],
+            metadata: std::collections::HashMap::new(),
+        });
+
+        // 100-token tool_results budget → ~400 chars cap.
+        let out = truncate_tool_results(conv, 100);
+        let tool_msg = out.messages.iter().find(|m| m.role == Role::Tool).unwrap();
+        let block = tool_msg.content.iter().next().unwrap();
+        match block {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(content.contains("memory_search"));
+                // Capped well below the original 50_000.
+                assert!(content.chars().count() < 1000);
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn truncate_tool_results_leaves_short_outputs_intact() {
+        let mut conv = Conversation::with_id("c1".into());
+        conv.add_message(Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "call_1".to_string(),
+                content: "small output".to_string(),
+            }],
+            metadata: std::collections::HashMap::new(),
+        });
+        let out = truncate_tool_results(conv, 100);
+        let block = out.messages[0].content.iter().next().unwrap();
+        match block {
+            ContentBlock::ToolResult { content, .. } => assert_eq!(content, "small output"),
+            _ => panic!("expected ToolResult"),
+        }
+    }
 }

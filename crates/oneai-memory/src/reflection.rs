@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use oneai_core::{Conversation, InferenceRequest, MemoryEntry, Message};
+use oneai_core::{Conversation, FactType, InferenceRequest, MemoryEntry, MemoryFact, Message};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
 
@@ -133,6 +133,51 @@ impl EpisodicMemory {
                 ("reflection".to_string(), self.reflection.clone()),
                 ("outcome".to_string(), self.outcome.clone()),
             ]),
+        }
+    }
+
+    /// Convert this episodic memory into a canonical `MemoryFact` for the
+    /// archival tier (the "提炼型 episodic 中间层", M5).
+    ///
+    /// The fact is richer than a plain atomic fact (it carries the reflection
+    /// summary plus key insights/decisions in `content`) yet far more compact
+    /// than raw transcript — exactly the middle档 between "fact 太干" and
+    /// "原文太长". High `importance` (0.8) so the three-factor recall surfaces
+    /// it ahead of incidental facts. `subject` = originating session,
+    /// `predicate` = "reflection".
+    pub fn to_fact(&self) -> MemoryFact {
+        let mut content = self.reflection.clone();
+        if !self.key_insights.is_empty() {
+            content.push_str("\n\nKey Insights:\n");
+            for insight in &self.key_insights {
+                content.push_str(&format!("- {}\n", insight));
+            }
+        }
+        if !self.decisions.is_empty() {
+            content.push_str("\nDecisions:\n");
+            for decision in &self.decisions {
+                content.push_str(&format!("- {}\n", decision));
+            }
+        }
+        if !self.outcome.is_empty() {
+            content.push_str(&format!("\nOutcome: {}", self.outcome));
+        }
+        MemoryFact {
+            id: self.id.clone(),
+            user_id: String::new(),
+            session_id: self.session_id.clone(),
+            fact_type: FactType::new("episodic"),
+            subject: format!("session.{}", self.session_id),
+            predicate: "reflection".to_string(),
+            content,
+            embedding: self.embedding.clone(),
+            metadata: std::collections::HashMap::from([
+                ("outcome".to_string(), self.outcome.clone()),
+            ]),
+            importance: 0.8,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
         }
     }
 }
@@ -446,6 +491,30 @@ mod tests {
         assert!(entry.content.contains("We explored Rust"));
         assert!(entry.content.contains("Key Insights:"));
         assert!(entry.content.contains("Rust is fast"));
+    }
+
+    #[test]
+    fn test_episodic_memory_to_fact() {
+        // M5: the episodic middle layer becomes a canonical archival fact.
+        let episodic = EpisodicMemory {
+            id: "epi_123".to_string(),
+            session_id: "sess_456".to_string(),
+            reflection: "We explored Rust".to_string(),
+            key_insights: vec!["Rust is fast".to_string()],
+            decisions: vec!["Use Rust backend".to_string()],
+            outcome: "success".to_string(),
+            embedding: None,
+        };
+
+        let fact = episodic.to_fact();
+        assert_eq!(fact.id, "epi_123");
+        assert_eq!(fact.fact_type.as_str(), "episodic");
+        assert_eq!(fact.subject, "session.sess_456");
+        assert_eq!(fact.predicate, "reflection");
+        assert!(fact.content.contains("We explored Rust"));
+        assert!(fact.content.contains("Use Rust backend"));
+        // High salience so the three-factor recall surfaces it.
+        assert!((fact.importance - 0.8).abs() < 1e-6);
     }
 
     #[tokio::test]

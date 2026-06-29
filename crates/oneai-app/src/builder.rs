@@ -389,48 +389,30 @@ impl AppBuilder {
     /// Enable memory reflection — the STM↔LTM closed loop.
     ///
     /// When enabled, the memory manager will:
-    /// 1. Proactively recall relevant LTM memories into STM context on each turn
-    /// 2. At session end, reflect on STM entries and generate episodic LTM memories
+    /// 1. Proactively recall relevant facts into context each turn (recall_facts)
+    /// 2. At session end, reflect on the conversation and generate an episodic fact
     ///
     /// This requires an LLM provider for the reflection prompt.
-    /// The same provider is used for both reflection and compression.
     ///
     /// **Usage**:
     /// ```ignore
     /// let app = AppBuilder::new()
     ///     .provider(provider)
-    ///     .with_memory_reflection()  // ← enables STM↔LTM closed loop
+    ///     .with_memory_reflection()  // ← enables session-end reflection
     ///     .build()?;
     /// ```
     pub fn with_memory_reflection(mut self) -> Self {
         if let Some(provider) = &self.provider {
             let config = MemoryManagerConfig::default();
-            let injection_config = oneai_memory::MemoryInjectionConfig::default();
             self.memory_manager = Some(Arc::new(
                 MemoryManager::with_compressor_and_reflection(
                     config,
-                    injection_config,
                     provider.clone(),
                 )
             ));
         }
         // If no provider is set yet, reflection will be enabled when
         // the provider is set (via the build() method).
-        self
-    }
-
-    /// Enable memory reflection with custom injection configuration.
-    pub fn with_memory_reflection_config(mut self, injection_config: oneai_memory::MemoryInjectionConfig) -> Self {
-        if let Some(provider) = &self.provider {
-            let config = MemoryManagerConfig::default();
-            self.memory_manager = Some(Arc::new(
-                MemoryManager::with_compressor_and_reflection(
-                    config,
-                    injection_config,
-                    provider.clone(),
-                )
-            ));
-        }
         self
     }
 
@@ -2093,14 +2075,33 @@ mod tests {
             .await
             .expect("Build should succeed");
 
-        let mut session = app.create_session();
+        let session = app.create_session();
 
-        // Add messages to memory
-        session.send_user_message("Rust is a programming language").await.unwrap();
+        // The canonical long-term memory is now the fact_archive (M1: working
+        // memory is single-sourced on the Conversation, so sending a user
+        // message no longer round-trips through STM). Insert a fact into the
+        // archival tier and verify retrieve_memory recalls it via recall_facts.
+        let fact = oneai_core::MemoryFact {
+            id: "f1".to_string(),
+            user_id: String::new(),
+            session_id: String::new(),
+            fact_type: oneai_core::FactType::new("decision"),
+            subject: "lang".to_string(),
+            predicate: "is".to_string(),
+            content: "Rust is a programming language".to_string(),
+            embedding: None,
+            metadata: std::collections::HashMap::new(),
+            importance: 0.5,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+        };
+        session.memory_manager().archive_facts(vec![fact]).await;
 
-        // Retrieve from memory
+        // Retrieve from memory (recall_facts → fact_archive three-factor search).
         let results = session.retrieve_memory("programming", 5).await.unwrap();
         assert!(!results.is_empty());
+        assert!(results[0].content.contains("Rust"));
     }
 
     #[tokio::test]

@@ -52,12 +52,10 @@ impl OneAIAppBuilder {
     }
 
     /// Set the memory manager with custom config.
-    pub fn memory_manager_with_config(self: Arc<Self>, window_size: u32, threshold_tokens: u32) -> Arc<Self> {
+    pub fn memory_manager_with_config(self: Arc<Self>, threshold_tokens: u32) -> Arc<Self> {
         let config = oneai_memory::MemoryManagerConfig {
-            stm_window_size: window_size as usize,
             compression_threshold_tokens: threshold_tokens as usize,
-            compression_keep_recent_turns: 6,
-            evict_to_ltm: true,
+            ..Default::default()
         };
         let manager = Arc::new(MemoryManager::with_config(config));
         let builder = self.take_inner().memory_manager(manager);
