@@ -822,6 +822,201 @@ pub enum ApprovalResponse {
     },
 }
 
+// ─── PlanStep / PlanStepStatus ───────────────────────────────────────────────
+//
+// `PlanStep` lives in `oneai-core` (not `oneai-agent`) so that
+// `InteractionRequest::PlanReview` — whose signature is part of the
+// `InteractionGate` trait defined in core — can reference it without a
+// layering violation (core must not depend on agent). The `plan_agent`
+// crate re-exports these for backward-compatible `oneai_agent::PlanStep`
+// access.
+
+/// A single step in a task plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlanStep {
+    /// Step identifier (e.g., "step_1").
+    pub id: String,
+
+    /// Brief description of what this step should accomplish.
+    pub description: String,
+
+    /// Whether this step is coupled to previous steps.
+    /// - Coupled: must wait for previous step's result → ReAct pipeline
+    /// - Non-coupled: can run independently → parallel sub-agent
+    pub coupled: bool,
+
+    /// Which previous step IDs this step depends on (if coupled).
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+
+    /// Execution status of this step. Defaults to Pending when created by the
+    /// planner; mutated by the `task_update` tool during execution so the TUI
+    /// can render live progress.
+    #[serde(default)]
+    pub status: PlanStepStatus,
+
+    /// Present-continuous label shown in the spinner while the step is in
+    /// progress (e.g. "Running tests"). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+}
+
+/// Execution status of a plan step.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    /// Not started yet.
+    #[default]
+    Pending,
+    /// Currently being worked on.
+    InProgress,
+    /// Finished successfully.
+    Completed,
+    /// Failed or aborted.
+    Failed,
+}
+
+impl PlanStepStatus {
+    /// Icon for TUI display.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            PlanStepStatus::Pending => "○",
+            PlanStepStatus::InProgress => "◐",
+            PlanStepStatus::Completed => "●",
+            PlanStepStatus::Failed => "✗",
+        }
+    }
+}
+
+// ─── InteractionGate types ───────────────────────────────────────────────────
+//
+// Unified "agent loop suspends → asks the application layer → resumes with a
+// reply" surface. Replaces the split between `ApprovalGate` (tool approve/deny),
+// `on_plan_submitted` (bool plan accept), and the dead PreInfer/PostInfer
+// `LifecycleHook` interactive path. The application layer decides per-point
+// whether to actually call back to the UI (`enabled(point)`); all other points
+// short-circuit to `Proceed` with zero latency.
+
+/// Which decision point in the agent loop an interaction request originates from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum InteractionPoint {
+    /// Before an LLM inference call.
+    PreInfer,
+    /// After an LLM inference call.
+    PostInfer,
+    /// High-risk tool approval.
+    ToolApproval,
+    /// A tradeoff decision surfaced during planning (before the final plan).
+    PlanDecision,
+    /// Final confirmation of a single produced plan.
+    PlanReview,
+}
+
+/// A selectable option for a [`InteractionRequest::PlanDecision`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionOption {
+    /// Stable id, e.g. `"opt_a"`.
+    pub id: String,
+    /// Short human label, e.g. `"优先速度"`.
+    pub label: String,
+    /// What this option means.
+    pub description: String,
+    /// The cost / tradeoff this option incurs, stated honestly.
+    pub tradeoffs: String,
+}
+
+/// A request from the agent loop to the application layer at a decision point.
+///
+/// The loop blocks on the corresponding [`InteractionResponse`] before resuming.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum InteractionRequest {
+    /// LLM inference is about to run. The layer may rewrite the request
+    /// (inject context / filter tools), ask for a feedback-grounded retry,
+    /// or skip this iteration.
+    PreInfer {
+        request: InferenceRequest,
+        iteration: usize,
+        paradigm: String,
+    },
+    /// LLM inference just returned. The layer may validate / filter / replace
+    /// the response, or ask for a feedback-grounded retry.
+    PostInfer {
+        response: InferenceResponse,
+        request: InferenceRequest,
+        iteration: usize,
+        paradigm: String,
+    },
+    /// A high-risk tool is about to execute — replaces `ApprovalRequest`'s
+    /// interactive role.
+    ToolApproval {
+        approval: ApprovalRequest,
+    },
+    /// The planner hit a tradeoff with no clearly superior option and asks the
+    /// user to choose (or supply a custom decision) before producing the final
+    /// plan. Surfaces before [`InteractionRequest::PlanReview`].
+    PlanDecision {
+        decision_id: String,
+        /// The question requiring a decision (e.g. "优先速度还是正确性？").
+        question: String,
+        /// Why the user's input is needed at this point.
+        context: String,
+        options: Vec<DecisionOption>,
+    },
+    /// Final confirmation of a single produced plan.
+    PlanReview {
+        plan: String,
+        steps: Vec<PlanStep>,
+    },
+}
+
+/// The application layer's reply to an [`InteractionRequest`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum InteractionResponse {
+    /// Proceed without changes.
+    Proceed,
+    /// Proceed but apply a modification (PreInfer rewrites request, PostInfer
+    /// replaces response, ToolApproval rewrites args, PlanReview uses a
+    /// user-edited plan).
+    ProceedWith {
+        modification: InteractionModification,
+    },
+    /// Reject and feed back free-text corrective guidance. The loop injects the
+    /// feedback into the conversation and retries / re-plans.
+    Revise {
+        feedback: String,
+    },
+    /// `PlanDecision`-only: select an option by its `id`.
+    Choose {
+        option_id: String,
+    },
+    /// Abort this iteration or the whole loop.
+    Abort {
+        reason: String,
+    },
+}
+
+/// A modification attached to [`InteractionResponse::ProceedWith`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum InteractionModification {
+    /// PreInfer: inject a system message into the conversation.
+    InjectSystemMessage(String),
+    /// PreInfer: replace the inference request entirely.
+    ReplaceRequest(InferenceRequest),
+    /// PostInfer: replace the inference response entirely.
+    ReplaceResponse(InferenceResponse),
+    /// ToolApproval: replace the tool arguments.
+    ReplaceToolArgs(serde_json::Value),
+    /// PlanReview: the user edited the plan directly in the UI.
+    ReplacePlan {
+        plan: String,
+        steps: Vec<PlanStep>,
+    },
+}
+
 // ─── ConstrainedOutputConfig ──────────────────────────────────────────────────
 
 /// Configuration for constrained/structured output (Layer 1 of the parser).

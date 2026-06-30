@@ -54,6 +54,11 @@ pub enum OneAIError {
     #[error("Approval error: {0}")]
     Approval(ApprovalError),
 
+    /// Errors from the unified interaction gate (PreInfer/PostInfer/ToolApproval/
+    /// PlanDecision/PlanReview).
+    #[error("Interaction error: {0}")]
+    Interaction(InteractionError),
+
     /// Serialization / deserialization errors.
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -154,6 +159,23 @@ pub enum ApprovalError {
     /// The approval gate is not configured.
     #[error("No approval gate configured")]
     NotConfigured,
+}
+
+/// Errors from the unified [`InteractionGate`](crate::traits::InteractionGate).
+#[derive(Debug, Error)]
+pub enum InteractionError {
+    /// The interaction channel was dropped before a response arrived (the UI
+    /// handler exited or never consumed the request).
+    #[error("Interaction response channel dropped")]
+    ChannelDropped,
+
+    /// No interaction gate is configured.
+    #[error("No interaction gate configured")]
+    NotConfigured,
+
+    /// The interaction timed out waiting for the application layer.
+    #[error("Interaction timed out after {seconds}s")]
+    Timeout { seconds: u64 },
 }
 
 /// Convenience type alias for Results in the OneAI framework.

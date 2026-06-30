@@ -643,7 +643,7 @@ fn truncate_span_to_width(content: &str, max_visual_width: usize) -> String {
 /// Uses `unicode_width` for proper CJK/emoji handling — each character's
 /// display cell width is respected, not just byte length.
 fn wrap_content(content: &str, max_width: usize) -> Vec<String> {
-    if max_width <= 0 {
+    if max_width == 0 {
         return vec![content.to_string()];
     }
 
@@ -760,7 +760,7 @@ fn detect_diff_content(content: &str) -> bool {
 ///
 /// Returns a list of Vec<Span> groups, each group fitting within max_width.
 fn wrap_line_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<'static>>> {
-    if max_width <= 0 {
+    if max_width == 0 {
         return vec![spans];
     }
 
@@ -892,7 +892,7 @@ fn process_overflow_span(
 /// Tries to break at a space character within the span for word-wrap.
 /// If no suitable space is found, performs a hard character-boundary break.
 fn split_span_at_width(span: &Span<'static>, max_visual_width: usize) -> (Option<Span<'static>>, Option<Span<'static>>) {
-    if max_visual_width <= 0 {
+    if max_visual_width == 0 {
         return (None, Some(span.clone()));
     }
 

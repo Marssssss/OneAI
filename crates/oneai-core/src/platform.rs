@@ -12,11 +12,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use crate::{ApprovalRequest, ApprovalResponse};
+use crate::{ApprovalRequest, ApprovalResponse, InteractionRequest, InteractionResponse};
 use crate::error::Result;
-use crate::traits::ApprovalGate;
+use crate::traits::{ApprovalGate, InteractionGate};
 
-// ─── PlatformApprovalGate ──────────────────────────────────────────────
+// ─── PlatformApprovalGate (deprecated) ─────────────────────────────────
 
 /// Platform-specific approval gate that uses native UI dialogs.
 ///
@@ -29,6 +29,14 @@ use crate::traits::ApprovalGate;
 ///
 /// The default implementation uses a tokio channel to communicate
 /// with the platform UI thread.
+///
+/// # Deprecated
+///
+/// Superseded by [`PlatformInteractionGate`], which covers the full decision
+/// surface (PreInfer/PostInfer/PlanDecision/PlanReview) via
+/// [`InteractionGate`]. Migrate platform implementations; this trait is
+/// scheduled for removal in 0.3.
+#[deprecated(since = "0.2.0", note = "use PlatformInteractionGate instead")]
 #[async_trait]
 pub trait PlatformApprovalGate: ApprovalGate {
     /// Get the platform name this gate is designed for.
@@ -38,12 +46,76 @@ pub trait PlatformApprovalGate: ApprovalGate {
     fn is_ui_available(&self) -> bool;
 }
 
+// ─── PlatformInteractionGate ───────────────────────────────────────────
+
+/// Platform-specific interaction gate that uses native UI dialogs.
+///
+/// The `InteractionGate` equivalent of the deprecated `PlatformApprovalGate`:
+/// each platform implements this to surface every decision point
+/// (PreInfer/PostInfer/ToolApproval/PlanDecision/PlanReview) through native UI.
+/// A platform gate is wired into the app via `AppBuilder::interaction_gate(...)`.
+#[async_trait]
+pub trait PlatformInteractionGate: InteractionGate {
+    /// Get the platform name this gate is designed for.
+    fn platform_name(&self) -> &'static str;
+
+    /// Whether the platform UI is available.
+    fn is_ui_available(&self) -> bool;
+}
+
+/// Stub implementation for development/testing — always proceeds and disables
+/// every point (zero-latency, like `NoopInteractionGate`).
+pub struct StubPlatformInteractionGate {
+    #[allow(dead_code)]
+    platform_name: String,
+}
+
+impl StubPlatformInteractionGate {
+    /// Create a new stub interaction gate for the given platform name.
+    pub fn new(platform_name: impl Into<String>) -> Self {
+        Self {
+            platform_name: platform_name.into(),
+        }
+    }
+
+    /// Create a macOS stub.
+    pub fn macos() -> Self {
+        Self::new("macos")
+    }
+}
+
+#[async_trait]
+impl InteractionGate for StubPlatformInteractionGate {
+    async fn request(&self, _req: InteractionRequest) -> Result<InteractionResponse> {
+        Ok(InteractionResponse::Proceed)
+    }
+
+    fn enabled(&self, _point: crate::InteractionPoint) -> bool {
+        false
+    }
+}
+
+#[async_trait]
+impl PlatformInteractionGate for StubPlatformInteractionGate {
+    fn platform_name(&self) -> &'static str {
+        "stub"
+    }
+
+    fn is_ui_available(&self) -> bool {
+        false
+    }
+}
+
+// ─── StubPlatformApprovalGate (deprecated) ─────────────────────────────
+
 /// Stub implementation for development/testing — always auto-approves.
+#[deprecated(since = "0.2.0", note = "use StubPlatformInteractionGate instead")]
 pub struct StubPlatformApprovalGate {
     #[allow(dead_code)]
     platform_name: String,
 }
 
+#[allow(deprecated)]
 impl StubPlatformApprovalGate {
     /// Create a new stub approval gate for the given platform name.
     pub fn new(platform_name: impl Into<String>) -> Self {
@@ -79,6 +151,7 @@ impl StubPlatformApprovalGate {
 }
 
 #[async_trait]
+#[allow(deprecated)]
 impl ApprovalGate for StubPlatformApprovalGate {
     async fn request_approval(&self, _request: ApprovalRequest) -> Result<ApprovalResponse> {
         Ok(ApprovalResponse::Approved { modified_args: None })
@@ -86,6 +159,7 @@ impl ApprovalGate for StubPlatformApprovalGate {
 }
 
 #[async_trait]
+#[allow(deprecated)]
 impl PlatformApprovalGate for StubPlatformApprovalGate {
     fn platform_name(&self) -> &'static str {
         // This is a limitation — we can't return a reference to a String field.

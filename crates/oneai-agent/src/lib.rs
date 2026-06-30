@@ -210,6 +210,44 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_decisions_object() {
+        let raw = "{\"decisions\":[{\"decision_id\":\"d1\",\"question\":\"speed or correctness?\",\"context\":\"tradeoff\",\"options\":[{\"id\":\"opt_a\",\"label\":\"speed\",\"description\":\"fast\",\"tradeoffs\":\"less accurate\"},{\"id\":\"opt_b\",\"label\":\"correct\",\"description\":\"precise\",\"tradeoffs\":\"slower\"}]}]}";
+        let decisions = plan_state::parse_decisions(raw);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].decision_id, "d1");
+        assert_eq!(decisions[0].options.len(), 2);
+        assert_eq!(decisions[0].options[1].id, "opt_b");
+    }
+
+    #[test]
+    fn test_parse_decisions_empty() {
+        let raw = "{\"decisions\":[]}";
+        let decisions = plan_state::parse_decisions(raw);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_decisions_embedded() {
+        let raw = "Here is stage 1:\n{\"decisions\":[{\"decision_id\":\"d1\",\"question\":\"q\",\"context\":\"c\",\"options\":[{\"id\":\"opt_a\",\"label\":\"a\",\"description\":\"d\",\"tradeoffs\":\"t\"}]}]}\nthat's it.";
+        let decisions = plan_state::parse_decisions(raw);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].options[0].label, "a");
+    }
+
+    #[test]
+    fn test_parse_decisions_no_options_dropped() {
+        // A decision with no options is not a real decision — drop it.
+        let raw = "{\"decisions\":[{\"decision_id\":\"d1\",\"question\":\"q\",\"context\":\"c\",\"options\":[]}]}";
+        let decisions = plan_state::parse_decisions(raw);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_decisions_garbage_returns_empty() {
+        assert!(plan_state::parse_decisions("not json at all").is_empty());
+    }
+
+    #[test]
     fn test_react_config_default() {
         let config = ReActConfig::default();
         assert_eq!(config.max_iterations, 10);

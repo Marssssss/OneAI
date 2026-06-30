@@ -150,12 +150,58 @@ pub trait PlatformTool: Tool {
 /// and sends an `ApprovalRequest` to the upper layer (UI). The process
 /// resumes after the user responds. This avoids callback hell by using
 /// a suspend/resume pattern with state preserved in the persistence layer.
+///
+/// # Deprecated
+///
+/// This trait only covers tool approval and cannot feed back free-text
+/// corrective guidance, surface planning tradeoffs, or reach the application
+/// layer at PreInfer/PostInfer. It is superseded by [`InteractionGate`], which
+/// unifies every "loop suspends → asks the app → resumes" decision point.
+/// Migrate callers to `InteractionGate`; this trait is scheduled for removal in 0.3.
+#[deprecated(since = "0.2.0", note = "use oneai_core::traits::InteractionGate instead")]
 #[async_trait]
 pub trait ApprovalGate: Send + Sync {
     /// Request approval for a high-risk tool execution.
     ///
     /// This method blocks until the user responds.
     async fn request_approval(&self, request: ApprovalRequest) -> Result<ApprovalResponse>;
+}
+
+// ─── InteractionGate ──────────────────────────────────────────────────────────
+
+/// Unified interaction gate — the single surface for every "agent loop suspends
+/// → asks the application layer → resumes with a reply" decision point.
+///
+/// Replaces the split between [`ApprovalGate`] (tool approve/deny), the
+/// `AgentLoopObserver::on_plan_submitted` bool gate, and the dead
+/// PreInfer/PostInfer `LifecycleHook` interactive path. The application layer
+/// decides per-point whether to actually call back to the UI via
+/// [`enabled`](Self::enabled); points that return `false` are short-circuited by
+/// the loop with zero latency (no lock taken, no channel send).
+///
+/// Implementations:
+/// - `NoopInteractionGate` — every point `enabled()==false`; the zero-latency
+///   default.
+/// - `ChannelInteractionGate` — mpsc+oneshot bridge to an external UI thread,
+///   configurable per-point via `InteractionGateConfig`.
+/// - `ThresholdInteractionGate` — low-risk tools auto-proceed, the rest go to
+///   the channel.
+#[async_trait]
+pub trait InteractionGate: Send + Sync {
+    /// Block at the decision point until the application layer replies.
+    async fn request(&self, req: InteractionRequest) -> Result<InteractionResponse>;
+
+    /// Whether this point should call back to the application layer.
+    ///
+    /// Returning `false` lets the loop skip the entire interaction block — no
+    /// lock acquisition, no channel send, no allocation. This is the lever that
+    /// lets a TUI enable `PlanDecision`/`PlanReview`/`ToolApproval` while leaving
+    /// `PreInfer`/`PostInfer` off (no per-iteration interruption). The default
+    /// returns `true`; `NoopInteractionGate` overrides it to `false` for all
+    /// points.
+    fn enabled(&self, _point: InteractionPoint) -> bool {
+        true
+    }
 }
 
 // ─── OutputParser ─────────────────────────────────────────────────────────────

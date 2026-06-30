@@ -19,10 +19,11 @@ use tokio::sync::RwLock;
 
 use oneai_core::{
     ContentBlock, Conversation, InferenceRequest, InferenceStreamChunk,
+    InteractionModification, InteractionRequest, InteractionResponse,
     Message, Role, ToolDefinition, ToolOutput,
 };
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool};
+use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool};
 
 /// Configuration for a ReAct agent execution.
 #[derive(Debug, Clone)]
@@ -89,7 +90,11 @@ pub struct ReActAgent {
     parser: Arc<dyn OutputParser>,
 
     /// Approval gate for high-risk tools.
+    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
     approval_gate: Arc<dyn ApprovalGate>,
+
+    /// Unified interaction gate for tool approval (and other decision points).
+    interaction_gate: Arc<dyn InteractionGate>,
 
     /// Agent configuration.
     config: ReActConfig,
@@ -97,11 +102,13 @@ pub struct ReActAgent {
 
 impl ReActAgent {
     /// Create a new ReAct agent.
+    #[allow(deprecated)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         config: ReActConfig,
     ) -> Self {
         Self {
@@ -109,18 +116,21 @@ impl ReActAgent {
             tools,
             parser,
             approval_gate,
+            interaction_gate,
             config,
         }
     }
 
     /// Create with default configuration.
+    #[allow(deprecated)]
     pub fn with_defaults(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
-        Self::new(provider, tools, parser, approval_gate, ReActConfig::default())
+        Self::new(provider, tools, parser, approval_gate, interaction_gate, ReActConfig::default())
     }
 
     /// Run the ReAct loop on a conversation.
@@ -215,38 +225,48 @@ impl ReActAgent {
                                 ),
                             };
 
-                            let approval_response = self.approval_gate.request_approval(approval_request).await?;
+                            let interaction_response = self
+                                .interaction_gate
+                                .request(InteractionRequest::ToolApproval {
+                                    approval: approval_request,
+                                })
+                                .await?;
 
-                            match approval_response {
-                                oneai_core::ApprovalResponse::Approved { modified_args } => {
-                                    // Use modified args if provided, otherwise use original
-                                    let final_args = modified_args.unwrap_or(args_value);
+                            match interaction_response {
+                                InteractionResponse::Proceed => {
+                                    let output = tool.execute(args_value).await?;
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        format_result(&output),
+                                    ));
+                                }
+                                InteractionResponse::ProceedWith { modification } => {
+                                    let final_args = match modification {
+                                        InteractionModification::ReplaceToolArgs(new_args) => new_args,
+                                        _ => args_value,
+                                    };
                                     let output = tool.execute(final_args).await?;
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         format_result(&output),
                                     ));
                                 }
-                                oneai_core::ApprovalResponse::Denied { reason } => {
+                                InteractionResponse::Revise { feedback } => {
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        format!("Tool execution rejected: {}", feedback),
+                                    ));
+                                }
+                                InteractionResponse::Abort { reason } => {
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
                                         format!("Tool execution denied: {}", reason),
                                     ));
                                 }
-                                oneai_core::ApprovalResponse::Modified { args } => {
-                                    let output = tool.execute(args).await?;
+                                _ => {
                                     conv.add_message(Message::tool_result(
                                         id.clone(),
-                                        format_result(&output),
-                                    ));
-                                }
-                                oneai_core::ApprovalResponse::Observe { observation } => {
-                                    // Observe mode — pause execution and let user inspect state
-                                    // In the legacy ReAct agent, treat Observe as a pause signal
-                                    // and add the observation as context
-                                    conv.add_message(Message::tool_result(
-                                        id.clone(),
-                                        format!("Execution paused for observation: {}", observation),
+                                        "Tool approval: unsupported response".to_string(),
                                     ));
                                 }
                             }
@@ -430,23 +450,33 @@ impl ReActAgent {
                                 permission_level: Some(oneai_core::PermissionLevel::Full),
                                 justification: format!("High-risk tool '{}'", name),
                             };
-                            let approval_response = self.approval_gate.request_approval(approval_request).await?;
-                            match approval_response {
-                                oneai_core::ApprovalResponse::Approved { modified_args } => {
-                                    let final_args = modified_args.unwrap_or(args_value);
+                            let interaction_response = self
+                                .interaction_gate
+                                .request(InteractionRequest::ToolApproval {
+                                    approval: approval_request,
+                                })
+                                .await?;
+                            match interaction_response {
+                                InteractionResponse::Proceed => {
+                                    let output = tool.execute(args_value).await?;
+                                    conv.add_message(Message::tool_result(id.clone(), format_result(&output)));
+                                }
+                                InteractionResponse::ProceedWith { modification } => {
+                                    let final_args = match modification {
+                                        InteractionModification::ReplaceToolArgs(new_args) => new_args,
+                                        _ => args_value,
+                                    };
                                     let output = tool.execute(final_args).await?;
                                     conv.add_message(Message::tool_result(id.clone(), format_result(&output)));
                                 }
-                                oneai_core::ApprovalResponse::Denied { reason } => {
+                                InteractionResponse::Revise { feedback } => {
+                                    conv.add_message(Message::tool_result(id.clone(), format!("Rejected: {}", feedback)));
+                                }
+                                InteractionResponse::Abort { reason } => {
                                     conv.add_message(Message::tool_result(id.clone(), format!("Denied: {}", reason)));
                                 }
-                                oneai_core::ApprovalResponse::Modified { args } => {
-                                    let output = tool.execute(args).await?;
-                                    conv.add_message(Message::tool_result(id.clone(), format_result(&output)));
-                                }
-                                oneai_core::ApprovalResponse::Observe { observation } => {
-                                    conv.add_message(Message::tool_result(id.clone(),
-                                        format!("Execution paused for observation: {}", observation)));
+                                _ => {
+                                    conv.add_message(Message::tool_result(id.clone(), "Unsupported approval response".to_string()));
                                 }
                             }
                         } else {

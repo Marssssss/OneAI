@@ -172,7 +172,7 @@ pub fn render_approval_card_inline(content: &str, max_width: usize, selected_ind
 ///
 /// Uses unicode_width to respect CJK/emoji display cell width.
 fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
-    if max_width <= 0 || line.is_empty() {
+    if max_width == 0 || line.is_empty() {
         return vec![line.to_string()];
     }
 

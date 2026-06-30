@@ -103,15 +103,19 @@ pub fn run_tui(
     };
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let (app, session_state, approval_rx) = rt.block_on(async {
-        // Use ChannelApprovalGateWithThreshold — Medium risk auto-approves,
-        // High risk requires human approval via the TUI
-        // Use default_rate_limiter — pre-call throttle with common provider limits
-        // (prevents exceeding API rate limits; provider-level retry handles 429 after)
-        let (builder, approval_rx) = AppBuilder::new()
+    let (app, session_state, interaction_rx) = rt.block_on(async {
+        // Threshold interaction gate: Medium-risk tools auto-proceed, High risk
+        // (and PlanDecision/PlanReview) call back to the TUI via the channel.
+        // tui_default config leaves PreInfer/PostInfer off (no per-iteration
+        // interruption).
+        let (builder, interaction_rx) = AppBuilder::new()
             .default_parser()
             .default_rate_limiter()
-            .channel_approval_gate(16, oneai_core::RiskLevel::Medium);
+            .threshold_interaction_gate_with_config(
+                16,
+                oneai_core::RiskLevel::Medium,
+                oneai_tool::InteractionGateConfig::tui_default(),
+            );
 
         let mut builder = builder.generation_config(generation.clone());
         if let Some(config) = provider_config {
@@ -167,7 +171,7 @@ pub fn run_tui(
         tui_app.skill_names = tui_app.skill_registry.skill_names().await;
         tui_app.current_domain = domain_pack_name.to_string();
 
-        (tui_app, session_state, approval_rx)
+        (tui_app, session_state, interaction_rx)
     });
 
     // Channel for observer events
@@ -180,7 +184,7 @@ pub fn run_tui(
         Arc::new(tokio::sync::Mutex::new(None));
 
     // Run the main loop
-    let result = run_main_loop(&mut terminal, app, session_state, observer_tx, observer_rx, &rt, approval_rx, interrupt_slot);
+    let result = run_main_loop(&mut terminal, app, session_state, observer_tx, observer_rx, &rt, interaction_rx, interrupt_slot);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -252,8 +256,14 @@ fn handle_key_event(
         handle_approval_key(app, key);
         return;
     }
-    // Plan accept/reject gate (exit_plan_mode) — handled before input so the
-    // user can't type while a decision is pending.
+    // Plan-decision gate (request_plan_decision) — a planning tradeoff the user
+    // must resolve. Handled before plan-review and input.
+    if app.plan_decision_pending.is_some() {
+        handle_plan_decision_key(app, key);
+        return;
+    }
+    // Plan review gate (exit_plan_mode) — handled before input so the user
+    // can't type while a decision is pending.
     if app.pending_plan.is_some() {
         handle_plan_approval_key(app, key);
         return;
@@ -415,7 +425,7 @@ fn run_main_loop(
     observer_tx: tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     mut observer_rx: tokio::sync::mpsc::UnboundedReceiver<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
-    mut approval_rx: tokio::sync::mpsc::Receiver<oneai_tool::ApprovalPendingItem>,
+    mut interaction_rx: tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     while !app.should_quit {
@@ -462,37 +472,64 @@ fn run_main_loop(
             process_observer_event(&mut app, event);
         }
 
-        // Process approval requests from the approval gate
-        if let Ok(item) = approval_rx.try_recv() {
-            let tool_name = item.request.tool_name.clone();
-            let justification = item.request.justification.clone();
-            let perm_label = item.request.permission_level.map(|p| format!("{:?}", p))
-                .unwrap_or_else(|| format!("{:?}", item.request.risk_level));
-
-            // Auto-accept mode — silently approve every tool call (no message, no card).
+        // Process interaction requests from the interaction gate (tool
+        // approval, plan decisions, plan review). Variants not enabled in the
+        // TUI config (PreInfer/PostInfer) never arrive; defensively Proceed.
+        if let Ok(item) = interaction_rx.try_recv() {
+            let response_tx = item.response_tx;
+            // Auto-accept mode — silently proceed every decision point (no card).
             if matches!(app.interaction_mode, app::InteractionMode::AutoAccept) {
-                let response = oneai_core::ApprovalResponse::Approved { modified_args: None };
-                let _ = item.response_tx.send(response);
-            // Check if the tool is in the session allowlist
-            } else if app.session_allowlist.contains(&tool_name) {
-                // Auto-approve for this session
-                let response = oneai_core::ApprovalResponse::Approved { modified_args: None };
-                let _ = item.response_tx.send(response);
-                app.add_message(ChatRole::System, format!("Auto-approved {} (session allowlist)", tool_name));
-            } else {
-                // Show approval card in the TUI
-                app.approval_pending = Some(ApprovalPendingState {
-                    request: item.request.clone(),
-                    response_tx: Some(item.response_tx),
-                    tool_name,
-                    justification,
-                });
-                app.add_message(ChatRole::Approval, format!(
-                    "Tool: {} ({})\n{}",
-                    app.approval_pending.as_ref().unwrap().tool_name,
-                    perm_label,
-                    app.approval_pending.as_ref().unwrap().justification,
-                ));
+                let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);
+                continue;
+            }
+            match item.request {
+                oneai_core::InteractionRequest::ToolApproval { approval } => {
+                    let tool_name = approval.tool_name.clone();
+                    let justification = approval.justification.clone();
+                    let perm_label = approval.permission_level.map(|p| format!("{:?}", p))
+                        .unwrap_or_else(|| format!("{:?}", approval.risk_level));
+
+                    if app.session_allowlist.contains(&tool_name) {
+                        let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);
+                        app.add_message(ChatRole::System, format!("Auto-approved {} (session allowlist)", tool_name));
+                    } else {
+                        // Show approval card in the TUI
+                        app.approval_pending = Some(ApprovalPendingState {
+                            request: approval,
+                            response_tx: Some(response_tx),
+                            tool_name,
+                            justification,
+                        });
+                        app.add_message(ChatRole::Approval, format!(
+                            "Tool: {} ({})\n{}",
+                            app.approval_pending.as_ref().unwrap().tool_name,
+                            perm_label,
+                            app.approval_pending.as_ref().unwrap().justification,
+                        ));
+                    }
+                }
+                oneai_core::InteractionRequest::PlanDecision {
+                    decision_id, question, context, options
+                } => {
+                    app.plan_decision_pending = Some(app::PlanDecisionState {
+                        decision_id,
+                        question,
+                        context,
+                        options,
+                        selected: 0,
+                        reply_tx: response_tx,
+                    });
+                    app.is_thinking = false; // pause spinner while awaiting decision
+                    app.add_message(ChatRole::System, "Decision needed — choose an option.".to_string());
+                }
+                oneai_core::InteractionRequest::PlanReview { plan, steps } => {
+                    app.pending_plan = Some((plan, steps, Some(response_tx)));
+                    app.is_thinking = false; // pause spinner while awaiting review
+                }
+                _ => {
+                    // PreInfer/PostInfer — not surfaced in the TUI; proceed.
+                    let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);
+                }
             }
         }
 
@@ -1776,20 +1813,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             }
             app.dirty = true;
         }
-        ObserverEvent::PlanSubmitted { plan, steps, reply_tx } => {
-            // exit_plan_mode — surface the plan for accept/reject (Phase 3 gate).
-            // The AgentLoop is blocked awaiting `reply_tx`; the user's decision
-            // (handled in handle_plan_approval_key) sends it.
-            app.pending_plan = Some((plan, steps, Some(reply_tx)));
-            app.plan_approval_selected_index = 0;
-            app.plan_approval_scroll = 0;
-            // Flip is_thinking off (stop spinner / show approval UI) but do NOT
-            // stop the work timer — the run is paused for an approval decision,
-            // not finished. Wall-clock "time on this problem" keeps running
-            // across the pause, consistent with the Esc-interrupt semantics.
-            app.is_thinking = false;
-            app.dirty = true;
-        }
         ObserverEvent::Error(msg) => {
             app.stop_thinking(); // run ended via error; retain duration for dim display
             // Run ended (via error) — dismiss the plan panel too.
@@ -1963,24 +1986,24 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
                 match app.approval_selected_index {
                     0 => { // Y: Approve
                         app.add_message(ChatRole::System, format!("✅ Approved: {}", state.tool_name));
-                        ApprovalResponse::Approved { modified_args: None }
+                        oneai_core::InteractionResponse::Proceed
                     }
                     1 => { // N: Deny
                         app.add_message(ChatRole::System, format!("❌ Denied: {}", state.tool_name));
-                        ApprovalResponse::Denied { reason: "User denied via TUI".to_string() }
+                        oneai_core::InteractionResponse::Abort { reason: "User denied via TUI".to_string() }
                     }
-                    2 => { // M: Modify
-                        app.add_message(ChatRole::System, format!("📝 Modify requested for: {} (denied — modify not yet supported)", state.tool_name));
-                        ApprovalResponse::Denied { reason: "User wants to modify — not yet supported in TUI".to_string() }
+                    2 => { // M: Modify → Revise with feedback
+                        app.add_message(ChatRole::System, format!("📝 Modify requested for: {} (rejected with feedback)", state.tool_name));
+                        oneai_core::InteractionResponse::Revise { feedback: "User wants to modify the tool arguments".to_string() }
                     }
                     3 => { // A: Always
                         app.session_allowlist.insert(state.tool_name.clone());
                         app.add_message(ChatRole::System, format!("✅ Always approved: {} (added to session allowlist)", state.tool_name));
-                        ApprovalResponse::Approved { modified_args: None }
+                        oneai_core::InteractionResponse::Proceed
                     }
                     _ => {
                         app.add_message(ChatRole::System, format!("✅ Approved: {}", state.tool_name));
-                        ApprovalResponse::Approved { modified_args: None }
+                        oneai_core::InteractionResponse::Proceed
                     }
                 }
             }
@@ -1988,32 +2011,32 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
             // Y: Approve (shortcut)
             (KeyModifiers::NONE, KeyCode::Char('y')) | (KeyModifiers::NONE, KeyCode::Char('Y')) => {
                 app.add_message(ChatRole::System, format!("✅ Approved: {}", state.tool_name));
-                ApprovalResponse::Approved { modified_args: None }
+                oneai_core::InteractionResponse::Proceed
             }
 
             // N: Deny (shortcut)
             (KeyModifiers::NONE, KeyCode::Char('n')) | (KeyModifiers::NONE, KeyCode::Char('N')) => {
                 app.add_message(ChatRole::System, format!("❌ Denied: {}", state.tool_name));
-                ApprovalResponse::Denied { reason: "User denied via TUI".to_string() }
+                oneai_core::InteractionResponse::Abort { reason: "User denied via TUI".to_string() }
             }
 
             // A: Always (shortcut)
             (KeyModifiers::NONE, KeyCode::Char('a')) | (KeyModifiers::NONE, KeyCode::Char('A')) => {
                 app.session_allowlist.insert(state.tool_name.clone());
                 app.add_message(ChatRole::System, format!("✅ Always approved: {} (added to session allowlist)", state.tool_name));
-                ApprovalResponse::Approved { modified_args: None }
+                oneai_core::InteractionResponse::Proceed
             }
 
-            // M: Modify (shortcut)
+            // M: Modify (shortcut) → Revise with feedback
             (KeyModifiers::NONE, KeyCode::Char('m')) | (KeyModifiers::NONE, KeyCode::Char('M')) => {
-                app.add_message(ChatRole::System, format!("📝 Modify requested for: {} (denied — modify not yet supported)", state.tool_name));
-                ApprovalResponse::Denied { reason: "User wants to modify — not yet supported in TUI".to_string() }
+                app.add_message(ChatRole::System, format!("📝 Modify requested for: {} (rejected with feedback)", state.tool_name));
+                oneai_core::InteractionResponse::Revise { feedback: "User wants to modify the tool arguments".to_string() }
             }
 
             // Esc: deny and cancel
             (_, KeyCode::Esc) => {
                 app.add_message(ChatRole::System, format!("❌ Cancelled: {}", state.tool_name));
-                ApprovalResponse::Denied { reason: "User cancelled via TUI".to_string() }
+                oneai_core::InteractionResponse::Abort { reason: "User cancelled via TUI".to_string() }
             }
 
             // Unknown key: put the state back and ignore
@@ -2031,18 +2054,53 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Handle keys while a plan (exit_plan_mode) is awaiting accept/reject.
+/// Handle keys while a plan (exit_plan_mode) is awaiting review.
 ///
-/// ←/→ or Tab selects Accept/Reject; Enter confirms; Esc = reject. The
-/// decision is sent to the blocked AgentLoop via the oneshot.
+/// ←/→ or Tab cycles Accept / Revise / Reject; Enter confirms. Accept →
+/// `Proceed`, Reject/Esc → `Abort`. Revise opens an inline input box; Enter in
+/// the input box submits `Revise { feedback }` (the loop stays in plan mode and
+/// feeds the feedback back to the model), Esc cancels the input (back to buttons).
 /// ↑↓/j/k/PageUp/PageDown/Home/End scroll the plan body so the user can read
 /// plans that overflow the compact default window.
 fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
     if key.kind != KeyEventKind::Press {
         return;
     }
-    // 0 = Accept, 1 = Reject
-    let count = 2usize;
+    // 0 = Accept, 1 = Revise, 2 = Reject
+    let count = 3usize;
+
+    // While collecting Revise feedback, route keys to the input box.
+    if let Some(buf) = app.plan_revise_input.as_mut() {
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) => {
+                // Cancel input — back to button navigation, plan still pending.
+                app.plan_revise_input = None;
+                app.dirty = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                let feedback = std::mem::take(buf);
+                app.plan_revise_input = None;
+                if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(oneai_core::InteractionResponse::Revise { feedback });
+                    }
+                    app.add_message(ChatRole::System, "↩️ Plan revise feedback sent — model will re-plan.");
+                }
+                app.is_thinking = true;
+                app.dirty = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Backspace) => {
+                buf.pop();
+                app.dirty = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Char(c)) => {
+                buf.push(c);
+                app.dirty = true;
+            }
+            _ => {}
+        }
+        return;
+    }
 
     // Scroll handling — only meaningful when there's a body to page through.
     let scroll_max = |app: &App| -> usize {
@@ -2095,30 +2153,150 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             app.dirty = true;
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
-            let accepted = app.plan_approval_selected_index == 0;
-            if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
-                if let Some(tx) = reply_tx {
-                    let _ = tx.send(accepted);
+            match app.plan_approval_selected_index {
+                0 => {
+                    // Accept
+                    if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
+                        if let Some(tx) = reply_tx {
+                            let _ = tx.send(oneai_core::InteractionResponse::Proceed);
+                        }
+                        app.add_message(ChatRole::System, "✅ Plan accepted — execution starting.");
+                    }
+                    app.is_thinking = true;
                 }
-                if accepted {
-                    app.add_message(ChatRole::System, "✅ Plan accepted — execution starting.");
-                } else {
-                    app.add_message(ChatRole::System, "↩️ Plan rejected — revise and re-submit (exit_plan_mode).");
+                1 => {
+                    // Revise — open inline input box, plan stays pending.
+                    app.plan_revise_input = Some(String::new());
+                    app.add_message(ChatRole::System, "✏️ Enter revise feedback, then Enter (Esc to cancel).");
+                }
+                _ => {
+                    // Reject (index 2)
+                    if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
+                        if let Some(tx) = reply_tx {
+                            let _ = tx.send(oneai_core::InteractionResponse::Abort {
+                                reason: "User rejected plan".to_string(),
+                            });
+                        }
+                        app.add_message(ChatRole::System, "↩️ Plan rejected — revise and re-submit (exit_plan_mode).");
+                    }
+                    app.is_thinking = true;
                 }
             }
-            app.is_thinking = true; // loop resumes (was blocked on the gate)
-            // Note: work_timer is NOT restarted here — it kept running across the
-            // plan-approval pause (PlanSubmitted only flips is_thinking, not the
-            // timer), so wall-clock "time on this problem" stays continuous.
             app.dirty = true;
         }
         (_, KeyCode::Esc) => {
             if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
                 if let Some(tx) = reply_tx {
-                    let _ = tx.send(false);
+                    let _ = tx.send(oneai_core::InteractionResponse::Abort {
+                        reason: "User rejected plan".to_string(),
+                    });
                 }
                 app.add_message(ChatRole::System, "↩️ Plan rejected (Esc) — revise and re-submit.");
             }
+            app.is_thinking = true;
+            app.dirty = true;
+        }
+        _ => {}
+    }
+}
+
+/// Handle keys while a plan-decision (request_plan_decision) is pending.
+///
+/// ↑↓/Tab cycles options; Enter chooses (`Choose`); `e` opens an inline input
+/// box for custom feedback → `Revise`; Esc → `Abort`.
+fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    // While collecting custom feedback, route keys to the input box.
+    if let Some(buf) = app.plan_revise_input.as_mut() {
+        match (key.modifiers, key.code) {
+            (_, KeyCode::Esc) => {
+                app.plan_revise_input = None;
+                app.dirty = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                let feedback = std::mem::take(buf);
+                app.plan_revise_input = None;
+                if let Some(state) = app.plan_decision_pending.take() {
+                    let _ = state.reply_tx.send(oneai_core::InteractionResponse::Revise { feedback });
+                    app.add_message(ChatRole::System, "↩️ Custom decision sent — planner will use it.");
+                }
+                app.is_thinking = true;
+                app.dirty = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Backspace) => {
+                buf.pop();
+                app.dirty = true;
+            }
+            (KeyModifiers::NONE, KeyCode::Char(c)) => {
+                buf.push(c);
+                app.dirty = true;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let opts_len = app
+        .plan_decision_pending
+        .as_ref()
+        .map(|s| s.options.len())
+        .unwrap_or(0);
+
+    match (key.modifiers, key.code) {
+        (KeyModifiers::NONE, KeyCode::Up)
+        | (KeyModifiers::NONE, KeyCode::Char('k'))
+        | (KeyModifiers::NONE, KeyCode::Left)
+        | (KeyModifiers::NONE, KeyCode::Tab) => {
+            if let Some(state) = app.plan_decision_pending.as_mut() {
+                if state.selected == 0 {
+                    state.selected = opts_len.saturating_sub(1);
+                } else {
+                    state.selected -= 1;
+                }
+                app.dirty = true;
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Down)
+        | (KeyModifiers::NONE, KeyCode::Char('j'))
+        | (KeyModifiers::NONE, KeyCode::Right) => {
+            if let Some(state) = app.plan_decision_pending.as_mut() {
+                if opts_len > 0 {
+                    state.selected = (state.selected + 1) % opts_len;
+                    app.dirty = true;
+                }
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            if let Some(state) = app.plan_decision_pending.take() {
+                let opt = state.options.get(state.selected).cloned();
+                let resp = match opt {
+                    Some(o) => {
+                        app.add_message(ChatRole::System, format!("✅ Chose: {} ({})", o.id, o.label));
+                        oneai_core::InteractionResponse::Choose { option_id: o.id }
+                    }
+                    None => oneai_core::InteractionResponse::Proceed,
+                };
+                let _ = state.reply_tx.send(resp);
+            }
+            app.is_thinking = true;
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::Char('e')) => {
+            app.plan_revise_input = Some(String::new());
+            app.add_message(ChatRole::System, "✏️ Enter custom decision, then Enter (Esc to cancel).");
+            app.dirty = true;
+        }
+        (_, KeyCode::Esc) => {
+            if let Some(state) = app.plan_decision_pending.take() {
+                let _ = state.reply_tx.send(oneai_core::InteractionResponse::Abort {
+                    reason: "User cancelled decision".to_string(),
+                });
+                app.add_message(ChatRole::System, "❌ Decision cancelled.");
+            }
+            app.is_thinking = true;
             app.dirty = true;
         }
         _ => {}

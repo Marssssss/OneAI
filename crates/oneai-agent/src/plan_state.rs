@@ -10,7 +10,7 @@
 
 use oneai_core::ToolOutput;
 
-use crate::plan_agent::{PlanStep, PlanStepStatus};
+use crate::plan_agent::{PlanDecisionRequest, PlanStep, PlanStepStatus};
 
 /// The live plan tracked across an agent run.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -83,12 +83,21 @@ pub const TOOL_TASK_UPDATE: &str = "task_update";
 pub const TOOL_TASK_LIST: &str = "task_list";
 /// Tool name for submitting a plan and exiting plan mode (handled in Phase 3).
 pub const TOOL_EXIT_PLAN_MODE: &str = "exit_plan_mode";
+/// Tool name for asking the user to resolve a planning tradeoff with no clear
+/// winner. The loop intercepts this call and routes it through
+/// `InteractionGate::request(PlanDecision{..})`; the user's choice is fed back
+/// as the tool result so the model can finish the plan with the decision baked in.
+pub const TOOL_REQUEST_PLAN_DECISION: &str = "request_plan_decision";
 
 /// Whether a tool name is a plan/task control tool that the loop intercepts.
 pub fn is_control_tool(name: &str) -> bool {
     matches!(
         name,
-        TOOL_TASK_CREATE | TOOL_TASK_UPDATE | TOOL_TASK_LIST | TOOL_EXIT_PLAN_MODE
+        TOOL_TASK_CREATE
+            | TOOL_TASK_UPDATE
+            | TOOL_TASK_LIST
+            | TOOL_EXIT_PLAN_MODE
+            | TOOL_REQUEST_PLAN_DECISION
     )
 }
 
@@ -167,6 +176,37 @@ pub fn control_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
                 "required": ["plan", "steps"]
             }),
         },
+        oneai_core::ToolDefinition {
+            name: TOOL_REQUEST_PLAN_DECISION.into(),
+            description: "Ask the user to resolve a planning tradeoff that has NO clearly superior \
+                option (e.g. speed vs correctness, cost vs quality, library A vs B). Only call this \
+                for genuine tradeoffs — if one option is objectively better for the task, pick it \
+                silently instead. Provide 2–4 options, each with its tradeoff stated honestly. The \
+                user's choice (or custom feedback) is returned as the tool result; bake it into the \
+                final plan and then call exit_plan_mode.".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "decision_id": { "type": "string", "description": "Stable id, e.g. \"d1\"." },
+                    "question": { "type": "string", "description": "The decision to make, e.g. \"优先速度还是正确性？\"." },
+                    "context": { "type": "string", "description": "Why this needs the user's input." },
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "label": { "type": "string" },
+                                "description": { "type": "string" },
+                                "tradeoffs": { "type": "string" }
+                            },
+                            "required": ["id", "label", "description", "tradeoffs"]
+                        }
+                    }
+                },
+                "required": ["decision_id", "question", "context", "options"]
+            }),
+        },
     ]
 }
 
@@ -235,6 +275,20 @@ pub fn apply_control_tool(
                 .unwrap_or("");
             ok(format!("Plan submitted (awaiting approval):\n{}", plan_text))
         }
+        TOOL_REQUEST_PLAN_DECISION => {
+            // The loop intercepts this tool name and routes it through the
+            // InteractionGate; this branch is only hit if the loop didn't
+            // intercept (e.g. plan_mode off). Acknowledge politely.
+            let q = args
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("a decision");
+            ok(format!(
+                "Decision request for '{}' was not intercepted by the interaction gate \
+                 (plan mode off?). Proceeding with the planner's own judgement.",
+                q
+            ))
+        }
         _ => fail(&format!("Unknown control tool: {}", tool_name)),
     }
 }
@@ -266,6 +320,91 @@ fn parse_steps(steps: Option<&serde_json::Value>) -> Vec<PlanStep> {
 /// proposed steps for the accept/reject gate.
 pub fn extract_steps(args: &serde_json::Value) -> Vec<PlanStep> {
     parse_steps(args.get("steps"))
+}
+
+/// Parse stage-1 decisions from the planner's stage-1 response text.
+///
+/// Accepts either a bare `{"decisions":[...]}` object or, defensively, a bare
+/// JSON array. Like [`parse_plan_steps`] it tries a direct parse, then a
+/// fragment extraction, then returns an empty list (no decisions) on total
+/// failure — the planner proceeds to stage 2 with no user input.
+pub fn parse_decisions(raw: &str) -> Vec<PlanDecisionRequest> {
+    // Direct object parse: {"decisions": [...]}
+    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(raw) {
+        let parsed = decode_decisions(&obj);
+        if !parsed.is_empty() || obj.get("decisions").map(|d| d.as_array().map(|a| a.is_empty()).unwrap_or(false)).unwrap_or(false) {
+            return parsed;
+        }
+    }
+
+    // Fragment extraction: find the {...} or [...] blob.
+    let obj_start = raw.find('{');
+    let obj_end = raw.rfind('}');
+    if let (Some(s), Some(e)) = (obj_start, obj_end) {
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&raw[s..e + 1]) {
+            return decode_decisions(&obj);
+        }
+    }
+    let arr_start = raw.find('[');
+    let arr_end = raw.rfind(']');
+    if let (Some(s), Some(e)) = (arr_start, arr_end) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw[s..e + 1]) {
+            return decode_decisions_array(&val);
+        }
+    }
+
+    Vec::new()
+}
+
+/// Decode `{"decisions":[...]}` (or a bare array) into requests.
+fn decode_decisions(obj: &serde_json::Value) -> Vec<PlanDecisionRequest> {
+    let arr = match obj.get("decisions").and_then(|d| d.as_array()) {
+        Some(a) => a,
+        None => return decode_decisions_array(obj),
+    };
+    arr.iter().filter_map(parse_decision_value).collect()
+}
+
+fn decode_decisions_array(val: &serde_json::Value) -> Vec<PlanDecisionRequest> {
+    match val.as_array() {
+        Some(arr) => arr.iter().filter_map(parse_decision_value).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn parse_decision_value(item: &serde_json::Value) -> Option<PlanDecisionRequest> {
+    let decision_id = item.get("decision_id")?.as_str()?.to_string();
+    let question = item.get("question")?.as_str()?.to_string();
+    let context = item
+        .get("context")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let options = item
+        .get("options")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|o| {
+                    Some(oneai_core::DecisionOption {
+                        id: o.get("id")?.as_str()?.to_string(),
+                        label: o.get("label")?.as_str()?.to_string(),
+                        description: o.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        tradeoffs: o.get("tradeoffs").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if options.is_empty() {
+        return None;
+    }
+    Some(PlanDecisionRequest {
+        decision_id,
+        question,
+        context,
+        options,
+    })
 }
 
 fn parse_status(s: &str) -> Option<PlanStepStatus> {

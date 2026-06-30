@@ -214,8 +214,19 @@ pub fn draw_plan_approval(f: &mut Frame, area: Rect, app: &App) {
         .scroll((scroll, 0));
     f.render_widget(para, chunks[0]);
 
-    // Buttons.
-    let opts = [("Accept (execute)", SUCCESS), ("Reject (re-plan)", DANGER)];
+    // Buttons (or the Revise input box when collecting feedback).
+    if let Some(buf) = &app.plan_revise_input {
+        let prompt = format!(" Revise feedback: {}█ (Enter=send · Esc=cancel)", buf);
+        let input = Paragraph::new(prompt).alignment(Alignment::Center);
+        f.render_widget(input, chunks[1]);
+        return;
+    }
+
+    let opts = [
+        ("Accept (execute)", SUCCESS),
+        ("Revise (feedback)", WARNING),
+        ("Reject (re-plan)", DANGER),
+    ];
     let mut spans: Vec<Span> = Vec::new();
     for (i, (label, color)) in opts.iter().enumerate() {
         let selected = i == app.plan_approval_selected_index;
@@ -229,4 +240,95 @@ pub fn draw_plan_approval(f: &mut Frame, area: Rect, app: &App) {
     }
     let buttons = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
     f.render_widget(buttons, chunks[1]);
+}
+
+/// Draw the PlanDecision overlay — a planning tradeoff the user must resolve.
+///
+/// Shows the question + context, lists the options (label + tradeoffs) with the
+/// current selection highlighted, and prompts `Enter=choose · e=custom · Esc=abort`.
+/// When `plan_revise_input` is set, an inline input box is shown instead.
+pub fn draw_plan_decision(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::layout::Margin;
+    use ratatui::widgets::{Block, Borders, Clear};
+    let state = match &app.plan_decision_pending {
+        Some(s) => s,
+        None => return,
+    };
+
+    let popup = centered_rect(60, 20, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Plan decision ", Style::default().fg(WARNING).add_modifier(Modifier::BOLD)));
+    f.render_widget(block, popup);
+
+    let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+
+    // Build the popup body: question, context, options, prompt / input box.
+    let mut content: Vec<Line> = Vec::new();
+    content.push(Line::styled(state.question.clone(), Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
+    if !state.context.is_empty() {
+        for l in textwrap_line(&state.context, 76) {
+            content.push(Line::styled(l, Style::default().fg(DIM)));
+        }
+    }
+    content.push(Span::raw("").into());
+    for (i, opt) in state.options.iter().enumerate() {
+        let marker = if i == state.selected { "▶" } else { " " };
+        let color = if i == state.selected { SUCCESS } else { TEXT };
+        content.push(Line::styled(
+            format!("{} {} — {}", marker, opt.label, opt.description),
+            Style::default().fg(color),
+        ));
+        content.push(Line::styled(format!("     tradeoff: {}", opt.tradeoffs), Style::default().fg(DIM)));
+    }
+    content.push(Span::raw("").into());
+    if let Some(buf) = &app.plan_revise_input {
+        content.push(Line::styled(
+            format!(" Custom: {}█ (Enter=send · Esc=cancel)", buf),
+            Style::default().fg(WARNING),
+        ));
+    } else {
+        content.push(Line::styled(
+            " Enter=choose · e=custom · Esc=abort ".to_string(),
+            Style::default().fg(DIM),
+        ));
+    }
+
+    let para = Paragraph::new(content).wrap(Wrap { trim: true });
+    f.render_widget(para, inner);
+}
+
+/// Wrap a long string into lines of at most `width` chars (greedy word wrap).
+fn textwrap_line(s: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        if cur.is_empty() {
+            cur = word.to_string();
+        } else if cur.len() + 1 + word.len() > width {
+            out.push(std::mem::take(&mut cur));
+            cur = word.to_string();
+        } else {
+            cur.push(' ');
+            cur.push_str(word);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Center a rect of the given percentage width/height inside `area`.
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    use ratatui::layout::Constraint;
+    let pop_w = area.width * percent_x / 100;
+    let pop_h = area.height * percent_y / 100;
+    let x = area.x + (area.width.saturating_sub(pop_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(pop_h)) / 2;
+    Rect::new(x, y, pop_w, pop_h)
 }

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool, EmbeddingService};
+use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService};
 use oneai_core::EmbeddingConfig;
 use oneai_core::usage::{UsageTracker, InMemoryUsageTracker};
 use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
@@ -26,7 +26,11 @@ use oneai_core::ContextManagerConfig;
 
 use oneai_provider::{ProviderPool, SmartRouter};
 
-use oneai_tool::{ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate, ChannelApprovalGateWithThreshold};
+use oneai_tool::{
+    ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate,
+    ChannelApprovalGateWithThreshold, InteractionGateConfig, NoopInteractionGate,
+    ChannelInteractionGate, ThresholdInteractionGate,
+};
 use oneai_memory::{MemoryManager, MemoryManagerConfig};
 use oneai_rag::DocumentIndex;
 use oneai_rag::EmbeddingConfigExt;
@@ -56,8 +60,12 @@ pub struct AppBuilder {
     provider: Option<Arc<dyn LlmProvider>>,
     /// Tool registry.
     tool_registry: Arc<ToolRegistry>,
-    /// Approval gate.
+    /// Approval gate (deprecated — use `interaction_gate`).
+    #[allow(deprecated)]
     approval_gate: Option<Arc<dyn ApprovalGate>>,
+    /// Unified interaction gate — every loop-suspend decision point.
+    /// When `None` at `build()` time, defaults to `NoopInteractionGate` (zero latency).
+    interaction_gate: Option<Arc<dyn InteractionGate>>,
     /// Output parser.
     parser: Option<Arc<dyn OutputParser>>,
     /// Memory manager.
@@ -163,6 +171,7 @@ impl AppBuilder {
             provider: None,
             tool_registry: Arc::new(ToolRegistry::new()),
             approval_gate: None,
+            interaction_gate: None,
             parser: None,
             memory_manager: None,
             rag_index: None,
@@ -272,24 +281,28 @@ impl AppBuilder {
     }
 
     /// Set the approval gate.
+    #[deprecated(since = "0.2.0", note = "use interaction_gate() instead")]
     pub fn approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
         self.approval_gate = Some(gate);
         self
     }
 
     /// Use the blocking (always-deny) approval gate.
+    #[deprecated(since = "0.2.0", note = "use noop_interaction_gate() or interaction_gate() instead")]
     pub fn blocking_approval_gate(mut self) -> Self {
         self.approval_gate = Some(Arc::new(BlockingApprovalGate));
         self
     }
 
     /// Use the auto-approve gate (for testing).
+    #[deprecated(since = "0.2.0", note = "use noop_interaction_gate() instead")]
     pub fn auto_approval_gate(mut self) -> Self {
         self.approval_gate = Some(Arc::new(AutoApprovalGate));
         self
     }
 
     /// Use a channel-based approval gate with auto-approve threshold.
+    #[deprecated(since = "0.2.0", note = "use channel_interaction_gate() instead")]
     pub fn channel_approval_gate(
         mut self,
         buffer_size: usize,
@@ -304,9 +317,79 @@ impl AppBuilder {
     ///
     /// This allows the app to use native UI dialogs (NSAlert, AlertDialog,
     /// UIAlertController, etc.) for high-risk tool approval.
+    #[deprecated(since = "0.2.0", note = "use platform_interaction_gate() instead")]
     pub fn platform_approval_gate(mut self, gate: Arc<dyn PlatformApprovalGate>) -> Self {
         self.approval_gate = Some(gate as Arc<dyn ApprovalGate>);
         self
+    }
+
+    // ─── InteractionGate (unified) ──────────────────────────────────────────
+
+    /// Set the unified interaction gate directly.
+    pub fn interaction_gate(mut self, gate: Arc<dyn InteractionGate>) -> Self {
+        self.interaction_gate = Some(gate);
+        self
+    }
+
+    /// Use the no-op interaction gate (every point disabled, zero latency).
+    /// This is the default when no gate is configured.
+    pub fn noop_interaction_gate(mut self) -> Self {
+        self.interaction_gate = Some(Arc::new(NoopInteractionGate));
+        self
+    }
+
+    /// Use a channel-based interaction gate with all points enabled.
+    ///
+    /// Returns the builder plus the receiver the UI thread drains for pending
+    /// interaction requests.
+    pub fn channel_interaction_gate(
+        mut self,
+        buffer_size: usize,
+    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
+        let (gate, receiver) = ChannelInteractionGate::new(buffer_size);
+        self.interaction_gate = Some(Arc::new(gate));
+        (self, receiver)
+    }
+
+    /// Use a channel-based interaction gate with a per-point config.
+    pub fn channel_interaction_gate_with_config(
+        mut self,
+        buffer_size: usize,
+        config: InteractionGateConfig,
+    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
+        let (gate, receiver) = ChannelInteractionGate::with_config(buffer_size, config);
+        self.interaction_gate = Some(Arc::new(gate));
+        (self, receiver)
+    }
+
+    /// Use a threshold interaction gate: low-risk tools auto-proceed, the rest
+    /// (and all other enabled decision points) go through the channel.
+    pub fn threshold_interaction_gate(
+        mut self,
+        buffer_size: usize,
+        threshold: oneai_core::RiskLevel,
+    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
+        let (gate, receiver) = ThresholdInteractionGate::new(
+            buffer_size,
+            threshold,
+            InteractionGateConfig::default(),
+        );
+        self.interaction_gate = Some(Arc::new(gate));
+        (self, receiver)
+    }
+
+    /// Threshold interaction gate with a per-point config — the TUI uses this
+    /// with `InteractionGateConfig::tui_default()` (PreInfer/PostInfer off) plus
+    /// a Medium risk threshold so standard tools auto-proceed.
+    pub fn threshold_interaction_gate_with_config(
+        mut self,
+        buffer_size: usize,
+        threshold: oneai_core::RiskLevel,
+        config: InteractionGateConfig,
+    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
+        let (gate, receiver) = ThresholdInteractionGate::new(buffer_size, threshold, config);
+        self.interaction_gate = Some(Arc::new(gate));
+        (self, receiver)
     }
 
     /// Use a PlatformAdapter's approval gate.
@@ -1421,6 +1504,17 @@ impl AppBuilder {
     /// into the ToolRegistry and WorkflowExecutor, so they are ready
     /// before any session is created.
     pub async fn build(self) -> Result<App> {
+        // The unified interaction gate defaults to Noop (every point disabled,
+        // zero latency) — production runs without a UI are not blocked. A TUI or
+        // platform app wires a Channel/Threshold gate via the interaction_gate* builders.
+        let interaction_gate = self.interaction_gate.unwrap_or_else(|| {
+            Arc::new(NoopInteractionGate)
+        });
+        // Deprecated approval gate: keep a best-effort value for legacy callers
+        // that still read `App::approval_gate`. If the user set one, use it;
+        // otherwise mirror the interaction gate's tool-approval behavior via a
+        // blocking placeholder (the interaction gate is the source of truth).
+        #[allow(deprecated)]
         let approval_gate = self.approval_gate.unwrap_or_else(|| {
             Arc::new(BlockingApprovalGate)
         });
@@ -1733,7 +1827,9 @@ impl AppBuilder {
             provider,
             tool_registry: self.tool_registry,
             tool_executor,
+            #[allow(deprecated)]
             approval_gate,
+            interaction_gate,
             parser,
             memory_manager,
             rag_index: self.rag_index,
@@ -1788,8 +1884,11 @@ pub struct App {
     pub tool_registry: Arc<ToolRegistry>,
     /// Tool executor (registry + approval gate).
     pub tool_executor: Arc<ToolExecutor>,
-    /// Approval gate.
+    /// Approval gate (deprecated — use `interaction_gate`).
+    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
     pub approval_gate: Arc<dyn ApprovalGate>,
+    /// Unified interaction gate — every loop-suspend decision point.
+    pub interaction_gate: Arc<dyn InteractionGate>,
     /// Output parser.
     pub parser: Arc<dyn OutputParser>,
     /// Memory manager.

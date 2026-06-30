@@ -15,11 +15,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use oneai_core::{Conversation, GlobalState, Message, Role};
+use oneai_core::{
+    Conversation, GlobalState, InteractionPoint, InteractionRequest, InteractionResponse, Message,
+    Role,
+};
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool, StateReducer};
+use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool, StateReducer};
 
-use crate::plan_agent::{PlanAgent, PlanConfig, PlanResult, PlanStep};
+use crate::plan_agent::{
+    PlanAgent, PlanConfig, PlanDecisionResolution, PlanResult, PlanStep,
+};
 use crate::react_agent::{ReActAgent, ReActConfig, ReActResult};
 use crate::reflection_agent::{ReflectionAgent, ReflectionConfig, ReflectionResult};
 use crate::parallel_executor::{ParallelExecutor, ParallelResult, ParallelStepResult};
@@ -116,7 +121,12 @@ pub struct AgentRunner {
     parser: Arc<dyn OutputParser>,
 
     /// Approval gate for high-risk tools.
+    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
     approval_gate: Arc<dyn ApprovalGate>,
+
+    /// Unified interaction gate — the single surface for every loop-suspend
+    /// decision point (PreInfer/PostInfer/ToolApproval/PlanDecision/PlanReview).
+    interaction_gate: Arc<dyn InteractionGate>,
 
     /// State reducer for merging parallel results.
     reducer: Arc<dyn StateReducer>,
@@ -127,11 +137,13 @@ pub struct AgentRunner {
 
 impl AgentRunner {
     /// Create a new AgentRunner with all dependencies.
+    #[allow(deprecated)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         reducer: Arc<dyn StateReducer>,
         config: AgentRunnerConfig,
     ) -> Self {
@@ -140,23 +152,27 @@ impl AgentRunner {
             tools,
             parser,
             approval_gate,
+            interaction_gate,
             reducer,
             config,
         }
     }
 
     /// Create with default configuration.
+    #[allow(deprecated)]
     pub fn with_defaults(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
         Self::new(
             provider,
             tools,
             parser,
             approval_gate,
+            interaction_gate,
             Arc::new(crate::scope_state::DefaultStateReducer),
             AgentRunnerConfig::default(),
         )
@@ -184,10 +200,65 @@ impl AgentRunner {
         let mut total_iterations = 0;
 
         if self.config.use_planning {
-            // Step 1: Plan
-            tracing::info!("AgentRunner: Starting planning phase");
+            // Step 1: Two-stage planning — identify tradeoff decisions, ask the
+            // user via the interaction gate, then produce a single final plan.
+            tracing::info!("AgentRunner: Starting planning phase (two-stage)");
             let plan_agent = PlanAgent::new(self.provider.clone(), self.config.plan_config.clone());
-            let plan = plan_agent.plan(task).await?;
+
+            // Stage 1: surface decisions (only those with no clear winner).
+            let decisions = plan_agent.identify_decisions(task).await?;
+            let mut resolutions: Vec<PlanDecisionResolution> = Vec::new();
+            for d in decisions {
+                if !self
+                    .interaction_gate
+                    .enabled(InteractionPoint::PlanDecision)
+                {
+                    continue;
+                }
+                let resp = self
+                    .interaction_gate
+                    .request(InteractionRequest::PlanDecision {
+                        decision_id: d.decision_id.clone(),
+                        question: d.question.clone(),
+                        context: d.context.clone(),
+                        options: d.options.clone(),
+                    })
+                    .await?;
+                match resp {
+                    InteractionResponse::Choose { option_id } => resolutions.push(
+                        PlanDecisionResolution {
+                            decision_id: d.decision_id,
+                            chosen: option_id,
+                            custom: None,
+                        },
+                    ),
+                    InteractionResponse::Revise { feedback } => resolutions.push(
+                        PlanDecisionResolution {
+                            decision_id: d.decision_id,
+                            chosen: String::new(),
+                            custom: Some(feedback),
+                        },
+                    ),
+                    InteractionResponse::Abort { reason } => {
+                        tracing::warn!("AgentRunner: planning aborted by user: {}", reason);
+                        return Ok(AgentRunnerResult {
+                            conversation: conv,
+                            plan: None,
+                            react_result: None,
+                            parallel_result: None,
+                            reflection_result: None,
+                            success: false,
+                            total_iterations,
+                            final_answer: format!("Planning aborted: {}", reason),
+                            global_state,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            // Stage 2: produce the single final plan with the resolutions baked in.
+            let plan = plan_agent.plan_with_resolutions(task, &resolutions).await?;
             tracing::info!("AgentRunner: Plan generated with {} steps", plan.steps.len());
             plan_result = Some(plan.clone());
 
@@ -211,7 +282,9 @@ impl AgentRunner {
                 let config = self.config.react_config.clone();
                 let tools = self.tools.clone();
                 let parser = self.parser.clone();
+                #[allow(deprecated)]
                 let approval_gate = self.approval_gate.clone();
+                let interaction_gate = self.interaction_gate.clone();
 
                 let par_result = parallel_exec.execute_parallel(
                     &non_coupled_steps,
@@ -221,6 +294,7 @@ impl AgentRunner {
                         let tools = tools.clone();
                         let parser = parser.clone();
                         let approval_gate = approval_gate.clone();
+                        let interaction_gate = interaction_gate.clone();
                         let config = config.clone();
                         async move {
                             // Create a ReAct agent for each parallel step
@@ -229,6 +303,7 @@ impl AgentRunner {
                                 tools,
                                 parser,
                                 approval_gate,
+                                interaction_gate,
                                 config,
                             );
 
@@ -273,7 +348,9 @@ impl AgentRunner {
                     self.provider.clone(),
                     self.tools.clone(),
                     self.parser.clone(),
+                    #[allow(deprecated)]
                     self.approval_gate.clone(),
+                    self.interaction_gate.clone(),
                     self.config.react_config.clone(),
                 );
 
@@ -315,7 +392,9 @@ impl AgentRunner {
                 self.provider.clone(),
                 self.tools.clone(),
                 self.parser.clone(),
+                #[allow(deprecated)]
                 self.approval_gate.clone(),
+                self.interaction_gate.clone(),
                 self.config.react_config.clone(),
             );
             let result = react_agent.run(conv).await?;
@@ -378,7 +457,9 @@ impl AgentRunner {
             self.provider.clone(),
             self.tools.clone(),
             self.parser.clone(),
+            #[allow(deprecated)]
             self.approval_gate.clone(),
+            self.interaction_gate.clone(),
             self.config.react_config.clone(),
         );
 

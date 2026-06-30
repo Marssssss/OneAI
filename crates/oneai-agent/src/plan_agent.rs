@@ -9,6 +9,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// `PlanStep` / `PlanStepStatus` now live in `oneai-core` so that
+// `InteractionRequest::PlanReview` (part of the `InteractionGate` trait in
+// core) can reference them without a layering violation. Re-export here for
+// backward-compatible `oneai_agent::PlanStep` / `crate::plan_agent::PlanStep`
+// access.
+pub use oneai_core::{PlanStep, PlanStepStatus};
+
 use oneai_core::{
     Conversation, InferenceRequest, Message, Role,
 };
@@ -16,61 +23,12 @@ use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
 
 /// A single step in a plan.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct PlanStep {
-    /// Step identifier (e.g., "step_1").
-    pub id: String,
-
-    /// Brief description of what this step should accomplish.
-    pub description: String,
-
-    /// Whether this step is coupled to previous steps.
-    /// - Coupled: must wait for previous step's result → ReAct pipeline
-    /// - Non-coupled: can run independently → parallel sub-agent
-    pub coupled: bool,
-
-    /// Which previous step IDs this step depends on (if coupled).
-    #[serde(default)]
-    pub depends_on: Vec<String>,
-
-    /// Execution status of this step. Defaults to Pending when created by the
-    /// planner; mutated by the `task_update` tool during execution so the TUI
-    /// can render live progress.
-    #[serde(default)]
-    pub status: PlanStepStatus,
-
-    /// Present-continuous label shown in the spinner while the step is in
-    /// progress (e.g. "Running tests"). Optional.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_form: Option<String>,
-}
-
-/// Execution status of a plan step.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanStepStatus {
-    /// Not started yet.
-    #[default]
-    Pending,
-    /// Currently being worked on.
-    InProgress,
-    /// Finished successfully.
-    Completed,
-    /// Failed or aborted.
-    Failed,
-}
-
-impl PlanStepStatus {
-    /// Icon for TUI display.
-    pub fn icon(&self) -> &'static str {
-        match self {
-            PlanStepStatus::Pending => "○",
-            PlanStepStatus::InProgress => "◐",
-            PlanStepStatus::Completed => "●",
-            PlanStepStatus::Failed => "✗",
-        }
-    }
-}
+///
+/// # Deprecated location
+///
+/// This definition has moved to [`oneai_core::PlanStep`]. The alias above
+/// re-exports it from this module for compatibility. New code should import
+/// from `oneai_core` directly.
 
 /// Result of a PlanAgent execution.
 #[derive(Debug, Clone)]
@@ -83,6 +41,32 @@ pub struct PlanResult {
 
     /// The raw model response.
     pub raw_response: String,
+}
+
+/// A planning tradeoff with no clearly superior option, surfaced for the user
+/// to resolve before the final plan is produced (stage 1 of two-stage planning).
+#[derive(Debug, Clone)]
+pub struct PlanDecisionRequest {
+    /// Stable id, e.g. `"d1"`.
+    pub decision_id: String,
+    /// The question requiring a decision.
+    pub question: String,
+    /// Why the user's input is needed.
+    pub context: String,
+    /// The selectable options.
+    pub options: Vec<oneai_core::DecisionOption>,
+}
+
+/// The user's resolution to a [`PlanDecisionRequest`], fed into stage 2.
+#[derive(Debug, Clone)]
+pub struct PlanDecisionResolution {
+    /// Which decision this resolves (matches `PlanDecisionRequest::decision_id`).
+    pub decision_id: String,
+    /// The id of the chosen option, if the user picked one.
+    pub chosen: String,
+    /// Free-text custom guidance, if the user supplied their own answer
+    /// (Revise) instead of picking an option.
+    pub custom: Option<String>,
 }
 
 /// Configuration for a Plan agent.
@@ -108,38 +92,48 @@ impl Default for PlanConfig {
     }
 }
 
-/// Default system prompt for the planning agent.
+/// Default system prompt for the planning agent (two-stage).
 const PLAN_SYSTEM_PROMPT: &str = "\
-You are a task planning assistant. When given a complex task, decompose it into clear, ordered steps.
+You are a task planning assistant. You plan in TWO stages.
 
-For each step, determine whether it is:
-- COUPLED: This step depends on the output of a previous step and must wait for it.
-- NON-COUpled: This step can be executed independently in parallel with other non-coupled steps.
+STAGE 1 — scan for decisions that involve a genuine tradeoff with NO clearly
+superior option (e.g. speed vs correctness, cost vs quality, library A vs B,
+breadth vs depth). Output stage 1 as JSON:
+```json
+{\"decisions\": [
+  {\"decision_id\": \"d1\", \"question\": \"优先速度还是正确性？\", \"context\": \"...\",
+   \"options\": [
+     {\"id\": \"opt_a\", \"label\": \"优先速度\", \"description\": \"...\", \"tradeoffs\": \"...\"},
+     {\"id\": \"opt_b\", \"label\": \"优先正确性\", \"description\": \"...\", \"tradeoffs\": \"...\"}
+   ]}
+]}
+```
+Rules for decisions:
+- Only surface a decision when the options are genuinely comparable (no clear
+  winner). If one option is objectively better for this task, pick it silently
+  — do NOT ask.
+- Keep decisions to the minimum necessary (typically 0–3). Trivial choices are
+  not decisions.
+- For each decision, provide 2–4 options, each with its tradeoff stated honestly.
+- If there are no decisions, output exactly: {\"decisions\": []}
 
-Output your plan as a JSON array with this exact format:
+STAGE 2 — after you receive the user's choices (or an empty list if none were
+asked), output the SINGLE final plan as a JSON array with this exact format
+(do NOT produce multiple final plans):
 ```json
 [
-  {
-    \"id\": \"step_1\",
-    \"description\": \"Brief description of what to do\",
-    \"coupled\": false,
-    \"depends_on\": []
-  },
-  {
-    \"id\": \"step_2\",
-    \"description\": \"Brief description\",
-    \"coupled\": true,
-    \"depends_on\": [\"step_1\"]
-  }
+  {\"id\": \"step_1\", \"description\": \"Brief description of what to do\",
+   \"coupled\": false, \"depends_on\": []},
+  {\"id\": \"step_2\", \"description\": \"Brief description\", \"coupled\": true,
+   \"depends_on\": [\"step_1\"]}
 ]
 ```
-
-Important rules:
+Stage 2 rules:
 1. Start IDs from step_1 and increment sequentially.
-2. If a step is coupled, list all step IDs it depends on in depends_on.
-3. Non-coupled steps should have empty depends_on arrays.
-4. Keep descriptions concise but actionable.
-5. Output ONLY the JSON array, no other text.";
+2. coupled=true means the step depends on a previous step's output; list those
+   IDs in depends_on. Non-coupled steps have empty depends_on.
+3. Keep descriptions concise but actionable.
+4. Output ONLY the JSON, no other text.";
 
 /// Plan Agent — decomposes complex tasks into ordered steps.
 pub struct PlanAgent {
@@ -163,17 +157,84 @@ impl PlanAgent {
 
     /// Decompose a task into plan steps.
     ///
-    /// Takes a user's task description and returns a list of PlanSteps.
+    /// # Deprecated
+    ///
+    /// This skips stage-1 decision identification. Prefer
+    /// [`identify_decisions`](Self::identify_decisions) +
+    /// [`plan_with_resolutions`](Self::plan_with_resolutions), or call
+    /// [`plan_with_resolutions`](Self::plan_with_resolutions) directly with an
+    /// empty resolution list for the old one-shot behavior.
+    #[deprecated(since = "0.2.0", note = "use plan_with_resolutions / identify_decisions instead")]
     pub async fn plan(&self, task: &str) -> Result<PlanResult> {
+        self.plan_with_resolutions(task, &[]).await
+    }
+
+    /// Stage 1: scan the task for tradeoffs that need the user's input.
+    ///
+    /// Returns the decisions the planner surfaced (may be empty). The caller
+    /// resolves each via `InteractionGate::request(PlanDecision{..})` and feeds
+    /// the results into [`plan_with_resolutions`](Self::plan_with_resolutions).
+    pub async fn identify_decisions(&self, task: &str) -> Result<Vec<PlanDecisionRequest>> {
         let mut conv = Conversation::new();
         conv.add_message(Message::system(self.config.system_prompt.clone()));
         conv.add_message(Message::user(format!(
-            "Please decompose this task into steps:\n\n{}", task
+            "Stage 1: scan this task for decisions with no clearly superior option. \
+             Output only the JSON {{\"decisions\":[...]}} per the prompt rules.\n\nTask:\n{}",
+            task
         )));
 
+        let raw = self.infer_text(&mut conv).await?;
+        Ok(crate::plan_state::parse_decisions(&raw))
+    }
+
+    /// Stage 2: produce the SINGLE final plan, given the user's resolutions.
+    ///
+    /// `resolutions` is the list of user answers to the decisions surfaced by
+    /// [`identify_decisions`](Self::identify_decisions) (empty if there were
+    /// none). Each resolution is injected into the user message as guidance so
+    /// the model bakes the decisions into the final plan.
+    pub async fn plan_with_resolutions(
+        &self,
+        task: &str,
+        resolutions: &[PlanDecisionResolution],
+    ) -> Result<PlanResult> {
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system(self.config.system_prompt.clone()));
+
+        let mut user_msg = format!(
+            "Stage 2: produce the SINGLE final plan as a JSON array of steps per the \
+             prompt rules. Do not produce multiple plans. Output ONLY the JSON.\n\nTask:\n{}\n",
+            task
+        );
+        if resolutions.is_empty() {
+            user_msg.push_str("\n(No user decisions were needed for this task.)\n");
+        } else {
+            user_msg.push_str("\nUser decisions to bake into the plan:\n");
+            for r in resolutions {
+                if let Some(custom) = &r.custom {
+                    user_msg.push_str(&format!("- {}: {}\n", r.decision_id, custom));
+                } else {
+                    user_msg.push_str(&format!("- {}: chose {}\n", r.decision_id, r.chosen));
+                }
+            }
+        }
+        conv.add_message(Message::user(user_msg));
+
+        let raw_response = self.infer_text(&mut conv).await?;
+        let steps = parse_plan_steps(&raw_response)?;
+        Ok(PlanResult {
+            steps,
+            conversation: conv,
+            raw_response,
+        })
+    }
+
+    /// Run a single no-tools inference against `conv`, append the assistant
+    /// message, and return its text content.
+    async fn infer_text(&self, conv: &mut Conversation) -> Result<String> {
         let request = InferenceRequest {
             conversation: conv.clone(),
-            tools: vec![], // Planning doesn't need tools
+            tools: vec![],
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             top_p: None,
@@ -182,20 +243,10 @@ impl PlanAgent {
             thinking_budget: None,
             metadata: HashMap::new(),
         };
-
         let response = self.provider.infer(request).await?;
-
-        // Parse the plan from the response
-        let raw_response = response.message.text_content();
-        conv.add_message(response.message.clone());
-
-        let steps = parse_plan_steps(&raw_response)?;
-
-        Ok(PlanResult {
-            steps,
-            conversation: conv,
-            raw_response,
-        })
+        let text = response.message.text_content();
+        conv.add_message(response.message);
+        Ok(text)
     }
 
     /// Decompose a task within an existing conversation context.

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 
 use oneai_core::error::Result;
 use oneai_core::budget::TokenBudget;
-use oneai_core::traits::{LlmProvider, OutputParser, ApprovalGate, Tool};
+use oneai_core::traits::{LlmProvider, OutputParser, ApprovalGate, InteractionGate, Tool};
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig};
 use crate::worktree_isolation::{WorktreeIsolation, WorktreeConfig, WorktreeHandle, MergeResult};
@@ -567,7 +567,9 @@ impl SubAgentFactory for SubAgentFactoryNone {
 pub struct DefaultSubAgentFactory {
     provider: Arc<dyn LlmProvider>,
     parser: Arc<dyn OutputParser>,
+    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
     approval_gate: Arc<dyn ApprovalGate>,
+    interaction_gate: Arc<dyn InteractionGate>,
     tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     /// The project directory (root of the git repository).
     /// Used for git worktree isolation when creating Code sub-agents.
@@ -580,14 +582,16 @@ pub struct DefaultSubAgentFactory {
 
 impl DefaultSubAgentFactory {
     /// Create a new default factory with the given dependencies.
+    #[allow(deprecated)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     ) -> Self {
         Self {
-            provider, parser, approval_gate, tools,
+            provider, parser, approval_gate, interaction_gate, tools,
             project_path: None,
             worktree_config: None,
         }
@@ -598,16 +602,18 @@ impl DefaultSubAgentFactory {
     /// When a project_path is provided, Code sub-agents will create
     /// git worktrees for isolated file operations. This prevents
     /// conflicts when multiple Code sub-agents run in parallel.
+    #[allow(deprecated)]
     pub fn with_worktree(
         provider: Arc<dyn LlmProvider>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
         project_path: PathBuf,
         worktree_config: WorktreeConfig,
     ) -> Self {
         Self {
-            provider, parser, approval_gate, tools,
+            provider, parser, approval_gate, interaction_gate, tools,
             project_path: Some(project_path),
             worktree_config: Some(worktree_config),
         }
@@ -695,7 +701,9 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             self.provider.clone(),
             scoped_tools,  // ← SCOPED, not self.tools.clone()
             self.parser.clone(),
+            #[allow(deprecated)]
             self.approval_gate.clone(),
+            self.interaction_gate.clone(),
             Arc::new(oneai_skill::SkillSelector::new()),
             Arc::new(oneai_core::budget::ContextBudgetManager::new(
                 budget.clone(),

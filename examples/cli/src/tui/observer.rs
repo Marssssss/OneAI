@@ -44,16 +44,6 @@ pub enum ObserverEvent {
     /// Plan state changed (task created/updated). Carries the current plan
     /// snapshot (None = cleared). The TUI updates the persistent plan panel.
     PlanUpdate(Option<PlanStateSnapshot>),
-    /// The model submitted a plan via `exit_plan_mode`. The TUI shows an
-    /// accept/reject gate and signals the decision back via `reply_tx`
-    /// (true = accept & execute, false = reject & re-plan). The AgentLoop
-    /// blocks on this response before continuing.
-    PlanSubmitted {
-        plan: String,
-        steps: Vec<ProposedStep>,
-        reply_tx: tokio::sync::oneshot::Sender<bool>,
-    },
-
     /// `/init` finished (background project-info generation). The payload is a
     /// pre-formatted result/error message to display. Always clears `is_thinking`.
     InitResult(String),
@@ -154,16 +144,7 @@ impl AgentLoopObserver for TuiObserver {
         let _ = self.tx.send(ObserverEvent::PlanUpdate(plan.cloned()));
     }
 
-    fn on_plan_submitted(
-        &self,
-        plan: &str,
-        steps: &[oneai_agent::PlanStep],
-        reply: tokio::sync::oneshot::Sender<bool>,
-    ) {
-        let _ = self.tx.send(ObserverEvent::PlanSubmitted {
-            plan: plan.to_string(),
-            steps: steps.to_vec(),
-            reply_tx: reply,
-        });
-    }
+    // on_plan_submitted is intentionally not overridden — plan confirmation now
+    // flows through the InteractionGate (PlanReview) channel, not the observer.
+    // The trait method remains (deprecated) with its empty default.
 }

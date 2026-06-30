@@ -138,7 +138,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_command_popup(f, panel_layout[1], panel_layout[2], app);
     }
 
-    // Draw plan accept/reject popup (exit_plan_mode gate) if a plan is pending.
+    // Draw plan-decision popup (request_plan_decision) if pending — drawn
+    // above the plan-review popup since a decision must resolve first.
+    if app.plan_decision_pending.is_some() {
+        plan::draw_plan_decision(f, total_size, app);
+    }
+
+    // Draw plan review popup (exit_plan_mode gate) if a plan is pending.
     if app.pending_plan.is_some() {
         plan::draw_plan_approval(f, total_size, app);
     }

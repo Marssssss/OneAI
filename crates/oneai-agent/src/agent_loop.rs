@@ -25,9 +25,10 @@ use oneai_core::{
     Message, Role, ToolDefinition, ToolOutput,
     HookPoint, HookContext, InterruptPoint, InterruptReason,
     ResumeSignal, ResumeAction, StructuredOutputConfig,
+    InteractionModification, InteractionPoint, InteractionRequest, InteractionResponse,
 };
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, LlmProvider, OutputParser, Tool};
+use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool};
 
 use oneai_domain::{MergedDomainPack, PermissionAction};
 
@@ -81,9 +82,20 @@ pub trait AgentLoopObserver: Send + Sync {
 
     /// Called when an approval request is pending (high-risk tool).
     /// The UI can display an approval card and await user response.
+    ///
+    /// # Deprecated
+    ///
+    /// Tool approval now flows through `InteractionGate::request(ToolApproval{..})`.
+    /// This observer hook is observation-only and scheduled for removal in 0.3.
+    #[deprecated(since = "0.2.0", note = "use InteractionGate (ToolApproval) instead")]
     fn on_approval_request(&self, _request: &oneai_core::ApprovalRequest) {}
 
     /// Called when the user responds to an approval request.
+    ///
+    /// # Deprecated
+    ///
+    /// See [`on_approval_request`](Self::on_approval_request). Use `InteractionGate` instead.
+    #[deprecated(since = "0.2.0", note = "use InteractionGate (ToolApproval) instead")]
     fn on_approval_response(&self, _response: &oneai_core::ApprovalResponse) {}
 
     /// Called after each inference with token usage stats.
@@ -111,6 +123,13 @@ pub trait AgentLoopObserver: Send + Sync {
     /// an accept/reject gate and signals the decision back via `reply`
     /// (true = accept & execute, false = reject & keep planning). The loop
     /// awaits `reply` before continuing — this is the plan-approval gate.
+    ///
+    /// # Deprecated
+    ///
+    /// Plan confirmation now flows through `InteractionGate::request(PlanReview{..})`,
+    /// which also supports `Revise` (free-text corrective feedback) and `Abort`.
+    /// This bool-only gate is scheduled for removal in 0.3.
+    #[deprecated(since = "0.2.0", note = "use InteractionGate (PlanReview) instead")]
     fn on_plan_submitted(
         &self,
         _plan: &str,
@@ -446,6 +465,22 @@ fn paradigm_name(kind: &ParadigmKind) -> &'static str {
     }
 }
 
+/// Build a safe fallback `InferenceResponse` for when the PostInfer interaction
+/// gate aborts a response (e.g. the layer flagged disallowed content). The
+/// fallback is a benign assistant message carrying the abort reason.
+fn safe_fallback_response(reason: &str) -> InferenceResponse {
+    InferenceResponse {
+        message: Message::assistant(format!("(response replaced by PostInfer gate: {})", reason)),
+        usage: oneai_core::TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        },
+        model: String::new(),
+        metadata: HashMap::new(),
+    }
+}
+
 // ─── AgentLoopResult ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -611,7 +646,11 @@ pub struct AgentLoop {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     parser: Arc<dyn OutputParser>,
+    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
     approval_gate: Arc<dyn ApprovalGate>,
+    /// Unified interaction gate — single surface for every loop-suspend
+    /// decision point (PreInfer/PostInfer/ToolApproval/PlanDecision/PlanReview).
+    interaction_gate: Arc<dyn InteractionGate>,
     skill_selector: Arc<oneai_skill::SkillSelector>,
     /// Shared skill registry — used to inject the always-on skill menu (Tier1
     /// progressive disclosure) into the system prompt each turn. The `skill`
@@ -658,7 +697,9 @@ impl Clone for AgentLoop {
             provider: self.provider.clone(),
             tools: self.tools.clone(),
             parser: self.parser.clone(),
+            #[allow(deprecated)]
             approval_gate: self.approval_gate.clone(),
+            interaction_gate: self.interaction_gate.clone(),
             skill_selector: self.skill_selector.clone(),
             skill_registry: self.skill_registry.clone(),
             active_skill: self.active_skill.clone(),
@@ -707,11 +748,13 @@ impl AgentLoop {
     }
 
     /// Create a new AgentLoop with all dependencies.
+    #[allow(deprecated)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         skill_selector: Arc<oneai_skill::SkillSelector>,
         context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
         sub_agent_factory: Arc<dyn SubAgentFactory>,
@@ -720,7 +763,7 @@ impl AgentLoop {
         checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
         config: AgentLoopConfig,
     ) -> Self {
-        Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
+        Self { provider, tools, parser, approval_gate, interaction_gate, skill_selector, context_budget,
             sub_agent_factory, async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
             stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
@@ -735,11 +778,13 @@ impl AgentLoop {
     }
 
     /// Create a new AgentLoop with a domain pack and recovery manager.
+    #[allow(deprecated)]
     pub fn with_domain_pack(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
         approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         skill_selector: Arc<oneai_skill::SkillSelector>,
         context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
         sub_agent_factory: Arc<dyn SubAgentFactory>,
@@ -749,7 +794,7 @@ impl AgentLoop {
         config: AgentLoopConfig,
         domain_pack: Arc<MergedDomainPack>,
     ) -> Self {
-        Self { provider, tools, parser, approval_gate, skill_selector, context_budget,
+        Self { provider, tools, parser, approval_gate, interaction_gate, skill_selector, context_budget,
             sub_agent_factory, async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
             stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
@@ -1069,8 +1114,12 @@ impl AgentLoop {
                 metadata: HashMap::new(),
             };
 
-            // 3b. PreInfer hook — lifecycle hooks can modify the inference request
-            // before it's sent to the LLM (e.g., inject context, filter tools).
+            // 3b. PreInfer interaction gate — the application layer can rewrite
+            // the inference request (inject context / filter tools), ask for a
+            // feedback-grounded retry, or skip this iteration. This replaces
+            // the dead PreInfer `LifecycleHook` interactive path; in-process
+            // hooks still run for audit/logging only (their Modify/Deny is not
+            // applied — use the interaction gate for interactive control).
             {
                 let registry = self.hook_registry.read().await;
                 if registry.count_at(&HookPoint::PreInfer) > 0 {
@@ -1084,21 +1133,42 @@ impl AgentLoop {
                         iteration: state.iterations,
                         paradigm: paradigm_name(&state.active_paradigm).to_string(),
                     };
-                    let results = registry.run_hooks(HookPoint::PreInfer, hook_context).await;
-                    let resolved = HookRegistry::resolve_results(&results);
-                    if let ResolvedHookAction::Modify { modified_args } = resolved {
-                        // Modified args may contain a modified conversation or extra context
-                        if let Some(extra_msg) = modified_args.get("inject_system_message").and_then(|v| v.as_str()) {
-                            state.conversation.add_message(Message::system(extra_msg.to_string()));
+                    let _ = registry.run_hooks(HookPoint::PreInfer, hook_context).await;
+                    // Hooks are non-interactive audit only; ignore Modify/Deny.
+                }
+            }
+            if self.interaction_gate.enabled(InteractionPoint::PreInfer) {
+                let resp = self
+                    .interaction_gate
+                    .request(InteractionRequest::PreInfer {
+                        request: request.clone(),
+                        iteration: state.iterations,
+                        paradigm: paradigm_name(&state.active_paradigm).to_string(),
+                    })
+                    .await?;
+                match resp {
+                    InteractionResponse::Proceed => {}
+                    InteractionResponse::ProceedWith { modification } => match modification {
+                        InteractionModification::InjectSystemMessage(msg) => {
+                            state.conversation.add_message(Message::system(msg));
                             request.conversation = state.conversation.clone();
                         }
-                    } else if let ResolvedHookAction::Deny { reason } = resolved {
-                        // PreInfer Deny: skip this inference iteration
+                        InteractionModification::ReplaceRequest(new_req) => {
+                            request = new_req;
+                        }
+                        _ => {}
+                    },
+                    InteractionResponse::Revise { feedback } => {
+                        state.conversation.add_message(Message::user(feedback));
+                        request.conversation = state.conversation.clone();
+                    }
+                    InteractionResponse::Abort { reason } => {
                         state.conversation.add_message(Message::system(
-                            format!("Inference skipped by PreInfer hook: {}", reason)
+                            format!("Inference aborted by PreInfer gate: {}", reason),
                         ));
                         continue;
                     }
+                    _ => {}
                 }
             }
 
@@ -1137,6 +1207,10 @@ impl AgentLoop {
             // just wait and retry. This handles cases where provider-level retry
             // (ProviderRetryConfig) was exhausted but the rate limit might clear
             // after waiting longer.
+            // Snapshot the final request before inference — the non-streaming
+            // path moves `request` into `provider.infer`, but PostInfer (below)
+            // needs it to build the interaction request.
+            let request_snapshot = request.clone();
             let response_result = if self.config.use_streaming {
                 self.run_streaming_iteration_async(&request, observer).await
             } else {
@@ -1151,7 +1225,7 @@ impl AgentLoop {
                 }
             };
 
-            let response = match response_result {
+            let mut response = match response_result {
                 Ok(resp) => {
                     // Successful inference — reset consecutive rate limit counter
                     consecutive_rate_limit_errors = 0;
@@ -1237,8 +1311,10 @@ impl AgentLoop {
                 }
             }
 
-            // 4c. PostInfer hook — lifecycle hooks can modify the inference response
-            // after it's received from the LLM (e.g., filter content, validate).
+            // 4c. PostInfer interaction gate — the application layer can validate
+            // / filter / REPLACE the response (fixing the old "logged but not
+            // applied" dead path), or ask for a feedback-grounded retry. Hooks
+            // still run for audit only.
             {
                 let registry = self.hook_registry.read().await;
                 if registry.count_at(&HookPoint::PostInfer) > 0 {
@@ -1252,17 +1328,37 @@ impl AgentLoop {
                         iteration: state.iterations,
                         paradigm: paradigm_name(&state.active_paradigm).to_string(),
                     };
-                    let results = registry.run_hooks(HookPoint::PostInfer, hook_context).await;
-                    let resolved = HookRegistry::resolve_results(&results);
-                    if let ResolvedHookAction::Modify { modified_args: _ } = resolved {
-                        // PostInfer Modify: the modified_args may contain replacement content
-                        // For now, we log it but don't replace the response (to keep backward compat)
-                        tracing::info!("PostInfer hook modified response (logged but not applied for safety)");
-                    } else if let ResolvedHookAction::Deny { reason } = resolved {
-                        // PostInfer Deny: treat as "model produced disallowed content"
-                        // Replace the response with a safe fallback
-                        tracing::warn!("PostInfer hook denied response: {}", reason);
+                    let _ = registry.run_hooks(HookPoint::PostInfer, hook_context).await;
+                }
+            }
+            if self.interaction_gate.enabled(InteractionPoint::PostInfer) {
+                let resp = self
+                    .interaction_gate
+                    .request(InteractionRequest::PostInfer {
+                        response: response.clone(),
+                        request: request_snapshot.clone(),
+                        iteration: state.iterations,
+                        paradigm: paradigm_name(&state.active_paradigm).to_string(),
+                    })
+                    .await?;
+                match resp {
+                    InteractionResponse::Proceed => {}
+                    InteractionResponse::ProceedWith { modification } => match modification {
+                        InteractionModification::ReplaceResponse(r) => {
+                            response = r;
+                        }
+                        _ => {}
+                    },
+                    InteractionResponse::Revise { feedback } => {
+                        state.conversation.add_message(response.message.clone());
+                        state.conversation.add_message(Message::user(feedback));
+                        continue;
                     }
+                    InteractionResponse::Abort { reason } => {
+                        tracing::warn!("PostInfer gate aborted response: {}", reason);
+                        response = safe_fallback_response(&reason);
+                    }
+                    _ => {}
                 }
             }
 
@@ -1594,7 +1690,7 @@ impl AgentLoop {
                             continue;
                         }
                         // Compute the control-tool output FIRST (the exit_plan_mode
-                        // gate may block awaiting the user's accept/reject).
+                        // gate may block awaiting the user's plan review).
                         let output = if call.name == crate::plan_state::TOOL_EXIT_PLAN_MODE {
                             let plan_text = call.args.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let steps = crate::plan_state::extract_steps(&call.args);
@@ -1606,26 +1702,132 @@ impl AgentLoop {
                                 state.plan_state = Some(ps);
                             }
                             observer.on_plan_update(state.plan_state.as_ref());
-                            // Block on the user's accept/reject decision.
-                            let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
-                            observer.on_plan_submitted(&plan_text, &steps, tx);
-                            let accepted = rx.await.unwrap_or(false);
-                            if accepted {
-                                self.set_plan_mode(false);
-                                oneai_core::ToolOutput {
-                                    success: true,
-                                    content: "Plan approved — proceeding with execution. \
-                                        Use task_update to mark steps in_progress/completed as \
-                                        you work.".to_string(),
-                                    error: None,
-                                }
+                            // PlanReview via the interaction gate (single plan).
+                            let resp = if self.interaction_gate.enabled(InteractionPoint::PlanReview) {
+                                self.interaction_gate
+                                    .request(InteractionRequest::PlanReview {
+                                        plan: plan_text.clone(),
+                                        steps: steps.clone(),
+                                    })
+                                    .await?
                             } else {
-                                oneai_core::ToolOutput {
-                                    success: true,
-                                    content: "Plan rejected by the user. Stay in plan mode, \
-                                        revise the plan, then call exit_plan_mode again.".to_string(),
-                                    error: None,
+                                InteractionResponse::Proceed
+                            };
+                            match resp {
+                                InteractionResponse::Proceed => {
+                                    self.set_plan_mode(false);
+                                    oneai_core::ToolOutput {
+                                        success: true,
+                                        content: "Plan approved — proceeding with execution. \
+                                            Use task_update to mark steps in_progress/completed as \
+                                            you work.".to_string(),
+                                        error: None,
+                                    }
                                 }
+                                InteractionResponse::ProceedWith { modification } => {
+                                    if let InteractionModification::ReplacePlan { plan: new_plan, steps: new_steps } = modification {
+                                        // Apply the user's edits to the tracked plan.
+                                        let mut ps = state.plan_state.take().unwrap_or_default();
+                                        ps.set_steps(new_steps);
+                                        state.plan_state = Some(ps);
+                                        observer.on_plan_update(state.plan_state.as_ref());
+                                        self.set_plan_mode(false);
+                                        oneai_core::ToolOutput {
+                                            success: true,
+                                            content: format!(
+                                                "Plan approved with edits — proceeding. \
+                                                Use task_update to mark steps in_progress/completed \
+                                                as you work. Edited plan:\n{}", new_plan),
+                                            error: None,
+                                        }
+                                    } else {
+                                        self.set_plan_mode(false);
+                                        oneai_core::ToolOutput {
+                                            success: true,
+                                            content: "Plan approved — proceeding with execution.".to_string(),
+                                            error: None,
+                                        }
+                                    }
+                                }
+                                InteractionResponse::Revise { feedback } => {
+                                    oneai_core::ToolOutput {
+                                        success: true,
+                                        content: format!(
+                                            "Plan rejected with feedback: {}. \
+                                            Revise the plan and call exit_plan_mode again.", feedback),
+                                        error: None,
+                                    }
+                                }
+                                InteractionResponse::Abort { reason } => {
+                                    oneai_core::ToolOutput {
+                                        success: true,
+                                        content: format!("Plan aborted: {}. Stay in plan mode or revise.", reason),
+                                        error: None,
+                                    }
+                                }
+                                _ => oneai_core::ToolOutput {
+                                    success: true,
+                                    content: "Plan review returned no action; staying in plan mode.".to_string(),
+                                    error: None,
+                                },
+                            }
+                        } else if call.name == crate::plan_state::TOOL_REQUEST_PLAN_DECISION {
+                            // PlanDecision: the model hit a tradeoff and asks the
+                            // user to choose. The reply is fed back as tool_result.
+                            let decision_id = call.args.get("decision_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let question = call.args.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let context = call.args.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let options = call.args.get("options").and_then(|v| v.as_array()).map(|arr| {
+                                arr.iter().filter_map(|o| {
+                                    Some(oneai_core::DecisionOption {
+                                        id: o.get("id")?.as_str()?.to_string(),
+                                        label: o.get("label")?.as_str()?.to_string(),
+                                        description: o.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                        tradeoffs: o.get("tradeoffs").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    })
+                                }).collect::<Vec<_>>()
+                            }).unwrap_or_default();
+                            let resp = if self.interaction_gate.enabled(InteractionPoint::PlanDecision) {
+                                self.interaction_gate
+                                    .request(InteractionRequest::PlanDecision {
+                                        decision_id: decision_id.clone(),
+                                        question: question.clone(),
+                                        context: context.clone(),
+                                        options: options.clone(),
+                                    })
+                                    .await?
+                            } else {
+                                InteractionResponse::Proceed
+                            };
+                            match resp {
+                                InteractionResponse::Choose { option_id } => {
+                                    let label = options.iter().find(|o| o.id == option_id)
+                                        .map(|o| o.label.clone()).unwrap_or_default();
+                                    oneai_core::ToolOutput {
+                                        success: true,
+                                        content: format!("User chose {} ({}). Bake this into the final plan.", option_id, label),
+                                        error: None,
+                                    }
+                                }
+                                InteractionResponse::Revise { feedback } => {
+                                    oneai_core::ToolOutput {
+                                        success: true,
+                                        content: format!("User custom decision: {}. Bake this into the final plan.", feedback),
+                                        error: None,
+                                    }
+                                }
+                                InteractionResponse::Abort { reason } => {
+                                    oneai_core::ToolOutput {
+                                        success: true,
+                                        content: format!("Decision aborted: {}. Pick a sensible default and continue planning.", reason),
+                                        error: None,
+                                    }
+                                }
+                                _ => oneai_core::ToolOutput {
+                                    success: true,
+                                    content: "Decision auto-proceeded. Pick a sensible default and continue planning.".to_string(),
+                                    error: None,
+                                },
                             }
                         } else {
                             crate::plan_state::apply_control_tool(
@@ -1936,7 +2138,9 @@ impl AgentLoop {
                 provider: self.provider.clone(),
                 tools: self.tools.clone(),
                 parser: self.parser.clone(),
+                #[allow(deprecated)]
                 approval_gate: self.approval_gate.clone(),
+                interaction_gate: self.interaction_gate.clone(),
                 domain_pack: self.domain_pack.clone(),
                 hook_registry: self.hook_registry.clone(),
                 recovery_manager: self.recovery_manager.clone(),
@@ -2186,7 +2390,7 @@ impl AgentLoop {
             let call_id = call.id.clone();
             let args = call.args.clone();
             let tool_opt = tools_map.get(&tool_name).cloned();
-            let approval_gate = self.approval_gate.clone();
+            let interaction_gate = self.interaction_gate.clone();
             let perm_check = domain_permission_checks[idx].clone();
             async move {
                 // Step 1: Check domain PermissionProfile (highest priority)
@@ -2224,7 +2428,7 @@ impl AgentLoop {
                                     permission_level: Some(oneai_core::PermissionLevel::Full),
                                     justification: format!("Domain policy requires confirmation for '{}'", tool_name),
                                 };
-                                Self::handle_approval(approval_gate, request, tool, args, call_id, tool_name).await
+                                Self::handle_approval(interaction_gate, request, tool, args, call_id, tool_name).await
                             }
                             None => {
                                 let err_msg = format!("Tool '{}' not found", tool_name);
@@ -2247,7 +2451,7 @@ impl AgentLoop {
                                         permission_level: Some(level),
                                         justification: format!("Full-permission tool '{}' requires approval", tool_name),
                                     };
-                                    Self::handle_approval(approval_gate, request, tool, args, call_id, tool_name).await
+                                    Self::handle_approval(interaction_gate, request, tool, args, call_id, tool_name).await
                                 } else {
                                     let output = tool.execute(args).await?;
                                     Ok::<ToolCallResult, oneai_core::error::OneAIError>(ToolCallResult { call_id, tool_name, output })
@@ -2275,7 +2479,7 @@ impl AgentLoop {
                                         permission_level: Some(perm_level),
                                         justification: format!("Full-permission tool '{}' requires approval", tool_name),
                                     };
-                                    Self::handle_approval(approval_gate, request, tool, args, call_id, tool_name).await
+                                    Self::handle_approval(interaction_gate, request, tool, args, call_id, tool_name).await
                                 } else {
                                     let output = tool.execute(args).await?;
                                     Ok(ToolCallResult { call_id, tool_name, output })
@@ -3066,44 +3270,79 @@ impl AgentLoop {
         }
     }
 
-    /// Handle the approval gate interaction for a tool call.
+    /// Handle the interaction-gate approval for a tool call.
+    ///
+    /// Routes the tool approval through the unified `InteractionGate`
+    /// (`ToolApproval` point). `Proceed`/`ProceedWith{ReplaceToolArgs}` execute
+    /// the tool (optionally with rewritten args); `Revise{feedback}` rejects
+    /// execution and feeds the corrective guidance back as the tool result;
+    /// `Abort{reason}` is the hard deny.
     async fn handle_approval(
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         request: oneai_core::ApprovalRequest,
         tool: Arc<dyn Tool>,
         args: serde_json::Value,
         call_id: String,
         tool_name: String,
     ) -> Result<ToolCallResult> {
-        match approval_gate.request_approval(request).await {
-            Ok(oneai_core::ApprovalResponse::Approved { modified_args }) => {
-                let final_args = modified_args.unwrap_or(args);
-                let output = tool.execute(final_args).await?;
+        let resp = interaction_gate
+            .request(InteractionRequest::ToolApproval { approval: request })
+            .await;
+        match resp {
+            Ok(InteractionResponse::Proceed) => {
+                let output = tool.execute(args).await?;
                 Ok(ToolCallResult { call_id, tool_name, output })
             }
-            Ok(oneai_core::ApprovalResponse::Denied { reason }) => {
-                Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
-                    success: false, content: String::new(),
-                    error: Some(format!("Denied: {}", reason)),
-                }})
+            Ok(InteractionResponse::ProceedWith { modification }) => match modification {
+                InteractionModification::ReplaceToolArgs(new_args) => {
+                    let output = tool.execute(new_args).await?;
+                    Ok(ToolCallResult { call_id, tool_name, output })
+                }
+                _ => {
+                    let output = tool.execute(args).await?;
+                    Ok(ToolCallResult { call_id, tool_name, output })
+                }
+            },
+            Ok(InteractionResponse::Revise { feedback }) => {
+                Ok(ToolCallResult {
+                    call_id,
+                    tool_name,
+                    output: ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("User rejected: {}", feedback)),
+                    },
+                })
             }
-            Ok(oneai_core::ApprovalResponse::Modified { args: modified_args }) => {
-                let output = tool.execute(modified_args).await?;
-                Ok(ToolCallResult { call_id, tool_name, output })
+            Ok(InteractionResponse::Abort { reason }) => {
+                Ok(ToolCallResult {
+                    call_id,
+                    tool_name,
+                    output: ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Denied: {}", reason)),
+                    },
+                })
             }
-            Ok(oneai_core::ApprovalResponse::Observe { observation }) => {
-                Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
+            Ok(_) => Ok(ToolCallResult {
+                call_id,
+                tool_name,
+                output: ToolOutput {
                     success: false,
-                    content: format!("Observe: {}", observation),
-                    error: Some("Execution paused for observation".to_string()),
-                }})
-            }
-            Err(e) => {
-                Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
-                    success: false, content: String::new(),
-                    error: Some(format!("Approval error: {}", e)),
-                }})
-            }
+                    content: String::new(),
+                    error: Some("Unsupported interaction response for tool approval".to_string()),
+                },
+            }),
+            Err(e) => Ok(ToolCallResult {
+                call_id,
+                tool_name,
+                output: ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(format!("Interaction error: {}", e)),
+                },
+            }),
         }
     }
 }
@@ -3126,12 +3365,13 @@ impl AgentLoop {
 /// pack decorators), and ToolCall nodes go through the full permission and
 /// hooks pipeline. This makes StateGraph execution truly integrated with
 /// the AgentLoop, not a separate disconnected system.
-#[allow(dead_code)]
+#[allow(deprecated, dead_code)]
 pub struct AgentLoopGraphActionExecutor {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     parser: Arc<dyn OutputParser>,
     approval_gate: Arc<dyn ApprovalGate>,
+    interaction_gate: Arc<dyn InteractionGate>,
     domain_pack: Option<Arc<MergedDomainPack>>,
     hook_registry: Arc<RwLock<HookRegistry>>,
     recovery_manager: Option<Arc<crate::error_recovery::RecoveryManager>>,
@@ -3260,7 +3500,7 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                     });
                 }
                 oneai_domain::PermissionAction::RequireConfirmation => {
-                    // Need approval gate interaction
+                    // Need interaction-gate approval
                     let request = oneai_core::ApprovalRequest {
                         tool_name: tool_name.to_string(),
                         args: args.clone(),
@@ -3268,39 +3508,9 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                         permission_level: Some(oneai_core::PermissionLevel::Full),
                         justification: format!("Domain policy requires confirmation for '{}'", tool_name),
                     };
-                    let approval = self.approval_gate.request_approval(request).await?;
-                    match approval {
-                        oneai_core::ApprovalResponse::Denied { reason } => {
-                            return Ok(oneai_workflow::ActionResult {
-                                output: String::new(),
-                                error: Some(format!("Denied: {}", reason)),
-                            });
-                        }
-                        oneai_core::ApprovalResponse::Approved { modified_args } => {
-                            let final_args = modified_args.unwrap_or_else(|| args.clone());
-                            let output = tool.execute(final_args).await?;
-                            state.conversation.add_message(Message::tool_result(
-                                format!("graph_tool_{}", tool_name),
-                                output.content.clone(),
-                            ));
-                            return Ok(oneai_workflow::ActionResult {
-                                output: output.content,
-                                error: output.error,
-                            });
-                        }
-                        _ => {
-                            // Modified or Observe — proceed with execution
-                            let output = tool.execute(args.clone()).await?;
-                            state.conversation.add_message(Message::tool_result(
-                                format!("graph_tool_{}", tool_name),
-                                output.content.clone(),
-                            ));
-                            return Ok(oneai_workflow::ActionResult {
-                                output: output.content,
-                                error: output.error,
-                            });
-                        }
-                    }
+                    return self
+                        .graph_tool_approval(request, tool.clone(), args.clone(), tool_name, state)
+                        .await;
                 }
                 oneai_domain::PermissionAction::UseDefaultPermission { level } => {
                     if level == oneai_core::PermissionLevel::Full {
@@ -3311,26 +3521,9 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                             permission_level: Some(level),
                             justification: format!("Full-permission tool '{}' requires approval", tool_name),
                         };
-                        let approval = self.approval_gate.request_approval(request).await?;
-                        match approval {
-                            oneai_core::ApprovalResponse::Denied { reason } => {
-                                return Ok(oneai_workflow::ActionResult {
-                                    output: String::new(),
-                                    error: Some(format!("Denied: {}", reason)),
-                                });
-                            }
-                            _ => {
-                                let output = tool.execute(args.clone()).await?;
-                                state.conversation.add_message(Message::tool_result(
-                                    format!("graph_tool_{}", tool_name),
-                                    output.content.clone(),
-                                ));
-                                return Ok(oneai_workflow::ActionResult {
-                                    output: output.content,
-                                    error: output.error,
-                                });
-                            }
-                        }
+                        return self
+                            .graph_tool_approval(request, tool.clone(), args.clone(), tool_name, state)
+                            .await;
                     }
                     // Standard or Read permission — execute directly
                     let output = tool.execute(args.clone()).await?;
@@ -3356,38 +3549,9 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                 permission_level: Some(perm_level),
                 justification: format!("Full-permission tool '{}' requires approval", tool_name),
             };
-            let approval = self.approval_gate.request_approval(request).await?;
-            match approval {
-                oneai_core::ApprovalResponse::Denied { reason } => {
-                    return Ok(oneai_workflow::ActionResult {
-                        output: String::new(),
-                        error: Some(format!("Denied: {}", reason)),
-                    });
-                }
-                oneai_core::ApprovalResponse::Approved { modified_args } => {
-                    let final_args = modified_args.unwrap_or_else(|| args.clone());
-                    let output = tool.execute(final_args).await?;
-                    state.conversation.add_message(Message::tool_result(
-                        format!("graph_tool_{}", tool_name),
-                        output.content.clone(),
-                    ));
-                    return Ok(oneai_workflow::ActionResult {
-                        output: output.content,
-                        error: output.error,
-                    });
-                }
-                _ => {
-                    let output = tool.execute(args.clone()).await?;
-                    state.conversation.add_message(Message::tool_result(
-                        format!("graph_tool_{}", tool_name),
-                        output.content.clone(),
-                    ));
-                    return Ok(oneai_workflow::ActionResult {
-                        output: output.content,
-                        error: output.error,
-                    });
-                }
-            }
+            return self
+                .graph_tool_approval(request, tool.clone(), args.clone(), tool_name, state)
+                .await;
         }
 
         // Standard or Read permission — execute directly
@@ -3511,6 +3675,72 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
 }
 
 impl AgentLoopGraphActionExecutor {
+    /// Route a graph-tool approval through the unified interaction gate and
+    /// (on proceed) execute the tool, recording the result into `state`.
+    /// Shared by the three full-permission approval sites in `execute_tool_call`.
+    async fn graph_tool_approval(
+        &self,
+        request: oneai_core::ApprovalRequest,
+        tool: Arc<dyn Tool>,
+        args: serde_json::Value,
+        tool_name: &str,
+        state: &mut oneai_workflow::GraphState,
+    ) -> Result<oneai_workflow::ActionResult> {
+        let resp = self
+            .interaction_gate
+            .request(InteractionRequest::ToolApproval { approval: request })
+            .await?;
+        match resp {
+            InteractionResponse::Proceed => {
+                let output = tool.execute(args).await?;
+                state.conversation.add_message(Message::tool_result(
+                    format!("graph_tool_{}", tool_name),
+                    output.content.clone(),
+                ));
+                Ok(oneai_workflow::ActionResult {
+                    output: output.content,
+                    error: output.error,
+                })
+            }
+            InteractionResponse::ProceedWith { modification } => match modification {
+                InteractionModification::ReplaceToolArgs(new_args) => {
+                    let output = tool.execute(new_args).await?;
+                    state.conversation.add_message(Message::tool_result(
+                        format!("graph_tool_{}", tool_name),
+                        output.content.clone(),
+                    ));
+                    Ok(oneai_workflow::ActionResult {
+                        output: output.content,
+                        error: output.error,
+                    })
+                }
+                _ => {
+                    let output = tool.execute(args).await?;
+                    state.conversation.add_message(Message::tool_result(
+                        format!("graph_tool_{}", tool_name),
+                        output.content.clone(),
+                    ));
+                    Ok(oneai_workflow::ActionResult {
+                        output: output.content,
+                        error: output.error,
+                    })
+                }
+            },
+            InteractionResponse::Revise { feedback } => Ok(oneai_workflow::ActionResult {
+                output: String::new(),
+                error: Some(format!("User rejected: {}", feedback)),
+            }),
+            InteractionResponse::Abort { reason } => Ok(oneai_workflow::ActionResult {
+                output: String::new(),
+                error: Some(format!("Denied: {}", reason)),
+            }),
+            _ => Ok(oneai_workflow::ActionResult {
+                output: String::new(),
+                error: Some("Unsupported interaction response for tool approval".to_string()),
+            }),
+        }
+    }
+
     /// Build tool definitions filtered by paradigm config and domain pack.
     ///
     /// This is the same logic as `AgentLoop.build_tool_definitions_for_paradigm()`,

@@ -37,11 +37,13 @@ impl FallbackLoop {
         failed_output: &str,
         error_description: &str,
     ) -> std::result::Result<ParsedOutput, OneAIError> {
-        let mut retries = 0;
         let current_error = error_description.to_string();
 
-        while retries < self.max_retries {
-            retries += 1;
+        // The fallback self-correction attempts at most one re-inference: if
+        // configured to allow retries, do one corrected inference and return;
+        // otherwise fall through to the exhausted error below.
+        if self.max_retries > 0 {
+            let retries = 1;
 
             // Create the self-correction prompt
             let _correction_message = Message::assistant(

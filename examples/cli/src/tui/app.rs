@@ -194,9 +194,23 @@ pub struct ApprovalPendingState {
     pub request: ApprovalRequest,
     pub tool_name: String,
     pub justification: String,
-    /// The oneshot channel to send the approval response back.
+    /// The oneshot channel to send the interaction response back.
     /// This is optional because it gets consumed when the user responds.
-    pub response_tx: Option<tokio::sync::oneshot::Sender<oneai_core::ApprovalResponse>>,
+    pub response_tx: Option<tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>>,
+}
+
+/// State for a pending plan-decision request (a planning tradeoff the user must
+/// resolve). Set when an `InteractionRequest::PlanDecision` arrives.
+#[derive(Debug)]
+pub struct PlanDecisionState {
+    pub decision_id: String,
+    pub question: String,
+    pub context: String,
+    pub options: Vec<oneai_core::DecisionOption>,
+    /// Currently highlighted option index.
+    pub selected: usize,
+    /// Reply channel for the chosen `InteractionResponse` (Choose/Revise/Abort).
+    pub reply_tx: tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>,
 }
 
 // ─── Chat Message ──────────────────────────────────────────────────────────
@@ -676,13 +690,19 @@ pub struct App {
     /// A plan submitted via `exit_plan_mode`, awaiting the user's
     /// accept/reject decision. While set, the TUI shows an accept/reject UI.
     /// The oneshot sender returns the decision to the (blocked) AgentLoop.
-    pub pending_plan: Option<(String, Vec<oneai_agent::PlanStep>, Option<tokio::sync::oneshot::Sender<bool>>)>,
-    /// Selected option in the plan-approval UI (0=Accept, 1=Reject).
+    pub pending_plan: Option<(String, Vec<oneai_agent::PlanStep>, Option<tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>>)>,
+    /// Pending plan-decision request (a tradeoff the user must resolve during
+    /// planning). Set when an `InteractionRequest::PlanDecision` arrives.
+    pub plan_decision_pending: Option<PlanDecisionState>,
+    /// Selected option in the plan-review UI (0=Accept, 1=Revise, 2=Reject).
     pub plan_approval_selected_index: usize,
     /// Vertical scroll offset of the plan-approval popup body.
     /// Lets the user page through the full plan_text + steps that don't fit
     /// the default compact window.
     pub plan_approval_scroll: usize,
+    /// When set, the plan-review popup is collecting Revise feedback text
+    /// instead of navigating buttons.
+    pub plan_revise_input: Option<String>,
 }
 
 impl App {
@@ -758,8 +778,10 @@ impl App {
             last_context_accounting: None,
             plan_state: None,
             pending_plan: None,
+            plan_decision_pending: None,
             plan_approval_selected_index: 0,
             plan_approval_scroll: 0,
+            plan_revise_input: None,
         }
     }
 
