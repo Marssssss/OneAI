@@ -22,7 +22,7 @@
 //!     .build();
 //!
 //! // Run against an App
-//! let app = AppBuilder::new().provider(provider).auto_approval_gate().build().await?;
+//! let app = AppBuilder::new().provider(provider).noop_interaction_gate().build().await?;
 //! let runner = EvalRunner::new(app);
 //! let report = runner.run(&suite).await?;
 //!

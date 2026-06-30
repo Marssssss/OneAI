@@ -33,15 +33,17 @@ impl OneAIAppBuilder {
         }
     }
 
-    /// Use the auto-approve gate (for testing).
-    pub fn auto_approval_gate(self: Arc<Self>) -> Arc<Self> {
-        let builder = self.take_inner().auto_approval_gate();
+    /// Use the no-op interaction gate (every point disabled, zero latency).
+    pub fn noop_interaction_gate(self: Arc<Self>) -> Arc<Self> {
+        let builder = self.take_inner().noop_interaction_gate();
         Arc::new(Self::from_builder(builder))
     }
 
-    /// Use the blocking (always-deny) gate.
-    pub fn blocking_approval_gate(self: Arc<Self>) -> Arc<Self> {
-        let builder = self.take_inner().blocking_approval_gate();
+    /// Use the deny-all interaction gate (every point aborted).
+    pub fn deny_all_interaction_gate(self: Arc<Self>) -> Arc<Self> {
+        let builder = self
+            .take_inner()
+            .interaction_gate(Arc::new(oneai_tool::DenyAllInteractionGate));
         Arc::new(Self::from_builder(builder))
     }
 
@@ -103,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_builder_auto_approve() {
         let builder = Arc::new(OneAIAppBuilder::new());
-        let builder = builder.auto_approval_gate();
+        let builder = builder.noop_interaction_gate();
         let builder = builder.default_parser();
         let app = builder.build().await.expect("Build should succeed");
 
@@ -113,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_builder_blocking() {
         let builder = Arc::new(OneAIAppBuilder::new());
-        let builder = builder.blocking_approval_gate();
+        let builder = builder.deny_all_interaction_gate();
         let builder = builder.default_parser();
         let app = builder.build().await.expect("Build should succeed");
 
@@ -127,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_builder_with_persistence() {
         let builder = Arc::new(OneAIAppBuilder::new());
-        let builder = builder.auto_approval_gate();
+        let builder = builder.noop_interaction_gate();
         let builder = builder.persistence("/tmp/oneai_uniffi_test".to_string());
         let app = builder.build().await.expect("Build should succeed");
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
 use serde::{Deserialize, Serialize};
-use oneai_core::{ToolOutput, InterruptPoint, ResumeSignal, ApprovalRequest, ApprovalResponse};
+use oneai_core::{ToolOutput, InterruptPoint, ResumeSignal};
 use oneai_agent::{AgentLoopObserver, ParadigmKind, ToolCallRequest, AgentLoopResult, SubAgentKind};
 use oneai_trace::{TraceContext, InMemoryCollector};
 use oneai_persistence::FilePersistence;
@@ -55,12 +55,6 @@ pub enum StudioEvent {
 
     /// Streaming text chunk (typewriter effect).
     StreamChunk { text: String },
-
-    /// Approval request pending (high-risk tool).
-    ApprovalRequest { tool_name: String, args: serde_json::Value, risk_level: String },
-
-    /// Approval response received.
-    ApprovalResponse { approved: bool, reason: String },
 
     /// Agent loop completed.
     LoopComplete { result_summary: String },
@@ -290,27 +284,6 @@ impl AgentLoopObserver for StudioState {
 
     fn on_thinking(&self, text: &str) {
         self.broadcast(StudioEvent::Thinking { text: text.to_string() });
-    }
-
-    fn on_approval_request(&self, request: &ApprovalRequest) {
-        self.broadcast(StudioEvent::ApprovalRequest {
-            tool_name: request.tool_name.clone(),
-            args: request.args.clone(),
-            risk_level: format!("{:?}", request.risk_level),
-        });
-    }
-
-    fn on_approval_response(&self, response: &ApprovalResponse) {
-        let (approved, reason): (bool, String) = match response {
-            ApprovalResponse::Approved { .. } => (true, "Approved".to_string()),
-            ApprovalResponse::Denied { reason } => (false, reason.clone()),
-            ApprovalResponse::Modified { .. } => (true, "Modified".to_string()),
-            ApprovalResponse::Observe { observation } => (false, observation.clone()),
-        };
-        self.broadcast(StudioEvent::ApprovalResponse {
-            approved,
-            reason,
-        });
     }
 
     fn on_token_usage(&self, prompt_tokens: u32, completion_tokens: u32) {

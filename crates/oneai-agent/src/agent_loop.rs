@@ -28,7 +28,7 @@ use oneai_core::{
     InteractionModification, InteractionPoint, InteractionRequest, InteractionResponse,
 };
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool};
+use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
 
 use oneai_domain::{MergedDomainPack, PermissionAction};
 
@@ -80,24 +80,6 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Each call contains a fragment of the thinking text (streaming).
     fn on_thinking(&self, _text: &str) {}
 
-    /// Called when an approval request is pending (high-risk tool).
-    /// The UI can display an approval card and await user response.
-    ///
-    /// # Deprecated
-    ///
-    /// Tool approval now flows through `InteractionGate::request(ToolApproval{..})`.
-    /// This observer hook is observation-only and scheduled for removal in 0.3.
-    #[deprecated(since = "0.2.0", note = "use InteractionGate (ToolApproval) instead")]
-    fn on_approval_request(&self, _request: &oneai_core::ApprovalRequest) {}
-
-    /// Called when the user responds to an approval request.
-    ///
-    /// # Deprecated
-    ///
-    /// See [`on_approval_request`](Self::on_approval_request). Use `InteractionGate` instead.
-    #[deprecated(since = "0.2.0", note = "use InteractionGate (ToolApproval) instead")]
-    fn on_approval_response(&self, _response: &oneai_core::ApprovalResponse) {}
-
     /// Called after each inference with token usage stats.
     fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {}
 
@@ -118,25 +100,6 @@ pub trait AgentLoopObserver: Send + Sync {
     /// this to re-render the persistent plan panel. `None` means the plan was
     /// cleared; `Some(plan)` is the current state (clone).
     fn on_plan_update(&self, _plan: Option<&crate::plan_state::PlanState>) {}
-
-    /// Called when the model submits a plan via `exit_plan_mode`. The TUI shows
-    /// an accept/reject gate and signals the decision back via `reply`
-    /// (true = accept & execute, false = reject & keep planning). The loop
-    /// awaits `reply` before continuing — this is the plan-approval gate.
-    ///
-    /// # Deprecated
-    ///
-    /// Plan confirmation now flows through `InteractionGate::request(PlanReview{..})`,
-    /// which also supports `Revise` (free-text corrective feedback) and `Abort`.
-    /// This bool-only gate is scheduled for removal in 0.3.
-    #[deprecated(since = "0.2.0", note = "use InteractionGate (PlanReview) instead")]
-    fn on_plan_submitted(
-        &self,
-        _plan: &str,
-        _steps: &[crate::plan_agent::PlanStep],
-        _reply: tokio::sync::oneshot::Sender<bool>,
-    ) {
-    }
 }
 
 // ─── AgentDecision ──────────────────────────────────────────────────────────
@@ -646,8 +609,6 @@ pub struct AgentLoop {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     parser: Arc<dyn OutputParser>,
-    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
-    approval_gate: Arc<dyn ApprovalGate>,
     /// Unified interaction gate — single surface for every loop-suspend
     /// decision point (PreInfer/PostInfer/ToolApproval/PlanDecision/PlanReview).
     interaction_gate: Arc<dyn InteractionGate>,
@@ -697,8 +658,6 @@ impl Clone for AgentLoop {
             provider: self.provider.clone(),
             tools: self.tools.clone(),
             parser: self.parser.clone(),
-            #[allow(deprecated)]
-            approval_gate: self.approval_gate.clone(),
             interaction_gate: self.interaction_gate.clone(),
             skill_selector: self.skill_selector.clone(),
             skill_registry: self.skill_registry.clone(),
@@ -748,12 +707,10 @@ impl AgentLoop {
     }
 
     /// Create a new AgentLoop with all dependencies.
-    #[allow(deprecated)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
-        approval_gate: Arc<dyn ApprovalGate>,
         interaction_gate: Arc<dyn InteractionGate>,
         skill_selector: Arc<oneai_skill::SkillSelector>,
         context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
@@ -763,7 +720,7 @@ impl AgentLoop {
         checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
         config: AgentLoopConfig,
     ) -> Self {
-        Self { provider, tools, parser, approval_gate, interaction_gate, skill_selector, context_budget,
+        Self { provider, tools, parser, interaction_gate, skill_selector, context_budget,
             sub_agent_factory, async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
             stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
@@ -778,12 +735,10 @@ impl AgentLoop {
     }
 
     /// Create a new AgentLoop with a domain pack and recovery manager.
-    #[allow(deprecated)]
     pub fn with_domain_pack(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
-        approval_gate: Arc<dyn ApprovalGate>,
         interaction_gate: Arc<dyn InteractionGate>,
         skill_selector: Arc<oneai_skill::SkillSelector>,
         context_budget: Arc<oneai_core::budget::ContextBudgetManager>,
@@ -794,7 +749,7 @@ impl AgentLoop {
         config: AgentLoopConfig,
         domain_pack: Arc<MergedDomainPack>,
     ) -> Self {
-        Self { provider, tools, parser, approval_gate, interaction_gate, skill_selector, context_budget,
+        Self { provider, tools, parser, interaction_gate, skill_selector, context_budget,
             sub_agent_factory, async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
             stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
@@ -2138,8 +2093,6 @@ impl AgentLoop {
                 provider: self.provider.clone(),
                 tools: self.tools.clone(),
                 parser: self.parser.clone(),
-                #[allow(deprecated)]
-                approval_gate: self.approval_gate.clone(),
                 interaction_gate: self.interaction_gate.clone(),
                 domain_pack: self.domain_pack.clone(),
                 hook_registry: self.hook_registry.clone(),
@@ -2169,7 +2122,7 @@ impl AgentLoop {
         let executor = oneai_workflow::StateGraphExecutor::new(
             action_executor,
             delegate_factory,
-            self.approval_gate.clone(),
+            self.interaction_gate.clone(),
             self.config.hard_max_iterations.unwrap_or(50),
         );
 
@@ -2815,7 +2768,7 @@ impl AgentLoop {
                 self.provider.clone(),
                 self.tools.clone(),
                 delegate_factory,
-                self.approval_gate.clone(),
+                self.interaction_gate.clone(),
             );
 
             // Build initial state from the current conversation
@@ -3365,12 +3318,11 @@ impl AgentLoop {
 /// pack decorators), and ToolCall nodes go through the full permission and
 /// hooks pipeline. This makes StateGraph execution truly integrated with
 /// the AgentLoop, not a separate disconnected system.
-#[allow(deprecated, dead_code)]
+#[allow(dead_code)]
 pub struct AgentLoopGraphActionExecutor {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     parser: Arc<dyn OutputParser>,
-    approval_gate: Arc<dyn ApprovalGate>,
     interaction_gate: Arc<dyn InteractionGate>,
     domain_pack: Option<Arc<MergedDomainPack>>,
     hook_registry: Arc<RwLock<HookRegistry>>,

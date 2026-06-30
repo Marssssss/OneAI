@@ -119,81 +119,6 @@ impl From<ApprovalRequestView> for oneai_core::ApprovalRequest {
     }
 }
 
-// ─── ApprovalResponseView ───────────────────────────────────────────
-
-/// User response to an approval request (UniFFI-compatible view).
-#[derive(Debug, Clone, uniffi::Enum)]
-pub enum ApprovalResponseView {
-    /// Approved — allow execution (possibly with modified args).
-    Approved {
-        /// JSON-encoded modified arguments (null means no modification).
-        modified_args_json: Option<String>,
-    },
-    /// Denied — block execution.
-    Denied {
-        reason: String,
-    },
-    /// Modified — allow execution with different arguments.
-    Modified {
-        /// JSON-encoded modified arguments.
-        args_json: String,
-    },
-    /// Observe — pause execution and observe the agent's current state.
-    Observe {
-        /// The user's observation comment.
-        observation: String,
-    },
-}
-
-impl From<oneai_core::ApprovalResponse> for ApprovalResponseView {
-    fn from(resp: oneai_core::ApprovalResponse) -> Self {
-        match resp {
-            oneai_core::ApprovalResponse::Approved { modified_args } => {
-                ApprovalResponseView::Approved {
-                    modified_args_json: modified_args.map(|v| v.to_string()),
-                }
-            }
-            oneai_core::ApprovalResponse::Denied { reason } => {
-                ApprovalResponseView::Denied { reason }
-            }
-            oneai_core::ApprovalResponse::Modified { args } => {
-                ApprovalResponseView::Modified {
-                    args_json: args.to_string(),
-                }
-            }
-            oneai_core::ApprovalResponse::Observe { observation } => {
-                ApprovalResponseView::Observe { observation }
-            }
-        }
-    }
-}
-
-impl From<ApprovalResponseView> for oneai_core::ApprovalResponse {
-    fn from(view: ApprovalResponseView) -> Self {
-        match view {
-            ApprovalResponseView::Approved { modified_args_json } => {
-                oneai_core::ApprovalResponse::Approved {
-                    modified_args: modified_args_json.map(|json| {
-                        serde_json::from_str(&json).unwrap_or(serde_json::json!({}))
-                    }),
-                }
-            }
-            ApprovalResponseView::Denied { reason } => {
-                oneai_core::ApprovalResponse::Denied { reason }
-            }
-            ApprovalResponseView::Modified { args_json } => {
-                oneai_core::ApprovalResponse::Modified {
-                    args: serde_json::from_str(&args_json)
-                        .unwrap_or(serde_json::json!({})),
-                }
-            }
-            ApprovalResponseView::Observe { observation } => {
-                oneai_core::ApprovalResponse::Observe { observation }
-            }
-        }
-    }
-}
-
 // ─── ToolOutputView ─────────────────────────────────────────────────
 
 /// Tool execution output (UniFFI-compatible view).
@@ -337,8 +262,6 @@ pub enum OneAIErrorView {
     Rag { message: String },
     /// Configuration error.
     Config { message: String },
-    /// Approval gate error.
-    Approval { message: String },
     /// Serialization error.
     Serialization { message: String },
     /// Network/HTTP error.
@@ -369,9 +292,6 @@ impl From<oneai_core::OneAIError> for OneAIErrorView {
             oneai_core::OneAIError::Persistence(msg) => OneAIErrorView::Persistence { message: msg },
             oneai_core::OneAIError::Rag(msg) => OneAIErrorView::Rag { message: msg },
             oneai_core::OneAIError::Config(msg) => OneAIErrorView::Config { message: msg },
-            oneai_core::OneAIError::Approval(approval_err) => OneAIErrorView::Approval {
-                message: format!("{}", approval_err),
-            },
             oneai_core::OneAIError::Serialization(msg) => OneAIErrorView::Serialization { message: msg },
             oneai_core::OneAIError::Network(msg) => OneAIErrorView::Network { message: msg },
             oneai_core::OneAIError::Timeout(msg) => OneAIErrorView::Timeout { message: msg },
@@ -457,17 +377,6 @@ mod tests {
         assert_eq!(back.tool_name, "shell");
         assert_eq!(back.risk_level, oneai_core::RiskLevel::Medium);
         assert!(back.permission_level.is_none());
-    }
-
-    #[test]
-    fn test_approval_response_conversion() {
-        let approved = oneai_core::ApprovalResponse::Approved { modified_args: None };
-        let view: ApprovalResponseView = approved.into();
-        assert!(matches!(view, ApprovalResponseView::Approved { modified_args_json: None }));
-
-        let denied = oneai_core::ApprovalResponse::Denied { reason: "test".to_string() };
-        let view: ApprovalResponseView = denied.into();
-        assert!(matches!(view, ApprovalResponseView::Denied { reason: _ }));
     }
 
     #[test]

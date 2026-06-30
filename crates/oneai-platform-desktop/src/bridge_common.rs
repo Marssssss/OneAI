@@ -1,54 +1,55 @@
 //! Common bridge infrastructure shared across desktop platforms.
 //!
-//! The DesktopApprovalBridge wraps the mpsc::Receiver and provides
-//! a common interface for receiving pending approval items and
+//! The DesktopInteractionBridge wraps the mpsc::Receiver and provides
+//! a common interface for receiving pending interaction items and
 //! sending responses back.
 
 use tokio::sync::mpsc;
-use oneai_core::ApprovalResponse;
-use oneai_tool::ApprovalPendingItem;
+use oneai_core::InteractionResponse;
+use oneai_tool::InteractionPendingItem;
 
-/// A shared bridge that holds the channel receiver for desktop approval items.
+/// A shared bridge that holds the channel receiver for desktop interaction items.
 ///
 /// This is the platform-independent base that each platform-specific bridge
 /// wraps. It provides the core channel receive/send mechanism.
-pub struct DesktopApprovalBridge {
-    /// Channel receiver for pending approval items.
-    pending_rx: mpsc::Receiver<ApprovalPendingItem>,
+pub struct DesktopInteractionBridge {
+    /// Channel receiver for pending interaction items.
+    pending_rx: mpsc::Receiver<InteractionPendingItem>,
 }
 
-impl DesktopApprovalBridge {
+impl DesktopInteractionBridge {
     /// Create a new bridge from a channel receiver.
-    pub fn new(pending_rx: mpsc::Receiver<ApprovalPendingItem>) -> Self {
+    pub fn new(pending_rx: mpsc::Receiver<InteractionPendingItem>) -> Self {
         Self { pending_rx }
     }
 
-    /// Try to receive a pending approval item (non-blocking).
+    /// Try to receive a pending interaction item (non-blocking).
     ///
     /// Returns None if no item is available right now.
-    pub fn try_recv(&mut self) -> Option<ApprovalPendingItem> {
+    pub fn try_recv(&mut self) -> Option<InteractionPendingItem> {
         self.pending_rx.try_recv().ok()
     }
 
-    /// Receive a pending approval item (blocking, async).
+    /// Receive a pending interaction item (blocking, async).
     ///
     /// Waits until an item is available or the channel is closed.
-    pub async fn recv(&mut self) -> Option<ApprovalPendingItem> {
+    pub async fn recv(&mut self) -> Option<InteractionPendingItem> {
         self.pending_rx.recv().await
     }
 
-    /// Send an approval response for a pending item.
+    /// Send an interaction response for a pending item.
     ///
     /// This sends the response back through the oneshot channel
     /// embedded in the pending item, unblocking the agent's
-    /// approval request. Takes ownership of the item.
-    pub fn send_response(item: ApprovalPendingItem, response: ApprovalResponse) -> Result<(), ()> {
+    /// interaction request. Takes ownership of the item.
+    pub fn send_response(item: InteractionPendingItem, response: InteractionResponse) -> Result<(), ()> {
         item.response_tx.send(response).map_err(|_| ())
     }
 
-    /// Format an approval request for display in a native dialog.
+    /// Format a tool-approval request for display in a native dialog.
     ///
-    /// Returns a human-readable string summarizing the request.
+    /// Returns a human-readable string summarizing the request. Used for the
+    /// `InteractionRequest::ToolApproval` point (which carries an `ApprovalRequest`).
     pub fn format_request(request: &oneai_core::ApprovalRequest) -> String {
         let risk_label = match request.risk_level {
             oneai_core::RiskLevel::Low => "Low",
@@ -69,7 +70,7 @@ impl DesktopApprovalBridge {
     ///
     /// Uses a spin loop with short sleep intervals. This is used in
     /// platform UI thread contexts where tokio async receive is not available.
-    pub fn recv_blocking(&mut self) -> Option<ApprovalPendingItem> {
+    pub fn recv_blocking(&mut self) -> Option<InteractionPendingItem> {
         loop {
             match self.try_recv() {
                 Some(item) => return Some(item),
@@ -81,25 +82,27 @@ impl DesktopApprovalBridge {
     }
 }
 
-// Helper for creating ApprovalResponse from dialog choices
-/// Helper for creating approval responses from native dialog choices.
+// Helper for creating InteractionResponse from dialog choices
+/// Helper for creating interaction responses from native dialog choices.
 #[allow(dead_code)]
-pub struct DesktopApprovalDecision;
+pub struct DesktopInteractionDecision;
 
 #[allow(dead_code)]
-impl DesktopApprovalDecision {
-    /// Approve the request (allow execution unchanged).
-    pub fn approve() -> ApprovalResponse {
-        ApprovalResponse::Approved { modified_args: None }
+impl DesktopInteractionDecision {
+    /// Proceed with the request unchanged (approve).
+    pub fn approve() -> InteractionResponse {
+        InteractionResponse::Proceed
     }
 
-    /// Deny the request with a reason.
-    pub fn deny(reason: impl Into<String>) -> ApprovalResponse {
-        ApprovalResponse::Denied { reason: reason.into() }
+    /// Abort the request with a reason (deny).
+    pub fn deny(reason: impl Into<String>) -> InteractionResponse {
+        InteractionResponse::Abort { reason: reason.into() }
     }
 
-    /// Approve with modified arguments.
-    pub fn modify(args: serde_json::Value) -> ApprovalResponse {
-        ApprovalResponse::Modified { args }
+    /// Proceed with replaced tool arguments (approve with modification).
+    pub fn modify(args: serde_json::Value) -> InteractionResponse {
+        InteractionResponse::ProceedWith {
+            modification: oneai_core::InteractionModification::ReplaceToolArgs(args),
+        }
     }
 }

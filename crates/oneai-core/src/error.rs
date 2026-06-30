@@ -50,10 +50,6 @@ pub enum OneAIError {
     #[error("Config error: {0}")]
     Config(String),
 
-    /// Errors from approval gates (human-machine collaboration).
-    #[error("Approval error: {0}")]
-    Approval(ApprovalError),
-
     /// Errors from the unified interaction gate (PreInfer/PostInfer/ToolApproval/
     /// PlanDecision/PlanReview).
     #[error("Interaction error: {0}")]
@@ -143,22 +139,6 @@ pub enum ParserError {
     /// General parsing error.
     #[error("Parse error: {0}")]
     General(String),
-}
-
-/// Approval gate errors.
-#[derive(Debug, Error)]
-pub enum ApprovalError {
-    /// The approval request was denied by the user.
-    #[error("Approval denied: {reason}")]
-    Denied { reason: String },
-
-    /// The approval gate timed out waiting for user response.
-    #[error("Approval timed out after {seconds}s")]
-    Timeout { seconds: u64 },
-
-    /// The approval gate is not configured.
-    #[error("No approval gate configured")]
-    NotConfigured,
 }
 
 /// Errors from the unified [`InteractionGate`](crate::traits::InteractionGate).

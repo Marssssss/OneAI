@@ -11,12 +11,12 @@
 use std::sync::Arc;
 
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService};
+use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService};
 use oneai_core::EmbeddingConfig;
 use oneai_core::usage::{UsageTracker, InMemoryUsageTracker};
 use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
 use oneai_core::circuit_breaker::{CircuitBreaker, ThresholdCircuitBreaker, CircuitBreakerConfig};
-use oneai_core::platform::{Platform, PlatformAdapter, PlatformApprovalGate};
+use oneai_core::platform::{Platform, PlatformAdapter};
 use oneai_core::{ModelConfig, CloudProviderKind};
 use oneai_core::ProviderPoolConfig;
 use oneai_core::SmartRouteConfig;
@@ -27,8 +27,7 @@ use oneai_core::ContextManagerConfig;
 use oneai_provider::{ProviderPool, SmartRouter};
 
 use oneai_tool::{
-    ToolExecutor, ToolRegistry, BlockingApprovalGate, AutoApprovalGate,
-    ChannelApprovalGateWithThreshold, InteractionGateConfig, NoopInteractionGate,
+    ToolExecutor, ToolRegistry, InteractionGateConfig, NoopInteractionGate,
     ChannelInteractionGate, ThresholdInteractionGate,
 };
 use oneai_memory::{MemoryManager, MemoryManagerConfig};
@@ -60,9 +59,6 @@ pub struct AppBuilder {
     provider: Option<Arc<dyn LlmProvider>>,
     /// Tool registry.
     tool_registry: Arc<ToolRegistry>,
-    /// Approval gate (deprecated — use `interaction_gate`).
-    #[allow(deprecated)]
-    approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// Unified interaction gate — every loop-suspend decision point.
     /// When `None` at `build()` time, defaults to `NoopInteractionGate` (zero latency).
     interaction_gate: Option<Arc<dyn InteractionGate>>,
@@ -170,7 +166,6 @@ impl AppBuilder {
         Self {
             provider: None,
             tool_registry: Arc::new(ToolRegistry::new()),
-            approval_gate: None,
             interaction_gate: None,
             parser: None,
             memory_manager: None,
@@ -280,49 +275,6 @@ impl AppBuilder {
         self
     }
 
-    /// Set the approval gate.
-    #[deprecated(since = "0.2.0", note = "use interaction_gate() instead")]
-    pub fn approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
-        self.approval_gate = Some(gate);
-        self
-    }
-
-    /// Use the blocking (always-deny) approval gate.
-    #[deprecated(since = "0.2.0", note = "use noop_interaction_gate() or interaction_gate() instead")]
-    pub fn blocking_approval_gate(mut self) -> Self {
-        self.approval_gate = Some(Arc::new(BlockingApprovalGate));
-        self
-    }
-
-    /// Use the auto-approve gate (for testing).
-    #[deprecated(since = "0.2.0", note = "use noop_interaction_gate() instead")]
-    pub fn auto_approval_gate(mut self) -> Self {
-        self.approval_gate = Some(Arc::new(AutoApprovalGate));
-        self
-    }
-
-    /// Use a channel-based approval gate with auto-approve threshold.
-    #[deprecated(since = "0.2.0", note = "use channel_interaction_gate() instead")]
-    pub fn channel_approval_gate(
-        mut self,
-        buffer_size: usize,
-        threshold: oneai_core::RiskLevel,
-    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::ApprovalPendingItem>) {
-        let (gate, receiver) = ChannelApprovalGateWithThreshold::new(buffer_size, threshold);
-        self.approval_gate = Some(Arc::new(gate));
-        (self, receiver)
-    }
-
-    /// Use a platform-specific approval gate.
-    ///
-    /// This allows the app to use native UI dialogs (NSAlert, AlertDialog,
-    /// UIAlertController, etc.) for high-risk tool approval.
-    #[deprecated(since = "0.2.0", note = "use platform_interaction_gate() instead")]
-    pub fn platform_approval_gate(mut self, gate: Arc<dyn PlatformApprovalGate>) -> Self {
-        self.approval_gate = Some(gate as Arc<dyn ApprovalGate>);
-        self
-    }
-
     // ─── InteractionGate (unified) ──────────────────────────────────────────
 
     /// Set the unified interaction gate directly.
@@ -392,12 +344,12 @@ impl AppBuilder {
         (self, receiver)
     }
 
-    /// Use a PlatformAdapter's approval gate.
+    /// Use a PlatformAdapter's interaction gate.
     ///
-    /// Convenience method that unpacks the platform adapter's approval gate
-    /// and sets it as the app's approval gate. Also records the platform type.
+    /// Convenience method that unpacks the platform adapter's interaction gate
+    /// and sets it as the app's interaction gate. Also records the platform type.
     pub fn platform_adapter(mut self, adapter: PlatformAdapter) -> Self {
-        self.approval_gate = Some(adapter.approval_gate);
+        self.interaction_gate = Some(adapter.interaction_gate);
         self.platform = Some(adapter.platform);
         self
     }
@@ -1510,14 +1462,6 @@ impl AppBuilder {
         let interaction_gate = self.interaction_gate.unwrap_or_else(|| {
             Arc::new(NoopInteractionGate)
         });
-        // Deprecated approval gate: keep a best-effort value for legacy callers
-        // that still read `App::approval_gate`. If the user set one, use it;
-        // otherwise mirror the interaction gate's tool-approval behavior via a
-        // blocking placeholder (the interaction gate is the source of truth).
-        #[allow(deprecated)]
-        let approval_gate = self.approval_gate.unwrap_or_else(|| {
-            Arc::new(BlockingApprovalGate)
-        });
 
         let parser = self.parser.unwrap_or_else(|| {
             Arc::new(ThreeLayerParser::new())
@@ -1551,15 +1495,15 @@ impl AppBuilder {
             }
         });
 
-        let tool_executor = Arc::new(ToolExecutor::with_approval_gate(
+        let tool_executor = Arc::new(ToolExecutor::with_interaction_gate(
             self.tool_registry.clone(),
-            approval_gate.clone(),
+            interaction_gate.clone(),
         ));
 
         // Build workflow executor with the tool registry
         let workflow_executor = Arc::new(WorkflowExecutor::new(
             Arc::new(std::collections::HashMap::new()),
-            approval_gate.clone(),
+            interaction_gate.clone(),
         ));
 
         // Eagerly register domain pack tools at build time
@@ -1827,8 +1771,6 @@ impl AppBuilder {
             provider,
             tool_registry: self.tool_registry,
             tool_executor,
-            #[allow(deprecated)]
-            approval_gate,
             interaction_gate,
             parser,
             memory_manager,
@@ -1884,9 +1826,6 @@ pub struct App {
     pub tool_registry: Arc<ToolRegistry>,
     /// Tool executor (registry + approval gate).
     pub tool_executor: Arc<ToolExecutor>,
-    /// Approval gate (deprecated — use `interaction_gate`).
-    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
-    pub approval_gate: Arc<dyn ApprovalGate>,
     /// Unified interaction gate — every loop-suspend decision point.
     pub interaction_gate: Arc<dyn InteractionGate>,
     /// Output parser.
@@ -2121,12 +2060,12 @@ impl App {
 mod tests {
     use super::*;
     use oneai_tool::CalculatorTool;
-    use oneai_core::platform::StubPlatformApprovalGate;
+    use oneai_core::platform::PlatformAdapter;
 
     #[tokio::test]
     async fn test_app_builder_default_build() {
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .default_parser()
             .build()
             .await
@@ -2139,7 +2078,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_register_and_use_tool() {
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .build()
             .await
             .expect("Build should succeed");
@@ -2157,7 +2096,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_session_memory() {
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .build()
             .await
             .expect("Build should succeed");
@@ -2194,7 +2133,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_blocking_gate() {
         let app = AppBuilder::new()
-            .blocking_approval_gate()
+            .interaction_gate(Arc::new(oneai_tool::DenyAllInteractionGate))
             .build()
             .await
             .expect("Build should succeed");
@@ -2203,7 +2142,7 @@ mod tests {
 
         let session = app.create_session();
 
-        // Shell is high-risk — should be denied by blocking gate
+        // Shell is high-risk — should be denied by the deny-all gate
         let result = session.execute_tool("shell", serde_json::json!({"command": "echo test"})).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("denied"));
@@ -2215,7 +2154,7 @@ mod tests {
         let persistence = Arc::new(FilePersistence::new(tmp_dir.path().to_str().unwrap()));
 
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .persistence(persistence)
             .build()
             .await
@@ -2231,16 +2170,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_app_platform_approval_gate() {
-        // Test building an App with a platform approval gate (stub)
-        let gate = Arc::new(StubPlatformApprovalGate::macos());
+    async fn test_app_platform_interaction_gate() {
+        // Test building an App with a platform interaction gate (stub) via a
+        // PlatformAdapter — the adapter bundles the gate + detected platform.
         let app = AppBuilder::new()
-            .platform_approval_gate(gate)
+            .platform_adapter(PlatformAdapter::macos_stub())
             .build()
             .await
             .expect("Build should succeed");
 
-        // Stub auto-approves, so tools should work
+        // Stub auto-proceeds (every point disabled), so tools should work
         app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
         let session = app.create_session();
 
@@ -2248,7 +2187,7 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.content, "4");
 
-        // Platform should be auto-detected
+        // Platform should be set by the adapter
         assert!(matches!(app.platform(), Platform::Macos | Platform::Linux | Platform::Windows));
     }
 
@@ -2269,7 +2208,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_with_mcp_server_host() {
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .mcp_server_host()  // ← enable MCP server hosting
             .build()
             .await
@@ -2287,7 +2226,7 @@ mod tests {
     async fn test_app_with_mcp_plugin_registry() {
         let registry = oneai_mcp::McpPluginRegistry::new();
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .mcp_plugin_registry(registry)  // ← set MCP plugin registry
             .build()
             .await
@@ -2303,7 +2242,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_with_mcp_servers_from_config() {
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .mcp_servers_from_config()  // ← load MCP servers from config file
             .build()
             .await
@@ -2320,7 +2259,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_with_mcp_and_tools() {
         let app = AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .mcp_server_host()
             .build()
             .await

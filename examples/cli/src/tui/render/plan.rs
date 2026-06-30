@@ -325,7 +325,6 @@ fn textwrap_line(s: &str, width: usize) -> Vec<String> {
 
 /// Center a rect of the given percentage width/height inside `area`.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    use ratatui::layout::Constraint;
     let pop_w = area.width * percent_x / 100;
     let pop_h = area.height * percent_y / 100;
     let x = area.x + (area.width.saturating_sub(pop_w)) / 2;

@@ -20,7 +20,6 @@ pub mod registry;
 pub mod local_tools;
 pub mod mcp_tools;
 pub mod mcp_real;
-pub mod approval;
 pub mod interaction_gate;
 pub mod executor;
 pub mod tool_interfaces;
@@ -36,7 +35,6 @@ pub use mcp_real::{McpConnection, McpFramingParser, McpServerConfig, McpTranspor
 pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
 pub use mcp_real::McpServerManager as RealMcpServerManager;
 pub use mcp_real::{default_mcp_configs, optional_mcp_configs};
-pub use approval::*;
 pub use interaction_gate::*;
 pub use executor::*;
 pub use tool_interfaces::*;
@@ -205,11 +203,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_blocking_approval_gate() {
-        use oneai_core::traits::ApprovalGate;
-        use oneai_core::{ApprovalRequest, ApprovalResponse, PermissionLevel};
+    async fn test_deny_all_interaction_gate() {
+        use oneai_core::traits::InteractionGate;
+        use oneai_core::{ApprovalRequest, InteractionRequest, InteractionResponse, PermissionLevel};
 
-        let gate = BlockingApprovalGate;
+        let gate = DenyAllInteractionGate;
+        assert!(gate.enabled(oneai_core::InteractionPoint::ToolApproval));
         let request = ApprovalRequest {
             tool_name: "shell".to_string(),
             args: serde_json::json!({"command": "rm -rf /"}),
@@ -218,12 +217,15 @@ mod tests {
             justification: "Delete everything".to_string(),
         };
 
-        let response = gate.request_approval(request).await.unwrap();
+        let response = gate
+            .request(InteractionRequest::ToolApproval { approval: request })
+            .await
+            .unwrap();
         match response {
-            ApprovalResponse::Denied { reason } => {
-                assert!(reason.contains("placeholder"));
+            InteractionResponse::Abort { reason } => {
+                assert!(reason.contains("denied by DenyAllInteractionGate"));
             }
-            _ => panic!("Expected Denied response"),
+            _ => panic!("Expected Abort response"),
         }
     }
 }

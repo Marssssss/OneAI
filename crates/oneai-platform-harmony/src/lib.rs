@@ -1,7 +1,7 @@
 //! # OneAI Platform — HarmonyOS
 //!
 //! HarmonyOS platform adapter for the OneAI framework.
-//! Provides an approval gate that bridges to HarmonyOS CommonDialog
+//! Provides an interaction gate that bridges to HarmonyOS CommonDialog
 //! via a C callback mechanism, allowing the ArkTS side to present
 //! native dialogs for high-risk tool approval.
 //!
@@ -13,33 +13,33 @@ mod callback_bridge;
 
 use oneai_core::RiskLevel;
 
-pub use gate::{HarmonyApprovalGate, HarmonyApprovalBridge};
-pub use callback_bridge::CallbackApprovalBridge;
+pub use gate::{HarmonyInteractionGate, HarmonyInteractionBridge};
+pub use callback_bridge::CallbackInteractionBridge;
 
-/// Factory for creating HarmonyOS approval gates.
-pub struct HarmonyApprovalGateFactory;
+/// Factory for creating HarmonyOS interaction gates.
+pub struct HarmonyInteractionGateFactory;
 
-impl HarmonyApprovalGateFactory {
-    /// Create a HarmonyOS approval gate with auto-approve threshold.
-    pub fn create(buffer_size: usize, threshold: RiskLevel) -> (HarmonyApprovalGate, HarmonyApprovalBridge) {
-        HarmonyApprovalGate::new(buffer_size, threshold)
+impl HarmonyInteractionGateFactory {
+    /// Create a HarmonyOS interaction gate with an auto-proceed threshold.
+    pub fn create(buffer_size: usize, threshold: RiskLevel) -> (HarmonyInteractionGate, HarmonyInteractionBridge) {
+        HarmonyInteractionGate::new(buffer_size, threshold)
     }
 
-    /// Create a gate where all requests go through the channel (no auto-approve).
-    pub fn create_manual_only(buffer_size: usize) -> (HarmonyApprovalGate, HarmonyApprovalBridge) {
-        HarmonyApprovalGate::new_manual_only(buffer_size)
+    /// Create a gate where tool-approval requests go through the channel.
+    pub fn create_manual_only(buffer_size: usize) -> (HarmonyInteractionGate, HarmonyInteractionBridge) {
+        HarmonyInteractionGate::new_manual_only(buffer_size)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_core::traits::ApprovalGate;
-    use oneai_core::{ApprovalRequest, ApprovalResponse};
+    use oneai_core::traits::InteractionGate;
+    use oneai_core::{ApprovalRequest, InteractionRequest, InteractionResponse};
 
     #[tokio::test]
-    async fn test_harmony_approval_gate_auto_approve() {
-        let (gate, _bridge) = HarmonyApprovalGateFactory::create(16, RiskLevel::Medium);
+    async fn test_harmony_interaction_gate_auto_proceed_low_risk() {
+        let (gate, _bridge) = HarmonyInteractionGateFactory::create(16, RiskLevel::Medium);
 
         let request = ApprovalRequest {
             tool_name: "calculator".to_string(),
@@ -49,7 +49,10 @@ mod tests {
             justification: "Simple calculation".to_string(),
         };
 
-        let response = gate.request_approval(request).await.unwrap();
-        assert!(matches!(response, ApprovalResponse::Approved { .. }));
+        let response = gate
+            .request(InteractionRequest::ToolApproval { approval: request })
+            .await
+            .unwrap();
+        assert!(matches!(response, InteractionResponse::Proceed));
     }
 }

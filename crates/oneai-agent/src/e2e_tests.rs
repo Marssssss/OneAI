@@ -23,7 +23,6 @@ use oneai_core::budget::{TokenBudget, BudgetAllocation, ContextBudgetManager};
 
 use oneai_parser::ThreeLayerParser;
 use oneai_skill::SkillSelector;
-use oneai_tool::AutoApprovalGate;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, AgentLoopObserver, ParadigmKind, ToolCallRequest};
 use crate::mock_provider::{MockProvider, ScriptedResponse};
@@ -81,7 +80,6 @@ fn build_test_agent_loop(
         Arc::new(provider),
         tools_map,
         Arc::new(ThreeLayerParser::new()),
-        Arc::new(AutoApprovalGate),
         Arc::new(oneai_tool::NoopInteractionGate),
         Arc::new(SkillSelector::new()),
         Arc::new(ContextBudgetManager::new(
@@ -338,7 +336,6 @@ async fn e2e_scenario_5_sub_agent_delegation() {
         Arc::new(provider),
         tools_map,
         Arc::new(ThreeLayerParser::new()),
-        Arc::new(AutoApprovalGate),
         Arc::new(oneai_tool::NoopInteractionGate),
         Arc::new(SkillSelector::new()),
         Arc::new(ContextBudgetManager::new(
@@ -398,7 +395,6 @@ async fn e2e_scenario_6_approval_deny() {
         Arc::new(provider),
         tools_map,
         Arc::new(ThreeLayerParser::new()),
-        Arc::new(oneai_tool::BlockingApprovalGate), // Blocking gate — always denies
         Arc::new(DenyAllInteractionGate) as Arc<dyn oneai_core::traits::InteractionGate>,
         Arc::new(SkillSelector::new()),
         Arc::new(ContextBudgetManager::new(
@@ -494,7 +490,6 @@ async fn e2e_scenario_8_error_recovery() {
         Arc::new(provider),
         tools_map,
         Arc::new(ThreeLayerParser::new()),
-        Arc::new(oneai_tool::AutoApprovalGate),
         Arc::new(oneai_tool::NoopInteractionGate),
         Arc::new(SkillSelector::new()),
         Arc::new(ContextBudgetManager::new(
@@ -621,7 +616,6 @@ async fn e2e_hooks_pre_tool_use_deny() {
         Arc::new(provider),
         tools_map,
         Arc::new(ThreeLayerParser::new()),
-        Arc::new(AutoApprovalGate),
         Arc::new(oneai_tool::NoopInteractionGate),
         Arc::new(SkillSelector::new()),
         Arc::new(ContextBudgetManager::new(
@@ -1034,7 +1028,7 @@ async fn e2e_scenario_11_state_graph_react_loop() {
     let executor = oneai_workflow::StateGraphExecutor::new(
         action_executor,
         delegate_factory,
-        Arc::new(oneai_tool::AutoApprovalGate),
+        Arc::new(oneai_tool::NoopInteractionGate),
         10,
     );
 
@@ -1144,7 +1138,7 @@ async fn e2e_scenario_12_state_graph_paradigm_switch() {
     let executor = oneai_workflow::StateGraphExecutor::new(
         action_executor,
         Arc::new(oneai_workflow::NoopDelegateFactory),
-        Arc::new(oneai_tool::AutoApprovalGate),
+        Arc::new(oneai_tool::NoopInteractionGate),
         10,
     );
 
@@ -1228,7 +1222,7 @@ async fn e2e_scenario_13_state_graph_decision_routing() {
     let executor = oneai_workflow::StateGraphExecutor::new(
         action_executor,
         Arc::new(oneai_workflow::NoopDelegateFactory),
-        Arc::new(oneai_tool::AutoApprovalGate),
+        Arc::new(oneai_tool::NoopInteractionGate),
         10,
     );
 
@@ -1320,7 +1314,6 @@ fn build_plan_mode_loop(
         Arc::new(provider),
         tools_map,
         Arc::new(ThreeLayerParser::new()),
-        Arc::new(oneai_tool::BlockingApprovalGate),
         gate,
         Arc::new(SkillSelector::new()),
         Arc::new(ContextBudgetManager::new(

@@ -203,7 +203,6 @@ pub struct ApprovalPendingState {
 /// resolve). Set when an `InteractionRequest::PlanDecision` arrives.
 #[derive(Debug)]
 pub struct PlanDecisionState {
-    pub decision_id: String,
     pub question: String,
     pub context: String,
     pub options: Vec<oneai_core::DecisionOption>,

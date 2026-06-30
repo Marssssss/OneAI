@@ -17,9 +17,9 @@
 use std::sync::Arc;
 
 use oneai_app::AppBuilder;
-use oneai_core::RiskLevel;
+use oneai_core::{InteractionModification, InteractionRequest, InteractionResponse, RiskLevel};
 use oneai_memory::MemoryManager;
-use oneai_tool::{CalculatorTool, ShellTool, ApprovalDecision};
+use oneai_tool::{CalculatorTool, ChannelInteractionGate, ShellTool};
 
 #[tokio::main]
 async fn main() {
@@ -37,9 +37,9 @@ async fn main() {
     println!("   • Auto-approve threshold: Medium (Low → auto, Medium+ → manual)");
     println!();
 
-    // AppBuilder::channel_approval_gate() returns (builder, Receiver<ApprovalPendingItem>)
+    // AppBuilder::threshold_interaction_gate() returns (builder, Receiver<InteractionPendingItem>)
     let (builder, mut receiver) = AppBuilder::new()
-        .channel_approval_gate(16, RiskLevel::Medium);
+        .threshold_interaction_gate(16, RiskLevel::Medium);
 
     // ─── Build App ───────────────────────────────────────────────────
     println!("🔧 Building OneAI App with channel approval gate...");
@@ -84,16 +84,20 @@ async fn main() {
     let handler_task = tokio::spawn(async move {
         // Wait for a pending item
         while let Some(item) = receiver.recv().await {
+            let approval = match &item.request {
+                InteractionRequest::ToolApproval { approval } => approval,
+                _ => continue,
+            };
             println!("   → Received approval request:");
-            println!("      • Tool: {}", item.request.tool_name);
-            println!("      • Risk: {:?}", item.request.risk_level);
-            println!("      • Args: {}", item.request.args);
-            println!("      • Justification: {}", item.request.justification);
+            println!("      • Tool: {}", approval.tool_name);
+            println!("      • Risk: {:?}", approval.risk_level);
+            println!("      • Args: {}", approval.args);
+            println!("      • Justification: {}", approval.justification);
             println!();
             println!("   → APPROVING request");
 
-            // Send Approved response via the embedded oneshot channel
-            item.response_tx.send(ApprovalDecision::approve()).unwrap();
+            // Send Proceed via the embedded oneshot channel
+            item.response_tx.send(InteractionResponse::Proceed).unwrap();
         }
     });
 
@@ -113,7 +117,7 @@ async fn main() {
 
     // Build a new app with Low threshold (only Low risk auto-approved)
     let (builder2, mut receiver2) = AppBuilder::new()
-        .channel_approval_gate(16, RiskLevel::Low);
+        .threshold_interaction_gate(16, RiskLevel::Low);
 
     let app2 = builder2
         .default_parser()
@@ -128,12 +132,20 @@ async fn main() {
     // Handler that denies all requests
     let deny_handler = tokio::spawn(async move {
         while let Some(item) = receiver2.recv().await {
+            let approval = match &item.request {
+                InteractionRequest::ToolApproval { approval } => approval,
+                _ => continue,
+            };
             println!("   → Received request for dangerous command:");
-            println!("      • Tool: {}", item.request.tool_name);
-            println!("      • Args: {}", item.request.args);
+            println!("      • Tool: {}", approval.tool_name);
+            println!("      • Args: {}", approval.args);
             println!("   → DENYING request");
 
-            item.response_tx.send(ApprovalDecision::deny("Dangerous command rejected")).unwrap();
+            item.response_tx
+                .send(InteractionResponse::Abort {
+                    reason: "Dangerous command rejected".to_string(),
+                })
+                .unwrap();
         }
     });
 
@@ -149,10 +161,11 @@ async fn main() {
     println!("✏️  Demo 4: Modified approval (change args before executing)");
     println!("─────────────────────────────────────────────────────────");
 
-    // Use a manual-only ChannelApprovalGate
-    let (manual_gate, mut manual_receiver) = oneai_tool::ChannelApprovalGateWithThreshold::new_manual_only(16);
+    // Use a manual-only ChannelInteractionGate (no threshold → every tool-approval
+    // goes through the channel).
+    let (manual_gate, mut manual_receiver) = ChannelInteractionGate::new(16);
     let app3 = AppBuilder::new()
-        .approval_gate(Arc::new(manual_gate))
+        .interaction_gate(Arc::new(manual_gate))
         .default_parser()
         .build()
         .await
@@ -164,12 +177,20 @@ async fn main() {
     // Handler that modifies args
     let modify_handler = tokio::spawn(async move {
         while let Some(item) = manual_receiver.recv().await {
+            let _approval = match &item.request {
+                InteractionRequest::ToolApproval { approval } => approval,
+                _ => continue,
+            };
             println!("   → Received request for 'cat /etc/passwd'");
             println!("   → MODIFYING args to safer command: 'echo Modified_by_gate'");
 
-            item.response_tx.send(ApprovalDecision::modify(
-                serde_json::json!({"command": "echo 'Modified by approval gate'"})
-            )).unwrap();
+            item.response_tx
+                .send(InteractionResponse::ProceedWith {
+                    modification: InteractionModification::ReplaceToolArgs(
+                        serde_json::json!({"command": "echo 'Modified by approval gate'"}),
+                    ),
+                })
+                .unwrap();
         }
     });
 
@@ -185,9 +206,9 @@ async fn main() {
     println!("🔒 Demo 5: Manual-only gate (all requests need approval)");
     println!("─────────────────────────────────────────────");
 
-    let (manual_gate2, mut manual_receiver2) = oneai_tool::ChannelApprovalGateWithThreshold::new_manual_only(16);
+    let (manual_gate2, mut manual_receiver2) = ChannelInteractionGate::new(16);
     let app4 = AppBuilder::new()
-        .approval_gate(Arc::new(manual_gate2))
+        .interaction_gate(Arc::new(manual_gate2))
         .default_parser()
         .build()
         .await
@@ -200,10 +221,14 @@ async fn main() {
 
     let approve_handler = tokio::spawn(async move {
         while let Some(item) = manual_receiver2.recv().await {
-            println!("      • Tool: {}, Risk: {:?}", item.request.tool_name, item.request.risk_level);
+            let approval = match &item.request {
+                InteractionRequest::ToolApproval { approval } => approval,
+                _ => continue,
+            };
+            println!("      • Tool: {}, Risk: {:?}", approval.tool_name, approval.risk_level);
             println!("   → Approving calculator request");
 
-            item.response_tx.send(ApprovalDecision::approve()).unwrap();
+            item.response_tx.send(InteractionResponse::Proceed).unwrap();
         }
     });
 

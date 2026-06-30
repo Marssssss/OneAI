@@ -23,7 +23,7 @@ use oneai_core::{
     Message, Role, ToolDefinition, ToolOutput,
 };
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool};
+use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
 
 /// Configuration for a ReAct agent execution.
 #[derive(Debug, Clone)]
@@ -89,10 +89,6 @@ pub struct ReActAgent {
     #[allow(dead_code)]
     parser: Arc<dyn OutputParser>,
 
-    /// Approval gate for high-risk tools.
-    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
-    approval_gate: Arc<dyn ApprovalGate>,
-
     /// Unified interaction gate for tool approval (and other decision points).
     interaction_gate: Arc<dyn InteractionGate>,
 
@@ -102,12 +98,10 @@ pub struct ReActAgent {
 
 impl ReActAgent {
     /// Create a new ReAct agent.
-    #[allow(deprecated)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
-        approval_gate: Arc<dyn ApprovalGate>,
         interaction_gate: Arc<dyn InteractionGate>,
         config: ReActConfig,
     ) -> Self {
@@ -115,22 +109,19 @@ impl ReActAgent {
             provider,
             tools,
             parser,
-            approval_gate,
             interaction_gate,
             config,
         }
     }
 
     /// Create with default configuration.
-    #[allow(deprecated)]
     pub fn with_defaults(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
-        approval_gate: Arc<dyn ApprovalGate>,
         interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
-        Self::new(provider, tools, parser, approval_gate, interaction_gate, ReActConfig::default())
+        Self::new(provider, tools, parser, interaction_gate, ReActConfig::default())
     }
 
     /// Run the ReAct loop on a conversation.

@@ -16,9 +16,10 @@ use oneai_app::AppBuilder;
 use oneai_core::RiskLevel;
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
-use oneai_tool::{CalculatorTool, FileReadTool, ShellTool, ApprovalDecision};
-use oneai_platform_desktop::DesktopApprovalGateFactory;
-use oneai_platform_desktop::DesktopApprovalBridge;
+use oneai_tool::{CalculatorTool, FileReadTool, ShellTool};
+use oneai_core::{InteractionRequest, InteractionResponse};
+use oneai_platform_desktop::DesktopInteractionGateFactory;
+use oneai_platform_desktop::DesktopInteractionBridge;
 
 #[tokio::main]
 async fn main() {
@@ -31,12 +32,12 @@ async fn main() {
     println!();
 
     // ─── Detect Platform ────────────────────────────────────────────
-    let platform = DesktopApprovalGateFactory::current_platform();
+    let platform = DesktopInteractionGateFactory::current_platform();
     println!("🖥  Detected platform: {:?}", platform);
     println!();
 
     // ─── Create Desktop Approval Gate ───────────────────────────────
-    println!("🛡  Creating desktop approval gate...");
+    println!("🛡  Creating desktop interaction gate...");
     println!("   • Auto-approve threshold: {:?}", RiskLevel::Medium);
     println!("   • Requests with risk ≤ Medium → auto-approved");
     println!("   • Requests with risk > Medium → bridge processing");
@@ -44,12 +45,12 @@ async fn main() {
 
     // Create the platform-specific gate + bridge pair
     // Buffer size 16, threshold Medium (auto-approve below Medium)
-    let (gate, bridge) = DesktopApprovalGateFactory::create(16, RiskLevel::Medium);
+    let (gate, bridge) = DesktopInteractionGateFactory::create(16, RiskLevel::Medium);
 
     // ─── Build the App ──────────────────────────────────────────────
-    println!("🔧 Building OneAI App with desktop approval gate...");
+    println!("🔧 Building OneAI App with desktop interaction gate...");
     let app = AppBuilder::new()
-        .platform_approval_gate(Arc::new(gate))
+        .interaction_gate(Arc::new(gate))
         .default_parser()
         .memory_manager(Arc::new(MemoryManager::new()))
         .persistence(Arc::new(FilePersistence::new("/tmp/oneai_desktop_demo")))
@@ -101,16 +102,26 @@ async fn main() {
         loop {
             match bridge.try_recv() {
                 Some(item) => {
+                    let approval = match &item.request {
+                        InteractionRequest::ToolApproval { approval } => approval,
+                        _ => {
+                            let _ = DesktopInteractionBridge::send_response(
+                                item,
+                                InteractionResponse::Proceed,
+                            );
+                            continue;
+                        }
+                    };
                     println!("   → Bridge received: tool={}, risk={:?}",
-                        item.request.tool_name, item.request.risk_level);
+                        approval.tool_name, approval.risk_level);
 
                     // Format the request for display
-                    let formatted = DesktopApprovalBridge::format_request(&item.request);
+                    let formatted = DesktopInteractionBridge::format_request(approval);
                     println!("   → Request details:\n{}", formatted);
                     println!("   → Auto-approving (for demo purposes)");
 
                     // Send approval response
-                    DesktopApprovalBridge::send_response(item, ApprovalDecision::approve()).unwrap();
+                    DesktopInteractionBridge::send_response(item, InteractionResponse::Proceed).unwrap();
                 }
                 None => {
                     // No pending items — wait briefly
@@ -136,9 +147,9 @@ async fn main() {
     println!("🚫 Demo 3: Manual-only gate (all requests need approval)");
     println!("───────────────────────────────────────────────────────────────");
 
-    let (manual_gate, manual_bridge) = DesktopApprovalGateFactory::create_manual_only(16);
+    let (manual_gate, manual_bridge) = DesktopInteractionGateFactory::create_manual_only(16);
     let manual_app = AppBuilder::new()
-        .platform_approval_gate(Arc::new(manual_gate))
+        .interaction_gate(Arc::new(manual_gate))
         .default_parser()
         .build()
         .await
@@ -153,8 +164,12 @@ async fn main() {
         loop {
             match manual_bridge.try_recv() {
                 Some(item) => {
-                    println!("   → Manual bridge: tool={}", item.request.tool_name);
-                    DesktopApprovalBridge::send_response(item, ApprovalDecision::approve()).unwrap();
+                    let tool_name = match &item.request {
+                        InteractionRequest::ToolApproval { approval } => approval.tool_name.clone(),
+                        _ => "<non-tool point>".to_string(),
+                    };
+                    println!("   → Manual bridge: tool={}", tool_name);
+                    DesktopInteractionBridge::send_response(item, InteractionResponse::Proceed).unwrap();
                 }
                 None => {
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

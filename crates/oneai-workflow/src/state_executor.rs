@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::{ApprovalGate, LlmProvider, Tool};
+use oneai_core::traits::{InteractionGate, LlmProvider, Tool};
 use oneai_core::{InferenceRequest, InferenceResponse, Message, Role};
 
 use crate::state_graph::{
@@ -388,7 +388,7 @@ pub struct StateGraphExecutor {
     /// Delegate factory for Delegate nodes.
     delegate_factory: Arc<dyn DelegateFactory>,
     /// Approval gate for interrupt points and HumanApproval nodes.
-    approval_gate: Arc<dyn ApprovalGate>,
+    interaction_gate: Arc<dyn InteractionGate>,
     /// Maximum iterations through the graph (prevents infinite loops).
     /// Default: 50.
     max_iterations: usize,
@@ -402,13 +402,13 @@ impl StateGraphExecutor {
     pub fn new(
         action_executor: Arc<dyn GraphActionExecutor>,
         delegate_factory: Arc<dyn DelegateFactory>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         max_iterations: usize,
     ) -> Self {
         Self {
             action_executor,
             delegate_factory,
-            approval_gate,
+            interaction_gate,
             max_iterations,
         }
     }
@@ -417,9 +417,9 @@ impl StateGraphExecutor {
     pub fn with_defaults(
         action_executor: Arc<dyn GraphActionExecutor>,
         delegate_factory: Arc<dyn DelegateFactory>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
-        Self::new(action_executor, delegate_factory, approval_gate, 50)
+        Self::new(action_executor, delegate_factory, interaction_gate, 50)
     }
 
     /// Create with direct provider + tools (backward-compatible constructor).
@@ -432,11 +432,11 @@ impl StateGraphExecutor {
         provider: Arc<dyn LlmProvider>,
         tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
         delegate_factory: Arc<dyn DelegateFactory>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         max_iterations: usize,
     ) -> Self {
         let action_executor = Arc::new(DirectProviderActionExecutor::new(provider, tools));
-        Self::new(action_executor, delegate_factory, approval_gate, max_iterations)
+        Self::new(action_executor, delegate_factory, interaction_gate, max_iterations)
     }
 
     /// Create with direct provider + default max_iterations (50).
@@ -445,9 +445,9 @@ impl StateGraphExecutor {
         provider: Arc<dyn LlmProvider>,
         tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
         delegate_factory: Arc<dyn DelegateFactory>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
-        Self::with_direct_provider(provider, tools, delegate_factory, approval_gate, 50)
+        Self::with_direct_provider(provider, tools, delegate_factory, interaction_gate, 50)
     }
 
     /// Execute a StateGraph starting from its entry point.
@@ -513,9 +513,14 @@ impl StateGraphExecutor {
                         current_node_id, graph.name),
                 };
 
-                let approval = self.approval_gate.request_approval(approval_request).await?;
+                let approval = self
+                    .interaction_gate
+                    .request(oneai_core::InteractionRequest::ToolApproval {
+                        approval: approval_request,
+                    })
+                    .await?;
                 match approval {
-                    oneai_core::ApprovalResponse::Denied { reason } => {
+                    oneai_core::InteractionResponse::Abort { reason } => {
                         state.should_terminate = true;
                         state.last_error = Some(format!("Interrupt denied: {}", reason));
                         return Ok(GraphExecutionResult {
@@ -527,7 +532,20 @@ impl StateGraphExecutor {
                             interrupt_checkpoints,
                         });
                     }
-                    _ => { /* Approved — continue execution */ }
+                    oneai_core::InteractionResponse::Revise { feedback } => {
+                        // Stateless graph path can't loop on feedback → deny.
+                        state.should_terminate = true;
+                        state.last_error = Some(format!("Interrupt denied: {}", feedback));
+                        return Ok(GraphExecutionResult {
+                            name: graph.name.clone(),
+                            final_state: state,
+                            completed: false,
+                            terminal_node: None,
+                            iterations,
+                            interrupt_checkpoints,
+                        });
+                    }
+                    _ => { /* Proceed / ProceedWith / Choose — continue execution */ }
                 }
             }
 

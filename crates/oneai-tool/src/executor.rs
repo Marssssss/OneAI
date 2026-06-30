@@ -18,12 +18,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use oneai_core::{ApprovalRequest, ApprovalResponse, RiskLevel, PermissionLevel, ToolOutput};
+use oneai_core::{
+    ApprovalRequest, InteractionModification, InteractionPoint, InteractionRequest,
+    InteractionResponse, PermissionLevel, RiskLevel, ToolOutput,
+};
 use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::{ApprovalGate, Tool};
+use oneai_core::traits::{InteractionGate, Tool};
 
 use crate::registry::ToolRegistry;
-use crate::approval::BlockingApprovalGate;
+use crate::interaction_gate::DenyAllInteractionGate;
 
 /// Configuration for the ToolExecutor.
 #[derive(Debug, Clone)]
@@ -44,56 +47,57 @@ impl Default for ToolExecutorConfig {
     }
 }
 
-/// Tool executor that orchestrates tool execution with approval gating.
+/// Tool executor that orchestrates tool execution with interaction gating.
 ///
 /// The ToolExecutor is the primary interface for executing tools in the agent loop.
-/// It combines the ToolRegistry and ApprovalGate to provide:
-/// - Automatic approval gating for high-risk tools
-/// - Argument modification via the approval flow
+/// It combines the ToolRegistry and InteractionGate to provide:
+/// - Automatic approval gating for high-risk tools (via the ToolApproval point)
+/// - Argument modification via the interaction flow (ProceedWith → ReplaceToolArgs)
 /// - Timeout enforcement
 /// - Execution logging
 pub struct ToolExecutor {
     /// Tool registry for looking up and executing tools.
     registry: Arc<ToolRegistry>,
-    /// Approval gate for high-risk tool approval.
-    approval_gate: Arc<dyn ApprovalGate>,
+    /// Interaction gate — the ToolApproval decision point for high-risk tools.
+    interaction_gate: Arc<dyn InteractionGate>,
     /// Configuration.
     config: ToolExecutorConfig,
 }
 
 impl ToolExecutor {
-    /// Create a new tool executor with a blocking (always-deny) approval gate.
+    /// Create a new tool executor with a deny-all interaction gate.
     ///
-    /// Useful for testing environments where no UI is available.
+    /// Useful for testing environments where every high-risk tool must be
+    /// rejected outright (the replacement for the removed `BlockingApprovalGate`).
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
         Self {
             registry,
-            approval_gate: Arc::new(BlockingApprovalGate),
+            interaction_gate: Arc::new(DenyAllInteractionGate),
             config: ToolExecutorConfig::default(),
         }
     }
 
-    /// Create a tool executor with a custom approval gate.
-    pub fn with_approval_gate(
+    /// Create a tool executor with a custom interaction gate.
+    pub fn with_interaction_gate(
         registry: Arc<ToolRegistry>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
         Self {
             registry,
-            approval_gate,
+            interaction_gate,
             config: ToolExecutorConfig::default(),
         }
     }
 
-    /// Create a tool executor with custom configuration and approval gate.
+    /// Create a tool executor with custom configuration and interaction gate.
     pub fn with_config(
         registry: Arc<ToolRegistry>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         config: ToolExecutorConfig,
     ) -> Self {
         Self {
             registry,
-            approval_gate,
+            interaction_gate,
             config,
         }
     }
@@ -121,8 +125,8 @@ impl ToolExecutor {
         // Check if the tool requires approval
         let needs_approval = self.needs_approval(&tool);
 
-        if needs_approval {
-            // Request approval
+        if needs_approval && self.interaction_gate.enabled(InteractionPoint::ToolApproval) {
+            // Ask the interaction gate's ToolApproval point whether to proceed.
             let approval_request = ApprovalRequest {
                 tool_name: tool_name.to_string(),
                 args: args.clone(),
@@ -134,49 +138,62 @@ impl ToolExecutor {
                 ),
             };
 
-            let approval_response = self.approval_gate.request_approval(approval_request).await?;
+            let response = self
+                .interaction_gate
+                .request(InteractionRequest::ToolApproval { approval: approval_request })
+                .await?;
 
-            match approval_response {
-                ApprovalResponse::Approved { modified_args } => {
-                    // Use modified args if provided, otherwise use original args
-                    let final_args = modified_args.unwrap_or(args);
+            match response {
+                InteractionResponse::Proceed => {
                     tracing::info!(
                         "Tool '{}' approved for execution with args: {}",
+                        tool_name, args
+                    );
+                    self.execute_with_timeout(tool, args).await
+                }
+                InteractionResponse::ProceedWith { modification } => {
+                    // ToolApproval only honours an arg rewrite; other modifications
+                    // (which don't apply here) fall through to the original args.
+                    let final_args = match modification {
+                        InteractionModification::ReplaceToolArgs(new_args) => new_args,
+                        _ => args,
+                    };
+                    tracing::info!(
+                        "Tool '{}' approved with modified args: {}",
                         tool_name, final_args
                     );
                     self.execute_with_timeout(tool, final_args).await
                 }
-                ApprovalResponse::Denied { reason } => {
-                    tracing::warn!(
-                        "Tool '{}' denied: {}", tool_name, reason
-                    );
+                InteractionResponse::Abort { reason } => {
+                    tracing::warn!("Tool '{}' denied: {}", tool_name, reason);
                     Ok(ToolOutput {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Execution denied: {}", reason)),
                     })
                 }
-                ApprovalResponse::Modified { args: modified_args } => {
-                    tracing::info!(
-                        "Tool '{}' approved with modified args: {}",
-                        tool_name, modified_args
-                    );
-                    self.execute_with_timeout(tool, modified_args).await
-                }
-                ApprovalResponse::Observe { observation } => {
-                    tracing::info!(
-                        "Tool '{}' execution paused for observation: {}",
-                        tool_name, observation
-                    );
+                InteractionResponse::Revise { feedback } => {
+                    // The direct execute_tool path can't loop on feedback, so a
+                    // Revise is surfaced as a denial carrying the feedback.
+                    tracing::warn!("Tool '{}' revise-feedback: {}", tool_name, feedback);
                     Ok(ToolOutput {
                         success: false,
                         content: String::new(),
-                        error: Some(format!("Execution paused for observation: {}", observation)),
+                        error: Some(format!("Execution denied: {}", feedback)),
                     })
                 }
+                InteractionResponse::Choose { .. } => {
+                    // PlanDecision-only reply; doesn't apply to ToolApproval. Proceed.
+                    self.execute_with_timeout(tool, args).await
+                }
+                // InteractionResponse is #[non_exhaustive]; unknown variants
+                // (e.g. future decision points) default to proceeding.
+                _ => self.execute_with_timeout(tool, args).await,
             }
         } else {
-            // No approval needed — execute directly
+            // No approval needed (or the gate disabled the ToolApproval point) —
+            // execute directly. A disabled point short-circuits to auto-proceed,
+            // which mirrors the agent-loop's behaviour under NoopInteractionGate.
             tracing::info!(
                 "Tool '{}' executing directly (risk level: {:?})",
                 tool_name, tool.risk_level()
@@ -240,9 +257,9 @@ impl ToolExecutor {
         self.registry.tools_map()
     }
 
-    /// Get the approval gate.
-    pub fn approval_gate(&self) -> &Arc<dyn ApprovalGate> {
-        &self.approval_gate
+    /// Get the interaction gate.
+    pub fn interaction_gate(&self) -> &Arc<dyn InteractionGate> {
+        &self.interaction_gate
     }
 
     /// Get the configuration.
@@ -256,8 +273,8 @@ mod tests {
     use super::*;
     use crate::local_tools::CalculatorTool;
     use crate::tool_interfaces::{ShellTool, FileReadTool, FileEditTool};
-    use crate::approval::{AutoApprovalGate, ChannelApprovalGateWithThreshold, ApprovalDecision};
-    use oneai_core::RiskLevel;
+    use crate::interaction_gate::{ChannelInteractionGate, NoopInteractionGate};
+    use oneai_core::InteractionResponse;
 
     #[tokio::test]
     async fn test_tool_executor_auto_approve_low_risk() {
@@ -277,10 +294,10 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(ShellTool::new())).await.unwrap();
 
-        // Use AutoApprovalGate — all requests are approved
-        let executor = ToolExecutor::with_approval_gate(
+        // NoopInteractionGate disables the ToolApproval point → auto-proceed.
+        let executor = ToolExecutor::with_interaction_gate(
             registry,
-            Arc::new(AutoApprovalGate),
+            Arc::new(NoopInteractionGate),
         );
 
         // Shell is high-risk — should be auto-approved
@@ -300,10 +317,10 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(ShellTool::new())).await.unwrap();
 
-        // Use blocking (always-deny) gate
+        // ToolExecutor::new defaults to DenyAllInteractionGate (always abort).
         let executor = ToolExecutor::new(registry);
 
-        // Shell is high-risk — should be denied by the blocking gate
+        // Shell is high-risk — should be denied by the deny-all gate
         let result = executor.execute("shell", serde_json::json!({"command": "echo hello"})).await.unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("denied"));
@@ -314,16 +331,16 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(ShellTool::new())).await.unwrap();
 
-        let (gate, mut receiver) = ChannelApprovalGateWithThreshold::new_manual_only(16);
+        let (gate, mut receiver) = ChannelInteractionGate::new(16);
 
         // Spawn a task that approves all requests
         tokio::spawn(async move {
             while let Some(item) = receiver.recv().await {
-                item.response_tx.send(ApprovalDecision::approve()).unwrap();
+                item.response_tx.send(InteractionResponse::Proceed).unwrap();
             }
         });
 
-        let executor = ToolExecutor::with_approval_gate(
+        let executor = ToolExecutor::with_interaction_gate(
             registry,
             Arc::new(gate),
         );
@@ -340,16 +357,18 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(ShellTool::new())).await.unwrap();
 
-        let (gate, mut receiver) = ChannelApprovalGateWithThreshold::new_manual_only(16);
+        let (gate, mut receiver) = ChannelInteractionGate::new(16);
 
         // Spawn a task that denies all requests
         tokio::spawn(async move {
             while let Some(item) = receiver.recv().await {
-                item.response_tx.send(ApprovalDecision::deny("Forbidden")).unwrap();
+                item.response_tx
+                    .send(InteractionResponse::Abort { reason: "Forbidden".to_string() })
+                    .unwrap();
             }
         });
 
-        let executor = ToolExecutor::with_approval_gate(
+        let executor = ToolExecutor::with_interaction_gate(
             registry,
             Arc::new(gate),
         );
@@ -364,24 +383,28 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
 
-        let (gate, mut receiver) = ChannelApprovalGateWithThreshold::new(16, RiskLevel::Medium);
+        let (gate, mut receiver) = ChannelInteractionGate::new(16);
 
-        // Spawn a task that modifies the args
+        // Spawn a task that would modify the args (replace them).
         tokio::spawn(async move {
             while let Some(item) = receiver.recv().await {
-                // Modify the expression
-                item.response_tx.send(ApprovalDecision::modify(
-                    serde_json::json!({"expression": "10 * 5"})
-                )).unwrap();
+                item.response_tx
+                    .send(InteractionResponse::ProceedWith {
+                        modification: InteractionModification::ReplaceToolArgs(
+                            serde_json::json!({"expression": "10 * 5"}),
+                        ),
+                    })
+                    .unwrap();
             }
         });
 
-        let executor = ToolExecutor::with_approval_gate(
+        let executor = ToolExecutor::with_interaction_gate(
             registry,
             Arc::new(gate),
         );
 
-        // Calculator is low-risk — should be auto-approved, not modified
+        // Calculator is low-risk — bypasses the ToolApproval point, so the
+        // spawn task is never reached and the original expression runs.
         let result = executor.execute("calculator", serde_json::json!({"expression": "2+3"})).await.unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5"); // Original expression, not modified
@@ -409,7 +432,7 @@ mod tests {
 
         let executor = ToolExecutor::with_config(
             registry,
-            Arc::new(BlockingApprovalGate),
+            Arc::new(DenyAllInteractionGate),
             config,
         );
 

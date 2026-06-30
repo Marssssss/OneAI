@@ -92,7 +92,7 @@ impl EvalRunnerConfig {
 /// ```ignore
 /// let app = AppBuilder::new()
 ///     .provider(provider)
-///     .auto_approval_gate()
+///     .noop_interaction_gate()
 ///     .trace_in_memory()
 ///     .build().await?;
 ///

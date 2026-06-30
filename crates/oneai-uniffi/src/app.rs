@@ -112,7 +112,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_create_session() {
         let builder = Arc::new(OneAIAppBuilder::new());
-        let builder = builder.auto_approval_gate();
+        let builder = builder.noop_interaction_gate();
         let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();
@@ -122,7 +122,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_send_message() {
         let builder = Arc::new(OneAIAppBuilder::new());
-        let builder = builder.auto_approval_gate();
+        let builder = builder.noop_interaction_gate();
         let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();
@@ -132,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_execute_tool() {
         let builder = Arc::new(OneAIAppBuilder::new());
-        let builder = builder.auto_approval_gate();
+        let builder = builder.noop_interaction_gate();
         let app = builder.build().await.expect("Build should succeed");
 
         let calc_wrapper = Arc::new(OneAIToolWrapper {
@@ -149,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_retrieve_memory() {
         let builder = Arc::new(OneAIAppBuilder::new());
-        let builder = builder.auto_approval_gate();
+        let builder = builder.noop_interaction_gate();
         let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();

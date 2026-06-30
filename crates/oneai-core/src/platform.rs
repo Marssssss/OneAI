@@ -12,39 +12,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use crate::{ApprovalRequest, ApprovalResponse, InteractionRequest, InteractionResponse};
+use crate::{InteractionRequest, InteractionResponse};
 use crate::error::Result;
-use crate::traits::{ApprovalGate, InteractionGate};
-
-// ─── PlatformApprovalGate (deprecated) ─────────────────────────────────
-
-/// Platform-specific approval gate that uses native UI dialogs.
-///
-/// Each platform implements this to show a native dialog/popup:
-/// - Android: AlertDialog or Activity permission screen
-/// - iOS: UIAlertController
-/// - macOS: NSAlert
-/// - Windows: MessageBox
-/// - HarmonyOS: CommonDialog
-///
-/// The default implementation uses a tokio channel to communicate
-/// with the platform UI thread.
-///
-/// # Deprecated
-///
-/// Superseded by [`PlatformInteractionGate`], which covers the full decision
-/// surface (PreInfer/PostInfer/PlanDecision/PlanReview) via
-/// [`InteractionGate`]. Migrate platform implementations; this trait is
-/// scheduled for removal in 0.3.
-#[deprecated(since = "0.2.0", note = "use PlatformInteractionGate instead")]
-#[async_trait]
-pub trait PlatformApprovalGate: ApprovalGate {
-    /// Get the platform name this gate is designed for.
-    fn platform_name(&self) -> &'static str;
-
-    /// Whether the platform UI is available.
-    fn is_ui_available(&self) -> bool;
-}
+use crate::traits::InteractionGate;
 
 // ─── PlatformInteractionGate ───────────────────────────────────────────
 
@@ -82,6 +52,26 @@ impl StubPlatformInteractionGate {
     pub fn macos() -> Self {
         Self::new("macos")
     }
+
+    /// Create a Windows stub.
+    pub fn windows() -> Self {
+        Self::new("windows")
+    }
+
+    /// Create an Android stub.
+    pub fn android() -> Self {
+        Self::new("android")
+    }
+
+    /// Create an iOS stub.
+    pub fn ios() -> Self {
+        Self::new("ios")
+    }
+
+    /// Create a HarmonyOS stub.
+    pub fn harmony() -> Self {
+        Self::new("harmony")
+    }
 }
 
 #[async_trait]
@@ -103,72 +93,6 @@ impl PlatformInteractionGate for StubPlatformInteractionGate {
 
     fn is_ui_available(&self) -> bool {
         false
-    }
-}
-
-// ─── StubPlatformApprovalGate (deprecated) ─────────────────────────────
-
-/// Stub implementation for development/testing — always auto-approves.
-#[deprecated(since = "0.2.0", note = "use StubPlatformInteractionGate instead")]
-pub struct StubPlatformApprovalGate {
-    #[allow(dead_code)]
-    platform_name: String,
-}
-
-#[allow(deprecated)]
-impl StubPlatformApprovalGate {
-    /// Create a new stub approval gate for the given platform name.
-    pub fn new(platform_name: impl Into<String>) -> Self {
-        Self {
-            platform_name: platform_name.into(),
-        }
-    }
-
-    /// Create a macOS stub.
-    pub fn macos() -> Self {
-        Self::new("macos")
-    }
-
-    /// Create an Android stub.
-    pub fn android() -> Self {
-        Self::new("android")
-    }
-
-    /// Create an iOS stub.
-    pub fn ios() -> Self {
-        Self::new("ios")
-    }
-
-    /// Create a Windows stub.
-    pub fn windows() -> Self {
-        Self::new("windows")
-    }
-
-    /// Create a HarmonyOS stub.
-    pub fn harmony() -> Self {
-        Self::new("harmony")
-    }
-}
-
-#[async_trait]
-#[allow(deprecated)]
-impl ApprovalGate for StubPlatformApprovalGate {
-    async fn request_approval(&self, _request: ApprovalRequest) -> Result<ApprovalResponse> {
-        Ok(ApprovalResponse::Approved { modified_args: None })
-    }
-}
-
-#[async_trait]
-#[allow(deprecated)]
-impl PlatformApprovalGate for StubPlatformApprovalGate {
-    fn platform_name(&self) -> &'static str {
-        // This is a limitation — we can't return a reference to a String field.
-        // In practice, each platform implementation would use a static string.
-        "stub"
-    }
-
-    fn is_ui_available(&self) -> bool {
-        false // Stub has no real UI
     }
 }
 
@@ -240,8 +164,8 @@ impl Platform {
 pub struct PlatformAdapter {
     /// The detected platform.
     pub platform: Platform,
-    /// The approval gate (native dialog).
-    pub approval_gate: Arc<dyn PlatformApprovalGate>,
+    /// The interaction gate (native dialog).
+    pub interaction_gate: Arc<dyn PlatformInteractionGate>,
 }
 
 impl PlatformAdapter {
@@ -249,41 +173,41 @@ impl PlatformAdapter {
     pub fn default_stub() -> Self {
         Self {
             platform: Platform::current(),
-            approval_gate: Arc::new(StubPlatformApprovalGate::new(
+            interaction_gate: Arc::new(StubPlatformInteractionGate::new(
                 Platform::current().name().to_lowercase()
             )),
         }
     }
 
-    /// Create an adapter for macOS with stub approval.
+    /// Create an adapter for macOS with stub interaction.
     pub fn macos_stub() -> Self {
         Self {
             platform: Platform::Macos,
-            approval_gate: Arc::new(StubPlatformApprovalGate::macos()),
+            interaction_gate: Arc::new(StubPlatformInteractionGate::macos()),
         }
     }
 
-    /// Create an adapter for Android with stub approval.
+    /// Create an adapter for Android with stub interaction.
     pub fn android_stub() -> Self {
         Self {
             platform: Platform::Android,
-            approval_gate: Arc::new(StubPlatformApprovalGate::android()),
+            interaction_gate: Arc::new(StubPlatformInteractionGate::android()),
         }
     }
 
-    /// Create an adapter for iOS with stub approval.
+    /// Create an adapter for iOS with stub interaction.
     pub fn ios_stub() -> Self {
         Self {
             platform: Platform::Ios,
-            approval_gate: Arc::new(StubPlatformApprovalGate::ios()),
+            interaction_gate: Arc::new(StubPlatformInteractionGate::ios()),
         }
     }
 
-    /// Create an adapter for HarmonyOS with stub approval.
+    /// Create an adapter for HarmonyOS with stub interaction.
     pub fn harmony_stub() -> Self {
         Self {
             platform: Platform::Harmony,
-            approval_gate: Arc::new(StubPlatformApprovalGate::harmony()),
+            interaction_gate: Arc::new(StubPlatformInteractionGate::harmony()),
         }
     }
 }
@@ -291,8 +215,6 @@ impl PlatformAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::ApprovalGate;
-    use crate::RiskLevel;
 
     #[test]
     fn test_platform_detection() {
@@ -320,31 +242,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stub_approval_gate() {
-        let gate = StubPlatformApprovalGate::macos();
-        let request = ApprovalRequest {
-            tool_name: "shell".to_string(),
-            args: serde_json::json!({"command": "ls"}),
-            risk_level: RiskLevel::High,
-            permission_level: None,
-            justification: "List files".to_string(),
-        };
-
-        let response = gate.request_approval(request).await.unwrap();
-        assert!(matches!(response, ApprovalResponse::Approved { .. }));
+    async fn test_stub_interaction_gate() {
+        let gate = StubPlatformInteractionGate::macos();
+        let resp = gate
+            .request(InteractionRequest::PlanReview {
+                plan: "p".to_string(),
+                steps: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(resp, InteractionResponse::Proceed));
+        assert!(!gate.enabled(crate::InteractionPoint::PlanReview));
     }
 
     #[test]
     fn test_platform_adapter_stub() {
         let adapter = PlatformAdapter::default_stub();
-        assert!(!adapter.approval_gate.is_ui_available());
+        assert!(!adapter.interaction_gate.is_ui_available());
     }
 
     #[test]
     fn test_platform_adapter_android() {
         let adapter = PlatformAdapter::android_stub();
         assert_eq!(adapter.platform, Platform::Android);
-        assert!(!adapter.approval_gate.is_ui_available());
+        assert!(!adapter.interaction_gate.is_ui_available());
     }
 
     #[test]

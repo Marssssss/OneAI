@@ -99,8 +99,6 @@ mod tests {
             StudioEvent::TraceEvent { kind: "Thought".to_string(), name: "agent.thought".to_string(), attributes: serde_json::json!({"msg": "thinking"}) },
             StudioEvent::Thinking { text: "reasoning...".to_string() },
             StudioEvent::StreamChunk { text: "chunk".to_string() },
-            StudioEvent::ApprovalRequest { tool_name: "shell".to_string(), args: serde_json::json!({}), risk_level: "High".to_string() },
-            StudioEvent::ApprovalResponse { approved: true, reason: "OK".to_string() },
             StudioEvent::LoopComplete { result_summary: "Success".to_string() },
             StudioEvent::Error { message: "oops".to_string() },
         ];

@@ -111,29 +111,6 @@ impl ProviderFactory {
     }
 }
 
-/// A concrete approval gate factory for foreign-language bindings.
-#[derive(uniffi::Object)]
-pub struct ApprovalGateFactory;
-
-impl ApprovalGateFactory {
-    #[uniffi::constructor]
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Create an auto-approve gate (for testing).
-    #[uniffi::method]
-    pub fn create_auto_approve(&self) -> oneai_tool::AutoApprovalGate {
-        oneai_tool::AutoApprovalGate
-    }
-
-    /// Create a blocking (always-deny) gate (placeholder).
-    #[uniffi::method]
-    pub fn create_blocking(&self) -> oneai_tool::BlockingApprovalGate {
-        oneai_tool::BlockingApprovalGate
-    }
-}
-
 /// A concrete memory manager factory for foreign-language bindings.
 #[derive(uniffi::Object)]
 pub struct MemoryFactory;
@@ -243,13 +220,6 @@ mod tests {
             "llama3".to_string(),
         );
         assert_eq!(provider.config().model_name.clone().unwrap(), "llama3");
-    }
-
-    #[test]
-    fn test_approval_gate_factory() {
-        let factory = ApprovalGateFactory::new();
-        let _auto = factory.create_auto_approve();
-        let _blocking = factory.create_blocking();
     }
 
     #[test]

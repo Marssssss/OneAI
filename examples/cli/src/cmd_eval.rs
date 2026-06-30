@@ -64,7 +64,7 @@ pub async fn cmd_eval_run(suite_name: &str, output_format: &str) {
 
     let app = oneai_app::AppBuilder::new()
         .provider(Arc::from(provider))
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .trace_in_memory()
         .default_parser()
         .build()
@@ -182,7 +182,7 @@ pub async fn cmd_eval_swebench(
 
     let app = oneai_app::AppBuilder::new()
         .provider(Arc::from(provider))
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .default_usage_tracker()
         .default_token_counter()

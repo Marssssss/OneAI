@@ -3,15 +3,12 @@
 
 use oneai_agent::{AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest, SubAgentKind};
 use oneai_core::ToolOutput;
-use oneai_core::{ApprovalRequest, ApprovalResponse, ContextAccounting};
+use oneai_core::ContextAccounting;
 
 use super::app::TokenUsage;
 
 /// A snapshot of the live plan state, sent so the TUI can render the plan panel.
 pub type PlanStateSnapshot = oneai_agent::PlanState;
-
-/// A proposed step from `exit_plan_mode`, for the accept/reject gate.
-pub type ProposedStep = oneai_agent::PlanStep;
 
 /// Events sent from the observer to the TUI event loop.
 ///
@@ -33,8 +30,6 @@ pub enum ObserverEvent {
     Error(String),
 
     // New events for enhanced TUI
-    ApprovalRequest(ApprovalRequest),
-    ApprovalResponse(ApprovalResponse),
     TokenUsageUpdate(TokenUsage),
     ContextAccountingUpdate(ContextAccounting),
 
@@ -111,14 +106,6 @@ impl AgentLoopObserver for TuiObserver {
 
     fn on_stream_chunk(&self, text: &str) {
         let _ = self.tx.send(ObserverEvent::StreamChunk(text.to_string()));
-    }
-
-    fn on_approval_request(&self, request: &oneai_core::ApprovalRequest) {
-        let _ = self.tx.send(ObserverEvent::ApprovalRequest(request.clone()));
-    }
-
-    fn on_approval_response(&self, response: &oneai_core::ApprovalResponse) {
-        let _ = self.tx.send(ObserverEvent::ApprovalResponse(response.clone()));
     }
 
     fn on_token_usage(&self, prompt_tokens: u32, completion_tokens: u32) {

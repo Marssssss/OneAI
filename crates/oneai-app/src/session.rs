@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use oneai_core::{Conversation, GlobalState, Message, MemoryEntry};
 use oneai_core::error::Result;
-use oneai_core::traits::ApprovalGate;
 use oneai_core::traits::StatePersistence;
 
 use oneai_memory::MemoryManager;
@@ -89,8 +88,6 @@ struct AppResources {
     tool_executor: Arc<ToolExecutor>,
     #[allow(dead_code)]
     tool_registry: Arc<oneai_tool::ToolRegistry>,
-    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
-    approval_gate: Arc<dyn ApprovalGate>,
     interaction_gate: Arc<dyn oneai_core::traits::InteractionGate>,
     memory_manager: Arc<MemoryManager>,
     rag_index: Option<Arc<DocumentIndex>>,
@@ -149,8 +146,6 @@ impl AppSession {
             app: Arc::new(AppResources {
                 tool_executor: app.tool_executor.clone(),
                 tool_registry: app.tool_registry.clone(),
-                #[allow(deprecated)]
-                approval_gate: app.approval_gate.clone(),
                 interaction_gate: app.interaction_gate.clone(),
                 memory_manager: app.memory_manager.clone(),
                 rag_index: app.rag_index.clone(),
@@ -438,7 +433,7 @@ impl AppSession {
             provider.clone(),
             self.app.workflow_executor.tools_handle(),
             Arc::new(NoopDelegateFactory), // Use noop for now; real impl wired in later
-            self.app.approval_gate.clone(),
+            self.app.interaction_gate.clone(),
         );
 
         let initial_state = oneai_workflow::GraphState::new();
@@ -633,8 +628,6 @@ impl AppSession {
                 provider.clone(),
                 self.app.tool_executor.tools_map(),
                 self.app.parser.clone(),
-                #[allow(deprecated)]
-                self.app.approval_gate.clone(),
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
                 Arc::new(oneai_core::budget::ContextBudgetManager::new(
@@ -651,8 +644,6 @@ impl AppSession {
                 Arc::new(oneai_agent::DefaultSubAgentFactory::new(
                     provider.clone(),
                     self.app.parser.clone(),
-                    #[allow(deprecated)]
-                    self.app.approval_gate.clone(),
                     self.app.interaction_gate.clone(),
                     self.app.tool_executor.tools_map(),
                 )),
@@ -710,8 +701,6 @@ impl AppSession {
                 provider.clone(),
                 self.app.tool_executor.tools_map(),
                 self.app.parser.clone(),
-                #[allow(deprecated)]
-                self.app.approval_gate.clone(),
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
                 Arc::new(oneai_core::budget::ContextBudgetManager::new(
@@ -728,8 +717,6 @@ impl AppSession {
                 Arc::new(oneai_agent::DefaultSubAgentFactory::new(
                     provider.clone(),
                     self.app.parser.clone(),
-                    #[allow(deprecated)]
-                    self.app.approval_gate.clone(),
                     self.app.interaction_gate.clone(),
                     self.app.tool_executor.tools_map(),
                 )),

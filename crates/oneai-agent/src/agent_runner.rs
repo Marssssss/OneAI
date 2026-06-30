@@ -20,7 +20,7 @@ use oneai_core::{
     Role,
 };
 use oneai_core::error::Result;
-use oneai_core::traits::{ApprovalGate, InteractionGate, LlmProvider, OutputParser, Tool, StateReducer};
+use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, StateReducer};
 
 use crate::plan_agent::{
     PlanAgent, PlanConfig, PlanDecisionResolution, PlanResult, PlanStep,
@@ -120,10 +120,6 @@ pub struct AgentRunner {
     /// Output parser (3-layer defense).
     parser: Arc<dyn OutputParser>,
 
-    /// Approval gate for high-risk tools.
-    #[deprecated(since = "0.2.0", note = "use interaction_gate instead")]
-    approval_gate: Arc<dyn ApprovalGate>,
-
     /// Unified interaction gate — the single surface for every loop-suspend
     /// decision point (PreInfer/PostInfer/ToolApproval/PlanDecision/PlanReview).
     interaction_gate: Arc<dyn InteractionGate>,
@@ -137,12 +133,10 @@ pub struct AgentRunner {
 
 impl AgentRunner {
     /// Create a new AgentRunner with all dependencies.
-    #[allow(deprecated)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
-        approval_gate: Arc<dyn ApprovalGate>,
         interaction_gate: Arc<dyn InteractionGate>,
         reducer: Arc<dyn StateReducer>,
         config: AgentRunnerConfig,
@@ -151,7 +145,6 @@ impl AgentRunner {
             provider,
             tools,
             parser,
-            approval_gate,
             interaction_gate,
             reducer,
             config,
@@ -159,19 +152,16 @@ impl AgentRunner {
     }
 
     /// Create with default configuration.
-    #[allow(deprecated)]
     pub fn with_defaults(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
         parser: Arc<dyn OutputParser>,
-        approval_gate: Arc<dyn ApprovalGate>,
         interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
         Self::new(
             provider,
             tools,
             parser,
-            approval_gate,
             interaction_gate,
             Arc::new(crate::scope_state::DefaultStateReducer),
             AgentRunnerConfig::default(),
@@ -282,8 +272,6 @@ impl AgentRunner {
                 let config = self.config.react_config.clone();
                 let tools = self.tools.clone();
                 let parser = self.parser.clone();
-                #[allow(deprecated)]
-                let approval_gate = self.approval_gate.clone();
                 let interaction_gate = self.interaction_gate.clone();
 
                 let par_result = parallel_exec.execute_parallel(
@@ -293,7 +281,6 @@ impl AgentRunner {
                         let provider = provider.clone();
                         let tools = tools.clone();
                         let parser = parser.clone();
-                        let approval_gate = approval_gate.clone();
                         let interaction_gate = interaction_gate.clone();
                         let config = config.clone();
                         async move {
@@ -302,7 +289,6 @@ impl AgentRunner {
                                 provider,
                                 tools,
                                 parser,
-                                approval_gate,
                                 interaction_gate,
                                 config,
                             );
@@ -348,8 +334,6 @@ impl AgentRunner {
                     self.provider.clone(),
                     self.tools.clone(),
                     self.parser.clone(),
-                    #[allow(deprecated)]
-                    self.approval_gate.clone(),
                     self.interaction_gate.clone(),
                     self.config.react_config.clone(),
                 );
@@ -392,8 +376,6 @@ impl AgentRunner {
                 self.provider.clone(),
                 self.tools.clone(),
                 self.parser.clone(),
-                #[allow(deprecated)]
-                self.approval_gate.clone(),
                 self.interaction_gate.clone(),
                 self.config.react_config.clone(),
             );
@@ -457,8 +439,6 @@ impl AgentRunner {
             self.provider.clone(),
             self.tools.clone(),
             self.parser.clone(),
-            #[allow(deprecated)]
-            self.approval_gate.clone(),
             self.interaction_gate.clone(),
             self.config.react_config.clone(),
         );

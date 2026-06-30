@@ -439,7 +439,7 @@ mod tests {
 
         let app = oneai_app::AppBuilder::new()
             .provider(provider)
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .default_parser()
             .default_usage_tracker()
             .trace_in_memory()
@@ -540,7 +540,7 @@ mod tests {
 
         let app = oneai_app::AppBuilder::new()
             .provider(provider)
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .default_parser()
             .default_usage_tracker()
             .trace_in_memory()
@@ -631,7 +631,7 @@ mod tests {
 
         let app = oneai_app::AppBuilder::new()
             .provider(provider)
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .default_parser()
             .default_usage_tracker()
             .default_token_counter()
@@ -682,7 +682,7 @@ mod tests {
     async fn test_runner_missing_provider_errors() {
         // Build an App with NO provider → instance marked as error, not panic.
         let app = oneai_app::AppBuilder::new()
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .default_parser()
             .build()
             .await

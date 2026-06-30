@@ -769,9 +769,14 @@ impl PermissionLevel {
     }
 }
 
-// ─── ApprovalRequest / ApprovalResponse ───────────────────────────────────────
+// ─── ApprovalRequest ─────────────────────────────────────────────────────────
 
 /// Request for human approval of a high-risk tool execution.
+///
+/// Carried by [`InteractionRequest::ToolApproval`](crate::InteractionRequest) —
+/// the unified interaction gate's tool-approval decision point. The reply is an
+/// [`InteractionResponse`](crate::InteractionResponse) (Proceed / ProceedWith
+/// {ReplaceArgs} / Abort / Revise), not a dedicated approval enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     /// The name of the tool requesting approval.
@@ -789,37 +794,6 @@ pub struct ApprovalRequest {
 
     /// Justification for why the tool should be allowed to execute.
     pub justification: String,
-}
-
-/// User response to an approval request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ApprovalResponse {
-    /// Approved — allow execution (possibly with modified args).
-    Approved {
-        modified_args: Option<serde_json::Value>,
-    },
-    /// Denied — block execution.
-    Denied {
-        reason: String,
-    },
-    /// Modified — allow execution with different arguments.
-    Modified {
-        args: serde_json::Value,
-    },
-    /// Observe — pause execution and observe the agent's current state.
-    ///
-    /// This enables the "observation mode" (Issue #17):
-    /// humans can view the agent's state flow in real-time
-    /// and decide to continue, terminate, or modify at any point.
-    ///
-    /// When the AgentLoop receives an Observe response:
-    /// 1. Execution pauses
-    /// 2. The current LoopState snapshot is emitted to the UI
-    /// 3. The user decides: Continue / Terminate / Modify
-    Observe {
-        /// The user's observation comment (optional).
-        observation: String,
-    },
 }
 
 // ─── PlanStep / PlanStepStatus ───────────────────────────────────────────────

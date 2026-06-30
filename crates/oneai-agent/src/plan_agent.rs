@@ -155,20 +155,6 @@ impl PlanAgent {
         Self::new(provider, PlanConfig::default())
     }
 
-    /// Decompose a task into plan steps.
-    ///
-    /// # Deprecated
-    ///
-    /// This skips stage-1 decision identification. Prefer
-    /// [`identify_decisions`](Self::identify_decisions) +
-    /// [`plan_with_resolutions`](Self::plan_with_resolutions), or call
-    /// [`plan_with_resolutions`](Self::plan_with_resolutions) directly with an
-    /// empty resolution list for the old one-shot behavior.
-    #[deprecated(since = "0.2.0", note = "use plan_with_resolutions / identify_decisions instead")]
-    pub async fn plan(&self, task: &str) -> Result<PlanResult> {
-        self.plan_with_resolutions(task, &[]).await
-    }
-
     /// Stage 1: scan the task for tradeoffs that need the user's input.
     ///
     /// Returns the decisions the planner surfaced (may be empty). The caller

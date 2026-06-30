@@ -6,7 +6,7 @@
 //! - `MemoryStore`: Short-term and long-term memory
 //! - `SkillProvider`: Skill selection and management
 //! - `PlatformTool`: Platform-specific tool extension
-//! - `ApprovalGate`: Human-machine collaboration approval
+//! - `InteractionGate`: Human-machine collaboration at every loop decision point
 //! - `OutputParser`: 3-layer output parsing defense
 //! - `StateReducer`: ScopeState reduction for parallel agents
 //! - `TaskScheduler`: Platform-independent task scheduling
@@ -67,7 +67,7 @@ pub trait LlmProvider: Send + Sync {
 /// Unified interface for all tools — local, MCP, and platform-specific.
 ///
 /// Each tool has a name, description, parameter schema, and risk level.
-/// High-risk tools must pass through the `ApprovalGate` before execution.
+/// High-risk tools must pass through the `InteractionGate` (ToolApproval) before execution.
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// The tool's unique name.
@@ -142,40 +142,14 @@ pub trait PlatformTool: Tool {
     fn platform(&self) -> Platform;
 }
 
-// ─── ApprovalGate ─────────────────────────────────────────────────────────────
-
-/// Human-machine collaboration approval gate.
-///
-/// When a high-risk tool is triggered, the approval gate suspends execution
-/// and sends an `ApprovalRequest` to the upper layer (UI). The process
-/// resumes after the user responds. This avoids callback hell by using
-/// a suspend/resume pattern with state preserved in the persistence layer.
-///
-/// # Deprecated
-///
-/// This trait only covers tool approval and cannot feed back free-text
-/// corrective guidance, surface planning tradeoffs, or reach the application
-/// layer at PreInfer/PostInfer. It is superseded by [`InteractionGate`], which
-/// unifies every "loop suspends → asks the app → resumes" decision point.
-/// Migrate callers to `InteractionGate`; this trait is scheduled for removal in 0.3.
-#[deprecated(since = "0.2.0", note = "use oneai_core::traits::InteractionGate instead")]
-#[async_trait]
-pub trait ApprovalGate: Send + Sync {
-    /// Request approval for a high-risk tool execution.
-    ///
-    /// This method blocks until the user responds.
-    async fn request_approval(&self, request: ApprovalRequest) -> Result<ApprovalResponse>;
-}
-
 // ─── InteractionGate ──────────────────────────────────────────────────────────
 
 /// Unified interaction gate — the single surface for every "agent loop suspends
 /// → asks the application layer → resumes with a reply" decision point.
 ///
-/// Replaces the split between [`ApprovalGate`] (tool approve/deny), the
-/// `AgentLoopObserver::on_plan_submitted` bool gate, and the dead
-/// PreInfer/PostInfer `LifecycleHook` interactive path. The application layer
-/// decides per-point whether to actually call back to the UI via
+/// Covers tool approval (PreInfer/PostInfer/ToolApproval), planning tradeoffs
+/// (PlanDecision), and final plan confirmation (PlanReview). The application
+/// layer decides per-point whether to actually call back to the UI via
 /// [`enabled`](Self::enabled); points that return `false` are short-circuited by
 /// the loop with zero latency (no lock taken, no channel send).
 ///
@@ -417,7 +391,7 @@ pub struct CheckpointInfo {
 
 /// A lifecycle hook that runs at specific points in the agent loop.
 ///
-/// Lifecycle hooks are the evolution from ApprovalGate's "围栏式安全"
+/// Lifecycle hooks are the evolution from InteractionGate's "围栏式安全"
 /// (gate-based: approve/deny before execution) to "生命周期安全"
 /// (event-driven: allow/deny/modify at every lifecycle stage).
 ///

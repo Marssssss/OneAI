@@ -24,7 +24,6 @@ use oneai_core::ModelConfig;
 use oneai_provider::ProviderFactory;
 use oneai_tool::CalculatorTool;
 use oneai_agent::ParadigmKind;
-use oneai_core::ApprovalResponse;
 use oneai_domain::coding_pack;
 
 use app::{App, ApprovalPendingState, ChatRole, TokenUsage};
@@ -509,10 +508,12 @@ fn run_main_loop(
                     }
                 }
                 oneai_core::InteractionRequest::PlanDecision {
-                    decision_id, question, context, options
+                    decision_id: _,
+                    question,
+                    context,
+                    options,
                 } => {
                     app.plan_decision_pending = Some(app::PlanDecisionState {
-                        decision_id,
                         question,
                         context,
                         options,
@@ -1862,24 +1863,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.last_context_accounting = None;
             app.dirty = true;
         }
-        // ObserverEvent::ApprovalRequest comes from the observer trait,
-        // but actual approval flow uses ChannelApprovalGateWithThreshold
-        // which sends ApprovalPendingItem directly. This is just an informational
-        // event from the observer.
-        ObserverEvent::ApprovalRequest(request) => {
-            let perm_label = request.permission_level.map(|p| format!("{:?}", p))
-                .unwrap_or_else(|| format!("{:?}", request.risk_level));
-            app.add_message(ChatRole::Approval, format!(
-                "⚠️ Tool: {} ({})\n{}",
-                request.tool_name,
-                perm_label,
-                request.justification
-            ));
-        }
-        ObserverEvent::ApprovalResponse(_response) => {
-            app.approval_pending = None;
-            app.dirty = true;
-        }
         ObserverEvent::TokenUsageUpdate(usage) => {
             // Accumulate raw usage (some providers report real data, others 0)
             let iter_prompt = if usage.prompt > 0 { usage.prompt }
@@ -2118,9 +2101,18 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
     };
 
     match (key.modifiers, key.code) {
-        (KeyModifiers::NONE, KeyCode::Left)
-        | (KeyModifiers::NONE, KeyCode::Tab)
+        (KeyModifiers::NONE, KeyCode::Left) => {
+            // ← cycles backwards (wraps to last).
+            app.plan_approval_selected_index = if app.plan_approval_selected_index == 0 {
+                count.saturating_sub(1)
+            } else {
+                app.plan_approval_selected_index - 1
+            };
+            app.dirty = true;
+        }
+        (KeyModifiers::NONE, KeyCode::Tab)
         | (KeyModifiers::NONE, KeyCode::Right) => {
+            // Tab/→ cycle forwards (wraps to first).
             app.plan_approval_selected_index = (app.plan_approval_selected_index + 1) % count;
             app.dirty = true;
         }

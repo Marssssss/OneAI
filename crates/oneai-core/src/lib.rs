@@ -193,13 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_response() {
-        let approved = ApprovalResponse::Approved { modified_args: None };
-        let json = serde_json::to_string(&approved).unwrap();
-        assert!(json.contains("Approved"));
-    }
-
-    #[test]
     fn test_memory_entry_serialization() {
         let entry = MemoryEntry {
             id: "mem_1".to_string(),

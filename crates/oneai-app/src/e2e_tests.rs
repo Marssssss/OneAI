@@ -34,14 +34,14 @@ impl AgentLoopObserver for SessionTestObserver {
 async fn e2e_app_session_direct_answer() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("The answer is 42"));
 
-    // Build with auto_approval_gate and default parser
+    // Build with noop_interaction_gate and default parser
     // Note: The session's run_agent() defaults to use_streaming=true,
     // which uses IncrementalStreamParser. For MockProvider's streaming,
     // the final answer may differ from the exact scripted text.
     // We verify the loop completes correctly.
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .build()
         .await
@@ -75,7 +75,7 @@ async fn e2e_app_session_tool_call_then_answer() {
 
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .build()
         .await
@@ -96,7 +96,7 @@ async fn e2e_app_session_conversation_history() {
 
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .build()
         .await
@@ -121,7 +121,7 @@ async fn e2e_app_session_with_domain_pack() {
 
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .domain_pack(coding_pack)
         .build()
@@ -152,7 +152,7 @@ async fn e2e_app_session_empty_response_retry() {
 
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .build()
         .await
@@ -180,7 +180,7 @@ async fn e2e_app_session_double_empty_response() {
 
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .build()
         .await
@@ -207,7 +207,7 @@ async fn e2e_app_session_compact_summarizes_and_injects_summary() {
 
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .build()
         .await
@@ -254,7 +254,7 @@ async fn e2e_app_session_compact_too_short_is_noop() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("unused"));
     let app = AppBuilder::new()
         .provider(provider)
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .build()
         .await

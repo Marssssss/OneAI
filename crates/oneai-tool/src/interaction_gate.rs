@@ -44,6 +44,30 @@ impl InteractionGate for NoopInteractionGate {
     }
 }
 
+// ─── DenyAllInteractionGate ──────────────────────────────────────────────────
+
+/// An interaction gate that denies every decision point it is asked about.
+///
+/// `enabled()` returns `true` for every point and `request()` always returns
+/// [`InteractionResponse::Abort`]. This is the runtime/test replacement for the
+/// removed `BlockingApprovalGate` (which always denied high-risk tools): wire it
+/// in when every tool approval / plan review must be rejected outright.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DenyAllInteractionGate;
+
+#[async_trait::async_trait]
+impl InteractionGate for DenyAllInteractionGate {
+    async fn request(&self, _req: InteractionRequest) -> Result<InteractionResponse> {
+        Ok(InteractionResponse::Abort {
+            reason: "denied by DenyAllInteractionGate".to_string(),
+        })
+    }
+
+    fn enabled(&self, _point: InteractionPoint) -> bool {
+        true
+    }
+}
+
 // ─── InteractionGateConfig ──────────────────────────────────────────────────
 
 /// Per-point enablement for [`ChannelInteractionGate`] / [`ThresholdInteractionGate`].

@@ -493,7 +493,7 @@ mod tests {
         assert!(out.success);
         assert!(!plan.as_ref().unwrap().all_done());
 
-        let out = apply_control_tool(
+        let _out = apply_control_tool(
             &mut plan,
             TOOL_TASK_UPDATE,
             &serde_json::json!({"task_id": "2", "status": "completed"}),

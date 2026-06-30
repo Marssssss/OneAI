@@ -1,8 +1,8 @@
-//! JNI bridge for Android approval flow.
+//! JNI bridge for Android interaction flow.
 //!
-//! Provides a bridge between the Rust channel-based approval gate
+//! Provides a bridge between the Rust channel-based interaction gate
 //! and the Android Kotlin/Java side. The Kotlin code polls for
-//! pending approval requests via JNI, shows AlertDialog, and
+//! pending tool-approval requests via JNI, shows AlertDialog, and
 //! sends responses back.
 //!
 //! The bridge maintains a HashMap of pending response senders,
@@ -12,21 +12,21 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use oneai_core::ApprovalResponse;
-use oneai_tool::ApprovalPendingItem;
+use oneai_core::{InteractionRequest, InteractionResponse};
+use oneai_tool::InteractionPendingItem;
 
-/// JNI-compatible approval bridge that tracks pending items by ID.
+/// JNI-compatible interaction bridge that tracks pending items by ID.
 ///
-/// The Kotlin-side `OneAIApprovalHandler` uses this to:
+/// The Kotlin-side `OneAIInteractionHandler` uses this to:
 /// 1. Poll for pending items (returns JSON + request ID)
-/// 2. Show AlertDialog for each item
+/// 2. Show AlertDialog for each tool-approval item
 /// 3. Send response (by request ID)
-pub struct JniApprovalBridge {
+pub struct JniInteractionBridge {
     /// Pending response senders, keyed by request ID.
-    pending_senders: Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalResponse>>>,
+    pending_senders: Mutex<HashMap<String, tokio::sync::oneshot::Sender<InteractionResponse>>>,
 }
 
-impl JniApprovalBridge {
+impl JniInteractionBridge {
     /// Create a new JNI bridge.
     pub fn new() -> Self {
         Self {
@@ -34,33 +34,43 @@ impl JniApprovalBridge {
         }
     }
 
-    /// Register a pending approval item.
+    /// Register a pending interaction item.
     ///
     /// Returns the request as a JSON string, with the response sender
-    /// stored internally keyed by a unique request ID.
-    pub fn register_pending(&self, item: ApprovalPendingItem) -> String {
-        let request_id = format!("{}_{}", item.request.tool_name, uuid::Uuid::new_v4());
-        let _request_json = serde_json::to_string(&item.request).unwrap_or_default();
+    /// stored internally keyed by a unique request ID. Only `ToolApproval`
+    /// items carry a meaningful request payload; other points are
+    /// auto-responded `Proceed` (the gate config disables them anyway).
+    pub fn register_pending(&self, item: InteractionPendingItem) -> String {
+        let approval = match &item.request {
+            InteractionRequest::ToolApproval { approval } => approval,
+            _ => {
+                let _ = item.response_tx.send(InteractionResponse::Proceed);
+                return String::new();
+            }
+        };
+
+        let request_id = format!("{}_{}", approval.tool_name, uuid::Uuid::new_v4());
 
         let mut senders = self.pending_senders.lock().unwrap();
         senders.insert(request_id.clone(), item.response_tx);
 
-        // Return both the ID and the request JSON
         serde_json::json!({
             "request_id": request_id,
-            "request": item.request,
-        }).to_string()
+            "request": {
+                "tool_name": approval.tool_name,
+                "args": approval.args,
+                "risk_level": approval.risk_level,
+                "justification": approval.justification,
+            },
+        })
+        .to_string()
     }
 
-    /// Send a response for a pending approval request by ID.
+    /// Send a response for a pending request by ID.
     ///
-    /// The Kotlin side calls this after the user responds to the AlertDialog.
-    /// Returns true if the response was successfully sent.
+    /// `response_json` shape: `{ "decision": "approve"|"deny"|"modify", "reason": "...", "args": <json> }`.
     pub fn send_response_by_id(&self, request_id: &str, response_json: &str) -> bool {
-        let response: ApprovalResponse = serde_json::from_str(response_json)
-            .unwrap_or(ApprovalResponse::Denied {
-                reason: "Failed to parse response JSON".to_string(),
-            });
+        let response = parse_response_json(response_json);
 
         let mut senders = self.pending_senders.lock().unwrap();
         if let Some(sender) = senders.remove(request_id) {
@@ -76,8 +86,40 @@ impl JniApprovalBridge {
     }
 }
 
-impl Default for JniApprovalBridge {
+impl Default for JniInteractionBridge {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn parse_response_json(response_json: &str) -> InteractionResponse {
+    let value: serde_json::Value = match serde_json::from_str(response_json) {
+        Ok(v) => v,
+        Err(_) => {
+            return InteractionResponse::Abort {
+                reason: "Failed to parse response JSON".to_string(),
+            }
+        }
+    };
+
+    let decision = value
+        .get("decision")
+        .and_then(|v| v.as_str())
+        .unwrap_or("deny");
+    match decision {
+        "approve" => InteractionResponse::Proceed,
+        "modify" => {
+            let args = value.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            InteractionResponse::ProceedWith {
+                modification: oneai_core::InteractionModification::ReplaceToolArgs(args),
+            }
+        }
+        _ => InteractionResponse::Abort {
+            reason: value
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("User denied via platform dialog")
+                .to_string(),
+        },
     }
 }

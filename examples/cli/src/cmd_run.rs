@@ -46,7 +46,7 @@ pub fn cmd_run(
         let provider = oneai_provider::ProviderFactory::create(model_config);
         let builder = AppBuilder::new()
             .provider(Arc::from(provider))
-            .auto_approval_gate()
+            .noop_interaction_gate()
             .default_parser()
             .generation_config(config.generation.clone());
         let builder = if let Some(uid) = user {

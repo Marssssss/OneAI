@@ -18,7 +18,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::{ApprovalGate, LlmProvider, Tool};
+use oneai_core::traits::{InteractionGate, LlmProvider, Tool};
 use oneai_core::{Conversation, InferenceRequest, Message};
 
 use crate::dag::WorkflowDag;
@@ -161,7 +161,7 @@ pub struct WorkflowExecutor {
     /// Uses RwLock so tools can be registered after construction.
     tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     /// The approval gate for high-risk tool approval.
-    approval_gate: Arc<dyn ApprovalGate>,
+    interaction_gate: Arc<dyn InteractionGate>,
     /// Optional LLM provider for executing prompt-based steps.
     /// When set, steps with a `prompt` field but no `tool` will call
     /// the provider for actual inference. When None, prompt steps
@@ -173,22 +173,22 @@ impl WorkflowExecutor {
     /// Create a new executor with tools and approval gate.
     pub fn new(
         tools: Arc<HashMap<String, Arc<dyn Tool>>>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
         // Convert static HashMap into RwLock-backed HashMap for dynamic registration
         Self {
             tools: Arc::new(tokio::sync::RwLock::new((*tools).clone())),
-            approval_gate,
+            interaction_gate,
             provider: None,
         }
     }
 
     /// Create a new executor with an empty tool registry.
     /// Tools can be registered later via `register_tool()`.
-    pub fn new_empty(approval_gate: Arc<dyn ApprovalGate>) -> Self {
+    pub fn new_empty(interaction_gate: Arc<dyn InteractionGate>) -> Self {
         Self {
             tools: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            approval_gate,
+            interaction_gate,
             provider: None,
         }
     }
@@ -197,12 +197,12 @@ impl WorkflowExecutor {
     /// With a provider, prompt-based steps will execute actual LLM inference.
     pub fn with_provider(
         tools: Arc<HashMap<String, Arc<dyn Tool>>>,
-        approval_gate: Arc<dyn ApprovalGate>,
+        interaction_gate: Arc<dyn InteractionGate>,
         provider: Arc<dyn LlmProvider>,
     ) -> Self {
         Self {
             tools: Arc::new(tokio::sync::RwLock::new((*tools).clone())),
-            approval_gate,
+            interaction_gate,
             provider: Some(provider),
         }
     }
@@ -296,7 +296,7 @@ impl WorkflowExecutor {
                 let retry_policy = config.effective_retry_policy(step_id);
                 let timeout_secs = config.effective_timeout(step_id);
                 let tools = self.tools.clone();
-                let approval_gate = self.approval_gate.clone();
+                let interaction_gate = self.interaction_gate.clone();
                 let context_snapshot = context.clone();
                 let provider = self.provider.clone();
 
@@ -306,7 +306,7 @@ impl WorkflowExecutor {
                         retry_policy,
                         timeout_secs,
                         tools,
-                        approval_gate,
+                        interaction_gate,
                         context_snapshot,
                         provider,
                     ).await
@@ -369,7 +369,7 @@ async fn execute_step(
     retry_policy: RetryPolicy,
     timeout_secs: Option<u64>,
     tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
-    approval_gate: Arc<dyn ApprovalGate>,
+    interaction_gate: Arc<dyn InteractionGate>,
     context: WorkflowContext,
     provider: Option<Arc<dyn LlmProvider>>,
 ) -> Result<StepResult> {
@@ -401,9 +401,13 @@ async fn execute_step(
             justification: format!("Workflow step '{}' requires human approval", step.id),
         };
 
-        let approval_response = approval_gate.request_approval(approval_request).await?;
-        match approval_response {
-            oneai_core::ApprovalResponse::Denied { reason } => {
+        let response = interaction_gate
+            .request(oneai_core::InteractionRequest::ToolApproval {
+                approval: approval_request,
+            })
+            .await?;
+        match response {
+            oneai_core::InteractionResponse::Abort { reason } => {
                 return Ok(StepResult {
                     step_id,
                     status: StepStatus::Failed,
@@ -413,21 +417,30 @@ async fn execute_step(
                     execution_time_ms: Some(start_time.elapsed().as_millis() as u64),
                 });
             }
-            oneai_core::ApprovalResponse::Approved { modified_args } => {
-                // Use modified args if provided
-                if let Some(_modified) = modified_args {
-                    // Update step args with modified version
-                    // (In a real implementation, we'd merge modified args into tool_args)
-                }
+            oneai_core::InteractionResponse::Revise { feedback } => {
+                // Stateless workflow path can't loop on feedback → treat as denied.
+                return Ok(StepResult {
+                    step_id,
+                    status: StepStatus::Failed,
+                    output: None,
+                    error: Some(format!("Approval denied: {}", feedback)),
+                    retries_used: 0,
+                    execution_time_ms: Some(start_time.elapsed().as_millis() as u64),
+                });
             }
-            oneai_core::ApprovalResponse::Modified { args: _ } => {
-                // Use modified args
+            oneai_core::InteractionResponse::ProceedWith {
+                modification: oneai_core::InteractionModification::ReplaceToolArgs(_args),
+            } => {
+                // Tool args were rewritten by the approver. (In a real
+                // implementation we'd merge _args into tool_args before exec.)
             }
-            oneai_core::ApprovalResponse::Observe { observation } => {
-                // Observe mode — pause for human inspection
-                // In workflow context, treat observation as a pause/resume signal
-                tracing::info!("Workflow step '{}' paused for observation: {}", step_id, observation);
+            oneai_core::InteractionResponse::ProceedWith { .. }
+            | oneai_core::InteractionResponse::Proceed
+            | oneai_core::InteractionResponse::Choose { .. } => {
+                // Approved as-is (Choose is PlanDecision-only and doesn't apply).
             }
+            // InteractionResponse is #[non_exhaustive]; unknown variants proceed.
+            _ => {}
         }
     }
 
