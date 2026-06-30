@@ -48,6 +48,7 @@ pub mod handoff;
 pub mod swarm;
 pub mod skill_tool;
 pub mod plan_state;
+pub mod meta_tool;
 
 pub use scope_state::*;
 pub use react_agent::*;

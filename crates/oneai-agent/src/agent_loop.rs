@@ -540,8 +540,21 @@ impl Default for AgentLoopConfig {
         Self {
             system_prompt: "You are an intelligent AI agent that can plan, execute, and reflect on tasks. \
                 When you need to use a tool, output a tool call. When you have the final answer, \
-                respond with just text without any tool calls. \
-                When a task is complex, you can delegate it to a specialized sub-agent or switch to a planning paradigm.\n\n\
+                respond with just text without any tool calls.\n\n\
+                **Model-driven control tools** (call these instead of plain tools when appropriate):\n\
+                - `delegate(task, agent_type, budget_tokens?)`: hand a self-contained subtask to a \
+                specialized sub-agent that runs in its own context window and returns a summary. \
+                `agent_type` is one of \"Plan\", \"Explore\", \"Code\", \"Review\". Use it when the \
+                subtask has a clear boundary and the main loop should not be cluttered with its \
+                intermediate steps. After calling `delegate`, the main loop waits for the \
+                sub-agent's summary — do not call other tools in the same turn.\n\
+                - `switch_paradigm(paradigm)`: switch to a fixed graph flow. `paradigm` is one of \
+                \"plan\", \"react\", \"reflect\", \"explore\". Use \"plan\" for structured \
+                decomposition, \"reflect\" to deeply review the last result, \"explore\" for \
+                breadth-first search, \"react\" to return to the standard reason-then-act loop. \
+                After calling, execution continues inside that paradigm's graph and the result is \
+                fed back to you.\n\
+                (Sub-agent kinds mirror the configured SubAgentTypeDefinitions; see the domain pack.)\n\n\
                 **Tool Preference Rules** (IMPORTANT — always follow these):\n\
                 - For reading files: use read_file (NOT shell cat/head/tail)\n\
                 - For editing files: use edit_file (NOT shell sed/awk)\n\
@@ -1640,6 +1653,34 @@ impl AgentLoop {
                     let mut control_results: Vec<ToolCallResult> = Vec::new();
                     let mut regular_calls: Vec<ToolCallRequest> = Vec::new();
                     for call in filtered_calls.drain(..) {
+                        // Defensive backstop: delegate/switch_paradigm are
+                        // model-driven meta-tools that `parse_decision` converts
+                        // to `AgentDecision` *before* dispatch, so they should
+                        // never reach here. If a future routing change lets one
+                        // slip through, do NOT send it to the ToolExecutor
+                        // (which would error "tool not found"); surface it as a
+                        // tool result so the conversation stays balanced.
+                        if crate::meta_tool::is_meta_tool(&call.name) {
+                            tracing::warn!(
+                                "Meta-tool '{}' reached the dispatch path — it should have been \
+                                intercepted by parse_decision. Skipping ToolExecutor dispatch.",
+                                call.name
+                            );
+                            control_results.push(ToolCallResult {
+                                call_id: call.id.clone(),
+                                tool_name: call.name.clone(),
+                                output: oneai_core::ToolOutput {
+                                    success: true,
+                                    content: format!(
+                                        "Internal meta-tool '{}' was not intercepted as expected. \
+                                        Treat this as a no-op and continue.",
+                                        call.name
+                                    ),
+                                    error: None,
+                                },
+                            });
+                            continue;
+                        }
                         if !crate::plan_state::is_control_tool(&call.name) {
                             regular_calls.push(call);
                             continue;
@@ -2760,15 +2801,30 @@ impl AgentLoop {
                     self.sub_agent_factory.clone(),
                 ));
 
-            // P2-2: Use DirectProviderActionExecutor for backward-compatible
-            // StateGraph execution within paradigm switch context.
-            // The AgentLoopGraphActionExecutor will be used for full
-            // StateGraph-driven execution via run_with_state_graph().
-            let executor = oneai_workflow::StateGraphExecutor::with_direct_provider_defaults(
-                self.provider.clone(),
-                self.tools.clone(),
+            // Use the FULL bridge (AgentLoopGraphActionExecutor) — the same one
+            // `run_with_state_graph` uses — so an inline paradigm switch runs
+            // its graph through the loop's own hooks / domain permissions /
+            // OutputParser / tool-definition builder. This removes the prior
+            // consistency hole where the inline path used the stripped-down
+            // DirectProviderActionExecutor (no hooks, no domain decorators,
+            // no OutputParser). The executor only holds cloned Arcs (read-only
+            // infrastructure); results are fed back into LoopState below.
+            let action_executor: Arc<dyn oneai_workflow::GraphActionExecutor> =
+                Arc::new(AgentLoopGraphActionExecutor {
+                    provider: self.provider.clone(),
+                    tools: self.tools.clone(),
+                    parser: self.parser.clone(),
+                    interaction_gate: self.interaction_gate.clone(),
+                    domain_pack: self.domain_pack.clone(),
+                    hook_registry: self.hook_registry.clone(),
+                    recovery_manager: self.recovery_manager.clone(),
+                    config: self.config.clone(),
+                });
+            let executor = oneai_workflow::StateGraphExecutor::new(
+                action_executor,
                 delegate_factory,
                 self.interaction_gate.clone(),
+                self.config.hard_max_iterations.unwrap_or(50),
             );
 
             // Build initial state from the current conversation
@@ -3159,6 +3215,14 @@ impl AgentLoop {
         };
         let mut all = control_defs;
         all.append(&mut defs);
+        // Inject the model-driven meta-tools (delegate / switch_paradigm) so the
+        // model can actually call them. Like the control tools above, these are
+        // intercepted by `parse_decision` and never dispatched to the
+        // ToolExecutor. In plan mode the model should focus on planning, so we
+        // only expose them outside plan mode.
+        if !self.plan_mode() {
+            all.append(&mut crate::meta_tool::meta_tool_definitions());
+        }
         all
     }
 
@@ -3318,6 +3382,16 @@ impl AgentLoop {
 /// pack decorators), and ToolCall nodes go through the full permission and
 /// hooks pipeline. This makes StateGraph execution truly integrated with
 /// the AgentLoop, not a separate disconnected system.
+///
+/// The struct type is now used by both the top-level `run_with_state_graph`
+/// path and the inline `apply_paradigm_switch_with_graph` path, so the two
+/// share the same executor. The `parser`, `hook_registry`, and
+/// `recovery_manager` fields are cloned in but not yet read inside the
+/// `GraphActionExecutor` impl — they are retained so the full-bridge
+/// PreInfer/PostInfer hook firing, OutputParser-based decision parsing, and
+/// tool-call error recovery can be wired in without another constructor
+/// change. Wiring them is tracked as follow-up; until then these fields stay
+/// `#[allow(dead_code)]` to keep the build clean.
 #[allow(dead_code)]
 pub struct AgentLoopGraphActionExecutor {
     provider: Arc<dyn LlmProvider>,
@@ -3724,7 +3798,7 @@ impl AgentLoopGraphActionExecutor {
         };
 
         // Apply domain pack tool decorators
-        if let Some(domain) = &self.domain_pack {
+        let mut defs: Vec<ToolDefinition> = if let Some(domain) = &self.domain_pack {
             filtered_tools.iter().map(|tool| {
                 let decorator = domain.find_decorator(tool.name());
                 match decorator {
@@ -3758,7 +3832,17 @@ impl AgentLoopGraphActionExecutor {
                 description: tool.description().to_string(),
                 parameters_schema: tool.parameters_schema(),
             }).collect()
-        }
+        };
+
+        // Inject the model-driven meta-tools (delegate / switch_paradigm) so
+        // LlmInfer nodes inside a StateGraph can also delegate / switch
+        // paradigm. Intercepted by `AgentLoopGraphActionExecutor::parse_decision`,
+        // never dispatched to the ToolExecutor.
+        // NOTE: the plan control tools (task_create/exit_plan_mode/...) are not
+        // injected here yet — that is pre-existing tech debt, out of scope for
+        // the meta-tool打通 work.
+        defs.append(&mut crate::meta_tool::meta_tool_definitions());
+        defs
     }
 }
 

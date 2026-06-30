@@ -428,6 +428,9 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
         ],
         state_graphs: vec![
             react_state_graph(),
+            plan_workflow_state_graph(),
+            reflect_workflow_state_graph(),
+            explore_workflow_state_graph(),
         ],
         sub_agent_definitions: SubAgentTypeDefinition::defaults(),
     }
@@ -833,6 +836,293 @@ fn react_state_graph() -> StateGraph {
     graph
 }
 
+/// Plan-workflow graph — structured task decomposition.
+///
+/// A single `plan` LlmInfer node loops until the model produces a final
+/// answer (the plan). Tool definitions are restricted to the plan control
+/// tools (`exit_plan_mode`, `task_create`) so the model is nudged toward
+/// committing a plan rather than executing real tools. If the model delegates
+/// a sub-planning task, a `delegate` node spawns a Plan sub-agent and returns
+/// to `plan`.
+///
+/// Termination: every `plan` iteration either reaches `end` (IsFinalAnswer,
+/// terminal) or loops back — bounded by `StateGraphExecutor::max_iterations`.
+fn plan_workflow_state_graph() -> StateGraph {
+    let mut graph = StateGraph::new("plan-workflow", "plan");
+
+    // plan node — decompose the task; only plan control tools are exposed.
+    graph.add_node(GraphNode {
+        id: "plan".to_string(),
+        action: NodeAction::LlmInfer {
+            system_prompt_override: Some(
+                "You are a planning agent. Decompose the task into ordered, \
+                dependency-ordered steps. Use `task_create` to commit the step \
+                list, then `exit_plan_mode` to submit, or give the plan as \
+                your final answer text.".to_string(),
+            ),
+            use_streaming: true,
+            include_tool_definitions: true,
+            tool_filter_override: Some(vec![
+                "exit_plan_mode".to_string(),
+                "task_create".to_string(),
+            ]),
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // delegate node — hand a sub-planning task to a Plan sub-agent.
+    graph.add_node(GraphNode {
+        id: "delegate".to_string(),
+        action: NodeAction::Delegate {
+            agent_kind: "Plan".to_string(),
+            task_template: "{{task}}".to_string(),
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // end node — final plan answer.
+    graph.add_node(GraphNode {
+        id: "end".to_string(),
+        action: NodeAction::LlmInfer {
+            system_prompt_override: Some(
+                "Present the finalized plan to the user as a clear, ordered \
+                list of steps.".to_string(),
+            ),
+            use_streaming: true,
+            include_tool_definitions: false,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // plan → end (final answer), plan → delegate (sub-planning), plan → plan (tool calls loop)
+    graph.add_edge(GraphEdge {
+        from: "plan".to_string(),
+        to: "end".to_string(),
+        condition: Some(EdgeCondition::IsFinalAnswer),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "plan".to_string(),
+        to: "delegate".to_string(),
+        condition: Some(EdgeCondition::RequestsDelegation),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "plan".to_string(),
+        to: "plan".to_string(),
+        condition: Some(EdgeCondition::HasToolCalls),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "delegate".to_string(),
+        to: "plan".to_string(),
+        condition: Some(EdgeCondition::Always),
+        metadata: HashMap::new(),
+    });
+
+    graph.add_terminal("end".to_string());
+    graph
+}
+
+/// Reflect-workflow graph — critical review of the last result.
+///
+/// A `reflect` LlmInfer node reasons about `last_result` and either produces
+/// a final assessment (`end`) or calls a tool to verify/fix (`act`), looping
+/// back. Mirrors the ReAct shape but with a reflection-focused system prompt
+/// so the node's job is review, not open-ended action.
+///
+/// Termination: reflect → end (IsFinalAnswer, terminal) or reflect → act →
+/// reflect, bounded by `max_iterations`.
+fn reflect_workflow_state_graph() -> StateGraph {
+    let mut graph = StateGraph::new("reflect-workflow", "reflect");
+
+    graph.add_node(GraphNode {
+        id: "reflect".to_string(),
+        action: NodeAction::LlmInfer {
+            system_prompt_override: Some(
+                "You are a reflection agent. Critically review the last result: \
+                check for correctness, gaps, and regressions. If a verification \
+                or fix is needed, call the right tool; otherwise give your \
+                final assessment as text.".to_string(),
+            ),
+            use_streaming: true,
+            include_tool_definitions: true,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    graph.add_node(GraphNode {
+        id: "act".to_string(),
+        action: NodeAction::ToolCall {
+            tool_name: "{{selected_tool}}".to_string(),
+            args_template: Some("{{tool_args}}".to_string()),
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    graph.add_node(GraphNode {
+        id: "end".to_string(),
+        action: NodeAction::LlmInfer {
+            system_prompt_override: Some(
+                "Provide the final reflection assessment.".to_string(),
+            ),
+            use_streaming: true,
+            include_tool_definitions: false,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    graph.add_edge(GraphEdge {
+        from: "reflect".to_string(),
+        to: "end".to_string(),
+        condition: Some(EdgeCondition::IsFinalAnswer),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "reflect".to_string(),
+        to: "act".to_string(),
+        condition: Some(EdgeCondition::HasToolCalls),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "act".to_string(),
+        to: "reflect".to_string(),
+        condition: Some(EdgeCondition::Always),
+        metadata: HashMap::new(),
+    });
+
+    graph.add_terminal("end".to_string());
+    graph
+}
+
+/// Explore-workflow graph — breadth-first search with delegation.
+///
+/// An `explore` LlmInfer node searches/understands the environment. It can
+/// call real tools (`act`), delegate sub-explorations to an Explore sub-agent
+/// (`delegate`), or finish by producing findings that the `synthesize` node
+/// rolls into a final summary.
+///
+/// Termination: explore → synthesize (IsFinalAnswer, terminal); other paths
+/// loop back, bounded by `max_iterations`.
+fn explore_workflow_state_graph() -> StateGraph {
+    let mut graph = StateGraph::new("explore-workflow", "explore");
+
+    graph.add_node(GraphNode {
+        id: "explore".to_string(),
+        action: NodeAction::LlmInfer {
+            system_prompt_override: Some(
+                "You are an exploration agent. Search and understand the \
+                codebase/environment. Call tools to inspect, or delegate \
+                focused sub-searches to an Explore sub-agent. When you have \
+                enough, give your findings as your final answer.".to_string(),
+            ),
+            use_streaming: true,
+            include_tool_definitions: true,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    graph.add_node(GraphNode {
+        id: "act".to_string(),
+        action: NodeAction::ToolCall {
+            tool_name: "{{selected_tool}}".to_string(),
+            args_template: Some("{{tool_args}}".to_string()),
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    graph.add_node(GraphNode {
+        id: "delegate".to_string(),
+        action: NodeAction::Delegate {
+            agent_kind: "Explore".to_string(),
+            task_template: "{{task}}".to_string(),
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    graph.add_node(GraphNode {
+        id: "synthesize".to_string(),
+        action: NodeAction::LlmInfer {
+            system_prompt_override: Some(
+                "Synthesize the exploration findings into a comprehensive \
+                final summary: file paths, key signatures, and patterns.".to_string(),
+            ),
+            use_streaming: true,
+            include_tool_definitions: false,
+            tool_filter_override: None,
+            thinking_budget: None,
+            temperature: None,
+            max_tokens: None,
+        },
+        interrupt: false,
+        metadata: HashMap::new(),
+    });
+
+    // explore → synthesize (final answer), explore → delegate (sub-search),
+    // explore → act (real tool), both loop back to explore.
+    graph.add_edge(GraphEdge {
+        from: "explore".to_string(),
+        to: "synthesize".to_string(),
+        condition: Some(EdgeCondition::IsFinalAnswer),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "explore".to_string(),
+        to: "delegate".to_string(),
+        condition: Some(EdgeCondition::RequestsDelegation),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "explore".to_string(),
+        to: "act".to_string(),
+        condition: Some(EdgeCondition::HasToolCalls),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "act".to_string(),
+        to: "explore".to_string(),
+        condition: Some(EdgeCondition::Always),
+        metadata: HashMap::new(),
+    });
+    graph.add_edge(GraphEdge {
+        from: "delegate".to_string(),
+        to: "explore".to_string(),
+        condition: Some(EdgeCondition::Always),
+        metadata: HashMap::new(),
+    });
+
+    graph.add_terminal("synthesize".to_string());
+    graph
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,6 +1136,41 @@ mod tests {
         assert_eq!(pack.tool_decorators.len(), 10); // 8 original + apply_patch + web_search
         assert_eq!(pack.context_sources.len(), 7); // 6 original + RepoMapSource
         assert!(!pack.system_prompt_template.is_empty());
+    }
+
+    #[test]
+    fn test_coding_pack_state_graphs() {
+        let pack = coding_pack("/tmp/test_project");
+
+        // All four paradigm graphs must be registered.
+        assert_eq!(pack.state_graphs.len(), 4);
+        let names: Vec<&str> = pack.state_graphs.iter()
+            .map(|g| g.name.as_str()).collect();
+        for expected in ["react-loop", "plan-workflow", "reflect-workflow", "explore-workflow"] {
+            assert!(
+                names.contains(&expected),
+                "missing state graph '{}'; got: {:?}", expected, names
+            );
+        }
+
+        // Each graph must have an entry point and at least one terminal node
+        // (guaranteed termination path for the StateGraphExecutor).
+        for g in &pack.state_graphs {
+            assert!(!g.entry_point.is_empty(), "graph '{}' has no entry point", g.name);
+            assert!(!g.terminal_nodes.is_empty(), "graph '{}' has no terminal nodes", g.name);
+            assert!(g.node_count() > 0, "graph '{}' has no nodes", g.name);
+        }
+
+        // Spot-check the new graphs' terminals.
+        let terminal_of = |name: &str| -> &Vec<String> {
+            pack.state_graphs.iter()
+                .find(|g| g.name == name)
+                .expect("graph must exist")
+                .terminal_nodes.as_ref()
+        };
+        assert_eq!(terminal_of("plan-workflow"), &vec!["end".to_string()]);
+        assert_eq!(terminal_of("reflect-workflow"), &vec!["end".to_string()]);
+        assert_eq!(terminal_of("explore-workflow"), &vec!["synthesize".to_string()]);
     }
 
     #[test]

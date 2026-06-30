@@ -1422,3 +1422,141 @@ async fn interaction_gate_plan_review_revise_keeps_plan_mode() {
     let result = loop_.run("plan it").await.unwrap();
     assert!(result.final_answer.contains("ok"));
 }
+
+// ─── Meta-tool injection (delegate / switch_paradigm) ────────────────────────
+
+/// Helper: build a non-plan-mode AgentLoop, returning a cloned handle to the
+/// MockProvider so the test can inspect the recorded InferenceRequest (and
+/// the tool definitions that were sent to the model).
+fn build_meta_tool_loop(
+    provider: MockProvider,
+) -> (AgentLoop, Arc<MockProvider>) {
+    let provider_arc = Arc::new(provider);
+    let handle = Arc::clone(&provider_arc);
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let loop_ = AgentLoop::new(
+        provider_arc,
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        None,
+        AgentLoopConfig {
+            use_streaming: false,
+            auto_checkpoint: false,
+            inject_skills: false,
+            detect_env_changes: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+    (loop_, handle)
+}
+
+/// In normal (non-plan) mode, the `delegate` and `switch_paradigm` meta-tool
+/// definitions must be injected into the inference request so a real model can
+/// actually call them. This is the core of the "端到端打通" work — without
+/// injection the interception routing in `parse_decision` is dead code for
+/// non-mock providers.
+#[tokio::test]
+async fn e2e_meta_tools_injected_in_normal_mode() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let (loop_, provider_handle) = build_meta_tool_loop(provider);
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let _result = loop_.run_with_observer("do something", &observer).await.unwrap();
+
+    let log = provider_handle.call_log().await;
+    assert!(!log.is_empty(), "at least one inference call expected");
+    let sent_tools: Vec<String> = log[0].request.tools.iter()
+        .map(|d| d.name.clone()).collect();
+    assert!(
+        sent_tools.iter().any(|n| n == "delegate"),
+        "delegate meta-tool must be injected; got: {:?}", sent_tools
+    );
+    assert!(
+        sent_tools.iter().any(|n| n == "switch_paradigm"),
+        "switch_paradigm meta-tool must be injected; got: {:?}", sent_tools
+    );
+}
+
+/// In plan mode the model should focus on planning, so the meta-tools must
+/// NOT be injected (only `exit_plan_mode` among the control tools is exposed).
+#[tokio::test]
+async fn e2e_meta_tools_not_injected_in_plan_mode() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call(
+            "exit_plan_mode",
+            serde_json::json!({
+                "plan": "do the thing",
+                "steps": [{"id": "1", "description": "step one"}]
+            }),
+        ),
+        ScriptedResponse::direct_answer("executed"),
+    ]);
+    let provider_arc = Arc::new(provider);
+    let provider_handle = Arc::clone(&provider_arc);
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let loop_ = AgentLoop::new(
+        provider_arc,
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(MockInteractionGate::new()),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        None,
+        AgentLoopConfig {
+            plan_mode: true,
+            use_streaming: false,
+            auto_checkpoint: false,
+            inject_skills: false,
+            detect_env_changes: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let _result = loop_.run("plan it").await.unwrap();
+
+    let log = provider_handle.call_log().await;
+    assert!(!log.is_empty(), "at least one inference call expected");
+    let sent_tools: Vec<String> = log[0].request.tools.iter()
+        .map(|d| d.name.clone()).collect();
+    assert!(
+        !sent_tools.iter().any(|n| n == "delegate"),
+        "delegate must NOT be injected in plan mode; got: {:?}", sent_tools
+    );
+    assert!(
+        !sent_tools.iter().any(|n| n == "switch_paradigm"),
+        "switch_paradigm must NOT be injected in plan mode; got: {:?}", sent_tools
+    );
+    // exit_plan_mode should still be present in plan mode.
+    assert!(
+        sent_tools.iter().any(|n| n == "exit_plan_mode"),
+        "exit_plan_mode should be exposed in plan mode; got: {:?}", sent_tools
+    );
+}
