@@ -617,6 +617,14 @@ impl DefaultSubAgentFactory {
     ///
     /// Filters the full tool registry to only include tools listed in
     /// available_tools, creating an isolated tool environment for the sub-agent.
+    ///
+    /// If none of the preferred tools are registered (e.g. a Code sub-agent's
+    /// `[read_file, edit_file, shell, ...]` against a registry without those
+    /// tools — typical when no DomainPack is loaded), fall back to **all**
+    /// registered tools rather than handing the sub-agent an empty toolset
+    /// while its prompt tells it to "use available tools". The least-privilege
+    /// scoping only bites when the named tools actually exist; when they don't,
+    /// the useful behavior is to expose whatever is available.
     async fn create_scoped_tools(&self, available_tools: &[&str]) -> Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>> {
         let full_tools = self.tools.read().await;
         let mut scoped = HashMap::new();
@@ -626,6 +634,18 @@ impl DefaultSubAgentFactory {
             if let Some(tool) = full_tools.get(key) {
                 scoped.insert(tool_name.to_string(), tool.clone());
             }
+        }
+
+        // Fall back to the full tool set when the preferred tools are absent,
+        // so the sub-agent isn't left with zero tools against a prompt that
+        // asks it to use them.
+        if scoped.is_empty() && !full_tools.is_empty() {
+            tracing::info!(
+                "Sub-agent preferred tools {:?} not registered — falling back to all {} available tools",
+                available_tools,
+                full_tools.len()
+            );
+            scoped = full_tools.clone();
         }
 
         Arc::new(tokio::sync::RwLock::new(scoped))
@@ -778,5 +798,72 @@ impl oneai_workflow::DelegateFactory for SubAgentDelegateFactory {
         // Run the sub-agent silently (no observer — this is inside a StateGraph)
         let result = sub_agent.run(task).await?;
         Ok(result.summary)
+    }
+}
+#[cfg(test)]
+mod scoped_tools_tests {
+    //! Verifies the no-DomainPack sub-agent tool fallback: when the hardcoded
+    //! preferred tool names are absent from the registry, the scoped set falls
+    //! back to all registered tools instead of leaving the sub-agent with an
+    //! empty toolset against a prompt that asks it to use tools.
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use oneai_core::traits::Tool;
+    use oneai_parser::ThreeLayerParser;
+    use crate::mock_tool::MockTool;
+    use crate::mock_provider::MockProvider;
+
+    fn build_factory(
+        tool_names: &[&str],
+    ) -> (DefaultSubAgentFactory, Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>) {
+        let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        for n in tool_names {
+            map.insert(
+                n.to_string(),
+                Arc::new(MockTool::success_tool(*n, "ok")) as Arc<dyn Tool>,
+            );
+        }
+        let tools = Arc::new(tokio::sync::RwLock::new(map));
+        let factory = DefaultSubAgentFactory::new(
+            Arc::new(MockProvider::from_script(vec![])),
+            Arc::new(ThreeLayerParser::new()),
+            Arc::new(oneai_tool::NoopInteractionGate),
+            tools.clone(),
+        );
+        (factory, tools)
+    }
+
+    #[tokio::test]
+    async fn scoped_tools_match_preferred_set() {
+        // Coding tools present → scoped to the Code kind's preferred set only.
+        let (factory, _tools) =
+            build_factory(&["read_file", "edit_file", "shell", "grep", "glob", "memory_search"]);
+        let scoped = factory.create_scoped_tools(SubAgentKind::Code.default_tools()).await;
+        let scoped_names: Vec<String> = scoped.read().await.keys().cloned().collect();
+        assert!(scoped_names.contains(&"read_file".to_string()));
+        assert!(scoped_names.contains(&"edit_file".to_string()));
+        // memory_search is registered but not in the Code preferred set → excluded.
+        assert!(!scoped_names.contains(&"memory_search".to_string()));
+    }
+
+    #[tokio::test]
+    async fn scoped_tools_fall_back_to_all_when_preferred_absent() {
+        // No coding tools registered (no DomainPack) → fallback exposes whatever
+        // IS available, rather than an empty set.
+        let (factory, _tools) = build_factory(&["memory_search", "web_fetch"]);
+        let scoped = factory.create_scoped_tools(SubAgentKind::Code.default_tools()).await;
+        let scoped_names: Vec<String> = scoped.read().await.keys().cloned().collect();
+        assert_eq!(scoped_names.len(), 2);
+        assert!(scoped_names.contains(&"memory_search".to_string()));
+        assert!(scoped_names.contains(&"web_fetch".to_string()));
+    }
+
+    #[tokio::test]
+    async fn scoped_tools_empty_registry_yields_empty() {
+        // Truly empty registry → no fallback possible, empty set (honest).
+        let (factory, _tools) = build_factory(&[]);
+        let scoped = factory.create_scoped_tools(SubAgentKind::Explore.default_tools()).await;
+        assert!(scoped.read().await.is_empty());
     }
 }

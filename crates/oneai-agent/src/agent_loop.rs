@@ -555,16 +555,7 @@ impl Default for AgentLoopConfig {
                 After calling, execution continues inside that paradigm's graph and the result is \
                 fed back to you.\n\
                 (Sub-agent kinds mirror the configured SubAgentTypeDefinitions; see the domain pack.)\n\n\
-                **Tool Preference Rules** (IMPORTANT — always follow these):\n\
-                - For reading files: use read_file (NOT shell cat/head/tail)\n\
-                - For editing files: use edit_file (NOT shell sed/awk)\n\
-                - For creating/writing files: use file_write (NOT shell echo/tee)\n\
-                - For listing directories: use list_directory (NOT shell ls)\n\
-                - For searching content: use grep (NOT shell grep/find)\n\
-                - For finding files: use glob (NOT shell find)\n\
-                - Use shell ONLY for: compilation, testing, git operations, package management, \
-                  running scripts, or commands that have no dedicated tool equivalent\n\
-                - This ensures safer, more precise, and more readable operations"
+                {{TOOL_PREFERENCE_RULES}}"
                 .to_string(),
             use_streaming: false,
             temperature: None,
@@ -854,9 +845,13 @@ impl AgentLoop {
             // Append the runtime context block (current date/time + a nudge to use
             // web_search for time-sensitive questions) so the model always knows
             // "today" and reaches for search tools rather than stale memory.
+            // The base prompt is resolved through `build_system_prompt`, which
+            // substitutes the `{{TOOL_PREFERENCE_RULES}}` marker with rules
+            // derived from the actual tool registry — so the prompt never
+            // references tools the model cannot call.
             let system_prompt = format!(
                 "{}{}",
-                self.config.system_prompt,
+                self.build_system_prompt().await,
                 crate::context_assembler::runtime_context_block(),
             );
             state.conversation.add_message(Message::system(system_prompt));
@@ -879,10 +874,12 @@ impl AgentLoop {
         let mut state = LoopState::from_conversation(conversation, task);
 
         if !state.conversation.messages.iter().any(|m| m.role == Role::System) {
-            // See run_with_observer: append current date/time + search guidance.
+            // See run_with_observer: append current date/time + search guidance,
+            // and resolve the `{{TOOL_PREFERENCE_RULES}}` marker against the
+            // actual tool registry.
             let system_prompt = format!(
                 "{}{}",
-                self.config.system_prompt,
+                self.build_system_prompt().await,
                 crate::context_assembler::runtime_context_block(),
             );
             state.conversation.add_message(Message::system(system_prompt));
@@ -3038,6 +3035,32 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Build the tool-preference rules block dynamically from the actual tool
+    /// registry, so the system prompt never promises the model tools it cannot
+    /// call. Each rule is emitted only when its referenced tool is registered;
+    /// if none of the known coding tools are present, a generic nudge is
+    /// emitted instead. This is the dynamic replacement for the
+    /// `{{TOOL_PREFERENCE_RULES}}` marker in the default system prompt.
+    async fn tool_preference_block(&self) -> String {
+        let tools = self.tools.read().await;
+        build_tool_preference_block(&tools)
+    }
+
+    /// Resolve the effective system prompt: the configured prompt with the
+    /// `{{TOOL_PREFERENCE_RULES}}` marker (if present) replaced by the
+    /// registry-derived preference block. Domain-provided prompts that do not
+    /// contain the marker are returned unchanged, so this only mutates the
+    /// default prompt path — preserving domain prompt behavior.
+    async fn build_system_prompt(&self) -> String {
+        let prompt = self.config.system_prompt.clone();
+        if prompt.contains("{{TOOL_PREFERENCE_RULES}}") {
+            let block = self.tool_preference_block().await;
+            prompt.replace("{{TOOL_PREFERENCE_RULES}}", &block)
+        } else {
+            prompt
+        }
+    }
+
     #[allow(dead_code)]
     async fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
@@ -3105,16 +3128,26 @@ impl AgentLoop {
 
         // If a paradigm config is active, filter tools by its tool_filter list.
         // Only tools in the filter are sent to the model — this prevents the
-        // model from calling tools that aren appropriate for the current paradigm.
+        // model from calling tools that aren't appropriate for the current paradigm.
         let filtered_tools: Vec<&Arc<dyn Tool>> = if let Some(config) = paradigm_config {
             if config.tool_filter.is_empty() {
                 // Empty filter means "all tools available" — no restriction
                 tools_map.values().collect()
             } else {
-                // Filter: only include tools that are in the paradigm's tool_filter
-                tools_map.values()
+                // Filter: only include tools that are in the paradigm's tool_filter.
+                // If the filter names tools that aren't registered (e.g. a coding
+                // paradigm's `[read_file, grep, glob]` against a registry without
+                // those tools — typical when no DomainPack is loaded), fall back to
+                // all tools rather than silently handing the model an empty toolset.
+                let matched: Vec<&Arc<dyn Tool>> = tools_map
+                    .values()
                     .filter(|tool| config.tool_filter.contains(&tool.name().to_string()))
-                    .collect()
+                    .collect();
+                if matched.is_empty() {
+                    tools_map.values().collect()
+                } else {
+                    matched
+                }
             }
         } else {
             // No paradigm config — all tools available (default ReAct behavior)
@@ -3438,9 +3471,19 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
             _ => return Err(oneai_core::error::OneAIError::Workflow("Expected LlmInfer action".to_string())),
         };
 
-        // Build system prompt — use override or default from config
-        let system_prompt = system_prompt_override
+        // Build system prompt — use override or default from config. When the
+        // default config is in use (no override), resolve the
+        // `{{TOOL_PREFERENCE_RULES}}` marker against the actual tool registry so
+        // the StateGraph path, like the main loop, never promises tools the
+        // model cannot call and never leaks the marker verbatim.
+        let base_prompt = system_prompt_override
             .unwrap_or_else(|| self.config.system_prompt.clone());
+        let system_prompt = if base_prompt.contains("{{TOOL_PREFERENCE_RULES}}") {
+            let tools = self.tools.read().await;
+            resolve_tool_preference_marker(&base_prompt, &tools)
+        } else {
+            base_prompt
+        };
 
         let mut conversation = state.conversation.clone();
         // Inject system prompt if not already present
@@ -3778,20 +3821,36 @@ impl AgentLoopGraphActionExecutor {
     ) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
 
-        // Determine tool filter: override > paradigm config > all tools
+        // Determine tool filter: override > paradigm config > all tools.
+        // As with `build_tool_definitions_for_paradigm`, a non-empty filter that
+        // matches nothing in the registry falls back to all tools — otherwise a
+        // coding paradigm's filter would yield an empty toolset when no
+        // DomainPack registered the named tools.
         let paradigm_config = active_paradigm_to_config(active_paradigm);
         let filtered_tools: Vec<&Arc<dyn Tool>> = if let Some(filter) = tool_filter_override {
             // Override: only include specified tools
-            tools_map.values()
+            let matched: Vec<&Arc<dyn Tool>> = tools_map
+                .values()
                 .filter(|tool| filter.contains(&tool.name().to_string()))
-                .collect()
+                .collect();
+            if matched.is_empty() {
+                tools_map.values().collect()
+            } else {
+                matched
+            }
         } else if let Some(config) = &paradigm_config {
             if config.tool_filter.is_empty() {
                 tools_map.values().collect()
             } else {
-                tools_map.values()
+                let matched: Vec<&Arc<dyn Tool>> = tools_map
+                    .values()
                     .filter(|tool| config.tool_filter.contains(&tool.name().to_string()))
-                    .collect()
+                    .collect();
+                if matched.is_empty() {
+                    tools_map.values().collect()
+                } else {
+                    matched
+                }
             }
         } else {
             tools_map.values().collect()
@@ -3854,6 +3913,68 @@ fn active_paradigm_to_config(paradigm: &Option<String>) -> Option<ParadigmConfig
         "explore" => ParadigmKind::Explore,
         _ => ParadigmKind::ReAct,
     }))
+}
+
+/// Build the tool-preference rules block from a tool registry, emitting a rule
+/// only for tools that are actually registered. Used both by the main
+/// `AgentLoop` (via `tool_preference_block`) and by the StateGraph
+/// `AgentLoopGraphActionExecutor` when resolving the `{{TOOL_PREFERENCE_RULES}}`
+/// marker — so neither path promises the model tools it cannot call.
+fn build_tool_preference_block(tools: &HashMap<String, Arc<dyn Tool>>) -> String {
+    let has = |n: &str| tools.contains_key(n);
+
+    let mut rules: Vec<&str> = Vec::new();
+    if has("read_file") {
+        rules.push("- For reading files: use read_file (NOT shell cat/head/tail)");
+    }
+    if has("edit_file") {
+        rules.push("- For editing files: use edit_file (NOT shell sed/awk)");
+    }
+    if has("file_write") {
+        rules.push("- For creating/writing files: use file_write (NOT shell echo/tee)");
+    }
+    if has("list_directory") {
+        rules.push("- For listing directories: use list_directory (NOT shell ls)");
+    }
+    if has("grep") {
+        rules.push("- For searching content: use grep (NOT shell grep/find)");
+    }
+    if has("glob") {
+        rules.push("- For finding files: use glob (NOT shell find)");
+    }
+    if has("shell") {
+        rules.push(
+            "- Use shell ONLY for: compilation, testing, git operations, package management, \
+             running scripts, or commands that have no dedicated tool equivalent",
+        );
+    }
+    if rules.is_empty() {
+        // No known coding tools registered — don't promise specifics. Nudge the
+        // model toward the tools that ARE available (listed in its tool
+        // definitions) rather than naming tools that may not exist.
+        return "\n\n**Tool Use**: Use the tools available to you when they help; \
+                if none apply, answer directly. When you have the final answer, \
+                respond with just text without any tool calls."
+            .to_string();
+    }
+    format!(
+        "\n\n**Tool Preference Rules** (IMPORTANT — always follow these):\n{}\n\
+         - This ensures safer, more precise, and more readable operations",
+        rules.join("\n")
+    )
+}
+
+/// Replace the `{{TOOL_PREFERENCE_RULES}}` marker in `prompt` with a block
+/// derived from `tools`, returning the prompt unchanged when the marker is
+/// absent. Shared by the main loop and the graph action executor so the marker
+/// can never leak into a system message unexpanded.
+fn resolve_tool_preference_marker(prompt: &str, tools: &HashMap<String, Arc<dyn Tool>>) -> String {
+    if prompt.contains("{{TOOL_PREFERENCE_RULES}}") {
+        let block = build_tool_preference_block(tools);
+        prompt.replace("{{TOOL_PREFERENCE_RULES}}", &block)
+    } else {
+        prompt.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -4021,5 +4142,144 @@ mod smart_router_tests {
         };
         let routed = AgentLoop::route_shell_to_specialized(call);
         assert_eq!(routed.name, "shell"); // Empty command stays as shell
+    }
+}
+#[cfg(test)]
+mod dynamic_tool_prompt_tests {
+    //! Tests for the registry-derived system prompt and tool filtering —
+    //! verifies the prompt never promises tools the model cannot call, and
+    //! that paradigm/sub-agent tool filters fall back to all tools when their
+    //! hardcoded preferred names are absent from the registry (the no-DomainPack
+    //! case).
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use oneai_core::budget::{TokenBudget, BudgetAllocation, ContextBudgetManager};
+    use oneai_parser::ThreeLayerParser;
+    use oneai_skill::SkillSelector;
+    use crate::mock_tool::MockTool;
+    use crate::mock_provider::MockProvider;
+    use crate::sub_agent::SubAgentFactoryNone;
+    use crate::context_assembler::ContextAssembler;
+    use crate::streaming::IncrementalStreamParser;
+
+    fn build_loop_with(tool_names: &[&str], config: AgentLoopConfig) -> AgentLoop {
+        let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        for n in tool_names {
+            map.insert(n.to_string(), Arc::new(MockTool::success_tool(*n, "ok")) as Arc<dyn Tool>);
+        }
+        let tools_map = Arc::new(tokio::sync::RwLock::new(map));
+        AgentLoop::new(
+            Arc::new(MockProvider::from_script(vec![])),
+            tools_map,
+            Arc::new(ThreeLayerParser::new()),
+            Arc::new(oneai_tool::NoopInteractionGate),
+            Arc::new(SkillSelector::new()),
+            Arc::new(ContextBudgetManager::new(
+                TokenBudget::new(100000),
+                BudgetAllocation::default(),
+                Arc::new(oneai_core::budget::NoopCompressor),
+            )),
+            Arc::new(SubAgentFactoryNone),
+            ContextAssembler::new(),
+            IncrementalStreamParser::new(),
+            None,
+            config,
+        )
+    }
+
+    fn build_loop(tool_names: &[&str]) -> AgentLoop {
+        build_loop_with(tool_names, AgentLoopConfig::default())
+    }
+
+    #[tokio::test]
+    async fn tool_preference_block_empty_registry_emits_generic_nudge() {
+        let loop_ = build_loop(&[]);
+        let block = loop_.tool_preference_block().await;
+        // No coding tools registered → must not promise any, and must not
+        // emit the "Tool Preference Rules" header.
+        assert!(!block.contains("read_file"));
+        assert!(!block.contains("Tool Preference Rules"));
+        assert!(block.contains("Tool Use"));
+    }
+
+    #[tokio::test]
+    async fn tool_preference_block_with_coding_tools_emits_rules() {
+        let loop_ = build_loop(&["read_file", "edit_file", "grep", "glob", "shell"]);
+        let block = loop_.tool_preference_block().await;
+        assert!(block.contains("Tool Preference Rules"));
+        assert!(block.contains("read_file"));
+        assert!(block.contains("edit_file"));
+        assert!(block.contains("Use shell ONLY for"));
+    }
+
+    #[tokio::test]
+    async fn build_system_prompt_replaces_marker() {
+        let loop_ = build_loop(&["read_file"]);
+        let prompt = loop_.build_system_prompt().await;
+        // The marker must be substituted, and the substituted rules must reflect
+        // the actual registry.
+        assert!(!prompt.contains("{{TOOL_PREFERENCE_RULES}}"));
+        assert!(prompt.contains("read_file"));
+    }
+
+    #[tokio::test]
+    async fn build_system_prompt_no_marker_left_unchanged() {
+        // A domain-style prompt without the marker is returned verbatim — the
+        // dynamic block is not appended, preserving domain prompt behavior.
+        let cfg = AgentLoopConfig {
+            system_prompt: "You are a research agent. Use the available tools.".to_string(),
+            ..AgentLoopConfig::default()
+        };
+        let loop_ = build_loop_with(&["read_file"], cfg);
+        let prompt = loop_.build_system_prompt().await;
+        assert_eq!(prompt, "You are a research agent. Use the available tools.");
+    }
+
+    #[tokio::test]
+    async fn paradigm_tool_filter_no_match_falls_back_to_all() {
+        // Plan paradigm filters to [read_file, grep, glob]; registry has only
+        // "shell". Without the fallback this would yield zero real tools.
+        let loop_ = build_loop(&["shell"]);
+        let cfg = ParadigmConfig::for_paradigm(ParadigmKind::Plan);
+        let defs = loop_.build_tool_definitions_for_paradigm(Some(&cfg)).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"shell"), "shell should be exposed via fallback, got {:?}", names);
+        assert!(!names.contains(&"read_file"));
+    }
+
+    #[tokio::test]
+    async fn paradigm_tool_filter_with_match_scopes_normally() {
+        // When the filter matches, least-privilege scoping is preserved:
+        // edit_file and shell are excluded for the Plan paradigm.
+        let loop_ = build_loop(&["read_file", "edit_file", "shell"]);
+        let cfg = ParadigmConfig::for_paradigm(ParadigmKind::Plan);
+        let defs = loop_.build_tool_definitions_for_paradigm(Some(&cfg)).await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(!names.contains(&"edit_file"));
+        assert!(!names.contains(&"shell"));
+    }
+
+    #[tokio::test]
+    async fn resolve_marker_never_leaks_into_prompt() {
+        // Regression guard for the StateGraph (AgentLoopGraphActionExecutor)
+        // path: a default config prompt containing the marker must be fully
+        // resolved against the registry, and a non-marker prompt must pass
+        // through untouched.
+        let loop_with_coding = build_loop(&["read_file", "shell"]);
+        let tools = loop_with_coding.tools.read().await;
+        let resolved = resolve_tool_preference_marker(
+            &loop_with_coding.config.system_prompt,
+            &tools,
+        );
+        assert!(!resolved.contains("{{TOOL_PREFERENCE_RULES}}"));
+        assert!(resolved.contains("read_file"));
+
+        let custom = "You are a research agent.".to_string();
+        assert_eq!(
+            resolve_tool_preference_marker(&custom, &tools),
+            custom,
+        );
     }
 }
