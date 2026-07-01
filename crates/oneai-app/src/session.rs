@@ -524,6 +524,23 @@ impl AppSession {
                 "No LLM provider configured. Set ONEAI_API_KEY and ONEAI_BASE_URL environment variables.".to_string()
             ))?;
 
+        // Resolve the model's real context window so the token budget and
+        // compression threshold scale with it instead of a hardcoded 100k/80k
+        // (different models have wildly different windows — 8k llama3 to 2M
+        // gemini). Warm the resolver first (L2 provider probe, cached), then
+        // read synchronously. When no resolver/model is available this falls
+        // back to a conservative default. The budget uses 80% of the window
+        // (TokenBudget::from_context_window); the compressor threshold is set
+        // to that same effective budget so the two stay consistent — the
+        // ContextBudgetManager actually gates compression on budget.total, so
+        // the compressor's own threshold must match it.
+        self.warm_model_context().await;
+        let model_ctx_window: u32 = match (&self.app.model_context_resolver, provider.config().model_name.as_deref()) {
+            (Some(resolver), Some(model)) => resolver.resolve_cached(model),
+            _ => 100_000, // legacy default when no resolver is configured
+        };
+        let budget_total = oneai_core::budget::TokenBudget::from_context_window(model_ctx_window).total as usize;
+
         // Snapshot the manually-activated skill (set via `/skill <name>`) for
         // this run — its prompt_template is injected every turn by the loop.
         let active_skill = self.app.active_skill.read().await.clone();
@@ -613,7 +630,7 @@ impl AppSession {
             // tier, so compressed-out information is not lost.
             let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> =
                 Arc::new(oneai_memory::ContextCompressor::with_template(
-                    80000,  // threshold_tokens — trigger compression at 80% of budget
+                    budget_total,  // threshold_tokens — trigger compression at the effective budget (80% of context window)
                     6,      // keep_recent_turns
                     provider.clone(),
                     domain.compression_template.clone(),
@@ -631,7 +648,7 @@ impl AppSession {
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
                 Arc::new(oneai_core::budget::ContextBudgetManager::new(
-                    oneai_core::budget::TokenBudget::new(100000),
+                    oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
                     oneai_core::budget::BudgetAllocation::default(),
                     compressor,
                 )
@@ -687,7 +704,7 @@ impl AppSession {
             ];
             let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> =
                 Arc::new(oneai_memory::ContextCompressor::new(
-                    80000, // threshold_tokens
+                    budget_total, // threshold_tokens — effective budget (80% of context window)
                     6,     // keep_recent_turns
                     provider.clone(),
                 )
@@ -704,7 +721,7 @@ impl AppSession {
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
                 Arc::new(oneai_core::budget::ContextBudgetManager::new(
-                    oneai_core::budget::TokenBudget::new(100000),
+                    oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
                     oneai_core::budget::BudgetAllocation::default(),
                     compressor,
                 )
