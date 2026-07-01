@@ -6,7 +6,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Crates: 24](https://img.shields.io/badge/Crates-24-orange.svg)]()
-[![Tests: 1271](https://img.shields.io/badge/Tests-1271-green.svg)]()
+[![Tests: 1378](https://img.shields.io/badge/Tests-1378-green.svg)]()
 [![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-blue.svg)]()
 
 <p align="center">
@@ -58,7 +58,7 @@ cargo run -p oneai-cli-demo
 # or, after `cargo install --path examples/cli`, just: oneai
 ```
 
-You're dropped into the interactive agent. Type a task and watch the full pipeline run live: streaming thinking bubbles, tool calls, the plan checklist, cost/token accounting, and trajectory trace.
+You're dropped into the interactive agent. Type a task and watch the full pipeline run live: streaming thinking bubbles, tool calls, the plan checklist, token usage accounting, and trajectory trace.
 
 **Interaction modes — cycle with `Shift+Tab`:**
 
@@ -79,7 +79,7 @@ You're dropped into the interactive agent. Type a task and watch the full pipeli
 | Mouse drag | Select & copy text · wheel to scroll |
 | `Esc` | Vim mode / quit |
 
-**In-chat slash commands** (type `/help` for the full list): `/skills` `/skill` `/tools` `/cost` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`.
+**In-chat slash commands** (type `/help` for the full list): `/skills` `/skill` `/tools` `/usage` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`.
 
 ### 3. Non-interactive single-shot
 
@@ -98,7 +98,7 @@ oneai studio                         # launch the Web UI (StateGraph viz + check
 oneai mcp serve                      # run as an MCP server (Claude Code/Cursor compatible)
 oneai provider status                # provider-pool health & fallback log
 oneai route                          # show SmartRouter's last routing decision
-oneai cost report                    # cost/usage/budget report
+oneai usage report                 # token usage report (prompt/completion/total/calls, token-only)
 oneai token --prompt "..."          # count tokens & check context-window fit
 oneai team run code-review           # multi-agent team coordination
 oneai swarm run --task "..."         # swarm orchestration
@@ -118,7 +118,7 @@ use oneai_domain::coding_pack;
 #[tokio::main]
 async fn main() {
     let app = AppBuilder::new()
-        .auto_approval_gate()
+        .noop_interaction_gate()
         .default_parser()
         .domain_pack(coding_pack("/project/dir"))  // ← one-line domain switch
         .build()
@@ -145,7 +145,7 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 - **Type-safe throughout** — sealed enum hierarchies (`#[non_exhaustive]` on every public enum), trait-driven abstractions, no stringly-typed configs.
 - **Domain-pluggable** — the DomainPack system makes domain knowledge declarative, composable, and switchable in one line; packs can be validated against a JSON Schema and shared via a pack market.
 - **Multi-agent native** — SubAgents, Team coordination (Coordinate/Route/Collaborate/Debate), Handoff protocol, and Swarm orchestration with capability-driven routing.
-- **Production-grade infra** — ProviderPool fallback chains, SmartRouter multi-factor routing, cost/usage budgets, rate limiting, circuit breakers, and token-aware context management.
+- **Production-grade infra** — ProviderPool fallback chains, SmartRouter multi-factor routing, token usage tracking, rate limiting, circuit breakers, and token-aware context management.
 - **Cross-platform** — macOS, Windows, Linux, Android, iOS, and HarmonyOS via UniFFI (Kotlin, Swift, C++, C#).
 - **Eval-ready** — built-in OpenInference-compatible trajectory logger plus a dedicated eval framework (6 metrics, 3 suites).
 - **Human-machine collaboration** — approval gates with native UI dialogs for high-risk tool operations; Plan mode gate before execution.
@@ -164,11 +164,11 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 │ agent    │ workflow │ memory   │ tool     │ rag      │ skill        │
 │ AgentLoop│ DAG +    │ STM +    │ Registry │ Document │ Selector     │
 │ +SubAgent│ StateGrph│ LTM +    │ + MCP +  │ Index +  │ + Registry   │
-│ +ReAct   │ Compile→ │ Compress │ Approval │ Embedding│ + Skills     │
+│ +ReAct   │ Compile→ │ Compress │Interact. │ Embedding│ + Skills     │
 │ +Plan    │ Execute   │ +SQLite  │ +12 tools│ Retrieval│              │
 │ +Reflect │          │ persist  │          │          │              │
 ├──────────┴──────────┴──────────┴──────────┴──────────┴──────────────┤
-│ oneai-domain (5-layer DomainPack + market + spec validator)          │
+│ oneai-domain (7-layer DomainPack + market + spec validator)           │
 │ oneai-a2a   oneai-wasm   oneai-eval   oneai-studio   oneai-mcp        │
 │ A2A SDK     Wasmtime     Eval suite   Web UI         MCP server/host │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -180,9 +180,9 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 ├──────────────────────────────────────────────────────────────────────┤
 │                     oneai-core (Foundation)                          │
 │  ContentBlock, Message, Conversation, PermissionLevel, Budget,       │
-│  ContextBudgetManager, PlatformCapabilities, all core traits         │
-│  (LlmProvider, Tool, ApprovalGate, EmbeddingService, CostTracker,   │
-│   RateLimiter, CircuitBreaker, TokenCounter)                         │
+│  ContextBudgetManager, PlatformCapabilities, ModelContextResolver,   │
+│  all core traits (LlmProvider, Tool, InteractionGate, EmbeddingService,│
+│   UsageTracker, RateLimiter, CircuitBreaker, TokenCounter)           │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -193,30 +193,30 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 | Crate | Description | Tests |
 |-------|-------------|-------|
 | `oneai-core` | Core types, traits, PermissionLevel, Budget, PlatformCapabilities | 259 |
-| `oneai-provider` | LLM providers (OpenAI, Anthropic, Gemini, Ollama) + ProviderPool + SmartRouter | 91 |
+| `oneai-provider` | LLM providers (OpenAI, Anthropic, Gemini, Ollama) + ProviderPool + SmartRouter | 95 |
 | `oneai-parser` | 3-layer output parsing defense | 12 |
-| `oneai-memory` | STM, LTM, compression, HNSW, MemoryManager + persistence | 33 |
-| `oneai-tool` | Tool registry, MCP client, approval gates, executor, 12 tools | 55 |
-| `oneai-skill` | Skill selector + registry + built-in domain skills | — |
-| `oneai-domain` | DomainPack system (5-layer), CodingPack, market, spec validator | 102 |
-| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm | 179 |
+| `oneai-memory` | STM, LTM, compression, HNSW, MemoryManager + persistence | 59 |
+| `oneai-tool` | Tool registry, MCP client, InteractionGate, executor, 12 tools | 56 |
+| `oneai-skill` | Skill selector + registry + built-in domain skills | 8 |
+| `oneai-domain` | DomainPack system (7-layer), CodingPack, market, spec validator | 127 |
+| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm | 194 |
 | `oneai-rag` | RAG + EmbeddingService (OpenAI/Anthropic/Voyage/Ollama/FastEmbed) | 61 |
 | `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44 |
 | `oneai-scheduler` | In-memory task scheduling | 6 |
-| `oneai-persistence` | ProgressiveCheckpoint + SQLite (sessions/cost) backends | 39 |
+| `oneai-persistence` | ProgressiveCheckpoint + SQLite (sessions/usage) backends | 40 |
 | `oneai-a2a` | A2A protocol SDK — client + server host + DomainPack→AgentCard | 88 |
 | `oneai-wasm` | WASM sandbox engine — Wasmtime + WasmTool + module registry | 95 |
-| `oneai-eval` | Eval framework — cases, metrics, runner, 3 suites | 59 |
+| `oneai-eval` | Eval framework — cases, metrics, runner, 3 suites + SWE-bench three-axis | 86 |
 | `oneai-studio` | Studio Web UI — axum HTTP+WS + D3.js StateGraph viz + checkpoint time-travel | 34 |
 | `oneai-mcp` | MCP server ecosystem — host + plugin registry + config | 57 |
-| `oneai-app` | Application integration layer (AppBuilder) | 17 |
+| `oneai-app` | Application integration layer (AppBuilder) | 19 |
 | `oneai-trace` | OpenInference-compatible trajectory logger | 14 |
-| `oneai-uniffi` | UniFFI binding definitions for FFI | 20 |
+| `oneai-uniffi` | UniFFI binding definitions for FFI | 18 |
 | `oneai-platform-desktop` | Desktop platform (macOS/Windows/Linux) | 2 |
 | `oneai-platform-android` | Android platform | 2 |
 | `oneai-platform-ios` | iOS platform | 1 |
 | `oneai-platform-harmony` | HarmonyOS platform | 1 |
-| **Total** | | **1271** |
+| **Total** | | **1378** |
 
 ---
 
@@ -224,7 +224,7 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 
 ### Domain Pack System
 
-The DomainPack is OneAI's key architectural innovation — it makes domain knowledge **declarative, pluggable, and composable** instead of hardcoded. A DomainPack encapsulates 5 layers of domain-specific configuration:
+The DomainPack is OneAI's key architectural innovation — it makes domain knowledge **declarative, pluggable, and composable** instead of hardcoded. A DomainPack encapsulates 7 layers of domain-specific configuration:
 
 | Layer | Component | Purpose |
 |-------|-----------|---------|
@@ -233,6 +233,8 @@ The DomainPack is OneAI's key architectural innovation — it makes domain knowl
 | 3 | **PermissionProfile** | Domain-specific permission classification (deny/auto/confirm) |
 | 4 | **ParadigmStrategies** | Domain-specific task → paradigm mapping |
 | 5 | **CompressionTemplate** | Domain-specific context preservation priorities |
+| 6 | **Workflow + StateGraph** | Domain-predefined workflows and cyclic graphs |
+| 7 | **MemoryProfile** | Domain-specific memory policy (extraction schema / recall / core budget / self-managed tools / cross-session habits) |
 
 ```rust
 let app = AppBuilder::new()
@@ -264,7 +266,7 @@ The core execution engine is a **dynamic loop** — not a fixed pipeline. Each i
 | **Delegate** | Model delegates a subtask to a specialized sub-agent |
 | **SwitchParadigm** | Model switches paradigm (Plan/Reflect/Explore) — changes system prompt + tool filter |
 
-Termination is governed by **TokenBudget**, not a hardcoded `max_iterations`. Lifecycle hooks (`PreToolUse`/`PostToolUse`/etc.), interrupt/resume (`CancellationToken`), and structured output are built in.
+Termination is governed by **TokenBudget**, not a hardcoded `max_iterations`. `delegate` / `switch_paradigm` are injected as model-callable meta-tools (`meta_tool.rs`) — the model can actively delegate to a sub-agent or switch paradigm, and `apply_paradigm_switch` + `AgentLoopGraphActionExecutor` inline-upgrade the paradigm (system prompt + tool filter). Lifecycle hooks (`PreToolUse`/`PostToolUse`/etc.), interrupt/resume (`CancellationToken`), and structured output are built in.
 
 ### Agent Paradigms
 
@@ -280,14 +282,14 @@ Paradigms are **model/workflow-driven** — the model calls `switch_paradigm`, o
 
 ### Permission Model
 
-Three-tier permission system: `Read` (auto-approve), `Standard` (policy-dependent), `Full` (requires approval). Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → tool's own `risk_level()`. Approval gates: `BlockingApprovalGate`, `AutoApprovalGate`, `ChannelApprovalGate`, `PlatformApprovalGate` (native NSAlert/AlertDialog/UIController dialogs).
+Three-tier permission system: `Read` (auto-approve), `Standard` (policy-dependent), `Full` (requires approval). Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → tool's own `risk_level()`. Human-machine interaction is guarded by the unified **`InteractionGate`** at 5 decision points: `PreInfer` (rewrite/skip the request before inference), `PostInfer` (validate/replace the response), `ToolApproval` (release high-risk tools, wired to native dialogs), `PlanDecision` (planning tradeoff choice), and `PlanReview` (final plan accept/reject/Revise). Built-in implementations: `NoopInteractionGate` (zero-latency proceed at every point, equivalent to auto-approve), `ChannelInteractionGate` (mpsc+oneshot bridge to a UI thread, configurable per point), `ThresholdInteractionGate` (low-risk tools auto-proceed, the rest go to the channel), and `DenyAllInteractionGate` (deny all). On the platform side, `PlatformInteractionGate` uses native NSAlert/MessageBox/AlertDialog/UIController/CommonDialog for `ToolApproval` on macOS/Windows/Linux/Android/iOS/HarmonyOS. The old `ApprovalGate` / `on_plan_submitted` were removed.
 
 ### LLM Providers & Routing
 
 Built-in providers: **OpenAI, Anthropic, Gemini, Ollama** — all behind the `LlmProvider` trait (`infer` + `infer_stream`). On top of them sit two production layers:
 
 - **ProviderPool** — a fallback chain of providers with per-provider circuit breakers, rate limiters, and degradation rules (e.g. Anthropic→OpenAI→local). Automatic 429/retry handling with `Retry-After` parsing.
-- **SmartRouter** — multi-factor routing (cost / latency / quality / balanced / custom) that scores providers and picks the best for each request, integrating circuit/rate/budget/context constraints. Logs every decision for inspection.
+- **SmartRouter** — multi-factor routing (latency / quality / balanced / custom) that scores providers and picks the best for each request, integrating circuit/rate/context constraints. Logs every decision for inspection.
 
 ```rust
 let app = AppBuilder::new()
@@ -319,19 +321,25 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 | **SubAgent** | Hierarchical delegation to specialized sub-agents (Plan/Explore/Code/Review/Custom), with optional worktree isolation |
 | **Team** | `TeamCoordinator` with 4 strategies — Coordinate, Route, Collaborate, Debate — plus 4 presets (`code_review`, `research_route`, `dev_pipeline`, `arch_debate`) |
 | **Handoff** | `HandoffTool` (handoff-as-tool-call) + `HandoffManager` + 3 presets |
-| **Swarm** | Dynamic agent pool with 4 routing strategies (BestFit/LoadBalanced/CostOptimized/Fastest), task decomposition + quality validation + retry |
+| **Swarm** | Dynamic agent pool with 3 routing strategies (BestFit/LoadBalanced/Fastest), task decomposition + quality validation + retry |
 
 ### Memory System
 
+- **Three-layer memory (Letta-style)** — recall log (`Conversation`) / core (resident, token-budgeted, agent self-managed) / archival (full fact vector store, recalled on demand). `Conversation` is the single source of truth; core holds only curated atomic facts, with no redundant copies.
+- **MemoryProfile (DomainPack layer 7)** — declares the domain-level "extraction schema (what to remember) + recall strategy + core budget + whether to expose self-managed tools + habit-fact types (cross-session)", composable alongside `CompressionTemplate` / `ContextSource`. `CodingPack` / `ResearchPack` ship default profiles.
+- **Compression → archival incremental extraction** — before `ContextCompressor` drops old turns, it uses `FactExtractor` under the domain schema to pull atomic facts, archived via `MemoryFactStore`'s Mem0-style conflict update (same subject+predicate updates instead of appends) — closing the "compression = data loss" hole.
+- **Compression-resistant injection** — `CoreMemorySource` (implements `ContextSource`, `EveryIteration`) re-injects the core block + recall context every iteration, auto-re-injected after compression.
+- **Self-managed memory tools (domain opt-in)** — `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent actively curate memory → "the more it's used, the better it gets."
+- **Dual namespace + persistence** — `user_id` (cross-session habits) + `session_id` (this session's episodic); a unified `memories` table persists, `oneai memory search/list --user`. The `--user` flag namespaces cross-session memory.
 - **Short-term memory** — sliding window with automatic eviction to long-term.
 - **Long-term memory** — HNSW-like vector store + content store + hybrid scoring; **auto-embeds** entries via the configured `EmbeddingService`.
 - **STM↔LTM closed loop** — `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`.
 - **Context compression** — summarization past threshold, keeping recent turns; `ContextBudgetManager` allocates per-iteration budget proportionally.
-- **Persistence** — `SqliteSessionStore` persists conversations / STM / LTM; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`.
+- **Persistence** — `SqliteSessionStore` persists sessions / LTM / facts; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`, `oneai memory search <kw> --user <id> / list --user <id>`.
 
-### Cost, Usage & Reliability
+### Usage & Reliability
 
-- **CostTracker** (`InMemory` + `Sqlite`) with a `ModelPricingCatalog` (25+ models) — `oneai cost report / budget / models / export`.
+- **Token-only usage tracking** — `UsageTracker` trait + `UsageRecord`, with `InMemoryUsageTracker` and the persistent `SqliteUsageTracker` (`oneai-persistence`). After each inference the AgentLoop records prompt/completion/total tokens and call count — **no USD amounts or budgets are tracked** (USD cost/budget management was removed) — `oneai usage report / session <id> / export`.
 - **RateLimiter** (`TokenWindowRateLimiter`) + **CircuitBreaker** (`ThresholdCircuitBreaker`, Closed/Open/HalfOpen) — enforced inside the AgentLoop.
 - **Token counting** — `HeuristicTokenCounter` (per-provider, CJK-aware) + `ContextWindowProfile` + 4 trimming strategies + fit checks — `oneai token`.
 
@@ -352,7 +360,7 @@ LLM outputs are defended in three layers: constrained decoding → fuzzy JSON re
 
 - **A2A** (`oneai-a2a`) — Agent-to-Agent protocol SDK: client + axum JSON-RPC server host + DomainPack→AgentCard auto-exposure. `oneai a2a serve / discover / list / send`.
 - **WASM** (`oneai-wasm`) — Wasmtime sandbox for untrusted code: `WasmTool`, `WasmModuleRegistry`, resource monitoring, WASI-restricted access, Native↔Wasm execution modes. `oneai wasm list / load / run / health / stats`.
-- **Eval** (`oneai-eval`) — `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 builtin metrics + 3 suites. `oneai eval run <suite>` / `eval score`.
+- **Eval** (`oneai-eval`) — `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 builtin metrics + 3 suites. `oneai eval run <suite>` / `eval score`. Also includes a **SWE-bench three-axis eval** (capability × usage × efficiency) — see [the dedicated section below](#swe-bench-eval-capability--usage--efficiency-three-axis).
 - **Studio** (`oneai-studio`) — axum HTTP+WebSocket server, REST API, live event push, D3.js SVG StateGraph visualization, and checkpoint time-travel. `oneai studio`.
 - **MCP ecosystem** (`oneai-mcp`) — `McpServerHost` (JSON-RPC server) + `McpPluginRegistry` (discovery/config/connect) + TOML config + stdio transport. `oneai mcp serve / list / add / remove / connect`.
 
@@ -369,9 +377,102 @@ println!("Success rate: {:.1}%", tree.metrics.success_rate * 100.0);
 
 ---
 
+## SWE-bench Eval (Capability × Usage × Efficiency Three-Axis)
+
+OneAI runs [SWE-bench Lite](https://www.swebench.com/) (300 instances) as its coding-agent benchmark, collecting three axes: **capability (resolved) × usage × efficiency**:
+
+- **Capability axis** ← the external SWE-bench harness verdict (`resolved` true/false), obtained by `SwebenchJudge` spawning a Python subprocess.
+- **Usage axis** ← `UsageTracker.session_usage()` (api_calls + prompt/completion/total token breakdown, token-only — no USD).
+- **Efficiency axis** ← `TraceMetrics` (total_tokens / tool_call_count / avg_iterations) + per-phase wall-clock breakdown.
+
+Per instance: `git clone <repo>` → `git checkout <base_commit>` → drive the agent with the `problem_statement` (CodingPack provides read_file/edit_file/grep/glob/shell) → `git diff` to collect the patch → external harness judges `resolved`; all three axes are written into the `EvalResult`.
+
+### Prerequisites
+
+```bash
+# 1) Create a venv and install datasets + swebench + modal (one venv does double duty: data export + judging)
+#    Homebrew Python on macOS is PEP-668-locked and can't install system-wide; you must use a venv
+python3 -m venv ~/.venvs/swebench
+~/.venvs/swebench/bin/pip install datasets swebench modal httpx[socks]
+~/.venvs/swebench/bin/modal token new        # log in to Modal
+
+# 2) Use that venv's python to export the dataset JSONL locally (the Rust side does no HF networking)
+~/.venvs/swebench/bin/python scripts/swebench/export_dataset.py
+# → produces swe_bench_lite.jsonl (300 lines)
+
+# 3) LLM provider (the agent really calls the API = real money)
+export ONEAI_API_KEY=sk-...
+```
+
+> Verified (500 instances) is also available: `export_dataset.py --dataset princeton-nlp/SWE-bench_Verified --out swe_bench_verified.jsonl`.
+> `scripts/swebench/` also has `fetch_instance.py` (pull a single instance's metadata) and `make_prediction.py` (manual git diff → JSONL) — the stage-1 manual path, superseded by the CLI command below in stage 2.
+> The judge looks for `~/.venvs/swebench/bin/python` (the venv above) by default; override with `--python <path>`.
+
+### Test a single instance (smoke-test the loop first)
+
+```bash
+cargo run -p oneai-cli-demo -- eval swebench \
+    --dataset ./swe_bench_lite.jsonl \
+    --instances astropy__astropy-12907 \
+    --workspace ./swebench-workspace \
+    --run-id oneai-smoke
+```
+
+### Test a batch of instances
+
+```bash
+# Limit to N (takes the first N from the dataset, to avoid burning too much API at once)
+cargo run -p oneai-cli-demo -- eval swebench \
+    --dataset ./swe_bench_lite.jsonl \
+    --limit 10 \
+    --workspace ./swebench-workspace \
+    --run-id oneai-batch
+
+# Or specify multiple instance ids
+cargo run -p oneai-cli-demo -- eval swebench \
+    --dataset ./swe_bench_lite.jsonl \
+    --instances astropy__astropy-12907,django__django-11099 \
+    --workspace ./swebench-workspace \
+    --run-id oneai-batch
+```
+
+### Test all 300 instances
+
+```bash
+cargo run -p oneai-cli-demo -- eval swebench \
+    --dataset ./swe_bench_lite.jsonl \
+    --workspace ./swebench-workspace \
+    --run-id oneai-full-$(date +%Y%m%d) \
+    --format json
+```
+
+> The full 300 instances really clones 300 repos and runs 300 agent rounds — non-trivial API cost and time. Smoke-test a single instance before going batch.
+
+### Artifacts & options
+
+Each run produces under `--workspace`:
+
+| File | Contents |
+|---|---|
+| `predictions.jsonl` | the agent's patch (re-runnable / submittable to the harness) |
+| `leaderboard.json` | swebench.com submission schema: `instance_calls` / `resolved_count` / `total_instances` / `resolution_rate` / `per_instance:[{instance_id, api_calls, resolved}]` (USD cost fields were removed; the comparable quantity is `api_calls`) |
+| `evaluation_results/<run_id>/` | the swebench harness's own judgment detail |
+
+stdout reports in these formats:
+
+| `--format` | Output |
+|---|---|
+| `markdown` (default) | human-readable report (per-instance capability/usage/efficiency three-axis) |
+| `json` | full `EvalReport` JSON |
+| `compact` | a CI-friendly one-line summary |
+
+Common options: `--python <path>` selects the judge interpreter (default `~/.venvs/swebench/bin/python`); `--modal false` switches to local docker (on Apple Silicon use `--namespace ''`, slow); `--dataset-name princeton-nlp/SWE-bench_Lite` is forwarded to the harness; `--run-id` controls the `evaluation_results/` subdirectory name.
+
+---
+
 ## Cross-Platform Support
 
-| Platform | Binding Language | Approval Gate | PlatformCapabilities |
+| Platform | Binding Language | Interaction Gate | PlatformCapabilities |
 |----------|-----------------|---------------|----------------------|
 | macOS / Windows / Linux | C++ / C# | NSAlert / MessageBox | Screenshot, FilesystemSandbox, Notifications |
 | Android | Kotlin | AlertDialog | Camera, Screenshot, Network |
@@ -391,12 +492,12 @@ oneai/
 │   ├── oneai-memory/         # STM, LTM, compression, HNSW, MemoryManager + persistence
 │   ├── oneai-tool/          # Registry, 12 tools, MCP client, approval, executor
 │   ├── oneai-skill/         # Skill registry + selector + built-in domain skills
-│   ├── oneai-domain/        # DomainPack (5-layer), CodingPack, market, spec validator
+│   ├── oneai-domain/        # DomainPack (7-layer), CodingPack, market, spec validator
 │   ├── oneai-agent/         # AgentLoop, SubAgent, paradigms, Team/Handoff/Swarm, StreamParser
 │   ├── oneai-rag/           # Document, index, EmbeddingService, retrieval
 │   ├── oneai-workflow/      # DAG, StateGraph, compiler, validator, executor
 │   ├── oneai-scheduler/     # InMemoryScheduler
-│   ├── oneai-persistence/   # Checkpoint + SQLite session/cost backends
+│   ├── oneai-persistence/   # Checkpoint + SQLite session/usage backends
 │   ├── oneai-a2a/           # A2A protocol SDK (client + server host)
 │   ├── oneai-wasm/          # Wasmtime sandbox + WasmTool + module registry
 │   ├── oneai-eval/          # Eval cases, metrics, runner, suites
@@ -423,7 +524,7 @@ oneai/
 
 ```bash
 cargo build                      # build the whole workspace
-cargo test                       # all 1271 tests across 24 crates
+cargo test                       # all 1378 tests across 24 crates
 cargo test -p oneai-agent        # tests for a single crate
 cargo test -p oneai-agent plan   # a single test/module within a crate
 cargo clippy --workspace --all-targets   # keep lints clean
@@ -450,7 +551,7 @@ The workspace uses `resolver = "2"`, `edition = "2021"`, shared version `0.2.0` 
 | P3-6 | MCP server ecosystem | ✅ Complete |
 | P4-1/2 | A2A server host + MCP client enhancement | ✅ Complete |
 | P4-3/4 | DomainPack spec validator + WASM runtime enhancement | ✅ Complete |
-| P5-1/2/3 | SQLite persistence + embedding service + cost/usage management | ✅ Complete |
+| P5-1/2/3 | SQLite persistence + embedding service + usage (token) management | ✅ Complete |
 | P6-1/2/3 | ProviderPool + SmartRouter + token counting/context management | ✅ Complete |
 | P7-1/2/3 | Team coordination + Handoff protocol + Swarm orchestration | ✅ Complete |
 | TUI | Tool display, Plan mode gate, skill disclosure, scroll perf, mouse selection | ✅ Complete |
