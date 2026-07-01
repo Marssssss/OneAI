@@ -456,6 +456,15 @@ impl LlmProvider for OpenAIProvider {
             let mut total_tool_calls: usize = 0;
             let mut total_events_processed: usize = 0;
             let mut total_events_skipped_json: usize = 0;
+            // Per-index tool-call state: (id, name). OpenAI distinguishes
+            // parallel tool calls by `index`, and emits the `id`/`name` only on
+            // the first chunk for each index — subsequent chunks carry just
+            // `index` + an `arguments` fragment. We remember the id/name per
+            // index so each fragment can be emitted with its full `id`, letting
+            // the downstream parser route by id (correct for interleaved calls)
+            // instead of by a single "current" pointer (which misroutes) or by
+            // `id.is_empty()` (which breaks providers that echo id per chunk).
+            let mut tool_call_index: HashMap<u32, (String, String)> = HashMap::new();
 
             while let Some(event) = stream.next().await {
                 match event {
@@ -534,16 +543,19 @@ impl LlmProvider for OpenAIProvider {
                                     content_blocks.push(ContentBlock::Thinking { text: reasoning.to_string() });
                                 }
 
-                                // Parse tool calls from stream delta
+                                // Parse tool calls from stream delta. The
+                                // index→id translation lives in
+                                // `translate_tool_call_delta` (unit-tested
+                                // separately); this loop just applies it and
+                                // counts new tool calls for the diagnostic
+                                // summary.
                                 if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
                                     for tc in tool_calls {
-                                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let func = tc.get("function").unwrap_or(&Value::Null);
-                                        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        if !name.is_empty() || !args.is_empty() {
-                                            total_tool_calls += 1;
-                                            content_blocks.push(ContentBlock::ToolCall { id, name, args });
+                                        if let Some(block) = translate_tool_call_delta(tc, &mut tool_call_index) {
+                                            if matches!(block, ContentBlock::ToolCall { ref name, .. } if !name.is_empty()) {
+                                                total_tool_calls += 1;
+                                            }
+                                            content_blocks.push(block);
                                         }
                                     }
                                 }
@@ -658,6 +670,63 @@ impl LlmProvider for OpenAIProvider {
     /// valid JSON reliably. We detect "local" by the endpoint's host.
     fn prefers_constrained_output(&self) -> bool {
         is_local_endpoint(&self.config.resolved_url())
+    }
+}
+
+/// Translate one streamed `tool_calls` delta entry into a `ContentBlock`.
+///
+/// OpenAI streaming tool_calls carry an `index` field identifying which
+/// parallel call a chunk belongs to; `id` and `function.name` appear only on
+/// the first chunk per index, while `function.arguments` fragments stream
+/// across many chunks (and may interleave between indices). We remember
+/// `(id, name)` per `index` and re-emit every fragment with its **full id**
+/// so the downstream parser (`IncrementalStreamParser`) can route by id —
+/// correct for interleaved parallel calls — rather than by a single "current"
+/// pointer (which misroutes) or by `id.is_empty()` (which breaks providers
+/// that echo id on every chunk).
+///
+/// Returns `None` for chunks with no actionable payload (id/name echo only).
+fn translate_tool_call_delta(
+    tc: &Value,
+    index_state: &mut HashMap<u32, (String, String)>,
+) -> Option<ContentBlock> {
+    let index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let func = tc.get("function").unwrap_or(&Value::Null);
+    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // Remember id/name for this index (first chunk carries them; later
+    // chunks omit them).
+    let entry = index_state
+        .entry(index)
+        .or_insert_with(|| (String::new(), String::new()));
+    if !id.is_empty() { entry.0 = id.clone(); }
+    if !name.is_empty() { entry.1 = name.clone(); }
+    let known_id = entry.0.clone();
+    let known_name = entry.1.clone();
+
+    if !known_name.is_empty() && !name.is_empty() {
+        // First chunk for this index — emit intent (id + name, possibly with
+        // an initial args fragment).
+        Some(ContentBlock::ToolCall {
+            id: known_id,
+            name: known_name,
+            args,
+        })
+    } else if !args.is_empty() {
+        // Arguments continuation fragment. Echo the known id (empty name) so
+        // the parser routes by id — this is the fix for interleaved parallel
+        // calls and for providers that echo id per chunk.
+        Some(ContentBlock::ToolCall {
+            id: known_id,
+            name: String::new(),
+            args,
+        })
+    } else {
+        // id/name echo with no payload — nothing to emit; the parser ignores
+        // id-only chunks.
+        None
     }
 }
 
@@ -1115,6 +1184,93 @@ mod tests {
         }
 
         assert!(body.get("stream_options").is_some());
+    }
+}
+
+/// Tests for the streaming tool-call index→id translation
+/// (`translate_tool_call_delta`), which is the core of the fix for
+/// interleaved parallel tool calls and per-chunk id echoes.
+#[cfg(test)]
+mod tool_call_stream_tests {
+    use super::*;
+    use oneai_core::ContentBlock;
+
+    fn tc_delta(index: u64, id: &str, name: &str, args: &str) -> Value {
+        let mut v = serde_json::json!({ "index": index, "function": {} });
+        if !id.is_empty() { v["id"] = Value::String(id.to_string()); }
+        if !name.is_empty() { v["function"]["name"] = Value::String(name.to_string()); }
+        if !args.is_empty() { v["function"]["arguments"] = Value::String(args.to_string()); }
+        v
+    }
+
+    fn extract(b: ContentBlock) -> (String, String, String) {
+        match b {
+            ContentBlock::ToolCall { id, name, args } => (id, name, args),
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn first_chunk_emits_intent_with_name() {
+        let mut state = HashMap::new();
+        let block = translate_tool_call_delta(&tc_delta(0, "call_A", "read_file", ""), &mut state).unwrap();
+        let (id, name, args) = extract(block);
+        assert_eq!((id.as_str(), name.as_str(), args.as_str()), ("call_A", "read_file", ""));
+        assert_eq!(state.get(&0), Some(&("call_A".to_string(), "read_file".to_string())));
+    }
+
+    #[test]
+    fn continuation_fragment_echoes_known_id_empty_name() {
+        let mut state = HashMap::new();
+        translate_tool_call_delta(&tc_delta(0, "call_A", "read_file", ""), &mut state);
+        // Subsequent fragment: index only, no id, no name, just args.
+        let block = translate_tool_call_delta(&tc_delta(0, "", "", "{\"path\""), &mut state).unwrap();
+        let (id, name, args) = extract(block);
+        assert_eq!((id.as_str(), name.as_str()), ("call_A", ""));
+        assert_eq!(args, "{\"path\"");
+    }
+
+    #[test]
+    fn interleaved_parallel_calls_keep_separate_ids() {
+        // Reproduces bug (a): two parallel calls with interleaved arg fragments.
+        let mut state = HashMap::new();
+        // index 0: A intent
+        let a0 = translate_tool_call_delta(&tc_delta(0, "A", "read_file", ""), &mut state).unwrap();
+        // index 1: B intent
+        let b0 = translate_tool_call_delta(&tc_delta(1, "B", "grep", ""), &mut state).unwrap();
+        // index 0: A arg fragment
+        let a1 = translate_tool_call_delta(&tc_delta(0, "", "", "{\"pat"), &mut state).unwrap();
+        // index 1: B arg fragment
+        let b1 = translate_tool_call_delta(&tc_delta(1, "", "", "\"key\""), &mut state).unwrap();
+        // index 0: A arg fragment
+        let a2 = translate_tool_call_delta(&tc_delta(0, "", "", "h\":\"x\"}"), &mut state).unwrap();
+
+        assert_eq!(extract(a0).0, "A");
+        assert_eq!(extract(b0).0, "B");
+        assert_eq!(extract(a1), ("A".to_string(), String::new(), "{\"pat".to_string()));
+        assert_eq!(extract(b1), ("B".to_string(), String::new(), "\"key\"".to_string()));
+        assert_eq!(extract(a2), ("A".to_string(), String::new(), "h\":\"x\"}".to_string()));
+    }
+
+    #[test]
+    fn id_only_echo_chunk_emits_nothing() {
+        // A chunk that carries only an id (no name, no args) has no
+        // actionable payload — must emit None so the parser isn't confused.
+        let mut state = HashMap::new();
+        translate_tool_call_delta(&tc_delta(0, "call_A", "read_file", ""), &mut state);
+        let block = translate_tool_call_delta(&tc_delta(0, "call_A", "", ""), &mut state);
+        assert!(block.is_none());
+    }
+
+    #[test]
+    fn missing_index_defaults_to_zero() {
+        // Some non-parallel providers omit `index` entirely — default to 0
+        // so a single sequential tool call still routes correctly.
+        let mut state = HashMap::new();
+        let v = serde_json::json!({ "id": "call_1", "function": { "name": "env", "arguments": "" } });
+        let block = translate_tool_call_delta(&v, &mut state).unwrap();
+        assert_eq!(extract(block).0, "call_1");
+        assert!(state.contains_key(&0));
     }
 }
 

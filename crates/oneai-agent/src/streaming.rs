@@ -175,46 +175,84 @@ impl IncrementalStreamParser {
                     self.emit_event(event);
                 }
                 ContentBlock::ToolCall { id, name, args } => {
-                    // New tool call detected (has an ID)
-                    if !id.is_empty() && !name.is_empty() {
-                        // Finalize any previous tool call
-                        if let Some(prev_id) = self.current_tool_call_id.take() {
-                            if let Some(builder) = self.tool_call_builders.get_mut(&prev_id) {
-                                let event = StreamEvent::ToolCallComplete {
-                                    call_id: builder.id.clone(),
-                                    tool_name: builder.name.clone(),
-                                    args: builder.args_buffer.clone(),
-                                };
-                                events.push(event.clone());
-                                self.emit_event(event);
-                            }
-                        }
-
-                        // Start new tool call
+                    // ─── Routing contract ────────────────────────────────────
+                    // OpenAI streams parallel tool calls distinguished by `index`,
+                    // with argument fragments that interleave across calls. The
+                    // provider (openai.rs) translates `index → id` and echoes the
+                    // full `id` on every fragment, so we route by `id` here — NOT
+                    // by a single "current" pointer (which misroutes interleaved
+                    // fragments) and NOT by `id.is_empty()` (which breaks providers
+                    // that echo `id` on every chunk).
+                    //
+                    //   • name non-empty            → new tool call (intent)
+                    //   • name empty, args non-empty → arg fragment; route by id
+                    //     (fall back to current only if id is absent)
+                    //   • id only, no name/args      → no payload; ignore
+                    if !name.is_empty() {
+                        // New tool call. Parallel calls coexist — do NOT finalize
+                        // the previous builder here; all pending builders are
+                        // completed together at is_final. If a builder with this
+                        // id already exists (e.g. Anthropic content_block_stop
+                        // re-emits id+name+full-args), overwrite it with the
+                        // now-complete args.
                         let builder = ToolCallBuilder {
                             id: id.clone(),
                             name: name.clone(),
                             args_buffer: if !args.is_empty() { args.clone() } else { String::new() },
                             name_complete: true,
                         };
+                        let is_new = !self.tool_call_builders.contains_key(id);
                         self.tool_call_builders.insert(id.clone(), builder);
                         self.current_tool_call_id = Some(id.clone());
 
-                        // Emit intent detection immediately
-                        let event = StreamEvent::ToolIntentDetected {
-                            call_id: id.clone(),
-                            tool_name: name.clone(),
+                        // Emit intent detection only for genuinely new calls,
+                        // not for re-emissions of an already-known id.
+                        if is_new {
+                            let event = StreamEvent::ToolIntentDetected {
+                                call_id: id.clone(),
+                                tool_name: name.clone(),
+                            };
+                            events.push(event.clone());
+                            self.emit_event(event);
+                        }
+                    } else if !args.is_empty() {
+                        // Argument continuation fragment.
+                        let target_id = if !id.is_empty() {
+                            Some(id.clone())
+                        } else {
+                            self.current_tool_call_id.clone()
                         };
-                        events.push(event.clone());
-                        self.emit_event(event);
-                    }
-                    // Argument continuation (empty id, non-empty args)
-                    else if id.is_empty() && !args.is_empty() {
-                        if let Some(current_id) = &self.current_tool_call_id {
-                            if let Some(builder) = self.tool_call_builders.get_mut(current_id) {
-                                builder.args_buffer.push_str(args);
+                        match target_id {
+                            Some(tid) => {
+                                if let Some(builder) = self.tool_call_builders.get_mut(&tid) {
+                                    builder.args_buffer.push_str(args);
+                                } else {
+                                    // No builder for this id — the model streamed an
+                                    // arg fragment without a preceding intent chunk.
+                                    // Log it (observability parity with openai.rs's
+                                    // JSON-parse warn) rather than silently dropping.
+                                    tracing::warn!(
+                                        "tool-call arg fragment with no matching builder \
+                                         (id={:?}, current={:?}); fragment dropped",
+                                        id, self.current_tool_call_id
+                                    );
+                                }
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "tool-call arg fragment with no routable id \
+                                     (no id on chunk and no current tool call); \
+                                     fragment dropped"
+                                );
                             }
                         }
+                    } else if !id.is_empty() {
+                        // id-only echo with no name/args payload — nothing
+                        // actionable. Debug-log for completeness.
+                        tracing::debug!(
+                            "tool-call chunk with id only, no name/args (ignored): id={:?}",
+                            id
+                        );
                     }
                 }
                 ContentBlock::Thinking { text } => {
@@ -315,17 +353,23 @@ impl IncrementalStreamParser {
     /// Emit completion events for the end of streaming WITHOUT clearing buffers.
     ///
     /// This is used in process_chunk() when is_final=true. It emits
-    /// ToolCallComplete events for any pending tool calls and a
-    /// StreamComplete event, but does NOT call finalize() (which would
-    /// clear the text/thinking/tool buffers). The actual buffer clearing
-    /// happens in the finalize() call from run_streaming_iteration_async,
-    /// ensuring buffers are only cleared once.
+    /// `ToolCallComplete` for **every** pending tool-call builder (parallel
+    /// calls coexist — we must complete all of them, not just the last one
+    /// pointed at by `current_tool_call_id`) and a `StreamComplete` event,
+    /// but does NOT call finalize() (which would clear the text/thinking/tool
+    /// buffers). The actual buffer clearing happens in the finalize() call
+    /// from run_streaming_iteration_async, ensuring buffers are only cleared
+    /// once.
     fn emit_completion_events(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
-        // Complete any pending tool call (without clearing tool_call_builders)
-        if let Some(current_id) = self.current_tool_call_id.take() {
-            if let Some(builder) = self.tool_call_builders.get(&current_id) {
+        // Complete every pending tool call (parallel calls coexist).
+        // Iterate over a snapshot of the ids because emit_event may take a
+        // &self callback while we hold &mut self — collect first, then look up.
+        self.current_tool_call_id = None;
+        let ids: Vec<String> = self.tool_call_builders.keys().cloned().collect();
+        for tid in ids {
+            if let Some(builder) = self.tool_call_builders.get(&tid) {
                 let event = StreamEvent::ToolCallComplete {
                     call_id: builder.id.clone(),
                     tool_name: builder.name.clone(),
@@ -369,5 +413,167 @@ impl IncrementalStreamParser {
 impl Default for IncrementalStreamParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oneai_core::{ContentBlock, InferenceStreamChunk};
+
+    fn tc(id: &str, name: &str, args: &str) -> ContentBlock {
+        ContentBlock::ToolCall { id: id.to_string(), name: name.to_string(), args: args.to_string() }
+    }
+
+    fn chunk(blocks: Vec<ContentBlock>, is_final: bool) -> InferenceStreamChunk {
+        InferenceStreamChunk { content: blocks, is_final, usage: None, model: None }
+    }
+
+    /// Collect the tool calls assembled by a sequence of chunks.
+    fn assemble(chunks: Vec<InferenceStreamChunk>) -> Vec<(String, String, String)> {
+        let mut parser = IncrementalStreamParser::new();
+        let mut events_all = Vec::new();
+        for c in chunks {
+            events_all.extend(parser.process_chunk(c));
+        }
+        // finalize() returns the assembled content blocks
+        let blocks = parser.finalize();
+        blocks.into_iter().filter_map(|b| match b {
+            ContentBlock::ToolCall { id, name, args } => Some((id, name, args)),
+            _ => None,
+        }).collect()
+    }
+
+    /// Collect ToolCallComplete events (id, name, args) in order.
+    fn complete_events(chunks: Vec<InferenceStreamChunk>) -> Vec<(String, String, String)> {
+        let mut parser = IncrementalStreamParser::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            for e in parser.process_chunk(c) {
+                if let StreamEvent::ToolCallComplete { call_id, tool_name, args } = e {
+                    out.push((call_id, tool_name, args));
+                }
+            }
+        }
+        out
+    }
+
+    /// Regression for bug (a): interleaved parallel tool calls must NOT
+    /// concatenate args. The provider echoes the full `id` on every fragment
+    /// (the new openai.rs contract), so the parser routes by id.
+    #[test]
+    fn parallel_interleaved_tool_calls_route_by_id() {
+        let chunks = vec![
+            chunk(vec![tc("A", "read_file", "")], false),
+            chunk(vec![tc("B", "grep", "")], false),
+            chunk(vec![tc("A", "", "{\"pat")], false),
+            chunk(vec![tc("B", "", "\"key\"")], false),
+            chunk(vec![tc("A", "", "h\":\"x\"}")], false),
+            chunk(vec![], true),
+        ];
+        let assembled = assemble(chunks);
+        assert_eq!(assembled.len(), 2);
+        let a = assembled.iter().find(|(id, _, _)| id == "A").unwrap();
+        let b = assembled.iter().find(|(id, _, _)| id == "B").unwrap();
+        assert_eq!(a.1, "read_file");
+        assert_eq!(a.2, "{\"path\":\"x\"}");
+        assert_eq!(b.1, "grep");
+        assert_eq!(b.2, "\"key\"");
+    }
+
+    /// Both parallel tool calls must fire a ToolCallComplete event at is_final
+    /// (previously only the last `current` was completed).
+    #[test]
+    fn parallel_tool_calls_both_complete_events_fire() {
+        let chunks = vec![
+            chunk(vec![tc("A", "read_file", "")], false),
+            chunk(vec![tc("B", "grep", "")], false),
+            chunk(vec![tc("A", "", "{}")], false),
+            chunk(vec![tc("B", "", "{}")], false),
+            chunk(vec![], true),
+        ];
+        let evts = complete_events(chunks);
+        assert_eq!(evts.len(), 2, "both parallel calls should complete");
+        assert!(evts.iter().any(|(id, _, _)| id == "A"));
+        assert!(evts.iter().any(|(id, _, _)| id == "B"));
+    }
+
+    /// Regression for bug (b): a provider that echoes the full `id` on every
+    /// continuation chunk (id non-empty, name empty, args fragment). The old
+    /// parser dropped these silently; the new parser routes by id.
+    #[test]
+    fn provider_echoes_id_on_every_fragment() {
+        let chunks = vec![
+            chunk(vec![tc("call_1", "environment", "")], false),
+            chunk(vec![tc("call_1", "", "{\"info")], false),
+            chunk(vec![tc("call_1", "", "_type\":\"all\"}")], false),
+            chunk(vec![], true),
+        ];
+        let assembled = assemble(chunks);
+        assert_eq!(assembled.len(), 1);
+        assert_eq!(assembled[0].0, "call_1");
+        assert_eq!(assembled[0].1, "environment");
+        assert_eq!(assembled[0].2, "{\"info_type\":\"all\"}");
+    }
+
+    /// The legacy OpenAI contract (id empty on fragments) must still work via
+    /// the `current` fallback for providers that don't echo id.
+    #[test]
+    fn legacy_empty_id_fragments_route_via_current() {
+        let chunks = vec![
+            chunk(vec![tc("call_1", "environment", "")], false),
+            chunk(vec![tc("", "", "{\"info")], false),
+            chunk(vec![tc("", "", "_type\":\"all\"}")], false),
+            chunk(vec![], true),
+        ];
+        let assembled = assemble(chunks);
+        assert_eq!(assembled.len(), 1);
+        assert_eq!(assembled[0].0, "call_1");
+        assert_eq!(assembled[0].2, "{\"info_type\":\"all\"}");
+    }
+
+    /// Anthropic contract: id+name+full-args emitted once at content_block_stop,
+    /// no arg fragments. Must still assemble correctly and not double-fire intent.
+    #[test]
+    fn anthropic_style_single_complete_chunk() {
+        let chunks = vec![
+            // content_block_start: id+name, empty args
+            chunk(vec![tc("call_1", "environment", "")], false),
+            // content_block_stop: id+name+full args (name re-emitted)
+            chunk(vec![tc("call_1", "environment", "{\"info_type\":\"all\"}")], false),
+            chunk(vec![], true),
+        ];
+        let assembled = assemble(chunks);
+        assert_eq!(assembled.len(), 1);
+        assert_eq!(assembled[0].2, "{\"info_type\":\"all\"}");
+
+        // Intent should fire exactly once (the re-emission with the same id
+        // is not a new call).
+        let mut parser = IncrementalStreamParser::new();
+        let mut intent = 0;
+        for c in [
+            chunk(vec![tc("call_1", "environment", "")], false),
+            chunk(vec![tc("call_1", "environment", "{}")], false),
+            chunk(vec![], true),
+        ] {
+            for e in parser.process_chunk(c) {
+                if matches!(e, StreamEvent::ToolIntentDetected { .. }) { intent += 1; }
+            }
+        }
+        assert_eq!(intent, 1, "intent should fire once per unique id");
+    }
+
+    /// First-chunk may carry an initial args fragment alongside the name.
+    #[test]
+    fn first_chunk_with_initial_args_fragment() {
+        let chunks = vec![
+            chunk(vec![tc("call_1", "environment", "{\"info")], false),
+            chunk(vec![tc("call_1", "", "_type\":\"all\"}")], false),
+            chunk(vec![], true),
+        ];
+        let assembled = assemble(chunks);
+        assert_eq!(assembled[0].2, "{\"info_type\":\"all\"}");
     }
 }
