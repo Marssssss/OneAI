@@ -160,7 +160,6 @@ async fn e2e_scenario_1_direct_answer() {
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -189,7 +188,6 @@ async fn e2e_scenario_2_single_tool_call() {
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -225,7 +223,6 @@ async fn e2e_scenario_3_multi_tool_calls() {
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file), Arc::new(edit_file)], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -256,7 +253,6 @@ async fn e2e_scenario_4_paradigm_switch() {
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -350,7 +346,6 @@ async fn e2e_scenario_5_sub_agent_delegation() {
         AgentLoopConfig {
             auto_checkpoint: false,
             inject_skills: false,
-            detect_env_changes: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()
@@ -409,7 +404,6 @@ async fn e2e_scenario_6_approval_deny() {
         AgentLoopConfig {
             auto_checkpoint: false,
             inject_skills: false,
-            detect_env_changes: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()
@@ -442,7 +436,6 @@ async fn e2e_scenario_7_streaming() {
         use_streaming: true,
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -504,7 +497,6 @@ async fn e2e_scenario_8_error_recovery() {
         AgentLoopConfig {
             auto_checkpoint: false,
             inject_skills: false,
-            detect_env_changes: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()
@@ -541,7 +533,6 @@ async fn e2e_thinking_then_answer() {
         use_streaming: false,
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -568,7 +559,6 @@ async fn e2e_streaming_thinking() {
         use_streaming: true,
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -630,7 +620,6 @@ async fn e2e_hooks_pre_tool_use_deny() {
         AgentLoopConfig {
             auto_checkpoint: false,
             inject_skills: false,
-            detect_env_changes: false,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()
         },
@@ -667,7 +656,6 @@ async fn e2e_hooks_audit_log() {
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
     });
@@ -700,7 +688,6 @@ async fn e2e_interrupt_resume() {
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
     });
@@ -729,7 +716,6 @@ async fn e2e_interrupt_resume() {
     let new_agent_loop = build_test_agent_loop(new_provider, vec![], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
     });
@@ -765,7 +751,6 @@ async fn e2e_structured_output_valid() {
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         structured_output: Some(StructuredOutputConfig {
             schema: serde_json::json!({
                 "type": "object",
@@ -802,7 +787,6 @@ async fn e2e_structured_output_invalid_then_valid() {
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         structured_output: Some(StructuredOutputConfig {
             schema: serde_json::json!({
                 "type": "object",
@@ -838,7 +822,6 @@ async fn e2e_structured_output_max_retries_exhausted() {
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         structured_output: Some(StructuredOutputConfig {
             schema: serde_json::json!({"type": "object", "required": ["answer"]}),
             max_retries: 1, // Only one retry attempt
@@ -987,7 +970,6 @@ async fn e2e_scenario_11_state_graph_react_loop() {
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         auto_checkpoint: false,
         inject_skills: false,
-        detect_env_changes: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -1330,7 +1312,6 @@ fn build_plan_mode_loop(
             use_streaming: false,
             auto_checkpoint: false,
             inject_skills: false,
-            detect_env_changes: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()
@@ -1454,7 +1435,6 @@ fn build_meta_tool_loop(
             use_streaming: false,
             auto_checkpoint: false,
             inject_skills: false,
-            detect_env_changes: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()
@@ -1533,7 +1513,6 @@ async fn e2e_meta_tools_not_injected_in_plan_mode() {
             use_streaming: false,
             auto_checkpoint: false,
             inject_skills: false,
-            detect_env_changes: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()

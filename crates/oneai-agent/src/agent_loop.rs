@@ -303,7 +303,6 @@ pub struct LoopState {
     /// Updated when paradigm switching occurs.
     pub active_paradigm_config: Option<ParadigmConfig>,
     pub sub_agent_results: Vec<SubAgentSummary>,
-    pub env_snapshot: Option<crate::context_assembler::EnvironmentSnapshot>,
     /// Interrupt points accumulated during the loop.
     /// Each interrupt represents a pause point where human feedback was requested.
     pub interrupt_points: Vec<InterruptPoint>,
@@ -331,7 +330,6 @@ impl LoopState {
             active_paradigm: ParadigmKind::ReAct,
             active_paradigm_config: None, // Uses default system prompt until switch
             sub_agent_results: Vec::new(),
-            env_snapshot: None,
             interrupt_points: Vec::new(),
             pending_interrupt: None,
             plan_state: None,
@@ -356,7 +354,6 @@ impl LoopState {
             active_paradigm: ParadigmKind::ReAct,
             active_paradigm_config: None,
             sub_agent_results: Vec::new(),
-            env_snapshot: None,
             interrupt_points: Vec::new(),
             pending_interrupt: None,
             plan_state: None,
@@ -478,7 +475,6 @@ pub struct AgentLoopConfig {
     pub hard_max_iterations: Option<usize>,
     pub auto_checkpoint: bool,
     pub inject_skills: bool,
-    pub detect_env_changes: bool,
     /// Usage tracker — records token usage after each inference call.
     /// When set, the loop automatically records token usage (no USD cost).
     pub usage_tracker: Option<Arc<dyn oneai_core::UsageTracker>>,
@@ -523,7 +519,6 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("hard_max_iterations", &self.hard_max_iterations)
             .field("auto_checkpoint", &self.auto_checkpoint)
             .field("inject_skills", &self.inject_skills)
-            .field("detect_env_changes", &self.detect_env_changes)
             .field("usage_tracker", &self.usage_tracker.as_ref().map(|_| "Arc<dyn UsageTracker>"))
             .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
             .field("circuit_breaker", &self.circuit_breaker.as_ref().map(|_| "Arc<dyn CircuitBreaker>"))
@@ -569,7 +564,6 @@ impl Default for AgentLoopConfig {
             hard_max_iterations: Some(200), // Safety guard: None = only budget constraint, Some(N) = budget + iteration limit
             auto_checkpoint: true,
             inject_skills: true,
-            detect_env_changes: true,
             usage_tracker: None,
             rate_limiter: None,
             circuit_breaker: None,
@@ -991,39 +985,14 @@ impl AgentLoop {
                 ca.refresh_sources().await?;
             }
 
-            // 1b. Context Epoch — take environment snapshot for diff detection.
-            // This addresses the "Context Epoch 未接入 Loop" gap.
-            // take_snapshot() and compute_diff() already exist in ContextAssembler,
-            // but were never called from the loop. Now, each iteration takes a
-            // snapshot, and the assembler injects the diff into context on the
-            // next iteration (when last_snapshot differs from the current one).
-            //
-            // IMPORTANT ordering: we set `state.env_snapshot` here but do NOT yet
-            // store it as `last_snapshot`. assemble() (below) detects the first
-            // epoch via `last_snapshot.is_none()`; if we recorded the snapshot
-            // before assembling, the first epoch would never trigger and the full
-            // baseline (env snapshot + all context sources) would never be
-            // injected. We update_snapshot() *after* assemble so the next
-            // iteration diffs against this one.
-            if self.config.detect_env_changes {
-                let tools_map = self.tools.read().await;
-                let tool_names: std::collections::HashSet<String> = tools_map.keys().cloned().collect();
-                let snapshot = {
-                    let ca = self.context_assembler.read().await;
-                    ca.take_snapshot(&tool_names).await?
-                };
-                state.env_snapshot = Some(snapshot);
-            }
+            // Context Epoch is now self-managed by the assembler: the first
+            // assemble() injects every source as the baseline; subsequent
+            // iterations inject only what each source's RefreshPolicy permits
+            // (OnChange / EveryIteration / Periodic / OnceAtStart). Environment
+            // sensing (git status, file tree, …) lives entirely in the
+            // ContextSource impls — the loop no longer runs its own probes.
+            let assembled = self.context_assembler.write().await.assemble(&state)?;
 
-            let assembled = self.context_assembler.read().await.assemble(&state)?;
-
-            // 1c. Now record the snapshot as last_snapshot so the next iteration
-            // computes a diff against it (assemble above already saw None on the
-            // first iteration, so the baseline epoch was correctly detected).
-            if let Some(snapshot) = &state.env_snapshot {
-                let mut ca = self.context_assembler.write().await;
-                ca.update_snapshot(snapshot.clone());
-            }
             if self.context_budget.needs_compression(&assembled) {
                 state.conversation = self.context_budget.compress(assembled).await?;
             }

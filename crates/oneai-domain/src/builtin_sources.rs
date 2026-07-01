@@ -1,8 +1,9 @@
 //! Built-in ContextSource implementations for common domains.
 //!
 //! These sources provide the default environment information that most
-//! domains need. They replace the hardcoded `EnvironmentSnapshot` with
-//! pluggable implementations that can be independently configured.
+//! domains need. They are the pluggable, refresh-policy-governed equivalent of
+//! a hardcoded environment snapshot — the single source of truth for env
+//! sensing, composed via DomainPacks.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,19 +66,49 @@ impl ContextSource for GitStatusSource {
             _ => "unknown".to_string(),
         };
 
-        // Get status summary
+        // A single `git status --short` call yields the full per-file change set.
+        // Parse the two-letter status code (XY) into modified / created / deleted
+        // lists — this subsumes the old count-only summary *and* the agent-side
+        // per-file diff scan, so git is hit once per iteration for status, not
+        // multiple times in parallel paths.
         let status_result = tokio::time::timeout(
             Duration::from_secs(5),
             tokio::process::Command::new(shell)
                 .arg(shell_arg)
-                .arg(format!("cd {} && git status --short 2>/dev/null | wc -l", dir))
+                .arg(format!("cd {} && git status --short 2>/dev/null", dir))
                 .output()
         ).await;
 
-        let changes_count = match status_result {
-            Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            _ => "0".to_string(),
-        };
+        let mut modified: Vec<String> = Vec::new();
+        let mut created: Vec<String> = Vec::new();
+        let mut deleted: Vec<String> = Vec::new();
+
+        if let Ok(Ok(output)) = status_result {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                // `git status --short` format: "<XY> <path>", where X = index
+                // status, Y = worktree status. Path may be quoted; take the
+                // trimmed remainder after the two-char code.
+                if line.len() < 3 {
+                    continue;
+                }
+                let x = line.as_bytes().first().copied().unwrap_or(b' ');
+                let y = line.as_bytes().get(1).copied().unwrap_or(b' ');
+                let path = line[3..].trim().trim_matches('"').to_string();
+                if path.is_empty() {
+                    continue;
+                }
+                // Classify by the most informative status code. Untracked ("??")
+                // and A count as created; D in either column counts as deleted;
+                // everything else (M, R, C, …) counts as modified.
+                if x == b'D' || y == b'D' {
+                    deleted.push(path);
+                } else if x == b'A' || y == b'A' || (x == b'?' && y == b'?') {
+                    created.push(path);
+                } else {
+                    modified.push(path);
+                }
+            }
+        }
 
         // Get recent commits (last 5)
         let commits_result = tokio::time::timeout(
@@ -93,10 +124,21 @@ impl ContextSource for GitStatusSource {
             _ => "no commits".to_string(),
         };
 
-        let content = format!(
-            "Git Branch: {}\nChanges: {} modified/new/deleted files\nRecent Commits:\n{}",
-            branch, changes_count, recent_commits
+        let changes_count = modified.len() + created.len() + deleted.len();
+        let mut content = format!(
+            "Git Branch: {}\nChanges: {} modified/new/deleted files",
+            branch, changes_count
         );
+        if !modified.is_empty() {
+            content.push_str(&format!("\nModified: {}", modified.join(", ")));
+        }
+        if !created.is_empty() {
+            content.push_str(&format!("\nCreated: {}", created.join(", ")));
+        }
+        if !deleted.is_empty() {
+            content.push_str(&format!("\nDeleted: {}", deleted.join(", ")));
+        }
+        content.push_str(&format!("\nRecent Commits:\n{}", recent_commits));
 
         // Store for OnChange comparison
         *self.last_content.write().await = Some(content.clone());
@@ -517,7 +559,11 @@ mod tests {
         assert_eq!(source.key(), "git_status");
 
         let content = source.load().await.unwrap();
-        assert!(content.contains("Git Branch:"));
+        assert!(content.contains("Git Branch:"), "missing branch line: {content}");
+        // The enriched content always surfaces a Changes summary and, when the
+        // tree is dirty, the per-file Modified/Created/Deleted lists.
+        assert!(content.contains("Changes:"), "missing changes summary: {content}");
+        assert!(content.contains("Recent Commits:"), "missing recent commits: {content}");
     }
 
     #[tokio::test]

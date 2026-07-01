@@ -695,7 +695,6 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             hard_max_iterations: Some(50),
             auto_checkpoint: false,
             inject_skills: false, // Sub-agents don't need skill injection
-            detect_env_changes: false, // Sub-agents don't need env diff detection
             usage_tracker: None, // Sub-agents inherit usage tracker from parent loop
             rate_limiter: None, // Sub-agents inherit rate limiter from parent loop
             circuit_breaker: None, // Sub-agents inherit circuit breaker from parent loop
