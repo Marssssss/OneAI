@@ -60,6 +60,21 @@ pub trait LlmProvider: Send + Sync {
     async fn probe_context_window(&self) -> Option<u32> {
         None
     }
+
+    /// Whether this backend benefits from constrained/structured-output decoding.
+    ///
+    /// Encodes a **cost/benefit judgment, not raw capability**: cloud SOTA backends
+    /// return `false` (constrained decoding hurts reasoning quality on strong models
+    /// for little gain — they already emit valid JSON reliably); local/self-hosted
+    /// backends (Ollama small models, vLLM/llama.cpp) return `true` (their invalid-JSON
+    /// rate is high enough that grammar-constrained decoding is net positive).
+    ///
+    /// Honored only when the agent's `ConstrainedOutputPolicy` is `Auto`. Post-hoc
+    /// `StructuredOutputConfig` validation + `ModelRetry` runs regardless of this flag.
+    /// Default `false` so cloud providers opt out unless they explicitly override.
+    fn prefers_constrained_output(&self) -> bool {
+        false
+    }
 }
 
 // ─── Tool ─────────────────────────────────────────────────────────────────────

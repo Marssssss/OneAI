@@ -158,6 +158,10 @@ pub struct AppBuilder {
     /// that drives every inference call. Each `Some` field overrides the
     /// agent-loop's scenario default; `None` fields inherit it.
     generation_config: oneai_core::GenerationConfig,
+    /// Policy for Layer-1 constrained decoding (tier-gated). Propagated into
+    /// the `AgentLoopConfig`. Only takes effect when `structured_output` is
+    /// also configured on the loop. Default `Auto`.
+    constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
 }
 
 impl AppBuilder {
@@ -210,6 +214,7 @@ impl AppBuilder {
             swarm_orchestrator: None,
             swarm_config: None,
             generation_config: oneai_core::GenerationConfig::new(),
+            constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
         }
     }
 
@@ -272,6 +277,21 @@ impl AppBuilder {
     /// Set stop sequences — generation halts when any is emitted.
     pub fn stop_sequences(mut self, stop_sequences: Vec<String>) -> Self {
         self.generation_config.stop_sequences = stop_sequences;
+        self
+    }
+
+    /// Set the Layer-1 constrained-decoding policy.
+    ///
+    /// Tier-gated: `Auto` (default) enables constrained decoding only for
+    /// local/small-model backends (where `LlmProvider::prefers_constrained_output`
+    /// returns true); `Always`/`Never` force it on/off. Only takes effect when
+    /// `structured_output` is configured on the agent loop. Post-hoc schema
+    /// validation + ModelRetry run regardless of this policy.
+    pub fn constrained_output_policy(
+        mut self,
+        policy: oneai_core::ConstrainedOutputPolicy,
+    ) -> Self {
+        self.constrained_output_policy = policy;
         self
     }
 
@@ -1808,6 +1828,7 @@ impl AppBuilder {
             handoff_manager: self.handoff_manager,
             swarm_orchestrator: self.swarm_orchestrator,
             generation_config: self.generation_config,
+            constrained_output_policy: self.constrained_output_policy,
         })
     }
 }
@@ -1902,6 +1923,9 @@ pub struct App {
     /// of every agent run (main loop, workflow nodes, sub-agents inherit via
     /// the parent). See `AppBuilder::generation_config`.
     pub generation_config: oneai_core::GenerationConfig,
+    /// Layer-1 constrained-decoding policy — propagated into every `AgentLoopConfig`.
+    /// See `AppBuilder::constrained_output_policy`.
+    pub constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
 }
 
 impl App {

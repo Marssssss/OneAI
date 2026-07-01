@@ -1015,6 +1015,30 @@ pub enum ConstrainedMode {
     Regex,
 }
 
+/// Policy for when to attach `ConstrainedOutputConfig` to an inference request.
+///
+/// Constrained decoding is **tier-gated**: it helps local/small models but hurts
+/// cloud SOTA reasoning models. This policy decides, per agent, how to combine
+/// the user's `StructuredOutputConfig` (always validated post-hoc) with the
+/// provider's `LlmProvider::prefers_constrained_output()` recommendation.
+///
+/// Regardless of this policy, post-hoc `validate_json_schema` + `ModelRetry`
+/// always runs when `StructuredOutputConfig` is set — constrained decoding is an
+/// additional generation-time layer, not a replacement for validation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ConstrainedOutputPolicy {
+    /// Trust the provider's `prefers_constrained_output()` judgment (default).
+    /// Local backends enable constrained decoding; cloud SOTA backends skip it.
+    #[default]
+    Auto,
+    /// Force-enable constrained decoding even when the provider opts out.
+    Always,
+    /// Force-disable constrained decoding even when the provider would opt in.
+    Never,
+}
+
 // ─── ParsedOutput ─────────────────────────────────────────────────────────────
 
 /// Output from the parser after applying the 3-layer defense.

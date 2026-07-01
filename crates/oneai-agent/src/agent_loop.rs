@@ -25,6 +25,7 @@ use oneai_core::{
     Message, Role, ToolDefinition, ToolOutput,
     HookPoint, HookContext, InterruptPoint, InterruptReason,
     ResumeSignal, ResumeAction, StructuredOutputConfig,
+    ConstrainedOutputConfig, ConstrainedMode, ConstrainedOutputPolicy,
     InteractionModification, InteractionPoint, InteractionRequest, InteractionResponse,
 };
 use oneai_core::error::Result;
@@ -494,6 +495,13 @@ pub struct AgentLoopConfig {
     /// answer is validated against a JSON Schema. If validation fails,
     /// the model is re-prompted with the error for self-correction (ModelRetry).
     pub structured_output: Option<StructuredOutputConfig>,
+    /// Policy for attaching `ConstrainedOutputConfig` (Layer-1 constrained
+    /// decoding) to inference requests, derived from `structured_output.schema`.
+    /// Tier-gated: constrained decoding helps local/small models but hurts
+    /// cloud SOTA reasoning quality. Post-hoc validation + ModelRetry run
+    /// regardless of this policy. Default `Auto` trusts the provider's
+    /// `prefers_constrained_output()` recommendation.
+    pub constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
     /// Trace context for observability — when set, spans and events are
     /// emitted at key lifecycle points (iteration, inference, tool call,
     /// paradigm switch, delegation, approval). When None, tracing is
@@ -569,6 +577,7 @@ impl Default for AgentLoopConfig {
             circuit_breaker: None,
             token_counter: None,
             structured_output: None,
+            constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None,
             plan_mode: false,
         }
@@ -1043,7 +1052,7 @@ impl AgentLoop {
                 temperature: self.config.temperature.or(Some(0.3)),
                 top_p: self.config.top_p,
                 stop_sequences: self.config.stop_sequences.clone(),
-                constrained_output: None,
+                constrained_output: self.build_constrained_output(),
                 thinking_budget: self.config.thinking_budget,
                 metadata: HashMap::new(),
             };
@@ -1417,7 +1426,7 @@ impl AgentLoop {
                     temperature: self.config.temperature.or(Some(0.3)),
                     top_p: self.config.top_p,
                     stop_sequences: self.config.stop_sequences.clone(),
-                    constrained_output: None,
+                    constrained_output: self.build_constrained_output(),
                     thinking_budget: self.config.thinking_budget,
                     metadata: HashMap::new(),
                 };
@@ -3019,6 +3028,31 @@ impl AgentLoop {
     /// `{{TOOL_PREFERENCE_RULES}}` marker (if present) replaced by the
     /// registry-derived preference block. Domain-provided prompts that do not
     /// contain the marker are returned unchanged, so this only mutates the
+    /// Derive the Layer-1 `ConstrainedOutputConfig` to attach to an inference
+    /// request, bridging `structured_output.schema` with the tier-gating policy.
+    ///
+    /// Returns `None` when there is no `StructuredOutputConfig`, or when the
+    /// policy disables constrained decoding for this provider tier. Post-hoc
+    /// `validate_json_schema` + `ModelRetry` run regardless (they are driven by
+    /// `structured_output`, not by this value).
+    fn build_constrained_output(&self) -> Option<ConstrainedOutputConfig> {
+        let so = self.config.structured_output.as_ref()?;
+        let want = match self.config.constrained_output_policy {
+            ConstrainedOutputPolicy::Auto => self.provider.prefers_constrained_output(),
+            ConstrainedOutputPolicy::Always => true,
+            ConstrainedOutputPolicy::Never => false,
+            // non_exhaustive: unknown future variants fall back to Auto's behavior.
+            _ => self.provider.prefers_constrained_output(),
+        };
+        if !want {
+            return None;
+        }
+        Some(ConstrainedOutputConfig {
+            schema: so.schema.clone(),
+            mode: ConstrainedMode::JsonSchema,
+        })
+    }
+
     /// default prompt path — preserving domain prompt behavior.
     async fn build_system_prompt(&self) -> String {
         let prompt = self.config.system_prompt.clone();
@@ -4161,6 +4195,32 @@ mod dynamic_tool_prompt_tests {
         build_loop_with(tool_names, AgentLoopConfig::default())
     }
 
+    /// Like `build_loop_with` but with an explicit provider — used to test
+    /// provider-dependent behavior such as constrained-output tier gating.
+    fn build_loop_with_provider(
+        provider: Arc<dyn LlmProvider>,
+        config: AgentLoopConfig,
+    ) -> AgentLoop {
+        let tools_map = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        AgentLoop::new(
+            provider,
+            tools_map,
+            Arc::new(ThreeLayerParser::new()),
+            Arc::new(oneai_tool::NoopInteractionGate),
+            Arc::new(SkillSelector::new()),
+            Arc::new(ContextBudgetManager::new(
+                TokenBudget::new(100000),
+                BudgetAllocation::default(),
+                Arc::new(oneai_core::budget::NoopCompressor),
+            )),
+            Arc::new(SubAgentFactoryNone),
+            ContextAssembler::new(),
+            IncrementalStreamParser::new(),
+            None,
+            config,
+        )
+    }
+
     #[tokio::test]
     async fn tool_preference_block_empty_registry_emits_generic_nudge() {
         let loop_ = build_loop(&[]);
@@ -4203,6 +4263,67 @@ mod dynamic_tool_prompt_tests {
         let loop_ = build_loop_with(&["read_file"], cfg);
         let prompt = loop_.build_system_prompt().await;
         assert_eq!(prompt, "You are a research agent. Use the available tools.");
+    }
+
+    #[test]
+    fn build_constrained_output_bridges_policy_and_provider_tier() {
+        use oneai_core::{ConstrainedMode, ConstrainedOutputPolicy, StructuredOutputConfig};
+        use oneai_provider::OllamaProvider;
+
+        let schema = serde_json::json!({ "type": "object", "required": ["answer"] });
+        let so = StructuredOutputConfig {
+            schema: schema.clone(),
+            max_retries: 2,
+            re_prompt_on_failure: true,
+            error_prompt_template: None,
+        };
+
+        let cfg_with_so = |policy: ConstrainedOutputPolicy| AgentLoopConfig {
+            structured_output: Some(so.clone()),
+            constrained_output_policy: policy,
+            ..AgentLoopConfig::default()
+        };
+
+        // Auto + local backend (Ollama prefers true) → Some(JsonSchema, schema).
+        let ollama_loop = build_loop_with_provider(
+            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama("llama3".to_string()))),
+            cfg_with_so(ConstrainedOutputPolicy::Auto),
+        );
+        let co = ollama_loop.build_constrained_output().expect("Auto+local → Some");
+        assert_eq!(co.mode, ConstrainedMode::JsonSchema);
+        assert_eq!(co.schema, schema);
+
+        // Auto + cloud backend (MockProvider prefers false) → None.
+        let mock_loop = build_loop_with_provider(
+            Arc::new(MockProvider::always_answers("ok")),
+            cfg_with_so(ConstrainedOutputPolicy::Auto),
+        );
+        assert!(mock_loop.build_constrained_output().is_none());
+
+        // Always forces it on even for the cloud mock.
+        let always_loop = build_loop_with_provider(
+            Arc::new(MockProvider::always_answers("ok")),
+            cfg_with_so(ConstrainedOutputPolicy::Always),
+        );
+        assert!(always_loop.build_constrained_output().is_some());
+
+        // Never forces it off even for Ollama.
+        let never_loop = build_loop_with_provider(
+            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama("llama3".to_string()))),
+            cfg_with_so(ConstrainedOutputPolicy::Never),
+        );
+        assert!(never_loop.build_constrained_output().is_none());
+
+        // No structured_output → None regardless of policy/provider.
+        let no_so_loop = build_loop_with_provider(
+            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama("llama3".to_string()))),
+            AgentLoopConfig {
+                structured_output: None,
+                constrained_output_policy: ConstrainedOutputPolicy::Always,
+                ..AgentLoopConfig::default()
+            },
+        );
+        assert!(no_so_loop.build_constrained_output().is_none());
     }
 
     #[tokio::test]

@@ -123,6 +123,8 @@ struct AppResources {
     /// Sampling / generation params — propagated into the AgentLoopConfig
     /// of every agent run.
     generation_config: oneai_core::GenerationConfig,
+    /// Layer-1 constrained-decoding policy — propagated into every AgentLoopConfig.
+    constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
 }
 
 impl AppSession {
@@ -165,6 +167,7 @@ impl AppSession {
                 model_context_resolver: app.model_context_resolver.clone(),
                 probe_context_windows: app.probe_context_windows,
                 generation_config: app.generation_config.clone(),
+                constrained_output_policy: app.constrained_output_policy,
             }),
             conversation,
             session_id,
@@ -617,6 +620,7 @@ impl AppSession {
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
+                constrained_output_policy: self.app.constrained_output_policy,
                 ..AgentLoopConfig::default()
             };
             // Apply user-configured generation params (temperature/top_p/
@@ -687,6 +691,7 @@ impl AppSession {
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
+                constrained_output_policy: self.app.constrained_output_policy,
                 ..AgentLoopConfig::default()
             };
             // Apply user-configured generation params on top of the defaults.

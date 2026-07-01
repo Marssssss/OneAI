@@ -207,6 +207,21 @@ impl OpenAIProvider {
             body["tools"] = Value::Array(tools_json);
         }
 
+        // Constrained/structured output via `response_format`. Only attached when
+        // the agent's tier-gating policy opted in — for official OpenAI this path
+        // is not taken (prefers_constrained_output() returns false, since
+        // structured outputs can degrade reasoning-model quality), but local
+        // OpenAI-compatible backends (vLLM/llama.cpp) opt in and honor it.
+        if let Some(cfg) = &req.constrained_output {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output",
+                    "schema": cfg.schema,
+                }
+            });
+        }
+
         body
     }
 }
@@ -634,6 +649,40 @@ impl LlmProvider for OpenAIProvider {
 
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    /// Local/self-hosted OpenAI-compatible backends (vLLM, llama.cpp, Ollama's
+    /// OpenAI shim) benefit from constrained decoding; official OpenAI and other
+    /// cloud SOTA-compatible endpoints (DeepSeek, 智谱) do not — structured
+    /// outputs can degrade reasoning quality, and these models already emit
+    /// valid JSON reliably. We detect "local" by the endpoint's host.
+    fn prefers_constrained_output(&self) -> bool {
+        is_local_endpoint(&self.config.resolved_url())
+    }
+}
+
+/// Whether `resolved_url` points at a local/self-hosted backend.
+///
+/// True for localhost / loopback / RFC-1918 private hosts. Used by
+/// `OpenAIProvider::prefers_constrained_output` to gate constrained decoding
+/// to the model tier where it is net positive.
+fn is_local_endpoint(resolved_url: &str) -> bool {
+    let host = url::Url::parse(resolved_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+        .unwrap_or_default();
+    match host.as_str() {
+        "" | "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" => true,
+        h if h.starts_with("192.168.") || h.starts_with("10.") => true,
+        h if h.starts_with("172.") => {
+            let second: Option<u8> = h
+                .trim_start_matches("172.")
+                .split('.')
+                .next()
+                .and_then(|s| s.parse().ok());
+            matches!(second, Some(16..=31))
+        }
+        _ => false,
     }
 }
 
@@ -1066,5 +1115,78 @@ mod tests {
         }
 
         assert!(body.get("stream_options").is_some());
+    }
+}
+
+#[cfg(test)]
+mod constrained_tests {
+    use super::*;
+    use oneai_core::{
+        ConstrainedMode, ConstrainedOutputConfig, Conversation, InferenceRequest,
+    };
+
+    fn provider_with_url(base_url: &str) -> OpenAIProvider {
+        OpenAIProvider::new(ModelConfig {
+            api_key: Some("test-key".to_string()),
+            base_url: Some(base_url.to_string()),
+            model_name: Some("gpt-4".to_string()),
+            ..ModelConfig::default()
+        })
+        .retry_config(ProviderRetryConfig::no_retry())
+    }
+
+    fn request(constrained: Option<ConstrainedOutputConfig>) -> InferenceRequest {
+        InferenceRequest {
+            conversation: Conversation::new(),
+            tools: Vec::new(),
+            max_tokens: Some(64),
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            constrained_output: constrained,
+            thinking_budget: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn local_endpoints_prefer_constrained_output() {
+        // Localhost / loopback / RFC-1918 private hosts → local backend → true.
+        assert!(provider_with_url("http://localhost:8000/v1").prefers_constrained_output());
+        assert!(provider_with_url("http://127.0.0.1:11434/v1").prefers_constrained_output());
+        assert!(provider_with_url("http://192.168.1.5:8080").prefers_constrained_output());
+        assert!(provider_with_url("http://10.0.0.2:8000").prefers_constrained_output());
+        assert!(provider_with_url("http://172.16.0.1:8000").prefers_constrained_output());
+    }
+
+    #[test]
+    fn cloud_endpoints_do_not_prefer_constrained_output() {
+        // Official OpenAI and other cloud SOTA-compatible endpoints → false:
+        // structured outputs can degrade reasoning quality, and these models
+        // already emit valid JSON reliably.
+        assert!(!provider_with_url("https://api.openai.com/v1").prefers_constrained_output());
+        assert!(!provider_with_url("https://api.deepseek.com/v1").prefers_constrained_output());
+        assert!(!provider_with_url("https://open.bigmodel.cn/api/paas/v4").prefers_constrained_output());
+    }
+
+    #[test]
+    fn to_openai_request_emits_response_format_when_constrained() {
+        let cfg = ConstrainedOutputConfig {
+            schema: serde_json::json!({ "type": "object", "required": ["answer"] }),
+            mode: ConstrainedMode::JsonSchema,
+        };
+        let body = provider_with_url("http://localhost:8000/v1").to_openai_request(&request(Some(cfg)));
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["name"], "structured_output");
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"]["required"][0],
+            "answer"
+        );
+    }
+
+    #[test]
+    fn to_openai_request_omits_response_format_when_unset() {
+        let body = provider_with_url("http://localhost:8000/v1").to_openai_request(&request(None));
+        assert!(body.get("response_format").is_none());
     }
 }

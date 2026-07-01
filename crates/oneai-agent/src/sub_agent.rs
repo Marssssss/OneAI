@@ -700,6 +700,7 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             circuit_breaker: None, // Sub-agents inherit circuit breaker from parent loop
             token_counter: None, // Sub-agents inherit token counter from parent loop
             structured_output: None, // Sub-agents don't have structured output validation
+            constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None, // Sub-agents inherit trace from parent loop
             plan_mode: false, // Sub-agents never run in plan mode
         };

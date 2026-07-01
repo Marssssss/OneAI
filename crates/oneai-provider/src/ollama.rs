@@ -85,6 +85,19 @@ impl OllamaProvider {
             body["tools"] = Value::Array(tools_json);
         }
 
+        // Constrained/structured output — Ollama's OpenAI-compatible endpoint
+        // accepts `format: { type: "json_schema", schema }` to grammar-constrain
+        // decoding. This is the Layer-1 path that matters for local small models,
+        // where unconstrained JSON emission fails often enough to be worth the
+        // quality tradeoff. Only attached when the agent's tier-gating policy
+        // opted in (see AgentLoop::build_constrained_output).
+        if let Some(cfg) = &req.constrained_output {
+            body["format"] = serde_json::json!({
+                "type": "json_schema",
+                "schema": cfg.schema,
+            });
+        }
+
         body
     }
 }
@@ -293,6 +306,11 @@ impl LlmProvider for OllamaProvider {
     fn config(&self) -> &ModelConfig {
         &self.config
     }
+
+    /// Ollama serves local models — constrained decoding is net positive here.
+    fn prefers_constrained_output(&self) -> bool {
+        true
+    }
 }
 
 // ─── Ollama /api/show context-length parser ─────────────────────────────────
@@ -356,6 +374,57 @@ mod probe_tests {
     fn test_parse_ollama_no_context_length_key() {
         let resp = json!({ "model_info": { "general.architecture": "llama" } });
         assert_eq!(parse_ollama_context_window(&resp), None);
+    }
+}
+
+#[cfg(test)]
+mod constrained_tests {
+    use super::*;
+    use oneai_core::{ConstrainedMode, ConstrainedOutputConfig, Conversation, InferenceRequest};
+    use serde_json::json;
+
+    fn provider() -> OllamaProvider {
+        OllamaProvider::new(ModelConfig::ollama("llama3".to_string()))
+    }
+
+    fn request(constrained: Option<ConstrainedOutputConfig>) -> InferenceRequest {
+        InferenceRequest {
+            conversation: Conversation::new(),
+            tools: Vec::new(),
+            max_tokens: Some(64),
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            constrained_output: constrained,
+            thinking_budget: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn ollama_prefers_constrained_output() {
+        // Local backend — constrained decoding is net positive.
+        assert!(provider().prefers_constrained_output());
+    }
+
+    #[test]
+    fn to_ollama_request_emits_format_when_constrained() {
+        let cfg = ConstrainedOutputConfig {
+            schema: json!({ "type": "object", "required": ["answer"] }),
+            mode: ConstrainedMode::JsonSchema,
+        };
+        let body = provider().to_ollama_request(&request(Some(cfg)));
+        assert_eq!(body["format"]["type"], "json_schema");
+        assert_eq!(
+            body["format"]["schema"]["required"][0],
+            "answer"
+        );
+    }
+
+    #[test]
+    fn to_ollama_request_omits_format_when_unset() {
+        let body = provider().to_ollama_request(&request(None));
+        assert!(body.get("format").is_none());
     }
 }
 
