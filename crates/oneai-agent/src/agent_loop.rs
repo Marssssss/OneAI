@@ -64,6 +64,12 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Called when the model delegates to a sub-agent.
     fn on_delegate(&self, task: &str, agent_type: &SubAgentKind);
 
+    /// Called when a delegated sub-agent finishes and its summary is fed back
+    /// into the parent conversation. Pairs with `on_delegate` so the UI can
+    /// show the full sub-agent lifecycle (start → completion) instead of only
+    /// the start. Default empty to keep existing implementations compiling.
+    fn on_delegate_complete(&self, _summary: &crate::sub_agent::SubAgentSummary) {}
+
     /// Called when the model switches to a different paradigm.
     fn on_paradigm_switch(&self, paradigm: ParadigmKind);
 
@@ -1978,7 +1984,8 @@ impl AgentLoop {
                         state.conversation.add_message(Message::assistant(&text_content));
                     }
                     let summary = self.spawn_sub_agent(task, agent_type, budget).await?;
-                    state.feed_sub_agent_result(summary);
+                    state.feed_sub_agent_result(summary.clone());
+                    observer.on_delegate_complete(&summary);
                 }
                 AgentDecision::SwitchParadigm { paradigm } => {
                     observer.on_paradigm_switch(paradigm);

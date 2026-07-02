@@ -1,7 +1,7 @@
 //! TUI Observer — receives AgentLoop events and forwards them
 //! to the TUI via a channel for real-time rendering.
 
-use oneai_agent::{AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest, SubAgentKind};
+use oneai_agent::{AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest, SubAgentKind, SubAgentSummary};
 use oneai_core::ToolOutput;
 use oneai_core::ContextAccounting;
 
@@ -21,6 +21,9 @@ pub enum ObserverEvent {
     ToolCalls(Vec<ToolCallRequest>),
     ToolResult(String, String, ToolOutput),
     Delegate(String, SubAgentKind),
+    /// A delegated sub-agent finished. Pairs with `Delegate` to close the
+    /// lifecycle in the UI. Carries the sub-agent's summary.
+    DelegateComplete(SubAgentSummary),
     ParadigmSwitch(ParadigmKind),
     Checkpoint(usize),
     Complete(AgentLoopResult),
@@ -90,6 +93,10 @@ impl AgentLoopObserver for TuiObserver {
 
     fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
         let _ = self.tx.send(ObserverEvent::Delegate(task.to_string(), agent_type.clone()));
+    }
+
+    fn on_delegate_complete(&self, summary: &SubAgentSummary) {
+        let _ = self.tx.send(ObserverEvent::DelegateComplete(summary.clone()));
     }
 
     fn on_paradigm_switch(&self, paradigm: ParadigmKind) {

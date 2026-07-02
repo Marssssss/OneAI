@@ -1685,6 +1685,35 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
         ObserverEvent::Delegate(task, agent_type) => {
             app.add_message(ChatRole::System, format!("delegating to {} sub-agent: {}", agent_type.name(), task));
         }
+        ObserverEvent::DelegateComplete(summary) => {
+            // Pairs with the Delegate message above to close the lifecycle.
+            // Show status, a trimmed summary, and budget signal so the user
+            // can tell the sub-agent actually finished (not hung).
+            let status = if summary.completed { "✓" } else { "⚠ (incomplete)" };
+            let kind = summary.agent_kind.name();
+            let budget_tag = if summary.budget_exceeded { " · budget exceeded" } else { "" };
+            let body = summary.summary.trim();
+            let preview: String = if body.len() > 280 {
+                // char-boundary-safe truncation for CJK
+                let end = body.char_indices()
+                    .take_while(|(i, _)| *i < 280)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(280);
+                format!("{}…", &body[..end])
+            } else {
+                body.to_string()
+            };
+            let key_findings = if summary.key_findings.is_empty() {
+                String::new()
+            } else {
+                format!("\nKey findings: {}", summary.key_findings.join("; "))
+            };
+            app.add_message(
+                ChatRole::System,
+                format!("{} {} sub-agent finished{}: {}{}", status, kind, budget_tag, preview, key_findings),
+            );
+        }
         ObserverEvent::ParadigmSwitch(paradigm) => {
             app.active_paradigm = paradigm;
             let name = match paradigm {

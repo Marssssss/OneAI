@@ -109,6 +109,7 @@ enum TestEvent {
     ToolCalls(Vec<ToolCallRequest>),
     ToolResult(String, String, ToolOutput),
     Delegate(String, SubAgentKind),
+    DelegateComplete(SubAgentSummary),
     ParadigmSwitch(ParadigmKind),
     Checkpoint(usize),
     Complete(AgentLoopResult),
@@ -131,6 +132,9 @@ impl AgentLoopObserver for TestObserver {
     }
     fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
         self.events.lock().unwrap().push(TestEvent::Delegate(task.to_string(), agent_type.clone()));
+    }
+    fn on_delegate_complete(&self, summary: &SubAgentSummary) {
+        self.events.lock().unwrap().push(TestEvent::DelegateComplete(summary.clone()));
     }
     fn on_paradigm_switch(&self, paradigm: ParadigmKind) {
         self.events.lock().unwrap().push(TestEvent::ParadigmSwitch(paradigm));
@@ -366,6 +370,14 @@ async fn e2e_scenario_5_sub_agent_delegation() {
     let events = observer.events.lock().unwrap();
     let delegate_events = events.iter().filter(|e| matches!(e, TestEvent::Delegate(_, SubAgentKind::Explore))).count();
     assert_eq!(delegate_events, 1);
+
+    // Verify observer also received the completion callback pairing with the
+    // delegate event — the sub-agent lifecycle must be observable end-to-end.
+    let complete_events = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::DelegateComplete(s) if s.agent_kind == SubAgentKind::Explore && s.summary.contains("Explored")))
+        .count();
+    assert_eq!(complete_events, 1, "expected exactly one DelegateComplete event for the Explore sub-agent");
 }
 
 // ─── Scenario 6: Approval gate — tool denied ──────────────────────────────────
