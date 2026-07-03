@@ -53,7 +53,13 @@ base64 = "0.22"
 url = "2"
 
 # HTTP / SSE
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+# `socks` enables SOCKS4/4a/5/5h connectors (ALL_PROXY=socks5://...).
+# `system-proxy` lets reqwest additionally read macOS/Windows GUI proxy
+# settings on top of the always-on HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY
+# env-var detection. Every outbound HTTP client in the workspace (providers,
+# web_search/web_fetch, A2A, embedding, MCP HTTP) is built via
+# reqwest::Client::new()/builder(), so env-var proxy just works.
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "socks", "system-proxy"], default-features = false }
 eventsource-stream = "0.2"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }

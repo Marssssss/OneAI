@@ -18,6 +18,17 @@ cargo run -p oneai-cli-demo     # launch the interactive TUI demo (bin name: one
 
 The workspace uses `resolver = "2"`, `edition = "2021"`, shared version `0.2.0` from `[workspace.package]`, and all shared dependencies are pinned in `[workspace.dependencies]` — add new deps there and reference via `{ workspace = true }` in crate Cargo.tomls.
 
+## Network proxy
+
+All outbound HTTP in OneAI — LLM provider APIs (OpenAI/Anthropic/Ollama/Gemini), `web_search`/`web_fetch` tools, A2A client, embedding services, MCP HTTP transport — goes through `reqwest::Client`. Proxy support is therefore env-var based and works everywhere uniformly:
+
+- `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` — proxy URL (auto-detected by reqwest on every client build; no code path opt-in needed).
+- `NO_PROXY` — comma-separated exclusion list.
+- SOCKS5: set `ALL_PROXY=socks5://host:port` (requires the reqwest `socks` feature, kept on in the workspace `Cargo.toml`).
+- On macOS/Windows, reqwest's `system-proxy` feature also reads the OS GUI proxy settings; env vars always win.
+
+Do not wire a custom `reqwest::Client` into individual providers/tools for proxy purposes — rely on the env vars. If a future subsystem needs a bespoke client, build it with `reqwest::Client::builder()` so it still picks up these env vars. The `crates/oneai-provider/tests/proxy_feature.rs` smoke test guards the `socks`/proxy feature flags.
+
 `#[non_exhaustive]` is applied to public enums as part of the v0.2.0 API-stability commitment (P3-1). Preserve it on existing public enums and add it to new externally-facing enum APIs.
 
 ## Commit convention
