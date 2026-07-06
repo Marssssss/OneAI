@@ -3940,8 +3940,8 @@ fn build_tool_preference_block(tools: &HashMap<String, Arc<dyn Tool>>) -> String
     if has("edit_file") {
         rules.push("- For editing files: use edit_file (NOT shell sed/awk)");
     }
-    if has("file_write") {
-        rules.push("- For creating/writing files: use file_write (NOT shell echo/tee)");
+    if has("write_file") {
+        rules.push("- For creating/writing files: use write_file (NOT shell echo/tee/cat>)");
     }
     if has("list_directory") {
         rules.push("- For listing directories: use list_directory (NOT shell ls)");

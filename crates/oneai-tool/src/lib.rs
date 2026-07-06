@@ -173,6 +173,147 @@ mod tests {
         assert_eq!(tool.risk_level(), RiskLevel::High);
     }
 
+    #[tokio::test]
+    async fn test_file_write_tool_creates_parent_dirs() {
+        let tool = FileWriteTool::new();
+        let tmp = std::env::temp_dir();
+        // Use a unique nested path that definitely doesn't exist yet.
+        let unique = format!("oneai_write_test_{}", std::process::id());
+        let nested = tmp.join(&unique).join("nested").join("dir").join("file.txt");
+        // Sanity: parent really doesn't exist before the call.
+        assert!(!nested.parent().unwrap().exists());
+
+        let result = tool.execute(serde_json::json!({
+            "path": nested.to_str().unwrap(),
+            "content": "hello",
+        })).await.unwrap();
+        assert!(result.success, "write_file should succeed: {:?}", result.error);
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "hello");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(tmp.join(&unique));
+    }
+
+    #[tokio::test]
+    async fn test_shell_tool_rejects_cat_redirect() {
+        // Regression for the "cat > file <<EOF" failure: the model must NOT be
+        // allowed to fall back to shell file-writing; it should be redirected
+        // to write_file / apply_patch. The rejection must happen before any
+        // process is spawned, so this test is safe to run anywhere.
+        let tool = ShellTool::new();
+        let cases = [
+            "cat > /tmp/oneai_shell_test.txt",
+            "cat >> /tmp/oneai_shell_test.txt",
+            "cat>/tmp/oneai_shell_test.txt",
+            "cat > /tmp/oneai_shell_test.txt <<EOF\nhello\nEOF",
+            "echo hello > /tmp/oneai_shell_test.txt",
+            "printf 'x' > /tmp/oneai_shell_test.txt",
+            "tee /tmp/oneai_shell_test.txt",
+            "cat <<EOF > /tmp/oneai_shell_test.txt\nhello\nEOF",
+        ];
+        for cmd in cases {
+            let result = tool.execute(serde_json::json!({"command": cmd})).await.unwrap();
+            assert!(!result.success, "expected rejection for: {cmd}");
+            let err = result.error.unwrap_or_default();
+            assert!(
+                err.contains("write_file") || err.contains("apply_patch"),
+                "rejection should redirect to write_file/apply_patch, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_file_write_guard_no_false_positives() {
+        // Commands that are NOT file-writing must not trip the guard. Guards
+        // against bit-shift false positives (`1 << 8`) and legitimate output
+        // redirection from non-text commands (`cargo build > log.txt`).
+        use crate::tool_interfaces::detect_shell_file_write;
+        let safe = [
+            "cargo build --release",
+            "cargo build > build.log",
+            "git diff > patch.diff",
+            "echo $((1 << 8))",
+            "echo $((1 << y))",
+            "python -c 'print(1 << 4)'",
+            "ls -la",
+            "cat existing_file.txt",
+            "grep -rn 'pattern' src/",
+            // P2: a pure stdout heredoc (no file redirect) is NOT file writing
+            // and now works cross-platform via the POSIX-sh fallback, so it
+            // must not be rejected.
+            "mysql <<EOF\nSELECT 1;\nEOF",
+            "psql <<'EOF'\n\\d\nEOF",
+        ];
+        for cmd in safe {
+            assert!(
+                detect_shell_file_write(cmd).is_none(),
+                "falsely flagged as shell file write: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_file_write_guard_flags_heredoc_to_file() {
+        // A heredoc whose body is redirected to a file IS shell-based file
+        // writing and must be flagged even when `cat`/`echo`/`tee` aren't used.
+        use crate::tool_interfaces::detect_shell_file_write;
+        let cases = [
+            "python <<EOF > out.txt\nprint(1)\nEOF",
+            "awk <<'END' > report.txt\n{print}\nEND",
+        ];
+        for cmd in cases {
+            assert!(
+                detect_shell_file_write(cmd).is_some(),
+                "heredoc-to-file not flagged: {cmd}"
+            );
+        }
+    }
+
+    // ─── P2: cross-platform shell resolution tests ──────────────────────────
+
+    #[test]
+    fn test_find_sh_in_dirs_finds_sh() {
+        use crate::tool_interfaces::find_sh_in_dirs;
+        let tmp = std::env::temp_dir();
+        let unique = format!("oneai_sh_scan_{}", std::process::id());
+        let dir = tmp.join(&unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create a fake `sh` so find_sh_in_dirs returns it.
+        let fake_sh = dir.join("sh");
+        std::fs::write(&fake_sh, b"#!/bin/sh\n").unwrap();
+
+        let dir_path = dir.as_path();
+        let found = find_sh_in_dirs([dir_path]);
+        assert_eq!(found, Some(fake_sh));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_find_sh_in_dirs_none_when_absent() {
+        use crate::tool_interfaces::find_sh_in_dirs;
+        let tmp = std::env::temp_dir();
+        let unique = format!("oneai_sh_scan_empty_{}", std::process::id());
+        let dir = tmp.join(&unique);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let dir_path = dir.as_path();
+        assert_eq!(find_sh_in_dirs([dir_path]), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_resolve_shell_uses_sh_on_unix() {
+        // On Unix we always use sh -c. This pins the contract; the Windows
+        // branch (POSIX-sh-or-PowerShell) is exercised on Windows hosts.
+        use crate::tool_interfaces::resolve_shell;
+        let (shell, arg) = resolve_shell();
+        assert_eq!(shell, std::path::PathBuf::from("sh"));
+        assert_eq!(arg, "-c");
+    }
+
     #[test]
     fn test_mcp_tool_wrapper() {
         let tool = McpToolWrapper::new(

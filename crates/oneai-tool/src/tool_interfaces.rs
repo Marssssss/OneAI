@@ -212,6 +212,150 @@ fn default_blocked_patterns() -> Vec<regex::Regex> {
     .collect()
 }
 
+/// Detect shell constructs that write files via redirection instead of the
+/// dedicated write_file / apply_patch tools. Returns a short reason describing
+/// the matched construct so the rejection error can tell the model what to fix.
+///
+/// Matched patterns:
+/// - `cat > file` / `cat >> file` / `cat>file` (word-boundary on `cat`)
+/// - heredoc `<<EOF` / `<< EOF` / `<<'EOF'` / `<<"END"` (POSIX heredoc; the
+///   delimiter must start with a letter, underscore, or quote — this avoids
+///   matching bit-shift like `1 << 4` while catching real heredocs)
+/// - `echo > file` / `printf > file` / `tee file` write-to-file forms
+///
+/// On Windows these fail outright (PowerShell has no POSIX heredoc and uses
+/// different redirection syntax); on Unix they break under sandbox wrapping.
+/// Either way, write_file / apply_patch is the correct tool.
+pub(crate) fn detect_shell_file_write(command: &str) -> Option<&'static str> {
+
+    // Compile once per call — these are tiny patterns. Using a `static` Regex
+    // would require a crate like `lazy_static`/`once_cell`; inline compile is
+    // cheap enough for a per-command guard and keeps the dependency surface
+    // unchanged.
+    // `cat > file` / `cat >> file` / `cat>file` (word-boundary on `cat`; no
+    // trailing-space requirement so `cat>file` is caught too). The word
+    // boundary avoids matching `concat > x` or `bobcat > x`.
+    let cat_redirect = regex::Regex::new(r"\bcat\s*>>?").ok()?;
+    // Heredoc: `<<` then optional space then a quote or an UPPERCASE/underscore
+    // delimiter (EOF, END, 'EOF', "END", _DELIM, ...). Requiring uppercase/quote
+    // avoids matching bit-shift like `x << y` or `1 << 8` while still catching
+    // the heredocs the model actually writes.
+    let heredoc = regex::Regex::new(r#"<<\s*(['"]|[A-Z_])"#).ok()?;
+    // A file redirect: `>` or `>>` followed by optional spaces and a non-space,
+    // non-`&` char. The `&` exclusion avoids matching stderr/stdout dup
+    // operators like `2>&1` or `>&2`, which are not file writes.
+    let file_redirect = regex::Regex::new(r">>?\s*[^\s&]").ok()?;
+    let echo_write = regex::Regex::new(r#"\b(echo|printf)\s+.*>>?\s"#).ok()?;
+    let tee_write = regex::Regex::new(r#"\btee\s+(?:-a\s+)?[^\s|&;]+"#).ok()?;
+
+    if cat_redirect.is_match(command) {
+        return Some("shell `cat >`/`cat >>` file redirection");
+    }
+    // Heredoc-to-file: a heredoc whose body is redirected to a file
+    // (`python <<EOF > out.txt`, `cat <<EOF > f`). This is shell-based file
+    // writing and is fragile under sandbox wrapping. A *pure* stdout heredoc
+    // (e.g. `mysql <<EOF`) is NOT flagged — with the POSIX-sh fallback below
+    // it works cross-platform and isn't a write_file use case.
+    if heredoc.is_match(command) && file_redirect.is_match(command) {
+        return Some("POSIX heredoc-to-file (`<<EOF ... > file`)");
+    }
+    if echo_write.is_match(command) {
+        return Some("shell `echo >`/`printf >` file redirection");
+    }
+    if tee_write.is_match(command) {
+        return Some("shell `tee` file write");
+    }
+    None
+}
+
+// ─── Cross-platform shell resolution ──────────────────────────────────────────
+//
+// P2: On Windows, prefer a POSIX `sh` (Git for Windows / MSYS2) over PowerShell
+// so that heredocs (`<<EOF`), `cat >`, `2>&1`, `&&`/`||`, and other POSIX
+// constructs behave the same as on Unix. PowerShell has no POSIX heredoc and
+// different redirection semantics, which previously made every `cat > file`
+// attempt fail on Windows — pushing the model into a retry loop. When a POSIX
+// `sh` is found, we run commands via `sh -c` uniformly; otherwise we fall back
+// to PowerShell `-Command` (the historical behavior).
+
+/// Cached result of probing Windows for a POSIX `sh`. `None` means "no POSIX sh
+/// found; use PowerShell". Probed once per process.
+static WINDOWS_POSIX_SH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+
+/// Scan a sequence of directories for an `sh.exe` / `sh` executable. Pure and
+/// platform-agnostic so it can be unit-tested without a Windows host. Only
+/// referenced on Windows (by `find_posix_sh_on_windows`) and in tests, hence
+/// the cfg gate to avoid dead-code warnings on other platforms.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn find_sh_in_dirs<'a, I>(dirs: I) -> Option<std::path::PathBuf>
+where
+    I: IntoIterator<Item = &'a std::path::Path>,
+{
+    for dir in dirs {
+        for name in ["sh.exe", "sh"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// On Windows, locate a POSIX `sh` if one is reachable. Checks standard Git for
+/// Windows / MSYS2 install locations first, then scans `PATH`. Returns `None`
+/// on non-Windows platforms (the caller never invokes it there).
+#[cfg(target_os = "windows")]
+fn find_posix_sh_on_windows() -> Option<std::path::PathBuf> {
+    // 1. Standard Git for Windows / MSYS2 install locations (full exe paths).
+    const CANDIDATES: &[&str] = &[
+        r"C:\Program Files\Git\bin\sh.exe",
+        r"C:\Program Files\Git\usr\bin\sh.exe",
+        r"C:\Program Files (x86)\Git\bin\sh.exe",
+        r"C:\Program Files (x86)\Git\usr\bin\sh.exe",
+        r"C:\msys64\usr\bin\sh.exe",
+        r"C:\msys32\usr\bin\sh.exe",
+    ];
+    for c in CANDIDATES {
+        let p = std::path::Path::new(c);
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    // 2. Scan PATH for sh.exe / sh.
+    let path_env = std::env::var_os("PATH")?;
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path_env).collect();
+    let dir_refs: Vec<&std::path::Path> = dirs.iter().map(|d| d.as_path()).collect();
+    find_sh_in_dirs(dir_refs)
+}
+
+/// Resolve the shell program and its argument for executing a command string.
+///
+/// - Unix: `sh -c`
+/// - Windows with a reachable POSIX `sh`: `sh -c` (uniform POSIX semantics)
+/// - Windows without: `powershell -Command` (fallback)
+pub(crate) fn resolve_shell() -> (std::path::PathBuf, &'static str) {
+    if cfg!(target_os = "windows") {
+        let cached = WINDOWS_POSIX_SH.get_or_init(|| {
+            #[cfg(target_os = "windows")]
+            {
+                find_posix_sh_on_windows()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                None
+            }
+        });
+        if let Some(sh) = cached {
+            tracing::info!("ShellTool: using POSIX sh on Windows: {}", sh.display());
+            return (sh.clone(), "-c");
+        }
+        tracing::info!("ShellTool: no POSIX sh found on Windows; falling back to PowerShell");
+        return (std::path::PathBuf::from("powershell"), "-Command");
+    }
+    (std::path::PathBuf::from("sh"), "-c")
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -226,7 +370,7 @@ impl Tool for ShellTool {
         **CRITICAL: Always prefer specialized tools over shell commands**:\n\
         - Use read_file instead of: cat, head, tail, less\n\
         - Use edit_file instead of: sed, awk, perl -i, patch\n\
-        - Use file_write instead of: echo > file, tee, dd for writing\n\
+        - Use write_file instead of: `echo > file`, `cat > file` / heredoc (`<<EOF`), `tee`, `dd` for writing\n\
         - Use list_directory instead of: ls, find -type d\n\
         - Use grep instead of: grep command, rg, ag\n\
         - Use glob instead of: find, locate\n\n\
@@ -242,7 +386,16 @@ impl Tool for ShellTool {
         - Working directory: restricted to project directory\n\
         - Output is truncated if exceeds size limit to prevent context overflow\n\
         - Combine commands with && for sequential operations\n\
-        - Use timeout parameter for long-running commands"
+        - Use timeout parameter for long-running commands\n\n\
+        **Cross-platform semantics (IMPORTANT)**:\n\
+        - On Unix, commands run via `sh -c`. On Windows, this tool prefers a \
+        POSIX `sh` (Git for Windows / MSYS2) when one is installed, so heredocs \
+        (`<<EOF`), `cat >`, `2>&1`, and `&&`/`||` work the same as on Unix; if \
+        no POSIX `sh` is found, it falls back to PowerShell `-Command`, where \
+        POSIX constructs fail or behave differently.\n\
+        - Even with POSIX `sh` available, prefer write_file/edit_file/apply_patch \
+        for any file creation/writing — shell redirection is still more fragile \
+        under sandbox wrapping."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -292,6 +445,27 @@ impl Tool for ShellTool {
             }
         }
 
+        // Reject shell-based file writing that has a dedicated, safer tool.
+        // The model frequently falls back to `cat > file <<EOF ... EOF` or
+        // `echo > file` when it forgets write_file exists. These constructs
+        // are fragile: they break under sandbox wrapping (the heredoc body
+        // gets mangled by quote escaping in `sh -c '...'`), fail entirely on
+        // Windows (PowerShell has no POSIX heredoc), and are error-prone with
+        // special characters. Redirect the model to write_file / apply_patch
+        // instead of letting it retry until something sticks.
+        if let Some(reason) = detect_shell_file_write(command) {
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!(
+                    "Rejected: {}. Use the write_file tool to create/overwrite a file, \
+                     or apply_patch for multi-file changes — do NOT use shell redirection \
+                     or heredocs for file writing.",
+                    reason
+                )),
+            });
+        }
+
         // Determine the actual command to run — wrap with sandbox backend if available
         let effective_command = match &self.sandbox_mode {
             SandboxMode::Enabled { backend } => {
@@ -319,14 +493,12 @@ impl Tool for ShellTool {
             }
         };
 
-        // Determine the shell based on the platform
-        // If the command is already wrapped by a sandbox backend (contains "sandbox-exec" or "docker"),
-        // we need to use a shell that can execute the wrapped command directly.
-        let (shell, shell_arg) = if cfg!(target_os = "windows") {
-            ("powershell", "-Command")
-        } else {
-            ("sh", "-c")
-        };
+        // Determine the shell based on the platform and (on Windows) whether
+        // a POSIX `sh` is reachable. If the command is already wrapped by a
+        // sandbox backend (contains "sandbox-exec" or "docker"), we still need
+        // a shell that can execute the wrapped command string directly — `sh`
+        // handles this on every platform where it's available.
+        let (shell, shell_arg) = resolve_shell();
 
         // Clamp timeout to max
         let timeout = args.get("timeout")

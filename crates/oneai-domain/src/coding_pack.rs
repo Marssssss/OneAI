@@ -19,7 +19,7 @@ use std::sync::Arc;
 use oneai_core::PermissionLevel;
 use oneai_core::traits::Tool;
 use oneai_tool::{
-    ShellTool, FileReadTool, FileEditTool, GrepTool, GlobTool,
+    ShellTool, FileReadTool, FileEditTool, FileWriteTool, GrepTool, GlobTool,
     FileListTool, NotebookEditTool, EnvironmentTool, WebFetchTool, WebSearchTool,
     ApplyPatchTool,
 };
@@ -54,7 +54,7 @@ and executing code in the project.
 Always prefer the most specific tool available over shell commands:
 - For reading files: use read_file (NOT shell cat/head/tail/less)
 - For editing files: use edit_file (NOT shell sed/awk/perl -i)
-- For creating files: use apply_patch or edit_file (NOT shell echo/tee)
+- For creating files: use write_file (or apply_patch for multi-file) (NOT shell echo/tee/cat>)
 - For listing directories: use list_directory (NOT shell ls/find -type d)
 - For searching content: use grep (NOT shell grep/find)
 - For finding files: use glob (NOT shell find/locate)
@@ -113,12 +113,15 @@ fn coding_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
             name: "coder".to_string(),
             description: "Implements code changes based on a plan or specification".to_string(),
             system_prompt: "You are a code implementation agent. Your job is to write and modify \
-                code based on the given specification. Use edit_file and write_file for changes, \
-                shell for running tests, and read_file to understand the codebase. Return a \
-                summary of all changes you made.".to_string(),
+                code based on the given specification. Use edit_file for modifications, write_file \
+                (or apply_patch for batch/multi-file) for creating new files, shell for running \
+                tests, and read_file to understand the codebase. Return a summary of all changes \
+                you made.".to_string(),
             available_tools: vec![
                 "read_file".to_string(),
                 "edit_file".to_string(),
+                "write_file".to_string(),
+                "apply_patch".to_string(),
                 "shell".to_string(),
                 "grep".to_string(),
                 "glob".to_string(),
@@ -180,6 +183,7 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
         tools: vec![
             Arc::new(FileReadTool::new()) as Arc<dyn Tool>,
             Arc::new(FileEditTool::new()) as Arc<dyn Tool>,
+            Arc::new(FileWriteTool::new()) as Arc<dyn Tool>,
             Arc::new(ApplyPatchTool::new()) as Arc<dyn Tool>,
             Arc::new(ShellTool::new()) as Arc<dyn Tool>,
             Arc::new(GrepTool::new()) as Arc<dyn Tool>,
@@ -222,6 +226,20 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 unlike shell text manipulation which is error-prone and irreversible"
             ),
             ToolDecorator::with_description(
+                "write_file",
+                "Create a new file or fully overwrite an existing file with the given content. \
+                Use this for creating new files, writing generated code, or replacing a file's \
+                entire contents. The write is atomic — either the whole file is written or it \
+                fails.\n\n\
+                **RECOMMENDED** — always prefer write_file over shell for creating/writing files:\n\
+                - Do NOT use shell `cat > file` / heredoc (`<<EOF`) → use write_file\n\
+                - Do NOT use shell `echo > file` / `tee` → use write_file\n\
+                - Do NOT use shell `printf > file` → use write_file\n\
+                - For targeted edits to an existing file, use edit_file instead (write_file \
+                replaces the whole file and is wasteful for small edits)\n\
+                - For batch/multi-file changes, use apply_patch instead"
+            ),
+            ToolDecorator::with_description(
                 "apply_patch",
                 "Apply a unified diff patch to modify multiple files at once. Use for \
                 multi-file refactoring, batch edits, and applying review suggestions. \
@@ -241,11 +259,12 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 **Do NOT use shell for file operations — use dedicated tools instead**:\n\
                 - Do NOT use cat → use read_file\n\
                 - Do NOT use sed/awk → use edit_file\n\
-                - Do NOT use echo > file → use edit_file or apply_patch\n\
+                - Do NOT use echo > file → use write_file (or apply_patch for multi-file)\n\
+                - Do NOT use cat > file / heredoc <<EOF → use write_file\n\
                 - Do NOT use ls → use list_directory\n\
                 - Do NOT use grep → use grep tool\n\
                 - Do NOT use find → use glob\n\
-                - Do NOT use mkdir → use edit_file (creates files), list_directory checks dirs\n\n\
+                - Do NOT use mkdir → use write_file (creates parent dirs as needed), list_directory checks dirs\n\n\
                 Commands run with timeout (default 120s, max 600s). Dangerous commands \
                 (rm -rf, mkfs, dd, chmod 777) are blocked. Output truncated at 100KB.",
                 PermissionLevel::Full
@@ -1132,8 +1151,8 @@ mod tests {
         let pack = coding_pack("/tmp/test_project");
 
         assert_eq!(pack.name, "coding");
-        assert_eq!(pack.tools.len(), 11); // 9 original + ApplyPatchTool + WebSearchTool
-        assert_eq!(pack.tool_decorators.len(), 10); // 8 original + apply_patch + web_search
+        assert_eq!(pack.tools.len(), 12); // 9 original + ApplyPatchTool + WebSearchTool + FileWriteTool
+        assert_eq!(pack.tool_decorators.len(), 11); // 8 original + apply_patch + web_search + write_file
         assert_eq!(pack.context_sources.len(), 7); // 6 original + RepoMapSource
         assert!(!pack.system_prompt_template.is_empty());
     }

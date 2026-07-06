@@ -34,8 +34,16 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a local file. This is a high-risk tool that requires approval. \
-        Can create new files or overwrite existing ones."
+        "Create a new file or overwrite an existing file with the given content. \
+        Parent directories are created automatically if missing, so you can write \
+        to paths like `src/new_mod/mod.rs` in a single call. Set `append=true` to \
+        append to an existing file instead of overwriting.\n\n\
+        **RECOMMENDED** for creating/writing files — do NOT use shell for this:\n\
+        - Do NOT use `cat > file` / heredoc (`<<EOF`) → use write_file\n\
+        - Do NOT use `echo > file` / `tee` / `printf > file` → use write_file\n\
+        - For targeted edits to part of an existing file, use edit_file instead\n\
+        - For batch/multi-file changes, use apply_patch instead\n\n\
+        This is a high-risk tool: writing overwrites existing content without confirmation."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -108,6 +116,21 @@ impl Tool for FileWriteTool {
                 Err(e) => Err(e),
             }
         } else {
+            // Create parent directories if missing so the model can write to
+            // paths like `src/new_mod/mod.rs` in one step. tokio::fs::write
+            // alone fails when the parent dir does not exist, which previously
+            // pushed the model toward `mkdir -p` + `cat >` shell workarounds.
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() && !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                        return Ok(ToolOutput {
+                            success: false,
+                            content: String::new(),
+                            error: Some(format!("Failed to create parent directories: {}", e)),
+                        });
+                    }
+                }
+            }
             tokio::fs::write(path, content).await
         };
 
