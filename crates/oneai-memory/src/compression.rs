@@ -149,10 +149,34 @@ impl ContextCompressor {
             });
         }
 
-        // Split conversation: older turns to compress, recent turns to keep
-        let split_point = total_messages - self.keep_recent_turns;
-        let older_messages = &conversation.messages[..split_point];
-        let recent_messages = &conversation.messages[split_point..];
+        // Split conversation: older turns to compress, recent turns to keep.
+        // The first user message is the original task — pin it verbatim (Q2
+        // hard guarantee + the Q3 handoff must carry the original Goal) rather
+        // than letting it fall into the summarizable segment and be summarized
+        // away. It is pulled out of `older_messages` and re-added to the
+        // compressed conversation intact, between the summary and the recent tail.
+        let recent_start = total_messages - self.keep_recent_turns;
+        let first_user_idx = conversation.messages.iter()
+            .position(|m| m.role == Role::User);
+
+        // The first user message is pinned only when it would otherwise be
+        // summarized (i.e. it sits before the recent tail). When it's already
+        // inside the recent tail it's kept verbatim by the recent-segment copy
+        // below, so no special handling is needed.
+        let pin_first_user = first_user_idx
+            .map(|idx| idx < recent_start)
+            .unwrap_or(false);
+
+        // `older` = the summarizable segment = messages before the recent tail,
+        // excluding the pinned first user message (if any). Owned because the
+        // discarded segment is handed to the fact extractor + discarded sink.
+        let older_indices: Vec<usize> = (0..recent_start)
+            .filter(|&i| !(pin_first_user && Some(i) == first_user_idx))
+            .collect();
+        let older_messages: Vec<Message> = older_indices.iter()
+            .map(|&i| conversation.messages[i].clone())
+            .collect();
+        let recent_messages = &conversation.messages[recent_start..];
 
         // Build the text to summarize.
         //
@@ -228,6 +252,14 @@ impl ContextCompressor {
             "[Previous conversation summary]: ".to_string() + &summary_text
         ));
 
+        // Pin the original task (first user message) verbatim — Q2/Q3 hard
+        // guarantee. The model sees the unmodified goal alongside the handoff.
+        if pin_first_user {
+            if let Some(&idx) = first_user_idx.as_ref() {
+                compressed.add_message(conversation.messages[idx].clone());
+            }
+        }
+
         // Add the recent turns intact
         for msg in recent_messages {
             compressed.add_message(msg.clone());
@@ -258,13 +290,13 @@ impl ContextCompressor {
 
         // Compression-coupled fact extraction: turn the discarded (summarized-away)
         // turns into durable archival facts before they're lost. Fail-safe.
-        self.extract_and_archive(older_messages).await;
+        self.extract_and_archive(&older_messages).await;
 
         Ok(CompressedResult {
             compressed_conversation: compressed,
             summary: Some(summary_text),
             removed_entries,
-            discarded_messages: older_messages.to_vec(),
+            discarded_messages: older_messages,
         })
     }
 
@@ -431,5 +463,30 @@ mod closure_tests {
         let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider));
         let _ = compressor.compress(&long_conversation()).await.unwrap();
         assert!(archive.all().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compression_preserves_first_user_message_and_metadata() {
+        // Q2 hard guarantee: the original task (first user message) survives
+        // compression verbatim instead of being summarized away. Metadata
+        // (task_anchor / plan_state) is also copied through.
+        let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider));
+        let mut conv = long_conversation();
+        conv.metadata.insert("task_anchor".to_string(), "I use pnpm".to_string());
+        let result = compressor.compress(&conv).await.unwrap();
+
+        // The first user message text appears verbatim in the compressed conv.
+        let compressed_text: String = result.compressed_conversation.messages.iter()
+            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
+        assert!(compressed_text.contains("I use pnpm for package management."),
+            "first user message must be pinned verbatim, got: {compressed_text}");
+        // Metadata carried through.
+        assert_eq!(
+            result.compressed_conversation.metadata.get("task_anchor"),
+            Some(&"I use pnpm".to_string()),
+        );
+        // The pinned first user message is NOT in the discarded segment.
+        assert!(!result.discarded_messages.iter().any(|m| m.role == Role::User
+            && m.text_content().contains("I use pnpm for package management.")));
     }
 }

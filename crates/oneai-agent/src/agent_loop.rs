@@ -325,6 +325,10 @@ pub struct LoopState {
 impl LoopState {
     pub fn new(task: &str) -> Self {
         let mut conversation = Conversation::new();
+        // Mirror the original task into conversation metadata so every
+        // compressor (which copies metadata verbatim) preserves the task
+        // anchor even if the first user message itself gets summarized away.
+        conversation.metadata.insert("task_anchor".to_string(), task.to_string());
         conversation.add_message(Message::user(task.to_string()));
         Self {
             original_task: task.to_string(),
@@ -349,7 +353,12 @@ impl LoopState {
     /// while appending the new user input as the latest message.
     pub fn from_conversation(conversation: Conversation, task: &str) -> Self {
         let mut conv = conversation;
+        conv.metadata.insert("task_anchor".to_string(), task.to_string());
         conv.add_message(Message::user(task.to_string()));
+        // Q3 reseed: restore the live plan list from metadata so a reloaded /
+        // compacted session continues the in-flight task instead of losing it.
+        let plan_state = conv.metadata.get("plan_state")
+            .and_then(|s| crate::plan_state::PlanState::from_metadata_string(s));
         Self {
             original_task: task.to_string(),
             conversation: conv,
@@ -363,7 +372,7 @@ impl LoopState {
             sub_agent_results: Vec::new(),
             interrupt_points: Vec::new(),
             pending_interrupt: None,
-            plan_state: None,
+            plan_state,
         }
     }
 
@@ -994,50 +1003,55 @@ impl AgentLoop {
                 ]));
             }
 
-            // 1. Refresh domain context sources + assemble context
+            // 1. Refresh domain context sources, then decide on compression.
+            //
+            // Durable/ephemeral separation: `state.conversation` is the durable
+            // log (system prompt, user task, assistant replies, tool results)
+            // that the loop appends to and persists. The ContextSource blocks
+            // and the pinned TaskAnchor / PlanProgress / skill menu are
+            // *ephemeral* — re-injected fresh every turn onto a clone of the
+            // durable log, never written back. So pinned state survives context
+            // compression by re-injection rather than by relying on the
+            // compressor to keep it, and it doesn't accumulate over turns.
+            //
+            // When the request would overflow, compress the DURABLE log (not
+            // the ephemeral assembly) so `discarded_messages` is real
+            // transcript and the durable log stays bounded; the pinned blocks
+            // are then re-injected onto the compressed durable for the request.
+            // (Previously `assembled` was dropped on non-compression iterations
+            // and the request used the bare durable log, so no ContextSource
+            // injection ever reached the model on normal turns.)
             {
                 let mut ca = self.context_assembler.write().await;
                 ca.refresh_sources().await?;
             }
 
-            // Context Epoch is now self-managed by the assembler: the first
-            // assemble() injects every source as the baseline; subsequent
-            // iterations inject only what each source's RefreshPolicy permits
-            // (OnChange / EveryIteration / Periodic / OnceAtStart). Environment
-            // sensing (git status, file tree, …) lives entirely in the
-            // ContextSource impls — the loop no longer runs its own probes.
-            let assembled = self.context_assembler.write().await.assemble(&state)?;
+            // Build the full request conversation: durable log clone + cached
+            // ContextSource blocks + ephemeral pinned blocks (anchor / plan /
+            // skills). Then check fit on this real request size; if it
+            // overflows, compress the DURABLE log (so discarded_messages is
+            // real transcript and the durable log stays bounded) and re-build
+            // the request on top of the compressed durable.
+            let mut conv_for_inference = self.context_assembler.write().await.assemble(&state)?;
+            self.inject_pinned_blocks(&mut conv_for_inference, &state).await;
 
-            if self.context_budget.needs_compression(&assembled) {
-                state.conversation = self.context_budget.compress(assembled).await?;
+            if self.context_budget.needs_compression(&conv_for_inference) {
+                state.conversation = self.context_budget.compress(state.conversation.clone()).await?;
+                conv_for_inference = self.context_assembler.write().await.assemble(&state)?;
+                self.inject_pinned_blocks(&mut conv_for_inference, &state).await;
             }
 
-            // 2. Skill progressive disclosure
-            //
-            // Replaces the old auto-selector: selected skills were never rendered
-            // into the prompt (a dead write). Now we inject, every turn:
-            //  - Tier1: a compact "Available skills" menu (name + description) so
-            //    the model knows what skills exist and can call the `skill` tool.
-            //  - Tier3: if a skill was manually activated via `/skill <name>`, its
-            //    full prompt_template is injected so the model follows it.
-            if self.config.inject_skills {
-                if let Some(menu) = self.build_skill_menu().await {
-                    state.conversation.add_message(Message::system(menu));
+            // Sync the live plan_state into the durable log's metadata so it
+            // survives compression (every compressor copies metadata verbatim)
+            // and session reload — Q3 reseed. from_conversation restores it.
+            if let Some(plan) = &state.plan_state {
+                if let Some(serialized) = plan.to_metadata_string() {
+                    state.conversation.metadata.insert("plan_state".to_string(), serialized);
+                } else {
+                    state.conversation.metadata.remove("plan_state");
                 }
-                if let Some(name) = &self.active_skill {
-                    if let Some(skill) = self.skill_registry.find_by_name(name).await {
-                        state.active_skills = vec![skill.clone()];
-                        let inject = format!(
-                            "# Active skill: {}\n{}\n\n(Follow these instructions for this task.)",
-                            skill.name, skill.prompt_template
-                        );
-                        state.conversation.add_message(Message::system(inject));
-                    } else {
-                        // Activated skill no longer registered — clear to avoid
-                        // re-warning every turn.
-                        tracing::warn!("Active skill '{}' not in registry; clearing", name);
-                    }
-                }
+            } else {
+                state.conversation.metadata.remove("plan_state");
             }
 
             // 3. Build inference request (with paradigm-aware tool definitions)
@@ -1052,7 +1066,7 @@ impl AgentLoop {
                 state.active_paradigm_config.as_ref()
             ).await;
             let mut request = InferenceRequest {
-                conversation: state.conversation.clone(),
+                conversation: conv_for_inference,
                 tools: tool_defs,
                 max_tokens: self.config.max_tokens,
                 temperature: self.config.temperature.or(Some(0.3)),
@@ -1099,8 +1113,9 @@ impl AgentLoop {
                     InteractionResponse::Proceed => {}
                     InteractionResponse::ProceedWith { modification } => match modification {
                         InteractionModification::InjectSystemMessage(msg) => {
-                            state.conversation.add_message(Message::system(msg));
-                            request.conversation = state.conversation.clone();
+                            // Ephemeral injection for this iteration only — do
+                            // NOT write to the durable log (would accumulate).
+                            request.conversation.add_message(Message::system(msg));
                         }
                         InteractionModification::ReplaceRequest(new_req) => {
                             request = new_req;
@@ -1108,8 +1123,11 @@ impl AgentLoop {
                         _ => {}
                     },
                     InteractionResponse::Revise { feedback } => {
-                        state.conversation.add_message(Message::user(feedback));
-                        request.conversation = state.conversation.clone();
+                        // User feedback is a durable user turn (persists + next
+                        // iteration's assemble includes it) AND must appear in
+                        // this iteration's request so the model sees it now.
+                        state.conversation.add_message(Message::user(feedback.clone()));
+                        request.conversation.add_message(Message::user(feedback));
                     }
                     InteractionResponse::Abort { reason } => {
                         state.conversation.add_message(Message::system(
@@ -3290,6 +3308,42 @@ impl AgentLoop {
             lines.push(format!("- {}: {}", skill.name, skill.description));
         }
         Some(lines.join("\n"))
+    }
+
+    /// Inject the ephemeral pinned blocks onto a conversation clone — the
+    /// original-task anchor (Q2), the live plan/progress (Q1), and the skill
+    /// menu / active skill (progressive disclosure). These are re-injected
+    /// every turn and are NOT written to the durable `state.conversation`, so
+    /// they survive compression by re-injection and don't accumulate. The
+    /// `plan_state` is also mirrored to `conversation.metadata["plan_state"]`
+    /// (persisted + copied by every compressor) for Q3 reseed on reload.
+    async fn inject_pinned_blocks(&self, conv: &mut Conversation, state: &LoopState) {
+        conv.add_message(Message::system(crate::context_assembler::task_anchor_block(
+            &state.original_task,
+            &state.conversation.metadata,
+        )));
+        if let Some(plan) = &state.plan_state {
+            conv.add_message(Message::system(crate::context_assembler::plan_progress_block(
+                &state.original_task,
+                plan,
+            )));
+        }
+        if self.config.inject_skills {
+            if let Some(menu) = self.build_skill_menu().await {
+                conv.add_message(Message::system(menu));
+            }
+            if let Some(name) = &self.active_skill {
+                if let Some(skill) = self.skill_registry.find_by_name(name).await {
+                    let inject = format!(
+                        "# Active skill: {}\n{}\n\n(Follow these instructions for this task.)",
+                        skill.name, skill.prompt_template
+                    );
+                    conv.add_message(Message::system(inject));
+                } else {
+                    tracing::warn!("Active skill '{}' not in registry; clearing", name);
+                }
+            }
+        }
     }
 
     /// Select a recovery strategy based on the type of tool call failure.

@@ -63,6 +63,40 @@ impl PlanState {
             })
     }
 
+    /// Render the plan as a compact progress block for pinned injection each
+    /// iteration. This is the Q1 "状态外置" surface: the live plan lives in
+    /// `LoopState` (agent-side) and is re-injected as an ephemeral system block
+    /// every turn, so it survives context compression by re-injection rather
+    /// than by hoping the compressor keeps it.
+    pub fn render_progress(&self) -> String {
+        summarize(self).text
+    }
+
+    /// Serialize into a string for stashing in `Conversation::metadata`, so the
+    /// plan survives both compression (metadata is copied verbatim by every
+    /// compressor) and session persistence/reload (Q3 reseed). Returns `None`
+    /// for an empty plan so we don't pollute metadata with `"{"steps":[],"revision":0}`.
+    pub fn to_metadata_string(&self) -> Option<String> {
+        if self.steps.is_empty() {
+            return None;
+        }
+        serde_json::to_string(self).ok()
+    }
+
+    /// Inverse of [`to_metadata_string`]. Returns `None` on deserialization
+    /// failure or an empty plan — callers fall back to `None` plan state.
+    pub fn from_metadata_string(s: &str) -> Option<Self> {
+        if s.is_empty() {
+            return None;
+        }
+        let state: PlanState = serde_json::from_str(s).ok()?;
+        if state.steps.is_empty() {
+            None
+        } else {
+            Some(state)
+        }
+    }
+
     fn bump(&mut self) {
         self.revision = self.revision.saturating_add(1);
     }
@@ -533,5 +567,41 @@ mod tests {
         assert!(names.contains(&TOOL_TASK_UPDATE));
         assert!(names.contains(&TOOL_TASK_LIST));
         assert!(names.contains(&TOOL_EXIT_PLAN_MODE));
+    }
+
+    #[test]
+    fn test_metadata_roundtrip_and_render() {
+        let mut plan = None;
+        apply_control_tool(
+            &mut plan,
+            TOOL_TASK_CREATE,
+            &serde_json::json!({
+                "steps": [
+                    {"id": "1", "description": "write code"},
+                    {"id": "2", "description": "test it"}
+                ]
+            }),
+        );
+        let state = plan.clone().unwrap();
+        // Empty plan → no metadata string.
+        let empty = PlanState::default();
+        assert!(empty.to_metadata_string().is_none());
+        assert!(PlanState::from_metadata_string("").is_none());
+
+        // Non-empty plan round-trips through metadata.
+        let s = state.to_metadata_string().unwrap();
+        let restored = PlanState::from_metadata_string(&s).unwrap();
+        assert_eq!(restored.steps.len(), 2);
+        assert_eq!(restored.steps[0].description, "write code");
+        assert_eq!(restored.revision, state.revision);
+
+        // render_progress surfaces status icons + counts.
+        let rendered = state.render_progress();
+        assert!(rendered.contains("2 steps"));
+        assert!(rendered.contains("write code"));
+        assert!(rendered.contains("[1]"));
+
+        // Malformed metadata → None (no panic on reload).
+        assert!(PlanState::from_metadata_string("not json").is_none());
     }
 }

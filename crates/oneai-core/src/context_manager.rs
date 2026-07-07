@@ -379,6 +379,14 @@ pub struct ContextManager {
     /// `profile_for_model` is sourced from it (L1 user > L2 probe > L3 builtin)
     /// instead of the static profile map.
     resolver: Option<Arc<ModelContextResolver>>,
+
+    /// Optional LLM summarizer for the `SmartSummary` strategy. When set,
+    /// SmartSummary produces a real structured handoff (Goal / Progress /
+    /// Key Decisions / Critical Files / Next Steps) via one LLM call instead
+    /// of silently degrading to TruncateOldest. When absent, SmartSummary
+    /// falls back to TruncateOldest (with the first user message pinned) and
+    /// logs a warning — no silent quality loss.
+    summarizer: Option<Arc<dyn crate::traits::LlmProvider>>,
 }
 
 impl ContextManager {
@@ -397,6 +405,7 @@ impl ContextManager {
             profiles,
             auto_trim: true,
             resolver: None,
+            summarizer: None,
         }
     }
 
@@ -412,6 +421,7 @@ impl ContextManager {
             profiles,
             auto_trim: config.auto_trim,
             resolver: None,
+            summarizer: None,
         }
     }
 
@@ -419,6 +429,16 @@ impl ContextManager {
     pub fn with_defaults() -> Self {
         let counter = Arc::new(HeuristicTokenCounter::new());
         Self::new(counter, ContextTrimmingStrategy::default())
+    }
+
+    /// Attach an LLM summarizer so the `SmartSummary` strategy produces a real
+    /// handoff instead of degrading to TruncateOldest. This is the fix for the
+    /// doc-flagged "SmartSummary silently falls back" bug: with a summarizer
+    /// attached, SmartSummary actually summarizes; without one, it falls back
+    /// to TruncateOldest (first-user-pinned) and logs — never silent.
+    pub fn with_summarizer(mut self, summarizer: Arc<dyn crate::traits::LlmProvider>) -> Self {
+        self.summarizer = Some(summarizer);
+        self
     }
 
     /// Attach a 3-layer `ModelContextResolver` so context-window numbers come
@@ -512,11 +532,23 @@ impl ContextManager {
             ContextTrimmingStrategy::CompressMiddle { max_summary_chars, keep_first_turns, keep_last_turns } => {
                 Ok(self.trim_compress_middle(conversation, *max_summary_chars, *keep_first_turns, *keep_last_turns))
             }
-            ContextTrimmingStrategy::SmartSummary { .. } => {
-                // SmartSummary requires an LLM call — fall back to TruncateOldest
-                // when no provider is available. The AppSession will handle
-                // the LLM call when a provider is configured.
-                Ok(self.trim_truncate_oldest(conversation, 6))
+            ContextTrimmingStrategy::SmartSummary { keep_recent_turns, .. } => {
+                // SmartSummary: produce a real structured handoff via one LLM
+                // call when a summarizer is attached (the doc-flagged bug was
+                // that this branch *always* silently fell back to
+                // TruncateOldest, so no handoff was ever generated). Without a
+                // summarizer we still fall back — but to first-user-pinned
+                // TruncateOldest, and we log so it's not silent.
+                if let Some(summarizer) = &self.summarizer {
+                    self.trim_smart_summary(conversation, *keep_recent_turns, summarizer.clone()).await
+                } else {
+                    tracing::warn!(
+                        "SmartSummary strategy requested but no summarizer attached; \
+                         falling back to TruncateOldest (first-user-pinned). Attach one \
+                         via ContextManager::with_summarizer to generate a real handoff."
+                    );
+                    Ok(self.trim_truncate_oldest(conversation, *keep_recent_turns))
+                }
             }
         }
     }
@@ -561,11 +593,18 @@ impl ContextManager {
         let max_tool_result_chars = 2000;
         let max_summary_chars = 200;
 
+        // The first user message is the original task — pin it verbatim (Q2)
+        // instead of letting it fall into the "older" segment and be squashed
+        // to a 200-char stub. Identified once; treated like system/recent.
+        let first_user_idx = conversation.messages.iter()
+            .position(|m| m.role == Role::User);
+
         for (idx, msg) in conversation.messages.iter().enumerate() {
             let is_recent = idx >= total_messages - keep_recent_turns;
             let is_system = msg.role == Role::System;
+            let is_pinned_first_user = first_user_idx == Some(idx);
 
-            if is_system || is_recent {
+            if is_system || is_recent || is_pinned_first_user {
                 // Keep intact, but truncate long tool results
                 let processed_content = msg.content.iter().map(|block| {
                     match block {
@@ -809,6 +848,98 @@ impl ContextManager {
         }
 
         trimmed
+    }
+
+    /// SmartSummary trimming — generate a real structured handoff via one LLM
+    /// call, then rebuild as [handoff summary] + [first user verbatim] + [recent
+    /// N turns]. This is the Q3 "summarize into a handoff + reseed" path. The
+    /// handoff prompt is a generic structured template (Goal / Progress / Key
+    /// Decisions / Critical Files / Next Steps) — the domain-specific
+    /// `CompressionTemplate` lives in `oneai-domain` which this crate cannot
+    /// depend on (layering); the live path (`oneai_memory::ContextCompressor`)
+    /// uses the domain template directly.
+    async fn trim_smart_summary(
+        &self,
+        conversation: &Conversation,
+        keep_recent_turns: usize,
+        summarizer: Arc<dyn crate::traits::LlmProvider>,
+    ) -> Result<Conversation> {
+        use crate::InferenceRequest;
+
+        let total_messages = conversation.messages.len();
+        if total_messages <= keep_recent_turns + 1 {
+            return Ok(conversation.clone());
+        }
+
+        let recent_start = total_messages - keep_recent_turns;
+        let first_user_idx = conversation.messages.iter()
+            .position(|m| m.role == Role::User);
+        let pin_first_user = first_user_idx
+            .map(|idx| idx < recent_start)
+            .unwrap_or(false);
+
+        // Older segment to summarize (exclude the pinned first user message).
+        let older_text = (0..recent_start)
+            .filter(|&i| !(pin_first_user && Some(i) == first_user_idx))
+            .map(|i| {
+                let msg = &conversation.messages[i];
+                format!("[{}]: {}", role_name(&msg.role), msg.text_content())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let task_desc = first_user_idx
+            .map(|i| conversation.messages[i].text_content())
+            .unwrap_or_else(|| "unknown task".to_string());
+
+        // Generic structured handoff prompt (same shape as the coding
+        // CompressionTemplate, but inlined to avoid the domain dependency).
+        let prompt = format!(
+            "You are a conversation summarizer. Summarize the conversation below \
+            into a structured handoff following this exact format:\n\n\
+            # Session Summary\n\
+            ## Goal: {task}\n\
+            ## Progress: list each in-flight step's status\n\
+            ## Key Decisions: important decisions made\n\
+            ## Critical Files: file paths read/modified/relevant\n\
+            ## Next Steps: what to do next to continue\n\
+            ## Errors/Issues: errors and resolution status\n\n\
+            Be concise but complete. Do NOT omit file paths or progress status.\n\n\
+            Conversation to summarize:\n{older}",
+            task = task_desc,
+            older = older_text,
+        );
+
+        let mut summary_conv = Conversation::new();
+        summary_conv.add_message(Message::system(prompt));
+        let request = InferenceRequest {
+            conversation: summary_conv,
+            tools: vec![],
+            max_tokens: Some(512),
+            temperature: Some(0.0),
+            top_p: None,
+            stop_sequences: vec![],
+            constrained_output: None,
+            thinking_budget: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        let response = summarizer.infer(request).await?;
+        let summary_text = response.message.text_content();
+
+        let mut compressed = Conversation::with_id(conversation.id.clone());
+        compressed.metadata = conversation.metadata.clone();
+        compressed.add_message(Message::system(
+            "[Previous conversation summary]: ".to_string() + &summary_text,
+        ));
+        if pin_first_user {
+            if let Some(idx) = first_user_idx {
+                compressed.add_message(conversation.messages[idx].clone());
+            }
+        }
+        for msg in &conversation.messages[recent_start..] {
+            compressed.add_message(msg.clone());
+        }
+        Ok(compressed)
     }
 }
 
@@ -1150,6 +1281,86 @@ mod tests {
             .filter(|m| m.role == Role::System)
             .collect::<Vec<_>>();
         assert!(system_msgs.iter().any(|m| m.text_content().contains("CRITICAL SYSTEM PROMPT")));
+    }
+
+    #[test]
+    fn test_trim_truncate_oldest_pins_first_user_message() {
+        // Q2 (doc-flagged bug at the old `is_system || is_recent` check): the
+        // first user message — the original task — must survive TruncateOldest
+        // verbatim even when it falls in the "older" segment.
+        let counter = Arc::new(HeuristicTokenCounter::new());
+        let manager = ContextManager::new(counter, ContextTrimmingStrategy::default());
+
+        let long_task = "Please refactor the entire authentication module to use JWT \
+            tokens instead of session cookies, update all the middleware, and add tests.";
+        let mut conv = Conversation::new();
+        conv.add_message(Message::system("You are helpful".to_string()));
+        conv.add_message(Message::user(long_task.to_string()));
+        for i in 0..30 {
+            conv.add_message(Message::assistant(format!("Answer {}", i)));
+            conv.add_message(Message::user(format!("Question {}", i)));
+        }
+
+        let trimmed = manager.trim_truncate_oldest(&conv, 6);
+        let text: String = trimmed.messages.iter()
+            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains(long_task),
+            "first user message must be pinned verbatim by trim_truncate_oldest");
+    }
+
+    #[tokio::test]
+    async fn test_smart_summary_generates_handoff_with_summarizer() {
+        use crate::{InferenceRequest, InferenceResponse, ModelCapability, ModelConfig, ProviderType, TokenUsage};
+        use async_trait::async_trait;
+        use std::collections::HashMap;
+
+        struct HandoffMock;
+        #[async_trait]
+        impl crate::traits::LlmProvider for HandoffMock {
+            async fn infer(&self, _req: InferenceRequest) -> std::result::Result<InferenceResponse, crate::error::OneAIError> {
+                Ok(InferenceResponse {
+                    message: Message::assistant(
+                        "# Session Summary\n## Goal: refactor auth\n## Next Steps: add tests".to_string()
+                    ),
+                    usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                    model: "mock".to_string(),
+                    metadata: HashMap::new(),
+                })
+            }
+            async fn infer_stream(
+                &self, _req: InferenceRequest,
+            ) -> std::result::Result<std::pin::Pin<Box<dyn futures::Stream<Item = crate::InferenceStreamChunk> + Send>>, crate::error::OneAIError> {
+                Err(crate::error::OneAIError::Provider("no stream".into()))
+            }
+            fn capabilities(&self) -> ModelCapability {
+                ModelCapability { supports_multimodal: false, supports_streaming: false, supports_tools: false, context_window_size: 4096, max_output_tokens: 512 }
+            }
+            fn config(&self) -> &ModelConfig {
+                static CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
+                CONFIG.get_or_init(|| ModelConfig { provider_type: ProviderType::Local, ..Default::default() })
+            }
+        }
+
+        let counter = Arc::new(HeuristicTokenCounter::new());
+        let manager = ContextManager::new(counter, ContextTrimmingStrategy::smart_summary())
+            .with_summarizer(Arc::new(HandoffMock));
+
+        let mut conv = Conversation::new();
+        conv.add_message(Message::user("refactor auth module to JWT".to_string()));
+        for i in 0..20 {
+            conv.add_message(Message::assistant(format!("step {}", i)));
+            conv.add_message(Message::user(format!("go {}", i)));
+        }
+
+        let fit = manager.fits_context_window(&conv, "qwen2.5:7b");
+        let trimmed = manager.trim_with_strategy(
+            &conv, "qwen2.5:7b",
+            &ContextTrimmingStrategy::smart_summary(), &fit).await.unwrap();
+        let text: String = trimmed.messages.iter()
+            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
+        // The LLM-generated handoff is present (not a silent TruncateOldest stub).
+        assert!(text.contains("Session Summary"), "SmartSummary must produce a real handoff: {text}");
+        assert!(text.contains("refactor auth"), "handoff must carry the original goal: {text}");
     }
 
     #[test]

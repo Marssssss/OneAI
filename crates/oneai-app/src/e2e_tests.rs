@@ -224,27 +224,36 @@ async fn e2e_app_session_compact_summarizes_and_injects_summary() {
     session.add_assistant_message("a3").await.unwrap();
     assert_eq!(session.conversation().messages.len(), 6);
 
-    // keep_recent_turns=2 → fold the first 4 messages into a summary, keep [q3,a3].
+    // keep_recent_turns=2 → fold the middle 3 messages into a summary, keep
+    // [q1 (pinned original task), q3, a3]. The first user message is pinned
+    // verbatim (Q2) rather than summarized away.
     let outcome = session.compact(2).await.expect("compact should succeed");
 
     // Summary was produced and reported.
     assert_eq!(outcome.summary, "mock summary text");
-    assert_eq!(outcome.removed_count, 4);
-    // Retained recent turns are the last user/assistant pair, in order.
-    assert_eq!(outcome.retained.len(), 2);
-    assert_eq!(outcome.retained[0], ("user".to_string(), "q3".to_string()));
-    assert_eq!(outcome.retained[1], ("assistant".to_string(), "a3".to_string()));
+    // The 3 messages between the pinned first user (q1) and the recent tail
+    // [q3, a3] were folded into the summary.
+    assert_eq!(outcome.removed_count, 3);
+    // Retained user/assistant turns (after the leading summary): the pinned
+    // original task q1 plus the recent pair q3/a3, in order.
+    assert_eq!(outcome.retained.len(), 3);
+    assert_eq!(outcome.retained[0], ("user".to_string(), "q1".to_string()));
+    assert_eq!(outcome.retained[1], ("user".to_string(), "q3".to_string()));
+    assert_eq!(outcome.retained[2], ("assistant".to_string(), "a3".to_string()));
 
     // The backend conversation now leads with the summary system message
     // (the core fix: the model sees the summary on the next run), followed by
-    // the retained recent turns.
+    // the pinned original task, then the retained recent turns.
     let msgs = &session.conversation().messages;
-    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[0].role, oneai_core::Role::System);
     assert!(msgs[0].text_content().contains("[Previous conversation summary]"));
     assert!(msgs[0].text_content().contains("mock summary text"));
-    assert_eq!(msgs[1].text_content(), "q3");
-    assert_eq!(msgs[2].text_content(), "a3");
+    // Q2: the original task (q1) survives verbatim, not summarized away.
+    assert_eq!(msgs[1].role, oneai_core::Role::User);
+    assert_eq!(msgs[1].text_content(), "q1");
+    assert_eq!(msgs[2].text_content(), "q3");
+    assert_eq!(msgs[3].text_content(), "a3");
 }
 
 /// `/compact` on a conversation shorter than `keep_recent_turns` is a no-op:

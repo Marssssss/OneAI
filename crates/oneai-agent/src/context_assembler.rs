@@ -46,19 +46,8 @@ use oneai_domain::context_source::ContextSource;
 pub struct ContextAssembler {
     /// Domain-specific context sources (injected from DomainPack).
     context_sources: Vec<Arc<dyn ContextSource>>,
-    /// Cached context content from sources (for OnChange detection).
+    /// Cached context content from sources — re-injected on every `assemble()`.
     cached_context: HashMap<String, String>,
-    /// Baseline context content (from the first epoch — for diffing in incremental mode).
-    baseline_content: HashMap<String, String>,
-    /// Whether initial load has been done (for OnceAtStart sources).
-    initial_load_done: bool,
-    /// Whether the baseline epoch has been injected by `assemble()`.
-    /// Replaces the old `last_snapshot.is_none()` first-epoch signal — the
-    /// assembler now self-manages its epoch state instead of relying on the
-    /// loop to feed it an external snapshot.
-    baseline_injected: bool,
-    /// Number of iterations since the first epoch (for Periodic sources in incremental mode).
-    iterations_since_epoch: Option<usize>,
 }
 
 impl ContextAssembler {
@@ -67,10 +56,6 @@ impl ContextAssembler {
         Self {
             context_sources: Vec::new(),
             cached_context: HashMap::new(),
-            baseline_content: HashMap::new(),
-            initial_load_done: false,
-            baseline_injected: false,
-            iterations_since_epoch: None,
         }
     }
 
@@ -79,52 +64,38 @@ impl ContextAssembler {
         Self {
             context_sources,
             cached_context: HashMap::new(),
-            baseline_content: HashMap::new(),
-            initial_load_done: false,
-            baseline_injected: false,
-            iterations_since_epoch: None,
         }
     }
 
     /// Assemble the context for a loop iteration.
     ///
-    /// **Context Epoch mode**:
-    /// - First epoch (`baseline_injected` is false): inject every context
-    ///   source's cached content once, in priority order. This establishes the
-    ///   "baseline epoch" the model remembers; subsequent iterations only need
-    ///   the diff to stay current.
-    /// - Subsequent epochs: inject only what each source's `RefreshPolicy`
-    ///   permits (OnChange → only if changed since baseline; EveryIteration →
-    ///   always; Periodic → on its interval; OnceAtStart → never again).
-    ///   This is where the token savings happen — instead of re-injecting the
-    ///   entire file tree, git status, and all sources every turn, we inject
-    ///   only the changes.
+    /// **Ephemeral re-injection model** (the durable/ephemeral separation):
+    /// `state.conversation` is the durable log (system prompt, user task,
+    /// assistant replies, tool results) that the loop appends to and persists.
+    /// This assembler produces a *fresh, ephemeral* per-turn assembly — the
+    /// durable log clone plus every `ContextSource`'s cached content — that the
+    /// inference request uses. Because the assembly is rebuilt every turn and
+    /// never written back to the durable log, pinned state (env sensing, core
+    /// memory, future task anchor) survives context compression by
+    /// **re-injection** rather than by hoping the compressor keeps it. The
+    /// compressor only ever sees the ephemeral assembly; whatever it summarizes
+    /// away is restored next turn.
+    ///
+    /// `RefreshPolicy` therefore governs only whether `load()` is re-called
+    /// (in `refresh_sources`); the cached content is injected on **every**
+    /// `assemble()`. The old OnceAtStart/OnChange "skip re-injection"
+    /// optimizations only made sense when injections accumulated into the
+    /// durable log — under the ephemeral model they would make a source vanish
+    /// after the first turn.
     pub fn assemble(&mut self, state: &crate::agent_loop::LoopState) -> Result<Conversation> {
         let mut conversation = state.conversation.clone();
 
-        let is_first_epoch = !self.baseline_injected;
-
-        if is_first_epoch {
-            // First epoch: inject the full baseline — every source's cached
-            // content, in priority order. Refresh policies only gate
-            // *re*-injection on subsequent epochs; on the baseline epoch every
-            // source with cached content is injected once. (refresh_sources()
-            // populated the cache just before this call.)
-            self.inject_sources(&mut conversation, |policy, _key| {
-                // Baseline: inject everything regardless of policy.
-                let _ = policy;
-                true
-            });
-            self.baseline_injected = true;
-        } else {
-            // Incremental epoch: inject only the diff from the baseline.
-            // This is where the token savings happen — instead of re-injecting
-            // the entire file tree, git status, and all context sources every
-            // turn, we only inject the changes.
-            self.inject_sources(&mut conversation, |policy, key| {
-                should_reinject(policy, key, self)
-            });
-        }
+        // Inject every source with non-empty cached content. The epoch/baseline
+        // distinction no longer gates *injection* — only `refresh_sources`
+        // uses it to decide whether to re-call `load()`. This is what makes
+        // the block anti-compression: it reappears every turn regardless of
+        // what the compressor did to the prior assembly.
+        self.inject_sources(&mut conversation, |_policy, _key| true);
 
         Ok(conversation)
     }
@@ -158,53 +129,19 @@ impl ContextAssembler {
         }
     }
 
-    /// Check if a context source's content has changed since baseline.
-    fn has_source_changed(&self, key: &str) -> bool {
-        // In incremental mode, sources that changed since baseline should be re-injected.
-        // For now, we check if the cached content differs from the baseline content.
-        // The baseline_content map stores what was loaded during the first epoch.
-        if let Some(baseline) = self.baseline_content.get(key) {
-            if let Some(current) = self.cached_context.get(key) {
-                baseline != current
-            } else {
-                false
-            }
-        } else {
-            // Not in baseline — this is a new source, inject it
-            true
-        }
-    }
-
     /// Refresh and cache all context sources (async — called from the loop).
     ///
-    /// On the first call (baseline epoch), stores all source content as baseline.
-    /// On subsequent calls, only updates cached content for changed sources.
+    /// Under the ephemeral re-injection model this simply re-calls `load()` on
+    /// every source every turn and updates the cache; the cached content is
+    /// then injected by the next `assemble()`. (`RefreshPolicy` is honored by
+    /// the source's own `load()` impl — e.g. an OnChange source may return a
+    /// cached string if its internal snapshot hasn't changed — so we still
+    /// always call it here.)
     pub async fn refresh_sources(&mut self) -> Result<()> {
-        if !self.initial_load_done {
-            // First epoch: store all content as baseline for later diffing
-            for source in &self.context_sources {
-                let content = source.load().await?;
-                self.cached_context.insert(source.key().to_string(), content.clone());
-                // Store baseline content (never changes after first epoch)
-                self.baseline_content.insert(source.key().to_string(), content);
-            }
-            self.initial_load_done = true;
-            self.iterations_since_epoch = Some(0);
-        } else {
-            // Incremental epoch: update cache, only for changed sources
-            for source in &self.context_sources {
-                let content = source.load().await?;
-                let prev = self.cached_context.get(source.key());
-                if prev.is_none_or(|p| p != &content) {
-                    self.cached_context.insert(source.key().to_string(), content);
-                }
-            }
-            // Increment the epoch counter
-            if let Some(ref count) = self.iterations_since_epoch {
-                self.iterations_since_epoch = Some(count + 1);
-            }
+        for source in &self.context_sources {
+            let content = source.load().await?;
+            self.cached_context.insert(source.key().to_string(), content);
         }
-
         Ok(())
     }
 }
@@ -215,38 +152,36 @@ impl Default for ContextAssembler {
     }
 }
 
-/// Decide whether a source should be re-injected on an incremental epoch,
-/// given its `RefreshPolicy`.
+/// Build the pinned `[Task Anchor]` block injected every iteration.
 ///
-/// Free-standing so it can be unit-tested independently of `assemble()`.
-fn should_reinject(
-    policy: &oneai_domain::context_source::RefreshPolicy,
-    key: &str,
-    assembler: &ContextAssembler,
-) -> bool {
-    use oneai_domain::context_source::RefreshPolicy;
-    match policy {
-        // EveryIteration: always inject (this source changes every turn)
-        RefreshPolicy::EveryIteration => true,
-        // OnceAtStart: skip (already in baseline, no need to repeat)
-        RefreshPolicy::OnceAtStart => false,
-        // OnChange: inject only if content changed from baseline
-        RefreshPolicy::OnChange => {
-            assembler.cached_context.contains_key(key) && assembler.has_source_changed(key)
-        }
-        // Periodic: check if enough iterations passed since baseline
-        // Convert Duration to an approximate iteration count
-        // (assume ~5 seconds per iteration as rough estimate)
-        RefreshPolicy::Periodic(interval) => {
-            let interval_iters = (interval.as_secs() / 5).max(1) as usize;
-            if let Some(iterations) = assembler.iterations_since_epoch {
-                iterations % interval_iters == 0 && iterations > 0
-            } else {
-                false
-            }
-        }
-        _ => true, // #[non_exhaustive] catch-all
+/// The original user task is the most important context to preserve — if it
+/// gets compressed, the agent loses sight of what it's working toward. By
+/// re-injecting it as an ephemeral pinned block every turn (and mirroring it
+/// in `Conversation::metadata["task_anchor"]`, which every compressor copies
+/// verbatim), the task survives compression regardless of the trimming
+/// strategy. The `metadata` may carry a distilled intent / handoff under
+/// `task_intent` if one was captured earlier.
+pub fn task_anchor_block(task: &str, metadata: &std::collections::HashMap<String, String>) -> String {
+    let intent = metadata.get("task_intent").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    if let Some(intent) = intent {
+        format!("[Task Anchor] (do not compress — original task)\n原始任务: {}\n意图: {}", task, intent)
+    } else {
+        format!("[Task Anchor] (do not compress — original task)\n原始任务: {}", task)
     }
+}
+
+/// Build the pinned `[Plan & Progress]` block injected every iteration when a
+/// live plan exists. The plan lives in `LoopState` (agent-side) and is also
+/// persisted to `Conversation::metadata["plan_state"]`, so it survives both
+/// compression and session reload; this block just renders the current
+/// checklist so the model always knows what's ✅ done / 🔄 in progress /
+/// ⏳ pending without re-reading compressed-away turns.
+pub fn plan_progress_block(goal: &str, plan: &crate::plan_state::PlanState) -> String {
+    format!(
+        "[Plan & Progress] (do not compress — live task list)\n目标: {}\n{}",
+        goal,
+        plan.render_progress()
+    )
 }
 
 /// Build a runtime context block appended to the system prompt each session.
@@ -325,18 +260,19 @@ mod tests {
             .join("\n")
     }
 
-    /// Regression test for the Context Epoch first-epoch behaviour: the full
-    /// baseline (every context source, including OnceAtStart ones) MUST be
-    /// injected on the first assemble() call, and OnceAtStart sources MUST NOT
-    /// be re-injected on subsequent (incremental) epochs.
+    /// Under the ephemeral re-injection model, every cached source is injected
+    /// on **every** `assemble()` — the durable/ephemeral separation means
+    /// pinned state survives compression by re-injection, not by the
+    /// OnceAtStart/OnChange "skip" optimizations (those only worked when
+    /// injections accumulated into the durable log).
     #[tokio::test]
-    async fn first_epoch_injects_baseline_then_incremental_skips_once_at_start() {
+    async fn every_source_reinjected_every_turn_regardless_of_policy() {
         let sources: Vec<Arc<dyn ContextSource>> = vec![
             Arc::new(StubSource { key: "stub", content: "STUB-BASELINE-CONTENT" }),
         ];
         let mut ca = ContextAssembler::with_context_sources(sources);
 
-        // First epoch: refresh stores baseline, assemble injects the source.
+        // First epoch: refresh caches content, assemble injects it.
         ca.refresh_sources().await.unwrap();
         let state = LoopState::new("do something");
         let conv = ca.assemble(&state).unwrap();
@@ -344,20 +280,24 @@ mod tests {
         assert!(text.contains("[Context: stub]"), "context source missing on first epoch: {text}");
         assert!(text.contains("STUB-BASELINE-CONTENT"), "baseline content missing: {text}");
 
-        // Second epoch: incremental. OnceAtStart should NOT be re-injected.
+        // Second epoch: even though the source is OnceAtStart (policy would
+        // have skipped re-injection under the old incremental model), it is
+        // re-injected under the ephemeral model — otherwise it would vanish
+        // after the first turn and the compressor would be free to drop it.
         ca.refresh_sources().await.unwrap();
         let state2 = LoopState::new("next turn");
         let conv2 = ca.assemble(&state2).unwrap();
         let text2 = text_of(&conv2);
-        assert!(!text2.contains("STUB-BASELINE-CONTENT"),
-            "OnceAtStart source re-injected on incremental epoch: {text2}");
+        assert!(text2.contains("STUB-BASELINE-CONTENT"),
+            "OnceAtStart source must be re-injected every turn (ephemeral model): {text2}");
     }
 
-    /// An OnChange source that changes between epochs is re-injected; one that
-    /// doesn't change is not. This is the path that replaces the old
-    /// hardcoded environment-snapshot diff.
+    /// An OnChange source is re-injected every turn (its content is always
+    /// present in the assembly); `load()` is still called each turn so the
+    /// source can update its internal snapshot, and a content change shows up
+    /// in the next assembly.
     #[tokio::test]
-    async fn on_change_source_reinjects_only_when_content_changes() {
+    async fn on_change_source_reinjected_every_turn_with_current_content() {
         let content = Arc::new(Mutex::new("STUB-A".to_string()));
         let sources: Vec<Arc<dyn ContextSource>> = vec![
             Arc::new(MutableStubSource { key: "stub", content: content.clone() }),
@@ -369,18 +309,32 @@ mod tests {
         let conv = ca.assemble(&LoopState::new("t1")).unwrap();
         assert!(text_of(&conv).contains("STUB-A"), "baseline missing: {}", text_of(&conv));
 
-        // Second epoch, no change: OnChange source is NOT re-injected.
+        // Second epoch, no change: source is still re-injected (same content).
         ca.refresh_sources().await.unwrap();
         let conv2 = ca.assemble(&LoopState::new("t2")).unwrap();
-        assert!(!text_of(&conv2).contains("STUB-A"),
-            "unchanged OnChange source re-injected: {}", text_of(&conv2));
+        assert!(text_of(&conv2).contains("STUB-A"),
+            "unchanged OnChange source must still be present (ephemeral): {}", text_of(&conv2));
 
-        // Third epoch, content changes: OnChange source IS re-injected with new content.
+        // Third epoch, content changes: new content is injected.
         *content.lock().unwrap() = "STUB-B".to_string();
         ca.refresh_sources().await.unwrap();
         let conv3 = ca.assemble(&LoopState::new("t3")).unwrap();
         assert!(text_of(&conv3).contains("STUB-B"),
             "changed content not re-injected: {}", text_of(&conv3));
+    }
+
+    #[test]
+    fn task_anchor_block_renders_task_and_intent() {
+        use std::collections::HashMap;
+        let mut meta = HashMap::new();
+        let block = task_anchor_block("refactor auth", &meta);
+        assert!(block.contains("Task Anchor"));
+        assert!(block.contains("refactor auth"));
+
+        meta.insert("task_intent".to_string(), "swap to JWT".to_string());
+        let block = task_anchor_block("refactor auth", &meta);
+        assert!(block.contains("意图"));
+        assert!(block.contains("swap to JWT"));
     }
 
     #[test]

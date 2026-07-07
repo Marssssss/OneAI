@@ -206,13 +206,20 @@ impl ContextCompressorTrait for TruncationCompressor {
         // fact extraction so compressed-away content isn't lost.
         let mut discarded: Vec<Message> = Vec::new();
 
+        // The first user message is the original task — pin it verbatim (Q2)
+        // rather than truncating it to a 200-char stub. Identified once, then
+        // treated like system/recent for keep-intact purposes.
+        let first_user_idx = conversation.messages.iter()
+            .position(|m| m.role == Role::User);
+
         // Process messages in order
         for (idx, msg) in conversation.messages.iter().enumerate() {
             // Determine if this is a "recent" message (keep intact) or "older" (truncate)
             let is_recent = idx >= total_messages - self.keep_recent_turns;
             let is_system = msg.role == Role::System;
+            let is_pinned_first_user = first_user_idx == Some(idx);
 
-            if is_system || is_recent {
+            if is_system || is_recent || is_pinned_first_user {
                 // Keep system messages and recent turns intact
                 // But truncate long tool results even in recent turns
                 let processed_content = msg.content.iter().map(|block| {
@@ -764,5 +771,26 @@ mod tests {
             ContentBlock::ToolResult { content, .. } => assert_eq!(content, "small output"),
             _ => panic!("expected ToolResult"),
         }
+    }
+
+    #[tokio::test]
+    async fn truncation_compressor_pins_first_user_message() {
+        // Q2: the original task (first user message) is kept verbatim even when
+        // it would otherwise fall in the "older" segment and be truncated to a
+        // 200-char stub. A long first user message survives intact.
+        let compressor = TruncationCompressor::with_config(2000, 200, 2);
+        let long_task = "Please refactor the entire authentication module to use JWT \
+            tokens instead of session cookies, update all the middleware, and add tests.";
+        let mut conv = Conversation::with_id("c1".into());
+        conv.add_message(Message::user(long_task.to_string()));
+        for i in 0..20 {
+            conv.add_message(Message::assistant(format!("working {}", i)));
+            conv.add_message(Message::user(format!("continue {}", i)));
+        }
+        let result = compressor.compress(&conv).await.unwrap();
+        let text: String = result.compressed_conversation.messages.iter()
+            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains(long_task),
+            "first user message must be pinned verbatim by TruncationCompressor");
     }
 }
