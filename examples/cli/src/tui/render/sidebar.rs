@@ -131,6 +131,12 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         ])));
     }
 
+    // ── Tools & Paradigm sections — developer-only ──────────────────────
+    // Hidden in user mode (verbose_sidebar == false): these expose internal
+    // state (available tools, active paradigm) that the chat area and context
+    // bar already surface. Toggled with `v`. Body kept at base indent for a
+    // minimal diff — Rust does not require indentation inside `if`.
+    if app.verbose_sidebar {
     // ── Separator ────────────────────────────────────────────────────────
     items.push(ListItem::new(Line::from(Span::styled(
         " ──────────",
@@ -208,6 +214,7 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
             style,
         ))));
     }
+    } // end verbose_sidebar guard
 
     // ── Skills section ───────────────────────────────────────────────────
     items.push(ListItem::new(Line::from(Span::styled(
@@ -227,12 +234,10 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         ),
     ])));
 
-    // Display first 5 skills, with active skill highlighted
-    let max_display = 5;
-    let display_names: Vec<&String> = app.skill_names.iter().take(max_display).collect();
-    let overflow_count = skill_count.saturating_sub(max_display);
-
-    for name in display_names {
+    // Display all skills, with active skill highlighted. No fixed cap —
+    // matches the Sessions section's unbounded rendering above; ratatui's
+    // List clips whatever doesn't fit the viewport, same as Sessions.
+    for name in &app.skill_names {
         let is_active = app.active_skill.as_deref() == Some(name.as_str());
         let icon = skill_icon(name);
         let indicator = if is_active { "▸" } else { "•" };
@@ -244,13 +249,6 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         items.push(ListItem::new(Line::from(Span::styled(
             format!(" {} {} {}", indicator, icon, name),
             style,
-        ))));
-    }
-
-    if overflow_count > 0 {
-        items.push(ListItem::new(Line::from(Span::styled(
-            format!("   ...and {} more", overflow_count),
-            Style::default().fg(ratatui::style::Color::DarkGray),
         ))));
     }
 

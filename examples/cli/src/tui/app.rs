@@ -610,6 +610,13 @@ pub struct App {
     /// Current interaction mode (Normal / Auto-accept / Plan). Cycled with Shift+Tab.
     pub interaction_mode: InteractionMode,
 
+    /// Sidebar verbosity. User mode (default, false) hides the Tools & Paradigm
+    /// sections — they expose internal state users don't need (tool calls already
+    /// render inline in chat; paradigm shows in the context bar). Verbose mode
+    /// (toggled with `v`) restores the full developer observability panel.
+    /// Skills/Sessions/Cost/Context always show regardless.
+    pub verbose_sidebar: bool,
+
     /// Whether the one-time mode-prompt tip has been shown on first submission.
     pub mode_prompt_shown: bool,
 
@@ -756,6 +763,7 @@ impl App {
             approval_selected_index: 0,
             session_allowlist: HashSet::new(),
             interaction_mode: InteractionMode::default(),
+            verbose_sidebar: false,
             mode_prompt_shown: false,
             vim_mode: VimMode::default(),
             spinner_frame: 0,
@@ -1239,6 +1247,20 @@ impl App {
             (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
                 self.search_mode = true;
                 self.search_query.clear();
+                None
+            }
+
+            // v (on empty input): toggle sidebar verbosity. Guarded on empty
+            // input so typing 'v' mid-message still inserts the character.
+            (KeyModifiers::NONE, KeyCode::Char('v')) if self.input.is_empty() => {
+                self.verbose_sidebar = !self.verbose_sidebar;
+                if self.verbose_sidebar {
+                    self.add_message(ChatRole::System,
+                        "🔬 Verbose sidebar: showing Tools & Paradigm (press v to hide)");
+                } else {
+                    self.add_message(ChatRole::System,
+                        "Sidebar: user mode — Tools & Paradigm hidden (press v for developer panel)");
+                }
                 None
             }
 
