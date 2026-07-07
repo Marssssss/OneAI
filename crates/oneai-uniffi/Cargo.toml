@@ -10,6 +10,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 uniffi = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
 oneai-core = { workspace = true }
 oneai-provider = { workspace = true }
 oneai-agent = { workspace = true }

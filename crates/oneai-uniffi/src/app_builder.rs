@@ -12,7 +12,7 @@ use std::sync::Arc;
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
 
-use crate::types::OneAIErrorView;
+use crate::types::{OneAIErrorView, ProviderConfigView};
 use crate::app::OneAIApp;
 
 /// UniFFI-exported AppBuilder wrapper.
@@ -51,6 +51,57 @@ impl OneAIAppBuilder {
     pub fn default_parser(self: Arc<Self>) -> Arc<Self> {
         let builder = self.take_inner().default_parser();
         Arc::new(Self::from_builder(builder))
+    }
+
+    /// Set the LLM provider from a foreign-friendly config record.
+    ///
+    /// UniFFI can't cross `Arc<dyn LlmProvider>`, so foreign code passes a
+    /// `ProviderConfigView` and the concrete provider is constructed on the
+    /// Rust side (mirroring `ProviderFactory` in `lib.rs`). `kind` selects the
+    /// provider: `"openai"` (OpenAI-compatible), `"anthropic"`, or `"ollama"`.
+    /// Returns an error view for an unknown `kind`.
+    pub fn provider_config(
+        self: Arc<Self>,
+        cfg: ProviderConfigView,
+    ) -> std::result::Result<Arc<Self>, OneAIErrorView> {
+        let provider: Arc<dyn oneai_core::traits::LlmProvider> = match cfg.kind.as_str() {
+            "openai" => {
+                let config = oneai_core::ModelConfig::openai_compatible(
+                    cfg.api_key.unwrap_or_default(),
+                    cfg.base_url
+                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                    cfg.model,
+                );
+                Arc::new(oneai_provider::OpenAIProvider::new(config))
+            }
+            "anthropic" => {
+                let config =
+                    oneai_core::ModelConfig::anthropic(cfg.api_key.unwrap_or_default(), cfg.model);
+                Arc::new(oneai_provider::AnthropicProvider::new(config))
+            }
+            "ollama" => {
+                let config = if let Some(host) = cfg.host {
+                    oneai_core::ModelConfig::ollama_custom(
+                        host,
+                        cfg.port.unwrap_or(11434),
+                        cfg.model,
+                    )
+                } else {
+                    oneai_core::ModelConfig::ollama(cfg.model)
+                };
+                Arc::new(oneai_provider::OllamaProvider::new(config))
+            }
+            other => {
+                return Err(OneAIErrorView::Config {
+                    message: format!(
+                        "Unknown provider kind '{}'; expected openai/anthropic/ollama",
+                        other
+                    ),
+                });
+            }
+        };
+        let builder = self.take_inner().provider(provider);
+        Ok(Arc::new(Self::from_builder(builder)))
     }
 
     /// Set the memory manager with custom config.

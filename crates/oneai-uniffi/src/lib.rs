@@ -43,6 +43,10 @@ pub use oneai_app;
 pub mod types;
 pub use types::*;
 
+// Foreign-implemented callback interfaces + Rust-side observer adapter.
+pub mod callback;
+pub use callback::*;
+
 // UniFFI-exported wrapper objects
 pub mod app_builder;
 pub mod app;

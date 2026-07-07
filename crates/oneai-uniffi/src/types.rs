@@ -231,6 +231,55 @@ impl From<ContentBlockView> for oneai_core::ContentBlock {
     }
 }
 
+// ─── ChatEventView ──────────────────────────────────────────────────
+
+/// Streaming event surfaced to foreign code during `OneAISession::run_task`.
+///
+/// The foreign side implements `ChatEventCallback` and receives these events
+/// in real time (callback-driven, not polled). Each variant maps from the
+/// corresponding `AgentLoopObserver` callback in `oneai-agent`.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ChatEventView {
+    /// A streamed text fragment from the model (typewriter effect).
+    StreamChunk { text: String },
+    /// A streamed thinking/reasoning fragment (extended-thinking models).
+    Thinking { text: String },
+    /// The model decided to call one or more tools (one event per call).
+    ToolCall { id: String, name: String, args_json: String },
+    /// A tool call finished with its result.
+    ToolResult { call_id: String, tool_name: String, content: String, success: bool },
+    /// The model produced a final direct answer (loop will end).
+    DirectAnswer { text: String },
+    /// The agent loop completed with the final answer.
+    Complete { final_text: String },
+    /// The agent loop errored out.
+    Error { message: String },
+}
+
+// ─── ProviderConfigView ─────────────────────────────────────────────
+
+/// Provider configuration for foreign-language App construction.
+///
+/// Passed to `OneAIAppBuilder::provider_config` so foreign code can build an
+/// LLM-backed app without handling `Arc<dyn LlmProvider>` (which UniFFI can't
+/// cross). `kind` selects the concrete provider constructed on the Rust side;
+/// the remaining fields are forwarded to that provider's `ModelConfig`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ProviderConfigView {
+    /// Provider kind: `"openai"`, `"anthropic"`, or `"ollama"`.
+    pub kind: String,
+    /// API key (required for openai/anthropic; ignored for ollama).
+    pub api_key: Option<String>,
+    /// Base URL override (OpenAI-compatible endpoints). `None` = provider default.
+    pub base_url: Option<String>,
+    /// Model name (e.g. `gpt-4o`, `claude-sonnet-4`, `llama3`).
+    pub model: String,
+    /// Ollama host (ollama only). `None` = `http://localhost`.
+    pub host: Option<String>,
+    /// Ollama port (ollama only). `None` = 11434.
+    pub port: Option<u16>,
+}
+
 // ─── OneAIErrorView ─────────────────────────────────────────────────
 
 /// Flat error view (UniFFI-compatible).
