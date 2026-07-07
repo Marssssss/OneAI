@@ -212,20 +212,33 @@ fn default_blocked_patterns() -> Vec<regex::Regex> {
     .collect()
 }
 
-/// Detect shell constructs that write files via redirection instead of the
-/// dedicated write_file / apply_patch tools. Returns a short reason describing
-/// the matched construct so the rejection error can tell the model what to fix.
+/// Detect shell constructs that write files via redirection in a way that is
+/// *genuinely broken* (not merely suboptimal). Returns a short reason so the
+/// rejection error can tell the model what to fix.
 ///
-/// Matched patterns:
-/// - `cat > file` / `cat >> file` / `cat>file` (word-boundary on `cat`)
-/// - heredoc `<<EOF` / `<< EOF` / `<<'EOF'` / `<<"END"` (POSIX heredoc; the
-///   delimiter must start with a letter, underscore, or quote — this avoids
-///   matching bit-shift like `1 << 4` while catching real heredocs)
-/// - `echo > file` / `printf > file` / `tee file` write-to-file forms
+/// Matched patterns (only the constructs that actually fail or hang):
+/// - `cat > file` / `cat >> file` / `cat>file` — `cat` with no stdin source
+///   hangs reading the agent's stdin (or writes an empty file under a sandbox
+///   wrapper). The model means "create a file", which is `write_file`'s job.
+/// - heredoc-to-file `<<EOF ... > file` — the heredoc body sits inside the
+///   single-quoted `sh -c` argument and breaks on any quote/special char in
+///   the body; also fails entirely under sandbox wrapping. Use `write_file`.
 ///
-/// On Windows these fail outright (PowerShell has no POSIX heredoc and uses
-/// different redirection syntax); on Unix they break under sandbox wrapping.
-/// Either way, write_file / apply_patch is the correct tool.
+/// NOT matched (intentionally — they work fine under `sh -c` and have
+/// legitimate non-`write_file` uses; blocking them would reject the whole
+/// compound command and take down the `mkdir`/`python`/`cargo` in front of
+/// them, which is worse than the disease):
+/// - `echo x > file` / `printf x > file` — works; `write_file` is preferred
+///   for authored content but not enforced by a hard block.
+/// - `cmd | tee file` — legitimate "run + capture log" pattern; `write_file`
+///   cannot replace it. Blocking `tee` was the main cause of `python`/`mkdir`
+///   failures inside compound commands.
+/// - `cargo build > log.txt` / `python x.py > out` — redirecting a real
+///   command's output to a file is not file authoring.
+///
+/// On Windows these redirection constructs would also fail under PowerShell,
+/// but `resolve_shell` already prefers a POSIX `sh` there when one exists, so
+/// the non-blocked forms work cross-platform too.
 pub(crate) fn detect_shell_file_write(command: &str) -> Option<&'static str> {
 
     // Compile once per call — these are tiny patterns. Using a `static` Regex
@@ -245,8 +258,6 @@ pub(crate) fn detect_shell_file_write(command: &str) -> Option<&'static str> {
     // non-`&` char. The `&` exclusion avoids matching stderr/stdout dup
     // operators like `2>&1` or `>&2`, which are not file writes.
     let file_redirect = regex::Regex::new(r">>?\s*[^\s&]").ok()?;
-    let echo_write = regex::Regex::new(r#"\b(echo|printf)\s+.*>>?\s"#).ok()?;
-    let tee_write = regex::Regex::new(r#"\btee\s+(?:-a\s+)?[^\s|&;]+"#).ok()?;
 
     if cat_redirect.is_match(command) {
         return Some("shell `cat >`/`cat >>` file redirection");
@@ -258,12 +269,6 @@ pub(crate) fn detect_shell_file_write(command: &str) -> Option<&'static str> {
     // it works cross-platform and isn't a write_file use case.
     if heredoc.is_match(command) && file_redirect.is_match(command) {
         return Some("POSIX heredoc-to-file (`<<EOF ... > file`)");
-    }
-    if echo_write.is_match(command) {
-        return Some("shell `echo >`/`printf >` file redirection");
-    }
-    if tee_write.is_match(command) {
-        return Some("shell `tee` file write");
     }
     None
 }

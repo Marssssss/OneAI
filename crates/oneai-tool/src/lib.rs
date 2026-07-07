@@ -200,15 +200,18 @@ mod tests {
         // allowed to fall back to shell file-writing; it should be redirected
         // to write_file / apply_patch. The rejection must happen before any
         // process is spawned, so this test is safe to run anywhere.
+        //
+        // Only the genuinely-broken constructs are blocked: `cat >` (hangs on
+        // stdin) and heredoc-to-file (body breaks under `sh -c` quoting / sandbox
+        // wrapping). `echo >`/`printf >`/`tee` work fine under `sh -c` and are
+        // exercised in the no-false-positives test below — see the rationale in
+        // `detect_shell_file_write`'s doc comment.
         let tool = ShellTool::new();
         let cases = [
             "cat > /tmp/oneai_shell_test.txt",
             "cat >> /tmp/oneai_shell_test.txt",
             "cat>/tmp/oneai_shell_test.txt",
             "cat > /tmp/oneai_shell_test.txt <<EOF\nhello\nEOF",
-            "echo hello > /tmp/oneai_shell_test.txt",
-            "printf 'x' > /tmp/oneai_shell_test.txt",
-            "tee /tmp/oneai_shell_test.txt",
             "cat <<EOF > /tmp/oneai_shell_test.txt\nhello\nEOF",
         ];
         for cmd in cases {
@@ -227,6 +230,12 @@ mod tests {
         // Commands that are NOT file-writing must not trip the guard. Guards
         // against bit-shift false positives (`1 << 8`) and legitimate output
         // redirection from non-text commands (`cargo build > log.txt`).
+        //
+        // `echo >`/`printf >`/`tee` are intentionally NOT blocked: they work
+        // under `sh -c` and have legitimate uses (`cmd | tee log` for live+
+        // captured output, `echo x > marker`). Blocking them rejected the whole
+        // compound command and took down the `mkdir`/`python`/`cargo` in front
+        // of them — the regression this test pins in place.
         use crate::tool_interfaces::detect_shell_file_write;
         let safe = [
             "cargo build --release",
@@ -238,6 +247,16 @@ mod tests {
             "ls -la",
             "cat existing_file.txt",
             "grep -rn 'pattern' src/",
+            // `echo >`/`printf >`/`tee` are NOT file-authoring antipatterns that
+            // break — they run fine and are preferred over hard-blocking.
+            "echo hello > /tmp/oneai_shell_test.txt",
+            "printf 'x' > /tmp/oneai_shell_test.txt",
+            "tee /tmp/oneai_shell_test.txt",
+            // Compound commands the model writes in practice — must NOT be
+            // rejected wholesale (these were the mkdir/python failures).
+            "mkdir -p foo && echo done > foo/done.txt",
+            "python run.py 2>&1 | tee run.log",
+            "mkdir -p out && python gen.py | tee out/result.txt",
             // P2: a pure stdout heredoc (no file redirect) is NOT file writing
             // and now works cross-platform via the POSIX-sh fallback, so it
             // must not be rejected.
