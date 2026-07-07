@@ -1,0 +1,14 @@
+# Build artifacts
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# Staged by scripts/build_android.sh from the Rust build — regenerated each
+# build, do not commit. .gitkeep'd so the dirs exist empty.
+app/src/main/jniLibs/*/liboneai.so
+app/src/main/kotlin/uniffi/
+
+# Gradle wrapper jar IS committed (needed to run ./gradlew without gradle installed).
+!gradle/wrapper/gradle-wrapper.jar
