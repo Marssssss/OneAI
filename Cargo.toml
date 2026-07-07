@@ -95,8 +95,9 @@ crossterm = "0.28"
 # MCP
 rmcp = "0.1"
 
-# UniFFI
-uniffi = "0.28"
+# UniFFI — 0.32 (the bindgen CLI ships a binary at 0.32; 0.28's uniffi_bindgen
+# is library-only, which blocked library-mode binding generation).
+uniffi = "0.32"
 
 # Internal crates (shared)
 oneai-core = { path = "crates/oneai-core" }

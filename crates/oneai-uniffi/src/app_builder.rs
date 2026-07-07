@@ -24,6 +24,7 @@ pub struct OneAIAppBuilder {
     inner: std::sync::Mutex<Option<oneai_app::AppBuilder>>,
 }
 
+#[uniffi::export]
 impl OneAIAppBuilder {
     /// Create a new AppBuilder.
     #[uniffi::constructor]
@@ -34,12 +35,14 @@ impl OneAIAppBuilder {
     }
 
     /// Use the no-op interaction gate (every point disabled, zero latency).
+    #[uniffi::method]
     pub fn noop_interaction_gate(self: Arc<Self>) -> Arc<Self> {
         let builder = self.take_inner().noop_interaction_gate();
         Arc::new(Self::from_builder(builder))
     }
 
     /// Use the deny-all interaction gate (every point aborted).
+    #[uniffi::method]
     pub fn deny_all_interaction_gate(self: Arc<Self>) -> Arc<Self> {
         let builder = self
             .take_inner()
@@ -48,6 +51,7 @@ impl OneAIAppBuilder {
     }
 
     /// Use the default 3-layer parser.
+    #[uniffi::method]
     pub fn default_parser(self: Arc<Self>) -> Arc<Self> {
         let builder = self.take_inner().default_parser();
         Arc::new(Self::from_builder(builder))
@@ -60,6 +64,7 @@ impl OneAIAppBuilder {
     /// Rust side (mirroring `ProviderFactory` in `lib.rs`). `kind` selects the
     /// provider: `"openai"` (OpenAI-compatible), `"anthropic"`, or `"ollama"`.
     /// Returns an error view for an unknown `kind`.
+    #[uniffi::method]
     pub fn provider_config(
         self: Arc<Self>,
         cfg: ProviderConfigView,
@@ -105,6 +110,7 @@ impl OneAIAppBuilder {
     }
 
     /// Set the memory manager with custom config.
+    #[uniffi::method]
     pub fn memory_manager_with_config(self: Arc<Self>, threshold_tokens: u32) -> Arc<Self> {
         let config = oneai_memory::MemoryManagerConfig {
             compression_threshold_tokens: threshold_tokens as usize,
@@ -116,6 +122,7 @@ impl OneAIAppBuilder {
     }
 
     /// Set the persistence layer.
+    #[uniffi::method]
     pub fn persistence(self: Arc<Self>, path: String) -> Arc<Self> {
         let persistence = Arc::new(FilePersistence::new(&path));
         let builder = self.take_inner().persistence(persistence);
@@ -126,6 +133,7 @@ impl OneAIAppBuilder {
     ///
     /// This is async because domain pack tools are eagerly registered
     /// at build time, which requires async tool registry operations.
+    #[uniffi::method]
     pub async fn build(self: Arc<Self>) -> Result<Arc<OneAIApp>, OneAIErrorView> {
         let builder = self.take_inner();
         builder.build()

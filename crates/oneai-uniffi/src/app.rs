@@ -17,8 +17,10 @@ pub struct OneAIApp {
     pub(crate) inner: Arc<oneai_app::App>,
 }
 
+#[uniffi::export]
 impl OneAIApp {
     /// Create a new agent session.
+    #[uniffi::method]
     pub fn create_session(&self) -> Arc<OneAISession> {
         let inner_session = self.inner.create_session();
         let session_id = inner_session.session_id().to_string();
@@ -30,17 +32,20 @@ impl OneAIApp {
     }
 
     /// Register a tool.
+    #[uniffi::method]
     pub async fn register_tool(&self, tool: Arc<OneAIToolWrapper>) -> Result<(), OneAIErrorView> {
         self.inner.register_tool(tool.inner.clone()).await
             .map_err(OneAIErrorView::from)
     }
 
     /// Check if a provider is configured.
+    #[uniffi::method]
     pub fn has_provider(&self) -> bool {
         self.inner.has_provider()
     }
 
     /// Get the current platform.
+    #[uniffi::method]
     pub fn platform(&self) -> PlatformView {
         PlatformView::from(*self.inner.platform())
     }
@@ -67,8 +72,10 @@ pub struct OneAISession {
     interrupt_slot: Arc<tokio::sync::Mutex<Option<AgentLoop>>>,
 }
 
+#[uniffi::export]
 impl OneAISession {
     /// Get the session ID.
+    #[uniffi::method]
     pub fn session_id(&self) -> String {
         self.session_id.clone()
     }
@@ -78,6 +85,7 @@ impl OneAISession {
     /// Note: this only appends the message to the conversation — it does NOT
     /// trigger inference. To get a model reply, call `run_task` afterwards (or
     /// instead). Kept for foreign code that wants to seed context manually.
+    #[uniffi::method]
     pub async fn send_user_message(&self, text: String) -> Result<(), OneAIErrorView> {
         let mut inner = self.inner.lock().await;
         inner.send_user_message(text).await
@@ -85,6 +93,7 @@ impl OneAISession {
     }
 
     /// Execute a tool by name.
+    #[uniffi::method]
     pub async fn execute_tool(&self, name: String, args_json: String) -> Result<ToolOutputView, OneAIErrorView> {
         let inner = self.inner.lock().await;
         let args: serde_json::Value = serde_json::from_str(&args_json)
@@ -95,6 +104,7 @@ impl OneAISession {
     }
 
     /// Retrieve relevant context from memory.
+    #[uniffi::method]
     pub async fn retrieve_memory(&self, query: String, top_k: u32) -> Result<String, OneAIErrorView> {
         let inner = self.inner.lock().await;
         inner.retrieve_memory(&query, top_k as usize).await
@@ -108,6 +118,7 @@ impl OneAISession {
     }
 
     /// Save a checkpoint.
+    #[uniffi::method]
     pub async fn save_checkpoint(&self) -> Result<String, OneAIErrorView> {
         let inner = self.inner.lock().await;
         inner.save_checkpoint().await
@@ -124,6 +135,7 @@ impl OneAISession {
     ///
     /// Returns `Ok` when the loop completes (the final answer is delivered as
     /// a `Complete` event), or an error view on failure.
+    #[uniffi::method]
     pub async fn run_task(
         &self,
         task: String,
@@ -147,6 +159,7 @@ impl OneAISession {
 
     /// Request the running agent loop (if any) to interrupt at the next
     /// iteration boundary. No-op if no `run_task` is in flight.
+    #[uniffi::method]
     pub async fn interrupt(&self) {
         let slot = self.interrupt_slot.lock().await;
         if let Some(loop_handle) = slot.as_ref() {

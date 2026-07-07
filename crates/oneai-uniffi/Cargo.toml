@@ -5,10 +5,14 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
+# Name `oneai` so the cdylib is `liboneai.so` / `liboneai.dylib` — matches
+# `System.loadLibrary("oneai")` on Android and `scripts/generate_bindings.sh`
+# (which looks for `liboneai.*`). The package stays `oneai-uniffi`.
+name = "oneai"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-uniffi = { workspace = true }
+uniffi = { workspace = true, features = ["tokio", "cli"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 oneai-core = { workspace = true }

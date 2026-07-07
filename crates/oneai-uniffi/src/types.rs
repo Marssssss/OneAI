@@ -286,8 +286,10 @@ pub struct ProviderConfigView {
 ///
 /// UniFFI requires errors to be simple enums with String payloads.
 /// This flattens the nested OneAIError hierarchy into a single-level
-/// enum suitable for cross-language error handling.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+/// enum suitable for cross-language error handling. Derives
+/// `uniffi::Error` (not `uniffi::Enum`) so it can be used as the `E` in
+/// `Result<T, E>` returns on exported methods.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum OneAIErrorView {
     /// LLM provider error.
     Provider { message: String },
@@ -351,6 +353,36 @@ impl From<oneai_core::OneAIError> for OneAIErrorView {
         }
     }
 }
+
+// UniFFI's `Error` derive requires `Display` + `std::error::Error` so that
+// `Result<T, OneAIErrorView>` can be lowered across the FFI boundary.
+impl std::fmt::Display for OneAIErrorView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Each variant carries a `message: String`; surface a readable form.
+        let (kind, msg) = match self {
+            OneAIErrorView::Provider { message } => ("provider", message),
+            OneAIErrorView::Parser { message } => ("parser", message),
+            OneAIErrorView::Tool { message } => ("tool", message),
+            OneAIErrorView::Memory { message } => ("memory", message),
+            OneAIErrorView::Workflow { message } => ("workflow", message),
+            OneAIErrorView::Agent { message } => ("agent", message),
+            OneAIErrorView::Skill { message } => ("skill", message),
+            OneAIErrorView::Scheduler { message } => ("scheduler", message),
+            OneAIErrorView::Persistence { message } => ("persistence", message),
+            OneAIErrorView::Rag { message } => ("rag", message),
+            OneAIErrorView::Config { message } => ("config", message),
+            OneAIErrorView::Serialization { message } => ("serialization", message),
+            OneAIErrorView::Network { message } => ("network", message),
+            OneAIErrorView::Timeout { message } => ("timeout", message),
+            OneAIErrorView::Platform { message } => ("platform", message),
+            OneAIErrorView::Wasm { message } => ("wasm", message),
+            OneAIErrorView::Other { message } => ("other", message),
+        };
+        write!(f, "{} error: {}", kind, msg)
+    }
+}
+
+impl std::error::Error for OneAIErrorView {}
 
 // ─── PlatformView ───────────────────────────────────────────────────
 

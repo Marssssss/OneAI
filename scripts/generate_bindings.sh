@@ -52,12 +52,16 @@ detect_library() {
 }
 
 # ─── Language Generators ──────────────────────────────────────────────
+#
+# UniFFI 0.32 library mode: `--library <lib>` reads the metadata embedded by
+# the proc-macros directly from the compiled cdylib — no .udl file needed.
+# (Plain `generate <path>` would treat <path> as a UDL file and fail.)
 
 generate_kotlin() {
     local lib_file="$1"
     local out_dir="$BINDINGS_DIR/kotlin"
     echo "── Generating Kotlin bindings → $out_dir"
-    uniffi-bindgen generate "$lib_file" --language kotlin --out-dir "$out_dir"
+    uniffi-bindgen generate --library "$lib_file" --language kotlin --out-dir "$out_dir" --no-format
     echo "   ✓ Kotlin bindings generated"
 }
 
@@ -65,7 +69,7 @@ generate_swift() {
     local lib_file="$1"
     local out_dir="$BINDINGS_DIR/swift"
     echo "── Generating Swift bindings → $out_dir"
-    uniffi-bindgen generate "$lib_file" --language swift --out-dir "$out_dir"
+    uniffi-bindgen generate --library "$lib_file" --language swift --out-dir "$out_dir"
     echo "   ✓ Swift bindings generated"
 }
 
@@ -73,7 +77,7 @@ generate_cpp() {
     local lib_file="$1"
     local out_dir="$BINDINGS_DIR/cpp"
     echo "── Generating C++ bindings → $out_dir"
-    uniffi-bindgen generate "$lib_file" --language cpp --out-dir "$out_dir"
+    uniffi-bindgen generate --library "$lib_file" --language cpp --out-dir "$out_dir"
     echo "   ✓ C++ bindings generated"
 }
 
@@ -81,7 +85,7 @@ generate_csharp() {
     local lib_file="$1"
     local out_dir="$BINDINGS_DIR/csharp"
     echo "── Generating C# bindings → $out_dir"
-    uniffi-bindgen generate "$lib_file" --language csharp --out-dir "$out_dir"
+    uniffi-bindgen generate --library "$lib_file" --language csharp --out-dir "$out_dir"
     echo "   ✓ C# bindings generated"
 }
 

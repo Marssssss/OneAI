@@ -20,7 +20,12 @@ use crate::types::ChatEventView;
 /// Implement this in Kotlin/Swift and pass it to `OneAISession::run_task`.
 /// `on_event` fires on the Rust tokio worker thread; UI updates must marshal
 /// to the main thread (e.g. Kotlin `Handler(Looper.getMainLooper())`).
-#[uniffi::export(callback_interface)]
+///
+/// `#[uniffi::export(rust, foreign)]` (the non-deprecated successor to
+/// `callback_interface` / `with_foreign`) makes the trait cross the FFI
+/// boundary in both directions: foreign code implements it, and Rust impls
+/// (used by the unit tests) also work.
+#[uniffi::export(rust, foreign)]
 pub trait ChatEventCallback: Send + Sync {
     fn on_event(&self, event: ChatEventView);
 }
