@@ -4705,204 +4705,97 @@ public object FfiConverterTypeContentBlockView : FfiConverterRustBuffer<ContentB
  * `uniffi::Error` (not `uniffi::Enum`) so it can be used as the `E` in
  * `Result<T, E>` returns on exported methods.
  */
-sealed class OneAiErrorView: kotlin.Exception() {
-    
+sealed class OneAiErrorView(message: String): kotlin.Exception(message) {
+        
     /**
      * LLM provider error.
      */
-    class Provider(
+        class Provider(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Output parser error.
      */
-    class Parser(
+        class Parser(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Tool execution error.
      */
-    class Tool(
+        class Tool(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Memory operation error.
      */
-    class Memory(
+        class Memory(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Workflow error.
      */
-    class Workflow(
+        class Workflow(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Agent execution error.
      */
-    class Agent(
+        class Agent(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Skill selection error.
      */
-    class Skill(
+        class Skill(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Scheduler error.
      */
-    class Scheduler(
+        class Scheduler(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Persistence/checkpoint error.
      */
-    class Persistence(
+        class Persistence(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * RAG operation error.
      */
-    class Rag(
+        class Rag(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Configuration error.
      */
-    class Config(
+        class Config(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Serialization error.
      */
-    class Serialization(
+        class Serialization(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Network/HTTP error.
      */
-    class Network(
+        class Network(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Timeout error.
      */
-    class Timeout(
+        class Timeout(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Platform capability error.
      */
-    class Platform(
+        class Platform(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * WASM sandbox error.
      */
-    class Wasm(
+        class Wasm(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
     /**
      * Generic error.
      */
-    class Other(
+        class Other(message: String) : OneAiErrorView(message)
         
-        val `message`: kotlin.String
-        ) : OneAiErrorView() {
-        override val message
-            get() = "message=${ `message` }"
-    }
-    
-
-    
-
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<OneAiErrorView> {
         override fun lift(error_buf: RustBuffer.ByValue): OneAiErrorView = FfiConverterTypeOneAIErrorView.lift(error_buf)
     }
-
-    
 }
 
 /**
@@ -4911,238 +4804,101 @@ sealed class OneAiErrorView: kotlin.Exception() {
 public object FfiConverterTypeOneAIErrorView : FfiConverterRustBuffer<OneAiErrorView> {
     override fun read(buf: ByteBuffer): OneAiErrorView {
         
-
-        return when(buf.getInt()) {
-            1 -> OneAiErrorView.Provider(
-                FfiConverterString.read(buf),
-                )
-            2 -> OneAiErrorView.Parser(
-                FfiConverterString.read(buf),
-                )
-            3 -> OneAiErrorView.Tool(
-                FfiConverterString.read(buf),
-                )
-            4 -> OneAiErrorView.Memory(
-                FfiConverterString.read(buf),
-                )
-            5 -> OneAiErrorView.Workflow(
-                FfiConverterString.read(buf),
-                )
-            6 -> OneAiErrorView.Agent(
-                FfiConverterString.read(buf),
-                )
-            7 -> OneAiErrorView.Skill(
-                FfiConverterString.read(buf),
-                )
-            8 -> OneAiErrorView.Scheduler(
-                FfiConverterString.read(buf),
-                )
-            9 -> OneAiErrorView.Persistence(
-                FfiConverterString.read(buf),
-                )
-            10 -> OneAiErrorView.Rag(
-                FfiConverterString.read(buf),
-                )
-            11 -> OneAiErrorView.Config(
-                FfiConverterString.read(buf),
-                )
-            12 -> OneAiErrorView.Serialization(
-                FfiConverterString.read(buf),
-                )
-            13 -> OneAiErrorView.Network(
-                FfiConverterString.read(buf),
-                )
-            14 -> OneAiErrorView.Timeout(
-                FfiConverterString.read(buf),
-                )
-            15 -> OneAiErrorView.Platform(
-                FfiConverterString.read(buf),
-                )
-            16 -> OneAiErrorView.Wasm(
-                FfiConverterString.read(buf),
-                )
-            17 -> OneAiErrorView.Other(
-                FfiConverterString.read(buf),
-                )
+            return when(buf.getInt()) {
+            1 -> OneAiErrorView.Provider(FfiConverterString.read(buf))
+            2 -> OneAiErrorView.Parser(FfiConverterString.read(buf))
+            3 -> OneAiErrorView.Tool(FfiConverterString.read(buf))
+            4 -> OneAiErrorView.Memory(FfiConverterString.read(buf))
+            5 -> OneAiErrorView.Workflow(FfiConverterString.read(buf))
+            6 -> OneAiErrorView.Agent(FfiConverterString.read(buf))
+            7 -> OneAiErrorView.Skill(FfiConverterString.read(buf))
+            8 -> OneAiErrorView.Scheduler(FfiConverterString.read(buf))
+            9 -> OneAiErrorView.Persistence(FfiConverterString.read(buf))
+            10 -> OneAiErrorView.Rag(FfiConverterString.read(buf))
+            11 -> OneAiErrorView.Config(FfiConverterString.read(buf))
+            12 -> OneAiErrorView.Serialization(FfiConverterString.read(buf))
+            13 -> OneAiErrorView.Network(FfiConverterString.read(buf))
+            14 -> OneAiErrorView.Timeout(FfiConverterString.read(buf))
+            15 -> OneAiErrorView.Platform(FfiConverterString.read(buf))
+            16 -> OneAiErrorView.Wasm(FfiConverterString.read(buf))
+            17 -> OneAiErrorView.Other(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
+        
     }
 
     override fun allocationSize(value: OneAiErrorView): ULong {
-        return when(value) {
-            is OneAiErrorView.Provider -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Parser -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Tool -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Memory -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Workflow -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Agent -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Skill -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Scheduler -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Persistence -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Rag -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Config -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Serialization -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Network -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Timeout -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Platform -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Wasm -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-            is OneAiErrorView.Other -> (
-                // Add the size for the Int that specifies the variant plus the size needed for all fields
-                4UL
-                + FfiConverterString.allocationSize(value.`message`)
-            )
-        }
+        return 4UL
     }
 
     override fun write(value: OneAiErrorView, buf: ByteBuffer) {
         when(value) {
             is OneAiErrorView.Provider -> {
                 buf.putInt(1)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Parser -> {
                 buf.putInt(2)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Tool -> {
                 buf.putInt(3)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Memory -> {
                 buf.putInt(4)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Workflow -> {
                 buf.putInt(5)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Agent -> {
                 buf.putInt(6)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Skill -> {
                 buf.putInt(7)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Scheduler -> {
                 buf.putInt(8)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Persistence -> {
                 buf.putInt(9)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Rag -> {
                 buf.putInt(10)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Config -> {
                 buf.putInt(11)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Serialization -> {
                 buf.putInt(12)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Network -> {
                 buf.putInt(13)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Timeout -> {
                 buf.putInt(14)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Platform -> {
                 buf.putInt(15)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Wasm -> {
                 buf.putInt(16)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
             is OneAiErrorView.Other -> {
                 buf.putInt(17)
-                FfiConverterString.write(value.`message`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

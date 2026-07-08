@@ -290,6 +290,7 @@ pub struct ProviderConfigView {
 /// `uniffi::Error` (not `uniffi::Enum`) so it can be used as the `E` in
 /// `Result<T, E>` returns on exported methods.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+#[uniffi(flat_error)]
 pub enum OneAIErrorView {
     /// LLM provider error.
     Provider { message: String },
