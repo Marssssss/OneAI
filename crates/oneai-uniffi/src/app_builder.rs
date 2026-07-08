@@ -24,7 +24,7 @@ pub struct OneAIAppBuilder {
     inner: std::sync::Mutex<Option<oneai_app::AppBuilder>>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl OneAIAppBuilder {
     /// Create a new AppBuilder.
     #[uniffi::constructor]

@@ -17,7 +17,7 @@ pub struct OneAIApp {
     pub(crate) inner: Arc<oneai_app::App>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl OneAIApp {
     /// Create a new agent session.
     #[uniffi::method]
@@ -72,7 +72,7 @@ pub struct OneAISession {
     interrupt_slot: Arc<tokio::sync::Mutex<Option<AgentLoop>>>,
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl OneAISession {
     /// Get the session ID.
     #[uniffi::method]
