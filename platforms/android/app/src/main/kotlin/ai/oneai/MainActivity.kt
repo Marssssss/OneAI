@@ -108,17 +108,21 @@ private fun OneAiTheme(content: @Composable () -> Unit) {
 }
 
 // ── Chat model ───────────────────────────────────────────────────────
+// NB: LazyColumn item keys must be Bundle-saveable on Android (Long), NOT
+// plain `Any()`/Object — a java.lang.Object key throws
+// "Type of the key … is not supported. On Android you can only use types
+// which can be stored inside the Bundle." (FATAL during saveable state.)
 
 private sealed interface ChatItem {
-    val key: Any
+    val key: Long
 }
 
-private data class UserItem(val text: String, override val key: Any = Any()) : ChatItem
+private data class UserItem(val text: String, override val key: Long) : ChatItem
 
 /** A live assistant turn. `text` is observable so StreamChunk appends
  *  re-render the bubble in place (typewriter). `trace` holds the
  *  dimmed thinking/tool lines. */
-private class AssistantItem(override val key: Any = Any()) : ChatItem {
+private class AssistantItem(override val key: Long) : ChatItem {
     var text by mutableStateOf("")
     val trace = mutableStateListOf<String>()
     var done by mutableStateOf(false)
@@ -391,6 +395,12 @@ private class ChatViewModel(private val activity: ComponentActivity) {
 
     private var app: OneAiApp? = null
     private var session: OneAiSession? = null
+    private var keySeq = 0L
+
+    private fun nextKey(): Long {
+        keySeq += 1
+        return keySeq
+    }
 
     suspend fun runTask(task: String) {
         val s = session ?: ensureSession()
@@ -398,8 +408,8 @@ private class ChatViewModel(private val activity: ComponentActivity) {
             error = "session not built"
             return
         }
-        items.add(UserItem(text = task))
-        val turn = AssistantItem()
+        items.add(UserItem(text = task, key = nextKey()))
+        val turn = AssistantItem(key = nextKey())
         items.add(turn)
         running = true
         error = null
@@ -454,7 +464,6 @@ private class ChatViewModel(private val activity: ComponentActivity) {
 
     private suspend fun ensureSession(): OneAiSession? {
         return try {
-            val builder = OneAiAppBuilder()
             val cfg = ProviderConfigView(
                 kind = kind.trim().ifEmpty { "openai" },
                 apiKey = apiKey.trim().ifBlank { null },
@@ -463,7 +472,12 @@ private class ChatViewModel(private val activity: ComponentActivity) {
                 host = null,
                 port = null,
             )
-            builder.providerConfig(cfg)
+            // provider_config() consumes the builder Arc (Rust: self: Arc<Self>
+            // → take_inner()) and returns a NEW Arc<Self>. The returned builder
+            // MUST be used for the next call — the original handle is moved-out
+            // and empty. Discarding the return left build() with no provider
+            // ("No LLM provider configured").
+            val builder = OneAiAppBuilder().providerConfig(cfg)
             val a = builder.build()
             app = a
             val sess = a.createSession()
