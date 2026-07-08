@@ -728,6 +728,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_default_parser(
     ): Int
+    external fun uniffi_oneai_checksum_method_oneaiappbuilder_default_tools(
+    ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_deny_all_interaction_gate(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_memory_manager_with_config(
@@ -816,6 +818,8 @@ internal object UniffiLib {
     external fun uniffi_oneai_fn_method_oneaiappbuilder_build(`ptr`: Long,
     ): Long
     external fun uniffi_oneai_fn_method_oneaiappbuilder_default_parser(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaiappbuilder_default_tools(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_oneai_fn_method_oneaiappbuilder_deny_all_interaction_gate(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -987,10 +991,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_oneai_checksum_method_oneaisession_session_id() != 29299) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_build() != 44541) {
+    if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_build() != 2992) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_default_parser() != 50611) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_default_tools() != 40170) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_deny_all_interaction_gate() != 33007) {
@@ -2419,6 +2426,10 @@ public object FfiConverterTypeOneAIApp: FfiConverter<OneAiApp, Long> {
  *
  * Provides a builder-pattern API for foreign languages to construct
  * a OneAI App with all the necessary components.
+ *
+ * `extra_tools` survives the consumed-`Arc` builder chain (threaded
+ * through `from_builder`) so `default_tools()` set before
+ * `provider_config()` etc. is not lost.
  */
 public interface OneAiAppBuilderInterface {
     
@@ -2427,6 +2438,8 @@ public interface OneAiAppBuilderInterface {
      *
      * This is async because domain pack tools are eagerly registered
      * at build time, which requires async tool registry operations.
+     * `extra_tools` (e.g. from `default_tools()`) are registered on the
+     * built App here.
      */
     suspend fun `build`(): OneAiApp
     
@@ -2434,6 +2447,15 @@ public interface OneAiAppBuilderInterface {
      * Use the default 3-layer parser.
      */
     fun `defaultParser`(): OneAiAppBuilder
+    
+    /**
+     * Register the built-in read-only research tools (`web_search` +
+     * `web_fetch`) so a foreign app gets a working agent without wiring a
+     * DomainPack. `web_search` defaults to the DuckDuckGo backend — no API
+     * key required (set `ONEAI_SEARCH_*` env for Google/Bing/SerpAPI, though
+     * env is typically unavailable on mobile). Idempotent.
+     */
+    fun `defaultTools`(): OneAiAppBuilder
     
     /**
      * Use the deny-all interaction gate (every point aborted).
@@ -2474,6 +2496,10 @@ public interface OneAiAppBuilderInterface {
  *
  * Provides a builder-pattern API for foreign languages to construct
  * a OneAI App with all the necessary components.
+ *
+ * `extra_tools` survives the consumed-`Arc` builder chain (threaded
+ * through `from_builder`) so `default_tools()` set before
+ * `provider_config()` etc. is not lost.
  */
 open class OneAiAppBuilder: Disposable, AutoCloseable, OneAiAppBuilderInterface
 {
@@ -2593,6 +2619,8 @@ open class OneAiAppBuilder: Disposable, AutoCloseable, OneAiAppBuilderInterface
      *
      * This is async because domain pack tools are eagerly registered
      * at build time, which requires async tool registry operations.
+     * `extra_tools` (e.g. from `default_tools()`) are registered on the
+     * built App here.
      */
     @Throws(OneAiErrorView::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
@@ -2622,6 +2650,26 @@ open class OneAiAppBuilder: Disposable, AutoCloseable, OneAiAppBuilderInterface
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_oneai_fn_method_oneaiappbuilder_default_parser(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Register the built-in read-only research tools (`web_search` +
+     * `web_fetch`) so a foreign app gets a working agent without wiring a
+     * DomainPack. `web_search` defaults to the DuckDuckGo backend — no API
+     * key required (set `ONEAI_SEARCH_*` env for Google/Bing/SerpAPI, though
+     * env is typically unavailable on mobile). Idempotent.
+     */override fun `defaultTools`(): OneAiAppBuilder {
+            return FfiConverterTypeOneAIAppBuilder.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_oneai_fn_method_oneaiappbuilder_default_tools(
         it,
         _status)
 }

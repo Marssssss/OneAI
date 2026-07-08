@@ -48,12 +48,17 @@ Compose screen wired end-to-end through the FFI:
   card bg, horizontal-scroll), inline `` `code` ``, `**bold**`, bullet list
   prefix. No full markdown renderer by choice (zero dep / zero version risk).
 - **Provider config** (⚙ icon): `kind` / `model` / `apiKey` / `baseUrl`
-  → `OneAiAppBuilder().providerConfig(ProviderConfigView(...))` (the returned
-  builder is reused — `provider_config` consumes the Arc). No secrets baked
-  in; session built lazily on first send and reused. Defaults
+  → `OneAiAppBuilder().providerConfig(ProviderConfigView(...)).defaultTools()`
+  (the returned builder is reused — `provider_config`/`default_tools` consume
+  the Arc; `extra_tools` survives the chain via `from_builder`). **Persisted**
+  in `SharedPreferences("oneai_provider")` — survives app restarts. No secrets
+  baked in; session built lazily on first send and reused. Defaults
   `openai` / `gpt-4o-mini`.
   - Ollama on the host from the emulator: `kind=ollama`, `model=llama3`,
     `base url=http://10.0.2.2:11434`.
+- **Web search**: `defaultTools()` registers the built-in `web_search`
+  (DuckDuckGo backend, no API key) + `web_fetch` read-only research tools on
+  the Rust side, so the model can search without wiring a DomainPack.
 
 > `AndroidManifest` sets `windowSoftInputMode="adjustResize"`; the activity
 > calls `enableEdgeToEdge()` so Compose insets drive the layout.

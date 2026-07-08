@@ -83,7 +83,6 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import uniffi.oneai.ChatEventCallback
 import uniffi.oneai.ChatEventView
@@ -197,11 +196,22 @@ private fun ChatScreen(activity: ComponentActivity) {
     val listState = rememberLazyListState()
 
     // atBottom: true when the list can't scroll further down (or is empty).
-    // Reactive via derivedStateOf so the FAB + auto-scroll see live state.
     val atBottom by remember {
         derivedStateOf {
             listState.layoutInfo.totalItemsCount == 0 || !listState.canScrollForward
         }
+    }
+    // User intent: keep the newest content in view? Flipped to false when the
+    // user scrolls up (detected via isScrollInProgress, which the instant
+    // scrollToItem we use for auto-follow does NOT trigger), back to true when
+    // they return to the bottom or send a new message.
+    var stickToBottom by remember { mutableStateOf(true) }
+    LaunchedEffect(atBottom) { if (atBottom) stickToBottom = true }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to atBottom }
+            .collect { (scrolling, bottom) ->
+                if (scrolling && !bottom) stickToBottom = false
+            }
     }
 
     Scaffold(
@@ -226,6 +236,7 @@ private fun ChatScreen(activity: ComponentActivity) {
                     val task = vm.input.trim()
                     if (task.isNotEmpty() && !vm.running) {
                         vm.input = ""
+                        stickToBottom = true
                         scope.launch { vm.runTask(task) }
                     }
                 },
@@ -266,13 +277,14 @@ private fun ChatScreen(activity: ComponentActivity) {
                 }
             }
 
-            // 回到底部 — only when the user has scrolled up during/after a turn.
-            if (!atBottom && vm.items.isNotEmpty()) {
+            // 回到底部 — only when the user has scrolled away from the bottom.
+            if (!stickToBottom && vm.items.isNotEmpty()) {
                 androidx.compose.foundation.layout.Box(
                     modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp),
                 ) {
                     SmallFloatingActionButton(
                         onClick = {
+                            stickToBottom = true
                             scope.launch { listState.animateScrollToItem(vm.items.size) }
                         },
                         containerColor = SurfWhite,
@@ -285,23 +297,19 @@ private fun ChatScreen(activity: ComponentActivity) {
         }
     }
 
-    // Auto-stick-to-bottom while streaming, but only if the user hasn't
-    // scrolled away. Keyed on streamTick (fires per content chunk) + size.
+    // Auto-follow: snap (instant, NOT animated — animated scrolls relaunch
+    // every chunk and lock out manual drag) to the sentinel when sticking.
+    // Keyed on streamTick so it fires per content chunk during streaming
+    // (items.size alone wouldn't, since the last item grows in place).
     LaunchedEffect(vm.items.size, vm.streamTick) {
-        if (vm.items.isNotEmpty() && atBottom) {
-            listState.animateScrollToItem(vm.items.size)
+        if (stickToBottom && vm.items.isNotEmpty()) {
+            listState.scrollToItem(vm.items.size)
         }
     }
 
-    // If the user scrolls back to the bottom during a turn, resume following.
-    LaunchedEffect(vm.running) {
-        snapshotFlow { atBottom }
-            .distinctUntilChanged()
-            .collect { bottom ->
-                if (bottom && vm.items.isNotEmpty()) {
-                    listState.animateScrollToItem(vm.items.size)
-                }
-            }
+    // Persist provider config on any change (issue 2).
+    LaunchedEffect(vm.kind, vm.model, vm.apiKey, vm.baseUrl) {
+        vm.saveConfig()
     }
 }
 
@@ -741,11 +749,24 @@ private fun ProviderConfigCard(vm: ChatViewModel) {
 // ── ViewModel (plain holder — no androidx.lifecycle dep) ─────────────
 
 private class ChatViewModel(private val activity: ComponentActivity) {
-    var kind by mutableStateOf("openai")
-    var model by mutableStateOf("gpt-4o-mini")
-    var apiKey by mutableStateOf("")
-    var baseUrl by mutableStateOf("")
+    // Persist provider config across launches (issue 2). Loaded eagerly here;
+    // the screen writes back via saveConfig() on any field change.
+    private val prefs = activity.getSharedPreferences("oneai_provider", android.content.Context.MODE_PRIVATE)
+
+    var kind by mutableStateOf(prefs.getString("kind", "openai") ?: "openai")
+    var model by mutableStateOf(prefs.getString("model", "gpt-4o-mini") ?: "gpt-4o-mini")
+    var apiKey by mutableStateOf(prefs.getString("apiKey", "") ?: "")
+    var baseUrl by mutableStateOf(prefs.getString("baseUrl", "") ?: "")
     var showConfig by mutableStateOf(false)
+
+    fun saveConfig() {
+        prefs.edit()
+            .putString("kind", kind)
+            .putString("model", model)
+            .putString("apiKey", apiKey)
+            .putString("baseUrl", baseUrl)
+            .apply()
+    }
 
     val items = mutableStateListOf<ChatItem>()
     var input by mutableStateOf("")
@@ -874,7 +895,10 @@ private class ChatViewModel(private val activity: ComponentActivity) {
             // provider_config() consumes the builder Arc (Rust: self: Arc<Self>
             // → take_inner()) and returns a NEW Arc<Self>. The returned builder
             // MUST be used for the next call — the original handle is empty.
-            val builder = OneAiAppBuilder().providerConfig(cfg)
+            // default_tools() adds web_search + web_fetch (DuckDuckGo backend,
+            // no key) so the model can actually search; its extra_tools survive
+            // the consumed-Arc chain via from_builder.
+            val builder = OneAiAppBuilder().providerConfig(cfg).defaultTools()
             val a = builder.build()
             app = a
             val sess = a.createSession()

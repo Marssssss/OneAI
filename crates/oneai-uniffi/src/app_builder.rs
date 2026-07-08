@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use oneai_core::traits::Tool;
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
 
@@ -19,9 +20,14 @@ use crate::app::OneAIApp;
 ///
 /// Provides a builder-pattern API for foreign languages to construct
 /// a OneAI App with all the necessary components.
+///
+/// `extra_tools` survives the consumed-`Arc` builder chain (threaded
+/// through `from_builder`) so `default_tools()` set before
+/// `provider_config()` etc. is not lost.
 #[derive(uniffi::Object)]
 pub struct OneAIAppBuilder {
     inner: std::sync::Mutex<Option<oneai_app::AppBuilder>>,
+    extra_tools: std::sync::Mutex<Vec<Arc<dyn Tool>>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -31,30 +37,53 @@ impl OneAIAppBuilder {
     pub fn new() -> Self {
         Self {
             inner: std::sync::Mutex::new(Some(oneai_app::AppBuilder::new())),
+            extra_tools: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// Use the no-op interaction gate (every point disabled, zero latency).
     #[uniffi::method]
     pub fn noop_interaction_gate(self: Arc<Self>) -> Arc<Self> {
+        let extras = self.take_extra_tools();
         let builder = self.take_inner().noop_interaction_gate();
-        Arc::new(Self::from_builder(builder))
+        Arc::new(Self::from_builder(builder, extras))
     }
 
     /// Use the deny-all interaction gate (every point aborted).
     #[uniffi::method]
     pub fn deny_all_interaction_gate(self: Arc<Self>) -> Arc<Self> {
+        let extras = self.take_extra_tools();
         let builder = self
             .take_inner()
             .interaction_gate(Arc::new(oneai_tool::DenyAllInteractionGate));
-        Arc::new(Self::from_builder(builder))
+        Arc::new(Self::from_builder(builder, extras))
     }
 
     /// Use the default 3-layer parser.
     #[uniffi::method]
     pub fn default_parser(self: Arc<Self>) -> Arc<Self> {
+        let extras = self.take_extra_tools();
         let builder = self.take_inner().default_parser();
-        Arc::new(Self::from_builder(builder))
+        Arc::new(Self::from_builder(builder, extras))
+    }
+
+    /// Register the built-in read-only research tools (`web_search` +
+    /// `web_fetch`) so a foreign app gets a working agent without wiring a
+    /// DomainPack. `web_search` defaults to the DuckDuckGo backend — no API
+    /// key required (set `ONEAI_SEARCH_*` env for Google/Bing/SerpAPI, though
+    /// env is typically unavailable on mobile). Idempotent.
+    #[uniffi::method]
+    pub fn default_tools(self: Arc<Self>) -> Arc<Self> {
+        let extras = self.take_extra_tools();
+        let builder = self.take_inner();
+        let mut extras = extras;
+        if !extras.iter().any(|t| t.name() == "web_search") {
+            extras.push(Arc::new(oneai_tool::WebSearchTool::new()));
+        }
+        if !extras.iter().any(|t| t.name() == "web_fetch") {
+            extras.push(Arc::new(oneai_tool::WebFetchTool::new()));
+        }
+        Arc::new(Self::from_builder(builder, extras))
     }
 
     /// Set the LLM provider from a foreign-friendly config record.
@@ -69,6 +98,7 @@ impl OneAIAppBuilder {
         self: Arc<Self>,
         cfg: ProviderConfigView,
     ) -> std::result::Result<Arc<Self>, OneAIErrorView> {
+        let extras = self.take_extra_tools();
         let provider: Arc<dyn oneai_core::traits::LlmProvider> = match cfg.kind.as_str() {
             "openai" => {
                 let config = oneai_core::ModelConfig::openai_compatible(
@@ -106,40 +136,52 @@ impl OneAIAppBuilder {
             }
         };
         let builder = self.take_inner().provider(provider);
-        Ok(Arc::new(Self::from_builder(builder)))
+        Ok(Arc::new(Self::from_builder(builder, extras)))
     }
 
     /// Set the memory manager with custom config.
     #[uniffi::method]
     pub fn memory_manager_with_config(self: Arc<Self>, threshold_tokens: u32) -> Arc<Self> {
+        let extras = self.take_extra_tools();
         let config = oneai_memory::MemoryManagerConfig {
             compression_threshold_tokens: threshold_tokens as usize,
             ..Default::default()
         };
         let manager = Arc::new(MemoryManager::with_config(config));
         let builder = self.take_inner().memory_manager(manager);
-        Arc::new(Self::from_builder(builder))
+        Arc::new(Self::from_builder(builder, extras))
     }
 
     /// Set the persistence layer.
     #[uniffi::method]
     pub fn persistence(self: Arc<Self>, path: String) -> Arc<Self> {
+        let extras = self.take_extra_tools();
         let persistence = Arc::new(FilePersistence::new(&path));
         let builder = self.take_inner().persistence(persistence);
-        Arc::new(Self::from_builder(builder))
+        Arc::new(Self::from_builder(builder, extras))
     }
 
     /// Build the application.
     ///
     /// This is async because domain pack tools are eagerly registered
     /// at build time, which requires async tool registry operations.
+    /// `extra_tools` (e.g. from `default_tools()`) are registered on the
+    /// built App here.
     #[uniffi::method]
     pub async fn build(self: Arc<Self>) -> Result<Arc<OneAIApp>, OneAIErrorView> {
+        let extras = self.take_extra_tools();
         let builder = self.take_inner();
-        builder.build()
+        let app = builder
+            .build()
             .await
             .map(|app| Arc::new(OneAIApp { inner: Arc::new(app) }))
-            .map_err(OneAIErrorView::from)
+            .map_err(OneAIErrorView::from)?;
+        for tool in extras {
+            if let Err(e) = app.inner.register_tool(tool).await {
+                eprintln!("default tool registration failed: {:?}", e);
+            }
+        }
+        Ok(app)
     }
 }
 
@@ -149,10 +191,17 @@ impl OneAIAppBuilder {
         self.inner.lock().unwrap().take().unwrap_or_else(oneai_app::AppBuilder::new)
     }
 
-    /// Create from a raw builder.
-    fn from_builder(builder: oneai_app::AppBuilder) -> Self {
+    /// Take the extra tools (web_search/web_fetch from `default_tools`) out
+    /// of the mutex so they survive the consumed-`Arc` builder chain.
+    fn take_extra_tools(&self) -> Vec<Arc<dyn Tool>> {
+        std::mem::take(&mut *self.extra_tools.lock().unwrap())
+    }
+
+    /// Create from a raw builder, carrying over any extra tools.
+    fn from_builder(builder: oneai_app::AppBuilder, extras: Vec<Arc<dyn Tool>>) -> Self {
         Self {
             inner: std::sync::Mutex::new(Some(builder)),
+            extra_tools: std::sync::Mutex::new(extras),
         }
     }
 }
