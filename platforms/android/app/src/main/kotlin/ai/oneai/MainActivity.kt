@@ -3,6 +3,15 @@ package ai.oneai
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,51 +19,71 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.layout
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import uniffi.oneai.ChatEventCallback
 import uniffi.oneai.ChatEventView
@@ -64,34 +93,58 @@ import uniffi.oneai.OneAiSession
 import uniffi.oneai.ProviderConfigView
 
 // ──────────────────────────────────────────────────────────────────────
-// OneAI Android chat — S3.
+// OneAI Android chat — S3 (豆包-style rewrite).
 //
-// A single Jetpack Compose screen that wires the full FFI inference loop:
-//   input box  →  session.runTask(task, callback)
-//   ChatEventCallback receives StreamChunk (typewriter append),
-//   Thinking/ToolCall/ToolResult (dimmed trace), DirectAnswer/Complete
-//   (finish), Error (surface message).
+// Single Compose screen wired through the FFI inference loop:
+//   input box → session.runTask(task, callback)
+//   ChatEventCallback (fires on the tokio worker thread; every state
+//   mutation marshalled to main via runOnUiThread):
+//     StreamChunk   → append to live answer (typewriter + blinking cursor)
+//     Thinking      → accumulate into ONE collapsible "思考过程" card
+//     ToolCall/Result → compact dim step lines
+//     DirectAnswer/Complete → finalize, stop cursor
+//     Error         → inline error
 //
-// The callback fires on the tokio worker thread; every state mutation is
-// marshalled back to the main thread via runOnUiThread before touching
-// Compose snapshot state. runTask is suspend and driven from a
-// rememberCoroutineScope (main dispatcher).
+// Scrolling: a sentinel item at the end + a derivedStateOf `atBottom`
+// (from canScrollForward). While at bottom, stream chunks auto-stick to
+// the bottom; once the user scrolls up, auto-scroll stops and a
+// "回到底部" FAB appears. Tapping stop calls session.interrupt().
 //
-// The provider is configured from on-screen fields (kind/model/apiKey/
-// baseUrl) so no secrets are baked into the APK. Session is built lazily
-// on first send and reused thereafter.
+// Markdown: lightweight self-render — fenced ```code blocks``` (monospace
+// card) + inline `code` + **bold** + bullet/list prefix; no extra deps.
 // ──────────────────────────────────────────────────────────────────────
 
 private const val TAG = "OneAI"
 
+// ── 豆包-ish light palette ───────────────────────────────────────────
+private val BgChat = Color(0xFFF7F7F8)
+private val SurfWhite = Color(0xFFFFFFFF)
+private val TextPrimary = Color(0xFF1A1A1A)
+private val TextDim = Color(0xFF8A8A8A)
+private val UserBubble = Color(0xFFE7F0FF)
+private val CodeBg = Color(0xFFF2F3F5)
+private val Accent = Color(0xFF4D6BFE)
+
+private val DoubaoColors = lightColorScheme(
+    background = BgChat,
+    surface = SurfWhite,
+    onBackground = TextPrimary,
+    onSurface = TextPrimary,
+    onSurfaceVariant = TextDim,
+    primary = Accent,
+    onPrimary = Color.White,
+    surfaceVariant = Color(0xFFEFEFF1),
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
-            OneAiTheme {
+            MaterialTheme(colorScheme = DoubaoColors) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background,
+                    color = BgChat,
                 ) {
                     ChatScreen(activity = this)
                 }
@@ -100,18 +153,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ── Compose theme — lean on the default Material3 color scheme so the
-//    screen is legible without a custom palette. ──────────────────────
-@Composable
-private fun OneAiTheme(content: @Composable () -> Unit) {
-    MaterialTheme(content = content)
-}
-
 // ── Chat model ───────────────────────────────────────────────────────
-// NB: LazyColumn item keys must be Bundle-saveable on Android (Long), NOT
-// plain `Any()`/Object — a java.lang.Object key throws
-// "Type of the key … is not supported. On Android you can only use types
-// which can be stored inside the Bundle." (FATAL during saveable state.)
+// LazyColumn keys must be Bundle-saveable on Android → Long, never Any().
 
 private sealed interface ChatItem {
     val key: Long
@@ -119,14 +162,30 @@ private sealed interface ChatItem {
 
 private data class UserItem(val text: String, override val key: Long) : ChatItem
 
-/** A live assistant turn. `text` is observable so StreamChunk appends
- *  re-render the bubble in place (typewriter). `trace` holds the
- *  dimmed thinking/tool lines. */
 private class AssistantItem(override val key: Long) : ChatItem {
+    /** Accumulated reasoning text — one block, not one bubble per chunk. */
+    var thinking by mutableStateOf("")
+    var thinkingActive by mutableStateOf(false)
+    var thinkingDone by mutableStateOf(false)
+    var thinkingExpanded by mutableStateOf(false)
+
+    /** Compact tool trace (one line each — fine, these are infrequent). */
+    val steps = mutableStateListOf<ToolStep>()
+
+    /** Streamed answer. */
     var text by mutableStateOf("")
-    val trace = mutableStateListOf<String>()
+    var streaming by mutableStateOf(false)
     var done by mutableStateOf(false)
+    var error by mutableStateOf<String?>(null)
 }
+
+private data class ToolStep(
+    val callId: String,
+    val name: String,
+    val args: String,
+    var result: String? = null,
+    var ok: Boolean? = null,
+)
 
 // ── Screen ───────────────────────────────────────────────────────────
 
@@ -137,15 +196,25 @@ private fun ChatScreen(activity: ComponentActivity) {
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
+    // atBottom: true when the list can't scroll further down (or is empty).
+    // Reactive via derivedStateOf so the FAB + auto-scroll see live state.
+    val atBottom by remember {
+        derivedStateOf {
+            listState.layoutInfo.totalItemsCount == 0 || !listState.canScrollForward
+        }
+    }
+
     Scaffold(
+        containerColor = BgChat,
         topBar = {
             TopAppBar(
-                title = { Text("OneAI") },
+                title = { Text("OneAI", color = TextPrimary) },
                 actions = {
                     IconButton(onClick = { vm.showConfig = !vm.showConfig }) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Provider settings")
+                        Icon(Icons.Filled.Settings, contentDescription = "Provider settings", tint = TextDim)
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = BgChat),
             )
         },
         bottomBar = {
@@ -160,92 +229,212 @@ private fun ChatScreen(activity: ComponentActivity) {
                         scope.launch { vm.runTask(task) }
                     }
                 },
+                onStop = { scope.launch { vm.stop() } },
             )
         },
     ) { inner ->
-        Column(modifier = Modifier.padding(inner).fillMaxSize()) {
-            if (vm.showConfig) ProviderConfigCard(vm)
+        Box(modifier = Modifier.padding(inner).fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                if (vm.showConfig) ProviderConfigCard(vm)
 
-            // Auto-scroll to the newest item as the typewriter appends.
-            LaunchedEffectScroller(vm.items, listState)
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        start = 12.dp, end = 12.dp, top = 12.dp, bottom = 12.dp,
+                    ),
+                ) {
+                    items(vm.items, key = { it.key }) { item ->
+                        when (item) {
+                            is UserItem -> UserBubble(item.text)
+                            is AssistantItem -> AssistantBubble(item)
+                        }
+                    }
+                    // Sentinel: scrolling to items.size (this item's index)
+                    // clamps to max-scroll = stick to bottom. Also reserves a
+                    // little breathing room under the last message.
+                    item(key = "sentinel") { Spacer(Modifier.height(1.dp)) }
+                }
+                vm.error?.let { msg ->
+                    Text(
+                        "✗ $msg",
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        fontSize = 13.sp,
+                    )
+                }
+            }
 
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-            ) {
-                items(vm.items, key = { it.key }) { item ->
-                    when (item) {
-                        is UserItem -> Bubble(item.text, mine = true)
-                        is AssistantItem -> AssistantBubble(item)
+            // 回到底部 — only when the user has scrolled up during/after a turn.
+            if (!atBottom && vm.items.isNotEmpty()) {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp),
+                ) {
+                    SmallFloatingActionButton(
+                        onClick = {
+                            scope.launch { listState.animateScrollToItem(vm.items.size) }
+                        },
+                        containerColor = SurfWhite,
+                        contentColor = Accent,
+                    ) {
+                        Icon(Icons.Filled.ArrowDownward, contentDescription = "回到底部")
                     }
                 }
             }
-            vm.error?.let { msg ->
-                Text(
-                    "✗ $msg",
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                    fontSize = 13.sp,
-                )
-            }
         }
+    }
+
+    // Auto-stick-to-bottom while streaming, but only if the user hasn't
+    // scrolled away. Keyed on streamTick (fires per content chunk) + size.
+    LaunchedEffect(vm.items.size, vm.streamTick) {
+        if (vm.items.isNotEmpty() && atBottom) {
+            listState.animateScrollToItem(vm.items.size)
+        }
+    }
+
+    // If the user scrolls back to the bottom during a turn, resume following.
+    LaunchedEffect(vm.running) {
+        snapshotFlow { atBottom }
+            .distinctUntilChanged()
+            .collect { bottom ->
+                if (bottom && vm.items.isNotEmpty()) {
+                    listState.animateScrollToItem(vm.items.size)
+                }
+            }
     }
 }
 
-// ── Assistant bubble: streamed text + collapsed trace ───────────────
+// ── Assistant bubble: thinking card + steps + answer + cursor ───────
 
 @Composable
 private fun AssistantBubble(item: AssistantItem) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        if (item.trace.isNotEmpty()) {
-            item.trace.forEach { line ->
-                Text(
-                    line,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
-                )
+        ThinkingCard(item)
+        if (item.steps.isNotEmpty()) {
+            Column(modifier = Modifier.padding(top = 6.dp, bottom = 4.dp)) {
+                item.steps.forEach { StepLine(it) }
             }
         }
         if (item.text.isNotEmpty()) {
-            Bubble(item.text, mine = false)
+            MarkdownText(
+                text = item.text,
+                color = TextPrimary,
+                fontSize = 15.sp,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
-        if (!item.done && item.text.isNotEmpty()) {
+        if (item.streaming && item.text.isNotEmpty()) {
+            BlinkingCursor(modifier = Modifier.padding(top = 2.dp, start = 2.dp))
+        }
+        item.error?.let { msg ->
+            Text(
+                "✗ $msg",
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ThinkingCard(item: AssistantItem) {
+    if (item.thinking.isEmpty()) return
+    val expanded = item.thinkingActive || item.thinkingExpanded
+    Surface(
+        color = Color(0xFFF2F4FB),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .let { if (item.thinkingDone) it.then(Modifier.clickable { item.thinkingExpanded = !item.thinkingExpanded }) else it },
             ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(12.dp),
-                    strokeWidth = 1.5.dp,
+                Icon(
+                    Icons.Filled.Psychology,
+                    contentDescription = null,
+                    tint = Accent,
+                    modifier = Modifier.size(15.dp),
                 )
                 Spacer(Modifier.width(6.dp))
-                Text("…", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (item.thinkingActive) "思考中…" else "已深度思考",
+                    color = TextDim,
+                    fontSize = 12.sp,
+                )
+                if (item.thinkingActive) {
+                    Spacer(Modifier.width(6.dp))
+                    ThreeDots()
+                } else {
+                    Spacer(Modifier.weight(1f))
+                    Icon(
+                        if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = if (expanded) "收起" else "展开",
+                        tint = TextDim,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+            if (expanded) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 6.dp)
+                        .heightIn(max = 260.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Text(
+                        item.thinking,
+                        color = TextDim,
+                        fontSize = 13.sp,
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun Bubble(text: String, mine: Boolean) {
-    val align = if (mine) Alignment.End else Alignment.Start
-    val bg = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-    val fg = if (mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = align,
-    ) {
+private fun StepLine(step: ToolStep) {
+    val (icon, tint) = when (step.ok) {
+        true -> "✓" to Color(0xFF3B8C5A)
+        false -> "✗" to MaterialTheme.colorScheme.error
+        null -> "⚙" to TextDim
+    }
+    Column(modifier = Modifier.padding(vertical = 2.dp)) {
+        Text(
+            "$icon ${step.name}(${step.args})",
+            color = tint,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        step.result?.let { r ->
+            Text(
+                "    └ ${r.take(200)}",
+                color = TextDim,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
+
+// ── Bubbles ──────────────────────────────────────────────────────────
+
+@Composable
+private fun UserBubble(text: String) {
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         Surface(
-            color = bg,
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.widthInMax(0.85f),
+            color = UserBubble,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.widthIn(max = 320.dp),
         ) {
             Text(
                 text,
-                color = fg,
+                color = TextPrimary,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                 fontSize = 15.sp,
             )
@@ -253,24 +442,198 @@ private fun Bubble(text: String, mine: Boolean) {
     }
 }
 
-// Modifier.widthInMax — fraction-of-screen max width for bubbles.
-private fun Modifier.widthInMax(fraction: Float) =
-    this.then(layout { measurable, constraints ->
-        val maxW = (constraints.maxWidth * fraction).toInt().coerceAtLeast(1)
-        val placeable = measurable.measure(constraints.copy(maxWidth = maxW))
-        layout(placeable.width, placeable.height) { placeable.place(0, 0) }
-    })
+// ── Markdown (lightweight, no deps) ──────────────────────────────────
 
-// ── Input bar ────────────────────────────────────────────────────────
+private sealed interface MdSeg {
+    data class Prose(val text: String) : MdSeg
+    data class Code(val lang: String, val code: String) : MdSeg
+}
 
+@Composable
+private fun MarkdownText(
+    text: String,
+    color: Color,
+    fontSize: TextUnit,
+    modifier: Modifier = Modifier,
+) {
+    val segs = remember(text) { splitMarkdown(text) }
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        segs.forEach { seg ->
+            when (seg) {
+                is MdSeg.Code -> CodeCard(seg.lang, seg.code)
+                is MdSeg.Prose -> Text(
+                    text = buildInline(seg.text),
+                    color = color,
+                    fontSize = fontSize,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CodeCard(lang: String, code: String) {
+    Surface(
+        color = CodeBg,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            if (lang.isNotEmpty()) {
+                Text(
+                    lang,
+                    color = TextDim,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
+            Text(
+                code,
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+            )
+        }
+    }
+}
+
+private fun splitMarkdown(src: String): List<MdSeg> {
+    val out = mutableListOf<MdSeg>()
+    val lines = src.split("\n")
+    val buf = StringBuilder()
+    fun flush() {
+        if (buf.isNotEmpty()) {
+            out.add(MdSeg.Prose(buf.toString().trimEnd('\n')))
+            buf.clear()
+        }
+    }
+    var i = 0
+    while (i < lines.size) {
+        val l = lines[i]
+        if (l.trimStart().startsWith("```")) {
+            flush()
+            val lang = l.trimStart().removePrefix("```").trim()
+            val code = StringBuilder()
+            i++
+            while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
+                code.append(lines[i]).append('\n')
+                i++
+            }
+            i++ // skip closing fence (if any)
+            out.add(MdSeg.Code(lang, code.toString().trimEnd('\n')))
+        } else {
+            buf.append(l).append('\n')
+            i++
+        }
+    }
+    flush()
+    return out
+}
+
+/** Render inline `code` and **bold**, plus bullet/numbered list prefixes. */
+private fun buildInline(src: String): AnnotatedString = buildAnnotatedString {
+    for (rawLine in src.split("\n")) {
+        val trimmed = rawLine.trimEnd()
+        if (trimmed.isEmpty()) {
+            append('\n')
+            continue
+        }
+        // List markers → bullet prefix (numbered stays as-is text).
+        val (prefix, body) = when {
+            trimmed.startsWith("- ") || trimmed.startsWith("* ") -> "•  " to trimmed.substring(2)
+            else -> "" to trimmed
+        }
+        if (prefix.isNotEmpty()) append(prefix)
+        appendInline(body, this)
+        append('\n')
+    }
+}
+
+private fun appendInline(s: String, b: AnnotatedString.Builder) {
+    var i = 0
+    while (i < s.length) {
+        when {
+            s.startsWith("**", i) -> {
+                val end = s.indexOf("**", i + 2)
+                if (end >= 0) {
+                    b.withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                        appendInline(s.substring(i + 2, end), this)
+                    }
+                    i = end + 2
+                } else {
+                    b.append(s[i]); i++
+                }
+            }
+            s[i] == '`' -> {
+                val end = s.indexOf('`', i + 1)
+                if (end >= 0) {
+                    b.withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = CodeBg)) {
+                        append(s.substring(i + 1, end))
+                    }
+                    i = end + 1
+                } else {
+                    b.append(s[i]); i++
+                }
+            }
+            else -> {
+                b.append(s[i]); i++
+            }
+        }
+    }
+}
+
+// ── Streaming cursor + thinking indicator ───────────────────────────
+
+@Composable
+private fun BlinkingCursor(modifier: Modifier = Modifier) {
+    val t = rememberInfiniteTransition(label = "cursor")
+    val alpha by t.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.2f,
+        animationSpec = infiniteRepeatable(
+            animation = androidx.compose.animation.core.tween(500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "cursorAlpha",
+    )
+    Text("▍", color = Accent.copy(alpha = alpha), fontSize = 15.sp, modifier = modifier)
+}
+
+@Composable
+private fun ThreeDots() {
+    val t = rememberInfiniteTransition(label = "dots")
+    Row {
+        repeat(3) { idx ->
+            val a by t.animateFloat(
+                initialValue = 0.3f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = androidx.compose.animation.core.tween(600, delayMillis = idx * 150, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "dot$idx",
+            )
+            Text("·", color = TextDim.copy(alpha = a), fontSize = 16.sp)
+        }
+    }
+}
+
+// ── Input bar (pill + send/stop) ────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun InputBar(
     value: String,
     running: Boolean,
     onChange: (String) -> Unit,
     onSend: () -> Unit,
+    onStop: () -> Unit,
 ) {
-    Surface(tonalElevation = 3.dp) {
+    Surface(color = SurfWhite, tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -279,33 +642,42 @@ private fun InputBar(
                 .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextField(
+            OutlinedTextField(
                 value = value,
                 onValueChange = onChange,
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                placeholder = { Text("Ask OneAI…") },
+                placeholder = { Text("问点什么…", color = TextDim) },
                 maxLines = 4,
-                textStyle = TextStyle(fontSize = 15.sp),
-                colors = TextFieldDefaults.colors(
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
+                textStyle = TextStyle(fontSize = 15.sp, color = TextPrimary),
+                shape = RoundedCornerShape(20.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = CodeBg,
+                    unfocusedContainerColor = CodeBg,
+                    focusedBorderColor = Color.Transparent,
+                    unfocusedBorderColor = Color.Transparent,
                 ),
-                keyboardOptions = KeyboardOptions(capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Sentences),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
             )
             Spacer(Modifier.width(8.dp))
-            FilledIconButton(
-                onClick = onSend,
-                enabled = value.isNotBlank() && !running,
-                modifier = Modifier.size(44.dp),
-            ) {
-                if (running) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                } else {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+            if (running) {
+                FloatingActionButton(
+                    onClick = onStop,
+                    shape = CircleShape,
+                    containerColor = Color(0xFFE5484D),
+                    contentColor = Color.White,
+                    modifier = Modifier.size(46.dp),
+                ) {
+                    Icon(Icons.Filled.Stop, contentDescription = "停止", modifier = Modifier.size(22.dp))
+                }
+            } else {
+                FloatingActionButton(
+                    onClick = onSend,
+                    shape = CircleShape,
+                    containerColor = if (value.isNotBlank()) Accent else Color(0xFFD8D8D8),
+                    contentColor = Color.White,
+                    modifier = Modifier.size(46.dp),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", modifier = Modifier.size(20.dp))
                 }
             }
         }
@@ -319,10 +691,10 @@ private fun ProviderConfigCard(vm: ChatViewModel) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(12.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("Provider", style = MaterialTheme.typography.labelLarge)
+        Text("Provider", style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.SemiBold), color = TextDim)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = vm.kind,
@@ -361,21 +733,8 @@ private fun ProviderConfigCard(vm: ChatViewModel) {
         Text(
             "tip: ollama on the host emulator → kind=ollama, model=llama3, base url=http://10.0.2.2:11434",
             fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = TextDim,
         )
-        HorizontalDivider()
-    }
-}
-
-// ── Auto-scroll helper ───────────────────────────────────────────────
-
-@Composable
-private fun LaunchedEffectScroller(
-    items: List<ChatItem>,
-    state: androidx.compose.foundation.lazy.LazyListState,
-) {
-    androidx.compose.runtime.LaunchedEffect(items.size, items.lastOrNull()) {
-        if (items.isNotEmpty()) state.animateScrollToItem(items.lastIndex)
     }
 }
 
@@ -393,14 +752,17 @@ private class ChatViewModel(private val activity: ComponentActivity) {
     var running by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
 
+    /** Bumped on every content-bearing event so the auto-scroll LaunchedEffect
+     *  re-fires during streaming (items.size alone wouldn't). */
+    var streamTick by mutableStateOf(0L)
+        private set
+
     private var app: OneAiApp? = null
     private var session: OneAiSession? = null
     private var keySeq = 0L
 
-    private fun nextKey(): Long {
-        keySeq += 1
-        return keySeq
-    }
+    private fun nextKey(): Long { keySeq += 1; return keySeq }
+    private fun tick() { streamTick += 1 }
 
     suspend fun runTask(task: String) {
         val s = session ?: ensureSession()
@@ -414,30 +776,57 @@ private class ChatViewModel(private val activity: ComponentActivity) {
         running = true
         error = null
 
-        // ChatEventCallback fires on the tokio worker thread — marshal every
-        // state mutation to the main thread before touching Compose state.
         val callback = object : ChatEventCallback {
             override fun onEvent(event: ChatEventView) {
                 activity.runOnUiThread {
                     when (event) {
-                        is ChatEventView.StreamChunk -> turn.text += event.text
-                        is ChatEventView.Thinking -> turn.trace.add("💭 ${event.text}")
-                        is ChatEventView.ToolCall -> turn.trace.add("⚙ ${event.name}(${event.argsJson})")
-                        is ChatEventView.ToolResult -> turn.trace.add(
-                            (if (event.success) "✓ " else "✗ ") + "${event.toolName}: ${event.content}",
-                        )
+                        is ChatEventView.Thinking -> {
+                            turn.thinkingActive = true
+                            turn.thinking += event.text
+                            tick()
+                        }
+                        is ChatEventView.StreamChunk -> {
+                            // First answer chunk finalizes the thinking card.
+                            if (turn.thinkingActive) {
+                                turn.thinkingActive = false
+                                turn.thinkingDone = true
+                            }
+                            turn.streaming = true
+                            turn.text += event.text
+                            tick()
+                        }
+                        is ChatEventView.ToolCall -> {
+                            turn.steps.add(ToolStep(event.id, event.name, event.argsJson))
+                            tick()
+                        }
+                        is ChatEventView.ToolResult -> {
+                            val step = turn.steps.firstOrNull { it.callId == event.callId }
+                                ?: turn.steps.lastOrNull { it.result == null }
+                            if (step != null) {
+                                step.result = event.content
+                                step.ok = event.success
+                            }
+                            tick()
+                        }
                         is ChatEventView.DirectAnswer -> {
                             if (event.text.isNotBlank()) turn.text = event.text
+                            if (turn.thinkingActive) { turn.thinkingActive = false; turn.thinkingDone = true }
+                            tick()
                         }
                         is ChatEventView.Complete -> {
                             if (event.finalText.isNotBlank()) turn.text = event.finalText
+                            if (turn.thinkingActive) { turn.thinkingActive = false; turn.thinkingDone = true }
+                            turn.streaming = false
                             turn.done = true
                             running = false
+                            tick()
                         }
                         is ChatEventView.Error -> {
-                            error = event.message
+                            turn.error = event.message
+                            turn.streaming = false
                             turn.done = true
                             running = false
+                            tick()
                         }
                     }
                 }
@@ -446,19 +835,29 @@ private class ChatViewModel(private val activity: ComponentActivity) {
 
         try {
             s.runTask(task, callback)
-            // runTask returned — loop ended. Complete normally fires first,
-            // but guard in case the provider returned without one.
             activity.runOnUiThread {
+                turn.streaming = false
                 turn.done = true
                 running = false
+                tick()
             }
         } catch (e: Throwable) {
             Log.e(TAG, "runTask failed", e)
             activity.runOnUiThread {
-                error = e.message ?: e::class.simpleName
+                turn.error = e.message ?: e::class.simpleName
+                turn.streaming = false
                 turn.done = true
                 running = false
+                tick()
             }
+        }
+    }
+
+    suspend fun stop() {
+        try {
+            session?.interrupt()
+        } catch (e: Throwable) {
+            Log.e(TAG, "interrupt failed", e)
         }
     }
 
@@ -474,9 +873,7 @@ private class ChatViewModel(private val activity: ComponentActivity) {
             )
             // provider_config() consumes the builder Arc (Rust: self: Arc<Self>
             // → take_inner()) and returns a NEW Arc<Self>. The returned builder
-            // MUST be used for the next call — the original handle is moved-out
-            // and empty. Discarding the return left build() with no provider
-            // ("No LLM provider configured").
+            // MUST be used for the next call — the original handle is empty.
             val builder = OneAiAppBuilder().providerConfig(cfg)
             val a = builder.build()
             app = a
