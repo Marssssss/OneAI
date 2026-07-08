@@ -36,28 +36,38 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -90,27 +100,24 @@ import uniffi.oneai.OneAiApp
 import uniffi.oneai.OneAiAppBuilder
 import uniffi.oneai.OneAiSession
 import uniffi.oneai.ProviderConfigView
+import uniffi.oneai.SessionInfoView
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // ──────────────────────────────────────────────────────────────────────
-// OneAI Android chat — S3 (豆包-style rewrite).
+// OneAI Android chat — S4 (multi-session + persistence + settings).
 //
-// Single Compose screen wired through the FFI inference loop:
-//   input box → session.runTask(task, callback)
-//   ChatEventCallback (fires on the tokio worker thread; every state
-//   mutation marshalled to main via runOnUiThread):
-//     StreamChunk   → append to live answer (typewriter + blinking cursor)
-//     Thinking      → accumulate into ONE collapsible "思考过程" card
-//     ToolCall/Result → compact dim step lines
-//     DirectAnswer/Complete → finalize, stop cursor
-//     Error         → inline error
-//
-// Scrolling: a sentinel item at the end + a derivedStateOf `atBottom`
-// (from canScrollForward). While at bottom, stream chunks auto-stick to
-// the bottom; once the user scrolls up, auto-scroll stops and a
-// "回到底部" FAB appears. Tapping stop calls session.interrupt().
-//
-// Markdown: lightweight self-render — fenced ```code blocks``` (monospace
-// card) + inline `code` + **bold** + bullet/list prefix; no extra deps.
+// Built on S3's 豆包-style single screen. New:
+//   • App built eagerly with sqlite_persistence_at(<filesDir>/oneai.db) —
+//     every run_task auto-saves the conversation; restart-safe.
+//   • ModalNavigationDrawer: 新对话 / session list (tap→resume, 🗑→delete) /
+//     设置 row. list_conversations() backs the list.
+//   • ModalBottomSheet settings: kind/model/apiKey/baseUrl → 保存 rebuilds
+//     the App (same db path → history preserved) and reloads the current
+//     session.
+//   • loadSession(id): createSessionWithId(id) → messages() → replay user /
+//     assistant turns as finalized bubbles (thinking/steps not replayed).
 // ──────────────────────────────────────────────────────────────────────
 
 private const val TAG = "OneAI"
@@ -194,6 +201,20 @@ private fun ChatScreen(activity: ComponentActivity) {
     val vm = remember { ChatViewModel(activity) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+
+    // Build the App eagerly on first frame, then load the session list. The
+    // App persists across config changes via the remember{}-held ViewModel;
+    // provider changes call rebuildApp() explicitly.
+    LaunchedEffect(Unit) {
+        vm.ensureApp()
+        vm.refreshSessions()
+        // If there's a prior session, resume the most recent one; else start
+        // a fresh conversation (created lazily on first send below).
+        val mostRecent = vm.sessions.firstOrNull()
+        if (mostRecent != null) vm.loadSession(mostRecent.id)
+        else vm.newConversation()
+    }
 
     // atBottom: true when the list can't scroll further down (or is empty).
     val atBottom by remember {
@@ -201,10 +222,6 @@ private fun ChatScreen(activity: ComponentActivity) {
             listState.layoutInfo.totalItemsCount == 0 || !listState.canScrollForward
         }
     }
-    // User intent: keep the newest content in view? Flipped to false when the
-    // user scrolls up (detected via isScrollInProgress, which the instant
-    // scrollToItem we use for auto-follow does NOT trigger), back to true when
-    // they return to the bottom or send a new message.
     var stickToBottom by remember { mutableStateOf(true) }
     LaunchedEffect(atBottom) { if (atBottom) stickToBottom = true }
     LaunchedEffect(listState) {
@@ -214,83 +231,119 @@ private fun ChatScreen(activity: ComponentActivity) {
             }
     }
 
-    Scaffold(
-        containerColor = BgChat,
-        topBar = {
-            TopAppBar(
-                title = { Text("OneAI", color = TextPrimary) },
-                actions = {
-                    IconButton(onClick = { vm.showConfig = !vm.showConfig }) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Provider settings", tint = TextDim)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = BgChat),
-            )
-        },
-        bottomBar = {
-            InputBar(
-                value = vm.input,
-                running = vm.running,
-                onChange = { vm.input = it },
-                onSend = {
-                    val task = vm.input.trim()
-                    if (task.isNotEmpty() && !vm.running) {
-                        vm.input = ""
-                        stickToBottom = true
-                        scope.launch { vm.runTask(task) }
-                    }
-                },
-                onStop = { scope.launch { vm.stop() } },
-            )
-        },
-    ) { inner ->
-        Box(modifier = Modifier.padding(inner).fillMaxSize()) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                if (vm.showConfig) ProviderConfigCard(vm)
+    var showSettings by remember { mutableStateOf(false) }
 
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        start = 12.dp, end = 12.dp, top = 12.dp, bottom = 12.dp,
-                    ),
-                ) {
-                    items(vm.items, key = { it.key }) { item ->
-                        when (item) {
-                            is UserItem -> UserBubble(item.text)
-                            is AssistantItem -> AssistantBubble(item)
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            DrawerContent(
+                sessions = vm.sessions,
+                currentSessionId = vm.currentSessionId,
+                onNewChat = {
+                    scope.launch {
+                        vm.newConversation()
+                        drawerState.close()
+                    }
+                },
+                onOpenSession = { id ->
+                    scope.launch {
+                        vm.loadSession(id)
+                        drawerState.close()
+                    }
+                },
+                onDeleteSession = { id ->
+                    scope.launch { vm.deleteSession(id) }
+                },
+                onOpenSettings = {
+                    scope.launch {
+                        drawerState.close()
+                        showSettings = true
+                    }
+                },
+            )
+        },
+    ) {
+        Scaffold(
+            containerColor = BgChat,
+            topBar = {
+                TopAppBar(
+                    title = { Text("OneAI", color = TextPrimary) },
+                    navigationIcon = {
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Filled.Menu, contentDescription = "会话列表", tint = TextDim)
                         }
-                    }
-                    // Sentinel: scrolling to items.size (this item's index)
-                    // clamps to max-scroll = stick to bottom. Also reserves a
-                    // little breathing room under the last message.
-                    item(key = "sentinel") { Spacer(Modifier.height(1.dp)) }
-                }
-                vm.error?.let { msg ->
-                    Text(
-                        "✗ $msg",
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                        fontSize = 13.sp,
-                    )
-                }
-            }
-
-            // 回到底部 — only when the user has scrolled away from the bottom.
-            if (!stickToBottom && vm.items.isNotEmpty()) {
-                androidx.compose.foundation.layout.Box(
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp),
-                ) {
-                    SmallFloatingActionButton(
-                        onClick = {
+                    },
+                    actions = {
+                        IconButton(onClick = { showSettings = true }) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Provider 设置", tint = TextDim)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = BgChat),
+                )
+            },
+            bottomBar = {
+                InputBar(
+                    value = vm.input,
+                    running = vm.running,
+                    onChange = { vm.input = it },
+                    onSend = {
+                        val task = vm.input.trim()
+                        if (task.isNotEmpty() && !vm.running) {
+                            vm.input = ""
                             stickToBottom = true
-                            scope.launch { listState.animateScrollToItem(vm.items.size) }
-                        },
-                        containerColor = SurfWhite,
-                        contentColor = Accent,
+                            scope.launch { vm.runTask(task) }
+                        }
+                    },
+                    onStop = { scope.launch { vm.stop() } },
+                )
+            },
+        ) { inner ->
+            Box(modifier = Modifier.padding(inner).fillMaxSize()) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            start = 12.dp, end = 12.dp, top = 12.dp, bottom = 12.dp,
+                        ),
                     ) {
-                        Icon(Icons.Filled.ArrowDownward, contentDescription = "回到底部")
+                        items(vm.items, key = { it.key }) { item ->
+                            when (item) {
+                                is UserItem -> UserBubble(item.text)
+                                is AssistantItem -> AssistantBubble(item)
+                            }
+                        }
+                        // Sentinel: scrolling to items.size (this item's index)
+                        // clamps to max-scroll = stick to bottom. Also reserves a
+                        // little breathing room under the last message.
+                        item(key = "sentinel") { Spacer(Modifier.height(1.dp)) }
+                    }
+                    vm.error?.let { msg ->
+                        Text(
+                            "✗ $msg",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+
+                // 回到底部 — only when the user has scrolled away from the bottom.
+                if (!stickToBottom && vm.items.isNotEmpty()) {
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp),
+                    ) {
+                        SmallFloatingActionButton(
+                            onClick = {
+                                stickToBottom = true
+                                scope.launch { listState.animateScrollToItem(vm.items.size) }
+                            },
+                            containerColor = SurfWhite,
+                            contentColor = Accent,
+                        ) {
+                            Icon(Icons.Filled.ArrowDownward, contentDescription = "回到底部")
+                        }
                     }
                 }
             }
@@ -307,9 +360,210 @@ private fun ChatScreen(activity: ComponentActivity) {
         }
     }
 
-    // Persist provider config on any change (issue 2).
+    // Persist provider config on any change (SharedPreferences).
     LaunchedEffect(vm.kind, vm.model, vm.apiKey, vm.baseUrl) {
         vm.saveConfig()
+    }
+
+    // Settings sheet (⚙ or drawer 设置 row).
+    if (showSettings) {
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(
+            onDismissRequest = { showSettings = false },
+            sheetState = sheetState,
+            containerColor = SurfWhite,
+        ) {
+            SettingsContent(
+                vm = vm,
+                onSave = {
+                    scope.launch {
+                        vm.saveConfig()
+                        vm.rebuildApp()
+                        showSettings = false
+                    }
+                },
+            )
+        }
+    }
+}
+
+// ── Drawer ───────────────────────────────────────────────────────────
+
+@Composable
+private fun DrawerContent(
+    sessions: List<SessionInfoView>,
+    currentSessionId: String?,
+    onNewChat: () -> Unit,
+    onOpenSession: (String) -> Unit,
+    onDeleteSession: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    ModalDrawerSheet(
+        drawerContainerColor = SurfWhite,
+        drawerContentColor = TextPrimary,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("会话", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onNewChat) {
+                Icon(Icons.Filled.Add, contentDescription = "新对话", modifier = Modifier.size(18.dp), tint = Accent)
+                Spacer(Modifier.width(4.dp))
+                Text("新对话", color = Accent, fontSize = 14.sp)
+            }
+        }
+        HorizontalDivider(color = Color(0xFFEFEFF1))
+
+        if (sessions.isEmpty()) {
+            Text(
+                "还没有会话\n发一条消息开始吧",
+                color = TextDim,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
+            )
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                items(sessions, key = { it.id }) { s ->
+                    SessionRow(
+                        info = s,
+                        isCurrent = s.id == currentSessionId,
+                        onClick = { onOpenSession(s.id) },
+                        onDelete = { onDeleteSession(s.id) },
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.weight(1f))
+        HorizontalDivider(color = Color(0xFFEFEFF1))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenSettings() }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Settings, contentDescription = null, tint = TextDim, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(12.dp))
+            Text("设置", color = TextPrimary, fontSize = 15.sp)
+        }
+    }
+}
+
+@Composable
+private fun SessionRow(
+    info: SessionInfoView,
+    isCurrent: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(
+        color = if (isCurrent) Color(0xFFEEF3FF) else Color.Transparent,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onClick() }
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "对话 · ${info.messageCount} 条",
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                )
+                Text(
+                    relativeTime(info.updatedAtMs),
+                    color = TextDim,
+                    fontSize = 12.sp,
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Filled.Delete, contentDescription = "删除", tint = TextDim, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+private fun relativeTime(epochMs: Long): String {
+    val diff = System.currentTimeMillis() - epochMs
+    val mins = diff / 60_000
+    return when {
+        mins < 1 -> "刚刚"
+        mins < 60 -> "${mins} 分钟前"
+        mins < 60 * 24 -> "${mins / 60} 小时前"
+        mins < 60 * 24 * 7 -> "${mins / (60 * 24)} 天前"
+        else -> SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(epochMs))
+    }
+}
+
+// ── Settings sheet ───────────────────────────────────────────────────
+
+@Composable
+private fun SettingsContent(vm: ChatViewModel, onSave: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("Provider 设置", style = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.SemiBold), color = TextPrimary)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = vm.kind,
+                onValueChange = { vm.kind = it },
+                label = { Text("kind") },
+                singleLine = true,
+                modifier = Modifier.weight(0.4f),
+                textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+            )
+            OutlinedTextField(
+                value = vm.model,
+                onValueChange = { vm.model = it },
+                label = { Text("model") },
+                singleLine = true,
+                modifier = Modifier.weight(0.6f),
+                textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+            )
+        }
+        OutlinedTextField(
+            value = vm.apiKey,
+            onValueChange = { vm.apiKey = it },
+            label = { Text("api key (openai / anthropic)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        )
+        OutlinedTextField(
+            value = vm.baseUrl,
+            onValueChange = { vm.baseUrl = it },
+            label = { Text("base url override (blank = provider default)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+        )
+        Text(
+            "tip: ollama on the host emulator → kind=ollama, model=llama3, base url=http://10.0.2.2:11434\n保存后会重建 App(历史保留)。",
+            fontSize = 11.sp,
+            color = TextDim,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(onClick = onSave) {
+                Text("保存", color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -692,72 +946,18 @@ private fun InputBar(
     }
 }
 
-// ── Provider config card ─────────────────────────────────────────────
-
-@Composable
-private fun ProviderConfigCard(vm: ChatViewModel) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Text("Provider", style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.SemiBold), color = TextDim)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = vm.kind,
-                onValueChange = { vm.kind = it },
-                label = { Text("kind") },
-                singleLine = true,
-                modifier = Modifier.weight(0.4f),
-                textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
-            )
-            OutlinedTextField(
-                value = vm.model,
-                onValueChange = { vm.model = it },
-                label = { Text("model") },
-                singleLine = true,
-                modifier = Modifier.weight(0.6f),
-                textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
-            )
-        }
-        OutlinedTextField(
-            value = vm.apiKey,
-            onValueChange = { vm.apiKey = it },
-            label = { Text("api key (openai / anthropic)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        )
-        OutlinedTextField(
-            value = vm.baseUrl,
-            onValueChange = { vm.baseUrl = it },
-            label = { Text("base url override (blank = provider default)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace),
-        )
-        Text(
-            "tip: ollama on the host emulator → kind=ollama, model=llama3, base url=http://10.0.2.2:11434",
-            fontSize = 11.sp,
-            color = TextDim,
-        )
-    }
-}
-
 // ── ViewModel (plain holder — no androidx.lifecycle dep) ─────────────
 
 private class ChatViewModel(private val activity: ComponentActivity) {
-    // Persist provider config across launches (issue 2). Loaded eagerly here;
-    // the screen writes back via saveConfig() on any field change.
+    // Persist provider config across launches. Written back via saveConfig()
+    // on any field change, and on the settings 保存 button.
     private val prefs = activity.getSharedPreferences("oneai_provider", android.content.Context.MODE_PRIVATE)
+    private val dbPath = activity.filesDir.path + "/oneai.db"
 
     var kind by mutableStateOf(prefs.getString("kind", "openai") ?: "openai")
     var model by mutableStateOf(prefs.getString("model", "gpt-4o-mini") ?: "gpt-4o-mini")
     var apiKey by mutableStateOf(prefs.getString("apiKey", "") ?: "")
     var baseUrl by mutableStateOf(prefs.getString("baseUrl", "") ?: "")
-    var showConfig by mutableStateOf(false)
 
     fun saveConfig() {
         prefs.edit()
@@ -769,6 +969,7 @@ private class ChatViewModel(private val activity: ComponentActivity) {
     }
 
     val items = mutableStateListOf<ChatItem>()
+    val sessions = mutableStateListOf<SessionInfoView>()
     var input by mutableStateOf("")
     var running by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
@@ -778,6 +979,9 @@ private class ChatViewModel(private val activity: ComponentActivity) {
     var streamTick by mutableStateOf(0L)
         private set
 
+    var currentSessionId by mutableStateOf<String?>(null)
+        private set
+
     private var app: OneAiApp? = null
     private var session: OneAiSession? = null
     private var keySeq = 0L
@@ -785,8 +989,116 @@ private class ChatViewModel(private val activity: ComponentActivity) {
     private fun nextKey(): Long { keySeq += 1; return keySeq }
     private fun tick() { streamTick += 1 }
 
+    /** Build the OneAiApp once (eager). Reuses the stored provider config +
+     * sqlite_persistence_at(<filesDir>/oneai.db) + default_tools(). Safe to
+     * call repeatedly — no-ops if already built. */
+    suspend fun ensureApp() {
+        if (app != null) return
+        try {
+            val cfg = ProviderConfigView(
+                kind = kind.trim().ifEmpty { "openai" },
+                apiKey = apiKey.trim().ifBlank { null },
+                baseUrl = baseUrl.trim().ifBlank { null },
+                model = model.trim().ifEmpty { "gpt-4o-mini" },
+                host = null,
+                port = null,
+            )
+            // provider_config() consumes the builder Arc and returns a NEW one;
+            // chain off the returned handle. default_tools() adds web_search +
+            // web_fetch. sqlite_persistence_at() wires conversation save/load
+            // (run_task auto-saves after each turn).
+            val builder = OneAiAppBuilder().providerConfig(cfg).defaultTools().sqlitePersistenceAt(dbPath)
+            app = builder.build()
+        } catch (e: Throwable) {
+            Log.e(TAG, "ensureApp failed", e)
+            error = "build failed: ${e.message}"
+        }
+    }
+
+    /** Rebuild the App after a provider config change. Same db path → saved
+     *  conversations survive. Reloads the session list and re-resumes the
+     *  current session (or starts a fresh one). */
+    suspend fun rebuildApp() {
+        app = null
+        session = null
+        currentSessionId = null
+        items.clear()
+        error = null
+        ensureApp()
+        refreshSessions()
+        val cur = sessions.firstOrNull()
+        if (cur != null) loadSession(cur.id) else newConversation()
+    }
+
+    /** Refresh the drawer's session list from SQLite (newest-first). */
+    suspend fun refreshSessions() {
+        val a = app ?: return
+        try {
+            val list = a.listConversations()
+            sessions.clear()
+            sessions.addAll(list.sortedByDescending { it.updatedAtMs })
+        } catch (e: Throwable) {
+            Log.e(TAG, "refreshSessions failed", e)
+        }
+    }
+
+    /** Start a brand-new conversation (fresh uuid). */
+    suspend fun newConversation() {
+        val a = app ?: return
+        val s = a.createSession()
+        session = s
+        currentSessionId = s.sessionId()
+        items.clear()
+        error = null
+    }
+
+    /** Resume a saved conversation by id — replays user/assistant turns. */
+    suspend fun loadSession(id: String) {
+        val a = app ?: return
+        try {
+            val s = a.createSessionWithId(id)
+            session = s
+            currentSessionId = s.sessionId()
+            items.clear()
+            error = null
+            // Replay history: render user/assistant text as finalized bubbles.
+            // System/tool messages are skipped (no UI affordance for them in
+            // replay; tool trace is live-only). Pairs are reconstructed by
+            // walking the message list in order.
+            val msgs = s.messages()
+            for (m in msgs) {
+                when (m.role) {
+                    "user" -> if (m.text.isNotBlank()) items.add(UserItem(m.text, nextKey()))
+                    "assistant" -> if (m.text.isNotBlank()) {
+                        val item = AssistantItem(nextKey())
+                        item.text = m.text
+                        item.done = true
+                        items.add(item)
+                    }
+                    else -> { /* system / tool — not replayed */ }
+                }
+            }
+            tick()
+        } catch (e: Throwable) {
+            Log.e(TAG, "loadSession failed", e)
+            error = "load failed: ${e.message}"
+        }
+    }
+
+    /** Delete a saved conversation; if it was the current one, start fresh. */
+    suspend fun deleteSession(id: String) {
+        val a = app ?: return
+        try {
+            a.deleteConversation(id)
+        } catch (e: Throwable) {
+            Log.e(TAG, "deleteSession failed", e)
+        }
+        refreshSessions()
+        if (id == currentSessionId) newConversation()
+    }
+
     suspend fun runTask(task: String) {
-        val s = session ?: ensureSession()
+        val s = session
         if (s == null) {
             error = "session not built"
             return
@@ -872,6 +1184,9 @@ private class ChatViewModel(private val activity: ComponentActivity) {
                 tick()
             }
         }
+        // run_task auto-saved the conversation — refresh the drawer so the
+        // new/updated session appears with its message count.
+        refreshSessions()
     }
 
     suspend fun stop() {
@@ -879,35 +1194,6 @@ private class ChatViewModel(private val activity: ComponentActivity) {
             session?.interrupt()
         } catch (e: Throwable) {
             Log.e(TAG, "interrupt failed", e)
-        }
-    }
-
-    private suspend fun ensureSession(): OneAiSession? {
-        return try {
-            val cfg = ProviderConfigView(
-                kind = kind.trim().ifEmpty { "openai" },
-                apiKey = apiKey.trim().ifBlank { null },
-                baseUrl = baseUrl.trim().ifBlank { null },
-                model = model.trim().ifEmpty { "gpt-4o-mini" },
-                host = null,
-                port = null,
-            )
-            // provider_config() consumes the builder Arc (Rust: self: Arc<Self>
-            // → take_inner()) and returns a NEW Arc<Self>. The returned builder
-            // MUST be used for the next call — the original handle is empty.
-            // default_tools() adds web_search + web_fetch (DuckDuckGo backend,
-            // no key) so the model can actually search; its extra_tools survive
-            // the consumed-Arc chain via from_builder.
-            val builder = OneAiAppBuilder().providerConfig(cfg).defaultTools()
-            val a = builder.build()
-            app = a
-            val sess = a.createSession()
-            session = sess
-            sess
-        } catch (e: Throwable) {
-            Log.e(TAG, "ensureSession failed", e)
-            activity.runOnUiThread { error = "build failed: ${e.message}" }
-            null
         }
     }
 }

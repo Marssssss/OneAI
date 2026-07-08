@@ -704,7 +704,13 @@ internal object IntegrityCheckingUniffiLib {
     }
     external fun uniffi_oneai_checksum_method_oneaiapp_create_session(
     ): Int
+    external fun uniffi_oneai_checksum_method_oneaiapp_create_session_with_id(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaiapp_delete_conversation(
+    ): Int
     external fun uniffi_oneai_checksum_method_oneaiapp_has_provider(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaiapp_list_conversations(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiapp_platform(
     ): Int
@@ -713,6 +719,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_oneai_checksum_method_oneaisession_execute_tool(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_interrupt(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaisession_messages(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_retrieve_memory(
     ): Int
@@ -739,6 +747,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_persistence(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_provider_config(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaiappbuilder_sqlite_persistence_at(
     ): Int
     external fun uniffi_oneai_checksum_method_chateventcallback_on_event(
     ): Int
@@ -781,8 +791,14 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_oneai_fn_method_oneaiapp_create_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_oneai_fn_method_oneaiapp_create_session_with_id(`ptr`: Long,`id`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaiapp_delete_conversation(`ptr`: Long,`id`: RustBuffer.ByValue,
+    ): Long
     external fun uniffi_oneai_fn_method_oneaiapp_has_provider(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_oneai_fn_method_oneaiapp_list_conversations(`ptr`: Long,
+    ): Long
     external fun uniffi_oneai_fn_method_oneaiapp_platform(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_oneai_fn_method_oneaiapp_register_tool(`ptr`: Long,`tool`: Long,
@@ -794,6 +810,8 @@ internal object UniffiLib {
     external fun uniffi_oneai_fn_method_oneaisession_execute_tool(`ptr`: Long,`name`: RustBuffer.ByValue,`argsJson`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_oneai_fn_method_oneaisession_interrupt(`ptr`: Long,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaisession_messages(`ptr`: Long,
     ): Long
     external fun uniffi_oneai_fn_method_oneaisession_retrieve_memory(`ptr`: Long,`query`: RustBuffer.ByValue,`topK`: Int,
     ): Long
@@ -830,6 +848,8 @@ internal object UniffiLib {
     external fun uniffi_oneai_fn_method_oneaiappbuilder_persistence(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_oneai_fn_method_oneaiappbuilder_provider_config(`ptr`: Long,`cfg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaiappbuilder_sqlite_persistence_at(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_oneai_fn_clone_chateventcallback(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -961,7 +981,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_oneai_checksum_method_oneaiapp_create_session() != 11717) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_oneai_checksum_method_oneaiapp_create_session_with_id() != 31472) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaiapp_delete_conversation() != 9017) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_oneai_checksum_method_oneaiapp_has_provider() != 22871) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaiapp_list_conversations() != 5226) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaiapp_platform() != 10255) {
@@ -974,6 +1003,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaisession_interrupt() != 15203) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaisession_messages() != 43109) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaisession_retrieve_memory() != 60392) {
@@ -1013,6 +1045,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_provider_config() != 61651) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_sqlite_persistence_at() != 59712) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_chateventcallback_on_event() != 45403) {
@@ -1296,6 +1331,52 @@ public object FfiConverterUInt: FfiConverter<UInt, Int> {
 
     override fun write(value: UInt, buf: ByteBuffer) {
         buf.putInt(value.toInt())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
+
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
+
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
+
+    override fun allocationSize(value: ULong) = 8UL
+
+    override fun write(value: ULong, buf: ByteBuffer) {
+        buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
+
+    override fun lower(value: Long): Long {
+        return value
+    }
+
+    override fun allocationSize(value: Long) = 8UL
+
+    override fun write(value: Long, buf: ByteBuffer) {
+        buf.putLong(value)
     }
 }
 
@@ -2089,9 +2170,34 @@ public interface OneAiAppInterface {
     fun `createSession`(): OneAiSession
     
     /**
+     * Create or resume a session bound to an existing conversation id.
+     *
+     * If SQLite persistence is enabled (`sqlite_persistence_at`) and a
+     * conversation with this id is saved, its history is loaded into the new
+     * session. Use `messages()` afterwards to replay it in the UI. For an
+     * unknown id, an empty conversation is created (a brand-new chat) and will
+     * be auto-saved under this id on the next `run_task`.
+     */
+    suspend fun `createSessionWithId`(`id`: kotlin.String): OneAiSession
+    
+    /**
+     * Delete a saved conversation (and its STM entries) by id. No-op when
+     * SQLite persistence is not enabled.
+     */
+    suspend fun `deleteConversation`(`id`: kotlin.String)
+    
+    /**
      * Check if a provider is configured.
      */
     fun `hasProvider`(): kotlin.Boolean
+    
+    /**
+     * List all saved conversations (metadata only). Empty when SQLite
+     * persistence is not enabled. Order is implementation-defined (currently
+     * newest-first by row id); sort on the foreign side if a specific order
+     * is needed.
+     */
+    suspend fun `listConversations`(): List<SessionInfoView>
     
     /**
      * Get the current platform.
@@ -2231,6 +2337,63 @@ open class OneAiApp: Disposable, AutoCloseable, OneAiAppInterface
 
     
     /**
+     * Create or resume a session bound to an existing conversation id.
+     *
+     * If SQLite persistence is enabled (`sqlite_persistence_at`) and a
+     * conversation with this id is saved, its history is loaded into the new
+     * session. Use `messages()` afterwards to replay it in the UI. For an
+     * unknown id, an empty conversation is created (a brand-new chat) and will
+     * be auto-saved under this id on the next `run_task`.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `createSessionWithId`(`id`: kotlin.String) : OneAiSession {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaiapp_create_session_with_id(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`id`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeOneAISession.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Delete a saved conversation (and its STM entries) by id. No-op when
+     * SQLite persistence is not enabled.
+     */
+    @Throws(OneAiErrorView::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `deleteConversation`(`id`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaiapp_delete_conversation(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`id`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        OneAiErrorView.ErrorHandler,
+    )
+    }
+
+    
+    /**
      * Check if a provider is configured.
      */override fun `hasProvider`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -2244,6 +2407,32 @@ open class OneAiApp: Disposable, AutoCloseable, OneAiAppInterface
     )
     }
     
+
+    
+    /**
+     * List all saved conversations (metadata only). Empty when SQLite
+     * persistence is not enabled. Order is implementation-defined (currently
+     * newest-first by row id); sort on the foreign side if a specific order
+     * is needed.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `listConversations`() : List<SessionInfoView> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaiapp_list_conversations(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeSessionInfoView.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
 
     
     /**
@@ -2487,6 +2676,18 @@ public interface OneAiAppBuilderInterface {
      * Returns an error view for an unknown `kind`.
      */
     fun `providerConfig`(`cfg`: ProviderConfigView): OneAiAppBuilder
+    
+    /**
+     * Enable SQLite persistence at a foreign-provided db path.
+     *
+     * This is the mobile-friendly counterpart to `AppBuilder::sqlite_persistence_at`
+     * — on Android/iOS the app's private files dir is the only reliably writable
+     * location, and the default `~/.oneai/oneai.db` path does not exist. Enables
+     * conversation save/load (multi-session resume), STM/LTM, and checkpoint
+     * persistence. `run_task` auto-saves the conversation after each agent run,
+     * so no explicit save call is needed from foreign code.
+     */
+    fun `sqlitePersistenceAt`(`path`: kotlin.String): OneAiAppBuilder
     
     companion object
 }
@@ -2769,6 +2970,30 @@ open class OneAiAppBuilder: Disposable, AutoCloseable, OneAiAppBuilderInterface
     
 
     
+    /**
+     * Enable SQLite persistence at a foreign-provided db path.
+     *
+     * This is the mobile-friendly counterpart to `AppBuilder::sqlite_persistence_at`
+     * — on Android/iOS the app's private files dir is the only reliably writable
+     * location, and the default `~/.oneai/oneai.db` path does not exist. Enables
+     * conversation save/load (multi-session resume), STM/LTM, and checkpoint
+     * persistence. `run_task` auto-saves the conversation after each agent run,
+     * so no explicit save call is needed from foreign code.
+     */override fun `sqlitePersistenceAt`(`path`: kotlin.String): OneAiAppBuilder {
+            return FfiConverterTypeOneAIAppBuilder.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_oneai_fn_method_oneaiappbuilder_sqlite_persistence_at(
+        it,
+        
+        FfiConverterString.lower(`path`),_status)
+}
+    }
+    )
+    }
+    
+
+    
 
     
 
@@ -2925,6 +3150,17 @@ public interface OneAiSessionInterface {
      * iteration boundary. No-op if no `run_task` is in flight.
      */
     suspend fun `interrupt`()
+    
+    /**
+     * Snapshot the conversation's messages as `role` + `text` views.
+     *
+     * Used to replay a resumed session's history into the foreign UI (after
+     * `create_session_with_id`). Returns the in-memory conversation, which
+     * includes any turns added since the session was created/resumed — so it
+     * also reflects the current chat live. System/tool messages are included;
+     * the foreign UI typically renders only `user` and `assistant` rows.
+     */
+    suspend fun `messages`(): List<MessageView>
     
     /**
      * Retrieve relevant context from memory.
@@ -3125,6 +3361,35 @@ open class OneAiSession: Disposable, AutoCloseable, OneAiSessionInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Snapshot the conversation's messages as `role` + `text` views.
+     *
+     * Used to replay a resumed session's history into the foreign UI (after
+     * `create_session_with_id`). Returns the in-memory conversation, which
+     * includes any turns added since the session was created/resumed — so it
+     * also reflects the current chat live. System/tool messages are included;
+     * the foreign UI typically renders only `user` and `assistant` rows.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `messages`() : List<MessageView> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaisession_messages(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeMessageView.lift(it) },
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
@@ -4127,6 +4392,59 @@ public object FfiConverterTypeApprovalRequestView: FfiConverterRustBuffer<Approv
 
 
 /**
+ * A single conversation message (UniFFI-compatible view).
+ *
+ * Flattened to `role` + `text` — multimodal content blocks are reduced to
+ * their text content via `Message::text_content()`. Returned by
+ * `OneAISession::messages()` so a foreign UI can replay a resumed
+ * conversation's history. `role` is one of `"system"`, `"user"`,
+ * `"assistant"`, `"tool"`.
+ */
+data class MessageView (
+    /**
+     * Author role: `"system"` / `"user"` / `"assistant"` / `"tool"`.
+     */
+    var `role`: kotlin.String
+    , 
+    /**
+     * Concatenated text content of the message's text blocks.
+     */
+    var `text`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMessageView: FfiConverterRustBuffer<MessageView> {
+    override fun read(buf: ByteBuffer): MessageView {
+        return MessageView(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MessageView) = (
+            FfiConverterString.allocationSize(value.`role`) +
+            FfiConverterString.allocationSize(value.`text`)
+    )
+
+    override fun write(value: MessageView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`role`, buf)
+            FfiConverterString.write(value.`text`, buf)
+    }
+}
+
+
+
+/**
  * Provider configuration for foreign-language App construction.
  *
  * Passed to `OneAIAppBuilder::provider_config` so foreign code can build an
@@ -4205,6 +4523,74 @@ public object FfiConverterTypeProviderConfigView: FfiConverterRustBuffer<Provide
             FfiConverterString.write(value.`model`, buf)
             FfiConverterOptionalString.write(value.`host`, buf)
             FfiConverterOptionalUShort.write(value.`port`, buf)
+    }
+}
+
+
+
+/**
+ * Metadata about a saved conversation (UniFFI-compatible view).
+ *
+ * Mirrors `oneai_core::SessionInfo` but with epoch-millis timestamps
+ * (chrono `DateTime` can't cross UniFFI directly). Returned by
+ * `OneAIApp::list_conversations()` so a foreign UI can render a session
+ * list without loading full message histories.
+ */
+data class SessionInfoView (
+    /**
+     * The session/conversation ID.
+     */
+    var `id`: kotlin.String
+    , 
+    /**
+     * When the session was first created (epoch millis, UTC).
+     */
+    var `createdAtMs`: kotlin.Long
+    , 
+    /**
+     * When the session was last updated (epoch millis, UTC).
+     */
+    var `updatedAtMs`: kotlin.Long
+    , 
+    /**
+     * Number of messages in the conversation.
+     */
+    var `messageCount`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSessionInfoView: FfiConverterRustBuffer<SessionInfoView> {
+    override fun read(buf: ByteBuffer): SessionInfoView {
+        return SessionInfoView(
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SessionInfoView) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterLong.allocationSize(value.`createdAtMs`) +
+            FfiConverterLong.allocationSize(value.`updatedAtMs`) +
+            FfiConverterULong.allocationSize(value.`messageCount`)
+    )
+
+    override fun write(value: SessionInfoView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterLong.write(value.`createdAtMs`, buf)
+            FfiConverterLong.write(value.`updatedAtMs`, buf)
+            FfiConverterULong.write(value.`messageCount`, buf)
     }
 }
 
@@ -5182,6 +5568,62 @@ public object FfiConverterOptionalTypePermissionLevelView: FfiConverterRustBuffe
         } else {
             buf.put(1)
             FfiConverterTypePermissionLevelView.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeMessageView: FfiConverterRustBuffer<List<MessageView>> {
+    override fun read(buf: ByteBuffer): List<MessageView> {
+        val len = buf.getInt()
+        return List<MessageView>(len) {
+            FfiConverterTypeMessageView.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<MessageView>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeMessageView.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<MessageView>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeMessageView.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeSessionInfoView: FfiConverterRustBuffer<List<SessionInfoView>> {
+    override fun read(buf: ByteBuffer): List<SessionInfoView> {
+        val len = buf.getInt()
+        return List<SessionInfoView>(len) {
+            FfiConverterTypeSessionInfoView.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<SessionInfoView>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeSessionInfoView.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<SessionInfoView>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeSessionInfoView.write(it, buf)
         }
     }
 }

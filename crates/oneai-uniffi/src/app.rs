@@ -6,7 +6,7 @@ use oneai_core::traits::Tool;
 use oneai_agent::AgentLoop;
 
 use crate::callback::{CallbackObserver, ChatEventCallback};
-use crate::types::{ToolOutputView, OneAIErrorView, PlatformView};
+use crate::types::{ToolOutputView, OneAIErrorView, PlatformView, SessionInfoView, MessageView};
 
 /// UniFFI-exported App wrapper.
 ///
@@ -29,6 +29,41 @@ impl OneAIApp {
             inner: tokio::sync::Mutex::new(inner_session),
             interrupt_slot: Arc::new(tokio::sync::Mutex::new(None)),
         })
+    }
+
+    /// Create or resume a session bound to an existing conversation id.
+    ///
+    /// If SQLite persistence is enabled (`sqlite_persistence_at`) and a
+    /// conversation with this id is saved, its history is loaded into the new
+    /// session. Use `messages()` afterwards to replay it in the UI. For an
+    /// unknown id, an empty conversation is created (a brand-new chat) and will
+    /// be auto-saved under this id on the next `run_task`.
+    #[uniffi::method]
+    pub async fn create_session_with_id(&self, id: String) -> Arc<OneAISession> {
+        let inner_session = self.inner.create_session_with_id(&id).await;
+        let session_id = inner_session.session_id().to_string();
+        Arc::new(OneAISession {
+            session_id,
+            inner: tokio::sync::Mutex::new(inner_session),
+            interrupt_slot: Arc::new(tokio::sync::Mutex::new(None)),
+        })
+    }
+
+    /// List all saved conversations (metadata only). Empty when SQLite
+    /// persistence is not enabled. Order is implementation-defined (currently
+    /// newest-first by row id); sort on the foreign side if a specific order
+    /// is needed.
+    #[uniffi::method]
+    pub async fn list_conversations(&self) -> Vec<SessionInfoView> {
+        self.inner.list_conversations().await
+            .into_iter().map(SessionInfoView::from).collect()
+    }
+
+    /// Delete a saved conversation (and its STM entries) by id. No-op when
+    /// SQLite persistence is not enabled.
+    #[uniffi::method]
+    pub async fn delete_conversation(&self, id: String) -> Result<(), OneAIErrorView> {
+        self.inner.delete_conversation(&id).await.map_err(OneAIErrorView::from)
     }
 
     /// Register a tool.
@@ -155,6 +190,19 @@ impl OneAISession {
                 Err(view)
             }
         }
+    }
+
+    /// Snapshot the conversation's messages as `role` + `text` views.
+    ///
+    /// Used to replay a resumed session's history into the foreign UI (after
+    /// `create_session_with_id`). Returns the in-memory conversation, which
+    /// includes any turns added since the session was created/resumed — so it
+    /// also reflects the current chat live. System/tool messages are included;
+    /// the foreign UI typically renders only `user` and `assistant` rows.
+    #[uniffi::method]
+    pub async fn messages(&self) -> Vec<MessageView> {
+        let inner = self.inner.lock().await;
+        inner.conversation().messages.iter().map(MessageView::from).collect()
     }
 
     /// Request the running agent loop (if any) to interrupt at the next
@@ -345,5 +393,96 @@ mod tests {
             res.is_err(),
             "unknown provider kind must return an error, not silently build"
         );
+    }
+
+    // ─── S4: session persistence / resume / list / delete ──────────────
+
+    /// Unique temp db path per test (no tempfile dev-dep). The file is removed
+    /// first so each test starts clean.
+    fn tmp_db(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "oneai_uniffi_{}_{}_{}.db",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Build a OneAIApp with a MockProvider + SQLite persistence at `db_path`.
+    async fn app_with_sqlite(db_path: &str) -> Arc<OneAIApp> {
+        let provider = Arc::new(oneai_agent::MockProvider::always_answers("Hello from mock"));
+        let app_inner = oneai_app::AppBuilder::new()
+            .provider(provider)
+            .noop_interaction_gate()
+            .default_parser()
+            .sqlite_persistence_at(db_path)
+            .build()
+            .await
+            .expect("build");
+        Arc::new(OneAIApp { inner: Arc::new(app_inner) })
+    }
+
+    // `CollectingCallback` is defined above (next to
+    // `test_session_run_task_emits_complete`) and reused here.
+
+    #[tokio::test]
+    async fn test_sqlite_resume_round_trip() {
+        let db = tmp_db("resume");
+        let app = app_with_sqlite(&db).await;
+
+        // 1. New session, run a task → auto-saves under its id.
+        let session = app.create_session();
+        let id = session.session_id();
+        let cb = Arc::new(CollectingCallback { events: std::sync::Mutex::new(Vec::new()) });
+        session.run_task("Say hello".to_string(), cb).await.expect("run_task");
+
+        // 2. list_conversations includes it.
+        let list = app.list_conversations().await;
+        let found = list.iter().find(|s| s.id == id);
+        assert!(found.is_some(), "saved session must appear in list: {:?}", list);
+        assert!(found.unwrap().message_count >= 2, "user+assistant messages");
+
+        // 3. Resume by id → messages() replays user + assistant text.
+        let resumed = app.create_session_with_id(id.to_string()).await;
+        let msgs = resumed.messages().await;
+        let user_text = msgs.iter().find(|m| m.role == "user").map(|m| m.text.as_str());
+        let asst_text = msgs.iter().find(|m| m.role == "assistant").map(|m| m.text.as_str());
+        assert_eq!(user_text, Some("Say hello"), "user turn must be restored: {:?}", msgs);
+        assert!(asst_text.unwrap_or_default().contains("Hello from mock"),
+            "assistant turn must be restored: {:?}", msgs);
+    }
+
+    #[tokio::test]
+    async fn test_delete_conversation() {
+        let db = tmp_db("delete");
+        let app = app_with_sqlite(&db).await;
+
+        let session = app.create_session();
+        let id = session.session_id().to_string();
+        let cb = Arc::new(CollectingCallback { events: std::sync::Mutex::new(Vec::new()) });
+        session.run_task("hi".to_string(), cb).await.expect("run_task");
+
+        assert!(app.list_conversations().await.iter().any(|s| s.id == id));
+        app.delete_conversation(id.clone()).await.expect("delete");
+        assert!(
+            !app.list_conversations().await.iter().any(|s| s.id == id),
+            "deleted session must not appear in list"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_session_with_id_unknown_loads_empty() {
+        let db = tmp_db("unknown");
+        let app = app_with_sqlite(&db).await;
+
+        // Unknown id → empty conversation, no error.
+        let resumed = app.create_session_with_id("never-saved-id".to_string()).await;
+        assert_eq!(resumed.session_id(), "never-saved-id");
+        assert!(resumed.messages().await.is_empty(), "unknown id must load empty history");
     }
 }

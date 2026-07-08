@@ -161,6 +161,21 @@ impl OneAIAppBuilder {
         Arc::new(Self::from_builder(builder, extras))
     }
 
+    /// Enable SQLite persistence at a foreign-provided db path.
+    ///
+    /// This is the mobile-friendly counterpart to `AppBuilder::sqlite_persistence_at`
+    /// — on Android/iOS the app's private files dir is the only reliably writable
+    /// location, and the default `~/.oneai/oneai.db` path does not exist. Enables
+    /// conversation save/load (multi-session resume), STM/LTM, and checkpoint
+    /// persistence. `run_task` auto-saves the conversation after each agent run,
+    /// so no explicit save call is needed from foreign code.
+    #[uniffi::method]
+    pub fn sqlite_persistence_at(self: Arc<Self>, path: String) -> Arc<Self> {
+        let extras = self.take_extra_tools();
+        let builder = self.take_inner().sqlite_persistence_at(&path);
+        Arc::new(Self::from_builder(builder, extras))
+    }
+
     /// Build the application.
     ///
     /// This is async because domain pack tools are eagerly registered

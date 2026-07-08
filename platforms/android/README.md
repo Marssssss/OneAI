@@ -63,6 +63,34 @@ Compose screen wired end-to-end through the FFI:
 > `AndroidManifest` sets `windowSoftInputMode="adjustResize"`; the activity
 > calls `enableEdgeToEdge()` so Compose insets drive the layout.
 
+## S4 — Multi-session + persistence + settings
+
+S3's single-session screen becomes a real app:
+
+- **Persistence**: the App is built with `sqlite_persistence_at(<filesDir>/oneai.db)`.
+  `run_task` auto-saves the conversation after every turn (`AppSession::run_agent`
+  → `save_session`), so chats survive process restart. No explicit save call
+  from Kotlin.
+- **Multi-session drawer** (`ModalNavigationDrawer`, ☰ in the top bar):
+  `OneAiApp.listConversations()` → `SessionInfoView` list (newest-first),
+  each row showing message count + relative time. Tap → `createSessionWithId(id)`
+  + `session.messages()` replays user/assistant turns as finalized bubbles.
+  🗑 → `deleteConversation(id)`. 「新对话」 → `createSession()` (fresh uuid).
+- **Settings sheet** (`ModalBottomSheet`, ⚙ or drawer 设置 row): kind/model/
+  apiKey/baseUrl. 保存 → `rebuildApp()` drops the App and rebuilds it with the
+  new config (same db path → history preserved), then re-resumes the most
+  recent session. Provider config still persisted in `SharedPreferences`.
+- **Startup**: `ChatViewModel.ensureApp()` builds the App eagerly on first
+  frame, loads the session list, and resumes the most recent conversation (or
+  starts a fresh one).
+
+The FFI surface added for S4 (`crates/oneai-uniffi`): `OneAIAppBuilder::
+sqlite_persistence_at`, `OneAIApp::{create_session_with_id, list_conversations,
+delete_conversation}`, `OneAISession::messages`, plus `SessionInfoView` /
+`MessageView` records. Backed by `oneai-app`'s `App::create_session_with_id` /
+`list_conversations` / `delete_conversation` (which thin-wrap `SqliteSessionStore`)
+and `AppSession::new_with_conversation` (resume constructor).
+
 > Earlier milestones: S1/S2 proved `.so` load + FFI surface callability
 > (`OneAiAppBuilder().build()` → `createSession()` → `sessionId()` /
 > `platform()`). See the S2 smoke commit for the prior TextView activity.

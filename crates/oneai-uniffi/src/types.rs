@@ -280,6 +280,70 @@ pub struct ProviderConfigView {
     pub port: Option<u16>,
 }
 
+// ─── SessionInfoView ────────────────────────────────────────────────
+
+/// Metadata about a saved conversation (UniFFI-compatible view).
+///
+/// Mirrors `oneai_core::SessionInfo` but with epoch-millis timestamps
+/// (chrono `DateTime` can't cross UniFFI directly). Returned by
+/// `OneAIApp::list_conversations()` so a foreign UI can render a session
+/// list without loading full message histories.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SessionInfoView {
+    /// The session/conversation ID.
+    pub id: String,
+    /// When the session was first created (epoch millis, UTC).
+    pub created_at_ms: i64,
+    /// When the session was last updated (epoch millis, UTC).
+    pub updated_at_ms: i64,
+    /// Number of messages in the conversation.
+    pub message_count: u64,
+}
+
+impl From<oneai_core::SessionInfo> for SessionInfoView {
+    fn from(s: oneai_core::SessionInfo) -> Self {
+        Self {
+            id: s.id,
+            created_at_ms: s.created_at.timestamp_millis(),
+            updated_at_ms: s.updated_at.timestamp_millis(),
+            message_count: s.message_count as u64,
+        }
+    }
+}
+
+// ─── MessageView ────────────────────────────────────────────────────
+
+/// A single conversation message (UniFFI-compatible view).
+///
+/// Flattened to `role` + `text` — multimodal content blocks are reduced to
+/// their text content via `Message::text_content()`. Returned by
+/// `OneAISession::messages()` so a foreign UI can replay a resumed
+/// conversation's history. `role` is one of `"system"`, `"user"`,
+/// `"assistant"`, `"tool"`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MessageView {
+    /// Author role: `"system"` / `"user"` / `"assistant"` / `"tool"`.
+    pub role: String,
+    /// Concatenated text content of the message's text blocks.
+    pub text: String,
+}
+
+impl From<&oneai_core::Message> for MessageView {
+    fn from(m: &oneai_core::Message) -> Self {
+        let role = match m.role {
+            oneai_core::Role::System => "system",
+            oneai_core::Role::User => "user",
+            oneai_core::Role::Assistant => "assistant",
+            oneai_core::Role::Tool => "tool",
+            _ => "system", // #[non_exhaustive] catch-all
+        }.to_string();
+        Self {
+            role,
+            text: m.text_content(),
+        }
+    }
+}
+
 // ─── OneAIErrorView ─────────────────────────────────────────────────
 
 /// Flat error view (UniFFI-compatible).

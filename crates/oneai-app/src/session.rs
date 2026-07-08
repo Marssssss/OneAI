@@ -132,6 +132,17 @@ impl AppSession {
     pub(crate) fn new(app: &crate::builder::App) -> Self {
         let session_id = uuid::Uuid::new_v4().to_string();
         let conversation = Conversation::with_id(session_id.clone());
+        Self::new_with_conversation(app, conversation)
+    }
+
+    /// Create a session from an App with a pre-built conversation (e.g. one
+    /// loaded back from SQLite for session resume). `session_id` is taken
+    /// from `conversation.id()`.
+    ///
+    /// Used by `App::create_session_with_id` to restore a saved conversation's
+    /// message history before continuing the chat.
+    pub(crate) fn new_with_conversation(app: &crate::builder::App, conversation: Conversation) -> Self {
+        let session_id = conversation.id.clone();
 
         // Create trace context for this session (if tracing is enabled)
         let trace_context = app.trace_context.clone();

@@ -11,7 +11,8 @@
 use std::sync::Arc;
 
 use oneai_core::error::Result;
-use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService};
+use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService, MemoryPersistence};
+use oneai_core::{Conversation, SessionInfo};
 use oneai_core::EmbeddingConfig;
 use oneai_core::usage::{UsageTracker, InMemoryUsageTracker};
 use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
@@ -1932,6 +1933,43 @@ impl App {
     /// Create a new agent session.
     pub fn create_session(&self) -> AppSession {
         AppSession::new(self)
+    }
+
+    /// Create (or resume) a session bound to an existing conversation id.
+    ///
+    /// If SQLite persistence is enabled and a conversation with this id is
+    /// saved, its message history is loaded back into the new session so the
+    /// chat can continue where it left off. If no saved conversation exists,
+    /// an empty conversation with this id is created (the caller may have just
+    /// minted the id for a brand-new chat — subsequent `run_agent` calls will
+    /// auto-save it under the same id).
+    pub async fn create_session_with_id(&self, id: &str) -> AppSession {
+        let conversation = match &self.sqlite_store {
+            Some(store) => match store.load_conversation(id).await {
+                Ok(Some(conv)) => conv,
+                _ => Conversation::with_id(id.to_string()),
+            },
+            None => Conversation::with_id(id.to_string()),
+        };
+        AppSession::new_with_conversation(self, conversation)
+    }
+
+    /// List all saved conversations (metadata only — id, timestamps, message
+    /// count). Returns an empty vec when SQLite persistence is not enabled.
+    pub async fn list_conversations(&self) -> Vec<SessionInfo> {
+        match &self.sqlite_store {
+            Some(store) => store.list_conversations().await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Delete a saved conversation (and its STM entries) by id. No-op (Ok)
+    /// when SQLite persistence is not enabled.
+    pub async fn delete_conversation(&self, id: &str) -> Result<()> {
+        match &self.sqlite_store {
+            Some(store) => store.delete_conversation(id).await,
+            None => Ok(()),
+        }
     }
 
     /// Register a tool — adds it to both the tool executor and workflow executor.
