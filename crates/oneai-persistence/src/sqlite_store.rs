@@ -80,7 +80,8 @@ impl SqliteSessionStore {
                 id TEXT PRIMARY KEY,
                 messages_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                title TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);
 
@@ -134,6 +135,12 @@ impl SqliteSessionStore {
             "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5",
             [],
         );
+        // Same pattern for the `title` column on `conversations` (added for
+        // session-list previews). Legacy dbs get the column added as NULL.
+        let _ = conn.execute(
+            "ALTER TABLE conversations ADD COLUMN title TEXT",
+            [],
+        );
 
         Ok(conn)
     }
@@ -170,6 +177,31 @@ fn deserialize_metadata(json: &str) -> std::collections::HashMap<String, String>
         return std::collections::HashMap::new();
     }
     serde_json::from_str(json).unwrap_or_default()
+}
+
+/// Derive a short title from a conversation's first user message: take the
+/// first `User` message's text content, collapse runs of whitespace into
+/// single spaces, and truncate to `max` chars (appending "…" when truncated).
+/// Returns `None` when the conversation has no user message. Used as the
+/// `conversations.title` column so `list_conversations` can label rows without
+/// loading full histories.
+fn conversation_title(conversation: &Conversation, max: usize) -> Option<String> {
+    let first_user = conversation.messages.iter()
+        .find(|m| matches!(m.role, oneai_core::Role::User))?;
+    let text = first_user.text_content();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Collapse any run of whitespace (incl. newlines) into a single space.
+    let collapsed: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max {
+        Some(collapsed)
+    } else {
+        // Truncate on a char boundary to avoid splitting a multi-byte char.
+        let end = collapsed.char_indices().nth(max).map(|(i, _)| i).unwrap_or(collapsed.len());
+        Some(format!("{}…", &collapsed[..end]))
+    }
 }
 
 /// Compute cosine similarity between two vectors.
@@ -485,6 +517,7 @@ impl MemoryPersistence for SqliteSessionStore {
                 format!("Failed to serialize conversation '{}': {}", id, e)
             ))?;
         let now = chrono::Utc::now().to_rfc3339();
+        let title = conversation_title(conversation, 80);
 
         // Check if conversation already exists
         let exists: bool = conn.query_row(
@@ -496,16 +529,18 @@ impl MemoryPersistence for SqliteSessionStore {
         ))?;
 
         if exists {
+            // Recompute the title on update too — the first user message could
+            // have changed (e.g. history rewritten by a compact).
             conn.execute(
-                "UPDATE conversations SET messages_json = ?2, updated_at = ?3 WHERE id = ?1",
-                rusqlite::params![id, messages_json, now],
+                "UPDATE conversations SET messages_json = ?2, updated_at = ?3, title = ?4 WHERE id = ?1",
+                rusqlite::params![id, messages_json, now, title],
             ).map_err(|e| OneAIError::Persistence(
                 format!("Failed to update conversation '{}': {}", id, e)
             ))?;
         } else {
             conn.execute(
-                "INSERT INTO conversations (id, messages_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![id, messages_json, now, now],
+                "INSERT INTO conversations (id, messages_json, created_at, updated_at, title) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, messages_json, now, now, title],
             ).map_err(|e| OneAIError::Persistence(
                 format!("Failed to insert conversation '{}': {}", id, e)
             ))?;
@@ -543,7 +578,7 @@ impl MemoryPersistence for SqliteSessionStore {
     async fn list_conversations(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.open_connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id, created_at, updated_at, messages_json FROM conversations ORDER BY updated_at DESC"
+            "SELECT id, created_at, updated_at, messages_json, title FROM conversations ORDER BY updated_at DESC"
         ).map_err(|e| OneAIError::Persistence(
             format!("Failed to prepare conversation list query: {}", e)
         ))?;
@@ -553,18 +588,19 @@ impl MemoryPersistence for SqliteSessionStore {
             let created_at: String = row.get(1)?;
             let updated_at: String = row.get(2)?;
             let messages_json: String = row.get(3)?;
+            let title: Option<String> = row.get(4)?;
             // Count messages by parsing JSON
             let count = serde_json::from_str::<Vec<serde_json::Value>>(&messages_json)
                 .map(|v| v.len())
                 .unwrap_or(0);
-            Ok((id, created_at, updated_at, count))
+            Ok((id, created_at, updated_at, count, title))
         }).map_err(|e| OneAIError::Persistence(
             format!("Failed to execute conversation list query: {}", e)
         ))?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let (id, created_at_str, updated_at_str, message_count) = row
+            let (id, created_at_str, updated_at_str, message_count, title) = row
                 .map_err(|e| OneAIError::Persistence(
                     format!("Failed to read conversation row: {}", e)
                 ))?;
@@ -575,7 +611,7 @@ impl MemoryPersistence for SqliteSessionStore {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
 
-            sessions.push(SessionInfo::new(id, created_at, updated_at, message_count));
+            sessions.push(SessionInfo::with_title(id, created_at, updated_at, message_count, title));
         }
 
         tracing::debug!("Listed {} conversations", sessions.len());
@@ -905,6 +941,91 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         // Most recently updated should be first
         assert_eq!(sessions[0].message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_title_from_first_user_message() {
+        let (store, _dir) = make_store();
+
+        let mut conv = Conversation::with_id("conv1".to_string());
+        conv.add_message(oneai_core::Message::system("system prompt".to_string()));
+        conv.add_message(oneai_core::Message::user("How do I parse JSON in Rust?".to_string()));
+        conv.add_message(oneai_core::Message::assistant("Use serde_json…".to_string()));
+        store.save_conversation("conv1", &conv).await.unwrap();
+
+        let sessions = store.list_conversations().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].title.as_deref(),
+            Some("How do I parse JSON in Rust?"),
+            "title must be the first user message",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conversation_title_collapses_and_truncates() {
+        let (store, _dir) = make_store();
+        let long = "line one\nline two   with\ttabs and  many     spaces ".to_string()
+            .repeat(20); // well over 80 chars, with embedded newlines/runs
+        let mut conv = Conversation::with_id("c".to_string());
+        conv.add_message(oneai_core::Message::user(long));
+        store.save_conversation("c", &conv).await.unwrap();
+
+        let title = store.list_conversations().await.unwrap()[0].title.clone().unwrap();
+        assert!(!title.contains('\n'), "newlines must be collapsed: {title:?}");
+        assert!(!title.contains("  "), "whitespace runs must be collapsed: {title:?}");
+        assert!(title.ends_with('…'), "long title must be truncated with ellipsis: {title:?}");
+        // Truncation targets 80 chars + ellipsis.
+        assert!(title.chars().count() <= 81, "title too long: {} chars", title.chars().count());
+    }
+
+    #[tokio::test]
+    async fn test_conversation_title_none_without_user_message() {
+        let (store, _dir) = make_store();
+        let mut conv = Conversation::with_id("c".to_string());
+        conv.add_message(oneai_core::Message::assistant("hi".to_string()));
+        store.save_conversation("c", &conv).await.unwrap();
+
+        let sessions = store.list_conversations().await.unwrap();
+        assert_eq!(sessions[0].title, None, "no user message → no title");
+    }
+
+    #[tokio::test]
+    async fn test_conversation_title_migration_from_legacy_db() {
+        // A legacy db (pre-title-column) has conversations without the `title`
+        // column. Opening it must add the column via ALTER TABLE, and listing
+        // must return title=None for the pre-existing row instead of erroring.
+        let (store, dir) = make_store();
+        // Build a legacy-style row by inserting via a raw connection that lacks
+        // the title column, simulating an old database.
+        let db_path = store.db_path().clone();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            // Create the OLD schema (no title column) and insert a row.
+            conn.execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    messages_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);",
+            ).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let msgs = serde_json::to_string(&vec![oneai_core::Message::user("legacy".to_string())]).unwrap();
+            conn.execute(
+                "INSERT INTO conversations (id, messages_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["legacy_conv", msgs, now, now],
+            ).unwrap();
+        }
+        // `store` was constructed over the same path; its open_connection runs
+        // the ALTER migration. Re-list through the store. (`_dir` keeps the
+        // tempdir alive for the duration of the test.)
+        let _ = &dir;
+        let sessions = store.list_conversations().await.unwrap();
+        let legacy = sessions.iter().find(|s| s.id == "legacy_conv").expect("legacy row present");
+        assert_eq!(legacy.title, None, "legacy row has no title until re-saved");
+        assert_eq!(legacy.message_count, 1);
     }
 
     #[tokio::test]

@@ -205,6 +205,22 @@ impl OneAISession {
         inner.conversation().messages.iter().map(MessageView::from).collect()
     }
 
+    /// Persist the current in-memory conversation to SQLite immediately.
+    ///
+    /// `run_task` already auto-saves after the agent loop finishes, but a
+    /// foreign UI may want to save mid-turn (e.g. right after the user sends
+    /// their message, before the model replies, so the new chat shows up in
+    /// the session list instantly). No-op (Ok) when SQLite persistence is not
+    /// enabled — the auto-save path simply has nowhere to write.
+    #[uniffi::method]
+    pub async fn save(&self) -> Result<(), OneAIErrorView> {
+        let inner = self.inner.lock().await;
+        inner.memory_manager()
+            .save_session(inner.session_id(), inner.conversation())
+            .await
+            .map_err(OneAIErrorView::from)
+    }
+
     /// Request the running agent loop (if any) to interrupt at the next
     /// iteration boundary. No-op if no `run_task` is in flight.
     #[uniffi::method]

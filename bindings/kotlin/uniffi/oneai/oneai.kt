@@ -726,6 +726,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_run_task(
     ): Int
+    external fun uniffi_oneai_checksum_method_oneaisession_save(
+    ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_save_checkpoint(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_send_user_message(
@@ -816,6 +818,8 @@ internal object UniffiLib {
     external fun uniffi_oneai_fn_method_oneaisession_retrieve_memory(`ptr`: Long,`query`: RustBuffer.ByValue,`topK`: Int,
     ): Long
     external fun uniffi_oneai_fn_method_oneaisession_run_task(`ptr`: Long,`task`: RustBuffer.ByValue,`callback`: Long,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaisession_save(`ptr`: Long,
     ): Long
     external fun uniffi_oneai_fn_method_oneaisession_save_checkpoint(`ptr`: Long,
     ): Long
@@ -1012,6 +1016,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaisession_run_task() != 61081) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaisession_save() != 42851) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaisession_save_checkpoint() != 49179) {
@@ -3182,6 +3189,17 @@ public interface OneAiSessionInterface {
     suspend fun `runTask`(`task`: kotlin.String, `callback`: ChatEventCallback)
     
     /**
+     * Persist the current in-memory conversation to SQLite immediately.
+     *
+     * `run_task` already auto-saves after the agent loop finishes, but a
+     * foreign UI may want to save mid-turn (e.g. right after the user sends
+     * their message, before the model replies, so the new chat shows up in
+     * the session list instantly). No-op (Ok) when SQLite persistence is not
+     * enabled — the auto-save path simply has nowhere to write.
+     */
+    suspend fun `save`()
+    
+    /**
      * Save a checkpoint.
      */
     suspend fun `saveCheckpoint`(): kotlin.String
@@ -3444,6 +3462,37 @@ open class OneAiSession: Disposable, AutoCloseable, OneAiSessionInterface
                 
         FfiConverterString.lower(`task`),
         FfiConverterTypeChatEventCallback.lower(`callback`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        OneAiErrorView.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Persist the current in-memory conversation to SQLite immediately.
+     *
+     * `run_task` already auto-saves after the agent loop finishes, but a
+     * foreign UI may want to save mid-turn (e.g. right after the user sends
+     * their message, before the model replies, so the new chat shows up in
+     * the session list instantly). No-op (Ok) when SQLite persistence is not
+     * enabled — the auto-save path simply has nowhere to write.
+     */
+    @Throws(OneAiErrorView::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `save`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaisession_save(
+                uniffiHandle,
+                
             )
         },
         { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
@@ -4556,6 +4605,13 @@ data class SessionInfoView (
      * Number of messages in the conversation.
      */
     var `messageCount`: kotlin.ULong
+    , 
+    /**
+     * Short title from the first user message (whitespace-collapsed,
+     * truncated). `None` when the conversation has no user message yet.
+     * Render this as the drawer row label; fall back to a generic label.
+     */
+    var `title`: kotlin.String?
     
 ){
     
@@ -4576,6 +4632,7 @@ public object FfiConverterTypeSessionInfoView: FfiConverterRustBuffer<SessionInf
             FfiConverterLong.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -4583,7 +4640,8 @@ public object FfiConverterTypeSessionInfoView: FfiConverterRustBuffer<SessionInf
             FfiConverterString.allocationSize(value.`id`) +
             FfiConverterLong.allocationSize(value.`createdAtMs`) +
             FfiConverterLong.allocationSize(value.`updatedAtMs`) +
-            FfiConverterULong.allocationSize(value.`messageCount`)
+            FfiConverterULong.allocationSize(value.`messageCount`) +
+            FfiConverterOptionalString.allocationSize(value.`title`)
     )
 
     override fun write(value: SessionInfoView, buf: ByteBuffer) {
@@ -4591,6 +4649,7 @@ public object FfiConverterTypeSessionInfoView: FfiConverterRustBuffer<SessionInf
             FfiConverterLong.write(value.`createdAtMs`, buf)
             FfiConverterLong.write(value.`updatedAtMs`, buf)
             FfiConverterULong.write(value.`messageCount`, buf)
+            FfiConverterOptionalString.write(value.`title`, buf)
     }
 }
 

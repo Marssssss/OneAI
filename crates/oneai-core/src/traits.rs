@@ -579,17 +579,36 @@ pub struct SessionInfo {
 
     /// Number of messages in the conversation.
     pub message_count: usize,
+
+    /// A short title derived from the first user message (truncated, whitespace
+    /// collapsed). `None` when the conversation has no user message yet. Used by
+    /// foreign UIs (e.g. the Android drawer) to label session rows without
+    /// loading full histories.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 impl SessionInfo {
-    /// Create a new SessionInfo with the given fields.
+    /// Create a new SessionInfo with the given fields (title = None).
     pub fn new(
         id: String,
         created_at: chrono::DateTime<chrono::Utc>,
         updated_at: chrono::DateTime<chrono::Utc>,
         message_count: usize,
     ) -> Self {
-        Self { id, created_at, updated_at, message_count }
+        Self { id, created_at, updated_at, message_count, title: None }
+    }
+
+    /// Create a new SessionInfo with an explicit title (first-user-message
+    /// preview). The caller is responsible for truncating/collapsing the title.
+    pub fn with_title(
+        id: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        message_count: usize,
+        title: Option<String>,
+    ) -> Self {
+        Self { id, created_at, updated_at, message_count, title }
     }
 }
 

@@ -91,6 +91,41 @@ delete_conversation}`, `OneAISession::messages`, plus `SessionInfoView` /
 `list_conversations` / `delete_conversation` (which thin-wrap `SqliteSessionStore`)
 and `AppSession::new_with_conversation` (resume constructor).
 
+## S5 — Polish (dark theme + copy/share + presets + retry)
+
+S4's app gets a UX pass so it feels finished:
+
+- **Dark theme** follows the system (`isSystemInDarkTheme()`). Every color now
+  routes through `MaterialTheme.colorScheme` (light + dark palettes) — no
+  hardcoded `Color(0xFF…)` refs remain in composables.
+- **Session titles**: the drawer shows each conversation's first user message
+  (truncated, whitespace-collapsed) instead of a generic label. Backed by a new
+  `conversations.title` column — `SqliteSessionStore` extracts it at save time
+  and `list_conversations` returns it via `SessionInfo.title` / `SessionInfoView.title`.
+  Legacy dbs are migrated with `ALTER TABLE … ADD COLUMN title TEXT`.
+- **Copy / share**: long-press an assistant answer → dropdown with 复制
+  (clipboard) / 分享 (ACTION_SEND chooser).
+- **Provider preset dropdown**: `kind` is an `ExposedDropdownMenuBox`
+  (openai/anthropic/ollama); selecting fills sensible model + baseUrl defaults.
+  Ollama's baseUrl field is read as `host:port` (emulator → `10.0.2.2:11434`).
+- **Error detail + retry**: thrown `OneAiErrorView` exceptions are mapped to
+  readable Chinese hints (Provider/Network/Timeout/Config…). A failed turn
+  shows a 重试 button that re-runs the last user message (dropping the dead
+  error bubble first).
+- **Delete confirmation**: an `AlertDialog` guards `deleteConversation`.
+- **First-run hint**: when a provider that needs a key has none, a tappable
+  banner points to settings.
+- **Instant drawer entry**: `runTask` calls the new `OneAISession::save()`
+  right after the user message is added (before the model replies), so the new
+  chat — with its title — appears in the drawer immediately.
+- **Enter-to-send**: deferred — on a multi-line mobile field it conflicts with
+  newline input and the Compose `KeyEvent.isShiftPressed` accessor isn't
+  available in the pinned compose-ui version. The send button remains primary.
+
+The FFI surface added for S5: `OneAISession::save()` (mid-turn persistence) and
+the `title` field on `SessionInfoView` (backed by `SessionInfo.title` +
+`SqliteSessionStore`'s `title` column).
+
 > Earlier milestones: S1/S2 proved `.so` load + FFI surface callability
 > (`OneAiAppBuilder().build()` → `createSession()` → `sessionId()` /
 > `platform()`). See the S2 smoke commit for the prior TextView activity.

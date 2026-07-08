@@ -298,6 +298,10 @@ pub struct SessionInfoView {
     pub updated_at_ms: i64,
     /// Number of messages in the conversation.
     pub message_count: u64,
+    /// Short title from the first user message (whitespace-collapsed,
+    /// truncated). `None` when the conversation has no user message yet.
+    /// Render this as the drawer row label; fall back to a generic label.
+    pub title: Option<String>,
 }
 
 impl From<oneai_core::SessionInfo> for SessionInfoView {
@@ -307,6 +311,7 @@ impl From<oneai_core::SessionInfo> for SessionInfoView {
             created_at_ms: s.created_at.timestamp_millis(),
             updated_at_ms: s.updated_at.timestamp_millis(),
             message_count: s.message_count as u64,
+            title: s.title,
         }
     }
 }
