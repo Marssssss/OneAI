@@ -1,0 +1,9 @@
+# HarmonyOS build artifacts (DevEco hvigor) — do not commit.
+/build/
+/entry/build/
+/entry/.cxx/
+# Native liboneai.so staged by scripts/build_harmony.sh
+/entry/src/main/cpp/libs/
+# Local DevEco signing / caches
+.ccache/
+local.properties

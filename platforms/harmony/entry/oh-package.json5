@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "0.2.0",
+  "description": "OneAI HarmonyOS entry module (ArkTS chat + NAPI bridge).",
+  "main": "",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}
