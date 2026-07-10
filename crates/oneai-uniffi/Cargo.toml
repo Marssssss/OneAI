@@ -8,11 +8,12 @@ edition.workspace = true
 # Name `oneai` so the cdylib is `liboneai.so` / `liboneai.dylib` — matches
 # `System.loadLibrary("oneai")` on Android and `scripts/generate_bindings.sh`
 # (which looks for `liboneai.*`). The package stays `oneai-uniffi`.
-# `staticlib` yields `liboneai.a` for the Apple xcframework (iOS/macOS) and the
-# HarmonyOS `liboneai.so` cross-compile; `cdylib`/`lib` cover Android jniLibs
-# plus host bindgen-metadata reads.
+# The `lib` (rlib) covers Rust tests + downstream crates. The `staticlib`
+# (liboneai.a, needed by the Apple xcframework + HarmonyOS NAPI) lives in the
+# SEPARATE `oneai-staticlib` crate so debug/test builds don't produce a fat
+# ~900MB static archive — build that crate only when packaging a native lib.
 name = "oneai"
-crate-type = ["cdylib", "lib", "staticlib"]
+crate-type = ["cdylib", "lib"]
 
 [dependencies]
 uniffi = { workspace = true, features = ["tokio", "cli"] }

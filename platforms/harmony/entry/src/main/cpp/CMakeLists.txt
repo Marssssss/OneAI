@@ -19,14 +19,13 @@ add_library(oneai_napi SHARED
     napi_init.cpp
 )
 
-# liboneai.so is staged per-ABI by scripts/build_harmony.sh.
-# CMAKE_LIBRARY_ARCHITECTURE or OHOS arch picks the right subdir.
+# liboneai.a (staticlib) is staged per-ABI by scripts/build_harmony.sh and
+# linked statically into liboneai_napi.so (one self-contained NAPI .so).
 set(ONEAI_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_OHOS_ARCH_ABI})
-if(EXISTS "${ONEAI_LIB_DIR}/liboneai.so")
-    target_link_directories(oneai_napi PRIVATE ${ONEAI_LIB_DIR})
-    target_link_libraries(oneai_napi PRIVATE oneai)
+if(EXISTS "${ONEAI_LIB_DIR}/liboneai.a")
+    target_link_libraries(oneai_napi PRIVATE ${ONEAI_LIB_DIR}/liboneai.a)
 else()
-    message(WARNING "liboneai.so not found at ${ONEAI_LIB_DIR} — run scripts/build_harmony.sh first.")
+    message(WARNING "liboneai.a not found at ${ONEAI_LIB_DIR} — run scripts/build_harmony.sh first.")
 endif()
 
 # OHOS NAPI runtime

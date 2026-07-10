@@ -1,0 +1,14 @@
+[package]
+name = "oneai-staticlib"
+description = "Staticlib (liboneai.a) wrapper over oneai-uniffi — built only when packaging native libs (Apple xcframework / HarmonyOS NAPI). Keeps debug/test builds from producing a ~900MB static archive."
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# Same lib name `oneai` → output is `liboneai.a`, what build_apple.sh /
+# build_harmony.sh stage and what the macOS app / NAPI module link.
+name = "oneai"
+crate-type = ["staticlib"]
+
+[dependencies]
+oneai-uniffi = { workspace = true }

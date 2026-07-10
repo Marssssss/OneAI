@@ -42,18 +42,19 @@ ABIS=(
 for entry in "${ABIS[@]}"; do
     triple="${entry%%:*}"
     abi="${entry##*:}"
-    echo "── Building liboneai.so for $abi ($triple)"
-    # Point cargo at the OHOS clang for this target.
+    echo "── Building liboneai.a for $abi ($triple)"
+    # oneai-staticlib (crate-type=staticlib) → liboneai.a, linked statically into
+    # liboneai_napi.so by CMakeLists. (Build only on demand; debug builds don't
+    # emit this fat archive.) OHOS clang as the cargo linker.
     export "CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER"="$CLANG"
     export "CC_$triple"="$CLANG"
     export "CXX_$triple"="${CLANG}++"
-    # OHOS sysroot lives next to the toolchain.
     export "CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"="-C link-arg=--target=$triple -C link-arg=--sysroot=$OHOS_NDK_HOME/sysroot"
-    cargo build --release -p oneai-uniffi --target "$triple"
+    cargo build --release -p oneai-staticlib --target "$triple"
     mkdir -p "$CPP_LIBS/$abi"
-    cp "$ONEAI_ROOT/target/$triple/release/liboneai.so" "$CPP_LIBS/$abi/liboneai.so"
+    cp "$ONEAI_ROOT/target/$triple/release/liboneai.a" "$CPP_LIBS/$abi/liboneai.a"
 done
 
 echo ""
-echo "── Done. liboneai.so staged under $CPP_LIBS"
+echo "── Done. liboneai.a staged under $CPP_LIBS"
 echo "   Next: in DevEco Studio, build platforms/harmony (hvigorw assembleHap)"

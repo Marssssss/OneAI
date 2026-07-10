@@ -14,6 +14,43 @@ members = [
     "crates/oneai-persistence",
     "crates/oneai-app",
     "crates/oneai-uniffi",
+    "crates/oneai-staticlib",
+    "crates/oneai-domain",
+    "crates/oneai-platform-desktop",
+    "crates/oneai-platform-android",
+    "crates/oneai-platform-ios",
+    "crates/oneai-platform-harmony",
+    "crates/oneai-trace",
+    "crates/oneai-a2a",
+    "crates/oneai-wasm",
+    "crates/oneai-eval",
+    "crates/oneai-studio",
+    "crates/oneai-mcp",
+    "examples/cli",
+    "examples/desktop-app",
+    "examples/rust",
+]
+# oneai-staticlib (the liboneai.a staticlib) is a workspace member so `-p`
+# works and its workspace-inherited deps resolve, BUT it is excluded from
+# `default-members` so bare `cargo build`/`cargo test` never build it — they'd
+# otherwise emit a ~900MB debug static archive every run. Build it explicitly
+# (`cargo build -p oneai-staticlib` or scripts/build_apple.sh) only when
+# packaging a native lib. `cargo clippy --workspace --all-targets` uses check
+# mode and does not emit the archive.
+default-members = [
+    "crates/oneai-core",
+    "crates/oneai-provider",
+    "crates/oneai-agent",
+    "crates/oneai-workflow",
+    "crates/oneai-memory",
+    "crates/oneai-tool",
+    "crates/oneai-skill",
+    "crates/oneai-parser",
+    "crates/oneai-rag",
+    "crates/oneai-scheduler",
+    "crates/oneai-persistence",
+    "crates/oneai-app",
+    "crates/oneai-uniffi",
     "crates/oneai-domain",
     "crates/oneai-platform-desktop",
     "crates/oneai-platform-android",

@@ -45,7 +45,10 @@ have_xcode() { xcodebuild -version >/dev/null 2>&1; }
 build_target() {
     local triple="$1"
     echo "── Building liboneai.a for $triple [$PROFILE]"
-    cargo build "--$PROFILE" -p oneai-uniffi --target "$triple"
+    # oneai-staticlib (crate-type=staticlib, excluded from default-members) —
+    # keeps debug/test builds from emitting a fat ~900MB archive; built only
+    # here, for packaging.
+    cargo build "--$PROFILE" -p oneai-staticlib --target "$triple"
 }
 
 stage_a() {
