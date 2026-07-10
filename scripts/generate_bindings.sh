@@ -2,16 +2,21 @@
 # ──────────────────────────────────────────────────────────────────────
 # OneAI Binding Generation Script
 #
-# Generates Kotlin, Swift, C++, and C# foreign-language bindings from
-# the oneai-uniffi crate using the uniffi-bindgen tool.
+# Generates Kotlin and Swift foreign-language bindings from the
+# oneai-uniffi crate using the uniffi-bindgen tool (uniffi 0.32).
+#
+# NOTE: uniffi-bindgen 0.32 only supports kotlin / swift / python / ruby.
+# C# and C++ are NOT generated here — see bindings/csharp/ and bindings/cpp/
+# for hand-written SDK wrappers (and the platforms/windows + platforms/harmony
+# build paths that consume them).
 #
 # Usage:
 #   ./scripts/generate_bindings.sh [language]
-#   ./scripts/generate_bindings.sh          # Generate all languages
+#   ./scripts/generate_bindings.sh          # Generate all supported languages
 #   ./scripts/generate_bindings.sh kotlin   # Generate Kotlin only
 #   ./scripts/generate_bindings.sh swift    # Generate Swift only
-#   ./scripts/generate_bindings.sh cpp      # Generate C++ only
-#   ./scripts/generate_bindings.sh csharp   # Generate C# only
+#   ./scripts/generate_bindings.sh python   # Generate Python only
+#   ./scripts/generate_bindings.sh ruby     # Generate Ruby only
 #
 # Prerequisites:
 #   1. cargo install uniffi-bindgen
@@ -73,20 +78,20 @@ generate_swift() {
     echo "   ✓ Swift bindings generated"
 }
 
-generate_cpp() {
+generate_python() {
     local lib_file="$1"
-    local out_dir="$BINDINGS_DIR/cpp"
-    echo "── Generating C++ bindings → $out_dir"
-    uniffi-bindgen generate --library "$lib_file" --language cpp --out-dir "$out_dir"
-    echo "   ✓ C++ bindings generated"
+    local out_dir="$BINDINGS_DIR/python"
+    echo "── Generating Python bindings → $out_dir"
+    uniffi-bindgen generate --library "$lib_file" --language python --out-dir "$out_dir" --no-format
+    echo "   ✓ Python bindings generated"
 }
 
-generate_csharp() {
+generate_ruby() {
     local lib_file="$1"
-    local out_dir="$BINDINGS_DIR/csharp"
-    echo "── Generating C# bindings → $out_dir"
-    uniffi-bindgen generate --library "$lib_file" --language csharp --out-dir "$out_dir"
-    echo "   ✓ C# bindings generated"
+    local out_dir="$BINDINGS_DIR/ruby"
+    echo "── Generating Ruby bindings → $out_dir"
+    uniffi-bindgen generate --library "$lib_file" --language ruby --out-dir "$out_dir" --no-format
+    echo "   ✓ Ruby bindings generated"
 }
 
 # ─── Build Library ────────────────────────────────────────────────────
@@ -124,17 +129,15 @@ main() {
     case "$language" in
         kotlin)  generate_kotlin "$lib_file" ;;
         swift)   generate_swift "$lib_file" ;;
-        cpp)     generate_cpp "$lib_file" ;;
-        csharp)  generate_csharp "$lib_file" ;;
+        python)  generate_python "$lib_file" ;;
+        ruby)    generate_ruby "$lib_file" ;;
         all)
             generate_kotlin "$lib_file"
             generate_swift "$lib_file"
-            generate_cpp "$lib_file"
-            generate_csharp "$lib_file"
             ;;
         *)
             echo "ERROR: Unknown language '$language'"
-            echo "       Supported: kotlin, swift, cpp, csharp, all"
+            echo "       Supported: kotlin, swift, python, ruby, all"
             exit 1
             ;;
     esac

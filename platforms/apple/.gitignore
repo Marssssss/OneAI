@@ -1,0 +1,7 @@
+# Staged by scripts/build_apple.sh — regenerated each build, do not commit.
+# liboneai.a is a 250MB+ universal staticlib; the headers/ are derived from
+# bindings/swift/. A fresh checkout runs ./scripts/build_apple.sh to populate.
+lib/
+headers/
+OneAI.xcframework
+build/
