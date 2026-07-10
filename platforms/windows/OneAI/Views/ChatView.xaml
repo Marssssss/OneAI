@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ChatView: first-run hint + message list (user/assistant templates) +
+     error line + input bar (send/stop). Mirrors the macOS ChatDetail. -->
+<UserControl
+    x:Class="OneAI.Views.ChatView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:OneAI.ViewModels"
+    xmlns:views="using:OneAI.Views">
+
+    <UserControl.Resources>
+        <!-- User bubble -->
+        <DataTemplate x:Key="UserBubble" x:DataType="vm:UserItem">
+            <StackPanel HorizontalAlignment="Right" MaxWidth="360">
+                <Border Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="14"
+                        Padding="12,8">
+                    <TextBlock Text="{x:Bind Text}" FontSize="14" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
+                </Border>
+            </StackPanel>
+        </DataTemplate>
+
+        <!-- Assistant bubble: thinking Expander + steps + markdown + cursor + retry -->
+        <DataTemplate x:Key="AssistantBubble" x:DataType="vm:AssistantItem">
+            <StackPanel Spacing="6" HorizontalAlignment="Stretch">
+                <!-- Thinking card (only when there's thinking text) -->
+                <Expander IsExpanded="{x:Bind ThinkingExpanded, Mode=TwoWay}"
+                          Visibility="{x:Bind HasThinking, Mode=OneWay}"
+                          HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                          Padding="10,8">
+                    <Expander.Header>
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE955;" FontSize="13" />
+                            <TextBlock Text="{x:Bind ThinkingHeader, Mode=OneWay}" FontSize="12" />
+                        </StackPanel>
+                    </Expander.Header>
+                    <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto">
+                        <TextBlock Text="{x:Bind Thinking, Mode=OneWay}" FontSize="12"
+                                   TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                    </ScrollViewer>
+                </Expander>
+
+                <!-- Tool steps -->
+                <ItemsRepeater ItemsSource="{x:Bind Steps, Mode=OneWay}" Margin="0,2,0,2">
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ToolStep">
+                            <StackPanel Spacing="1" Margin="0,2">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <TextBlock FontSize="11" FontFamily="Consolas"
+                                               Foreground="{x:Bind StepIconColor, Mode=OneWay}"
+                                               Text="{x:Bind StepIcon, Mode=OneWay}" />
+                                    <TextBlock FontSize="11" FontFamily="Consolas" TextWrapping="Wrap"
+                                               Foreground="{x:Bind StepIconColor, Mode=OneWay}"
+                                               Text="{x:Bind StepSummary, Mode=OneWay}" />
+                                </StackPanel>
+                                <TextBlock FontSize="11" FontFamily="Consolas"
+                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                           Visibility="{x:Bind HasResult, Mode=OneWay}"
+                                           Text="{x:Bind ResultPreview, Mode=OneWay}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+
+                <!-- Markdown answer (with copy/share context menu) -->
+                <views:MarkdownTextBlock Markdown="{x:Bind Text, Mode=OneWay}">
+                    <views:MarkdownTextBlock.ContextFlyout>
+                        <MenuFlyout>
+                            <MenuFlyoutItem Text="复制" Click="CopyAnswer_Click" Tag="{x:Bind Text, Mode=OneWay}" />
+                            <MenuFlyoutItem Text="分享" Click="ShareAnswer_Click" Tag="{x:Bind Text, Mode=OneWay}" />
+                        </MenuFlyout>
+                    </views:MarkdownTextBlock.ContextFlyout>
+                </views:MarkdownTextBlock>
+
+                <!-- Streaming cursor -->
+                <TextBlock Text="▍" FontSize="14" Visibility="{x:Bind ShowCursor, Mode=OneWay}"
+                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+
+                <!-- Error + retry -->
+                <StackPanel Orientation="Horizontal" Spacing="8" Visibility="{x:Bind HasError, Mode=OneWay}">
+                    <TextBlock Text="{x:Bind ErrorWithPrefix, Mode=OneWay}" FontSize="12"
+                               Foreground="{ThemeResource SystemFillColorCriticalBrush}" VerticalAlignment="Center" />
+                    <Button Click="Retry_Click" Content="重试" Padding="8,2" />
+                </StackPanel>
+            </StackPanel>
+        </DataTemplate>
+
+        <views:ChatTemplateSelector x:Key="ChatSelector"
+            UserTemplate="{StaticResource UserBubble}"
+            AssistantTemplate="{StaticResource AssistantBubble}" />
+    </UserControl.Resources>
+
+    <Grid RowDefinitions="Auto,*,Auto,Auto">
+        <!-- First-run hint -->
+        <Border Grid.Row="0" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="10"
+                Padding="12,8" Margin="12,6" Visibility="{x:Bind Vm.NeedsKeyConfigVis, Mode=OneWay}">
+            <TextBlock Text="未配置 API Key,点击设置 → 填入 kind / model / key 后保存"
+                       FontSize="12" Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
+        </Border>
+
+        <!-- Messages -->
+        <ListView x:Name="Messages" Grid.Row="1" Padding="12"
+                  ItemsSource="{x:Bind Vm.Items, Mode=OneWay}"
+                  ItemTemplateSelector="{StaticResource ChatSelector}"
+                  SelectionMode="None" IsItemClickEnabled="False"
+                  ScrollViewer.HorizontalScrollMode="Disabled"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
+
+        <!-- Error line -->
+        <TextBlock Grid.Row="2" Margin="12,4" FontSize="12"
+                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                   Text="{x:Bind Vm.Error, Mode=OneWay}"
+                   Visibility="{x:Bind Vm.HasErrorVis, Mode=OneWay}" />
+
+        <!-- Input bar -->
+        <Grid Grid.Row="3" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="InputBox" Grid.Column="0" Text="{x:Bind Vm.Input, Mode=TwoWay}"
+                     PlaceholderText="问点什么…" AcceptsReturn="True" MinHeight="40" MaxHeight="120"
+                     TextWrapping="Wrap" KeyDown="InputBox_KeyDown" />
+            <Button Grid.Column="1" Click="Send_Click" Margin="8,0,0,0"
+                    Background="{ThemeResource AccentFillColorDefaultBrush}"
+                    Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}"
+                    Visibility="{x:Bind Vm.SendButtonVis, Mode=OneWay}"
+                    IsEnabled="{x:Bind Vm.HasInput, Mode=OneWay}">
+                <FontIcon Glyph="&#xE724;" />
+            </Button>
+            <Button Grid.Column="1" Click="Stop_Click" Margin="8,0,0,0"
+                    Background="{ThemeResource SystemFillColorCriticalBackgroundBrush}"
+                    Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}"
+                    Visibility="{x:Bind Vm.StopButtonVis, Mode=OneWay}">
+                <FontIcon Glyph="&#xE71A;" />
+            </Button>
+        </Grid>
+    </Grid>
+</UserControl>

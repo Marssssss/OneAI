@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SettingsDialog — provider kind/model/key/baseUrl. Save → rebuild app. -->
+<ContentDialog
+    x:Class="OneAI.Views.SettingsDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Provider 设置"
+    PrimaryButtonText="保存"
+    SecondaryButtonText="取消"
+    DefaultButton="Primary">
+
+    <StackPanel Spacing="10" Width="440">
+        <ComboBox x:Name="KindCombo" Header="kind" Width="200" IsEditable="False"
+                  SelectionChanged="Kind_Changed">
+            <x:String>openai</x:String>
+            <x:String>anthropic</x:String>
+            <x:String>ollama</x:String>
+        </ComboBox>
+        <TextBox x:Name="ModelBox" Header="model" FontFamily="Consolas" />
+        <PasswordBox x:Name="KeyBox" Header="api key (openai / anthropic)" FontFamily="Consolas" />
+        <TextBox x:Name="BaseUrlBox" Header="base url override (blank = 默认; ollama → host:port)" FontFamily="Consolas" />
+        <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                   Text="ollama 示例:kind=ollama, model=llama3, base url=127.0.0.1:11434。保存后重建 App(历史保留)。" TextWrapping="Wrap" />
+    </StackPanel>
+</ContentDialog>

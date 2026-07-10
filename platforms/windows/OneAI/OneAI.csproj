@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OneAI Windows (WinUI 3) app. Consumes oneai.dll (C facade) via P/Invoke.
+     Build on a Windows machine with Visual Studio + the WindowsAppSDK
+     workload. The native oneai.dll is produced by scripts/build_windows.ps1
+     and staged at ../native/oneai.dll (copied to output here). -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RootNamespace>OneAI</RootNamespace>
+    <AssemblyName>OneAI</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.*" />
+    <PackageReference Include="Microsoft.Windows.SDK.Build.Ref" Version="10.0.22621.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Staged by scripts/build_windows.ps1 → platforms/windows/native/oneai.dll -->
+    <None Include="..\native\oneai.dll" Condition="Exists('..\native\oneai.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="app.manifest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ApplicationDefinition Include="App.xaml" />
+    <Page Include="MainWindow.xaml" />
+    <Page Include="Views\ChatView.xaml" />
+    <Page Include="Views\SettingsDialog.xaml" />
+  </ItemGroup>
+</Project>

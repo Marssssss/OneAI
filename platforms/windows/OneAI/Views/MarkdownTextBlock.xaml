@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!-- MarkdownTextBlock: renders fenced code blocks + inline `code`/`bold`/bullets.
+     No RichText dependency — content is rebuilt in code-behind from
+     MarkdownHelper.Split. -->
+<UserControl
+    x:Class="OneAI.Views.MarkdownTextBlock"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel x:Name="Root" Spacing="6" />
+</UserControl>

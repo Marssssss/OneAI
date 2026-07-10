@@ -51,6 +51,11 @@ pub use callback::*;
 pub mod app_builder;
 pub mod app;
 
+// `extern "C"` JSON facade for runtimes UniFFI 0.32 can't generate bindings
+// for (C# / NAPI-C++). Exported from the same cdylib alongside the uniffi
+// symbols. See c_facade.rs.
+pub mod c_facade;
+
 // Register all UniFFI-exported types with the scaffolding system
 // (required for derive-macro-only approach, no UDL file)
 uniffi::setup_scaffolding!("oneai");
