@@ -6,26 +6,31 @@
       "arguments": "",
       "cppFlags": "",
       "abiFilters": ["arm64-v8a", "armeabi-v7a"]
+    },
+    "resOptions": {
+      "copyCodeResource": {
+        "enable": false
+      }
     }
   },
-  "buildModeSet": [
-    {
-      "name": "debug",
-      "arkOptions": {
-        "obfuscate": false
-      }
-    },
+  "buildOptionSet": [
     {
       "name": "release",
       "arkOptions": {
-        "obfuscate": false
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": false,
+            "files": [
+              "./obfuscation-rules.txt"
+            ]
+          }
+        }
       }
-    }
+    },
   ],
   "targets": [
     {
-      "name": "default",
-      "applyToProducts": ["default"]
+      "name": "default"
     }
   ]
 }

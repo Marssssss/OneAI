@@ -1,9 +1,10 @@
 {
+  "modelVersion": "6.0.1",
   "name": "oneai-harmony",
   "version": "0.2.0",
-  "lockfileVersion": 3,
+  "description": "OneAI HarmonyOS app (ArkTS chat + NAPI bridge).",
+  "dependencies": {},
   "devDependencies": {
-    "@ohos/hypium": "1.0.x",
-    "@ohos/hvigor-ohos-plugin": "5.x"
+    "@ohos/hypium": "1.0.24"
   }
 }

@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "OneAI entry module"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "OneAI chat entry"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "OneAI"
+    }
+  ]
+}
