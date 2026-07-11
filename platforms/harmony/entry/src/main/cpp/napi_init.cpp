@@ -42,8 +42,9 @@ static napi_value MakeString(napi_env env, const char* s) {
 
 static napi_value MakeBigintU64(napi_env env, uint64_t v) {
     napi_value big;
-    bool lossless = true;
-    napi_create_bigint_uint64(env, v, &big, &lossless);
+    // HarmonyOS NAPI: napi_create_bigint_uint64 takes 3 args (no lossless
+    // out-param), unlike standard Node NAPI's 4-arg variant.
+    napi_create_bigint_uint64(env, v, &big);
     return big;
 }
 
