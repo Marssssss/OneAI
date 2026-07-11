@@ -7,7 +7,7 @@
 # the NAPI module (platforms/harmony/entry/src/main/cpp/libs/<abi>/) to link.
 #
 # Run on a machine with DevEco Studio's Native SDK installed:
-#   rustup target add aarch64-linux-ohos armv7-linux-ohos
+#   rustup target add aarch64-linux-ohos x86_64-linux-ohos
 #   export OHOS_NDK_HOME=/path/to/harmony/.../native     # contains llvm/bin
 #   ./scripts/build_harmony.sh
 #

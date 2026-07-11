@@ -21,7 +21,7 @@ thread, dispatched on the ArkTS thread).
 # 1. Cross-compile liboneai.so for the OHOS ABIs + stage it where CMake finds it.
 export OHOS_NDK_HOME=/path/to/harmony/native   # contains llvm/bin/clang
 ./scripts/build_harmony.sh
-# (requires: rustup target add aarch64-linux-ohos armv7-linux-ohos)
+# (requires: rustup target add aarch64-linux-ohos x86_64-linux-ohos)
 
 # 2. Open platforms/harmony in DevEco Studio (or `hvigorw assembleHap`).
 #    DevEco's CMake builds liboneai_napi.so (entry/src/main/cpp/napi_init.cpp)
