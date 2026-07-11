@@ -33,10 +33,11 @@ if [[ -z "$OHOS_NDK_HOME" || ! -x "$OHOS_NDK_HOME/llvm/bin/clang" ]]; then
 fi
 CLANG="$OHOS_NDK_HOME/llvm/bin/clang"
 
-# ABIs: rust triple -> harmony ABI dir
+# ABIs: rust triple -> harmony ABI dir. HarmonyOS 6.0.1 supports arm64-v8a
+# (device) + x86_64 (emulator) only — armeabi-v7a is rejected.
 ABIS=(
   "aarch64-linux-ohos:arm64-v8a"
-  "armv7-linux-ohos:armeabi-v7a"
+  "x86_64-linux-ohos:x86_64"
 )
 
 for entry in "${ABIS[@]}"; do
