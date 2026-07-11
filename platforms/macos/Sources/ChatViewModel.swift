@@ -22,17 +22,23 @@ final class UserItem: Identifiable {
     init(text: String) { self.text = text }
 }
 
-final class AssistantItem: ObservableObject, Identifiable {
+// NOTE: AssistantItem is a plain class (NOT ObservableObject/@Published).
+// Per-token @Published sends on an ObservableObject re-enter Combine's
+// non-reentrant publisher lock during streaming and self-deadlock the main
+// thread. Instead, UI refresh is driven solely by the VM's `streamTick`
+// (@Published, low-frequency) — `handle()` mutates these plain fields then
+// bumps streamTick, so the row re-renders via the parent ForEach.
+final class AssistantItem: Identifiable {
     let id = UUID()
-    @Published var thinking = ""
-    @Published var thinkingActive = false
-    @Published var thinkingDone = false
-    @Published var thinkingExpanded = false
-    @Published var steps: [ToolStep] = []
-    @Published var text = ""
-    @Published var streaming = false
-    @Published var done = false
-    @Published var error: String? = nil
+    var thinking = ""
+    var thinkingActive = false
+    var thinkingDone = false
+    var thinkingExpanded = false
+    var steps: [ToolStep] = []
+    var text = ""
+    var streaming = false
+    var done = false
+    var error: String? = nil
 }
 
 enum ChatEntry: Identifiable {

@@ -223,7 +223,7 @@ private struct UserBubble: View {
 }
 
 private struct AssistantBubble: View {
-    @ObservedObject var item: AssistantItem
+    let item: AssistantItem
     let onRetry: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -265,7 +265,7 @@ private struct AssistantBubble: View {
 }
 
 private struct ThinkingCard: View {
-    @ObservedObject var item: AssistantItem
+    let item: AssistantItem
     var body: some View {
         if item.thinking.isEmpty { EmptyView() }
         else {
