@@ -9,10 +9,24 @@ project(oneai_napi)
 
 set(CMAKE_CXX_STANDARD 17)
 
+# Locate the repo root by walking up until we find bindings/c/oneai_c.h
+# (robust to the NAPI CMakeLists being moved within the tree).
+set(_search_dir ${CMAKE_CURRENT_SOURCE_DIR})
+while(NOT EXISTS "${_search_dir}/bindings/c/oneai_c.h")
+    get_filename_component(_parent ${_search_dir} DIRECTORY)
+    if(_parent STREQUAL _search_dir OR _parent STREQUAL "")
+        message(FATAL_ERROR
+            "bindings/c/oneai_c.h not found walking up from ${CMAKE_CURRENT_SOURCE_DIR}. "
+            "Is the HarmonyOS project inside the OneAI repo?")
+    endif()
+    set(_search_dir ${_parent})
+endwhile()
+set(ONEAI_ROOT ${_search_dir})
+message(STATUS "OneAI repo root: ${ONEAI_ROOT}")
+
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
-    # oneai_c.h lives at the repo root bindings/c/
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../bindings/c
+    ${ONEAI_ROOT}/bindings/c
 )
 
 add_library(oneai_napi SHARED
@@ -21,7 +35,14 @@ add_library(oneai_napi SHARED
 
 # liboneai.a (staticlib) is staged per-ABI by scripts/build_harmony.sh and
 # linked statically into liboneai_napi.so (one self-contained NAPI .so).
-set(ONEAI_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_OHOS_ARCH_ABI})
+# CMAKE_OHOS_ARCH_ABI is set by the OHOS NDK toolchain (arm64-v8a / x86_64).
+if(DEFINED CMAKE_OHOS_ARCH_ABI)
+    set(ONEAI_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_OHOS_ARCH_ABI})
+elseif(DEFINED OHOS_ARCH)
+    set(ONEAI_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libs/${OHOS_ARCH})
+else()
+    set(ONEAI_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/libs/${CMAKE_LIBRARY_ARCHITECTURE})
+endif()
 if(EXISTS "${ONEAI_LIB_DIR}/liboneai.a")
     target_link_libraries(oneai_napi PRIVATE ${ONEAI_LIB_DIR}/liboneai.a)
 else()
