@@ -46,8 +46,13 @@ endif()
 if(EXISTS "${ONEAI_LIB_DIR}/liboneai.a")
     target_link_libraries(oneai_napi PRIVATE ${ONEAI_LIB_DIR}/liboneai.a)
 else()
-    message(WARNING "liboneai.a not found at ${ONEAI_LIB_DIR} — run scripts/build_harmony.sh first.")
+    message(FATAL_ERROR
+        "liboneai.a not found at ${ONEAI_LIB_DIR}.\n"
+        "Build the Rust staticlib first:\n"
+        "  export OHOS_NDK_HOME=/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/native\n"
+        "  rustup target add aarch64-linux-ohos x86_64-linux-ohos\n"
+        "  ./scripts/build_harmony.sh")
 endif()
 
-# OHOS NAPI runtime
-target_link_libraries(oneai_napi PRIVATE hilog_ndk.z)
+# OHOS NAPI runtime (libace_napi.z.so — provides napi_* symbols) + hilog.
+target_link_libraries(oneai_napi PRIVATE ace_napi.z hilog_ndk.z)
