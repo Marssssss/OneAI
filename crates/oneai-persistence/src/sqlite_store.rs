@@ -186,6 +186,17 @@ fn deserialize_metadata(json: &str) -> std::collections::HashMap<String, String>
 /// `conversations.title` column so `list_conversations` can label rows without
 /// loading full histories.
 fn conversation_title(conversation: &Conversation, max: usize) -> Option<String> {
+    // An explicit title (set e.g. by group-chat scenarios as
+    // `metadata["title"] = "面试演练·前端工程师"`) wins over the default
+    // first-user-message derivation — group chats rarely carry a user message
+    // for the opener turn, so without this they fall back to "新对话".
+    if let Some(title) = conversation.metadata.get("title") {
+        let normalized = normalize_title(title, max);
+        if normalized.is_empty() {
+            return None;
+        }
+        return Some(normalized);
+    }
     let first_user = conversation.messages.iter()
         .find(|m| matches!(m.role, oneai_core::Role::User))?;
     let text = first_user.text_content();
@@ -193,14 +204,19 @@ fn conversation_title(conversation: &Conversation, max: usize) -> Option<String>
     if trimmed.is_empty() {
         return None;
     }
-    // Collapse any run of whitespace (incl. newlines) into a single space.
-    let collapsed: String = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(normalize_title(trimmed, max))
+}
+
+/// Collapse any run of whitespace (incl. newlines) into a single space, then
+/// truncate to `max` chars on a char boundary (appending an ellipsis).
+fn normalize_title(text: &str, max: usize) -> String {
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max {
-        Some(collapsed)
+        collapsed
     } else {
         // Truncate on a char boundary to avoid splitting a multi-byte char.
         let end = collapsed.char_indices().nth(max).map(|(i, _)| i).unwrap_or(collapsed.len());
-        Some(format!("{}…", &collapsed[..end]))
+        format!("{}…", &collapsed[..end])
     }
 }
 
@@ -941,6 +957,29 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         // Most recently updated should be first
         assert_eq!(sessions[0].message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_title_prefers_metadata_title() {
+        // Group-chat scenarios set metadata["title"]; it must win over the
+        // first-user-message derivation (which would be None for an opener-only
+        // transcript → "新对话" in the UI).
+        let (store, _dir) = make_store();
+
+        let mut conv = Conversation::with_id("conv1".to_string());
+        conv.metadata
+            .insert("title".to_string(), "面试演练·前端工程师".to_string());
+        // No user message — the default derivation would yield None.
+        conv.add_message(oneai_core::Message::assistant("开场白".to_string()));
+        store.save_conversation("conv1", &conv).await.unwrap();
+
+        let sessions = store.list_conversations().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].title.as_deref(),
+            Some("面试演练·前端工程师"),
+            "metadata.title must override the first-user-message derivation",
+        );
     }
 
     #[tokio::test]

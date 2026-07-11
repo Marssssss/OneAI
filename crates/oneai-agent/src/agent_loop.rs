@@ -2932,13 +2932,37 @@ impl AgentLoop {
 
         loop {
             // Check for cancellation between chunks so a mid-stream interrupt
-            // aborts promptly instead of draining the whole stream.
+            // aborts promptly instead of draining the whole stream. Also guard
+            // against a *stalled* stream: if the provider holds the connection
+            // open without sending a chunk or closing (common under provider
+            // load / proxy / network blips), `stream.next()` would otherwise
+            // block forever — the UI would show partial text + a blinking cursor
+            // and appear frozen with no recovery short of the Stop button. The
+            // idle timeout aborts with a retryable error so the user keeps the
+            // partial output and can retry. (Per-chunk timeout: each received
+            // chunk resets the timer, so slow-but-progressing streams survive.)
+            const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
             let chunk = tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => break,
-                c = stream.next() => match c {
-                    Some(c) => c,
-                    None => break,
+                // No data for the idle window → stream stalled. Surface as a
+                // retryable error (the partial text already streamed stays in
+                // the UI bubble; on_complete is NOT emitted, so the VM's error
+                // path attaches a retry affordance).
+                res = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()) => match res {
+                    Ok(Some(c)) => c,
+                    Ok(None) => break,            // stream closed cleanly
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            "stream idle timeout ({}s) — provider stalled mid-stream; \
+                             aborting with retryable error",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        );
+                        return Err(oneai_core::error::OneAIError::Other(format!(
+                            "模型流式输出停滞({}秒无数据),可能为网络/服务端中断,请重试。",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        )));
+                    }
                 },
             };
             // Save chunk metadata before processing

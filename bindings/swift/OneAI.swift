@@ -966,6 +966,16 @@ public func FfiConverterTypeMemoryFactory_lower(_ value: MemoryFactory) -> UInt6
 public protocol OneAiAppProtocol: AnyObject, Sendable {
     
     /**
+     * Build a multi-agent group-chat session from a scenario spec.
+     *
+     * Each member carries its own provider config (kind/model/api_key), so a
+     * scenario can mix models. The session streams `speaker`-labeled
+     * `ChatEventView`s through `run_task`'s callback. See
+     * [`OneAiGroupChatSession`](crate::group_chat::OneAiGroupChatSession).
+     */
+    func createGroupSession(scenario: ScenarioSpecView) throws  -> OneAiGroupChatSession
+    
+    /**
      * Create a new agent session.
      */
     func createSession()  -> OneAiSession
@@ -1069,6 +1079,24 @@ open class OneAiApp: OneAiAppProtocol, @unchecked Sendable {
 
     
 
+    
+    /**
+     * Build a multi-agent group-chat session from a scenario spec.
+     *
+     * Each member carries its own provider config (kind/model/api_key), so a
+     * scenario can mix models. The session streams `speaker`-labeled
+     * `ChatEventView`s through `run_task`'s callback. See
+     * [`OneAiGroupChatSession`](crate::group_chat::OneAiGroupChatSession).
+     */
+open func createGroupSession(scenario: ScenarioSpecView)throws  -> OneAiGroupChatSession  {
+    return try  FfiConverterTypeOneAiGroupChatSession_lift(try rustCallWithError(FfiConverterTypeOneAIErrorView_lift) {
+        uniffiCallStatus in
+    uniffi_oneai_fn_method_oneaiapp_create_group_session(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeScenarioSpecView_lower(scenario),uniffiCallStatus
+    )
+})
+}
     
     /**
      * Create a new agent session.
@@ -1323,6 +1351,18 @@ public protocol OneAiAppBuilderProtocol: AnyObject, Sendable {
      */
     func sqlitePersistenceAt(path: String)  -> OneAiAppBuilder
     
+    /**
+     * Set the agent's base system prompt (persona / role instruction).
+     *
+     * This is the foreign-friendly way to give a single-agent app a persona
+     * without constructing a full `DomainPack`. It injects a lightweight
+     * `DomainPack` whose only non-default field is `system_prompt_template`,
+     * via the same `AppBuilder::domain_pack` path the engine uses. Call
+     * before `provider_config`/`build`; the latest call wins. Idempotent in
+     * the sense that each call replaces the pack (no accumulation).
+     */
+    func systemPrompt(prompt: String)  -> OneAiAppBuilder
+    
 }
 /**
  * UniFFI-exported AppBuilder wrapper.
@@ -1535,6 +1575,26 @@ open func sqlitePersistenceAt(path: String) -> OneAiAppBuilder  {
     uniffi_oneai_fn_method_oneaiappbuilder_sqlite_persistence_at(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Set the agent's base system prompt (persona / role instruction).
+     *
+     * This is the foreign-friendly way to give a single-agent app a persona
+     * without constructing a full `DomainPack`. It injects a lightweight
+     * `DomainPack` whose only non-default field is `system_prompt_template`,
+     * via the same `AppBuilder::domain_pack` path the engine uses. Call
+     * before `provider_config`/`build`; the latest call wins. Idempotent in
+     * the sense that each call replaces the pack (no accumulation).
+     */
+open func systemPrompt(prompt: String) -> OneAiAppBuilder  {
+    return try!  FfiConverterTypeOneAIAppBuilder_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_oneai_fn_method_oneaiappbuilder_system_prompt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(prompt),uniffiCallStatus
     )
 })
 }
@@ -2099,6 +2159,289 @@ public func FfiConverterTypeOneAIToolWrapper_lower(_ value: OneAiToolWrapper) ->
 
 
 /**
+ * Foreign wrapper over the engine `GroupChatSession`.
+ */
+public protocol OneAiGroupChatSessionProtocol: AnyObject, Sendable {
+    
+    /**
+     * Request the running member to interrupt at the next iteration boundary.
+     */
+    func interrupt() async 
+    
+    /**
+     * Snapshot the shared conversation as speaker-labeled message views (for
+     * replaying a resumed scenario session).
+     */
+    func messages() async  -> [MessageView]
+    
+    /**
+     * Append the user's message and run the round's speakers per the turn
+     * policy until it's the user's turn again. Streams `speaker`-labeled
+     * events through `callback` (fires on the tokio worker thread — the
+     * foreign callback must marshal UI updates to the main thread).
+     */
+    func runTask(userInput: String, callback: ChatEventCallback) async throws 
+    
+    /**
+     * Persist the shared conversation immediately (no-op when SQLite
+     * persistence is not enabled). `run_task` already auto-saves after each
+     * round; this is for mid-round saves.
+     */
+    func save() async throws 
+    
+    /**
+     * Switch the turn policy to a fixed scripted order at runtime. Used by
+     * scenarios that change speakers mid-conversation — e.g. an interview
+     * scenario calls this with `["coach"]` to drop the interviewer and go
+     * coach-only for the debrief phase (coach summarizes, then takes the
+     * user's follow-up questions). The next `run_task` honors the new order.
+     */
+    func setScriptedOrder(order: [String]) async 
+    
+    /**
+     * Run the opener turn (if the scenario configured one). No user message
+     * is added. Call before the first `run_task`. Emits speaker-labeled
+     * events through `callback`.
+     */
+    func start(callback: ChatEventCallback) async throws 
+    
+}
+/**
+ * Foreign wrapper over the engine `GroupChatSession`.
+ */
+open class OneAiGroupChatSession: OneAiGroupChatSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_oneai_fn_clone_oneaigroupchatsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_oneai_fn_free_oneaigroupchatsession(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Request the running member to interrupt at the next iteration boundary.
+     */
+open func interrupt()async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaigroupchatsession_interrupt(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_void,
+            completeFunc: ffi_oneai_rust_future_complete_void,
+            freeFunc: ffi_oneai_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * Snapshot the shared conversation as speaker-labeled message views (for
+     * replaying a resumed scenario session).
+     */
+open func messages()async  -> [MessageView]  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaigroupchatsession_messages(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oneai_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oneai_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeMessageView.lift,
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * Append the user's message and run the round's speakers per the turn
+     * policy until it's the user's turn again. Streams `speaker`-labeled
+     * events through `callback` (fires on the tokio worker thread — the
+     * foreign callback must marshal UI updates to the main thread).
+     */
+open func runTask(userInput: String, callback: ChatEventCallback)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaigroupchatsession_run_task(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(userInput),FfiConverterTypeChatEventCallback_lower(callback)
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_void,
+            completeFunc: ffi_oneai_rust_future_complete_void,
+            freeFunc: ffi_oneai_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeOneAIErrorView_lift
+        )
+}
+    
+    /**
+     * Persist the shared conversation immediately (no-op when SQLite
+     * persistence is not enabled). `run_task` already auto-saves after each
+     * round; this is for mid-round saves.
+     */
+open func save()async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaigroupchatsession_save(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_void,
+            completeFunc: ffi_oneai_rust_future_complete_void,
+            freeFunc: ffi_oneai_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeOneAIErrorView_lift
+        )
+}
+    
+    /**
+     * Switch the turn policy to a fixed scripted order at runtime. Used by
+     * scenarios that change speakers mid-conversation — e.g. an interview
+     * scenario calls this with `["coach"]` to drop the interviewer and go
+     * coach-only for the debrief phase (coach summarizes, then takes the
+     * user's follow-up questions). The next `run_task` honors the new order.
+     */
+open func setScriptedOrder(order: [String])async   {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaigroupchatsession_set_scripted_order(
+                        self.uniffiCloneHandle(),FfiConverterSequenceString.lower(order)
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_void,
+            completeFunc: ffi_oneai_rust_future_complete_void,
+            freeFunc: ffi_oneai_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * Run the opener turn (if the scenario configured one). No user message
+     * is added. Call before the first `run_task`. Emits speaker-labeled
+     * events through `callback`.
+     */
+open func start(callback: ChatEventCallback)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaigroupchatsession_start(
+                        self.uniffiCloneHandle(),FfiConverterTypeChatEventCallback_lower(callback)
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_void,
+            completeFunc: ffi_oneai_rust_future_complete_void,
+            freeFunc: ffi_oneai_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeOneAIErrorView_lift
+        )
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOneAiGroupChatSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = OneAiGroupChatSession
+
+    public static func lift(_ handle: UInt64) throws -> OneAiGroupChatSession {
+        return OneAiGroupChatSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: OneAiGroupChatSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OneAiGroupChatSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: OneAiGroupChatSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneAiGroupChatSession_lift(_ handle: UInt64) throws -> OneAiGroupChatSession {
+    return try FfiConverterTypeOneAiGroupChatSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneAiGroupChatSession_lower(_ value: OneAiGroupChatSession) -> UInt64 {
+    return FfiConverterTypeOneAiGroupChatSession.lower(value)
+}
+
+
+
+
+
+
+/**
  * A concrete LLM provider factory for foreign-language bindings.
  *
  * Since UniFFI can't handle `Arc<dyn LlmProvider>`, this factory
@@ -2327,6 +2670,145 @@ public func FfiConverterTypeToolFactory_lower(_ value: ToolFactory) -> UInt64 {
 
 
 /**
+ * One persona in a scenario.
+ */
+public struct AgentSpecView: Equatable, Hashable {
+    /**
+     * Stable member id (referenced by turn policies / opener).
+     */
+    public var id: String
+    /**
+     * Display name.
+     */
+    public var name: String
+    /**
+     * Persona system prompt.
+     */
+    public var systemPrompt: String
+    /**
+     * Provider kind: `"openai"` / `"anthropic"` / `"ollama"`.
+     */
+    public var kind: String
+    /**
+     * Model name (e.g. `gpt-4o`, `claude-sonnet-4-6`).
+     */
+    public var model: String
+    /**
+     * API key (required for openai/anthropic; ignored for ollama).
+     */
+    public var apiKey: String?
+    /**
+     * Base URL override (OpenAI-compatible endpoints).
+     */
+    public var baseUrl: String?
+    /**
+     * UI accent color hint (e.g. `"#4D6BFE"`). Opaque to the engine.
+     */
+    public var color: String?
+    /**
+     * UI avatar SF-symbol hint. Opaque to the engine.
+     */
+    public var avatar: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stable member id (referenced by turn policies / opener).
+         */id: String, 
+        /**
+         * Display name.
+         */name: String, 
+        /**
+         * Persona system prompt.
+         */systemPrompt: String, 
+        /**
+         * Provider kind: `"openai"` / `"anthropic"` / `"ollama"`.
+         */kind: String, 
+        /**
+         * Model name (e.g. `gpt-4o`, `claude-sonnet-4-6`).
+         */model: String, 
+        /**
+         * API key (required for openai/anthropic; ignored for ollama).
+         */apiKey: String?, 
+        /**
+         * Base URL override (OpenAI-compatible endpoints).
+         */baseUrl: String?, 
+        /**
+         * UI accent color hint (e.g. `"#4D6BFE"`). Opaque to the engine.
+         */color: String?, 
+        /**
+         * UI avatar SF-symbol hint. Opaque to the engine.
+         */avatar: String?) {
+        self.id = id
+        self.name = name
+        self.systemPrompt = systemPrompt
+        self.kind = kind
+        self.model = model
+        self.apiKey = apiKey
+        self.baseUrl = baseUrl
+        self.color = color
+        self.avatar = avatar
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AgentSpecView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAgentSpecView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AgentSpecView {
+        return
+            try AgentSpecView(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                systemPrompt: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                model: FfiConverterString.read(from: &buf), 
+                apiKey: FfiConverterOptionString.read(from: &buf), 
+                baseUrl: FfiConverterOptionString.read(from: &buf), 
+                color: FfiConverterOptionString.read(from: &buf), 
+                avatar: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AgentSpecView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.systemPrompt, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.apiKey, into: &buf)
+        FfiConverterOptionString.write(value.baseUrl, into: &buf)
+        FfiConverterOptionString.write(value.color, into: &buf)
+        FfiConverterOptionString.write(value.avatar, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentSpecView_lift(_ buf: RustBuffer) throws -> AgentSpecView {
+    return try FfiConverterTypeAgentSpecView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAgentSpecView_lower(_ value: AgentSpecView) -> RustBuffer {
+    return FfiConverterTypeAgentSpecView.lower(value)
+}
+
+
+/**
  * Approval request (UniFFI-compatible view).
  *
  * `args_json` is a JSON-encoded string of the tool arguments,
@@ -2446,6 +2928,12 @@ public struct MessageView: Equatable, Hashable {
      * Concatenated text content of the message's text blocks.
      */
     public var text: String
+    /**
+     * Which agent produced this message. `None` for single-agent sessions
+     * (or system/tool messages); in a group-chat session it carries the
+     * speaking member's id, read from `Message.metadata["speaker"]`.
+     */
+    public var speaker: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2455,9 +2943,15 @@ public struct MessageView: Equatable, Hashable {
          */role: String, 
         /**
          * Concatenated text content of the message's text blocks.
-         */text: String) {
+         */text: String, 
+        /**
+         * Which agent produced this message. `None` for single-agent sessions
+         * (or system/tool messages); in a group-chat session it carries the
+         * speaking member's id, read from `Message.metadata["speaker"]`.
+         */speaker: String?) {
         self.role = role
         self.text = text
+        self.speaker = speaker
     }
 
     
@@ -2477,13 +2971,15 @@ public struct FfiConverterTypeMessageView: FfiConverterRustBuffer {
         return
             try MessageView(
                 role: FfiConverterString.read(from: &buf), 
-                text: FfiConverterString.read(from: &buf)
+                text: FfiConverterString.read(from: &buf), 
+                speaker: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: MessageView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.role, into: &buf)
         FfiConverterString.write(value.text, into: &buf)
+        FfiConverterOptionString.write(value.speaker, into: &buf)
     }
 }
 
@@ -2614,6 +3110,129 @@ public func FfiConverterTypeProviderConfigView_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeProviderConfigView_lower(_ value: ProviderConfigView) -> RustBuffer {
     return FfiConverterTypeProviderConfigView.lower(value)
+}
+
+
+/**
+ * A multi-agent scenario spec handed to `OneAIApp::create_group_session`.
+ */
+public struct ScenarioSpecView: Equatable, Hashable {
+    /**
+     * The cast (each member carries its own provider config).
+     */
+    public var members: [AgentSpecView]
+    /**
+     * `"scripted"` | `"roundrobin"` | `"moderator"`.
+     */
+    public var turnPolicy: String
+    /**
+     * `scripted` only — member ids to run in order after each user input.
+     */
+    public var scriptOrder: [String]?
+    /**
+     * `moderator` only — member id that picks the next speaker.
+     */
+    public var moderatorId: String?
+    /**
+     * Member id that delivers the opening turn (`None` = user speaks first).
+     */
+    public var openerAgentId: String?
+    /**
+     * Seed line for the opener.
+     */
+    public var openerLine: String?
+    /**
+     * Optional conversation title (e.g. `"面试演练·前端工程师"`). Persisted into
+     * `Conversation.metadata["title"]` so the saved session is named after the
+     * scenario instead of falling back to "新对话".
+     */
+    public var title: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The cast (each member carries its own provider config).
+         */members: [AgentSpecView], 
+        /**
+         * `"scripted"` | `"roundrobin"` | `"moderator"`.
+         */turnPolicy: String, 
+        /**
+         * `scripted` only — member ids to run in order after each user input.
+         */scriptOrder: [String]?, 
+        /**
+         * `moderator` only — member id that picks the next speaker.
+         */moderatorId: String?, 
+        /**
+         * Member id that delivers the opening turn (`None` = user speaks first).
+         */openerAgentId: String?, 
+        /**
+         * Seed line for the opener.
+         */openerLine: String?, 
+        /**
+         * Optional conversation title (e.g. `"面试演练·前端工程师"`). Persisted into
+         * `Conversation.metadata["title"]` so the saved session is named after the
+         * scenario instead of falling back to "新对话".
+         */title: String?) {
+        self.members = members
+        self.turnPolicy = turnPolicy
+        self.scriptOrder = scriptOrder
+        self.moderatorId = moderatorId
+        self.openerAgentId = openerAgentId
+        self.openerLine = openerLine
+        self.title = title
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ScenarioSpecView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScenarioSpecView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScenarioSpecView {
+        return
+            try ScenarioSpecView(
+                members: FfiConverterSequenceTypeAgentSpecView.read(from: &buf), 
+                turnPolicy: FfiConverterString.read(from: &buf), 
+                scriptOrder: FfiConverterOptionSequenceString.read(from: &buf), 
+                moderatorId: FfiConverterOptionString.read(from: &buf), 
+                openerAgentId: FfiConverterOptionString.read(from: &buf), 
+                openerLine: FfiConverterOptionString.read(from: &buf), 
+                title: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ScenarioSpecView, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeAgentSpecView.write(value.members, into: &buf)
+        FfiConverterString.write(value.turnPolicy, into: &buf)
+        FfiConverterOptionSequenceString.write(value.scriptOrder, into: &buf)
+        FfiConverterOptionString.write(value.moderatorId, into: &buf)
+        FfiConverterOptionString.write(value.openerAgentId, into: &buf)
+        FfiConverterOptionString.write(value.openerLine, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScenarioSpecView_lift(_ buf: RustBuffer) throws -> ScenarioSpecView {
+    return try FfiConverterTypeScenarioSpecView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScenarioSpecView_lower(_ value: ScenarioSpecView) -> RustBuffer {
+    return FfiConverterTypeScenarioSpecView.lower(value)
 }
 
 
@@ -2805,11 +3424,17 @@ public func FfiConverterTypeToolOutputView_lower(_ value: ToolOutputView) -> Rus
 
 
 /**
- * Streaming event surfaced to foreign code during `OneAISession::run_task`.
+ * Streaming event surfaced to foreign code during `OneAISession::run_task`
+ * (and `OneAiGroupChatSession::run_task`).
  *
  * The foreign side implements `ChatEventCallback` and receives these events
  * in real time (callback-driven, not polled). Each variant maps from the
  * corresponding `AgentLoopObserver` callback in `oneai-agent`.
+ *
+ * `speaker` identifies which agent produced the event. In single-agent
+ * `run_task` it is always `None` (the foreign UI treats it as the single
+ * assistant). In a group-chat session it carries the speaking member's id
+ * so the UI can route the fragment to that member's bubble.
  */
 
 public enum ChatEventView: Equatable, Hashable {
@@ -2817,37 +3442,37 @@ public enum ChatEventView: Equatable, Hashable {
     /**
      * A streamed text fragment from the model (typewriter effect).
      */
-    case streamChunk(text: String
+    case streamChunk(text: String, speaker: String?
     )
     /**
      * A streamed thinking/reasoning fragment (extended-thinking models).
      */
-    case thinking(text: String
+    case thinking(text: String, speaker: String?
     )
     /**
      * The model decided to call one or more tools (one event per call).
      */
-    case toolCall(id: String, name: String, argsJson: String
+    case toolCall(id: String, name: String, argsJson: String, speaker: String?
     )
     /**
      * A tool call finished with its result.
      */
-    case toolResult(callId: String, toolName: String, content: String, success: Bool
+    case toolResult(callId: String, toolName: String, content: String, success: Bool, speaker: String?
     )
     /**
      * The model produced a final direct answer (loop will end).
      */
-    case directAnswer(text: String
+    case directAnswer(text: String, speaker: String?
     )
     /**
      * The agent loop completed with the final answer.
      */
-    case complete(finalText: String
+    case complete(finalText: String, speaker: String?
     )
     /**
      * The agent loop errored out.
      */
-    case error(message: String
+    case error(message: String, speaker: String?
     )
 
 
@@ -2870,25 +3495,25 @@ public struct FfiConverterTypeChatEventView: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .streamChunk(text: try FfiConverterString.read(from: &buf)
+        case 1: return .streamChunk(text: try FfiConverterString.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 2: return .thinking(text: try FfiConverterString.read(from: &buf)
+        case 2: return .thinking(text: try FfiConverterString.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 3: return .toolCall(id: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf), argsJson: try FfiConverterString.read(from: &buf)
+        case 3: return .toolCall(id: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf), argsJson: try FfiConverterString.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 4: return .toolResult(callId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), content: try FfiConverterString.read(from: &buf), success: try FfiConverterBool.read(from: &buf)
+        case 4: return .toolResult(callId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), content: try FfiConverterString.read(from: &buf), success: try FfiConverterBool.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 5: return .directAnswer(text: try FfiConverterString.read(from: &buf)
+        case 5: return .directAnswer(text: try FfiConverterString.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 6: return .complete(finalText: try FfiConverterString.read(from: &buf)
+        case 6: return .complete(finalText: try FfiConverterString.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 7: return .error(message: try FfiConverterString.read(from: &buf)
+        case 7: return .error(message: try FfiConverterString.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -2899,44 +3524,51 @@ public struct FfiConverterTypeChatEventView: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .streamChunk(text):
+        case let .streamChunk(text,speaker):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(text, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
             
         
-        case let .thinking(text):
+        case let .thinking(text,speaker):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(text, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
             
         
-        case let .toolCall(id,name,argsJson):
+        case let .toolCall(id,name,argsJson,speaker):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(id, into: &buf)
             FfiConverterString.write(name, into: &buf)
             FfiConverterString.write(argsJson, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
             
         
-        case let .toolResult(callId,toolName,content,success):
+        case let .toolResult(callId,toolName,content,success,speaker):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(callId, into: &buf)
             FfiConverterString.write(toolName, into: &buf)
             FfiConverterString.write(content, into: &buf)
             FfiConverterBool.write(success, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
             
         
-        case let .directAnswer(text):
+        case let .directAnswer(text,speaker):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(text, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
             
         
-        case let .complete(finalText):
+        case let .complete(finalText,speaker):
             writeInt(&buf, Int32(6))
             FfiConverterString.write(finalText, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
             
         
-        case let .error(message):
+        case let .error(message,speaker):
             writeInt(&buf, Int32(7))
             FfiConverterString.write(message, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
             
         }
     }
@@ -3714,6 +4346,80 @@ fileprivate struct FfiConverterOptionTypePermissionLevelView: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAgentSpecView: FfiConverterRustBuffer {
+    typealias SwiftType = [AgentSpecView]
+
+    public static func write(_ value: [AgentSpecView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAgentSpecView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AgentSpecView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AgentSpecView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAgentSpecView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeMessageView: FfiConverterRustBuffer {
     typealias SwiftType = [MessageView]
 
@@ -3824,6 +4530,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_oneai_checksum_method_oneaiapp_create_group_session() != 19108) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_oneai_checksum_method_oneaiapp_create_session() != 11717) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3899,7 +4608,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_oneai_checksum_method_oneaiappbuilder_sqlite_persistence_at() != 59712) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_oneai_checksum_method_oneaiappbuilder_system_prompt() != 1384) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_oneai_checksum_method_chateventcallback_on_event() != 45403) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaigroupchatsession_interrupt() != 14580) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaigroupchatsession_messages() != 6744) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaigroupchatsession_run_task() != 51579) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaigroupchatsession_save() != 28711) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaigroupchatsession_set_scripted_order() != 36232) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaigroupchatsession_start() != 49816) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_constructor_oneaiappbuilder_new() != 34161) {

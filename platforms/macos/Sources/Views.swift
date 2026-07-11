@@ -10,7 +10,9 @@ import AppKit
 
 struct ChatScreen: View {
     @StateObject private var vm = ChatViewModel()
+    @StateObject private var artifacts = ArtifactStore()
     @State private var showSettings = false
+    @State private var showCommandPalette = false
     @State private var pendingDeleteId: String? = nil
 
     var body: some View {
@@ -20,6 +22,17 @@ struct ChatScreen: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } detail: {
             ChatDetail(vm: vm, onOpenSettings: { showSettings = true })
+                .environmentObject(artifacts)
+        }
+        .environmentObject(artifacts)
+        .background(
+            // ⌘K opens the command palette.
+            Button("") { showCommandPalette = true }
+                .keyboardShortcut("k", modifiers: .command)
+                .opacity(0)
+        )
+        .sheet(isPresented: $showCommandPalette) {
+            CommandPalette(vm: vm, isPresented: $showCommandPalette)
         }
         .task {
             await vm.ensureApp()
@@ -53,81 +66,259 @@ private struct Sidebar: View {
     @ObservedObject var vm: ChatViewModel
     let onOpenSettings: () -> Void
     let onDelete: (String) -> Void
+    /// Single sheet source-of-truth. SwiftUI glitches when two `.sheet`
+    /// modifiers attach to the same view (empty/unclosable sheet); one
+    /// enum-driven sheet sidesteps that entirely.
+    private enum SidebarSheet: Identifiable {
+        case editScenario(Scenario)   // new or edit a scenario in the editor
+        case topicFor(Scenario)      // prompt for a topic before starting
+        var id: String {
+            switch self {
+            case .editScenario(let s): return "edit-\(s.id)"
+            case .topicFor(let s):    return "topic-\(s.id)"
+            }
+        }
+    }
+    @State private var sheet: SidebarSheet? = nil
+
+    /// Start a scenario: if it declares topic-intake fields, prompt for them
+    /// first; otherwise start immediately.
+    private func startScenario(_ sc: Scenario) {
+        if !(sc.topicFields?.isEmpty ?? true) {
+            sheet = .topicFor(sc)
+        } else {
+            Task { await vm.newConversation(scenario: sc) }
+        }
+    }
+
+    /// New-conversation menu: single-agent chat, or start from a scenario.
+    private var newConversationMenu: some View {
+        Menu {
+            Button("新对话(单 Agent)") { Task { await vm.newConversation() } }
+            Menu("从场景开始") {
+                ForEach(vm.agentStore.scenarios) { sc in
+                    Button(sc.name) { startScenario(sc) }
+                }
+            }
+        } label: {
+            Label("新建", systemImage: "plus")
+        }
+    }
+
+    /// The scrollable scenario + recent-session list.
+    private var sidebarList: some View {
+        VStack(spacing: 0) {
+            scenariosSection
+            sessionsSection
+        }
+    }
+
+    private var scenariosSection: some View {
+        SidebarSection(title: "场景", trailing: newScenarioButton) {
+            ForEach(vm.agentStore.scenarios) { sc in
+                ScenarioRow(scenario: sc, isCurrent: vm.currentScenario?.id == sc.id) {
+                    startScenario(sc)
+                }
+                .contextMenu {
+                    Button("编辑场景") { sheet = .editScenario(sc) }
+                    Button("删除场景", role: .destructive) { vm.agentStore.delete(sc) }
+                }
+            }
+        }
+    }
+
+    private var newScenarioButton: some View {
+        Button {
+            let sc = Scenario(id: UUID().uuidString, name: "新场景", icon: "person.2",
+                              agents: [], turnPolicy: .scripted, scriptOrder: nil,
+                              moderatorId: nil, openerAgentId: nil, openerLine: nil,
+                              topicFields: nil, debrief: nil)
+            sheet = .editScenario(sc)
+        } label: { Image(systemName: "plus") }
+    }
+
+    private var sessionsSection: some View {
+        SidebarSection(title: "最近会话") {
+            if vm.sessions.isEmpty {
+                Text("还没有会话\n发一条消息开始吧")
+                    .foregroundStyle(Theme.onSurfaceVar)
+                    .font(.footnote)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(vm.sessions, id: \.id) { s in
+                    SessionRow(info: s, isCurrent: s.id == vm.currentSessionId,
+                               onTap: { Task { await vm.loadSession(s.id) } },
+                               onDelete: { onDelete(s.id) })
+                }
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("会话").font(.headline)
                 Spacer()
-                Button {
-                    Task { await vm.newConversation() }
-                } label: {
-                    Label("新对话", systemImage: "plus")
-                }
-                .buttonStyle(.borderless)
-                .help("新对话")
+                newConversationMenu
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("新建对话 / 从场景开始")
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
             Divider()
-            if vm.sessions.isEmpty {
-                Text("还没有会话\n发一条消息开始吧")
-                    .foregroundStyle(Theme.onSurfaceVar)
-                    .font(.footnote)
-                    .padding(20)
-                Spacer()
-            } else {
-                List(selection: Binding(
-                    get: { vm.currentSessionId },
-                    set: { if let id = $0 { Task { await vm.loadSession(id) } } }
-                )) {
-                    ForEach(vm.sessions, id: \.id) { s in
-                        SessionRow(info: s, isCurrent: s.id == vm.currentSessionId,
-                                   onDelete: { onDelete(s.id) })
-                            .tag(s.id)
-                    }
-                }
-                .listStyle(.sidebar)
+
+            ScrollView {
+                sidebarList
             }
-            Divider()
-            Button {
-                onOpenSettings()
-            } label: {
-                Label("设置", systemImage: "gearshape")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.vertical, 12)
         }
         .background(Theme.surface)
+        .sheet(item: $sheet) { presented in
+            switch presented {
+            case .editScenario(let sc):
+                ScenarioEditor(scenario: sc, store: vm.agentStore,
+                               onClose: { sheet = nil })
+            case .topicFor(let sc):
+                ScenarioFormSheet(scenario: sc, vm: vm) { sheet = nil }
+            }
+        }
+    }
+}
+
+private struct SidebarSection<Content: View>: View {
+    let title: String
+    let trailing: AnyView?
+    @ViewBuilder let content: () -> Content
+
+    init(title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title; self.trailing = nil; self.content = content
+    }
+    init<T: View>(title: String, trailing: T, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title; self.trailing = AnyView(trailing); self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).font(.caption.bold()).foregroundStyle(Theme.onSurfaceVar)
+                Spacer()
+                if let trailing { trailing }
+            }
+            .padding(.horizontal, 12).padding(.top, 8)
+            content()
+        }
+    }
+}
+
+private struct ScenarioRow: View {
+    let scenario: Scenario
+    let isCurrent: Bool
+    let onTap: () -> Void
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 8) {
+                Image(systemName: scenario.icon)
+                    .foregroundStyle(Theme.primary)
+                    .frame(width: 22)
+                Text(scenario.name)
+                    .font(.subheadline)
+                    .fontWeight(isCurrent ? .semibold : .regular)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .background(isCurrent ? Theme.primaryCont.opacity(0.5) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
+    }
+}
+
+/// Topic-intake form shown before starting a scenario that declares
+/// `topicFields`. The collected values (keyed by field id) are baked into each
+/// member's system prompt as background and into the session title by
+/// `Scenario.specView`. Blank fields are allowed — empty values are dropped.
+private struct ScenarioFormSheet: View {
+    let scenario: Scenario
+    @ObservedObject var vm: ChatViewModel
+    let onClose: () -> Void
+    /// field id → value, seeded empty.
+    @State private var values: [String: String] = [:]
+    @FocusState private var focusedField: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: scenario.icon)
+                    .foregroundStyle(Theme.primary).font(.title3)
+                Text("开始「\(scenario.name)」").font(.headline)
+                Spacer()
+            }
+            ForEach(scenario.topicFields ?? []) { f in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(f.label).font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                    TextField(f.placeholder ?? f.label, text: Binding(
+                        get: { values[f.id] ?? "" },
+                        set: { values[f.id] = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedField, equals: f.id)
+                    .onSubmit { start() }
+                }
+            }
+            Text("开场 agent 会围绕你输入的信息发言;这些值会作为各角色背景,并写入会话名。留空可直接开始。")
+                .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel, action: onClose).keyboardShortcut(.escape)
+                Button("开始") { start() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .frame(width: 440)
+        .padding(16)
+        .onAppear { focusedField = scenario.topicFields?.first?.id }
+    }
+
+    private func start() {
+        let v = values
+        onClose()
+        Task { await vm.newConversation(scenario: scenario, topicValues: v) }
     }
 }
 
 private struct SessionRow: View {
     let info: SessionInfoView
     let isCurrent: Bool
+    let onTap: () -> Void
     let onDelete: () -> Void
     var body: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(info.title?.isEmpty == false ? info.title! : "新对话")
-                    .font(.subheadline)
-                    .fontWeight(isCurrent ? .semibold : .regular)
-                    .lineLimit(1)
-                Text("\(info.messageCount) 条 · \(relativeTime(info.updatedAtMs))")
-                    .font(.caption)
-                    .foregroundStyle(Theme.onSurfaceVar)
-                    .lineLimit(1)
+        Button(action: onTap) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(info.title?.isEmpty == false ? info.title! : "新对话")
+                        .font(.subheadline)
+                        .fontWeight(isCurrent ? .semibold : .regular)
+                        .lineLimit(1)
+                    Text("\(info.messageCount) 条 · \(relativeTime(info.updatedAtMs))")
+                        .font(.caption)
+                        .foregroundStyle(Theme.onSurfaceVar)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundStyle(Theme.onSurfaceVar)
+                }
+                .buttonStyle(.plain)
+                .help("删除")
             }
-            Spacer()
-            Button(action: onDelete) {
-                Image(systemName: "trash")
-                    .foregroundStyle(Theme.onSurfaceVar)
-            }
-            .buttonStyle(.plain)
-            .help("删除")
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .background(isCurrent ? Theme.primaryCont.opacity(0.5) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
-        .padding(.vertical, 4)
-        .listRowBackground(isCurrent ? Theme.primaryCont.opacity(0.5) : Color.clear)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
     }
 }
 
@@ -146,20 +337,64 @@ private func relativeTime(_ epochMs: Int64) -> String {
 
 private struct ChatDetail: View {
     @ObservedObject var vm: ChatViewModel
+    @EnvironmentObject var artifacts: ArtifactStore
     let onOpenSettings: () -> Void
     @State private var stickToBottom = true
 
     var body: some View {
+        if artifacts.visible {
+            HSplitView {
+                detailContent
+                ArtifactCanvas(store: artifacts)
+                    .frame(minWidth: 280, idealWidth: 420)
+            }
+        } else {
+            detailContent
+        }
+    }
+
+    private var detailContent: some View {
         VStack(spacing: 0) {
             // Top bar
             HStack {
-                Text("OneAI").font(.title3.bold()).foregroundStyle(Theme.onBg)
+                if let sc = vm.currentScenario {
+                    Image(systemName: sc.icon).foregroundStyle(Theme.primary)
+                    Text(sc.name).font(.title3.bold()).foregroundStyle(Theme.onBg)
+                    if vm.debriefActive {
+                        // Debrief phase indicator.
+                        Text("· 总结阶段").font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                    } else if let debrief = sc.debrief {
+                        // "结束面试" button — switches to the debrief member only.
+                        Button {
+                            Task { await vm.endScenarioDebrief() }
+                        } label: {
+                            Label(debrief.buttonLabel, systemImage: "checkmark.circle")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(vm.running)
+                        .help("结束并进入总结阶段")
+                    }
+                } else {
+                    Text("OneAI").font(.title3.bold()).foregroundStyle(Theme.onBg)
+                }
                 Spacer()
+                if vm.lastTurnTokens > 0 {
+                    Label("\(vm.lastTurnTokens) tok", systemImage: "flame")
+                        .font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                        .help("本轮约 token 数")
+                }
                 Button { onOpenSettings() } label: { Image(systemName: "gearshape") }
                     .help("Provider 设置")
             }
             .padding(.horizontal, 16).padding(.vertical, 8)
             Divider()
+
+            // Turn-status bar (group-chat only): who's speaking / waiting.
+            if vm.currentScenario != nil {
+                TurnStatusBar(vm: vm)
+                Divider()
+            }
 
             if vm.needsKeyConfig {
                 FirstRunHint(onOpen: onOpenSettings).padding(.horizontal, 12).padding(.vertical, 6)
@@ -171,8 +406,8 @@ private struct ChatDetail: View {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(vm.items) { entry in
                             switch entry {
-                            case .user(let u): UserBubble(text: u.text)
-                            case .assistant(let a): AssistantBubble(item: a, onRetry: { Task { await vm.retryLast() } })
+                            case .user(let u): UserBubble(text: u.text, onEdit: { newText in Task { await vm.editAndResend(u, newText: newText) } })
+                            case .assistant(let a): AssistantBubble(item: a, scenario: vm.currentScenario, onRetry: { Task { await vm.retryLast() } })
                             }
                         }
                         Color.clear.frame(height: 1).id("bottom")
@@ -201,7 +436,10 @@ private struct ChatDetail: View {
                              Task { await vm.runTask(task) }
                          }
                      },
-                     onStop: { Task { await vm.stop() } })
+                     onStop: { Task { await vm.stop() } },
+                     canSend: {
+                         !vm.running && !vm.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                     })
         }
         .background(Theme.background)
     }
@@ -211,6 +449,9 @@ private struct ChatDetail: View {
 
 private struct UserBubble: View {
     let text: String
+    let onEdit: (String) -> Void
+    @State private var editing = false
+    @State private var draft = ""
     var body: some View {
         HStack { Spacer(minLength: 60)
             Text(text).foregroundStyle(Theme.onBg)
@@ -218,27 +459,112 @@ private struct UserBubble: View {
                 .background(Theme.primaryCont)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .frame(maxWidth: 360, alignment: .trailing)
+                .contextMenu {
+                    Button("编辑并重发") { draft = text; editing = true }
+                    Button("复制") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
+                }
         }
+        .sheet(isPresented: $editing) {
+            VStack(spacing: 12) {
+                Text("编辑消息").font(.headline)
+                TextEditor(text: $draft)
+                    .font(.body).scrollContentBackground(.hidden)
+                    .background(Theme.surfaceVar).clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(minHeight: 100, maxHeight: 240)
+                HStack {
+                    Spacer()
+                    Button("取消", role: .cancel) { editing = false }.keyboardShortcut(.escape)
+                    Button("重发") { let s = draft; editing = false; onEdit(s) }.keyboardShortcut(.defaultAction)
+                }
+            }.frame(width: 420).padding(16)
+        }
+    }
+}
+
+private struct SpeakerHeader: View {
+    let speakerId: String?
+    let scenario: Scenario?
+    var body: some View {
+        let meta = AgentStore.speakerMeta(for: speakerId ?? "", in: scenario)
+        HStack(spacing: 6) {
+            Image(systemName: meta.2)
+                .foregroundStyle(Color(hex: meta.1))
+            Text(meta.0)
+                .font(.subheadline.bold())
+                .foregroundStyle(Color(hex: meta.1))
+            if let a = scenario?.agent(speakerId ?? "") {
+                Text(a.role)
+                    .font(.caption2)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Color(hex: a.color).opacity(0.18))
+                    .foregroundStyle(Color(hex: a.color))
+                    .clipShape(Capsule())
+            }
+        }
+    }
+}
+
+/// Compact turn-status bar: shows the active speaker / who's waiting.
+private struct TurnStatusBar: View {
+    @ObservedObject var vm: ChatViewModel
+    var body: some View {
+        let policyLabel = vm.currentScenario?.turnPolicy.label ?? ""
+        HStack(spacing: 6) {
+            if vm.running, let sid = vm.activeSpeakerId {
+                let meta = AgentStore.speakerMeta(for: sid, in: vm.currentScenario)
+                Image(systemName: meta.2).foregroundStyle(Color(hex: meta.1))
+                Text("\(meta.0) 正在发言").font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                ThreeDots()
+            } else {
+                Image(systemName: "hand.raised").foregroundStyle(Theme.onSurfaceVar)
+                Text("轮到你 — 发送你的回答").font(.caption).foregroundStyle(Theme.onSurfaceVar)
+            }
+            Spacer()
+            Text("策略: \(policyLabel)").font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 5)
+        .background(Theme.secondaryCont)
     }
 }
 
 private struct AssistantBubble: View {
     let item: AssistantItem
+    let scenario: Scenario?
     let onRetry: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // Speaker header (group-chat only; single-agent shows nothing).
+            if item.speakerId != nil {
+                SpeakerHeader(speakerId: item.speakerId, scenario: scenario)
+            }
             ThinkingCard(item: item)
             if !item.steps.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(item.steps) { StepLine(step: $0) }
-                }
+                ToolStepsCard(steps: item.steps)
             }
             if !item.text.isEmpty {
-                MarkdownText(text: item.text)
-                    .contextMenu {
-                        Button("复制") { copyText(item.text) }
-                        Button("分享") { shareText(item.text) }
-                    }
+                if item.streaming && !item.done {
+                    // During streaming, render the partial text as plain Text —
+                    // NOT MarkdownText. Re-parsing the growing markdown on every
+                    // token (splitMarkdown + buildInline, O(n²) over the stream)
+                    // floods the main thread and beachballs the app on long
+                    // replies. The full markdown render lands once on `.done`.
+                    Text(item.text)
+                        .foregroundStyle(Theme.onBg)
+                        .font(.body)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    MarkdownText(text: item.text)
+                        .equatable()
+                        .contextMenu {
+                            Button("重新生成") { onRetry() }
+                            Button("复制") { copyText(item.text) }
+                            Button("分享") { shareText(item.text) }
+                        }
+                }
             }
             if item.streaming && !item.text.isEmpty {
                 BlinkingCursor()
@@ -252,6 +578,13 @@ private struct AssistantBubble: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Left accent bar in the speaker's color (group-chat only).
+        .overlay(alignment: .leading) {
+            if let sid = item.speakerId {
+                let meta = AgentStore.speakerMeta(for: sid, in: scenario)
+                Color(hex: meta.1).frame(width: 3).clipShape(RoundedRectangle(cornerRadius: 1.5))
+            }
+        }
     }
     private func copyText(_ s: String) {
         NSPasteboard.general.clearContents()
@@ -269,7 +602,12 @@ private struct ThinkingCard: View {
     var body: some View {
         if item.thinking.isEmpty { EmptyView() }
         else {
-            let expanded = item.thinkingActive || item.thinkingExpanded
+            // Collapsed by default — don't stream the raw reasoning text into
+            // the bubble (it's the model's internal chain-of-thought, often
+            // starting "The user…"; showing it expanded looked like a glitch).
+            // Show "思考中…" + dots while active, "已深度思考" + chevron after,
+            // expand on click.
+            let expanded = item.thinkingExpanded
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Image(systemName: "brain.head.profile").foregroundStyle(Theme.primary)
@@ -304,8 +642,43 @@ private struct ThinkingCard: View {
     }
 }
 
+private struct ToolStepsCard: View {
+    let steps: [ToolStep]
+    @State private var expanded: Bool = true
+    var body: some View {
+        let ok = steps.filter { $0.ok == true }.count
+        let fail = steps.filter { $0.ok == false }.count
+        let pending = steps.filter { $0.ok == nil }.count
+        VStack(alignment: .leading, spacing: 3) {
+            Button { withAnimation { expanded.toggle() } } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                    Image(systemName: "wrench.and.screwdriver")
+                        .font(.caption2).foregroundStyle(Theme.primary)
+                    Text("调用了 \(steps.count) 个工具")
+                        .font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                    if ok > 0 { Text("✓\(ok)").font(.caption2).foregroundStyle(Theme.tertiary) }
+                    if fail > 0 { Text("✗\(fail)").font(.caption2).foregroundStyle(Theme.errorC) }
+                    if pending > 0 { ThreeDots() }
+                }
+            }.buttonStyle(.plain)
+            if expanded {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(steps) { StepLine(step: $0) }
+                }
+                .padding(.leading, 12)
+            }
+        }
+        .padding(8)
+        .background(Theme.secondaryCont)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct StepLine: View {
     let step: ToolStep
+    @State private var expanded: Bool = false
     var body: some View {
         let (icon, color) = step.ok == true ? ("checkmark", Theme.tertiary)
                           : step.ok == false ? ("xmark", Theme.errorC)
@@ -319,29 +692,75 @@ private struct StepLine: View {
                     .lineLimit(2)
             }
             if let r = step.result {
-                Text("    └ \(String(r.prefix(200)))")
+                Text("└ \(r)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(Theme.onSurfaceVar)
-                    .lineLimit(3)
+                    .lineLimit(expanded ? nil : 3)
+                    .padding(.leading, 12)
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation { expanded.toggle() } }
     }
 }
 
 // MARK: - Markdown
 
-private struct MarkdownText: View {
+private struct MarkdownText: View, Equatable {
     let text: String
+    @State private var copied: Bool = false
+    // Equatable so `.equatable()` skips re-parsing the markdown of unchanged
+    // bubbles. Without this, every streamTick flush re-evaluates EVERY visible
+    // AssistantBubble (AssistantItem is a plain class SwiftUI can't short-circuit)
+    // → every MarkdownText re-runs splitMarkdown/buildInline → O(N×parse) per
+    // flush → main thread drowns → beachball on long conversations. With this,
+    // only the bubble whose `text` actually changed re-parses.
+    static func == (lhs: MarkdownText, rhs: MarkdownText) -> Bool { lhs.text == rhs.text }
     var body: some View {
-        let segs = splitMarkdown(text)
-        return VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(segs.enumerated()), id: \.offset) { _, seg in
-                switch seg {
-                case .prose(let body):
+        let blocks = splitMarkdown(text)
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .heading(let level, let body):
+                    Text(buildInline(body, codeBg: Theme.surfaceVar))
+                        .font(headingFont(level))
+                        .foregroundStyle(Theme.onBg)
+                        .textSelection(.enabled)
+                case .paragraph(let body):
                     Text(buildInline(body, codeBg: Theme.surfaceVar))
                         .foregroundStyle(Theme.onBg)
                         .font(.body)
                         .textSelection(.enabled)
+                case .blockquote(let body):
+                    HStack(alignment: .top, spacing: 8) {
+                        Rectangle().fill(Theme.primary.opacity(0.5)).frame(width: 3)
+                        Text(buildInline(body, codeBg: Theme.surfaceVar))
+                            .font(.body.italic())
+                            .foregroundStyle(Theme.onSurfaceVar)
+                            .textSelection(.enabled)
+                    }
+                case .bulletList(let items):
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text("•")
+                                Text(buildInline(item, codeBg: Theme.surfaceVar))
+                                    .foregroundStyle(Theme.onBg).font(.body).textSelection(.enabled)
+                            }
+                        }
+                    }
+                case .orderedList(let items):
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text("\(idx + 1).")
+                                Text(buildInline(item, codeBg: Theme.surfaceVar))
+                                    .foregroundStyle(Theme.onBg).font(.body).textSelection(.enabled)
+                            }
+                        }
+                    }
+                case .table(let header, let rows):
+                    MarkdownTable(header: header, rows: rows)
                 case .code(let lang, let code):
                     CodeCard(lang: lang, code: code)
                 }
@@ -349,27 +768,95 @@ private struct MarkdownText: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    private func headingFont(_ level: Int) -> Font {
+        switch level {
+        case 1: return .title2.bold()
+        case 2: return .title3.bold()
+        case 3: return .headline
+        default: return .subheadline.bold()
+        }
+    }
+}
+
+private struct MarkdownTable: View {
+    let header: [String]
+    let rows: [[String]]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 0) {
+                ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
+                    Text(buildInline(cell, codeBg: Theme.surfaceVar))
+                        .font(.subheadline.bold()).foregroundStyle(Theme.onBg)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                }
+            }
+            .background(Theme.surfaceVar)
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .top, spacing: 0) {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                        Text(buildInline(cell, codeBg: Theme.surfaceVar))
+                            .font(.subheadline).foregroundStyle(Theme.onBg)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(6)
+                    }
+                }
+                Divider()
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.surfaceVar, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
 }
 
 private struct CodeCard: View {
     let lang: String
     let code: String
+    @EnvironmentObject var artifacts: ArtifactStore
+    @State private var copied: Bool = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if !lang.isEmpty {
-                Text(lang).font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Theme.onSurfaceVar)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                if !lang.isEmpty {
+                    Text(lang).font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.onSurfaceVar)
+                }
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(code, forType: .string)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                }.buttonStyle(.plain).help("复制代码")
+                if code.count > 80 {
+                    Button {
+                        artifacts.open(Artifact(title: lang.isEmpty ? "代码" : lang,
+                                                lang: lang, content: code))
+                    } label: {
+                        Image(systemName: "rectangle.split.3x1")
+                            .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                    }
+                    .buttonStyle(.plain)
+                    .help("在画布打开")
+                }
             }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Theme.surfaceVar)
             ScrollView(.horizontal) {
                 Text(code).font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(Theme.onBg)
                     .textSelection(.enabled)
+                    .padding(.horizontal, 10).padding(.bottom, 10)
             }
         }
-        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surfaceVar)
+        .background(Theme.surfaceVar.opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.surfaceVar, lineWidth: 1))
     }
 }
 
@@ -428,7 +915,14 @@ private struct InputBar: View {
     let onChange: (String) -> Void
     let onSend: () -> Void
     let onStop: () -> Void
+    /// Live "can the input be sent right now?" (non-empty + not running). A
+    /// closure (not a Bool) so the Return-key monitor reads current state.
+    let canSend: () -> Bool
     @FocusState private var focused: Bool
+
+    /// Reference holder so the NSEvent monitor (installed once) reads live
+    /// focus state. Stored state lives across re-renders via @StateObject.
+    @StateObject private var focus = InputFocusHolder()
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -465,7 +959,40 @@ private struct InputBar: View {
         }
         .padding(8)
         .background(Theme.surface)
+        .onChange(of: focused) { focus.focused = $0 }
+        // ⏎ Return sends; ⇧⏎ inserts a newline. (macOS 13 TextEditor doesn't
+        // fire onSubmit on plain Return, and a Button `.return` shortcut is
+        // pre-empted by the field editor — so we intercept at the key-event
+        // level, scoped to when the input is focused.)
+        .onAppear {
+            focus.canSend = canSend
+            focus.send = onSend
+            if focus.monitor == nil {
+                focus.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [focus] event in
+                    // 36 = Return, 76 = keypad Enter.
+                    let isReturn = event.keyCode == 36 || event.keyCode == 76
+                    let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                    let bare = mods.isEmpty || mods == .capsLock
+                    guard isReturn, bare, focus.focused, focus.canSend() else { return event }
+                    DispatchQueue.main.async { focus.send() }
+                    return nil   // swallow so no newline is inserted
+                }
+            }
+        }
+        .onDisappear {
+            if let m = focus.monitor { NSEvent.removeMonitor(m); focus.monitor = nil }
+        }
     }
+}
+
+/// Holds live focus state + the install-once Return-key monitor, so the
+/// monitor (created in `onAppear`) reads current values instead of stale
+/// captures.
+private final class InputFocusHolder: ObservableObject {
+    var focused: Bool = false
+    var canSend: () -> Bool = { false }
+    var send: () -> Void = {}
+    var monitor: Any?
 }
 
 // MARK: - Settings sheet

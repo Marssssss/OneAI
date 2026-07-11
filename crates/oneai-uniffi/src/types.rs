@@ -233,27 +233,33 @@ impl From<ContentBlockView> for oneai_core::ContentBlock {
 
 // ─── ChatEventView ──────────────────────────────────────────────────
 
-/// Streaming event surfaced to foreign code during `OneAISession::run_task`.
+/// Streaming event surfaced to foreign code during `OneAISession::run_task`
+/// (and `OneAiGroupChatSession::run_task`).
 ///
 /// The foreign side implements `ChatEventCallback` and receives these events
 /// in real time (callback-driven, not polled). Each variant maps from the
 /// corresponding `AgentLoopObserver` callback in `oneai-agent`.
+///
+/// `speaker` identifies which agent produced the event. In single-agent
+/// `run_task` it is always `None` (the foreign UI treats it as the single
+/// assistant). In a group-chat session it carries the speaking member's id
+/// so the UI can route the fragment to that member's bubble.
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum ChatEventView {
     /// A streamed text fragment from the model (typewriter effect).
-    StreamChunk { text: String },
+    StreamChunk { text: String, speaker: Option<String> },
     /// A streamed thinking/reasoning fragment (extended-thinking models).
-    Thinking { text: String },
+    Thinking { text: String, speaker: Option<String> },
     /// The model decided to call one or more tools (one event per call).
-    ToolCall { id: String, name: String, args_json: String },
+    ToolCall { id: String, name: String, args_json: String, speaker: Option<String> },
     /// A tool call finished with its result.
-    ToolResult { call_id: String, tool_name: String, content: String, success: bool },
+    ToolResult { call_id: String, tool_name: String, content: String, success: bool, speaker: Option<String> },
     /// The model produced a final direct answer (loop will end).
-    DirectAnswer { text: String },
+    DirectAnswer { text: String, speaker: Option<String> },
     /// The agent loop completed with the final answer.
-    Complete { final_text: String },
+    Complete { final_text: String, speaker: Option<String> },
     /// The agent loop errored out.
-    Error { message: String },
+    Error { message: String, speaker: Option<String> },
 }
 
 // ─── ProviderConfigView ─────────────────────────────────────────────
@@ -331,6 +337,10 @@ pub struct MessageView {
     pub role: String,
     /// Concatenated text content of the message's text blocks.
     pub text: String,
+    /// Which agent produced this message. `None` for single-agent sessions
+    /// (or system/tool messages); in a group-chat session it carries the
+    /// speaking member's id, read from `Message.metadata["speaker"]`.
+    pub speaker: Option<String>,
 }
 
 impl From<&oneai_core::Message> for MessageView {
@@ -345,6 +355,7 @@ impl From<&oneai_core::Message> for MessageView {
         Self {
             role,
             text: m.text_content(),
+            speaker: m.metadata.get("speaker").cloned(),
         }
     }
 }

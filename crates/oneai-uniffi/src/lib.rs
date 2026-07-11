@@ -50,6 +50,7 @@ pub use callback::*;
 // UniFFI-exported wrapper objects
 pub mod app_builder;
 pub mod app;
+pub mod group_chat;
 
 // `extern "C"` JSON facade for runtimes UniFFI 0.32 can't generate bindings
 // for (C# / NAPI-C++). Exported from the same cdylib alongside the uniffi

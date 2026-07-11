@@ -6,6 +6,7 @@ use oneai_core::traits::Tool;
 use oneai_agent::AgentLoop;
 
 use crate::callback::{CallbackObserver, ChatEventCallback};
+use crate::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
 use crate::types::{ToolOutputView, OneAIErrorView, PlatformView, SessionInfoView, MessageView};
 
 /// UniFFI-exported App wrapper.
@@ -83,6 +84,20 @@ impl OneAIApp {
     #[uniffi::method]
     pub fn platform(&self) -> PlatformView {
         PlatformView::from(*self.inner.platform())
+    }
+
+    /// Build a multi-agent group-chat session from a scenario spec.
+    ///
+    /// Each member carries its own provider config (kind/model/api_key), so a
+    /// scenario can mix models. The session streams `speaker`-labeled
+    /// `ChatEventView`s through `run_task`'s callback. See
+    /// [`OneAiGroupChatSession`](crate::group_chat::OneAiGroupChatSession).
+    #[uniffi::method]
+    pub fn create_group_session(
+        &self,
+        scenario: ScenarioSpecView,
+    ) -> std::result::Result<Arc<OneAiGroupChatSession>, OneAIErrorView> {
+        OneAiGroupChatSession::build(scenario, &self.inner)
     }
 }
 
@@ -186,6 +201,7 @@ impl OneAISession {
                 let view = OneAIErrorView::from(e);
                 observer.emit(crate::types::ChatEventView::Error {
                     message: format!("{:?}", view),
+                    speaker: None,
                 });
                 Err(view)
             }
@@ -366,7 +382,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                crate::types::ChatEventView::Complete { ref final_text }
+                crate::types::ChatEventView::Complete { ref final_text, .. }
                     if final_text.contains("Hello")
             )),
             "expected a Complete event containing 'Hello', got: {:?}",
@@ -409,6 +425,64 @@ mod tests {
             res.is_err(),
             "unknown provider kind must return an error, not silently build"
         );
+    }
+
+    // ─── Group chat: create_group_session build/reject (no network) ────
+
+    async fn group_app() -> Arc<OneAIApp> {
+        // An app with no provider is fine — group-chat members carry their own
+        // provider configs. We only exercise the build/reject seam here; a full
+        // run_task needs a real provider (network).
+        let app_inner = oneai_app::AppBuilder::new()
+            .noop_interaction_gate()
+            .default_parser()
+            .build()
+            .await
+            .expect("build");
+        Arc::new(OneAIApp { inner: Arc::new(app_inner) })
+    }
+
+    #[tokio::test]
+    async fn test_create_group_session_rejects_empty_members() {
+        let app = group_app().await;
+        let scenario = crate::group_chat::ScenarioSpecView {
+            members: Vec::new(),
+            turn_policy: "roundrobin".to_string(),
+            script_order: None,
+            moderator_id: None,
+            opener_agent_id: None,
+            opener_line: None,
+            title: None,
+        };
+        let res = app.create_group_session(scenario);
+        assert!(res.is_err(), "empty members must error");
+    }
+
+    #[tokio::test]
+    async fn test_create_group_session_rejects_unknown_member_in_script_order() {
+        let app = group_app().await;
+        let m = crate::group_chat::AgentSpecView {
+            id: "interviewer".to_string(),
+            name: "面试官".to_string(),
+            system_prompt: "你是面试官".to_string(),
+            kind: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key: Some("sk-test".to_string()),
+            base_url: None,
+            color: None,
+            avatar: None,
+        };
+        let scenario = crate::group_chat::ScenarioSpecView {
+            members: vec![m],
+            turn_policy: "scripted".to_string(),
+            script_order: Some(vec!["ghost".to_string()]),
+            moderator_id: None,
+            opener_agent_id: None,
+            opener_line: None,
+            title: None,
+        };
+        let res = app.create_group_session(scenario);
+        assert!(res.is_err(), "scripted order referencing an unknown member must error");
     }
 
     // ─── S4: session persistence / resume / list / delete ──────────────

@@ -49,6 +49,7 @@ pub mod swarm;
 pub mod skill_tool;
 pub mod plan_state;
 pub mod meta_tool;
+pub mod group_chat;
 
 pub use scope_state::*;
 pub use react_agent::*;

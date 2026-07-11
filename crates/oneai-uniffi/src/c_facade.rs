@@ -77,6 +77,11 @@ fn message_to_json(m: &MessageView) -> String {
     j_escape(&m.role, &mut s);
     s.push_str(",\"text\":");
     j_escape(&m.text, &mut s);
+    s.push_str(",\"speaker\":");
+    match &m.speaker {
+        Some(sp) => j_escape(sp, &mut s),
+        None => s.push_str("null"),
+    }
     s.push('}');
     s
 }
@@ -100,35 +105,52 @@ fn session_to_json(s: &SessionInfoView) -> String {
 fn event_to_json(e: &ChatEventView) -> String {
     let mut o = String::new();
     match e {
-        ChatEventView::StreamChunk { text } => {
-            o.push_str("{\"type\":\"StreamChunk\",\"text\":"); j_escape(text, &mut o); o.push('}');
+        ChatEventView::StreamChunk { text, speaker } => {
+            o.push_str("{\"type\":\"StreamChunk\",\"text\":"); j_escape(text, &mut o);
+            push_speaker(&mut o, speaker); o.push('}');
         }
-        ChatEventView::Thinking { text } => {
-            o.push_str("{\"type\":\"Thinking\",\"text\":"); j_escape(text, &mut o); o.push('}');
+        ChatEventView::Thinking { text, speaker } => {
+            o.push_str("{\"type\":\"Thinking\",\"text\":"); j_escape(text, &mut o);
+            push_speaker(&mut o, speaker); o.push('}');
         }
-        ChatEventView::ToolCall { id, name, args_json } => {
+        ChatEventView::ToolCall { id, name, args_json, speaker } => {
             o.push_str("{\"type\":\"ToolCall\",\"id\":"); j_escape(id, &mut o);
             o.push_str(",\"name\":"); j_escape(name, &mut o);
-            o.push_str(",\"args_json\":"); j_escape(args_json, &mut o); o.push('}');
+            o.push_str(",\"args_json\":"); j_escape(args_json, &mut o);
+            push_speaker(&mut o, speaker); o.push('}');
         }
-        ChatEventView::ToolResult { call_id, tool_name, content, success } => {
+        ChatEventView::ToolResult { call_id, tool_name, content, success, speaker } => {
             o.push_str("{\"type\":\"ToolResult\",\"call_id\":"); j_escape(call_id, &mut o);
             o.push_str(",\"tool_name\":"); j_escape(tool_name, &mut o);
             o.push_str(",\"content\":"); j_escape(content, &mut o);
             o.push_str(",\"success\":"); o.push_str(if *success { "true" } else { "false" });
-            o.push('}');
+            push_speaker(&mut o, speaker); o.push('}');
         }
-        ChatEventView::DirectAnswer { text } => {
-            o.push_str("{\"type\":\"DirectAnswer\",\"text\":"); j_escape(text, &mut o); o.push('}');
+        ChatEventView::DirectAnswer { text, speaker } => {
+            o.push_str("{\"type\":\"DirectAnswer\",\"text\":"); j_escape(text, &mut o);
+            push_speaker(&mut o, speaker); o.push('}');
         }
-        ChatEventView::Complete { final_text } => {
-            o.push_str("{\"type\":\"Complete\",\"final_text\":"); j_escape(final_text, &mut o); o.push('}');
+        ChatEventView::Complete { final_text, speaker } => {
+            o.push_str("{\"type\":\"Complete\",\"final_text\":"); j_escape(final_text, &mut o);
+            push_speaker(&mut o, speaker); o.push('}');
         }
-        ChatEventView::Error { message } => {
-            o.push_str("{\"type\":\"Error\",\"message\":"); j_escape(message, &mut o); o.push('}');
+        ChatEventView::Error { message, speaker } => {
+            o.push_str("{\"type\":\"Error\",\"message\":"); j_escape(message, &mut o);
+            push_speaker(&mut o, speaker); o.push('}');
         }
     }
     o
+}
+
+/// Append `,"speaker":<id|null>` for a group-chat event; single-agent
+/// events pass `None` → emitted as JSON `null` (the foreign side treats
+/// null as the single assistant).
+fn push_speaker(o: &mut String, speaker: &Option<String>) {
+    o.push_str(",\"speaker\":");
+    match speaker {
+        Some(s) => j_escape(s, o),
+        None => o.push_str("null"),
+    }
 }
 
 // Box::into_raw a CString the caller frees with oneai_free_string.
@@ -436,10 +458,11 @@ mod tests {
 
     #[test]
     fn event_to_json_shape() {
-        let e = ChatEventView::StreamChunk { text: "hi".into() };
-        assert_eq!(event_to_json(&e), "{\"type\":\"StreamChunk\",\"text\":\"hi\"}");
-        let e = ChatEventView::ToolResult { call_id: "1".into(), tool_name: "calc".into(), content: "5".into(), success: true };
+        let e = ChatEventView::StreamChunk { text: "hi".into(), speaker: None };
+        assert_eq!(event_to_json(&e), "{\"type\":\"StreamChunk\",\"text\":\"hi\",\"speaker\":null}");
+        let e = ChatEventView::ToolResult { call_id: "1".into(), tool_name: "calc".into(), content: "5".into(), success: true, speaker: Some("interviewer".into()) };
         assert!(event_to_json(&e).contains("\"success\":true"));
+        assert!(event_to_json(&e).contains("\"speaker\":\"interviewer\""));
     }
 
     #[test]
@@ -447,7 +470,7 @@ mod tests {
         let c = Box::new(Collecting { events: Mutex::new(vec![]) });
         let ctx = &*c as *const Collecting as *mut c_void;
         let adapter = CCallback { cb: collect, ctx };
-        ChatEventCallback::on_event(&adapter, ChatEventView::Thinking { text: "x".into() });
+        ChatEventCallback::on_event(&adapter, ChatEventView::Thinking { text: "x".into(), speaker: None });
         assert_eq!(c.events.lock().unwrap().len(), 1);
         assert!(c.events.lock().unwrap()[0].contains("Thinking"));
     }

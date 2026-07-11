@@ -30,6 +30,8 @@ final class UserItem: Identifiable {
 // bumps streamTick, so the row re-renders via the parent ForEach.
 final class AssistantItem: Identifiable {
     let id = UUID()
+    /// Which member produced this item. `nil` = single-agent (legacy).
+    var speakerId: String? = nil
     var thinking = ""
     var thinkingActive = false
     var thinkingDone = false
@@ -56,13 +58,11 @@ enum ChatEntry: Identifiable {
 
 final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     weak var vm: ChatViewModel?
-    let turn: AssistantItem
-    init(vm: ChatViewModel, turn: AssistantItem) { self.vm = vm; self.turn = turn }
+    init(vm: ChatViewModel) { self.vm = vm }
     func onEvent(event: ChatEventView) {
         // Fires on the tokio worker thread → marshal to main before touching UI.
-        let turn = self.turn
         let vm = self.vm
-        DispatchQueue.main.async { vm?.handle(event, turn: turn) }
+        DispatchQueue.main.async { vm?.handle(event) }
     }
 }
 
@@ -83,6 +83,18 @@ final class ChatViewModel: ObservableObject {
     @Published var error: String? = nil
     @Published var streamTick: Int64 = 0
     @Published var currentSessionId: String? = nil
+    /// Multi-agent scenario library (presets + user-edited).
+    @Published var agentStore = AgentStore()
+    /// Active scenario for the current conversation; `nil` = single-agent chat.
+    @Published var currentScenario: Scenario? = nil
+    /// Speaker currently producing events (for the turn-status bar).
+    @Published var activeSpeakerId: String? = nil
+    /// True once the current scenario's debrief phase has been triggered (the
+    /// "结束面试" button). Drives the top-bar button visibility + the phase
+    /// label; reset on every new/loaded conversation.
+    @Published var debriefActive: Bool = false
+    /// Lightweight per-turn token estimate (chars/4) — surfaced in the top bar.
+    @Published var lastTurnTokens: Int = 0
 
     var needsKeyConfig: Bool {
         (kind == "openai" || kind == "anthropic") && apiKey.isEmpty
@@ -91,6 +103,17 @@ final class ChatViewModel: ObservableObject {
     private var lastUserTask: String? = nil
     private var app: OneAiApp? = nil
     private var session: OneAiSession? = nil
+    /// Group-chat session when `currentScenario != nil`.
+    private var groupSession: OneAiGroupChatSession? = nil
+    /// The AssistantItem currently accumulating events for the active speaker.
+    private var activeSpeakerItem: AssistantItem? = nil
+    /// Throttle: last time `streamTick` was bumped for a hot-path event
+    /// (streamChunk/thinking). Bumping per-token re-renders the whole chat
+    /// (incl. full markdown re-parse of the growing bubble) on every token —
+    /// for long streams the main queue backs up faster than it drains and the
+    /// app beachballs. Coalesce to ~20 fps; `.complete`/`.error` always flush.
+    private var lastStreamFlush = Date.distantPast
+    private static let streamFlushInterval: TimeInterval = 0.05
 
     var dbPath: String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -154,14 +177,20 @@ final class ChatViewModel: ObservableObject {
     }
 
     func rebuildApp() async {
+        let savedScenario = currentScenario
         app = nil
         session = nil
+        groupSession = nil
         currentSessionId = nil
+        currentScenario = nil
+        debriefActive = false
         items.removeAll()
         error = nil
         await ensureApp()
         await refreshSessions()
-        if let cur = sessions.first {
+        if let saved = savedScenario {
+            await newConversation(scenario: saved)
+        } else if let cur = sessions.first {
             await loadSession(cur.id)
         } else {
             await newConversation()
@@ -175,16 +204,110 @@ final class ChatViewModel: ObservableObject {
     }
 
     func newConversation() async {
-        guard let a = app else { return }
-        let s = a.createSession()
-        session = s
-        currentSessionId = s.sessionId()
-        items.removeAll()
-        error = nil
+        await newConversation(scenario: nil, topicValues: nil)
     }
 
+    /// Convenience for starting without collected topic values (a scenario
+    /// with no `topicFields`, or programmatic single-agent restart).
+    func newConversation(scenario: Scenario?) async {
+        await newConversation(scenario: scenario, topicValues: nil)
+    }
+
+    /// Start a fresh conversation. When `scenario` is non-nil, a multi-agent
+    /// group-chat session is created. The collected `topicValues` (keyed by
+    /// field id) are folded into each member's system prompt as background
+    /// and into the session title by `specView`. For scenarios with no opener,
+    /// the values are sent as the first user message to kick off the first
+    /// round (e.g. writing workshop → writer drafts).
+    func newConversation(scenario: Scenario?, topicValues: [String: String]?) async {
+        guard let a = app else { return }
+        currentScenario = scenario
+        groupSession = nil
+        activeSpeakerItem = nil
+        activeSpeakerId = nil
+        debriefActive = false
+
+        if let scenario = scenario {
+            let spec = scenario.specView(defaultKind: kind,
+                                         defaultApiKey: apiKey,
+                                         defaultBaseUrl: baseUrl,
+                                         defaultModel: model,
+                                         topicValues: topicValues)
+            do {
+                let gs = try a.createGroupSession(scenario: spec)
+                groupSession = gs
+                session = nil
+                items.removeAll()
+                error = nil
+                currentSessionId = nil   // group-chat conversation id is engine-side
+                running = true
+                if scenario.openerAgentId != nil {
+                    // Opener speaks first (it knows the topic from its system prompt).
+                    let cb = StreamCallback(vm: self)
+                    try await gs.start(callback: cb)
+                    running = false
+                    await refreshSessions()   // scenario session shows up, titled, immediately
+                } else {
+                    // No opener — kick off the first round with a user message
+                    // built from the collected topic values (writing workshop).
+                    let firstMsg = Self.firstUserMessage(for: scenario, topicValues: topicValues)
+                    if !firstMsg.isEmpty {
+                        await runGroupTask(firstMsg, addUserItem: true)
+                    } else {
+                        running = false
+                    }
+                }
+            } catch {
+                self.error = "场景启动失败: \(friendlyError(error))"
+                currentScenario = nil
+                groupSession = nil
+                debriefActive = false
+                running = false
+            }
+        } else {
+            // Single-agent path.
+            let s = a.createSession()
+            session = s
+            currentSessionId = s.sessionId()
+            items.removeAll()
+            error = nil
+        }
+    }
+
+    /// Compose the first user message for a no-opener scenario from its topic
+    /// fields + collected values (e.g. writing workshop → "秋天散文"). Empty
+    /// when the user supplied nothing.
+    private static func firstUserMessage(for scenario: Scenario, topicValues: [String: String]?) -> String {
+        guard let fields = scenario.topicFields else { return "" }
+        let vals = fields.compactMap { f -> String? in
+            let v = (topicValues?[f.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return v.isEmpty ? nil : v
+        }
+        return vals.joined(separator: " · ")
+    }
+
+    /// Trigger the scenario's debrief phase (e.g. "结束面试"): switch the turn
+    /// policy to a scripted order containing only the debrief member, then send
+    /// the summary prompt so that member produces a full-session summary.
+    /// Subsequent user messages route only to the debrief member — the other
+    /// members (e.g. the interviewer) no longer participate.
+    func endScenarioDebrief() async {
+        guard !running, let gs = groupSession, let debrief = currentScenario?.debrief,
+              !debriefActive else { return }
+        debriefActive = true
+        await gs.setScriptedOrder(order: [debrief.debriefMemberId])
+        // Send the summary prompt as a user turn; with the now-singleton order
+        // only the debrief member responds. runGroupTask handles streaming/save.
+        await runGroupTask(debrief.summaryPrompt, addUserItem: true)
+    }
+
+    /// Resume a saved single-agent session (group-chat resume not wired yet —
+    /// group chats are created fresh per conversation in v1).
     func loadSession(_ id: String) async {
         guard let a = app else { return }
+        currentScenario = nil
+        groupSession = nil
+        debriefActive = false
         let s = await a.createSessionWithId(id: id)
         session = s
         currentSessionId = s.sessionId()
@@ -199,6 +322,7 @@ final class ChatViewModel: ObservableObject {
             case "assistant":
                 if !m.text.isEmpty {
                     let item = AssistantItem()
+                    item.speakerId = m.speaker   // nil for single-agent
                     item.text = m.text
                     item.done = true
                     items.append(.assistant(item))
@@ -218,16 +342,42 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Run
 
-    func handle(_ event: ChatEventView, turn: AssistantItem) {
+    /// Route an event to the active speaker's AssistantItem. When the speaker
+    /// changes (a new member's turn), a fresh AssistantItem is created. For
+    /// single-agent events (speaker nil), each runTask call's first event
+    /// seeds the item.
+    func handle(_ event: ChatEventView) {
+        let speakerId = speaker(of: event)
+        // New speaker → flush the previous item and start a new one.
+        if let sid = speakerId, activeSpeakerItem?.speakerId != sid {
+            let item = AssistantItem()
+            item.speakerId = sid
+            activeSpeakerItem = item
+            items.append(.assistant(item))
+            activeSpeakerId = sid
+        } else if activeSpeakerItem == nil {
+            // Single-agent (speaker nil) — create the turn's item on first event.
+            let item = AssistantItem()
+            activeSpeakerItem = item
+            items.append(.assistant(item))
+        }
+        guard let turn = activeSpeakerItem else { return }
+
         switch event {
-        case .thinking(let text):
+        case .thinking(let text, _):
             turn.thinkingActive = true; turn.thinking += text
-        case .streamChunk(let text):
+        case .streamChunk(let text, _):
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
             turn.streaming = true; turn.text += text
-        case .toolCall(let id, let name, let argsJson):
+        case .toolCall(let id, let name, let argsJson, _):
+            // Dedup by callId: the engine emits on_tool_calls both mid-stream
+            // (incremental ToolCallComplete) AND after the iteration completes
+            // (AgentDecision::ToolCalls). Without dedup each call shows two rows.
+            if turn.steps.contains(where: { $0.callId == id }) {
+                break   // already shown — skip the duplicate emit
+            }
             turn.steps.append(ToolStep(callId: id, name: name, args: argsJson))
-        case .toolResult(let callId, _, let content, let success):
+        case .toolResult(let callId, _, let content, let success, _):
             if let idx = turn.steps.firstIndex(where: { $0.callId == callId }) {
                 turn.steps[idx].result = content
                 turn.steps[idx].ok = success
@@ -235,24 +385,67 @@ final class ChatViewModel: ObservableObject {
                 turn.steps[idx].result = content
                 turn.steps[idx].ok = success
             }
-        case .directAnswer(let text):
+        case .directAnswer(let text, _):
             if !text.isEmpty { turn.text = text }
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
-        case .complete(let finalText):
+        case .complete(let finalText, _):
             if !finalText.isEmpty { turn.text = finalText }
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
-            turn.streaming = false; turn.done = true; running = false
-        case .error(let message):
+            turn.streaming = false; turn.done = true
+            // Lightweight token estimate for the top-bar usage indicator.
+            lastTurnTokens = (finalText.count + turn.thinking.count) / 4
+            if currentScenario == nil { running = false }
+        case .error(let message, _):
             turn.error = message; turn.streaming = false; turn.done = true; running = false
+        }
+        bumpStreamTick(for: event)
+    }
+
+    /// Bump `streamTick` to trigger a UI refresh. Hot-path events
+    /// (streamChunk/thinking) are coalesced to ~20 fps so a long stream does
+    /// not flood the main queue with full-view re-renders; everything else
+    /// (tool calls, direct answer, complete, error) flushes immediately, and
+    /// `.complete`/`.error` reset the throttle window. The item's plain fields
+    /// (text/thinking/steps) are already mutated by the caller, so a deferred
+    /// flush still shows the latest content.
+    private func bumpStreamTick(for event: ChatEventView) {
+        let hot: Bool
+        switch event {
+        case .streamChunk, .thinking: hot = true
+        default: hot = false
+        }
+        if hot {
+            let now = Date()
+            if now.timeIntervalSince(lastStreamFlush) < Self.streamFlushInterval {
+                return   // within the throttle window — skip this refresh
+            }
+            lastStreamFlush = now
+        } else {
+            lastStreamFlush = Date.distantPast   // reset window; next hot event flushes
         }
         streamTick += 1
     }
 
+    /// Extract the speaker id from any event variant (nil = single-agent).
+    private func speaker(of event: ChatEventView) -> String? {
+        switch event {
+        case .streamChunk(_, let s), .thinking(_, let s),
+             .toolCall(_, _, _, let s), .toolResult(_, _, _, _, let s),
+             .directAnswer(_, let s), .complete(_, let s), .error(_, let s):
+            return s
+        }
+    }
+
     func runTask(_ task: String, addUserItem: Bool = true) async {
+        lastUserTask = task
+        if groupSession != nil {
+            await runGroupTask(task, addUserItem: addUserItem)
+            return
+        }
         guard let s = session else { self.error = "session not built"; return }
         if addUserItem { items.append(.user(UserItem(text: task))) }
-        lastUserTask = task
         let turn = AssistantItem()
+        activeSpeakerItem = turn
         items.append(.assistant(turn))
         running = true
         error = nil
@@ -261,7 +454,7 @@ final class ChatViewModel: ObservableObject {
         try? await s.save()
         await refreshSessions()
 
-        let callback = StreamCallback(vm: self, turn: turn)
+        let callback = StreamCallback(vm: self)
         do {
             try await s.runTask(task: task, callback: callback)
             turn.streaming = false; turn.done = true; running = false
@@ -269,6 +462,35 @@ final class ChatViewModel: ObservableObject {
             turn.error = friendlyError(error)
             turn.streaming = false; turn.done = true; running = false
         }
+        await refreshSessions()
+    }
+
+    /// Multi-agent run: appends the user item, runs the round (each member's
+    /// events route to its own item via `handle`), stops at the user's turn.
+    private func runGroupTask(_ task: String, addUserItem: Bool) async {
+        guard let gs = groupSession else { return }
+        if addUserItem { items.append(.user(UserItem(text: task))) }
+        activeSpeakerItem = nil     // a new round starts; first event seeds item
+        activeSpeakerId = nil
+        running = true
+        error = nil
+        let callback = StreamCallback(vm: self)
+        do {
+            try await gs.runTask(userInput: task, callback: callback)
+            running = false
+        } catch {
+            // Attach the error to the active speaker's item (or a fresh one).
+            if activeSpeakerItem == nil {
+                let item = AssistantItem()
+                activeSpeakerItem = item
+                items.append(.assistant(item))
+            }
+            activeSpeakerItem?.error = friendlyError(error)
+            activeSpeakerItem?.streaming = false
+            activeSpeakerItem?.done = true
+            running = false
+        }
+        try? await gs.save()
         await refreshSessions()
     }
 
@@ -282,7 +504,30 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Edit a user message in-place: replace its text, drop everything after
+    /// it, and re-run from that point (a pragmatic edit-and-branch — true
+    /// checkpoint branching lands with the persistence layer's help later).
+    func editAndResend(_ item: UserItem, newText: String) async {
+        guard !running else { return }
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Find the item, truncate everything after it (incl. its old reply).
+        if let idx = items.firstIndex(where: {
+            if case .user(let u) = $0 { return u.id == item.id }
+            return false
+        }) {
+            items[idx] = .user(UserItem(text: trimmed))
+            // Keep items up to and including the edited user message.
+            let kept = Array(items.prefix(idx + 1))
+            items = kept
+            lastUserTask = trimmed
+            // Re-run without re-adding the user item (already there).
+            await runTask(trimmed, addUserItem: false)
+        }
+    }
+
     func stop() async {
+        if let gs = groupSession { await gs.interrupt() }
         await session?.interrupt()
     }
 }

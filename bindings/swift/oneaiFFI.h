@@ -299,6 +299,11 @@ uint64_t uniffi_oneai_fn_clone_oneaiapp(uint64_t handle, RustCallStatus *_Nonnul
 void uniffi_oneai_fn_free_oneaiapp(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIAPP_CREATE_GROUP_SESSION
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIAPP_CREATE_GROUP_SESSION
+uint64_t uniffi_oneai_fn_method_oneaiapp_create_group_session(uint64_t ptr, RustBuffer scenario, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIAPP_CREATE_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIAPP_CREATE_SESSION
 uint64_t uniffi_oneai_fn_method_oneaiapp_create_session(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -460,6 +465,11 @@ uint64_t uniffi_oneai_fn_method_oneaiappbuilder_provider_config(uint64_t ptr, Ru
 uint64_t uniffi_oneai_fn_method_oneaiappbuilder_sqlite_persistence_at(uint64_t ptr, RustBuffer path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIAPPBUILDER_SYSTEM_PROMPT
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIAPPBUILDER_SYSTEM_PROMPT
+uint64_t uniffi_oneai_fn_method_oneaiappbuilder_system_prompt(uint64_t ptr, RustBuffer prompt, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_CLONE_CHATEVENTCALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_CLONE_CHATEVENTCALLBACK
 uint64_t uniffi_oneai_fn_clone_chateventcallback(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -478,6 +488,46 @@ void uniffi_oneai_fn_init_callback_vtable_chateventcallback(const UniffiVTableCa
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_CHATEVENTCALLBACK_ON_EVENT
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_CHATEVENTCALLBACK_ON_EVENT
 void uniffi_oneai_fn_method_chateventcallback_on_event(uint64_t ptr, RustBuffer event, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_CLONE_ONEAIGROUPCHATSESSION
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_CLONE_ONEAIGROUPCHATSESSION
+uint64_t uniffi_oneai_fn_clone_oneaigroupchatsession(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_FREE_ONEAIGROUPCHATSESSION
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_FREE_ONEAIGROUPCHATSESSION
+void uniffi_oneai_fn_free_oneaigroupchatsession(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_INTERRUPT
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_INTERRUPT
+uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_interrupt(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_MESSAGES
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_MESSAGES
+uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_messages(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_RUN_TASK
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_RUN_TASK
+uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_run_task(uint64_t ptr, RustBuffer user_input, uint64_t callback
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_SAVE
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_SAVE
+uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_save(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_SET_SCRIPTED_ORDER
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_SET_SCRIPTED_ORDER
+uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_set_scripted_order(uint64_t ptr, RustBuffer order
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_START
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAIGROUPCHATSESSION_START
+uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_start(uint64_t ptr, uint64_t callback
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_ONEAI_RUSTBUFFER_ALLOC
@@ -740,6 +790,12 @@ void ffi_oneai_rust_future_free_void(uint64_t handle
 void ffi_oneai_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIAPP_CREATE_GROUP_SESSION
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIAPP_CREATE_GROUP_SESSION
+uint16_t uniffi_oneai_checksum_method_oneaiapp_create_group_session(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIAPP_CREATE_SESSION
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIAPP_CREATE_SESSION
 uint16_t uniffi_oneai_checksum_method_oneaiapp_create_session(void
@@ -890,9 +946,51 @@ uint16_t uniffi_oneai_checksum_method_oneaiappbuilder_sqlite_persistence_at(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIAPPBUILDER_SYSTEM_PROMPT
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIAPPBUILDER_SYSTEM_PROMPT
+uint16_t uniffi_oneai_checksum_method_oneaiappbuilder_system_prompt(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_CHATEVENTCALLBACK_ON_EVENT
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_CHATEVENTCALLBACK_ON_EVENT
 uint16_t uniffi_oneai_checksum_method_chateventcallback_on_event(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_INTERRUPT
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_INTERRUPT
+uint16_t uniffi_oneai_checksum_method_oneaigroupchatsession_interrupt(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_MESSAGES
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_MESSAGES
+uint16_t uniffi_oneai_checksum_method_oneaigroupchatsession_messages(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_RUN_TASK
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_RUN_TASK
+uint16_t uniffi_oneai_checksum_method_oneaigroupchatsession_run_task(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_SAVE
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_SAVE
+uint16_t uniffi_oneai_checksum_method_oneaigroupchatsession_save(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_SET_SCRIPTED_ORDER
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_SET_SCRIPTED_ORDER
+uint16_t uniffi_oneai_checksum_method_oneaigroupchatsession_set_scripted_order(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_START
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIGROUPCHATSESSION_START
+uint16_t uniffi_oneai_checksum_method_oneaigroupchatsession_start(void
     
 );
 #endif

@@ -58,7 +58,7 @@ impl AgentLoopObserver for CallbackObserver {
     }
 
     fn on_direct_answer(&self, text: &str) {
-        self.emit(ChatEventView::DirectAnswer { text: text.to_string() });
+        self.emit(ChatEventView::DirectAnswer { text: text.to_string(), speaker: None });
     }
 
     fn on_tool_calls(&self, calls: &[ToolCallRequest]) {
@@ -67,6 +67,7 @@ impl AgentLoopObserver for CallbackObserver {
                 id: c.id.clone(),
                 name: c.name.clone(),
                 args_json: c.args.to_string(),
+                speaker: None,
             });
         }
     }
@@ -77,6 +78,7 @@ impl AgentLoopObserver for CallbackObserver {
             tool_name: tool_name.to_string(),
             content: output.content.clone(),
             success: output.success,
+            speaker: None,
         });
     }
 
@@ -95,15 +97,16 @@ impl AgentLoopObserver for CallbackObserver {
     fn on_complete(&self, result: &AgentLoopResult) {
         self.emit(ChatEventView::Complete {
             final_text: result.final_answer.clone(),
+            speaker: None,
         });
     }
 
     fn on_stream_chunk(&self, text: &str) {
-        self.emit(ChatEventView::StreamChunk { text: text.to_string() });
+        self.emit(ChatEventView::StreamChunk { text: text.to_string(), speaker: None });
     }
 
     fn on_thinking(&self, text: &str) {
-        self.emit(ChatEventView::Thinking { text: text.to_string() });
+        self.emit(ChatEventView::Thinking { text: text.to_string(), speaker: None });
     }
 
     fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {
@@ -155,8 +158,8 @@ mod tests {
         });
 
         let events = cb.take();
-        assert!(matches!(events[0], ChatEventView::StreamChunk { ref text } if text == "Hel"));
-        assert!(matches!(events[1], ChatEventView::StreamChunk { ref text } if text == "lo"));
-        assert!(matches!(events[2], ChatEventView::Complete { ref final_text } if final_text == "Hello"));
+        assert!(matches!(events[0], ChatEventView::StreamChunk { ref text, speaker: None } if text == "Hel"));
+        assert!(matches!(events[1], ChatEventView::StreamChunk { ref text, speaker: None } if text == "lo"));
+        assert!(matches!(events[2], ChatEventView::Complete { ref final_text, speaker: None } if final_text == "Hello"));
     }
 }

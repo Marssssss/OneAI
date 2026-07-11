@@ -32,6 +32,20 @@ enum Theme {
     static let errorC       = adaptive(light: 0xE5484D, dark: 0xFF6B6E)
 }
 
+// ── Color(hex:) — parse "#RRGGBB" / "RRGGBB" hex strings (per-agent colors) ─
+extension Color {
+    init(hex: String) {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        var v: UInt64 = 0x888888
+        Scanner(string: s).scanHexInt64(&v)
+        let r = CGFloat((v >> 16) & 0xff) / 255
+        let g = CGFloat((v >> 8) & 0xff) / 255
+        let b = CGFloat(v & 0xff) / 255
+        self = Color(NSColor(srgbRed: r, green: g, blue: b, alpha: 1))
+    }
+}
+
 @main
 struct OneAIApp: App {
     var body: some Scene {

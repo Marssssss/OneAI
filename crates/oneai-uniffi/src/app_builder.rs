@@ -139,6 +139,25 @@ impl OneAIAppBuilder {
         Ok(Arc::new(Self::from_builder(builder, extras)))
     }
 
+    /// Set the agent's base system prompt (persona / role instruction).
+    ///
+    /// This is the foreign-friendly way to give a single-agent app a persona
+    /// without constructing a full `DomainPack`. It injects a lightweight
+    /// `DomainPack` whose only non-default field is `system_prompt_template`,
+    /// via the same `AppBuilder::domain_pack` path the engine uses. Call
+    /// before `provider_config`/`build`; the latest call wins. Idempotent in
+    /// the sense that each call replaces the pack (no accumulation).
+    #[uniffi::method]
+    pub fn system_prompt(self: Arc<Self>, prompt: String) -> Arc<Self> {
+        let extras = self.take_extra_tools();
+        let pack = oneai_domain::DomainPackBuilder::new("persona")
+            .description("Foreign-configured persona system prompt.")
+            .system_prompt(prompt)
+            .build();
+        let builder = self.take_inner().domain_pack(pack);
+        Arc::new(Self::from_builder(builder, extras))
+    }
+
     /// Set the memory manager with custom config.
     #[uniffi::method]
     pub fn memory_manager_with_config(self: Arc<Self>, threshold_tokens: u32) -> Arc<Self> {
