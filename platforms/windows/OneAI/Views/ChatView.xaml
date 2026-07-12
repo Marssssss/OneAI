@@ -163,6 +163,8 @@
             <Grid Grid.Row="0" Padding="16,8" ColumnDefinitions="*,Auto,Auto">
                 <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <TextBlock x:Name="TopTitle" Text="OneAI" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock Text="·" FontSize="14" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                    <TextBlock Text="One AI, Every Platform" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
                     <TextBlock Text="{x:Bind Vm.CurrentScenarioIcon, Mode=OneWay}" FontSize="16" Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}" />
                     <TextBlock Text="{x:Bind Vm.CurrentScenarioName, Mode=OneWay}" FontSize="16" FontWeight="SemiBold" Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}" />
                     <TextBlock Text="· 总结阶段" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Visibility="{x:Bind Vm.DebriefPhaseVis, Mode=OneWay}" VerticalAlignment="Center" />

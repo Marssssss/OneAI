@@ -25,7 +25,7 @@ struct CommandPalette: View {
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.onSurfaceVar)
                 TextField("切换场景 / 会话 / 模型…", text: $query)
-                    .textFieldStyle(.plain).font(.body)
+                    .textFieldStyle(.plain).font(.oBody)
                     .onSubmit { isPresented = false }
                 Button("关闭") { isPresented = false }.buttonStyle(.borderless).keyboardShortcut(.escape)
             }
@@ -81,7 +81,7 @@ struct CommandPalette: View {
                 Image(systemName: icon).foregroundStyle(Theme.primary).frame(width: 20)
                 Text(title).foregroundStyle(Theme.onBg)
                 Spacer()
-                if let s = subtitle { Text(s).font(.caption).foregroundStyle(Theme.onSurfaceVar) }
+                if let s = subtitle { Text(s).font(.oCaption).foregroundStyle(Theme.onSurfaceVar) }
             }
             .padding(.horizontal, 14).padding(.vertical, 6)
             .contentShape(Rectangle())

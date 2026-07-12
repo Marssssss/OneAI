@@ -16,6 +16,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <RootNamespace>OneAI</RootNamespace>
     <AssemblyName>OneAI</AssemblyName>
   </PropertyGroup>
@@ -31,6 +32,14 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="app.manifest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- App icon (multi-res .ico). ApplicationIcon embeds it into the exe,
+         driving taskbar + window icon for the unpackaged WinUI 3 app. -->
+    <Content Include="Assets\app.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

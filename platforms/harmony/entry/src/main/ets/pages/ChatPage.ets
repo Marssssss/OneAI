@@ -106,7 +106,11 @@ struct ChatPage {
         // Top bar
         Row() {
           Button('☰').onClick(() => this.showDrawer = true).backgroundColor(Color.Transparent);
-          Text('OneAI').fontSize(18).fontWeight(FontWeight.Bold).margin({ left: 8 });
+          Text() {
+            Span('OneAI').fontSize(18).fontWeight(FontWeight.Bold)
+            Span(' · ').fontSize(12).fontColor('#9aa0b4')
+            Span('One AI, Every Platform').fontSize(11).fontColor('#9aa0b4')
+          }.margin({ left: 8 });
           Blank();
           Button('⚙').onClick(() => this.showSettings = true).backgroundColor(Color.Transparent);
         }.width('100%').height(48).padding({ left: 12, right: 12 });

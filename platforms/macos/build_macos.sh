@@ -61,6 +61,16 @@ swiftc \
 
 cp "$MACOS_DIR/Info.plist" "$BUILD_DIR/OneAI.app/Contents/Info.plist"
 
+# App icon (.icns) — staged at platforms/macos/Resources/OneAI.icns by the
+# icon-build step (iconutil from OneAI_icon.png). Falls back to the generic
+# macOS icon if absent so the build never hard-fails on a missing asset.
+mkdir -p "$BUILD_DIR/OneAI.app/Contents/Resources"
+if [[ -f "$MACOS_DIR/Resources/OneAI.icns" ]]; then
+  cp "$MACOS_DIR/Resources/OneAI.icns" "$BUILD_DIR/OneAI.app/Contents/Resources/OneAI.icns"
+else
+  echo "  (no OneAI.icns — icon falls back to default; generate via iconutil)"
+fi
+
 echo ""
 echo "── Built $BUILD_DIR/OneAI.app"
 echo "   Run: open $BUILD_DIR/OneAI.app"

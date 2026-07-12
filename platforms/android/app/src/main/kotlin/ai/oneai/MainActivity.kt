@@ -263,7 +263,13 @@ private fun ChatScreen(activity: ComponentActivity) {
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
-                    title = { Text("OneAI", color = MaterialTheme.colorScheme.onBackground) },
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("OneAI", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold)
+                            Text(" · ", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                            Text("One AI, Every Platform", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                        }
+                    },
                     navigationIcon = {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
                             Icon(Icons.Filled.Menu, contentDescription = "会话列表", tint = MaterialTheme.colorScheme.onSurfaceVariant)

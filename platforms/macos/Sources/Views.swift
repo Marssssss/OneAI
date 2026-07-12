@@ -25,6 +25,9 @@ struct ChatScreen: View {
                 .environmentObject(artifacts)
         }
         .environmentObject(artifacts)
+        // Extend into the (now hidden) title-bar region so the chat + sidebar
+        // headers sit at the very top instead of below a large reserved gap.
+        .ignoresSafeArea(.container, edges: .top)
         .background(
             // ⌘K opens the command palette.
             Button("") { showCommandPalette = true }
@@ -141,7 +144,7 @@ private struct Sidebar: View {
             if vm.sessions.isEmpty {
                 Text("还没有会话\n发一条消息开始吧")
                     .foregroundStyle(Theme.onSurfaceVar)
-                    .font(.footnote)
+                    .font(.oFootnote)
                     .padding(.vertical, 8)
             } else {
                 ForEach(vm.sessions, id: \.id) { s in
@@ -156,14 +159,17 @@ private struct Sidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("会话").font(.headline)
+                Text("会话").font(.oHeadline)
                 Spacer()
                 newConversationMenu
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                     .help("新建对话 / 从场景开始")
             }
-            .padding(.horizontal, 12).padding(.vertical, 10)
+            // Leading inset clears the floating traffic-light buttons (the bar
+            // is hidden via .windowStyle(.hiddenTitleBar)); "会话" sits at the
+            // top, just right of the lights — no overlap, no wasted gap.
+            .padding(.leading, 76).padding(.trailing, 12).padding(.vertical, 10)
             Divider()
 
             ScrollView {
@@ -196,7 +202,7 @@ private struct SidebarSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title).font(.caption.bold()).foregroundStyle(Theme.onSurfaceVar)
+                Text(title).font(.oCaptionBold).foregroundStyle(Theme.onSurfaceVar)
                 Spacer()
                 if let trailing { trailing }
             }
@@ -218,7 +224,7 @@ private struct ScenarioRow: View {
                     .foregroundStyle(Theme.primary)
                     .frame(width: 22)
                 Text(scenario.name)
-                    .font(.subheadline)
+                    .font(.oSubheadline)
                     .fontWeight(isCurrent ? .semibold : .regular)
                     .lineLimit(1)
                 Spacer()
@@ -255,10 +261,10 @@ struct TopicIntakeView: View {
                     HStack(spacing: 10) {
                         Image(systemName: scenario.icon)
                             .foregroundStyle(Theme.primary).font(.system(size: 30))
-                        Text(scenario.name).font(.title2.bold()).foregroundStyle(Theme.onBg)
+                        Text(scenario.name).font(.oTitle2).foregroundStyle(Theme.onBg)
                     }
                     if let desc = scenarioDescription {
-                        Text(desc).font(.subheadline).foregroundStyle(Theme.onSurfaceVar)
+                        Text(desc).font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
                     }
                 }
                 .padding(.bottom, 2)
@@ -266,10 +272,10 @@ struct TopicIntakeView: View {
                 ForEach(scenario.topicFields ?? []) { f in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
-                            Text(f.label).font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                            Text(f.label).font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                             if let v = f.visibleTo, !v.isEmpty {
                                 Text("· 仅 \(v.compactMap { scenario.agent($0)?.name }.joined(separator: "/")) 可见")
-                                    .font(.caption2).foregroundStyle(Theme.tertiary)
+                                    .font(.oCaption2).foregroundStyle(Theme.tertiary)
                             }
                         }
                         TextField(f.placeholder ?? f.label, text: Binding(
@@ -283,7 +289,7 @@ struct TopicIntakeView: View {
                     }
                 }
                 Text("开场角色会围绕你输入的信息发言;这些值会作为各角色背景,并写入会话名。留空可直接开始。")
-                    .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                    .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
                 HStack(spacing: 12) {
                     Button("取消", role: .cancel) { vm.cancelPendingScenario() }
                         .keyboardShortcut(.escape)
@@ -331,11 +337,11 @@ private struct SessionRow: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(info.title?.isEmpty == false ? info.title! : "新对话")
-                        .font(.subheadline)
+                        .font(.oSubheadline)
                         .fontWeight(isCurrent ? .semibold : .regular)
                         .lineLimit(1)
                     Text("\(info.messageCount) 条 · \(relativeTime(info.updatedAtMs))")
-                        .font(.caption)
+                        .font(.oCaption)
                         .foregroundStyle(Theme.onSurfaceVar)
                         .lineLimit(1)
                 }
@@ -425,17 +431,17 @@ private struct ChatDetail: View {
             HStack {
                 if let sc = vm.currentScenario {
                     Image(systemName: sc.icon).foregroundStyle(Theme.primary)
-                    Text(sc.name).font(.title3.bold()).foregroundStyle(Theme.onBg)
+                    Text(sc.name).font(.oTitle3).foregroundStyle(Theme.onBg)
                     if vm.debriefActive {
                         // Debrief phase indicator.
-                        Text("· 总结阶段").font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                        Text("· 总结阶段").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                     } else if let debrief = sc.debrief {
                         // "结束面试" button — switches to the debrief member only.
                         Button {
                             Task { await vm.endScenarioDebrief() }
                         } label: {
                             Label(debrief.buttonLabel, systemImage: "checkmark.circle")
-                                .font(.caption)
+                                .font(.oCaption)
                         }
                         .buttonStyle(.bordered)
                         .pointerCursor()
@@ -443,12 +449,16 @@ private struct ChatDetail: View {
                         .help("结束并进入总结阶段")
                     }
                 } else {
-                    Text("OneAI").font(.title3.bold()).foregroundStyle(Theme.onBg)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("OneAI").font(.oTitle2).foregroundStyle(Theme.onBg)
+                        Text("·").font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
+                        Text("One AI, Every Platform").font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
+                    }
                 }
                 Spacer()
                 if vm.lastTurnTokens > 0 {
                     Label("\(vm.lastTurnTokens) tok", systemImage: "flame")
-                        .font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                        .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                         .help("本轮约 token 数")
                 }
                 Button { onOpenSettings() } label: { Image(systemName: "gearshape") }
@@ -522,7 +532,7 @@ private struct ChatDetail: View {
                             stickToBottom = true
                         } label: {
                             Image(systemName: "arrow.down.circle.fill")
-                                .font(.title2)
+                                .font(.oTitle2)
                                 .foregroundStyle(Theme.primary, Theme.surface)
                                 .shadow(radius: 3)
                         }
@@ -535,7 +545,7 @@ private struct ChatDetail: View {
             }
 
             if let msg = vm.error {
-                Text("✗ \(msg)").foregroundStyle(Theme.errorC).font(.caption)
+                Text("✗ \(msg)").foregroundStyle(Theme.errorC).font(.oCaption)
                     .padding(.horizontal, 12).padding(.vertical, 4)
             }
 
@@ -566,7 +576,7 @@ private struct UserBubble: View {
     @State private var draft = ""
     var body: some View {
         HStack { Spacer(minLength: 60)
-            Text(text).foregroundStyle(Theme.onBg)
+            Text(text).font(.oBody).foregroundStyle(Theme.onBg)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(Theme.primaryCont)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
@@ -581,9 +591,9 @@ private struct UserBubble: View {
         }
         .sheet(isPresented: $editing) {
             VStack(spacing: 12) {
-                Text("编辑消息").font(.headline)
+                Text("编辑消息").font(.oHeadline)
                 TextEditor(text: $draft)
-                    .font(.body).scrollContentBackground(.hidden)
+                    .font(.oBody).scrollContentBackground(.hidden)
                     .background(Theme.surfaceVar).clipShape(RoundedRectangle(cornerRadius: 8))
                     .frame(minHeight: 100, maxHeight: 240)
                 HStack {
@@ -605,11 +615,11 @@ private struct SpeakerHeader: View {
             Image(systemName: meta.2)
                 .foregroundStyle(Color(hex: meta.1))
             Text(meta.0)
-                .font(.subheadline.bold())
+                .font(.oSubheadlineBold)
                 .foregroundStyle(Color(hex: meta.1))
             if let a = scenario?.agent(speakerId ?? "") {
                 Text(a.role)
-                    .font(.caption2)
+                    .font(.oCaption2)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Color(hex: a.color).opacity(0.18))
                     .foregroundStyle(Color(hex: a.color))
@@ -627,11 +637,11 @@ private struct TurnStatusBar: View {
             if vm.running, let sid = vm.activeSpeakerId {
                 let meta = AgentStore.speakerMeta(for: sid, in: vm.currentScenario)
                 Image(systemName: meta.2).foregroundStyle(Color(hex: meta.1))
-                Text("\(meta.0) 正在发言").font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                Text("\(meta.0) 正在发言").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                 ThreeDots()
             } else {
                 Image(systemName: "hand.raised").foregroundStyle(Theme.onSurfaceVar)
-                Text("轮到你 — 发送你的回答").font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                Text("轮到你 — 发送你的回答").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
             }
             Spacer()
         }
@@ -679,7 +689,7 @@ private struct AssistantBubble: View {
                     Text(Self.streamingDisplay(of: item.text)
                             .trimmingCharacters(in: .whitespacesAndNewlines) + "▍")
                         .foregroundStyle(Theme.onBg)
-                        .font(.body)
+                        .font(.oBody)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
@@ -694,7 +704,7 @@ private struct AssistantBubble: View {
             }
             if let msg = item.error {
                 HStack {
-                    Text("✗ \(msg)").foregroundStyle(Theme.errorC).font(.caption)
+                    Text("✗ \(msg)").foregroundStyle(Theme.errorC).font(.oCaption)
                     Spacer()
                     Button("重试", action: onRetry).buttonStyle(.borderless)
                 }
@@ -755,7 +765,7 @@ private struct ThinkingCard: View {
                 HStack {
                     Image(systemName: "brain.head.profile").foregroundStyle(Theme.primary)
                     Text(item.thinkingActive ? "思考中…" : "已深度思考")
-                        .foregroundStyle(Theme.onSurfaceVar).font(.caption)
+                        .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
                     if item.thinkingActive {
                         ThreeDots()
                     } else {
@@ -772,7 +782,7 @@ private struct ThinkingCard: View {
                 }
                 if expanded {
                     ScrollView { Text(item.thinking)
-                            .foregroundStyle(Theme.onSurfaceVar).font(.caption)
+                            .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
@@ -797,13 +807,13 @@ private struct ToolStepsCard: View {
             Button { withAnimation { expanded.toggle() } } label: {
                 HStack(spacing: 4) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                        .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
                     Image(systemName: "wrench.and.screwdriver")
-                        .font(.caption2).foregroundStyle(Theme.primary)
+                        .font(.oCaption2).foregroundStyle(Theme.primary)
                     Text("调用了 \(steps.count) 个工具")
-                        .font(.caption).foregroundStyle(Theme.onSurfaceVar)
-                    if ok > 0 { Text("✓\(ok)").font(.caption2).foregroundStyle(Theme.tertiary) }
-                    if fail > 0 { Text("✗\(fail)").font(.caption2).foregroundStyle(Theme.errorC) }
+                        .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
+                    if ok > 0 { Text("✓\(ok)").font(.oCaption2).foregroundStyle(Theme.tertiary) }
+                    if fail > 0 { Text("✗\(fail)").font(.oCaption2).foregroundStyle(Theme.errorC) }
                     if pending > 0 { ThreeDots() }
                 }
             }.buttonStyle(.plain).pointerCursor()
@@ -829,7 +839,7 @@ private struct StepLine: View {
                           : ("gearshape", Theme.onSurfaceVar)
         VStack(alignment: .leading, spacing: 1) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Image(systemName: icon).foregroundStyle(color).font(.caption2)
+                Image(systemName: icon).foregroundStyle(color).font(.oCaption2)
                 // Collapsed: just the tool name (clean). Expanded: name + args.
                 Text(expanded && !step.args.isEmpty ? "\(step.name)(\(step.args))" : step.name)
                     .font(.system(size: 11, design: .monospaced))
@@ -874,13 +884,13 @@ private struct MarkdownText: View, Equatable {
                 case .paragraph(let body):
                     Text(buildInline(body, codeBg: Theme.surfaceVar))
                         .foregroundStyle(Theme.onBg)
-                        .font(.body)
+                        .font(.oBody)
                         .textSelection(.enabled)
                 case .blockquote(let body):
                     HStack(alignment: .top, spacing: 8) {
                         Rectangle().fill(Theme.primary.opacity(0.5)).frame(width: 3)
                         Text(buildInline(body, codeBg: Theme.surfaceVar))
-                            .font(.body.italic())
+                            .font(.oBodyItalic)
                             .foregroundStyle(Theme.onSurfaceVar)
                             .textSelection(.enabled)
                     }
@@ -890,7 +900,7 @@ private struct MarkdownText: View, Equatable {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text("•")
                                 Text(buildInline(item, codeBg: Theme.surfaceVar))
-                                    .foregroundStyle(Theme.onBg).font(.body).textSelection(.enabled)
+                                    .foregroundStyle(Theme.onBg).font(.oBody).textSelection(.enabled)
                             }
                         }
                     }
@@ -900,7 +910,7 @@ private struct MarkdownText: View, Equatable {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text("\(idx + 1).")
                                 Text(buildInline(item, codeBg: Theme.surfaceVar))
-                                    .foregroundStyle(Theme.onBg).font(.body).textSelection(.enabled)
+                                    .foregroundStyle(Theme.onBg).font(.oBody).textSelection(.enabled)
                             }
                         }
                     }
@@ -932,7 +942,7 @@ private struct MarkdownTable: View {
             HStack(alignment: .top, spacing: 0) {
                 ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
                     Text(buildInline(cell, codeBg: Theme.surfaceVar))
-                        .font(.subheadline.bold()).foregroundStyle(Theme.onBg)
+                        .font(.oSubheadlineBold).foregroundStyle(Theme.onBg)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(6)
                 }
@@ -942,7 +952,7 @@ private struct MarkdownTable: View {
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
                         Text(buildInline(cell, codeBg: Theme.surfaceVar))
-                            .font(.subheadline).foregroundStyle(Theme.onBg)
+                            .font(.oSubheadline).foregroundStyle(Theme.onBg)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(6)
                     }
@@ -975,7 +985,7 @@ private struct CodeCard: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
                 } label: {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                        .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                        .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
                 }.buttonStyle(.plain).pointerCursor().help("复制代码")
                 if code.count > 80 {
                     Button {
@@ -983,7 +993,7 @@ private struct CodeCard: View {
                                                 lang: lang, content: code))
                     } label: {
                         Image(systemName: "rectangle.split.3x1")
-                            .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                            .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
                     }
                     .buttonStyle(.plain)
                     .pointerCursor()
@@ -1033,7 +1043,7 @@ private struct FirstRunHint: View {
     var body: some View {
         Button(action: onOpen) {
             Text("未配置 API Key,点击设置 → 填入 kind / model / key 后保存")
-                .foregroundStyle(Theme.onBg).font(.caption)
+                .foregroundStyle(Theme.onBg).font(.oCaption)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(Theme.primaryCont)
@@ -1095,7 +1105,7 @@ private struct InputBar: View {
             .disabled(running || !speech.available)
             .help(speech.available ? "语音输入(点击说话,再点结束)" : "语音识别不可用(检查权限/系统设置)")
             TextEditor(text: $value)
-                .font(.body)
+                .font(.oBody)
                 .scrollContentBackground(.hidden)
                 .background(Theme.surfaceVar)
                 .padding(.horizontal, 8).padding(.vertical, 4)
@@ -1184,7 +1194,7 @@ private struct SettingsSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Provider 设置").font(.headline)
+            Text("Provider 设置").font(.oHeadline)
             Picker("kind", selection: Binding(
                 get: { vm.kind },
                 set: { vm.applyProviderPreset($0) })) {
@@ -1199,7 +1209,7 @@ private struct SettingsSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
             Text("ollama 示例:kind=ollama, model=llama3, base url=127.0.0.1:11434。保存后重建 App(历史保留)。")
-                .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
             HStack {
                 Spacer()
                 Button("保存") {

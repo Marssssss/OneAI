@@ -69,7 +69,7 @@ struct ArtifactCanvas: View {
                 }
                 Spacer()
                 Button { if let id = store.selectedId { store.close(id) } } label: {
-                    Image(systemName: "xmark").font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                    Image(systemName: "xmark").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                 }.buttonStyle(.plain).padding(.horizontal, 8).help("关闭")
             }
             .padding(.vertical, 6)
@@ -104,10 +104,10 @@ struct ArtifactCanvas: View {
         let isSel = tab.id == store.selectedId
         return Button { store.selectedId = tab.id } label: {
             HStack(spacing: 4) {
-                Image(systemName: "doc.text").font(.caption2)
-                Text(tab.title).font(.caption)
+                Image(systemName: "doc.text").font(.oCaption2)
+                Text(tab.title).font(.oCaption)
                 Button { store.close(tab.id) } label: {
-                    Image(systemName: "xmark").font(.system(size: 8))
+                    Image(systemName: "xmark").font(.system(size: 10))
                 }.buttonStyle(.plain)
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
@@ -165,9 +165,9 @@ private struct ContentUnavailableViewCompat: View {
     var body: some View {
         VStack(spacing: 6) {
             Image(systemName: "doc.text.magnifyingglass")
-                .font(.title2).foregroundStyle(Theme.onSurfaceVar)
-            Text("点击代码块上的「在画布打开」").font(.caption).foregroundStyle(Theme.onSurfaceVar)
-            Text("长内容会在这里渲染,不挤占对话").font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                .font(.oTitle2).foregroundStyle(Theme.onSurfaceVar)
+            Text("点击代码块上的「在画布打开」").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
+            Text("长内容会在这里渲染,不挤占对话").font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

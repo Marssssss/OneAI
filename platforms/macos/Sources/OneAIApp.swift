@@ -62,7 +62,6 @@ private struct PointerHoverModifier: ViewModifier {
 extension View {
     func pointerCursor() -> some View { modifier(PointerHoverModifier()) }
 }
-
 @main
 struct OneAIApp: App {
     var body: some Scene {
@@ -70,7 +69,29 @@ struct OneAIApp: App {
             ChatScreen()
                 .frame(minWidth: 720, minHeight: 480)
         }
-        .windowStyle(.titleBar)
+        // hiddenTitleBar drops the (empty, space-wasting) native title bar;
+        // the traffic-light buttons still float over the sidebar top-left.
+        // The in-app header carries the OneAI title + slogan instead.
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 960, height: 640)
     }
+}
+
+// ── Explicit app font sizes ─────────────────────────────────────────────
+// macOS SwiftUI does NOT scale semantic fonts (.body/.caption/…) via
+// dynamicTypeSize the way iOS does, so the app sizes text explicitly. Tune
+// these to change sizes app-wide. (Code/monospaced sizes are bumped in place
+// at their call sites.)
+extension Font {
+    static let oTitle2          = Font.system(size: 22, weight: .bold)
+    static let oTitle3          = Font.system(size: 19, weight: .bold)
+    static let oHeadline        = Font.system(size: 17, weight: .semibold)
+    static let oBody            = Font.system(size: 14)
+    static let oBodyItalic      = Font.system(size: 14).italic()
+    static let oSubheadline     = Font.system(size: 14)
+    static let oSubheadlineBold = Font.system(size: 14, weight: .bold)
+    static let oFootnote        = Font.system(size: 13)
+    static let oCaption         = Font.system(size: 12)
+    static let oCaptionBold     = Font.system(size: 12, weight: .bold)
+    static let oCaption2        = Font.system(size: 11)
 }
