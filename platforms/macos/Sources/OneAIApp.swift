@@ -46,6 +46,23 @@ extension Color {
     }
 }
 
+// ── pointerCursor() — show the pointing-hand cursor over a clickable view.
+// SwiftUI's `.cursor(.pointingHand)` is macOS 14+ only; this builds the same
+// affordance on macOS 13 via NSCursor push/pop on hover, so every clickable
+// row/button reads as interactive (otherwise a plain Button gives no hover
+// cue and users don't know it's clickable).
+private struct PointerHoverModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.onHover { inside in
+            if inside { NSCursor.pointingHand.push() }
+            else { NSCursor.pop() }
+        }
+    }
+}
+extension View {
+    func pointerCursor() -> some View { modifier(PointerHoverModifier()) }
+}
+
 @main
 struct OneAIApp: App {
     var body: some Scene {

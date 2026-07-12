@@ -1430,7 +1430,7 @@ fn build_meta_tool_loop(
         Arc::new(tokio::sync::RwLock::new(HashMap::new()));
     let loop_ = AgentLoop::new(
         provider_arc,
-        tools_map,
+        Arc::clone(&tools_map),
         Arc::new(ThreeLayerParser::new()),
         Arc::new(oneai_tool::NoopInteractionGate),
         Arc::new(SkillSelector::new()),
@@ -1439,7 +1439,15 @@ fn build_meta_tool_loop(
             BudgetAllocation::default(),
             Arc::new(oneai_core::budget::NoopCompressor),
         )),
-        Arc::new(SubAgentFactoryNone),
+        // A real factory (not SubAgentFactoryNone) — `delegate` is only
+        // advertised when the factory can actually fulfill it. This test
+        // verifies a normal delegating agent sees the meta-tool.
+        Arc::new(crate::sub_agent::DefaultSubAgentFactory::new(
+            Arc::new(MockProvider::always_answers("x")),
+            Arc::new(ThreeLayerParser::new()),
+            Arc::new(oneai_tool::NoopInteractionGate),
+            Arc::clone(&tools_map),
+        )),
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
         None,

@@ -77,11 +77,23 @@ impl OneAIAppBuilder {
         let extras = self.take_extra_tools();
         let builder = self.take_inner();
         let mut extras = extras;
+        // Web access.
         if !extras.iter().any(|t| t.name() == "web_search") {
             extras.push(Arc::new(oneai_tool::WebSearchTool::new()));
         }
         if !extras.iter().any(|t| t.name() == "web_fetch") {
             extras.push(Arc::new(oneai_tool::WebFetchTool::new()));
+        }
+        // File access — so an agent (incl. group-chat persona members, whose
+        // sub-agent factory is None and therefore cannot `delegate` a write to
+        // a Code sub-agent) can read/write local files directly when asked
+        // (e.g. "把面试总结写到本地文件"). Without these the model's only
+        // path to file I/O is the `delegate` meta-tool, which hangs.
+        if !extras.iter().any(|t| t.name() == "read_file") {
+            extras.push(Arc::new(oneai_tool::FileReadTool::new()));
+        }
+        if !extras.iter().any(|t| t.name() == "write_file") {
+            extras.push(Arc::new(oneai_tool::FileWriteTool::new()));
         }
         Arc::new(Self::from_builder(builder, extras))
     }

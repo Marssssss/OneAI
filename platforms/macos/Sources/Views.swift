@@ -71,21 +71,20 @@ private struct Sidebar: View {
     /// enum-driven sheet sidesteps that entirely.
     private enum SidebarSheet: Identifiable {
         case editScenario(Scenario)   // new or edit a scenario in the editor
-        case topicFor(Scenario)      // prompt for a topic before starting
         var id: String {
             switch self {
             case .editScenario(let s): return "edit-\(s.id)"
-            case .topicFor(let s):    return "topic-\(s.id)"
             }
         }
     }
     @State private var sheet: SidebarSheet? = nil
 
-    /// Start a scenario: if it declares topic-intake fields, prompt for them
-    /// first; otherwise start immediately.
+    /// Start a scenario: scenarios with topic-intake fields route through the
+    /// inline `pendingScenario` page (rendered in the chat detail) instead of a
+    /// modal sheet; scenarios without fields start immediately.
     private func startScenario(_ sc: Scenario) {
         if !(sc.topicFields?.isEmpty ?? true) {
-            sheet = .topicFor(sc)
+            vm.pendingScenario = sc
         } else {
             Task { await vm.newConversation(scenario: sc) }
         }
@@ -132,7 +131,7 @@ private struct Sidebar: View {
             let sc = Scenario(id: UUID().uuidString, name: "新场景", icon: "person.2",
                               agents: [], turnPolicy: .scripted, scriptOrder: nil,
                               moderatorId: nil, openerAgentId: nil, openerLine: nil,
-                              topicFields: nil, debrief: nil)
+                              topicFields: nil, debrief: nil, reviewLoop: nil)
             sheet = .editScenario(sc)
         } label: { Image(systemName: "plus") }
     }
@@ -177,8 +176,6 @@ private struct Sidebar: View {
             case .editScenario(let sc):
                 ScenarioEditor(scenario: sc, store: vm.agentStore,
                                onClose: { sheet = nil })
-            case .topicFor(let sc):
-                ScenarioFormSheet(scenario: sc, vm: vm) { sheet = nil }
             }
         }
     }
@@ -213,6 +210,7 @@ private struct ScenarioRow: View {
     let scenario: Scenario
     let isCurrent: Bool
     let onTap: () -> Void
+    @State private var hovered = false
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
@@ -227,63 +225,98 @@ private struct ScenarioRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 5)
-            .background(isCurrent ? Theme.primaryCont.opacity(0.5) : Color.clear)
+            .background(isCurrent ? Theme.primaryCont.opacity(0.5)
+                       : (hovered ? Theme.secondaryCont : Color.clear))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        .pointerCursor()
+        .onHover { hovered = $0 }
         .padding(.horizontal, 6)
     }
 }
 
-/// Topic-intake form shown before starting a scenario that declares
-/// `topicFields`. The collected values (keyed by field id) are baked into each
-/// member's system prompt as background and into the session title by
-/// `Scenario.specView`. Blank fields are allowed — empty values are dropped.
-private struct ScenarioFormSheet: View {
+/// Inline topic-intake page rendered in place of the conversation when
+/// `vm.pendingScenario` is set (a flatter flow than the old modal sheet — the
+/// intake lives where the conversation will live). Collects the scenario's
+/// `topicFields`; the values are baked into each member's system prompt as
+/// background and into the session title by `Scenario.specView`. Blank fields
+/// are allowed — empty values are dropped.
+struct TopicIntakeView: View {
     let scenario: Scenario
     @ObservedObject var vm: ChatViewModel
-    let onClose: () -> Void
-    /// field id → value, seeded empty.
     @State private var values: [String: String] = [:]
     @FocusState private var focusedField: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                Image(systemName: scenario.icon)
-                    .foregroundStyle(Theme.primary).font(.title3)
-                Text("开始「\(scenario.name)」").font(.headline)
-                Spacer()
-            }
-            ForEach(scenario.topicFields ?? []) { f in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(f.label).font(.caption).foregroundStyle(Theme.onSurfaceVar)
-                    TextField(f.placeholder ?? f.label, text: Binding(
-                        get: { values[f.id] ?? "" },
-                        set: { values[f.id] = $0 }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .focused($focusedField, equals: f.id)
-                    .onSubmit { start() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Image(systemName: scenario.icon)
+                            .foregroundStyle(Theme.primary).font(.system(size: 30))
+                        Text(scenario.name).font(.title2.bold()).foregroundStyle(Theme.onBg)
+                    }
+                    if let desc = scenarioDescription {
+                        Text(desc).font(.subheadline).foregroundStyle(Theme.onSurfaceVar)
+                    }
+                }
+                .padding(.bottom, 2)
+
+                ForEach(scenario.topicFields ?? []) { f in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(f.label).font(.caption).foregroundStyle(Theme.onSurfaceVar)
+                            if let v = f.visibleTo, !v.isEmpty {
+                                Text("· 仅 \(v.compactMap { scenario.agent($0)?.name }.joined(separator: "/")) 可见")
+                                    .font(.caption2).foregroundStyle(Theme.tertiary)
+                            }
+                        }
+                        TextField(f.placeholder ?? f.label, text: Binding(
+                            get: { values[f.id] ?? "" },
+                            set: { values[f.id] = $0 }
+                        ), axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1...6)
+                        .focused($focusedField, equals: f.id)
+                        .onSubmit { start() }
+                    }
+                }
+                Text("开场角色会围绕你输入的信息发言;这些值会作为各角色背景,并写入会话名。留空可直接开始。")
+                    .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                HStack(spacing: 12) {
+                    Button("取消", role: .cancel) { vm.cancelPendingScenario() }
+                        .keyboardShortcut(.escape)
+                    Spacer()
+                    Button("开始") { start() }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
                 }
             }
-            Text("开场 agent 会围绕你输入的信息发言;这些值会作为各角色背景,并写入会话名。留空可直接开始。")
-                .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel, action: onClose).keyboardShortcut(.escape)
-                Button("开始") { start() }.keyboardShortcut(.defaultAction)
-            }
+            .padding(28)
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
         }
-        .frame(width: 440)
-        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background)
         .onAppear { focusedField = scenario.topicFields?.first?.id }
+    }
+
+    /// One-line description for known presets (purely UX — falls back to none).
+    private var scenarioDescription: String? {
+        switch scenario.id {
+        case "preset-interview": return "填入岗位与项目信息,面试官提问、指导员据此点评。项目经历仅指导员可见。"
+        case "preset-language-partner": return "指定语言与话题,陪练会按该语言自然对话并纠正你。"
+        case "preset-debate": return "输入辩题,主持人开场后正反方轮流立论。"
+        case "preset-writing-workshop": return "给定写作主题,写手起草、编辑审阅,直到定稿。"
+        case "preset-brainstorm": return "给出主题,创意官发散、评审收敛。"
+        default: return nil
+        }
     }
 
     private func start() {
         let v = values
-        onClose()
-        Task { await vm.newConversation(scenario: scenario, topicValues: v) }
+        Task { await vm.confirmStartScenario(topicValues: v) }
     }
 }
 
@@ -292,6 +325,7 @@ private struct SessionRow: View {
     let isCurrent: Bool
     let onTap: () -> Void
     let onDelete: () -> Void
+    @State private var hovered = false
     var body: some View {
         Button(action: onTap) {
             HStack(alignment: .center) {
@@ -311,13 +345,17 @@ private struct SessionRow: View {
                         .foregroundStyle(Theme.onSurfaceVar)
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
                 .help("删除")
             }
             .padding(.horizontal, 12).padding(.vertical, 5)
-            .background(isCurrent ? Theme.primaryCont.opacity(0.5) : Color.clear)
+            .background(isCurrent ? Theme.primaryCont.opacity(0.5)
+                       : (hovered ? Theme.secondaryCont : Color.clear))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        .pointerCursor()
+        .onHover { hovered = $0 }
         .padding(.horizontal, 6)
     }
 }
@@ -335,11 +373,27 @@ private func relativeTime(_ epochMs: Int64) -> String {
 
 // MARK: - Chat detail
 
+/// Bottom-of-content anchor's global maxY — used to detect how far the
+/// content bottom sits below the viewport (→ user scrolled up).
+private struct BottomAnchorKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+/// ScrollView viewport's global maxY (its bottom edge).
+private struct ViewportBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 private struct ChatDetail: View {
     @ObservedObject var vm: ChatViewModel
     @EnvironmentObject var artifacts: ArtifactStore
     let onOpenSettings: () -> Void
     @State private var stickToBottom = true
+    /// ScrollView's bottom edge in global coordinates (updated by the
+    /// viewport GeometryReader). Read by the bottom-anchor preference change
+    /// handler to compute "how far is the content bottom below the viewport".
+    @State private var viewportBottom: CGFloat = 0
 
     var body: some View {
         if artifacts.visible {
@@ -353,7 +407,19 @@ private struct ChatDetail: View {
         }
     }
 
+    @ViewBuilder
     private var detailContent: some View {
+        // Inline topic-intake page takes over the detail until confirmed/cancelled
+        // — a flatter flow than a modal sheet (the intake lives where the
+        // conversation will live).
+        if let pending = vm.pendingScenario {
+            TopicIntakeView(scenario: pending, vm: vm)
+        } else {
+            conversationContent
+        }
+    }
+
+    private var conversationContent: some View {
         VStack(spacing: 0) {
             // Top bar
             HStack {
@@ -372,6 +438,7 @@ private struct ChatDetail: View {
                                 .font(.caption)
                         }
                         .buttonStyle(.bordered)
+                        .pointerCursor()
                         .disabled(vm.running)
                         .help("结束并进入总结阶段")
                     }
@@ -385,6 +452,7 @@ private struct ChatDetail: View {
                         .help("本轮约 token 数")
                 }
                 Button { onOpenSettings() } label: { Image(systemName: "gearshape") }
+                    .pointerCursor()
                     .help("Provider 设置")
             }
             .padding(.horizontal, 16).padding(.vertical, 8)
@@ -411,14 +479,58 @@ private struct ChatDetail: View {
                             }
                         }
                         Color.clear.frame(height: 1).id("bottom")
+                            .background(GeometryReader { g in
+                                Color.clear.preference(key: BottomAnchorKey.self,
+                                                       value: g.frame(in: .global).maxY)
+                            })
                     }
                     .padding(12)
                 }
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: ViewportBottomKey.self,
+                                           value: g.frame(in: .global).maxY)
+                })
+                // Smart stick-to-bottom: track the content bottom's distance
+                // below the viewport. A real user scroll-up pushes it well
+                // past 200pt → break following so they can read history in
+                // peace. The hysteresis (false at >200, true at <80) plus the
+                // high false-threshold keeps a single per-flush content growth
+                // (a couple lines, well under 200pt) from tripping mid-stream
+                // and re-yanking a streaming reply back to the bottom. The
+                // scroll-to-bottom button offers a manual resume either way.
+                .onPreferenceChange(BottomAnchorKey.self) { bottomY in
+                    let dist = bottomY - viewportBottom
+                    if dist > 200 { stickToBottom = false }
+                    else if dist < 80 { stickToBottom = true }
+                }
+                .onPreferenceChange(ViewportBottomKey.self) { viewportBottom = $0 }
                 .onChange(of: vm.streamTick) { _ in
-                    if stickToBottom { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+                    // Non-animated snap. `withAnimation` here stacks ~20×/sec
+                    // during streaming and forces extra layout passes, which
+                    // visibly jitters the chat (the "上下晃动" + scrollbar
+                    // twitch). When the user scrolled up, stickToBottom is
+                    // false and this is a no-op.
+                    if stickToBottom { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
                 .onChange(of: vm.items.count) { _ in
                     if stickToBottom { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+                .overlay(alignment: .bottom) {
+                    if !stickToBottom && !vm.items.isEmpty {
+                        Button {
+                            withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                            stickToBottom = true
+                        } label: {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.title2)
+                                .foregroundStyle(Theme.primary, Theme.surface)
+                                .shadow(radius: 3)
+                        }
+                        .buttonStyle(.plain)
+                        .pointerCursor()
+                        .padding(.bottom, 8)
+                        .help("回到底部")
+                    }
                 }
             }
 
@@ -511,7 +623,6 @@ private struct SpeakerHeader: View {
 private struct TurnStatusBar: View {
     @ObservedObject var vm: ChatViewModel
     var body: some View {
-        let policyLabel = vm.currentScenario?.turnPolicy.label ?? ""
         HStack(spacing: 6) {
             if vm.running, let sid = vm.activeSpeakerId {
                 let meta = AgentStore.speakerMeta(for: sid, in: vm.currentScenario)
@@ -523,7 +634,6 @@ private struct TurnStatusBar: View {
                 Text("轮到你 — 发送你的回答").font(.caption).foregroundStyle(Theme.onSurfaceVar)
             }
             Spacer()
-            Text("策略: \(policyLabel)").font(.caption2).foregroundStyle(Theme.onSurfaceVar)
         }
         .padding(.horizontal, 16).padding(.vertical, 5)
         .background(Theme.secondaryCont)
@@ -551,13 +661,29 @@ private struct AssistantBubble: View {
                     // token (splitMarkdown + buildInline, O(n²) over the stream)
                     // floods the main thread and beachballs the app on long
                     // replies. The full markdown render lands once on `.done`.
-                    Text(item.text)
+                    //
+                    // Cap the displayed length: a plain `Text` re-lays-out its
+                    // ENTIRE content every flush (Core Text shapes/wraps the
+                    // whole growing string). For a long CJK reply the layout
+                    // cost grows past the flush interval and the main thread
+                    // saturates → persistent beachball mid-stream. Showing only
+                    // the tail keeps layout O(cap); the full text renders once
+                    // on completion.
+                    //
+                    // Inline steady caret "▍" appended to the SAME Text (not a
+                    // separate row): a separate BlinkingCursor row read as an
+                    // extra blank line + flicker. One flowable Text with a
+                    // steady caret at the tail avoids both. Trailing whitespace
+                    // trimmed so a partial trailing newline doesn't open an
+                    // empty line mid-stream.
+                    Text(Self.streamingDisplay(of: item.text)
+                            .trimmingCharacters(in: .whitespacesAndNewlines) + "▍")
                         .foregroundStyle(Theme.onBg)
                         .font(.body)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    MarkdownText(text: item.text)
+                    MarkdownText(text: item.text.trimmingCharacters(in: .whitespacesAndNewlines))
                         .equatable()
                         .contextMenu {
                             Button("重新生成") { onRetry() }
@@ -565,9 +691,6 @@ private struct AssistantBubble: View {
                             Button("分享") { shareText(item.text) }
                         }
                 }
-            }
-            if item.streaming && !item.text.isEmpty {
-                BlinkingCursor()
             }
             if let msg = item.error {
                 HStack {
@@ -578,6 +701,10 @@ private struct AssistantBubble: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Pad the content off the left accent bar so the speaker-colored bar
+        // (group-chat only) doesn't overlap the header/text — it sat at the
+        // very leading edge, directly under the first ~3px of content.
+        .padding(.leading, 12)
         // Left accent bar in the speaker's color (group-chat only).
         .overlay(alignment: .leading) {
             if let sid = item.speakerId {
@@ -585,6 +712,22 @@ private struct AssistantBubble: View {
                 Color(hex: meta.1).frame(width: 3).clipShape(RoundedRectangle(cornerRadius: 1.5))
             }
         }
+        // Extra top gap for group-chat speaker bubbles so consecutive roles
+        // (e.g. 指导员 → 面试官) read as distinct turns rather than one block.
+        .padding(.top, item.speakerId != nil ? 8 : 0)
+    }
+
+    /// The text to render while streaming, capped to the last `cap` characters.
+    /// A plain `Text` re-lays-out its whole content every flush; capping bounds
+    /// the Core Text work so a long reply doesn't saturate the main thread
+    /// mid-stream. The full text renders once on completion (MarkdownText).
+    /// No "…" prefix: it only appeared once the text crossed the cap, causing a
+    /// one-line layout jump mid-stream (the chat "晃动"). Showing the bare tail
+    /// keeps the row count stable across the cap boundary.
+    static let streamingCap = 1800
+    static func streamingDisplay(of text: String) -> String {
+        if text.count <= streamingCap { return text }
+        return String(text.suffix(streamingCap))
     }
     private func copyText(_ s: String) {
         NSPasteboard.general.clearContents()
@@ -624,6 +767,7 @@ private struct ThinkingCard: View {
                                 .foregroundStyle(Theme.onSurfaceVar)
                         }
                         .buttonStyle(.plain)
+                        .pointerCursor()
                     }
                 }
                 if expanded {
@@ -644,7 +788,7 @@ private struct ThinkingCard: View {
 
 private struct ToolStepsCard: View {
     let steps: [ToolStep]
-    @State private var expanded: Bool = true
+    @State private var expanded: Bool = false
     var body: some View {
         let ok = steps.filter { $0.ok == true }.count
         let fail = steps.filter { $0.ok == false }.count
@@ -662,7 +806,7 @@ private struct ToolStepsCard: View {
                     if fail > 0 { Text("✗\(fail)").font(.caption2).foregroundStyle(Theme.errorC) }
                     if pending > 0 { ThreeDots() }
                 }
-            }.buttonStyle(.plain)
+            }.buttonStyle(.plain).pointerCursor()
             if expanded {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(steps) { StepLine(step: $0) }
@@ -686,7 +830,8 @@ private struct StepLine: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Image(systemName: icon).foregroundStyle(color).font(.caption2)
-                Text("\(step.name)(\(step.args))")
+                // Collapsed: just the tool name (clean). Expanded: name + args.
+                Text(expanded && !step.args.isEmpty ? "\(step.name)(\(step.args))" : step.name)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(color)
                     .lineLimit(2)
@@ -831,7 +976,7 @@ private struct CodeCard: View {
                 } label: {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
-                }.buttonStyle(.plain).help("复制代码")
+                }.buttonStyle(.plain).pointerCursor().help("复制代码")
                 if code.count > 80 {
                     Button {
                         artifacts.open(Artifact(title: lang.isEmpty ? "代码" : lang,
@@ -841,6 +986,7 @@ private struct CodeCard: View {
                             .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
                     }
                     .buttonStyle(.plain)
+                    .pointerCursor()
                     .help("在画布打开")
                 }
             }
@@ -861,16 +1007,6 @@ private struct CodeCard: View {
 }
 
 // MARK: - Streaming cursors
-
-private struct BlinkingCursor: View {
-    @State private var on = true
-    var body: some View {
-        Text("▍").foregroundStyle(Theme.primary.opacity(on ? 1 : 0.2))
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) { on = false }
-            }
-    }
-}
 
 private struct ThreeDots: View {
     @State private var phase = 0.0
@@ -904,6 +1040,7 @@ private struct FirstRunHint: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
+        .pointerCursor()
     }
 }
 
@@ -923,9 +1060,40 @@ private struct InputBar: View {
     /// Reference holder so the NSEvent monitor (installed once) reads live
     /// focus state. Stored state lives across re-renders via @StateObject.
     @StateObject private var focus = InputFocusHolder()
+    /// Voice dictation. The mic button starts/stops it; recognized text fills
+    /// the field (prefixed with whatever the user had already typed).
+    @StateObject private var speech = SpeechRecognizer()
+    /// Text present when dictation started — preserved as a prefix so dictating
+    /// appends to, not replaces, any existing draft.
+    @State private var dictationPrefix: String = ""
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            // Mic button: toggle dictation. While running it's red + shows a
+            // waveform; recognized text flows into the field via the transcript
+            // onChange below.
+            Button {
+                if speech.isRunning {
+                    speech.stop()
+                    dictationPrefix = ""
+                    focused = true
+                } else {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    dictationPrefix = trimmed.isEmpty ? "" : value
+                    speech.start()
+                }
+            } label: {
+                Image(systemName: speech.isRunning ? "waveform.circle.fill" : "mic.fill")
+                    .font(.title3)
+                    .foregroundStyle(speech.isRunning ? .white : Theme.onSurfaceVar)
+                    .frame(width: 36, height: 36)
+                    .background(speech.isRunning ? Theme.errorC : Theme.surfaceVar)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .disabled(running || !speech.available)
+            .help(speech.available ? "语音输入(点击说话,再点结束)" : "语音识别不可用(检查权限/系统设置)")
             TextEditor(text: $value)
                 .font(.body)
                 .scrollContentBackground(.hidden)
@@ -944,6 +1112,7 @@ private struct InputBar: View {
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
             } else {
                 Button(action: onSend) {
                     Image(systemName: "paperplane.fill").font(.title3)
@@ -953,6 +1122,7 @@ private struct InputBar: View {
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
+                .pointerCursor()
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -960,6 +1130,16 @@ private struct InputBar: View {
         .padding(8)
         .background(Theme.surface)
         .onChange(of: focused) { focus.focused = $0 }
+        // Fold the live dictation transcript into the field, preserving the
+        // pre-dictation prefix.
+        .onChange(of: speech.transcript) { t in
+            let sep = dictationPrefix.isEmpty || t.isEmpty ? "" : " "
+            value = dictationPrefix + sep + t
+        }
+        .onChange(of: speech.isRunning) { running in
+            // When dictation stops, reclaim focus so Return-to-send works.
+            if !running { focused = true }
+        }
         // ⏎ Return sends; ⇧⏎ inserts a newline. (macOS 13 TextEditor doesn't
         // fire onSubmit on plain Return, and a Button `.return` shortcut is
         // pre-empted by the field editor — so we intercept at the key-event

@@ -70,13 +70,23 @@ struct Agent: Codable, Identifiable, Hashable {
 }
 
 /// One input field the user must fill before starting a scenario (e.g.
-/// "应聘岗位"). A scenario with `topicFields` non-empty prompts a form sheet
-/// on start; the collected values are baked into every member's system prompt
-/// as background and into the session title.
+/// "应聘岗位"). A scenario with `topicFields` non-empty prompts the inline
+/// intake page on start; the collected values are baked into every member's
+/// system prompt as background and into the session title.
+///
+/// `visibleTo` controls per-member visibility of the collected value: `nil`
+/// means the value is folded into ALL members' background (default — e.g. the
+/// interview's "应聘岗位" is shared context). A non-empty array restricts the
+/// value to only those member ids (e.g. the interviewee's "项目经历" is
+/// `["coach"]` so the coach can give specific advice but the interviewer never
+/// sees it and can't ask about it).
 struct TopicField: Codable, Identifiable, Hashable {
     var id: String
     var label: String
     var placeholder: String?
+    /// Member ids allowed to see this field's value in their system prompt.
+    /// `nil` = visible to all members. Non-empty = only those members.
+    var visibleTo: [String]? = nil
 }
 
 /// Optional "debrief" phase config for a scenario. After the user triggers
@@ -89,6 +99,16 @@ struct DebriefConfig: Codable, Hashable {
     var buttonLabel: String          // e.g. "结束面试"
     var summaryPrompt: String        // sent to the debrief member
     var debriefMemberId: String      // the member that takes over (e.g. "coach")
+}
+
+/// Optional review-revise loop (e.g. writing workshop: writer drafts → editor
+/// reviews → writer revises → editor re-reviews → … until the editor approves
+/// or `maxRounds` is reached). The reviewer's persona prompt must instruct it
+/// to emit `approveMarker` when satisfied. `nil` = single pass, no loop.
+struct ReviewLoopConfig: Codable, Hashable {
+    var reviewerId: String           // member id that decides approval (e.g. "editor")
+    var approveMarker: String         // substring the reviewer emits when satisfied (e.g. "定稿")
+    var maxRounds: Int                // total scripted passes to run at most (1 = no loop)
 }
 
 /// A multi-agent scenario — a cast of personas + a turn policy.
@@ -108,38 +128,59 @@ struct Scenario: Codable, Identifiable, Hashable {
     /// Optional debrief phase (e.g. interview → coach summary + Q&A). `nil`
     /// ⇒ no debrief button.
     var debrief: DebriefConfig?
+    /// Optional review-revise loop (e.g. writing workshop). `nil` = single pass.
+    var reviewLoop: ReviewLoopConfig?
 
     /// Build the FFI `ScenarioSpecView`, inheriting provider config per-agent.
-    /// `topicValues` (keyed by field id) is rendered into a background block
-    /// ("【场景背景】\n岗位: X\n目标公司: Y\n…") folded into each member's
-    /// system prompt, and into the session title ("场景名·v1·v2…").
+    /// `topicValues` (keyed by field id) is rendered into a per-member background
+    /// block ("【场景背景】\n岗位: X\n…") folded into each member's system prompt,
+    /// and into the session title ("场景名·v1·v2…").
+    ///
+    /// Per-member visibility: a field with `visibleTo` is only folded into the
+    /// background of the listed members (e.g. the interviewee's "项目经历" with
+    /// `visibleTo: ["coach"]` reaches the coach but NOT the interviewer — so
+    /// the coach can reference project specifics while the interviewer can't
+    /// ask about them). Fields with `visibleTo == nil` reach everyone.
     func specView(defaultKind: String, defaultApiKey: String, defaultBaseUrl: String,
                   defaultModel: String, topicValues: [String: String]?) -> ScenarioSpecView {
-        // Render the field values into a background block + a compact title suffix.
-        var lines: [String] = []
-        var titleParts: [String] = []
-        if let fields = topicFields, let vals = topicValues {
-            for f in fields {
-                let v = (vals[f.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if v.isEmpty { continue }
-                lines.append("\(f.label): \(v)")
-                titleParts.append(v)
-            }
+        // Pre-render the per-field (label, value) pairs, dropping blanks.
+        let fields = topicFields ?? []
+        let pairs: [(field: TopicField, value: String)] = fields.compactMap { f in
+            let v = (topicValues?[f.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return v.isEmpty ? nil : (f, v)
         }
-        let background = lines.isEmpty ? "" : "【场景背景】\n" + lines.joined(separator: "\n")
+        // Title suffix uses every non-blank value regardless of visibility
+        // (the title is conversation-scoped, not per-member).
+        let titleParts = pairs.map { $0.value }
         let title = titleParts.isEmpty ? name : "\(name)·" + titleParts.joined(separator: "·")
+
+        let members = self.agents.map { agent in
+            // Background for THIS member: only fields it's allowed to see.
+            let visible = pairs.filter { p in
+                guard let allowed = p.field.visibleTo else { return true }   // nil → all
+                return allowed.contains(agent.id)
+            }
+            let lines = visible.map { "\($0.field.label): \($0.value)" }
+            let background = lines.isEmpty ? "" : "【场景背景】\n" + lines.joined(separator: "\n")
+            return agent.specView(defaultKind: defaultKind,
+                                  defaultApiKey: defaultApiKey,
+                                  defaultBaseUrl: defaultBaseUrl,
+                                  defaultModel: defaultModel,
+                                  background: background)
+        }
         return ScenarioSpecView(
-            members: agents.map { $0.specView(defaultKind: defaultKind,
-                                              defaultApiKey: defaultApiKey,
-                                              defaultBaseUrl: defaultBaseUrl,
-                                              defaultModel: defaultModel,
-                                              background: background) },
+            members: members,
             turnPolicy: turnPolicy.specValue,
             scriptOrder: scriptOrder,
             moderatorId: moderatorId,
             openerAgentId: openerAgentId,
             openerLine: openerLine,
-            title: title
+            title: title,
+            reviewLoop: reviewLoop.map { rl in
+                ReviewLoopSpecView(reviewerId: rl.reviewerId,
+                                   approveMarker: rl.approveMarker,
+                                   maxRounds: UInt64(rl.maxRounds))
+            }
         )
     }
 

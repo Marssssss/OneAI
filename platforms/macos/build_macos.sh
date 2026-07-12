@@ -53,6 +53,7 @@ swiftc \
   -lz -lresolv -lc++ \
   -framework AppKit -framework SwiftUI -framework Foundation \
   -framework SystemConfiguration -framework CoreFoundation -framework Security -framework CFNetwork \
+  -framework Speech -framework AVFoundation \
   -module-name OneAI \
   -emit-executable \
   "${SOURCES[@]}" \

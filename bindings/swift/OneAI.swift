@@ -3114,6 +3114,88 @@ public func FfiConverterTypeProviderConfigView_lower(_ value: ProviderConfigView
 
 
 /**
+ * Review-revise loop config (e.g. writing workshop: writer drafts → editor
+ * reviews → writer revises → … until the editor approves or `max_rounds` is
+ * reached). The reviewer's persona prompt must instruct it to emit
+ * `approve_marker` when satisfied.
+ */
+public struct ReviewLoopSpecView: Equatable, Hashable {
+    /**
+     * Member id that decides approval (e.g. `"editor"`).
+     */
+    public var reviewerId: String
+    /**
+     * Substring the reviewer emits when satisfied (e.g. `"定稿"`).
+     */
+    public var approveMarker: String
+    /**
+     * Total scripted passes to run at most (1 = no loop, just the initial pass).
+     */
+    public var maxRounds: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Member id that decides approval (e.g. `"editor"`).
+         */reviewerId: String, 
+        /**
+         * Substring the reviewer emits when satisfied (e.g. `"定稿"`).
+         */approveMarker: String, 
+        /**
+         * Total scripted passes to run at most (1 = no loop, just the initial pass).
+         */maxRounds: UInt64) {
+        self.reviewerId = reviewerId
+        self.approveMarker = approveMarker
+        self.maxRounds = maxRounds
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ReviewLoopSpecView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReviewLoopSpecView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReviewLoopSpecView {
+        return
+            try ReviewLoopSpecView(
+                reviewerId: FfiConverterString.read(from: &buf), 
+                approveMarker: FfiConverterString.read(from: &buf), 
+                maxRounds: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReviewLoopSpecView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.reviewerId, into: &buf)
+        FfiConverterString.write(value.approveMarker, into: &buf)
+        FfiConverterUInt64.write(value.maxRounds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewLoopSpecView_lift(_ buf: RustBuffer) throws -> ReviewLoopSpecView {
+    return try FfiConverterTypeReviewLoopSpecView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReviewLoopSpecView_lower(_ value: ReviewLoopSpecView) -> RustBuffer {
+    return FfiConverterTypeReviewLoopSpecView.lower(value)
+}
+
+
+/**
  * A multi-agent scenario spec handed to `OneAIApp::create_group_session`.
  */
 public struct ScenarioSpecView: Equatable, Hashable {
@@ -3147,6 +3229,11 @@ public struct ScenarioSpecView: Equatable, Hashable {
      * scenario instead of falling back to "新对话".
      */
     public var title: String?
+    /**
+     * Optional review-revise loop. When set, the scripted order repeats up to
+     * `max_rounds` until the reviewer emits `approve_marker`. `None` = single pass.
+     */
+    public var reviewLoop: ReviewLoopSpecView?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -3173,7 +3260,11 @@ public struct ScenarioSpecView: Equatable, Hashable {
          * Optional conversation title (e.g. `"面试演练·前端工程师"`). Persisted into
          * `Conversation.metadata["title"]` so the saved session is named after the
          * scenario instead of falling back to "新对话".
-         */title: String?) {
+         */title: String?, 
+        /**
+         * Optional review-revise loop. When set, the scripted order repeats up to
+         * `max_rounds` until the reviewer emits `approve_marker`. `None` = single pass.
+         */reviewLoop: ReviewLoopSpecView?) {
         self.members = members
         self.turnPolicy = turnPolicy
         self.scriptOrder = scriptOrder
@@ -3181,6 +3272,7 @@ public struct ScenarioSpecView: Equatable, Hashable {
         self.openerAgentId = openerAgentId
         self.openerLine = openerLine
         self.title = title
+        self.reviewLoop = reviewLoop
     }
 
     
@@ -3205,7 +3297,8 @@ public struct FfiConverterTypeScenarioSpecView: FfiConverterRustBuffer {
                 moderatorId: FfiConverterOptionString.read(from: &buf), 
                 openerAgentId: FfiConverterOptionString.read(from: &buf), 
                 openerLine: FfiConverterOptionString.read(from: &buf), 
-                title: FfiConverterOptionString.read(from: &buf)
+                title: FfiConverterOptionString.read(from: &buf), 
+                reviewLoop: FfiConverterOptionTypeReviewLoopSpecView.read(from: &buf)
         )
     }
 
@@ -3217,6 +3310,7 @@ public struct FfiConverterTypeScenarioSpecView: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.openerAgentId, into: &buf)
         FfiConverterOptionString.write(value.openerLine, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionTypeReviewLoopSpecView.write(value.reviewLoop, into: &buf)
     }
 }
 
@@ -4314,6 +4408,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeReviewLoopSpecView: FfiConverterRustBuffer {
+    typealias SwiftType = ReviewLoopSpecView?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeReviewLoopSpecView.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeReviewLoopSpecView.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

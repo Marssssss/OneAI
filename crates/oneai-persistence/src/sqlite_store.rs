@@ -81,7 +81,8 @@ impl SqliteSessionStore {
                 messages_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                title TEXT
+                title TEXT,
+                metadata_json TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);
 
@@ -139,6 +140,15 @@ impl SqliteSessionStore {
         // session-list previews). Legacy dbs get the column added as NULL.
         let _ = conn.execute(
             "ALTER TABLE conversations ADD COLUMN title TEXT",
+            [],
+        );
+        // And the `metadata_json` column, added so a resumed conversation
+        // retains its metadata — notably `metadata["title"]` set by group-chat
+        // scenarios (e.g. "面试演练·前端工程师"). Without it, resume drops the
+        // title and the next save falls back to first-user-message derivation,
+        // clobbering the scenario name.
+        let _ = conn.execute(
+            "ALTER TABLE conversations ADD COLUMN metadata_json TEXT",
             [],
         );
 
@@ -532,6 +542,7 @@ impl MemoryPersistence for SqliteSessionStore {
             .map_err(|e| OneAIError::Persistence(
                 format!("Failed to serialize conversation '{}': {}", id, e)
             ))?;
+        let metadata_json = serialize_metadata(&conversation.metadata);
         let now = chrono::Utc::now().to_rfc3339();
         let title = conversation_title(conversation, 80);
 
@@ -546,17 +557,19 @@ impl MemoryPersistence for SqliteSessionStore {
 
         if exists {
             // Recompute the title on update too — the first user message could
-            // have changed (e.g. history rewritten by a compact).
+            // have changed (e.g. history rewritten by a compact). The metadata
+            // (which may carry an explicit `title`) is persisted verbatim so a
+            // resumed session keeps it; `conversation_title` still honors it.
             conn.execute(
-                "UPDATE conversations SET messages_json = ?2, updated_at = ?3, title = ?4 WHERE id = ?1",
-                rusqlite::params![id, messages_json, now, title],
+                "UPDATE conversations SET messages_json = ?2, metadata_json = ?3, updated_at = ?4, title = ?5 WHERE id = ?1",
+                rusqlite::params![id, messages_json, metadata_json, now, title],
             ).map_err(|e| OneAIError::Persistence(
                 format!("Failed to update conversation '{}': {}", id, e)
             ))?;
         } else {
             conn.execute(
-                "INSERT INTO conversations (id, messages_json, created_at, updated_at, title) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![id, messages_json, now, now, title],
+                "INSERT INTO conversations (id, messages_json, metadata_json, created_at, updated_at, title) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![id, messages_json, metadata_json, now, now, title],
             ).map_err(|e| OneAIError::Persistence(
                 format!("Failed to insert conversation '{}': {}", id, e)
             ))?;
@@ -569,19 +582,48 @@ impl MemoryPersistence for SqliteSessionStore {
     async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>> {
         let conn = self.open_connection()?;
         let result = conn.query_row(
-            "SELECT messages_json FROM conversations WHERE id = ?1",
+            "SELECT messages_json, metadata_json, title FROM conversations WHERE id = ?1",
             rusqlite::params![id],
-            |row| row.get::<_, String>(0),
+            |row| {
+                let messages_json: String = row.get(0)?;
+                // Legacy rows (pre-metadata_json column) return NULL → default "{}".
+                let metadata_json: Option<String> = row.get(1).ok();
+                let title: Option<String> = row.get(2).ok();
+                Ok((messages_json, metadata_json, title))
+            },
         );
 
         match result {
-            Ok(messages_json) => {
+            Ok((messages_json, metadata_json, title)) => {
                 let messages: Vec<oneai_core::Message> = serde_json::from_str(&messages_json)
                     .map_err(|e| OneAIError::Persistence(
                         format!("Failed to deserialize conversation '{}': {}", id, e)
                     ))?;
                 let mut conversation = Conversation::with_id(id.to_string());
                 conversation.messages = messages;
+                // Restore metadata so a resumed session keeps its title
+                // (and any other conversation-level metadata) across the next
+                // save — otherwise `conversation_title` falls back to the
+                // first-user-message derivation and clobbers the scenario name.
+                if let Some(json) = metadata_json {
+                    if !json.is_empty() {
+                        conversation.metadata = deserialize_metadata(&json);
+                    }
+                }
+                // Legacy fallback: rows saved before metadata_json existed have
+                // no metadata, so the title column is the only record of the
+                // scenario name. Promote it into metadata["title"] so the next
+                // save preserves it instead of re-deriving from the first user
+                // message (which would clobber "面试演练·前端工程师").
+                if conversation.metadata.get("title").map(|s| s.is_empty()).unwrap_or(true) {
+                    if let Some(t) = title {
+                        if !t.is_empty() {
+                            conversation
+                                .metadata
+                                .insert("title".to_string(), t);
+                        }
+                    }
+                }
                 Ok(Some(conversation))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -979,6 +1021,45 @@ mod tests {
             sessions[0].title.as_deref(),
             Some("面试演练·前端工程师"),
             "metadata.title must override the first-user-message derivation",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conversation_title_survives_resume_and_resave() {
+        // Regression: a group-chat session is saved with metadata["title"].
+        // It is then resumed (loaded) as a fresh conversation, a new user
+        // message is appended, and it is re-saved. The scenario title must be
+        // preserved — previously `load_conversation` dropped the metadata, so
+        // the re-save fell back to the first-user-message derivation and
+        // clobbered "面试演练·前端工程师" with the user's first answer.
+        let (store, _dir) = make_store();
+
+        let mut conv = Conversation::with_id("conv1".to_string());
+        conv.metadata
+            .insert("title".to_string(), "面试演练·前端工程师".to_string());
+        conv.add_message(oneai_core::Message::assistant("开场白".to_string()));
+        store.save_conversation("conv1", &conv).await.unwrap();
+
+        // Resume → metadata (incl. title) must round-trip.
+        let mut resumed = store.load_conversation("conv1").await.unwrap().unwrap();
+        assert_eq!(
+            resumed.metadata.get("title").map(|s| s.as_str()),
+            Some("面试演练·前端工程师"),
+            "metadata.title must be restored on load",
+        );
+
+        // Simulate the user coming back and sending a new message: append +
+        // re-save (now via the single-agent path, which has no metadata of its
+        // own). The title must NOT regress to the first user message.
+        resumed.add_message(oneai_core::Message::user("我的自我介绍是…".to_string()));
+        resumed.add_message(oneai_core::Message::assistant("好的".to_string()));
+        store.save_conversation("conv1", &resumed).await.unwrap();
+
+        let sessions = store.list_conversations().await.unwrap();
+        assert_eq!(
+            sessions[0].title.as_deref(),
+            Some("面试演练·前端工程师"),
+            "resumed scenario title must survive a re-save, not be clobbered",
         );
     }
 

@@ -2915,6 +2915,16 @@ impl AgentLoop {
         use futures::StreamExt;
 
         // Establish the stream (or abort immediately if already cancelled).
+        // The call to `infer_stream` itself is bounded by the idle timeout:
+        // without this, a provider/proxy that accepts the connection but
+        // never sends the first byte (or the response headers) hangs here
+        // FOREVER — the per-chunk `stream.next()` timeout below can't fire
+        // because we never get a stream to iterate. That manifests as a
+        // multi-minute "stuck" with no error and no tokens (observed 2–20
+        // min stalls in the macOS app). Bounding it surfaces a retryable
+        // error instead. STREAM_IDLE_TIMEOUT is reused so the budget is the
+        // same as for mid-stream stalls.
+        const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
         let mut stream = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
@@ -2922,7 +2932,19 @@ impl AgentLoop {
                     "Agent interrupted during inference.".to_string(),
                 ));
             }
-            res = self.provider.infer_stream(request.clone()) => res?,
+            res = tokio::time::timeout(STREAM_IDLE_TIMEOUT, self.provider.infer_stream(request.clone())) => match res {
+                Ok(s) => s?,
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        "infer_stream did not start within {}s — provider/proxy stalled on the request; aborting with retryable error",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    );
+                    return Err(oneai_core::error::OneAIError::Other(format!(
+                        "模型响应超时({}秒未开始),可能为网络/服务端中断,请重试。",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    )));
+                }
+            },
         };
 
         // Use the IncrementalStreamParser for proper incremental parsing
@@ -2982,14 +3004,17 @@ impl AgentLoop {
                     crate::streaming::StreamEvent::ThinkingFragment { text } => {
                         observer.on_thinking(&text);
                     }
-                    crate::streaming::StreamEvent::ToolIntentDetected { call_id: _, tool_name } => {
-                        // Tool intent detected — show the tool name in the TUI as a
-                        // lightweight "intent" indicator (no args yet, just the name).
-                        // This replaces the previous approach of calling on_tool_calls
-                        // with empty args, which created duplicate tool call cards in
-                        // the TUI (one for intent, one for completion). Now we only
-                        // send on_tool_calls for fully assembled tool calls.
-                        observer.on_stream_chunk(&format!("▸ preparing {}…", tool_name));
+                    crate::streaming::StreamEvent::ToolIntentDetected { .. } => {
+                        // Tool intent detected mid-stream. We do NOT surface
+                        // this to the observer: emitting it as a stream chunk
+                        // ("▸ preparing {tool}…") polluted the assistant's
+                        // answer text on clients that fold stream chunks into
+                        // the bubble (the macOS app rendered "preparing 工具"
+                        // as body text). The fully-assembled call arrives
+                        // moments later via `ToolCallComplete` → `on_tool_calls`,
+                        // which is what the UI's tool card renders. The intent
+                        // hint was a TUI-only nicety; dropping it keeps the
+                        // answer text clean on every port.
                     }
                     crate::streaming::StreamEvent::ToolCallComplete { call_id, tool_name, args } => {
                         // Tool call is fully assembled — notify observer with complete args
@@ -3306,7 +3331,17 @@ impl AgentLoop {
         // ToolExecutor. In plan mode the model should focus on planning, so we
         // only expose them outside plan mode.
         if !self.plan_mode() {
-            all.append(&mut crate::meta_tool::meta_tool_definitions());
+            let mut meta = crate::meta_tool::meta_tool_definitions();
+            // Don't advertise `delegate` when the sub-agent factory can't fulfill
+            // it (e.g. group-chat persona members use `SubAgentFactoryNone`).
+            // Otherwise the model decides to delegate a subtask, the loop emits
+            // "▸ preparing delegate…", and `spawn_sub_agent` errors out — leaving
+            // the UI stuck on "preparing delegate" with no path forward.
+            // `switch_paradigm` is independent of the factory, so it stays.
+            if self.sub_agent_factory.available_kinds().is_empty() {
+                meta.retain(|d| d.name != crate::meta_tool::TOOL_DELEGATE);
+            }
+            all.append(&mut meta);
         }
         all
     }

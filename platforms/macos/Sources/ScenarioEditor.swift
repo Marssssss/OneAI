@@ -38,15 +38,39 @@ struct ScenarioEditor: View {
             // ── Topic intake fields ──
             Text("主题输入字段(开始场景时弹出,值会嵌入各角色背景)").font(.headline)
             ForEach($scenario.topicFields.boundList) { $f in
-                HStack {
-                    TextField("字段名(如:应聘岗位)", text: $f.label).textFieldStyle(.roundedBorder)
-                    TextField("占位提示(可选)", text: Binding(
-                        get: { f.placeholder ?? "" },
-                        set: { f.placeholder = $0.isEmpty ? nil : $0 }
-                    )).textFieldStyle(.roundedBorder)
-                    Button { scenario.topicFields?.removeAll { $0.id == f.id } } label: {
-                        Image(systemName: "trash")
-                    }.buttonStyle(.borderless)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        TextField("字段名(如:应聘岗位)", text: $f.label).textFieldStyle(.roundedBorder)
+                        TextField("占位提示(可选)", text: Binding(
+                            get: { f.placeholder ?? "" },
+                            set: { f.placeholder = $0.isEmpty ? nil : $0 }
+                        )).textFieldStyle(.roundedBorder)
+                        Button { scenario.topicFields?.removeAll { $0.id == f.id } } label: {
+                            Image(systemName: "trash")
+                        }.buttonStyle(.borderless)
+                    }
+                    // Per-member visibility: nil = all members see this value
+                    // (shared context); otherwise only the checked members see it
+                    // (e.g. interviewee's project info → coach only).
+                    HStack {
+                        Image(systemName: "eye").font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                        Menu {
+                            Button { f.visibleTo = nil } label: { Label("全员可见", systemImage: f.visibleTo == nil ? "checkmark" : "") }
+                            ForEach(scenario.agents) { a in
+                                let on = f.visibleTo?.contains(a.id) ?? false
+                                Button {
+                                    var v = f.visibleTo ?? []
+                                    if v.contains(a.id) { v.removeAll { $0 == a.id } }
+                                    else { v.append(a.id) }
+                                    f.visibleTo = v.isEmpty ? nil : v
+                                } label: { Label(a.name, systemImage: on ? "checkmark" : "") }
+                            }
+                        } label: {
+                            Text(visibilityLabel(for: f, in: scenario))
+                                .font(.caption2).foregroundStyle(Theme.onSurfaceVar)
+                        }
+                        .menuStyle(.borderlessButton).fixedSize()
+                    }
                 }
             }
             Button {
@@ -150,6 +174,14 @@ struct ScenarioEditor: View {
         }
         .frame(width: 560, height: 640)
         .padding(16)
+    }
+
+    /// One-line summary of a topic field's per-member visibility for the Menu label.
+    private func visibilityLabel(for f: TopicField, in sc: Scenario) -> String {
+        guard let v = f.visibleTo, !v.isEmpty else { return "全员可见" }
+        let names = v.compactMap { sc.agent($0)?.name }
+        let shown = names.isEmpty ? v.joined(separator: ",") : names.joined(separator: "/")
+        return "仅 \(shown) 可见"
     }
 }
 

@@ -5,6 +5,59 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Stream debug logger
+//
+// Writes timestamped lines from both the tokio worker thread and the main
+// thread to ~/Library/Application Support/oneai_stream.log (truncated on each
+// launch). The gap pattern between the two threads localizes a streaming
+// beachball:
+//   • worker keeps logging token arrivals but main "hb" gaps for seconds
+//     → the main thread is BLOCKED (a sync call/lock), not merely busy.
+//   • main "hb" keeps firing every 200ms but each "flush" takes >200ms
+//     → main-thread CPU saturation (render cost).
+//   • worker "tok" lines stop arriving → provider/tokio stalled (network).
+// All writes go through a serial queue so the worker thread is never blocked
+// by file I/O (it just dispatches). Disable once the freeze is localized.
+
+private enum StreamLog {
+    private static let queue = DispatchQueue(label: "ai.oneai.streamlog")
+    private static var handle: FileHandle?
+    private static let df: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f
+    }()
+    static func start() {
+        queue.async {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("oneai_stream.log")
+            FileManager.default.createFile(atPath: url.path, contents: Data())
+            handle = try? FileHandle(forWritingTo: url)
+            log("init", "stream log started")
+        }
+    }
+    static func log(_ tag: String, _ msg: String) {
+        queue.async {
+            guard let h = handle else { return }
+            let ms = Int(Date().timeIntervalSince1970 * 1000) % 1000
+            let ts = "\(df.string(from: Date())).\(String(format: "%03d", ms))"
+            let line = "\(ts)  [\(tag)]  \(msg)\n"
+            if let data = line.data(using: .utf8) { h.write(data) }
+        }
+    }
+}
+
+/// Retains the main-runloop heartbeat Timer across re-renders.
+private var streamHeartbeatStarted = false
+
+extension ChatViewModel {
+    fileprivate static func scheduleHeartbeat() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            StreamLog.log("main", "hb")
+            scheduleHeartbeat()
+        }
+    }
+}
+
 // MARK: - Chat items
 
 struct ToolStep: Identifiable {
@@ -59,10 +112,89 @@ enum ChatEntry: Identifiable {
 final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     weak var vm: ChatViewModel?
     init(vm: ChatViewModel) { self.vm = vm }
+
+    /// Buffer of coalesced hot fragments (streamChunk/thinking), drained by a
+    /// single scheduled flush. Without coalescing, every token fires its own
+    /// `DispatchQueue.main.async` — for a long stream the main queue backs up
+    /// faster than it drains (each block runs `handle` +, on throttle-boundary,
+    /// a full re-render), the main thread never catches up, and the app
+    /// beachballs mid-stream. Batching bounds main-queue work to ~20 fps.
+    private let lock = NSLock()
+    private var pendingHot: [ChatEventView] = []
+    private var flushScheduled = false
+    /// ~20 fps. Renders are paced by this; if a render overruns it, flushes
+    /// naturally back off to render speed (no flooding).
+    private static let flushInterval: TimeInterval = 0.05
+
     func onEvent(event: ChatEventView) {
-        // Fires on the tokio worker thread → marshal to main before touching UI.
-        let vm = self.vm
-        DispatchQueue.main.async { vm?.handle(event) }
+        // Fires on the tokio worker thread — but confirm: log whether it's
+        // actually the main thread. If onEvent runs on main, the Rust future
+        // is being driven on the main thread and a slow inference blocks the
+        // UI → that's the beachball cause.
+        if Self.isHot(event) {
+            lock.lock()
+            pendingHot.append(event)
+            let n = pendingHot.count
+            let schedule = !flushScheduled
+            if schedule { flushScheduled = true }
+            lock.unlock()
+            StreamLog.log("worker", "hot pending=\(n) onMain=\(Thread.isMainThread)")
+            if schedule {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.flushInterval) { [weak self] in
+                    self?.flush()
+                }
+            }
+        } else {
+            lock.lock()
+            let pending = pendingHot
+            pendingHot.removeAll()
+            lock.unlock()
+            let kind = Self.eventKind(event)
+            StreamLog.log("worker", "nonhot=\(kind) pendingAhead=\(pending.count) onMain=\(Thread.isMainThread)")
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard let vm = self.vm else { return }
+                for e in pending { vm.handle(e) }
+                vm.handle(event)
+            }
+        }
+    }
+
+    private func flush() {
+        lock.lock()
+        flushScheduled = false
+        let pending = pendingHot
+        pendingHot.removeAll()
+        lock.unlock()
+        guard let vm = vm else { return }
+        if pending.isEmpty { return }
+        let t0 = Date()
+        StreamLog.log("main", "flush start pending=\(pending.count)")
+        // handle() throttles streamTick internally — the first hot event in the
+        // batch bumps (≥flushInterval since the last flush), the rest skip, so
+        // the whole batch produces exactly one re-render.
+        for e in pending { vm.handle(e) }
+        let durMs = Int(Date().timeIntervalSince(t0) * 1000)
+        StreamLog.log("main", "flush end dur_ms=\(durMs)")
+    }
+
+    private static func eventKind(_ e: ChatEventView) -> String {
+        switch e {
+        case .streamChunk: return "chunk"
+        case .thinking: return "thinking"
+        case .toolCall: return "toolCall"
+        case .toolResult: return "toolResult"
+        case .directAnswer: return "directAnswer"
+        case .complete: return "complete"
+        case .error: return "error"
+        }
+    }
+
+    private static func isHot(_ event: ChatEventView) -> Bool {
+        switch event {
+        case .streamChunk, .thinking: return true
+        default: return false
+        }
     }
 }
 
@@ -87,6 +219,12 @@ final class ChatViewModel: ObservableObject {
     @Published var agentStore = AgentStore()
     /// Active scenario for the current conversation; `nil` = single-agent chat.
     @Published var currentScenario: Scenario? = nil
+    /// A scenario the user picked but hasn't confirmed the topic for yet.
+    /// When non-nil, the chat detail renders an inline topic-intake page in
+    /// place of the conversation (a flatter flow than a modal sheet — the
+    /// intake lives where the conversation will live). Set by tapping a
+    /// scenario in the sidebar; cleared by confirm/cancel.
+    @Published var pendingScenario: Scenario? = nil
     /// Speaker currently producing events (for the turn-status bar).
     @Published var activeSpeakerId: String? = nil
     /// True once the current scenario's debrief phase has been triggered (the
@@ -165,6 +303,17 @@ final class ChatViewModel: ObservableObject {
 
     func ensureApp() async {
         guard app == nil else { return }
+        StreamLog.start()
+        // Main-thread heartbeat, driven by a self-rescheduling
+        // DispatchQueue.main.asyncAfter chain (NOT a Timer — that earlier
+        // attempt attached to the wrong runloop because this method runs off
+        // the main actor). This chain runs a block on the main queue every
+        // 200ms; if the main thread blocks, the next asyncAfter can't fire →
+        // a multi-second gap in "hb" lines. That gap localizes the block.
+        if !streamHeartbeatStarted {
+            streamHeartbeatStarted = true
+            Self.scheduleHeartbeat()
+        }
         do {
             var builder = OneAiAppBuilder()
             builder = try builder.providerConfig(cfg: providerConfigView())
@@ -211,6 +360,20 @@ final class ChatViewModel: ObservableObject {
     /// with no `topicFields`, or programmatic single-agent restart).
     func newConversation(scenario: Scenario?) async {
         await newConversation(scenario: scenario, topicValues: nil)
+    }
+
+    /// Confirm the inline topic-intake page: bake the collected values into the
+    /// scenario and start the conversation.
+    func confirmStartScenario(topicValues: [String: String]) async {
+        let sc = pendingScenario
+        pendingScenario = nil
+        guard let sc else { return }
+        await newConversation(scenario: sc, topicValues: topicValues)
+    }
+
+    /// Abort the inline topic-intake page; returns to whatever was current.
+    func cancelPendingScenario() {
+        pendingScenario = nil
     }
 
     /// Start a fresh conversation. When `scenario` is non-nil, a multi-agent
@@ -367,8 +530,16 @@ final class ChatViewModel: ObservableObject {
         case .thinking(let text, _):
             turn.thinkingActive = true; turn.thinking += text
         case .streamChunk(let text, _):
-            if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
+            // When the first text chunk arrives, thinking just ended. Force an
+            // immediate (non-throttled) flush so the ThinkingCard switches from
+            // "思考中…" to "已深度思考" right away — without this, the hot
+            // throttle drops this tick's streamTick bump and the card stays on
+            // "思考中…" (its plain-class field already flipped, but the row
+            // wasn't re-rendered) until the next flush window.
+            let flipped = turn.thinkingActive
+            if flipped { turn.thinkingActive = false; turn.thinkingDone = true }
             turn.streaming = true; turn.text += text
+            if flipped { lastStreamFlush = Date.distantPast }
         case .toolCall(let id, let name, let argsJson, _):
             // Dedup by callId: the engine emits on_tool_calls both mid-stream
             // (incremental ToolCallComplete) AND after the iteration completes
@@ -455,12 +626,15 @@ final class ChatViewModel: ObservableObject {
         await refreshSessions()
 
         let callback = StreamCallback(vm: self)
+        StreamLog.log("run", "single-agent runTask start len=\(task.count)")
         do {
             try await s.runTask(task: task, callback: callback)
             turn.streaming = false; turn.done = true; running = false
+            StreamLog.log("run", "single-agent runTask end ok")
         } catch {
             turn.error = friendlyError(error)
             turn.streaming = false; turn.done = true; running = false
+            StreamLog.log("run", "single-agent runTask err=\(friendlyError(error))")
         }
         await refreshSessions()
     }
@@ -475,9 +649,11 @@ final class ChatViewModel: ObservableObject {
         running = true
         error = nil
         let callback = StreamCallback(vm: self)
+        StreamLog.log("run", "group runTask start len=\(task.count)")
         do {
             try await gs.runTask(userInput: task, callback: callback)
             running = false
+            StreamLog.log("run", "group runTask end ok")
         } catch {
             // Attach the error to the active speaker's item (or a fresh one).
             if activeSpeakerItem == nil {

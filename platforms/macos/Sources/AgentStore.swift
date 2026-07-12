@@ -15,7 +15,7 @@ private struct ScenarioStoreData: Codable {
 }
 
 /// Bump when the preset structure changes — triggers a preset re-seed on load.
-private let SCENARIO_SCHEMA_VERSION = 2
+private let SCENARIO_SCHEMA_VERSION = 5
 
 final class AgentStore: ObservableObject {
     @Published var scenarios: [Scenario] = []
@@ -108,7 +108,8 @@ final class AgentStore: ObservableObject {
                       systemPrompt: """
                       你是一名面试指导教练。在用户每次回答后，你给出针对性点评：哪里回答得好、\
                       哪里不足、可以怎样改进，并给出一个简短的「行动建议」。点评要具体、可执行。\
-                      不要替用户回答面试官的问题。
+                      不要替用户回答面试官的问题。若【场景背景】中提供了候选人的项目经历，\
+                      请结合其项目内容给出项目级、有针对性的建议（这些信息面试官看不到，仅你用于点评）。
                       """,
                       model: nil, color: "#3B8C5A",
                       avatar: "person.crop.circle.badge.checkmark", kind: nil, apiKey: nil, baseUrl: nil),
@@ -123,12 +124,17 @@ final class AgentStore: ObservableObject {
                 TopicField(id: "position", label: "应聘岗位", placeholder: "如:前端工程师 3 年"),
                 TopicField(id: "company", label: "目标公司", placeholder: "如:字节跳动"),
                 TopicField(id: "level", label: "职位级别", placeholder: "如:社招 P5"),
+                // 项目经历只注入指导员的背景（visibleTo:["coach"]），面试官看不到、
+                // 也不会据此提问，但指导员能据此给出项目级建议。
+                TopicField(id: "projects", label: "项目经历", placeholder: "如:电商订单中台,负责库存与支付模块;可写多条",
+                           visibleTo: ["coach"]),
             ],
             debrief: DebriefConfig(
                 buttonLabel: "结束面试",
                 summaryPrompt: "（面试结束）请以指导员身份,对候选人本次面试的整体表现进行全场总结:亮点、不足、可改进之处,并给出后续学习与练习建议。",
                 debriefMemberId: "coach"
-            )
+            ),
+            reviewLoop: nil
         ),
         Scenario(
             id: "preset-language-partner",
@@ -138,7 +144,8 @@ final class AgentStore: ObservableObject {
                 Agent(id: "partner", name: "语言伙伴", role: "陪练",
                       systemPrompt: """
                       你是一名外语陪练伙伴。与用户进行自然对话，根据用户水平调整难度，\
-                      适时温和地纠正用词与语法错误，并给出更地道的说法。一次只推进话题一步。
+                      适时温和地纠正用词与语法错误，并给出更地道的说法。一次只推进话题一步。\
+                      请使用【场景背景】中“语言·话题”所指定的语言与用户交谈；若用户未指定语言，默认用英语。
                       """,
                       model: nil, color: "#B68C2E",
                       avatar: "globe", kind: nil, apiKey: nil, baseUrl: nil),
@@ -146,11 +153,12 @@ final class AgentStore: ObservableObject {
             turnPolicy: .roundRobin,
             scriptOrder: nil, moderatorId: nil,
             openerAgentId: "partner",
-            openerLine: "Hi! 我们今天用英语聊聊吧。你最近在忙什么？",
+            openerLine: "请按背景中指定的语言与话题自然开场，与用户聊起来。",
             topicFields: [
-                TopicField(id: "topic", label: "语言/话题(可选)", placeholder: "如:英语·旅行"),
+                TopicField(id: "topic", label: "语言·话题", placeholder: "如:中文·旅行"),
             ],
-            debrief: nil
+            debrief: nil,
+            reviewLoop: nil
         ),
         Scenario(
             id: "preset-debate",
@@ -166,7 +174,7 @@ final class AgentStore: ObservableObject {
                       model: nil, color: "#E5484D",
                       avatar: "arrow.down.circle", kind: nil, apiKey: nil, baseUrl: nil),
                 Agent(id: "moderator", name: "主持人", role: "调度",
-                      systemPrompt: "你是辩论主持人。根据当前讨论，选择下一位发言者，确保双方均衡发言。只回复角色 id（pro/con/user）。",
+                      systemPrompt: "你是辩论主持人。首轮请点明今日辩题并邀请正方先开始立论；其后每轮只回复下一个发言者的角色 id（pro/con/user），不要回复其他内容，并确保双方均衡发言。",
                       model: nil, color: "#8A8A8A",
                       avatar: "scalemass", kind: nil, apiKey: nil, baseUrl: nil),
             ],
@@ -174,11 +182,12 @@ final class AgentStore: ObservableObject {
             scriptOrder: nil,
             moderatorId: "moderator",
             openerAgentId: "moderator",
-            openerLine: "请简短开场:点明今日辩题,然后邀请正方先开始立论。",
+            openerLine: "请开场:点明今日辩题,邀请正方先开始立论。",
             topicFields: [
                 TopicField(id: "motion", label: "辩论主题", placeholder: "如:AI 是否会取代人类"),
             ],
-            debrief: nil
+            debrief: nil,
+            reviewLoop: nil
         ),
         Scenario(
             id: "preset-writing-workshop",
@@ -186,11 +195,18 @@ final class AgentStore: ObservableObject {
             icon: "pencil.line",
             agents: [
                 Agent(id: "writer", name: "写手", role: "起草",
-                      systemPrompt: "你是写手，根据用户主题起草初稿，注重结构与表达。",
+                      systemPrompt: """
+                      你是写手，根据用户主题起草初稿，注重结构与表达。\
+                      当编辑给出修改意见时，请据此修改你的稿件，并输出完整稿件，不要只描述改动。
+                      """,
                       model: nil, color: "#4D6BFE",
                       avatar: "pencil.line", kind: nil, apiKey: nil, baseUrl: nil),
                 Agent(id: "editor", name: "编辑", role: "润色",
-                      systemPrompt: "你是编辑，对写手的初稿给出修改建议并润色，说明改动理由。",
+                      systemPrompt: """
+                      你是编辑，对写手的稿件给出具体、可执行的修改建议并说明理由。\
+                      每轮审阅后必须明确表态：若稿件已达到可定稿的质量，请在回复中包含「定稿」二字以示通过；\
+                      否则指出需修改之处，交回写手继续修改。不要替写手重写全文。
+                      """,
                       model: nil, color: "#3B8C5A",
                       avatar: "pencil.tip.crop.circle", kind: nil, apiKey: nil, baseUrl: nil),
             ],
@@ -202,7 +218,10 @@ final class AgentStore: ObservableObject {
             topicFields: [
                 TopicField(id: "topic", label: "写作主题", placeholder: "如:一篇关于秋天的散文"),
             ],
-            debrief: nil
+            debrief: nil,
+            // 写手起草 → 编辑审阅 → 写手修改 → 编辑复审 → …，直到编辑在回复中
+            // 包含「定稿」或达到最多 3 轮（含首轮），防止无限修改。
+            reviewLoop: ReviewLoopConfig(reviewerId: "editor", approveMarker: "定稿", maxRounds: 3)
         ),
         Scenario(
             id: "preset-brainstorm",
@@ -226,7 +245,8 @@ final class AgentStore: ObservableObject {
             topicFields: [
                 TopicField(id: "topic", label: "头脑风暴主题", placeholder: "如:提升产品留存的点子"),
             ],
-            debrief: nil
+            debrief: nil,
+            reviewLoop: nil
         ),
     ]
 

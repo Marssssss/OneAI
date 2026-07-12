@@ -453,6 +453,7 @@ mod tests {
             opener_agent_id: None,
             opener_line: None,
             title: None,
+            review_loop: None,
         };
         let res = app.create_group_session(scenario);
         assert!(res.is_err(), "empty members must error");
@@ -480,6 +481,7 @@ mod tests {
             opener_agent_id: None,
             opener_line: None,
             title: None,
+            review_loop: None,
         };
         let res = app.create_group_session(scenario);
         assert!(res.is_err(), "scripted order referencing an unknown member must error");

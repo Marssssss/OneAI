@@ -25,5 +25,9 @@
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>OneAI 需要麦克风访问以进行语音输入(语音转文字填入输入框)。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>OneAI 使用系统语音识别将你的语音转为文字,音频在设备本地处理。</string>
 </dict>
 </plist>

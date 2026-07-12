@@ -115,6 +115,24 @@ pub enum TurnPolicy {
     Moderator { moderator_id: String, max_turns: usize },
 }
 
+/// Optional review-revise loop for a scripted scenario (e.g. writing workshop:
+/// writer drafts → editor reviews → writer revises → editor re-reviews → …
+/// until the editor approves). After the scripted speaker sequence runs once,
+/// the loop repeats the same sequence; after each pass the reviewer's last
+/// message is checked for `approve_marker`. The loop stops on approval or
+/// after `max_rounds` total passes (the safety cap that prevents infinite
+/// revision). The reviewer's persona prompt must instruct it to emit the
+/// marker when satisfied. `None` (the default) = single pass, no loop.
+#[derive(Debug, Clone)]
+pub struct ReviewLoopConfig {
+    /// Member id that decides approval (e.g. "editor").
+    pub reviewer_id: String,
+    /// Substring the reviewer emits when it's satisfied (e.g. "定稿").
+    pub approve_marker: String,
+    /// Total scripted passes to run at most (1 = no loop, just the initial pass).
+    pub max_rounds: usize,
+}
+
 /// Shared engine resources a group chat runs on (mirrors what
 /// `DefaultSubAgentFactory` needs to build a member loop). The provider is
 /// per-member (keyed by member id) so a scenario can mix models — e.g. a
@@ -142,6 +160,10 @@ pub struct GroupChatConfig {
     /// falling back to "新对话" — group chats rarely carry a first user
     /// message for the default first-user-message title derivation.
     pub title: Option<String>,
+    /// Optional review-revise loop (see [`ReviewLoopConfig`]). When set, the
+    /// scripted speaker sequence repeats up to `max_rounds` until the reviewer
+    /// emits `approve_marker`. `None` = single pass (default behavior).
+    pub review_loop: Option<ReviewLoopConfig>,
 }
 
 // ─── GroupChatSession ────────────────────────────────────────────────────────
@@ -291,29 +313,87 @@ impl GroupChatSession {
 
         // 2. Determine the speaker sequence for this round.
         let speakers = self.speakers_for_round().await?;
-        let mut first = true;
-        for member_id in speakers {
+        let review_loop = self.config.review_loop.clone();
+        let max_rounds = review_loop.as_ref().map(|r| r.max_rounds).unwrap_or(1);
+
+        // 3. Run the sequence, optionally repeating (review-revise loop) until
+        //    the reviewer approves or max_rounds is reached.
+        let mut first_ever = true;
+        for round in 0..max_rounds {
+            for member_id in &speakers {
+                if self.interrupt_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                // First speaker of the very first round responds directly to
+                // the user input (already in the transcript as the last user
+                // message). Subsequent turns get a role-nudge so they continue
+                // rather than re-answering — and, under a review loop, a
+                // revision/re-review nudge so the writer edits per feedback.
+                let task = self.turn_nudge(member_id, round, first_ever, &review_loop);
+                first_ever = false;
+                match self.run_member(member_id, task, observer).await {
+                    Ok(()) => {}
+                    Err(OneAIError::Other(msg)) if msg.contains("interrupted") => break,
+                    Err(e) => return Err(e),
+                }
+            }
             if self.interrupt_flag.load(Ordering::Relaxed) {
                 break;
             }
-            // First speaker responds directly to the user input (already in the
-            // shared transcript as the last user message); subsequent speakers
-            // get a role nudge so they continue rather than re-answering.
-            let task = if first {
-                format!("（用户刚发来消息，请以 {} 的身份作出回应。）", member_id)
-            } else {
-                format!("（现在轮到你（{}）发言，请结合上文继续对话。）", member_id)
-            };
-            first = false;
-            match self.run_member(&member_id, task, observer).await {
-                Ok(()) => {}
-                Err(OneAIError::Other(msg)) if msg.contains("interrupted") => break,
-                Err(e) => return Err(e),
+            if let Some(r) = &review_loop {
+                if self.reviewer_approved(r).await {
+                    break;
+                }
             }
         }
 
         self.persist().await;
         Ok(())
+    }
+
+    /// Build the task nudge handed to a member for its turn. The first speaker
+    /// of the first round answers the user; later turns continue the dialogue;
+    /// and under a review loop the reviewer is told to emit `approve_marker`
+    /// when satisfied while other members revise per the reviewer's feedback.
+    fn turn_nudge(
+        &self,
+        member_id: &str,
+        round: usize,
+        first_ever: bool,
+        review_loop: &Option<ReviewLoopConfig>,
+    ) -> String {
+        if first_ever {
+            return format!("（用户刚发来消息，请以 {} 的身份作出回应。）", member_id);
+        }
+        if let Some(r) = review_loop {
+            let n = round + 1;
+            if member_id == r.reviewer_id {
+                format!(
+                    "（已进入第{n}轮复审。请再次审阅写手本轮的修改。若已达到可定稿的质量，请在回复中包含「{}」以示通过；否则给出具体、可执行的修改意见。）",
+                    r.approve_marker
+                )
+            } else {
+                format!(
+                    "（已进入第{n}轮修改。请根据编辑上一轮的修改意见修改你的稿件，并输出完整稿件。）"
+                )
+            }
+        } else {
+            format!("（现在轮到你（{member_id}）发言，请结合上文继续对话。）")
+        }
+    }
+
+    /// Whether the reviewer's latest turn in the shared transcript contains the
+    /// approval marker (case-sensitive substring match). Drives the
+    /// review-revise loop's termination.
+    async fn reviewer_approved(&self, r: &ReviewLoopConfig) -> bool {
+        let conv = self.conversation.lock().await;
+        let last = conv.messages.iter().rev().find(|m| {
+            m.metadata.get("speaker").map(|s| s == &r.reviewer_id).unwrap_or(false)
+        });
+        match last {
+            Some(m) => m.text_content().contains(&r.approve_marker),
+            None => false,
+        }
     }
 
     /// Request the running member loop to interrupt at the next iteration
@@ -536,9 +616,23 @@ fn build_member_loop(
     let context_assembler = ContextAssembler::new();
     let stream_parser = IncrementalStreamParser::new();
     let budget = TokenBudget::new(100_000);
+    // Group-chat members are conversational personas, NOT tool executors
+    // (the shared `resources.tools` map is deliberately ignored here). Giving a
+    // member the full tool set let a confused persona — e.g. the debate
+    // moderator, whose speaker-selector persona clashed with its opening-line
+    // task — loop on tool calls (web_search, …), each toolCall/toolResult a
+    // non-hot event flushed straight onto the UI thread, flooding it into a
+    // persistent beachball ("主持人开场还没输出完就卡住了"). An empty tool map
+    // means the LLM is told there are no tools, so it can't tool-loop; the
+    // design comment above already states members are "conversational, not
+    // tool-heavy executors". The engine's own group-chat tests run with an
+    // empty tools map, so this matches the tested path. If a future scenario
+    // genuinely needs a tool-using member, opt that in explicitly.
+    let no_tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
     AgentLoop::new(
         provider,
-        resources.tools.clone(),
+        no_tools,
         resources.parser.clone(),
         resources.interaction_gate.clone(),
         Arc::new(SkillSelector::new()),
@@ -598,6 +692,8 @@ mod tests {
         let mut providers = HashMap::new();
         providers.insert("interviewer".to_string(), provider.clone());
         providers.insert("coach".to_string(), provider.clone());
+        providers.insert("writer".to_string(), provider.clone());
+        providers.insert("editor".to_string(), provider.clone());
         providers.insert("a".to_string(), provider);
         GroupChatResources {
             providers,
@@ -623,6 +719,7 @@ mod tests {
             opener_agent_id: None,
             opener_line: None,
             title: None,
+            review_loop: None,
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
@@ -657,6 +754,7 @@ mod tests {
             opener_agent_id: Some("interviewer".into()),
             opener_line: Some("开始面试".into()),
             title: None,
+            review_loop: None,
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
@@ -679,6 +777,7 @@ mod tests {
             turn_policy: TurnPolicy::RoundRobin,
             opener_agent_id: None, opener_line: None,
             title: None,
+            review_loop: None,
         };
         assert!(GroupChatSession::new(bad, resources(provider.clone())).is_err());
 
@@ -687,7 +786,88 @@ mod tests {
             turn_policy: TurnPolicy::Scripted { order: vec!["ghost".into()] },
             opener_agent_id: None, opener_line: None,
             title: None,
+            review_loop: None,
         };
         assert!(GroupChatSession::new(bad2, resources(provider)).is_err());
+    }
+
+    #[tokio::test]
+    async fn review_loop_runs_until_marker_then_stops() {
+        // Writing workshop: writer drafts → editor reviews (no marker) →
+        // writer revises → editor re-reviews WITH marker → loop stops at 2.
+        let provider = Arc::new(MockProvider::from_script(vec![
+            ScriptedResponse::direct_answer("初稿"),                       // writer round 0
+            ScriptedResponse::direct_answer("需修改第一段"),                // editor round 0 (no marker)
+            ScriptedResponse::direct_answer("修改稿"),                      // writer round 1
+            ScriptedResponse::direct_answer("很好，定稿"),                   // editor round 1 (marker)
+            // Safety: if the loop ignored the marker it would call this 5th
+            // response and keep going.
+            ScriptedResponse::direct_answer("不该出现的第三轮"),
+        ]));
+        let cfg = GroupChatConfig {
+            members: vec![
+                GroupChatMemberSpec { id: "writer".into(), name: "写手".into(), system_prompt: "你是写手".into() },
+                GroupChatMemberSpec { id: "editor".into(), name: "编辑".into(), system_prompt: "你是编辑".into() },
+            ],
+            turn_policy: TurnPolicy::Scripted { order: vec!["writer".into(), "editor".into()] },
+            opener_agent_id: None,
+            opener_line: None,
+            title: None,
+            review_loop: Some(ReviewLoopConfig {
+                reviewer_id: "editor".into(),
+                approve_marker: "定稿".into(),
+                max_rounds: 3,
+            }),
+        };
+        let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
+        let obs = Arc::new(RecordingObserver::new());
+        session.run_task("写一篇散文", obs.as_ref() as &dyn GroupChatObserver).await.unwrap();
+
+        let conv = session.conversation().await;
+        // 4 assistant turns (2 rounds × 2 members), not 6.
+        let assistant = conv.messages.iter().filter(|m| m.role == Role::Assistant).count();
+        assert_eq!(assistant, 4, "loop must stop at the approval marker");
+        // Last speaker is the editor, whose answer carries the marker.
+        let last = conv.messages.iter().rev().find(|m| m.role == Role::Assistant).unwrap();
+        assert_eq!(last.metadata.get("speaker").map(|s| s.as_str()), Some("editor"));
+        assert!(last.text_content().contains("定稿"));
+    }
+
+    #[tokio::test]
+    async fn review_loop_caps_at_max_rounds_without_marker() {
+        // Editor never emits the marker → loop must hit the max_rounds cap (2)
+        // and stop, not run forever.
+        let provider = Arc::new(MockProvider::from_script(vec![
+            ScriptedResponse::direct_answer("初稿"),
+            ScriptedResponse::direct_answer("再改改"),
+            ScriptedResponse::direct_answer("修改稿"),
+            ScriptedResponse::direct_answer("还是不行"),
+        ]));
+        let cfg = GroupChatConfig {
+            members: vec![
+                GroupChatMemberSpec { id: "writer".into(), name: "写手".into(), system_prompt: "你是写手".into() },
+                GroupChatMemberSpec { id: "editor".into(), name: "编辑".into(), system_prompt: "你是编辑".into() },
+            ],
+            turn_policy: TurnPolicy::Scripted { order: vec!["writer".into(), "editor".into()] },
+            opener_agent_id: None,
+            opener_line: None,
+            title: None,
+            review_loop: Some(ReviewLoopConfig {
+                reviewer_id: "editor".into(),
+                approve_marker: "定稿".into(),
+                max_rounds: 2,
+            }),
+        };
+        let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
+        let obs = Arc::new(RecordingObserver::new());
+        session.run_task("写一篇散文", obs.as_ref() as &dyn GroupChatObserver).await.unwrap();
+
+        let conv = session.conversation().await;
+        // 2 rounds × 2 members = 4 assistant turns; cap held.
+        assert_eq!(
+            conv.messages.iter().filter(|m| m.role == Role::Assistant).count(),
+            4,
+            "loop must cap at max_rounds without the marker"
+        );
     }
 }

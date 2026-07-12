@@ -65,6 +65,23 @@ pub struct ScenarioSpecView {
     /// `Conversation.metadata["title"]` so the saved session is named after the
     /// scenario instead of falling back to "新对话".
     pub title: Option<String>,
+    /// Optional review-revise loop. When set, the scripted order repeats up to
+    /// `max_rounds` until the reviewer emits `approve_marker`. `None` = single pass.
+    pub review_loop: Option<ReviewLoopSpecView>,
+}
+
+/// Review-revise loop config (e.g. writing workshop: writer drafts → editor
+/// reviews → writer revises → … until the editor approves or `max_rounds` is
+/// reached). The reviewer's persona prompt must instruct it to emit
+/// `approve_marker` when satisfied.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ReviewLoopSpecView {
+    /// Member id that decides approval (e.g. `"editor"`).
+    pub reviewer_id: String,
+    /// Substring the reviewer emits when satisfied (e.g. `"定稿"`).
+    pub approve_marker: String,
+    /// Total scripted passes to run at most (1 = no loop, just the initial pass).
+    pub max_rounds: u64,
 }
 
 // ─── OneAiGroupChatSession ────────────────────────────────────────────────────
@@ -174,6 +191,11 @@ impl OneAiGroupChatSession {
             opener_agent_id: scenario.opener_agent_id,
             opener_line: scenario.opener_line,
             title: scenario.title,
+            review_loop: scenario.review_loop.map(|r| oneai_agent::group_chat::ReviewLoopConfig {
+                reviewer_id: r.reviewer_id,
+                approve_marker: r.approve_marker,
+                max_rounds: r.max_rounds as usize,
+            }),
         };
 
         let session = GroupChatSession::new(config, resources)
