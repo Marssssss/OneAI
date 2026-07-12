@@ -2,34 +2,66 @@
 
 **English** | [简体中文](README.md)
 
-> A cross-platform AI agent framework built in Rust — modular, type-safe, domain-pluggable, eval-ready, and multi-agent native.
+> **One AI, Every Platform** — A cross-platform AI agent framework built in Rust: modular, type-safe, domain-pluggable, evaluable, natively multi-agent. One Rust core, six native targets.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Crates: 24](https://img.shields.io/badge/Crates-24-orange.svg)]()
 [![Tests: 1378](https://img.shields.io/badge/Tests-1378-green.svg)]()
 [![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-blue.svg)]()
+[![Rust: 1.74+](https://img.shields.io/badge/Rust-edition%202021-dea584.svg)]()
+[![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
 
 <p align="center">
-  <img src="oneai-tui-screenshot.jpg" alt="OneAI TUI — Plan mode executing a complex task" width="880">
+  <img src="OneAI_icon.png" alt="OneAI" width="160">
 </p>
 
-<p align="center"><em>The interactive TUI (<code>oneai-cli</code>) running a complex task in Plan mode — thinking bubbles, plan checklist panel, tool-call display, and the accept/reject review gate.</em></p>
+<p align="center"><em>One Rust core (<code>oneai-core</code>) drives native apps on macOS / Windows / Linux / Android / iOS / HarmonyOS via UniFFI bindings plus a hand-written <code>extern "C"</code> facade.</em></p>
 
 ---
 
-## Quick Start
+## At a glance
+
+<p align="center">
+  <img src="interview-opening-example.png" alt="macOS app — scenario intake" width="780">
+</p>
+
+<p align="center"><em>macOS native app · the <strong>mock interview</strong> scenario intake — before it starts you fill in position / target company / project history, and each field is injected into the right member's system prompt by <strong>per-member visibility</strong> (the interviewer never sees the project history; the coach uses it for project-level advice).</em></p>
+
+<p align="center">
+  <img src="interview-chat-example.png" alt="macOS app — multi-agent group chat" width="780">
+</p>
+
+<p align="center"><em>macOS native app · multi-agent group chat — the interviewer (blue, asks) and coach (green, critiques) speak on a scripted turn order: user answers → coach critiques → interviewer follows up. Token-by-token streaming with collapsible thinking bubbles.</em></p>
+
+<p align="center">
+  <img src="new-scenario-example.png" alt="macOS app — visual scenario editor" width="780">
+</p>
+
+<p align="center"><em>macOS native app · visual scenario editor — compose the cast, background fields, turn policy (scripted / round-robin / moderator), opening line and debrief phase; persisted to <code>~/Library/Application Support</code>.</em></p>
+
+<p align="center">
+  <img src="oneai-tui-screenshot.jpg" alt="OneAI CLI — executing a complex task in Plan mode" width="880">
+</p>
+
+<p align="center"><em>Interactive CLI (<code>oneai-cli</code>) · executing a complex task in Plan mode — thinking bubbles, plan checklist panel, tool-call display, and the accept/reject approval dialog.</em></p>
+
+**Same engine, two frontends**: the native app above is built for *scenario-based multi-agent conversations* (mock interview / language partner / debate / writing workshop / brainstorm); the CLI TUI below is built for *general agentic coding / task execution*. Both are powered by the same Rust core and the same `AgentLoop`.
+
+---
+
+## Quick start (CLI — 30 seconds)
 
 ### 1. Configure a provider
 
-OneAI talks to any **OpenAI-compatible** endpoint (OpenAI, Anthropic, Gemini, Ollama, and self-hosted gateways like 阿里百炼/DashScope, DeepSeek, vLLM). Set credentials via env vars or a config file — env vars take priority.
+OneAI works with any **OpenAI-compatible endpoint** (OpenAI, Anthropic, Gemini, Ollama, plus DashScope, DeepSeek, vLLM, …). Set credentials via env vars or a config file — env vars win.
 
 ```bash
-# OpenAI-compatible endpoint — works for OpenAI, DashScope, DeepSeek, etc.
+# OpenAI-compatible endpoint — OpenAI / DashScope / DeepSeek / your gateway
 export ONEAI_API_KEY="sk-..."
 export ONEAI_BASE_URL="https://api.openai.com/v1"   # or your gateway
-export ONEAI_MODEL="gpt-4o"                          # or qwen-plus, deepseek-chat, ...
+export ONEAI_MODEL="gpt-4o"                          # or qwen-plus, deepseek-chat ...
 
-# Ollama (local, no key needed)
+# Ollama (local, no key)
 export ONEAI_BASE_URL="http://localhost:11434"
 export ONEAI_MODEL="llama3"
 ```
@@ -49,64 +81,65 @@ default_pack = "coding"   # coding | research | general
 theme = "dark"
 ```
 
-Generate one with `oneai config create`, inspect with `oneai config show`.
+`oneai config create` generates a default config; `oneai config show` prints it.
 
 ### 2. Launch the TUI
 
 ```bash
 cargo run -p oneai-cli-demo
-# or, after `cargo install --path examples/cli`, just: oneai
+# or: cargo install --path examples/cli  then just:  oneai
 ```
 
-You're dropped into the interactive agent. Type a task and watch the full pipeline run live: streaming thinking bubbles, tool calls, the plan checklist, token usage accounting, and trajectory trace.
+Drop into the interactive agent. Type a task and watch the full pipeline run live: streaming thinking bubbles, tool calls, plan checklist, usage/token stats, trace logs.
 
 **Interaction modes — cycle with `Shift+Tab`:**
 
 | Mode | Behavior |
 |------|----------|
 | `Normal` | Default — high-risk tools pause for approval |
-| `⚡ Auto` | Auto-approve everything (fast iteration) |
-| `📋 Plan` | Tool execution disabled — the agent must produce a plan first; you review it in an accept/reject popup before anything runs |
+| `⚡ Auto` | Approve everything (fast iteration) |
+| `📋 Plan` | Disable tool execution — the agent must produce a plan first; you review it in an accept/reject dialog before any execution |
 
 **Keys:**
 
 | Key | Action |
-|-----|--------|
+|------|--------|
 | `Enter` | Send · `Ctrl+Enter` newline |
 | `Shift+Tab` | Cycle mode (Normal → Auto → Plan) |
 | `Tab` | Toggle sidebar |
 | `↑↓` / `Ctrl+↑↓` / `PgUp` / `PgDn` | History & chat scroll |
-| Mouse drag | Select & copy text · wheel to scroll |
+| Mouse drag | Select text to copy · wheel scroll |
 | `Esc` | Vim mode / quit |
 
-**In-chat slash commands** (type `/help` for the full list): `/skills` `/skill` `/tools` `/usage` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`.
+**In-conversation slash commands** (`/help` for the full list): `/skills` `/skill` `/tools` `/usage` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`.
 
-### 3. Non-interactive single-shot
+### 3. One-shot non-interactive inference
 
 ```bash
-oneai run "Refactor the auth module to use async" --domain coding --model gpt-4o
+oneai run "refactor the auth module to async" --domain coding --model gpt-4o
 ```
 
-### 4. Try a subsystem from the CLI
+### 4. Drive every subsystem from the CLI
 
-OneAI ships every subsystem behind a CLI subcommand so you can drive it without writing code:
+OneAI exposes every subsystem as a CLI subcommand — drive it without writing code:
 
 ```bash
 oneai pack list                      # browse DomainPacks
 oneai eval run coding-basic          # run an eval suite
+oneai eval swebench --dataset ./swe_bench_lite.jsonl --instances astropy__astropy-12907  # 3-axis SWE-bench eval
 oneai studio                         # launch the Web UI (StateGraph viz + checkpoint time-travel)
-oneai mcp serve                      # run as an MCP server (Claude Code/Cursor compatible)
-oneai provider status                # provider-pool health & fallback log
-oneai route                          # show SmartRouter's last routing decision
-oneai usage report                 # token usage report (prompt/completion/total/calls, token-only)
-oneai token --prompt "..."          # count tokens & check context-window fit
-oneai team run code-review           # multi-agent team coordination
+oneai mcp serve                      # run as an MCP server (Claude Code / Cursor compatible)
+oneai provider status                # provider-pool health & degradation log
+oneai route                          # inspect SmartRouter's recent routing decisions
+oneai usage report                   # token usage report (prompt/completion/total/calls — tokens only)
+oneai token --prompt "..."           # count tokens, check context-window fit
+oneai team run code-review           # multi-agent team
 oneai swarm run --task "..."         # swarm orchestration
-oneai session list / resume <id>     # persisted sessions (SQLite)
-oneai wasm list / run <name>         # WASM-sandboxed modules
-oneai embed generate "text"          # vector embeddings
-oneai a2a serve                       # expose the agent over the A2A protocol
-oneai init [--format oneai|agents|claude] [--force] [--no-llm]  # generate a project-instruction file (LLM-synthesized when a provider is configured, else heuristic)
+oneai session list / resume <id>     # persistent sessions (SQLite)
+oneai wasm list / run <name>         # WASM sandbox modules
+oneai embed generate "text"          # generate vector embeddings
+oneai a2a serve                       # expose an agent over the A2A protocol
+oneai init [--format oneai|agents|claude] [--force] [--no-llm]  # scaffold project instruction files (model-synthesized if LLM configured, else heuristic)
 ```
 
 ### 5. Minimal Rust program
@@ -122,34 +155,60 @@ async fn main() {
         .default_parser()
         .domain_pack(coding_pack("/project/dir"))  // ← one-line domain switch
         .build()
-        .expect("App build should succeed");
+        .expect("app builds");
 
     let session = app.create_session();
     let result = session
         .execute_tool("calculator", serde_json::json!({"expression": "2+3"}))
         .await
         .unwrap();
-    println!("Result: {}", result.content); // → "5"
+    println!("result: {}", result.content); // → "5"
 }
 ```
+
+> **For AI-agent readers of this repo**: this is a `cargo` workspace; the integration point is `AppBuilder` in `crates/oneai-app/src/builder.rs` — every subsystem is optional and plugged in via builder methods. For architecture, read [CLAUDE.md](CLAUDE.md) (crate layering, the 7-layer DomainPack, AgentLoop decisions, the permission model). To drive it programmatically, start from the minimal program above and `examples/cli`.
 
 ---
 
 ## What is OneAI?
 
-OneAI is a full-stack agent framework written in Rust. It provides everything you need to build, run, and evaluate AI agents — from LLM provider abstraction to tool execution, memory management, workflow orchestration, domain-specific configuration, multi-agent coordination, and trajectory logging — all with cross-platform support via UniFFI bindings. **The LLM provider is optional** — tool-only or workflow-only usage needs no provider.
+OneAI is a full-stack agent framework written in Rust. It provides everything you need to build, run, and evaluate AI agents — from the LLM provider abstraction to tool execution, memory management, workflow orchestration, domain-specific configuration, multi-agent collaboration, and tracing — all cross-platform via UniFFI bindings. **The LLM provider is optional** — tool-only or workflow-only usage needs no provider.
 
-**Key principles:**
+**Core principles:**
 
-- **Modular by design** — 24 independent crates, each with a clear responsibility. Use only what you need.
-- **Type-safe throughout** — sealed enum hierarchies (`#[non_exhaustive]` on every public enum), trait-driven abstractions, no stringly-typed configs.
-- **Domain-pluggable** — the DomainPack system makes domain knowledge declarative, composable, and switchable in one line; packs can be validated against a JSON Schema and shared via a pack market.
-- **Multi-agent native** — SubAgents, Team coordination (Coordinate/Route/Collaborate/Debate), Handoff protocol, and Swarm orchestration with capability-driven routing.
-- **Production-grade infra** — ProviderPool fallback chains, SmartRouter multi-factor routing, token usage tracking, rate limiting, circuit breakers, and token-aware context management.
-- **Cross-platform** — macOS, Windows, Linux, Android, iOS, and HarmonyOS via UniFFI (Kotlin, Swift, C++, C#).
-- **Eval-ready** — built-in OpenInference-compatible trajectory logger plus a dedicated eval framework (6 metrics, 3 suites).
-- **Human-machine collaboration** — approval gates with native UI dialogs for high-risk tool operations; Plan mode gate before execution.
-- **Dynamic agentic loop** — not a fixed pipeline; each iteration decides dynamically (direct answer, tool call, delegate to sub-agent, or switch paradigm).
+- **Modular** — 24 independent crates, each with one job; use what you need.
+- **Type-safe** — sealed-enum hierarchies (every public enum is `#[non_exhaustive]`), trait-driven abstractions, no stringly-typed config.
+- **Domain-pluggable** — the DomainPack system makes domain knowledge declarative, composable, and one-line switchable; it can be validated against a JSON Schema and shared via a pack market.
+- **Natively multi-agent** — SubAgent, Team coordination (Coordinate/Route/Collaborate/Debate), Handoff protocol, Swarm orchestration (capability-driven routing); plus an engine-level **GroupChat primitive** powering scenario-based multi-role conversations.
+- **Production-grade infra** — ProviderPool fallback chain, SmartRouter multi-factor routing, usage tracking, rate limiting, circuit breaking, token-aware context management.
+- **Cross-platform** — macOS, Windows, Linux, Android, iOS, and HarmonyOS (Kotlin, Swift, C++, C#, ArkTS) off one Rust core via UniFFI + a hand-written `extern "C"` facade.
+- **Evaluable** — built-in OpenInference-compatible tracer + standalone eval framework (6 metrics, 3 suites + SWE-bench three-axis).
+- **Human-in-the-loop** — high-risk tools approved via native UI dialogs; a Plan-mode approval gate before execution.
+- **Dynamic agentic loop** — not a fixed pipeline; each iteration decides dynamically (direct answer / tool call / delegate to a sub-agent / switch paradigm).
+
+---
+
+## Two ways to use it
+
+OneAI surfaces two user-facing frontends over the same core.
+
+### A. CLI / TUI — general agentic execution
+
+For coding, task execution, and subsystem exploration. `examples/cli` (bin `oneai-cli`) is a ratatui+crossterm interactive TUI running the full pipeline: streaming thinking bubbles, tool-call display, Plan-mode approval gate, usage/token stats, trace logs. Every subsystem is exposed as a clap subcommand (see "Drive every subsystem" above).
+
+### B. Native desktop / mobile app — scenario-based multi-agent chat
+
+For *multi-role collaborative conversations*. The macOS app is the reference implementation (other platforms mirror the design); the core is a **GroupChat primitive + scenario system**:
+
+- **A Scenario = cast + turn policy + topic fields + debrief phase.** An Agent is an AI persona (the user is an implicit extra participant, never stored as an Agent).
+- **Turn policies**: `scripted` (fixed order), `roundRobin` (cycle in list order), `moderator` (a moderator member picks the next speaker).
+- **Topic fields + per-member visibility**: an inline form collects background before start (e.g. "position", "project history"); each field is injected into the right members' system prompts via `visibleTo` — e.g. the interviewer never sees the candidate's project history, but the coach uses it for project-level advice.
+- **Debrief phase**: e.g. an "end interview" button switches to a coach full-session summary + follow-up Q&A, other members step back.
+- **Review loop**: e.g. the writing workshop's "writer drafts → editor reviews → writer revises → editor re-reviews" loop, ending when the editor emits an `approveMarker` ("定稿") or `maxRounds` is reached.
+- **5 built-in presets**: mock interview / language partner / debate / writing workshop / brainstorm — usable out of the box, editable, and you can build your own.
+- 20fps-coalesced streaming render, speech input (Speech framework), Markdown, dark mode following the system, command palette (`⌘K`), artifact canvas.
+
+Per-platform build & run instructions are in [Cross-platform: desktop & mobile](#cross-platform-desktop--mobile) below.
 
 ---
 
@@ -157,84 +216,86 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        oneai-app (Integration)                       │
-│  AppBuilder → App → AppSession   (the single wiring point)          │
+│                        oneai-app (integration layer)                │
+│  AppBuilder → App → AppSession (the single assembly entry point)    │
 ├──────────┬──────────┬──────────┬──────────┬──────────┬──────────────┤
 │ oneai-   │ oneai-   │ oneai-   │ oneai-   │ oneai-   │ oneai-       │
 │ agent    │ workflow │ memory   │ tool     │ rag      │ skill        │
 │ AgentLoop│ DAG +    │ STM +    │ Registry │ Document │ Selector     │
 │ +SubAgent│ StateGrph│ LTM +    │ + MCP +  │ Index +  │ + Registry   │
-│ +ReAct   │ Compile→ │ Compress │Interact. │ Embedding│ + Skills     │
-│ +Plan    │ Execute   │ +SQLite  │ +12 tools│ Retrieval│              │
+│ +ReAct   │ compile→ │ Compress │ Interact │ Embedding│ + Skills     │
+│ +Plan    │ execute  │ +SQLite  │ +12 tools│ Retrieval│              │
 │ +Reflect │          │ persist  │          │          │              │
 ├──────────┴──────────┴──────────┴──────────┴──────────┴──────────────┤
-│ oneai-domain (7-layer DomainPack + market + spec validator)           │
-│ oneai-a2a   oneai-wasm   oneai-eval   oneai-studio   oneai-mcp        │
-│ A2A SDK     Wasmtime     Eval suite   Web UI         MCP server/host │
+│ oneai-domain (7-layer DomainPack + market + spec validator)         │
+│ oneai-a2a   oneai-wasm   oneai-eval   oneai-studio   oneai-mcp      │
+│ A2A SDK     Wasmtime     eval suites   Web UI        MCP host/server │
 ├──────────────────────────────────────────────────────────────────────┤
-│ oneai-provider: OpenAI/Anthropic/Gemini/Ollama + ProviderPool +     │
-│                 SmartRouter + retry/429                              │
-│ oneai-parser (3-layer) · oneai-persistence · oneai-trace · oneai-    │
-│   scheduler · oneai-uniffi · oneai-platform-{desktop,android,ios,   │
-│   harmony}                                                           │
+│ oneai-provider: OpenAI/Anthropic/Gemini/Ollama + ProviderPool +    │
+│                 SmartRouter + 429 retry                              │
+│ oneai-parser (3-layer) · oneai-persistence · oneai-trace ·          │
+│   oneai-scheduler · oneai-uniffi · oneai-platform-{desktop,android,│
+│   ios,harmony}                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│                     oneai-core (Foundation)                          │
-│  ContentBlock, Message, Conversation, PermissionLevel, Budget,       │
-│  ContextBudgetManager, PlatformCapabilities, ModelContextResolver,   │
+│                     oneai-core (foundation)                         │
+│  ContentBlock, Message, Conversation, PermissionLevel, Budget,     │
+│  ContextBudgetManager, PlatformCapabilities, ModelContextResolver,  │
 │  all core traits (LlmProvider, Tool, InteractionGate, EmbeddingService,│
-│   UsageTracker, RateLimiter, CircuitBreaker, TokenCounter)           │
+│   UsageTracker, RateLimiter, CircuitBreaker, TokenCounter)          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Crate Overview
+## Crate map
 
-| Crate | Description | Tests |
-|-------|-------------|-------|
-| `oneai-core` | Core types, traits, PermissionLevel, Budget, PlatformCapabilities | 259 |
-| `oneai-provider` | LLM providers (OpenAI, Anthropic, Gemini, Ollama) + ProviderPool + SmartRouter | 95 |
-| `oneai-parser` | 3-layer output parsing defense | 12 |
-| `oneai-memory` | STM, LTM, compression, HNSW, MemoryManager + persistence | 59 |
-| `oneai-tool` | Tool registry, MCP client, InteractionGate, executor, 12 tools | 56 |
-| `oneai-skill` | Skill selector + registry + built-in domain skills | 8 |
-| `oneai-domain` | DomainPack system (7-layer), CodingPack, market, spec validator | 127 |
-| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm | 194 |
+| Crate | What it does | Tests |
+|-------|--------------|-------|
+| `oneai-core` | core types, traits, PermissionLevel, Budget, PlatformCapabilities | 259 |
+| `oneai-provider` | LLM providers (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter | 95 |
+| `oneai-parser` | 3-layer output-parse defense | 12 |
+| `oneai-memory` | memory system (STM, LTM, compression, HNSW, MemoryManager + persistence) | 59 |
+| `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 12 tools | 56 |
+| `oneai-skill` | skill selector + registry + built-in domain skills | 8 |
+| `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127 |
+| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 194 |
 | `oneai-rag` | RAG + EmbeddingService (OpenAI/Anthropic/Voyage/Ollama/FastEmbed) | 61 |
 | `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44 |
-| `oneai-scheduler` | In-memory task scheduling | 6 |
-| `oneai-persistence` | ProgressiveCheckpoint + SQLite (sessions/usage) backends | 40 |
+| `oneai-scheduler` | in-memory task scheduler | 6 |
+| `oneai-persistence` | progressive checkpoints + SQLite (session/usage) backends | 40 |
 | `oneai-a2a` | A2A protocol SDK — client + server host + DomainPack→AgentCard | 88 |
 | `oneai-wasm` | WASM sandbox engine — Wasmtime + WasmTool + module registry | 95 |
-| `oneai-eval` | Eval framework — cases, metrics, runner, 3 suites + SWE-bench three-axis | 86 |
+| `oneai-eval` | eval framework — cases/metrics/runner/3 suites + SWE-bench three-axis | 86 |
 | `oneai-studio` | Studio Web UI — axum HTTP+WS + D3.js StateGraph viz + checkpoint time-travel | 34 |
-| `oneai-mcp` | MCP server ecosystem — host + plugin registry + config | 57 |
-| `oneai-app` | Application integration layer (AppBuilder) | 19 |
-| `oneai-trace` | OpenInference-compatible trajectory logger | 14 |
-| `oneai-uniffi` | UniFFI binding definitions for FFI | 18 |
-| `oneai-platform-desktop` | Desktop platform (macOS/Windows/Linux) | 2 |
+| `oneai-mcp` | MCP ecosystem — host + plugin registry + config | 57 |
+| `oneai-app` | app integration layer (AppBuilder) | 19 |
+| `oneai-trace` | OpenInference-compatible tracer | 14 |
+| `oneai-uniffi` | UniFFI binding definitions + hand-written `extern "C"` facade (reused by C#/Windows, C++/HarmonyOS) | 18 |
+| `oneai-platform-desktop` | desktop platform (macOS/Windows/Linux) | 2 |
 | `oneai-platform-android` | Android platform | 2 |
 | `oneai-platform-ios` | iOS platform | 1 |
 | `oneai-platform-harmony` | HarmonyOS platform | 1 |
 | **Total** | | **1378** |
 
+> Plus `oneai-staticlib` (a crate-type=staticlib packaging crate, built only by the Apple/Windows build scripts, excluded from `default-members`, so not counted in the 24).
+
 ---
 
-## Core Concepts
+## Core concepts
 
-### Domain Pack System
+### The DomainPack system (domain config pack)
 
-The DomainPack is OneAI's key architectural innovation — it makes domain knowledge **declarative, pluggable, and composable** instead of hardcoded. A DomainPack encapsulates 7 layers of domain-specific configuration:
+DomainPack is OneAI's key architectural innovation — it makes domain knowledge **declarative, pluggable, composable** instead of hard-coded. A DomainPack encapsulates 7 layers of domain-specific config:
 
 | Layer | Component | Purpose |
 |-------|-----------|---------|
-| 1 | **Tools + ToolDecorators** | Domain-specific tool set and description overrides |
-| 2 | **ContextSources** | Domain-specific environment sensing with refresh policies |
-| 3 | **PermissionProfile** | Domain-specific permission classification (deny/auto/confirm) |
-| 4 | **ParadigmStrategies** | Domain-specific task → paradigm mapping |
-| 5 | **CompressionTemplate** | Domain-specific context preservation priorities |
-| 6 | **Workflow + StateGraph** | Domain-predefined workflows and cyclic graphs |
-| 7 | **MemoryProfile** | Domain-specific memory policy (extraction schema / recall / core budget / self-managed tools / cross-session habits) |
+| 1 | **Tools + ToolDecorator** | domain-specific toolset and description overrides |
+| 2 | **ContextSource** | domain-specific environment awareness (with refresh policies) |
+| 3 | **PermissionProfile** | domain-specific permission classification (deny/auto/confirm) |
+| 4 | **ParadigmStrategy** | domain-specific task→paradigm mapping |
+| 5 | **CompressionTemplate** | domain-specific context-retention priorities |
+| 6 | **Workflow + StateGraph** | domain-predefined workflows and cyclic graphs |
+| 7 | **MemoryProfile** | domain-specific memory policy (extraction schema / recall / core budget / self-managed tools / cross-session habits) |
 
 ```rust
 let app = AppBuilder::new()
@@ -243,53 +304,53 @@ let app = AppBuilder::new()
     .build()?;
 ```
 
-DomainPacks **merge** for multi-domain agents (coding + research) — strictest-wins permissions, priority merge for context sources. Packs can be **validated** against a JSON Schema (`DomainPackSpec`) with structural + semantic checks, **installed** from a path or git URL, and shared via the **pack market** (`PackSource` + `PackRegistry` + builtin index).
+DomainPacks can be **merged** for multi-domain agents (coding + research) — permissions are strictest-wins, context sources merge by priority. A pack can be **validated** against a JSON Schema (`DomainPackSpec`), **installed** from a path or git URL, and shared via a **market** (`PackSource` + `PackRegistry` + a builtin index).
 
 ```bash
-oneai pack list                  # browse builtin packs
-oneai pack validate spec.toml   # validate a pack against the spec
+oneai pack list                  # browse built-in packs
+oneai pack validate spec.toml   # validate against the spec
 oneai pack install ./my-pack     # install from a local path
 ```
 
-#### CodingPack (Built-in)
+#### CodingPack (built-in)
 
-Modeled after Claude Code's workflow embedding: 9 tools (FileRead, FileEdit, Shell, Grep, Glob, FileList, NotebookEdit, Environment, WebFetch), 8 tool decorators, 6 context sources with refresh policies, a permission profile (auto-approve reads, confirm edits/shell, deny `rm -rf`/`mkfs`), 4 paradigm strategies, and 3 sub-agent types (searcher / coder / reviewer).
+Modeled on Claude Code's workflow-embedding mechanism: 9 tools (FileRead, FileEdit, Shell, Grep, Glob, FileList, NotebookEdit, Environment, WebFetch), 8 tool decorators, 6 context sources with refresh policies, permission config (auto-approve reads, confirm edits/Shell, deny `rm -rf`/`mkfs`), 4 paradigm strategies, 3 sub-agent types (searcher / coder / reviewer).
 
-### Agentic Loop (AgentLoop)
+### The Agentic Loop (dynamic)
 
-The core execution engine is a **dynamic loop** — not a fixed pipeline. Each iteration, the model decides what to do next:
+The core execution engine is a **dynamic loop** — not a fixed pipeline. Each iteration the model decides the next step:
 
 | Decision | Action |
 |----------|--------|
-| **DirectAnswer** | Model produced a final answer → loop ends |
-| **ToolCalls** | Model wants to invoke tools → execute and feed results back |
-| **Delegate** | Model delegates a subtask to a specialized sub-agent |
-| **SwitchParadigm** | Model switches paradigm (Plan/Reflect/Explore) — changes system prompt + tool filter |
+| **DirectAnswer** | model gives the final answer → loop ends |
+| **ToolCalls** | model calls tools → execute and feed results back |
+| **Delegate** | model delegates a subtask to a specialized sub-agent |
+| **SwitchParadigm** | model switches paradigm (Plan/Reflect/Explore) — rewrites the system prompt + tool filter |
 
-Termination is governed by **TokenBudget**, not a hardcoded `max_iterations`. `delegate` / `switch_paradigm` are injected as model-callable meta-tools (`meta_tool.rs`) — the model can actively delegate to a sub-agent or switch paradigm, and `apply_paradigm_switch` + `AgentLoopGraphActionExecutor` inline-upgrade the paradigm (system prompt + tool filter). Lifecycle hooks (`PreToolUse`/`PostToolUse`/etc.), interrupt/resume (`CancellationToken`), and structured output are built in.
+The iteration ceiling is governed by a **TokenBudget** (not a hardcoded `max_iterations`). `delegate` / `switch_paradigm` are injected as model-callable meta-tools via `meta_tool.rs` — the model can actively delegate or switch paradigm; `apply_paradigm_switch` + `AgentLoopGraphActionExecutor` inline-upgrade the paradigm (system prompt + tool filter). Built-in lifecycle hooks (`PreToolUse`/`PostToolUse`, …), interrupt/resume (`CancellationToken`), structured output.
 
-### Agent Paradigms
+### Agent paradigms
 
-| Paradigm | Pattern | Use Case |
+| Paradigm | Pattern | Good for |
 |----------|---------|----------|
-| **ReAct** | Reason → Act → Observe loop | General tool-calling tasks |
-| **Plan** | Decompose → ordered step list | Complex multi-step tasks |
-| **Reflection** | Verify → suggest corrections | Quality assurance, self-check |
-| **Parallel** | ScopeState isolation → merge | Independent sub-tasks |
-| **Explore** | Search → understand → summarize | Codebase/search exploration |
+| **ReAct** | reason → act → observe loop | general tool-using tasks |
+| **Plan** | decompose → ordered step list | complex multi-step tasks |
+| **Reflection** | verify → suggest fixes | QA, self-checking |
+| **Parallel** | ScopeState isolation → merge | independent subtasks |
+| **Explore** | search → understand → summarize | codebase / search exploration |
 
-Paradigms are **model/workflow-driven** — the model calls `switch_paradigm`, or a StateGraph node emits `GraphDecision::SwitchParadigm`, and `apply_paradigm_switch` changes the system prompt + decision hint + tool filter. The user-facing execution policy is the separate **InteractionMode** (Normal/Auto/Plan via `Shift+Tab`).
+Paradigms are **model/workflow-driven** — the model calls `switch_paradigm`, or a StateGraph node emits `GraphDecision::SwitchParadigm`, and `apply_paradigm_switch` changes the system prompt + decision hint + tool filter. The user-side execution strategy is a separate **InteractionMode** (Normal/Auto/Plan, `Shift+Tab`).
 
-### Permission Model
+### Permission model
 
-Three-tier permission system: `Read` (auto-approve), `Standard` (policy-dependent), `Full` (requires approval). Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → tool's own `risk_level()`. Human-machine interaction is guarded by the unified **`InteractionGate`** at 5 decision points: `PreInfer` (rewrite/skip the request before inference), `PostInfer` (validate/replace the response), `ToolApproval` (release high-risk tools, wired to native dialogs), `PlanDecision` (planning tradeoff choice), and `PlanReview` (final plan accept/reject/Revise). Built-in implementations: `NoopInteractionGate` (zero-latency proceed at every point, equivalent to auto-approve), `ChannelInteractionGate` (mpsc+oneshot bridge to a UI thread, configurable per point), `ThresholdInteractionGate` (low-risk tools auto-proceed, the rest go to the channel), and `DenyAllInteractionGate` (deny all). On the platform side, `PlatformInteractionGate` uses native NSAlert/MessageBox/AlertDialog/UIController/CommonDialog for `ToolApproval` on macOS/Windows/Linux/Android/iOS/HarmonyOS. The old `ApprovalGate` / `on_plan_submitted` were removed.
+Three tiers: `Read` (auto-approve), `Standard` (policy-dependent), `Full` (needs approval). Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → the tool's own `risk_level()`. Human interaction is guarded by the unified **`InteractionGate`** across 5 decision points: `PreInfer` (rewrite/skip before inference), `PostInfer` (validate/replace after inference), `ToolApproval` (gate high-risk tools, wired to native dialogs), `PlanDecision` (planning trade-off), `PlanReview` (final plan accept/reject/Revise). Built-in implementations: `NoopInteractionGate` (zero-latency pass on every point ≈ auto-approve), `ChannelInteractionGate` (mpsc+oneshot bridge to the UI thread, per-point configurable), `ThresholdInteractionGate` (auto-pass low-risk, the rest go through the channel), `DenyAllInteractionGate` (deny all). The platform-side `PlatformInteractionGate` handles `ToolApproval` with native NSAlert/MessageBox/AlertDialog/UIController/CommonDialog on macOS/Windows/Linux/Android/iOS/HarmonyOS. The old `ApprovalGate` / `on_plan_submitted` were removed.
 
-### LLM Providers & Routing
+### LLM providers & routing
 
-Built-in providers: **OpenAI, Anthropic, Gemini, Ollama** — all behind the `LlmProvider` trait (`infer` + `infer_stream`). On top of them sit two production layers:
+Built-in providers: **OpenAI, Anthropic, Gemini, Ollama**, unified under the `LlmProvider` trait (`infer` + `infer_stream`). On top sit two production-grade layers:
 
-- **ProviderPool** — a fallback chain of providers with per-provider circuit breakers, rate limiters, and degradation rules (e.g. Anthropic→OpenAI→local). Automatic 429/retry handling with `Retry-After` parsing.
-- **SmartRouter** — multi-factor routing (latency / quality / balanced / custom) that scores providers and picks the best for each request, integrating circuit/rate/context constraints. Logs every decision for inspection.
+- **ProviderPool** — provider fallback chain; each provider has its own circuit breaker, rate limiter, and degradation rule (e.g. Anthropic→OpenAI→local). Handles 429/retry automatically, parses `Retry-After`.
+- **SmartRouter** — multi-factor routing (latency/quality/balanced/custom), scores providers and picks the best, with integrated circuit breaking / rate limiting / context constraints. Every decision is logged.
 
 ```rust
 let app = AppBuilder::new()
@@ -298,7 +359,7 @@ let app = AppBuilder::new()
     .build()?;
 ```
 
-### Tool System
+### Tool system
 
 ```rust
 #[async_trait]
@@ -312,91 +373,92 @@ pub trait Tool: Send + Sync {
 pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLevel; }
 ```
 
-**12 built-in tools:** ShellTool (safety blacklist + sandbox), FileReadTool (offset+limit), FileEditTool, FileWriteTool, FileListTool, GrepTool, GlobTool, EnvironmentTool, NotebookEditTool, FileDeleteTool, CalculatorTool, WebFetchTool. MCP client integration via `rmcp` (stdio/SSE/streamable-http); **MCP server** mode lets OneAI itself expose tools to Claude Code/Cursor (`oneai mcp serve`).
+**12 built-in tools:** ShellTool (safety blacklist + sandbox), FileReadTool (offset+limit paging), FileEditTool, FileWriteTool, FileListTool, GrepTool, GlobTool, EnvironmentTool, NotebookEditTool, FileDeleteTool, CalculatorTool, WebFetchTool. MCP client integration via `rmcp` (stdio/SSE/streamable-http); a **MCP server** mode lets OneAI itself expose tools to Claude Code/Cursor (`oneai mcp serve`).
 
-### Multi-Agent Coordination
+### Multi-agent collaboration
 
-| Pattern | Mechanism |
-|---------|-----------|
-| **SubAgent** | Hierarchical delegation to specialized sub-agents (Plan/Explore/Code/Review/Custom), with optional worktree isolation |
-| **Team** | `TeamCoordinator` with 4 strategies — Coordinate, Route, Collaborate, Debate — plus 4 presets (`code_review`, `research_route`, `dev_pipeline`, `arch_debate`) |
+| Mode | Mechanism |
+|------|-----------|
+| **GroupChat (scenarios)** | engine-level `GroupChatSession` primitive + scenario system (cast / turn policy / topic fields / debrief / review loop), driving multi-role chat on macOS/Windows/etc. |
+| **SubAgent** | hierarchical delegation to specialized sub-agents (Plan/Explore/Code/Review/Custom), optional worktree isolation |
+| **Team** | `TeamCoordinator` with 4 strategies — Coordinate/Route/Collaborate/Debate — plus 4 presets (`code_review`/`research_route`/`dev_pipeline`/`arch_debate`) |
 | **Handoff** | `HandoffTool` (handoff-as-tool-call) + `HandoffManager` + 3 presets |
-| **Swarm** | Dynamic agent pool with 3 routing strategies (BestFit/LoadBalanced/Fastest), task decomposition + quality validation + retry |
+| **Swarm** | dynamic agent pool, 3 routing strategies (BestFit/LoadBalanced/Fastest), task decomposition + quality checks + retries |
 
-### Memory System
+### Memory system
 
-- **Three-layer memory (Letta-style)** — recall log (`Conversation`) / core (resident, token-budgeted, agent self-managed) / archival (full fact vector store, recalled on demand). `Conversation` is the single source of truth; core holds only curated atomic facts, with no redundant copies.
-- **MemoryProfile (DomainPack layer 7)** — declares the domain-level "extraction schema (what to remember) + recall strategy + core budget + whether to expose self-managed tools + habit-fact types (cross-session)", composable alongside `CompressionTemplate` / `ContextSource`. `CodingPack` / `ResearchPack` ship default profiles.
-- **Compression → archival incremental extraction** — before `ContextCompressor` drops old turns, it uses `FactExtractor` under the domain schema to pull atomic facts, archived via `MemoryFactStore`'s Mem0-style conflict update (same subject+predicate updates instead of appends) — closing the "compression = data loss" hole.
-- **Compression-resistant injection** — `CoreMemorySource` (implements `ContextSource`, `EveryIteration`) re-injects the core block + recall context every iteration, auto-re-injected after compression.
-- **Self-managed memory tools (domain opt-in)** — `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent actively curate memory → "the more it's used, the better it gets."
-- **Dual namespace + persistence** — `user_id` (cross-session habits) + `session_id` (this session's episodic); a unified `memories` table persists, `oneai memory search/list --user`. The `--user` flag namespaces cross-session memory.
-- **Short-term memory** — sliding window with automatic eviction to long-term.
-- **Long-term memory** — HNSW-like vector store + content store + hybrid scoring; **auto-embeds** entries via the configured `EmbeddingService`.
+- **Three-tier memory (Letta-style)** — recall log (`Conversation`) / core (resident, token-budgeted, agent self-managed) / archival (full fact vector store, recalled on demand). `Conversation` is the only raw log; core holds only curated atomic facts, no redundant copies.
+- **MemoryProfile (DomainPack layer 7)** — declarative per-domain "extraction schema (what to remember) + recall strategy + core budget + whether to expose self-managed tools + habit-fact types (cross-session)", composable alongside `CompressionTemplate`/`ContextSource`. `CodingPack`/`ResearchPack` ship default profiles.
+- **Compression → archival incremental extraction** — before `ContextCompressor` drops old turns, it extracts atomic facts via `FactExtractor` per the domain schema, archived through `MemoryFactStore` with Mem0-style conflict updates (same subject+predicate → update, not append), plugging "compression = data loss".
+- **Compression-resistant injection** — `CoreMemorySource` (implements `ContextSource`, `EveryIteration`) injects the core block + recall context every turn; re-injected after compression.
+- **Self-managed memory tools (domain opt-in)** — `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent curate its own memory → "gets better with use".
+- **Dual namespace + persistence** — `user_id` (cross-session habits) + `session_id` (this session's episodic); a unified `memories` table persists; `oneai memory search/list --user`. The `--user` flag namespaces cross-session memory.
+- **Short-term memory** — sliding window, auto-evicted to long-term.
+- **Long-term memory** — HNSW vector store + content store + hybrid scoring; **auto-embedded** via the configured `EmbeddingService`.
 - **STM↔LTM closed loop** — `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`.
-- **Context compression** — summarization past threshold, keeping recent turns; `ContextBudgetManager` allocates per-iteration budget proportionally.
-- **Persistence** — `SqliteSessionStore` persists sessions / LTM / facts; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`, `oneai memory search <kw> --user <id> / list --user <id>`.
+- **Context compression** — auto-summarize when over token limit, keeping recent turns; `ContextBudgetManager` allocates per-turn budgets proportionally.
+- **Persistence** — `SqliteSessionStore` persists sessions/LTM/facts; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`, `oneai memory search <kw> --user <id> / list --user <id>`.
 
-### Usage & Reliability
+### Usage & reliability
 
-- **Token-only usage tracking** — `UsageTracker` trait + `UsageRecord`, with `InMemoryUsageTracker` and the persistent `SqliteUsageTracker` (`oneai-persistence`). After each inference the AgentLoop records prompt/completion/total tokens and call count — **no USD amounts or budgets are tracked** (USD cost/budget management was removed) — `oneai usage report / session <id> / export`.
+- **Usage tracking (tokens only)** — `UsageTracker` trait + `UsageRecord`, with `InMemoryUsageTracker` and the persistent `SqliteUsageTracker` (`oneai-persistence`). After each inference the AgentLoop records prompt/completion/total tokens and call count — **no USD amounts or budgets tracked** (USD cost/budget management was removed). `oneai usage report / session <id> / export`.
 - **RateLimiter** (`TokenWindowRateLimiter`) + **CircuitBreaker** (`ThresholdCircuitBreaker`, Closed/Open/HalfOpen) — enforced inside the AgentLoop.
-- **Token counting** — `HeuristicTokenCounter` (per-provider, CJK-aware) + `ContextWindowProfile` + 4 trimming strategies + fit checks — `oneai token`.
+- **Token counting** — `HeuristicTokenCounter` (per-provider, CJK-aware) + `ContextWindowProfile` + 4 trimming strategies + fits-in-window check — `oneai token`.
 
-### 3-Layer Output Parser
+### 3-layer output parser
 
-LLM outputs are defended in three layers: constrained decoding → fuzzy JSON repair (bracket closing, regex extraction, embedded JSON) → fallback self-correction re-prompt. Reuse it rather than parsing model output directly.
+LLM output passes through 3 defensive layers: constrained decoding → fuzzy JSON repair (bracket completion, regex extraction, embedded-JSON detection) → fallback self-correction re-prompt. Reuse it rather than parsing model output directly.
 
-### Workflow Engine
+### Workflow engine
 
 - **WorkflowDag** — declarative DAG for parallel step orchestration.
-- **StateGraph** — cyclic directed graph for iterative agent flows (ReAct loops, conditional routing, interrupt points). The StateGraph and AgentLoop close the loop: a graph node can emit `GraphDecision::SwitchParadigm`/`Delegate`/`ToolCalls`.
+- **StateGraph** — cyclic directed graph for iterative agent flows (ReAct loops, conditional routing, breakpoints). StateGraph closes the loop with AgentLoop: graph nodes can emit `GraphDecision::SwitchParadigm`/`Delegate`/`ToolCalls`.
 
 ### RAG
 
-`EmbeddingService` trait with OpenAI / Anthropic / Voyage / Ollama / FastEmbed (local ONNX) impls, an `EmbeddingServiceRegistry` (caching + fallback), and `AutoEmbeddingDocumentIndex` that embeds on `add_document()`. Chunking: SentenceBoundary / FixedSize / Paragraph.
+`EmbeddingService` trait with OpenAI/Anthropic/Voyage/Ollama/FastEmbed (local ONNX) implementations, `EmbeddingServiceRegistry` (cache + fallback), `AutoEmbeddingDocumentIndex` auto-embedding on `add_document()`. Chunking: SentenceBoundary/FixedSize/Paragraph.
 
-### A2A Protocol, WASM Sandbox, Eval, Studio, MCP
+### A2A protocol, WASM sandbox, eval, Studio, MCP
 
-- **A2A** (`oneai-a2a`) — Agent-to-Agent protocol SDK: client + axum JSON-RPC server host + DomainPack→AgentCard auto-exposure. `oneai a2a serve / discover / list / send`.
-- **WASM** (`oneai-wasm`) — Wasmtime sandbox for untrusted code: `WasmTool`, `WasmModuleRegistry`, resource monitoring, WASI-restricted access, Native↔Wasm execution modes. `oneai wasm list / load / run / health / stats`.
-- **Eval** (`oneai-eval`) — `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 builtin metrics + 3 suites. `oneai eval run <suite>` / `eval score`. Also includes a **SWE-bench three-axis eval** (capability × usage × efficiency) — see [the dedicated section below](#swe-bench-eval-capability--usage--efficiency-three-axis).
-- **Studio** (`oneai-studio`) — axum HTTP+WebSocket server, REST API, live event push, D3.js SVG StateGraph visualization, and checkpoint time-travel. `oneai studio`.
-- **MCP ecosystem** (`oneai-mcp`) — `McpServerHost` (JSON-RPC server) + `McpPluginRegistry` (discovery/config/connect) + TOML config + stdio transport. `oneai mcp serve / list / add / remove / connect`.
+- **A2A** (`oneai-a2a`) — agent-to-agent protocol SDK: client + axum JSON-RPC server host + DomainPack→AgentCard auto-exposure. `oneai a2a serve / discover / list / send`.
+- **WASM** (`oneai-wasm`) — Wasmtime sandbox for untrusted code: `WasmTool`, `WasmModuleRegistry`, resource monitor, WASI restricted access, Native↔Wasm execution modes. `oneai wasm list / load / run / health / stats`.
+- **Eval** (`oneai-eval`) — `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 built-in metrics + 3 suites. `oneai eval run <suite>` / `eval score`. Plus the **SWE-bench three-axis eval** (capability resolved × usage × efficiency), see [the dedicated section below](#swe-bench-eval-capability--usage--efficiency).
+- **Studio** (`oneai-studio`) — axum HTTP+WebSocket service, REST API, real-time event push, D3.js SVG StateGraph viz, checkpoint time-travel. `oneai studio`.
+- **MCP ecosystem** (`oneai-mcp`) — `McpServerHost` (JSON-RPC server) + `McpPluginRegistry` (discover/configure/connect) + TOML config + stdio transport. `oneai mcp serve / list / add / remove / connect`.
 
-### Trajectory Logging (Trace)
+### Tracing
 
-OpenInference-compatible trace for agent evaluation + an OTEL exporter (`OtlpCollector` + `OtelMetricsProvider`):
+OpenInference-compatible traces for agent evaluation, plus OTEL exporters (`OtlpCollector` + `OtelMetricsProvider`):
 
 ```rust
 let app = AppBuilder::new().trace_in_memory().build()?;
 session.end_session(SpanStatus::Ok);
 let tree = session.build_trace_tree();
-println!("Success rate: {:.1}%", tree.metrics.success_rate * 100.0);
+println!("success rate: {:.1}%", tree.metrics.success_rate * 100.0);
 ```
 
 ---
 
-## SWE-bench Eval (Capability × Usage × Efficiency Three-Axis)
+## SWE-bench eval (capability × usage × efficiency)
 
-OneAI runs [SWE-bench Lite](https://www.swebench.com/) (300 instances) as its coding-agent benchmark, collecting three axes: **capability (resolved) × usage × efficiency**:
+OneAI runs against [SWE-bench Lite](https://www.swebench.com/) (300 instances) as a coding-agent benchmark, collecting three axes — **capability (resolved) × usage × efficiency**:
 
-- **Capability axis** ← the external SWE-bench harness verdict (`resolved` true/false), obtained by `SwebenchJudge` spawning a Python subprocess.
-- **Usage axis** ← `UsageTracker.session_usage()` (api_calls + prompt/completion/total token breakdown, token-only — no USD).
+- **Capability axis** ← decided by the external SWE-bench harness (`resolved` true/false), via `SwebenchJudge` calling a Python subprocess.
+- **Usage axis** ← `UsageTracker.session_usage()` (api_calls + prompt/completion/total token breakdown — tokens only, no USD).
 - **Efficiency axis** ← `TraceMetrics` (total_tokens / tool_call_count / avg_iterations) + per-phase wall-clock breakdown.
 
-Per instance: `git clone <repo>` → `git checkout <base_commit>` → drive the agent with the `problem_statement` (CodingPack provides read_file/edit_file/grep/glob/shell) → `git diff` to collect the patch → external harness judges `resolved`; all three axes are written into the `EvalResult`.
+Per instance: `git clone <repo>` → `git checkout <base_commit>` → drive the agent with the `problem_statement` (CodingPack provides read_file/edit_file/grep/glob/shell) → collect the patch via `git diff` → the external harness decides `resolved`; all three axes are written into `EvalResult`.
 
 ### Prerequisites
 
 ```bash
-# 1) Create a venv and install datasets + swebench + modal (one venv does double duty: data export + judging)
-#    Homebrew Python on macOS is PEP-668-locked and can't install system-wide; you must use a venv
+# 1) Create a venv and install datasets + swebench + modal (one venv does double duty: export data + judge)
+#    macOS Homebrew Python is PEP-668-locked against system-wide installs, so a venv is mandatory.
 python3 -m venv ~/.venvs/swebench
 ~/.venvs/swebench/bin/pip install datasets swebench modal httpx[socks]
-~/.venvs/swebench/bin/modal token new        # log in to Modal
+~/.venvs/swebench/bin/modal token new        # log into Modal
 
-# 2) Use that venv's python to export the dataset JSONL locally (the Rust side does no HF networking)
+# 2) Export the dataset JSONL locally with that venv's python (the Rust side does no HF network I/O)
 ~/.venvs/swebench/bin/python scripts/swebench/export_dataset.py
 # → produces swe_bench_lite.jsonl (300 lines)
 
@@ -404,11 +466,11 @@ python3 -m venv ~/.venvs/swebench
 export ONEAI_API_KEY=sk-...
 ```
 
-> Verified (500 instances) is also available: `export_dataset.py --dataset princeton-nlp/SWE-bench_Verified --out swe_bench_verified.jsonl`.
-> `scripts/swebench/` also has `fetch_instance.py` (pull a single instance's metadata) and `make_prediction.py` (manual git diff → JSONL) — the stage-1 manual path, superseded by the CLI command below in stage 2.
+> Verified (500 instances) also works: `export_dataset.py --dataset princeton-nlp/SWE-bench_Verified --out swe_bench_verified.jsonl`.
+> `scripts/swebench/` also has `fetch_instance.py` (pull a single instance's metadata) and `make_prediction.py` (hand-craft git diff→JSONL) — the stage-1 manual path, superseded by the CLI commands below in stage 2.
 > The judge looks for `~/.venvs/swebench/bin/python` (the venv above) by default; override with `--python <path>`.
 
-### Test a single instance (smoke-test the loop first)
+### Smoke-test one instance (do this first to confirm the loop)
 
 ```bash
 cargo run -p oneai-cli-demo -- eval swebench \
@@ -418,17 +480,17 @@ cargo run -p oneai-cli-demo -- eval swebench \
     --run-id oneai-smoke
 ```
 
-### Test a batch of instances
+### Run a batch
 
 ```bash
-# Limit to N (takes the first N from the dataset, to avoid burning too much API at once)
+# Limit to N (first N from the dataset, to avoid burning too much API at once)
 cargo run -p oneai-cli-demo -- eval swebench \
     --dataset ./swe_bench_lite.jsonl \
     --limit 10 \
     --workspace ./swebench-workspace \
     --run-id oneai-batch
 
-# Or specify multiple instance ids
+# Or pin specific instance ids
 cargo run -p oneai-cli-demo -- eval swebench \
     --dataset ./swe_bench_lite.jsonl \
     --instances astropy__astropy-12907,django__django-11099 \
@@ -436,7 +498,7 @@ cargo run -p oneai-cli-demo -- eval swebench \
     --run-id oneai-batch
 ```
 
-### Test all 300 instances
+### Run all 300 instances
 
 ```bash
 cargo run -p oneai-cli-demo -- eval swebench \
@@ -446,118 +508,224 @@ cargo run -p oneai-cli-demo -- eval swebench \
     --format json
 ```
 
-> The full 300 instances really clones 300 repos and runs 300 agent rounds — non-trivial API cost and time. Smoke-test a single instance before going batch.
+> All 300 instances really clones 300 repos and runs 300 agent rounds — non-trivial API cost and time. Smoke-test one first, then go batch.
 
 ### Artifacts & options
 
-Each run produces under `--workspace`:
+Each run produces, under `--workspace`:
 
 | File | Contents |
 |---|---|
-| `predictions.jsonl` | the agent's patch (re-runnable / submittable to the harness) |
-| `leaderboard.json` | swebench.com submission schema: `instance_calls` / `resolved_count` / `total_instances` / `resolution_rate` / `per_instance:[{instance_id, api_calls, resolved}]` (USD cost fields were removed; the comparable quantity is `api_calls`) |
-| `evaluation_results/<run_id>/` | the swebench harness's own judgment detail |
+| `predictions.jsonl` | the patches the agent produced (re-runnable / submittable to the harness) |
+| `leaderboard.json` | swebench.com submission schema: `instance_calls` / `resolved_count` / `total_instances` / `resolution_rate` / `per_instance:[{instance_id, api_calls, resolved}]` (USD cost fields removed; the comparable axis is `api_calls`) |
+| `evaluation_results/<run_id>/` | the swebench harness's own judgment details |
 
-stdout reports in these formats:
+stdout reports via:
 
 | `--format` | Output |
 |---|---|
-| `markdown` (default) | human-readable report (per-instance capability/usage/efficiency three-axis) |
+| `markdown` (default) | human-readable report (per-instance capability/usage/efficiency) |
 | `json` | full `EvalReport` JSON |
-| `compact` | a CI-friendly one-line summary |
+| `compact` | CI-friendly one-line summary |
 
-Common options: `--python <path>` selects the judge interpreter (default `~/.venvs/swebench/bin/python`); `--modal false` switches to local docker (on Apple Silicon use `--namespace ''`, slow); `--dataset-name princeton-nlp/SWE-bench_Lite` is forwarded to the harness; `--run-id` controls the `evaluation_results/` subdirectory name.
-
----
-
-## Cross-Platform Support
-
-| Platform | Binding Language | Interaction Gate | PlatformCapabilities |
-|----------|-----------------|---------------|----------------------|
-| macOS / Windows / Linux | C++ / C# | NSAlert / MessageBox | Screenshot, FilesystemSandbox, Notifications |
-| Android | Kotlin | AlertDialog | Camera, Screenshot, Network |
-| iOS | Swift | UIAlertController | Camera (limited), Screenshot |
-| HarmonyOS | C++ | CommonDialog | Camera, AppSandbox |
+Common options: `--python <path>` the judge interpreter (default `~/.venvs/swebench/bin/python`); `--modal false` switch to local docker (Apple Silicon needs `--namespace ''`, slow); `--dataset-name princeton-nlp/SWE-bench_Lite` passed to the harness; `--run-id` controls the `evaluation_results/` subdirectory.
 
 ---
 
-## Project Structure
+## Cross-platform: desktop & mobile
+
+One Rust core (`oneai-core` + `oneai-app`) reaches six native targets via two FFI routes:
+
+- **UniFFI bindings** (Kotlin / Swift / Python) — Android, Apple platforms.
+- **A hand-written `extern "C"` JSON facade** (`crates/oneai-uniffi/src/c_facade.rs`, header `bindings/c/oneai_c.h`) — since `uniffi-bindgen` 0.32 has no C#/ArkTS generator, Windows (C# P/Invoke `oneai.dll`) and HarmonyOS (NAPI-wrapped) reuse this facade. All strings cross as UTF-8, so CJK round-trips correctly.
+
+| Platform | Tech | Binding lang | Native InteractionGate |
+|----------|------|--------------|-------------------------|
+| macOS | SwiftUI (`swiftc`, no Xcode needed) | Swift (UniFFI) | NSAlert |
+| Windows | WinUI 3 / C# | C# (P/Invoke facade) | MessageBox |
+| Linux | desktop-platform crate | C++ (facade) | MessageBox |
+| Android | Jetpack Compose / Kotlin | Kotlin (UniFFI) | AlertDialog |
+| iOS | SwiftUI / Swift | Swift (UniFFI xcframework) | UIAlertController |
+| HarmonyOS | ArkTS / ArkUI + NAPI | C++ (NAPI-wrapped facade) | CommonDialog |
+
+Every platform shares the same design: scenario-based multi-agent group chat (5 built-in presets), 20fps-coalesced streaming, Markdown, dark mode following the system, command palette, artifact canvas. **The macOS app is the reference implementation; the others mirror it.**
+
+### macOS (reference implementation — no Xcode required)
+
+```bash
+# Prereq: Command Line Tools (swiftc) + Apple Rust targets
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+# 1) Generate Swift bindings + cross-compile a universal static lib to platforms/apple/
+./scripts/generate_bindings.sh swift
+./scripts/build_apple.sh
+
+# 2) swiftc compiles the SwiftUI sources → OneAI.app
+./platforms/macos/build_macos.sh        # add --debug for a debug profile
+
+# 3) Run
+open platforms/macos/build/OneAI.app
+```
+
+Sources live in `platforms/macos/Sources/` (11 Swift files, ~3.3k lines): `OneAIApp` (entry/theme), `Views` (chat screen/sidebar), `ChatViewModel` (session lifecycle/stream coalescing), `AgentStore` (scenario CRUD + 5 presets), `Models` (Scenario/Agent/TurnPolicy), `ScenarioEditor`, `CommandPalette` (⌘K), `ArtifactCanvas`, `SpeechInput`, `Markdown`.
+
+### Windows (WinUI 3 / C#)
+
+```powershell
+# Prereq: Visual Studio + WindowsAppSDK workload
+rustup target add x86_64-pc-windows-msvc
+
+# 1) Cross-compile oneai.dll (cdylib — exports both uniffi symbols AND c_facade extern "C" symbols)
+pwsh ./scripts/build_windows.ps1
+
+# 2) Build the app (open OneAI.sln in VS, or dotnet)
+dotnet build platforms\windows\OneAI.sln -c Debug
+
+# 3) Run (unpackaged)
+dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug
+```
+
+Sources in `platforms/windows/OneAI/` (Native/ViewModels/Services/Views); see `platforms/windows/README.md`.
+
+### Android (Jetpack Compose / Kotlin)
+
+```bash
+# Prereq: Android NDK + cargo-ndk
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android
+cargo install cargo-ndk
+
+# 1) Cross-compile 4 ABIs + stage liboneai.so and Kotlin bindings
+./scripts/build_android.sh
+
+# 2) Build & install
+cd platforms/android
+./gradlew assembleDebug
+./gradlew installDebug
+```
+
+See `platforms/android/README.md`. Ollama on host from the emulator: `kind=ollama, model=llama3, base_url=http://10.0.2.2:11434`.
+
+### iOS (SwiftUI / Swift)
+
+```bash
+# Prereq: Xcode (Command Line Tools alone cannot build iOS / xcframeworks)
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+./scripts/build_apple.sh   # when xcodebuild is detected it also produces OneAI.xcframework (iOS+macOS slices)
+```
+
+Without Xcode, `build_apple.sh` produces only the macOS staticlib (skipping iOS/xcframework with a note). The iOS app project is forthcoming; the bindings and xcframework are staged by the script.
+
+### HarmonyOS (ArkTS / ArkUI + NAPI)
+
+```bash
+# Prereq: DevEco Studio + HarmonyOS Native SDK
+rustup target add aarch64-linux-ohos x86_64-linux-ohos
+export OHOS_NDK_HOME=/path/to/harmony/native   # contains llvm/bin/clang
+
+# 1) Cross-compile liboneai.so and stage it where CMake finds it
+./scripts/build_harmony.sh
+
+# 2) Open platforms/harmony in DevEco Studio → hvigorw assembleHap
+#    CMake builds liboneai_napi.so (wrapping the oneai_* C symbols) and links liboneai.so
+```
+
+See `platforms/harmony/README.md`. The streaming callback fires on a tokio worker thread via `napi_threadsafe_function` and is dispatched on the ArkTS thread.
+
+---
+
+## Project structure
 
 ```
 oneai/
 ├── crates/
-│   ├── oneai-core/          # Foundation: types, traits, PermissionLevel, Budget
+│   ├── oneai-core/          # foundation: types, traits, PermissionLevel, Budget
 │   ├── oneai-provider/      # OpenAI/Anthropic/Gemini/Ollama + ProviderPool + SmartRouter
-│   ├── oneai-parser/         # 3-layer output parsing
-│   ├── oneai-memory/         # STM, LTM, compression, HNSW, MemoryManager + persistence
-│   ├── oneai-tool/          # Registry, 12 tools, MCP client, approval, executor
-│   ├── oneai-skill/         # Skill registry + selector + built-in domain skills
-│   ├── oneai-domain/        # DomainPack (7-layer), CodingPack, market, spec validator
-│   ├── oneai-agent/         # AgentLoop, SubAgent, paradigms, Team/Handoff/Swarm, StreamParser
-│   ├── oneai-rag/           # Document, index, EmbeddingService, retrieval
+│   ├── oneai-parser/        # 3-layer output parsing
+│   ├── oneai-memory/        # STM, LTM, compression, HNSW, MemoryManager + persistence
+│   ├── oneai-tool/          # registry, 12 tools, MCP client, approval, executor
+│   ├── oneai-skill/         # skill registry + selector + built-in domain skills
+│   ├── oneai-domain/        # DomainPack (7 layers), CodingPack, market, spec validator
+│   ├── oneai-agent/         # AgentLoop, SubAgent, paradigms, Team/Handoff/Swarm/GroupChat, StreamParser
+│   ├── oneai-rag/           # Document, Index, EmbeddingService, Retrieval
 │   ├── oneai-workflow/      # DAG, StateGraph, compiler, validator, executor
 │   ├── oneai-scheduler/     # InMemoryScheduler
 │   ├── oneai-persistence/   # Checkpoint + SQLite session/usage backends
 │   ├── oneai-a2a/           # A2A protocol SDK (client + server host)
 │   ├── oneai-wasm/          # Wasmtime sandbox + WasmTool + module registry
-│   ├── oneai-eval/          # Eval cases, metrics, runner, suites
+│   ├── oneai-eval/          # eval cases/metrics/runner/suites + SWE-bench three-axis
 │   ├── oneai-studio/        # Studio Web UI (axum + WS + D3 viz)
 │   ├── oneai-mcp/           # MCP server host + plugin registry
 │   ├── oneai-app/           # AppBuilder, App, AppSession
-│   ├── oneai-trace/         # OpenInference trajectory + OTEL exporter
-│   ├── oneai-uniffi/        # UniFFI binding definitions
+│   ├── oneai-trace/         # OpenInference traces + OTEL exporters
+│   ├── oneai-uniffi/        # UniFFI binding definitions + hand-written extern "C" facade
 │   └── oneai-platform-{desktop,android,ios,harmony}/
+├── platforms/               # six native apps (SwiftUI / WinUI / Compose / ArkTS)
+│   ├── macos/               # reference implementation (SwiftUI, swiftc build)
+│   ├── windows/             # WinUI 3 / C#
+│   ├── android/             # Jetpack Compose / Kotlin
+│   ├── ios/                 # SwiftUI (Xcode xcframework)
+│   ├── harmony/             # ArkTS / ArkUI + NAPI
+│   └── apple/               # cross-compile staging: liboneai.a + headers + binding
 ├── examples/
-│   ├── cli/                 # Interactive TUI demo (ratatui + crossterm) — bin: oneai-cli
-│   ├── desktop-app/         # Desktop approval gate demo
-│   ├── rust/                # Channel approval gate demo
-│   ├── android-app/         # Android demo (Kotlin)
-│   └── ios-app/             # iOS demo (Swift)
-├── bindings/                # Generated UniFFI bindings (cpp/csharp/kotlin/swift)
-├── scripts/                 # generate_bindings.sh
-└── Cargo.toml               # Workspace root (resolver = "2", edition 2021, v0.2.0)
+│   ├── cli/                 # interactive TUI demo (ratatui + crossterm) — bin: oneai-cli
+│   ├── desktop-app/         # desktop approval-gate demo
+│   └── rust/                # channel approval-gate demo
+├── bindings/                # generated bindings (cpp/csharp/kotlin/swift + hand-written c/)
+├── scripts/                 # generate_bindings.sh + build_{apple,windows,android,harmony}.sh + swebench/
+└── Cargo.toml               # workspace root (resolver = "2", edition 2021, v0.2.0)
 ```
 
 ---
 
-## Build, Test, Run
+## Build, test, run
 
 ```bash
 cargo build                      # build the whole workspace
-cargo test                       # all 1378 tests across 24 crates
+cargo test                       # all 1378 tests (24 crates)
 cargo test -p oneai-agent        # tests for a single crate
-cargo test -p oneai-agent plan   # a single test/module within a crate
+cargo test -p oneai-agent plan   # a single test/module
 cargo clippy --workspace --all-targets   # keep lints clean
 cargo run -p oneai-cli-demo      # launch the interactive TUI (bin: oneai-cli)
 ```
 
-The workspace uses `resolver = "2"`, `edition = "2021"`, shared version `0.2.0` from `[workspace.package]`, and all shared dependencies pinned in `[workspace.dependencies]`. `#[non_exhaustive]` is applied to public enums as part of the v0.2.0 API-stability commitment.
+The workspace uses `resolver = "2"`, `edition = "2021"`, shared version `0.2.0` (from `[workspace.package]`), with all shared dependencies pinned in `[workspace.dependencies]`. Public enums are `#[non_exhaustive]` as part of the v0.2.0 API-stability commitment.
+
+### Network proxy
+
+All outbound HTTP — LLM provider APIs, `web_search`/`web_fetch`, the A2A client, embedding services, MCP HTTP transport — goes through `reqwest::Client`, so proxy support is env-var-based and uniform everywhere:
+
+- `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` — proxy URL (auto-detected by reqwest on every client build; no code opt-in needed).
+- `NO_PROXY` — comma-separated exclusion list.
+- SOCKS5: `ALL_PROXY=socks5://host:port` (reqwest `socks` feature is on in the workspace `Cargo.toml`).
+- On macOS/Windows, reqwest's `system-proxy` feature also reads the OS GUI proxy settings; env vars always win.
 
 ---
 
-## Development Roadmap
+## Roadmap
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| 1–11 | Core, providers, parser, paradigms, memory, tools, workflow, persistence, AppBuilder, UniFFI, platform UI, trajectory, DomainPack, TUI | ✅ Complete |
-| P2-1 | SubAgent + Worktree isolation + parallel execution | ✅ Complete |
-| P2-2 | StateGraph ↔ AgentLoop closed-loop execution | ✅ Complete |
-| P2-3/4 | OTEL observability + STM↔LTM closed loop | ✅ Complete |
-| P2-5 | A2A protocol SDK | ✅ Complete |
-| P2-6 | WASM sandbox engine | ✅ Complete |
-| P3-1 | API stabilization (`#[non_exhaustive]`, v0.2.0) | ✅ Complete |
-| P3-2/3 | DomainPack market + CLI polish (clap subcommands + config) | ✅ Complete |
-| P3-4/5 | Eval framework + Studio Web UI | ✅ Complete |
-| P3-6 | MCP server ecosystem | ✅ Complete |
-| P4-1/2 | A2A server host + MCP client enhancement | ✅ Complete |
-| P4-3/4 | DomainPack spec validator + WASM runtime enhancement | ✅ Complete |
-| P5-1/2/3 | SQLite persistence + embedding service + usage (token) management | ✅ Complete |
-| P6-1/2/3 | ProviderPool + SmartRouter + token counting/context management | ✅ Complete |
-| P7-1/2/3 | Team coordination + Handoff protocol + Swarm orchestration | ✅ Complete |
-| TUI | Tool display, Plan mode gate, skill disclosure, scroll perf, mouse selection | ✅ Complete |
+| 1–11 | core, provider, parser, paradigms, memory, tools, workflow, persistence, AppBuilder, UniFFI, platform UI, trace, DomainPack, TUI | ✅ done |
+| P2-1 | SubAgent + Worktree isolation + parallel execution | ✅ done |
+| P2-2 | StateGraph ↔ AgentLoop closed-loop execution | ✅ done |
+| P2-3/4 | OTEL observability + STM↔LTM closed loop | ✅ done |
+| P2-5 | A2A protocol SDK | ✅ done |
+| P2-6 | WASM sandbox engine | ✅ done |
+| P3-1 | API stabilization (`#[non_exhaustive]`, v0.2.0) | ✅ done |
+| P3-2/3 | DomainPack market + CLI polish (clap subcommands + config) | ✅ done |
+| P3-4/5 | eval framework + Studio Web UI | ✅ done |
+| P3-6 | MCP server ecosystem | ✅ done |
+| P4-1/2 | A2A server host + MCP client enhancements | ✅ done |
+| P4-3/4 | DomainPack spec validator + WASM runtime enhancements | ✅ done |
+| P5-1/2/3 | SQLite persistence + Embedding service + usage (token) management | ✅ done |
+| P6-1/2/3 | ProviderPool + SmartRouter + token counting / context management | ✅ done |
+| P7-1/2/3 | Team coordination + Handoff protocol + Swarm orchestration | ✅ done |
+| Native | six native apps: macOS/Windows/Android/iOS/HarmonyOS + scenario-based multi-agent chat | ✅ macOS/Windows/Android/Harmony · 🚧 iOS |
+| TUI | tool display, Plan-mode approval gate, skill disclosure, scroll perf, mouse selection | ✅ done |
 
 ---
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE) for details.
+Apache-2.0 — see [LICENSE](LICENSE).
