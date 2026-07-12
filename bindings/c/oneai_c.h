@@ -28,6 +28,7 @@ extern "C" {
 /* Opaque handles (heap-allocated Arc). */
 typedef struct OneAiApp OneAiApp;
 typedef struct OneAiSession OneAiSession;
+typedef struct OneAiGroupSession OneAiGroupSession;
 
 /* Streaming event callback. Fires on a tokio worker thread.
  * event_json is a NUL-terminated UTF-8 string, borrowed for the duration
@@ -66,6 +67,30 @@ bool  oneai_session_save(OneAiSession* s);
 char* oneai_session_run_task(OneAiSession* s, const char* task,
                              oneai_event_cb cb, void* ctx);
 void  oneai_session_interrupt(OneAiSession* s);
+
+/* ── Group chat (multi-agent scenario) ────────────────────────────────
+ * scenario_json shape (mirrors the uniffi ScenarioSpecView/AgentSpecView
+ * records the Swift/macOS binding builds):
+ *   {"members":[{"id","name","system_prompt","kind"("openai"|"anthropic"|"ollama"),
+ *                "model","api_key"?,"base_url"?,"color"?,"avatar"?}],
+ *    "turn_policy":"scripted"|"roundrobin"|"moderator",
+ *    "script_order"?:["id",..], "moderator_id"?,
+ *    "opener_agent_id"?, "opener_line"?, "title"?,
+ *    "review_loop"?:{"reviewer_id","approve_marker","max_rounds"}}
+ * Group events carry a "speaker" id (null for single-agent sessions) so the
+ * foreign UI can route fragments to the correct member's bubble.
+ * oneai_group_start / oneai_group_run_task BLOCK until the round completes
+ * and fire cb on a worker thread (marshal to your UI thread). */
+OneAiGroupSession* oneai_create_group_session(OneAiApp* app, const char* scenario_json);
+void   oneai_free_group_session(OneAiGroupSession* gs);
+char*  oneai_group_start(OneAiGroupSession* gs, oneai_event_cb cb, void* ctx);
+char*  oneai_group_run_task(OneAiGroupSession* gs, const char* user_input,
+                            oneai_event_cb cb, void* ctx);
+void   oneai_group_interrupt(OneAiGroupSession* gs);
+/* order_json is a JSON string array ["id",..]; returns null on success. */
+char*  oneai_group_set_scripted_order(OneAiGroupSession* gs, const char* order_json);
+char*  oneai_group_messages(OneAiGroupSession* gs);    /* free w/ oneai_free_string */
+bool   oneai_group_save(OneAiGroupSession* gs);
 
 /* ── String + error ──────────────────────────────────────────────────── */
 void  oneai_free_string(char* s);

@@ -38,5 +38,9 @@
     <Page Include="MainWindow.xaml" />
     <Page Include="Views\ChatView.xaml" />
     <Page Include="Views\SettingsDialog.xaml" />
+    <Page Include="Views\ScenarioEditor.xaml" />
+    <Page Include="Views\CommandPalette.xaml" />
+    <Page Include="Views\ArtifactCanvas.xaml" />
+    <Page Include="Views\MarkdownTextBlock.xaml" />
   </ItemGroup>
 </Project>

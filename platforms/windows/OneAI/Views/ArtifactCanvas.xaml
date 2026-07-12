@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!-- ArtifactCanvas: right-docked panel rendering long code / documents surfaced
+     by an assistant message. Tab bar + copy/export + monospace content. Port
+     of macOS ArtifactCanvas.swift. -->
+<UserControl
+    x:Class="OneAI.Views.ArtifactCanvas"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:s="using:OneAI.Services">
+    <Grid RowDefinitions="Auto,Auto,*">
+        <!-- Tab bar -->
+        <ListView x:Name="Tabs" Grid.Row="0" ItemsSource="{x:Bind Store.Artifacts, Mode=OneWay}"
+                  SelectedItem="{x:Bind Store.Selected, Mode=TwoWay}"
+                  SelectionMode="Single" SingleSelectionFollowsFocus="False"
+                  Background="{ThemeResource LayerFillColorDefaultBrush}"
+                  Padding="4,0,4,0">
+            <ListView.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" Spacing="2" />
+                </ItemsPanelTemplate>
+            </ListView.ItemsPanel>
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="s:Artifact">
+                    <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="6" Padding="6,3">
+                        <FontIcon Grid.Column="0" Glyph="&#xE8A5;" FontSize="11" />
+                        <TextBlock Grid.Column="1" Text="{x:Bind Title, Mode=OneWay}" FontSize="12" />
+                    </Grid>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- Toolbar: lang + copy + export -->
+        <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto,Auto" Padding="12,6"
+              Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <TextBlock Grid.Column="0" x:Name="LangLabel" FontFamily="Consolas" FontSize="11"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+            <Button Grid.Column="2" Click="Copy_Click" Content="复制" Padding="8,2" FontSize="11"
+                    Background="Transparent" BorderThickness="0" />
+            <Button Grid.Column="3" Click="Export_Click" Content="导出…" Padding="8,2" FontSize="11"
+                    Background="Transparent" BorderThickness="0" />
+        </Grid>
+
+        <!-- Content -->
+        <ScrollViewer Grid.Row="2" HorizontalScrollMode="Auto" VerticalScrollMode="Auto">
+            <TextBlock x:Name="Content" FontFamily="Consolas" FontSize="13" Padding="12"
+                       TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                       Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+        </ScrollViewer>
+    </Grid>
+</UserControl>

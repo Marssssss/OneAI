@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- ChatView: first-run hint + message list (user/assistant templates) +
-     error line + input bar (send/stop). Mirrors the macOS ChatDetail. -->
+<!-- ChatView: top bar (scenario/title/debrief/tokens/settings) + turn-status
+     bar (group only) + first-run hint + message list (user/assistant with
+     speaker header) + optional artifact canvas split + error + input bar
+     (mic placeholder / send / stop). Mirrors the macOS ChatDetail. -->
 <UserControl
     x:Class="OneAI.Views.ChatView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -12,77 +14,105 @@
         <!-- User bubble -->
         <DataTemplate x:Key="UserBubble" x:DataType="vm:UserItem">
             <StackPanel HorizontalAlignment="Right" MaxWidth="360">
-                <Border Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="14"
-                        Padding="12,8">
+                <Border Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="14" Padding="12,8">
                     <TextBlock Text="{x:Bind Text}" FontSize="14" TextWrapping="Wrap"
                                Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
                 </Border>
             </StackPanel>
         </DataTemplate>
 
-        <!-- Assistant bubble: thinking Expander + steps + markdown + cursor + retry -->
+        <!-- Assistant bubble: speaker header + thinking expander + tool steps +
+             streaming plain text (capped) OR markdown + cursor + retry -->
         <DataTemplate x:Key="AssistantBubble" x:DataType="vm:AssistantItem">
-            <StackPanel Spacing="6" HorizontalAlignment="Stretch">
-                <!-- Thinking card (only when there's thinking text) -->
-                <Expander IsExpanded="{x:Bind ThinkingExpanded, Mode=TwoWay}"
-                          Visibility="{x:Bind HasThinking, Mode=OneWay}"
-                          HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
-                          Padding="10,8">
-                    <Expander.Header>
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <FontIcon Glyph="&#xE955;" FontSize="13" />
-                            <TextBlock Text="{x:Bind ThinkingHeader, Mode=OneWay}" FontSize="12" />
-                        </StackPanel>
-                    </Expander.Header>
-                    <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto">
-                        <TextBlock Text="{x:Bind Thinking, Mode=OneWay}" FontSize="12"
-                                   TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                    </ScrollViewer>
-                </Expander>
+            <Grid ColumnDefinitions="3,*">
+                <!-- Left accent bar in the speaker's color (group only) -->
+                <Border Grid.Column="0" Width="3" CornerRadius="1.5" Visibility="{x:Bind HasSpeaker, Mode=OneWay}">
+                    <Border.Background>
+                        <SolidColorBrush Color="{x:Bind SpeakerColorBrush, Mode=OneWay}" />
+                    </Border.Background>
+                </Border>
+                <StackPanel Grid.Column="1" Spacing="6" HorizontalAlignment="Stretch" Margin="6,0,0,0">
 
-                <!-- Tool steps -->
-                <ItemsRepeater ItemsSource="{x:Bind Steps, Mode=OneWay}" Margin="0,2,0,2">
-                    <ItemsRepeater.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ToolStep">
-                            <StackPanel Spacing="1" Margin="0,2">
-                                <StackPanel Orientation="Horizontal" Spacing="4">
-                                    <TextBlock FontSize="11" FontFamily="Consolas"
-                                               Foreground="{x:Bind StepIconColor, Mode=OneWay}"
-                                               Text="{x:Bind StepIcon, Mode=OneWay}" />
-                                    <TextBlock FontSize="11" FontFamily="Consolas" TextWrapping="Wrap"
-                                               Foreground="{x:Bind StepIconColor, Mode=OneWay}"
-                                               Text="{x:Bind StepSummary, Mode=OneWay}" />
-                                </StackPanel>
-                                <TextBlock FontSize="11" FontFamily="Consolas"
-                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                           Visibility="{x:Bind HasResult, Mode=OneWay}"
-                                           Text="{x:Bind ResultPreview, Mode=OneWay}" />
+                    <!-- Speaker header (group only) -->
+                    <StackPanel Orientation="Horizontal" Spacing="6" Visibility="{x:Bind HasSpeaker, Mode=OneWay}">
+                        <TextBlock Text="{x:Bind SpeakerAvatar, Mode=OneWay}" FontSize="14" VerticalAlignment="Center" />
+                        <TextBlock Text="{x:Bind SpeakerName, Mode=OneWay}" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{x:Bind SpeakerBrush, Mode=OneWay}" VerticalAlignment="Center" />
+                        <Border CornerRadius="8" Padding="6,1" VerticalAlignment="Center">
+                            <Border.Background>
+                                <SolidColorBrush Color="{x:Bind SpeakerColorFaint, Mode=OneWay}" />
+                            </Border.Background>
+                            <TextBlock Text="{x:Bind SpeakerRole, Mode=OneWay}" FontSize="10"
+                                       Foreground="{x:Bind SpeakerBrush, Mode=OneWay}" />
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Thinking card (only when there's thinking text) -->
+                    <Expander IsExpanded="{x:Bind ThinkingExpanded, Mode=TwoWay}"
+                              Visibility="{x:Bind HasThinking, Mode=OneWay}"
+                              HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="10,4">
+                        <Expander.Header>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE955;" FontSize="13" />
+                                <TextBlock Text="{x:Bind ThinkingHeader, Mode=OneWay}" FontSize="12" />
                             </StackPanel>
-                        </DataTemplate>
-                    </ItemsRepeater.ItemTemplate>
-                </ItemsRepeater>
+                        </Expander.Header>
+                        <ScrollViewer MaxHeight="260" VerticalScrollBarVisibility="Auto">
+                            <TextBlock Text="{x:Bind Thinking, Mode=OneWay}" FontSize="12"
+                                       TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                        </ScrollViewer>
+                    </Expander>
 
-                <!-- Markdown answer (with copy/share context menu) -->
-                <views:MarkdownTextBlock Markdown="{x:Bind Text, Mode=OneWay}">
-                    <views:MarkdownTextBlock.ContextFlyout>
-                        <MenuFlyout>
-                            <MenuFlyoutItem Text="复制" Click="CopyAnswer_Click" Tag="{x:Bind Text, Mode=OneWay}" />
-                            <MenuFlyoutItem Text="分享" Click="ShareAnswer_Click" Tag="{x:Bind Text, Mode=OneWay}" />
-                        </MenuFlyout>
-                    </views:MarkdownTextBlock.ContextFlyout>
-                </views:MarkdownTextBlock>
+                    <!-- Tool steps -->
+                    <ItemsRepeater ItemsSource="{x:Bind Steps, Mode=OneWay}" Margin="0,2,0,2">
+                        <ItemsRepeater.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ToolStep">
+                                <StackPanel Spacing="1" Margin="0,2">
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <TextBlock FontSize="11" FontFamily="Consolas"
+                                                   Foreground="{x:Bind StepIconColor, Mode=OneWay}"
+                                                   Text="{x:Bind StepIcon, Mode=OneWay}" />
+                                        <TextBlock FontSize="11" FontFamily="Consolas" TextWrapping="Wrap"
+                                                   Foreground="{x:Bind StepIconColor, Mode=OneWay}"
+                                                   Text="{x:Bind StepSummary, Mode=OneWay}" />
+                                    </StackPanel>
+                                    <TextBlock FontSize="11" FontFamily="Consolas"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                               Visibility="{x:Bind HasResult, Mode=OneWay}"
+                                               Text="{x:Bind ResultPreview, Mode=OneWay}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsRepeater.ItemTemplate>
+                    </ItemsRepeater>
 
-                <!-- Streaming cursor -->
-                <TextBlock Text="▍" FontSize="14" Visibility="{x:Bind ShowCursor, Mode=OneWay}"
-                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                    <!-- Streaming partial text (plain, capped + steady caret).
+                         Re-parsing the growing markdown on every token floods
+                         the UI thread on long replies. -->
+                    <TextBlock Text="{x:Bind StreamingWithCursor, Mode=OneWay}" FontSize="14"
+                               TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                               Visibility="{x:Bind ShowStreamingTextVis, Mode=OneWay}"
+                               Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
 
-                <!-- Error + retry -->
-                <StackPanel Orientation="Horizontal" Spacing="8" Visibility="{x:Bind HasError, Mode=OneWay}">
-                    <TextBlock Text="{x:Bind ErrorWithPrefix, Mode=OneWay}" FontSize="12"
-                               Foreground="{ThemeResource SystemFillColorCriticalBrush}" VerticalAlignment="Center" />
-                    <Button Click="Retry_Click" Content="重试" Padding="8,2" />
+                    <!-- Markdown answer (rendered once on completion) -->
+                    <views:MarkdownTextBlock Markdown="{x:Bind Text, Mode=OneWay}"
+                                              Visibility="{x:Bind ShowMarkdownVis, Mode=OneWay}">
+                        <views:MarkdownTextBlock.ContextFlyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="重新生成" Click="Retry_Click" />
+                                <MenuFlyoutItem Text="复制" Click="CopyAnswer_Click" Tag="{x:Bind Text, Mode=OneWay}" />
+                                <MenuFlyoutItem Text="分享" Click="ShareAnswer_Click" Tag="{x:Bind Text, Mode=OneWay}" />
+                            </MenuFlyout>
+                        </views:MarkdownTextBlock.ContextFlyout>
+                    </views:MarkdownTextBlock>
+
+                    <!-- Error + retry -->
+                    <StackPanel Orientation="Horizontal" Spacing="8" Visibility="{x:Bind HasError, Mode=OneWay}">
+                        <TextBlock Text="{x:Bind ErrorWithPrefix, Mode=OneWay}" FontSize="12"
+                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}" VerticalAlignment="Center" />
+                        <Button Click="Retry_Click" Content="重试" Padding="8,2" />
+                    </StackPanel>
                 </StackPanel>
-            </StackPanel>
+            </Grid>
         </DataTemplate>
 
         <views:ChatTemplateSelector x:Key="ChatSelector"
@@ -90,50 +120,116 @@
             AssistantTemplate="{StaticResource AssistantBubble}" />
     </UserControl.Resources>
 
-    <Grid RowDefinitions="Auto,*,Auto,Auto">
-        <!-- First-run hint -->
-        <Border Grid.Row="0" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="10"
-                Padding="12,8" Margin="12,6" Visibility="{x:Bind Vm.NeedsKeyConfigVis, Mode=OneWay}">
-            <TextBlock Text="未配置 API Key,点击设置 → 填入 kind / model / key 后保存"
-                       FontSize="12" Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
-        </Border>
+    <Grid>
+        <!-- Inline topic-intake page (takes over until confirmed/cancelled) -->
+        <ScrollViewer Visibility="{x:Bind Vm.PendingScenarioVis, Mode=OneWay}" Padding="28">
+            <StackPanel Spacing="16" MaxWidth="560" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="6">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="{x:Bind Vm.PendingScenarioIcon, Mode=OneWay}" FontSize="28" />
+                        <TextBlock Text="{x:Bind Vm.PendingScenarioName, Mode=OneWay}" FontSize="20" FontWeight="Bold" />
+                    </StackPanel>
+                </StackPanel>
+                <ItemsRepeater ItemsSource="{x:Bind Vm.PendingScenarioFields, Mode=OneWay}">
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="vm:TopicField">
+                            <StackPanel Spacing="3" Margin="0,4,0,4">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock Text="{x:Bind Label, Mode=OneWay}" FontSize="12"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                    <TextBlock Text="{x:Bind VisibilityHint, Mode=OneWay}" FontSize="10"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                </StackPanel>
+                                <TextBox x:Name="FieldBox" PlaceholderText="{x:Bind Placeholder, Mode=OneWay}"
+                                         AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="120"
+                                         Loaded="FieldBox_Loaded" Tag="{x:Bind Id, Mode=OneWay}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+                <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           Text="开场角色会围绕你输入的信息发言;这些值会作为各角色背景,并写入会话名。留空可直接开始。"
+                           TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Right">
+                    <Button Click="CancelScenario_Click" Content="取消" />
+                    <Button Click="StartScenario_Click" Content="开始" Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
 
-        <!-- Messages -->
-        <ListView x:Name="Messages" Grid.Row="1" Padding="12"
-                  ItemsSource="{x:Bind Vm.Items, Mode=OneWay}"
-                  ItemTemplateSelector="{StaticResource ChatSelector}"
-                  SelectionMode="None" IsItemClickEnabled="False"
-                  ScrollViewer.HorizontalScrollMode="Disabled"
-                  ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
+        <!-- Conversation -->
+        <Grid Visibility="{x:Bind Vm.NoPendingScenarioVis, Mode=OneWay}" RowDefinitions="Auto,Auto,Auto,*,Auto,Auto">
+            <!-- Top bar -->
+            <Grid Grid.Row="0" Padding="16,8" ColumnDefinitions="*,Auto,Auto">
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock x:Name="TopTitle" Text="OneAI" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    <TextBlock Text="{x:Bind Vm.CurrentScenarioIcon, Mode=OneWay}" FontSize="16" Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}" />
+                    <TextBlock Text="{x:Bind Vm.CurrentScenarioName, Mode=OneWay}" FontSize="16" FontWeight="SemiBold" Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}" />
+                    <TextBlock Text="· 总结阶段" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Visibility="{x:Bind Vm.DebriefPhaseVis, Mode=OneWay}" VerticalAlignment="Center" />
+                    <Button Click="Debrief_Click" Content="结束面试" FontSize="11" Padding="8,2" Visibility="{x:Bind Vm.DebriefButtonVis, Mode=OneWay}" />
+                </StackPanel>
+                <TextBlock Grid.Column="1" VerticalAlignment="Center" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           Text="{x:Bind Vm.LastTurnTokensLabel, Mode=OneWay}" />
+                <Button Grid.Column="2" Click="Settings_Click" Background="Transparent" BorderThickness="0" Padding="8">
+                    <FontIcon Glyph="&#xE713;" />
+                </Button>
+            </Grid>
 
-        <!-- Error line -->
-        <TextBlock Grid.Row="2" Margin="12,4" FontSize="12"
-                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                   Text="{x:Bind Vm.Error, Mode=OneWay}"
-                   Visibility="{x:Bind Vm.HasErrorVis, Mode=OneWay}" />
+            <!-- Turn-status bar (group only) -->
+            <Border Grid.Row="1" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="16,5"
+                    Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}">
+                <TextBlock Text="{x:Bind Vm.TurnStatusLabel, Mode=OneWay}" FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Border>
 
-        <!-- Input bar -->
-        <Grid Grid.Row="3" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="8">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBox x:Name="InputBox" Grid.Column="0" Text="{x:Bind Vm.Input, Mode=TwoWay}"
-                     PlaceholderText="问点什么…" AcceptsReturn="True" MinHeight="40" MaxHeight="120"
-                     TextWrapping="Wrap" KeyDown="InputBox_KeyDown" />
-            <Button Grid.Column="1" Click="Send_Click" Margin="8,0,0,0"
-                    Background="{ThemeResource AccentFillColorDefaultBrush}"
-                    Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}"
-                    Visibility="{x:Bind Vm.SendButtonVis, Mode=OneWay}"
-                    IsEnabled="{x:Bind Vm.HasInput, Mode=OneWay}">
-                <FontIcon Glyph="&#xE724;" />
-            </Button>
-            <Button Grid.Column="1" Click="Stop_Click" Margin="8,0,0,0"
-                    Background="{ThemeResource SystemFillColorCriticalBackgroundBrush}"
-                    Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}"
-                    Visibility="{x:Bind Vm.StopButtonVis, Mode=OneWay}">
-                <FontIcon Glyph="&#xE71A;" />
-            </Button>
+            <!-- First-run hint -->
+            <Border Grid.Row="2" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="10"
+                    Padding="12,8" Margin="12,6" Visibility="{x:Bind Vm.NeedsKeyConfigVis, Mode=OneWay}">
+                <TextBlock Text="未配置 API Key,点击设置 → 填入 kind / model / key 后保存" FontSize="12"
+                           Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
+            </Border>
+
+            <!-- Message list + optional artifact canvas split -->
+            <Grid Grid.Row="3" ColumnDefinitions="*,Auto">
+                <ListView x:Name="Messages" Grid.Column="0" Padding="12"
+                          ItemsSource="{x:Bind Vm.Items, Mode=OneWay}"
+                          ItemTemplateSelector="{StaticResource ChatSelector}"
+                          SelectionMode="None" IsItemClickEnabled="False"
+                          ScrollViewer.HorizontalScrollMode="Disabled"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
+                <Border Grid.Column="1" x:Name="CanvasHost" Width="420" Visibility="Collapsed"
+                        BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1,0,0,0" />
+            </Grid>
+
+            <!-- Error line -->
+            <TextBlock Grid.Row="4" Margin="12,4" FontSize="12"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                       Text="{x:Bind Vm.Error, Mode=OneWay}"
+                       Visibility="{x:Bind Vm.HasErrorVis, Mode=OneWay}" />
+
+            <!-- Input bar (mic placeholder + textbox + send/stop) -->
+            <Grid Grid.Row="5" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="8" ColumnDefinitions="Auto,*,Auto">
+                <Button Grid.Column="0" Click="Mic_Click" Background="Transparent" BorderThickness="0" Padding="8"
+                        IsEnabled="False" ToolTipService.ToolTip="语音识别暂未支持">
+                    <FontIcon Glyph="&#xE720;" />
+                </Button>
+                <TextBox Grid.Column="1" x:Name="InputBox" Text="{x:Bind Vm.Input, Mode=TwoWay}"
+                         PlaceholderText="问点什么…" AcceptsReturn="True" MinHeight="40" MaxHeight="120"
+                         TextWrapping="Wrap" KeyDown="InputBox_KeyDown" />
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+                    <Button Click="Send_Click" Background="{ThemeResource AccentFillColorDefaultBrush}"
+                            Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}"
+                            Visibility="{x:Bind Vm.SendButtonVis, Mode=OneWay}"
+                            IsEnabled="{x:Bind Vm.HasInput, Mode=OneWay}">
+                        <FontIcon Glyph="&#xE724;" />
+                    </Button>
+                    <Button Click="Stop_Click" Background="{ThemeResource SystemFillColorCriticalBackgroundBrush}"
+                            Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}"
+                            Visibility="{x:Bind Vm.StopButtonVis, Mode=OneWay}">
+                        <FontIcon Glyph="&#xE71A;" />
+                    </Button>
+                </StackPanel>
+            </Grid>
         </Grid>
     </Grid>
 </UserControl>

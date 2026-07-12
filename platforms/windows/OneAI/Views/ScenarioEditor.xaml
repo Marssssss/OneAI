@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ScenarioEditor — build/edit a multi-agent scenario (cast + turn policy +
+     opener + topic intake + debrief). ContentDialog shown from the sidebar's
+     新场景/编辑场景 actions. Port of macOS ScenarioEditor.swift. -->
+<ContentDialog
+    x:Class="OneAI.Views.ScenarioEditor"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="编辑场景"
+    PrimaryButtonText="保存"
+    SecondaryButtonText="取消"
+    DefaultButton="Primary">
+
+    <ScrollViewer Width="540" MaxHeight="600" VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="Root" Spacing="12" Padding="4">
+            <!-- Name + icon -->
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                <TextBox Grid.Column="0" x:Name="NameBox" Header="场景名" />
+                <ComboBox Grid.Column="1" x:Name="IconCombo" Header="图标" Width="80"
+                          SelectedIndex="0">
+                    <x:String>🎤</x:String><x:String>🌐</x:String><x:String>⚖️</x:String>
+                    <x:String>✏️</x:String><x:String>💡</x:String><x:String>👥</x:String><x:String>🧠</x:String>
+                </ComboBox>
+            </Grid>
+
+            <!-- Cast -->
+            <TextBlock Text="演员表" FontWeight="SemiBold" />
+            <StackPanel x:Name="AgentsPanel" Spacing="6" />
+            <Button Click="AddAgent_Click" Content="添加智能体" />
+
+            <Border Background="{ThemeResource DividerStrokeColorDefaultBrush}" Height="1" />
+
+            <!-- Topic intake -->
+            <TextBlock Text="主题输入字段(开始场景时弹出,值会嵌入各角色背景)" FontWeight="SemiBold" />
+            <StackPanel x:Name="FieldsPanel" Spacing="6" />
+            <Button Click="AddField_Click" Content="添加字段" />
+
+            <Border Background="{ThemeResource DividerStrokeColorDefaultBrush}" Height="1" />
+
+            <!-- Debrief -->
+            <TextBlock Text="结束阶段(可选,如面试结束后指导员总结)" FontWeight="SemiBold" />
+            <ToggleSwitch x:Name="DebriefToggle" Header="启用结束阶段" Toggled="Debrief_Toggled" />
+            <StackPanel x:Name="DebriefPanel" Spacing="6" Visibility="Collapsed">
+                <TextBox x:Name="DebriefButtonBox" Header="按钮文字" />
+                <ComboBox x:Name="DebriefMemberCombo" Header="接管角色" />
+                <TextBox x:Name="DebriefSummaryBox" Header="总结提示词(发给接管角色)"
+                         AcceptsReturn="True" TextWrapping="Wrap" MinHeight="60" />
+            </StackPanel>
+
+            <Border Background="{ThemeResource DividerStrokeColorDefaultBrush}" Height="1" />
+
+            <!-- Turn policy -->
+            <TextBlock Text="轮次策略" FontWeight="SemiBold" />
+            <RadioButton x:Name="PolicyScripted" Content="脚本式" GroupName="policy" />
+            <RadioButton x:Name="PolicyRoundRobin" Content="轮询" GroupName="policy" />
+            <RadioButton x:Name="PolicyModerator" Content="主持人选择" GroupName="policy" />
+            <TextBox x:Name="ScriptOrderBox" Header="脚本顺序(成员 id,逗号分隔)" />
+            <ComboBox x:Name="ModeratorCombo" Header="主持人" />
+
+            <Border Background="{ThemeResource DividerStrokeColorDefaultBrush}" Height="1" />
+
+            <!-- Opener -->
+            <TextBlock Text="首轮发起" FontWeight="SemiBold" />
+            <ComboBox x:Name="OpenerCombo" Header="开场角色" />
+            <TextBox x:Name="OpenerLineBox" Header="开场白(可选)" />
+        </StackPanel>
+    </ScrollViewer>
+</ContentDialog>

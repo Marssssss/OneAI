@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using OneAI.ViewModels;
 using OneAI.Native;
 using OneAI.Views;
@@ -24,18 +25,51 @@ public sealed partial class MainWindow : Window
         await Vm.RefreshSessions();
         if (Vm.Sessions.Count > 0) await Vm.LoadSession(Vm.Sessions[0].Id);
         else await Vm.NewConversation();
-        if (Vm.Sessions.Count > 0) Nav.SelectedItem = Vm.Sessions[0];
     }
 
-    private void NewChat_Click(object sender, RoutedEventArgs e)
+    private void NewChat_Click(object sender, RoutedEventArgs e) => _ = Vm.NewConversation();
+
+    private void Scenario_Click(object sender, ItemClickEventArgs e)
     {
-        _ = Vm.NewConversation();
-        Nav.SelectedItem = null;
+        if (e.ClickedItem is Scenario sc) StartScenario(sc);
     }
 
-    private async void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    /// <summary>Scenarios with topic-intake fields route through the inline
+    /// PendingScenario page (rendered in the chat detail); scenarios without
+    /// fields start immediately.</summary>
+    private void StartScenario(Scenario sc)
     {
-        if (args.SelectedItem is SessionInfo s && s.Id != Vm.CurrentSessionId)
+        if (sc.TopicFields is { Count: > 0 }) Vm.PendingScenario = sc;
+        else _ = Vm.NewConversation(sc);
+    }
+
+    private async void EditScenario_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button b && b.Tag is string id)
+        {
+            var sc = Vm.AgentStore.Scenarios.FirstOrDefault(s => s.Id == id);
+            if (sc == null) return;
+            var dlg = new ScenarioEditor(sc, Vm.AgentStore) { XamlRoot = this.Content.XamlRoot };
+            await dlg.ShowAsync();
+        }
+    }
+
+    private async void NewScenario_Click(object sender, RoutedEventArgs e)
+    {
+        var sc = new Scenario
+        {
+            Id = Guid.NewGuid().ToString("N").Substring(0, 8),
+            Name = "新场景",
+            Icon = "👥",
+            TurnPolicy = TurnPolicy.Scripted,
+        };
+        var dlg = new ScenarioEditor(sc, Vm.AgentStore) { XamlRoot = this.Content.XamlRoot };
+        await dlg.ShowAsync();
+    }
+
+    private async void Session_Click(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is SessionInfo s && s.Id != Vm.CurrentSessionId)
             await Vm.LoadSession(s.Id);
     }
 
@@ -61,6 +95,13 @@ public sealed partial class MainWindow : Window
     {
         var dlg = new SettingsDialog { XamlRoot = this.Content.XamlRoot };
         dlg.SetVm(Vm);
+        await dlg.ShowAsync();
+    }
+
+    private async void CtrlK_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        var dlg = new CommandPalette(Vm) { XamlRoot = this.Content.XamlRoot };
         await dlg.ShowAsync();
     }
 }

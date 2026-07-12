@@ -4,12 +4,15 @@ namespace OneAI;
 
 public partial class App : Application
 {
-    private MainWindow? _window;
+    /// <summary>Live main window — some helpers (FileSavePicker hwnd) need a
+    /// window reference from non-window contexts.</summary>
+    public static MainWindow? MainWindowRef { get; private set; }
+
     public App() => this.InitializeComponent();
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        _window = new MainWindow();
-        _window.Activate();
+        MainWindowRef = new MainWindow();
+        MainWindowRef.Activate();
     }
 }

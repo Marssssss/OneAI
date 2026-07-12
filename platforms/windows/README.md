@@ -27,37 +27,84 @@ dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug
 ```
 OneAI/                      # the WinUI 3 app (net8.0-windows10.0.19041, unpackaged)
   Native/
-    OneAiNative.cs          # P/Invoke of oneai.dll (UTF-8 string marshalling)
-    Models.cs              # ChatEvent / SessionInfo / ChatMessage / ProviderConfig DTOs (System.Text.Json)
+    OneAiNative.cs          # P/Invoke of oneai.dll (UTF-8 string marshalling) — single +
+                            # group-chat sessions
+    Models.cs              # ChatEvent(+speaker) / SessionInfo / ChatMessage(+speaker) /
+                            # ProviderConfig / AgentSpecDto / ScenarioSpecDto / ReviewLoopSpecDto DTOs
   ViewModels/
-    ChatModels.cs          # ObservableObject base + UserItem / AssistantItem / ToolStep
-    ChatViewModel.cs       # App/session/run lifecycle; callback marshalled to UI via DispatcherQueue
+    ChatModels.cs          # ObservableObject base + UserItem / AssistantItem(+speaker meta,
+                            # streaming cap) / ToolStep + ColorUtil
+    ChatViewModel.cs       # App/session/group lifecycle; StreamCoalescer (20fps hot-event
+                            # batching to avoid UI-thread flooding); speaker-routed Handle
+    ScenarioModels.cs      # TurnPolicy / Agent / TopicField / DebriefConfig /
+                            # ReviewLoopConfig / Scenario.SpecDto (per-member visibility →
+                            # background fold) — port of macOS Models.swift
   Services/
     ProviderStore.cs       # LocalSettings persistence + provider presets + db path
-    MarkdownHelper.cs      # splitMarkdown / inline bold+code (no deps)
+    MarkdownHelper.cs      # splitMarkdown (code/heading/blockquote/ordered+unordered list/
+                            # table) + inline bold/code — port of macOS Markdown.swift
+    ScenarioStore.cs       # JSON persistence (schema-versioned) + 5 built-in presets
+                            # (面试演练/语言伙伴/辩论/写作工坊/头脑风暴) + SpeakerMeta
+    ArtifactStore.cs       # shared canvas state (long code → docked tab)
   Views/
-    ChatView.xaml(.cs)     # message list (user/assistant templates) + input bar + first-run hint
-    MainWindow.xaml(.cs)   # NavigationView sidebar (sessions) + ChatView
+    ChatView.xaml(.cs)     # top bar (scenario/debrief/tokens) + turn-status bar + first-run
+                            # hint + message list (user/assistant with speaker header + accent
+                            # bar) + inline topic-intake page + artifact canvas split +
+                            # streaming plain-text(cap)+caret vs markdown-on-done + input bar
+                            # (mic placeholder / send / stop)
+    MainWindow.xaml(.cs)   # custom sidebar (scenarios section + recent sessions + new menu +
+                            # settings) + Ctrl+K command palette
+    ScenarioEditor.xaml(.cs)  # ContentDialog: cast + topic fields (per-member visibility) +
+                            # debrief + turn policy + opener
+    CommandPalette.xaml(.cs)  # Ctrl+K fuzzy switch (scenarios/sessions/actions)
+    ArtifactCanvas.xaml(.cs)  # tab bar + copy/export + monospace content
+    MarkdownTextBlock.xaml(.cs)  # rebuilds blocks from MarkdownHelper.Split
     SettingsDialog.xaml(.cs)
-    MarkdownTextBlock.xaml(.cs)  # rebuilds Inlines from MarkdownHelper
     ChatTemplateSelector.cs
   OneAI.csproj / App.xaml(.cs) / app.manifest
 native/oneai.dll           # staged by build_windows.ps1 (gitignored)
 ```
 
-The `extern "C"` contract is documented in `bindings/c/oneai_c.h`. JSON event
-shapes match `ChatEvent` in `Models.cs`.
+The `extern "C"` contract is documented in `bindings/c/oneai_c.h` (now incl. group-chat
+entry points + scenario JSON shape). JSON event shapes match `ChatEvent` in `Models.cs`.
 
-## Feature parity (with Android S5 / macOS)
+## Feature parity (with macOS — full design port)
 
-Sidebar session list (new/switch/delete-confirm), streaming chat (callback fires
-on a tokio worker thread → `DispatcherQueue.TryEnqueue` to UI), thinking
-Expander (collapsible, "思考中…" → "已深度思考"), tool steps (`✓/✗/⚙ name(args)`
-+ truncated result), markdown (fenced code + inline `code`/`**bold**`/bullets),
-blinking cursor, retry-on-error, copy/share context menu, dark theme (follows
-system), first-run hint, stop button → `oneai_session_interrupt`. Provider
-settings persisted in `ApplicationData.Current.LocalSettings`; SQLite db at
-`ApplicationData.Current.LocalFolder/oneai.db`.
+- **Sidebar**: scenarios section (5 built-in presets + user-edited, tap→start, edit/delete)
+  + recent sessions (new/switch/delete-confirm), new-conversation menu (single Agent /
+  from scenario).
+- **Scenario system** (multi-agent group chat via the C facade group entry points):
+  - 5 presets: 面试演练 / 语言伙伴 / 辩论赛 / 写作工坊 / 头脑风暴 — system prompts,
+    topic fields, debrief, review loop ported verbatim from macOS AgentStore.swift.
+  - Turn policies: scripted / round-robin / moderator.
+  - Inline **topic-intake page**: collected values baked into each member's system prompt
+    as background (per-member `visibleTo` — e.g. interviewee projects → coach only) and
+    into the session title.
+  - **Debrief phase** ("结束面试"): switches turn policy to the debrief member only,
+    sends the summary prompt.
+  - **Review-revise loop** (writing workshop): writer→editor→… until "定稿" or max rounds.
+  - Speaker-routed bubbles: avatar + name + role pill + left accent bar in speaker color;
+    turn-status bar shows who's speaking / "轮到你".
+  - **ScenarioEditor** ContentDialog: full cast/topic/debrief/policy/opener editing.
+- **Command palette** (Ctrl+K): fuzzy-filtered scenario/session/action switch.
+- **Artifact canvas**: long code (>600 chars) or "在画布打开" promotes to a docked tab
+  (copy/export); short code stays inline.
+- **Streaming hardening** (the macOS beachball root-cause, ported): `StreamCoalescer`
+  batches hot events (StreamChunk/Thinking) to ~20fps `DispatcherQueue.TryEnqueue` so
+  per-token dispatch doesn't flood the UI thread; non-hot events flush immediately;
+  during streaming the partial text renders as plain Text capped to 1800 chars + steady
+  caret (NOT re-parsed markdown per token); full markdown renders once on `.done`.
+- Markdown (code fence + copy + open-in-canvas, heading, blockquote, ordered/unordered
+  list, table, inline `code`/`**bold**`), thinking Expander (collapsible, "思考中…" →
+  "已深度思考"), tool steps (`✓/✗/⚙ name(args)` + truncated result), retry-on-error,
+  copy/share context menu, dark theme (follows system), first-run hint, stop button →
+  `oneai_group_interrupt` / `oneai_session_interrupt`.
+- Provider settings (openai/anthropic/ollama presets) persisted in
+  `ApplicationData.Current.LocalSettings`; SQLite db at
+  `ApplicationData.Current.LocalFolder/oneai.db`; scenarios at `oneai_scenarios.json`.
+- **Voice dictation deferred** — the input bar has a disabled mic placeholder button
+  (WinRT speech recognition needs package identity in unpackaged WinUI 3; tracked as a
+  follow-up).
 
 ## Caveats
 

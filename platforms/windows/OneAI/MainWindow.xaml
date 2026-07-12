@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- MainWindow: NavigationView sidebar (sessions) + ChatView content.
-     Mirrors the Android drawer / macOS NavigationSplitView sidebar. -->
+<!-- MainWindow: custom sidebar (scenarios + recent sessions + new-conversation
+     menu + settings) + ChatView content. Ctrl+K opens the command palette.
+     Mirrors the macOS NavigationSplitView sidebar. -->
 <Window
     x:Class="OneAI.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -11,60 +12,103 @@
     Title="OneAI" MinWidth="720" MinHeight="480" Width="1000" Height="680">
 
     <Grid>
-        <NavigationView
-            x:Name="Nav"
-            PaneDisplayMode="Left"
-            OpenPaneLength="260"
-            IsBackButtonVisible="Collapsed"
-            MenuItemsSource="{x:Bind Vm.Sessions, Mode=OneWay}"
-            SelectionChanged="Nav_SelectionChanged">
-            <NavigationView.PaneHeader>
-                <Grid Margin="12,10,12,10">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Text="会话" VerticalAlignment="Center" FontWeight="SemiBold" />
-                    <Button Grid.Column="1" Click="NewChat_Click" ToolTipService.ToolTip="新对话">
-                        <StackPanel Orientation="Horizontal" Spacing="4">
-                            <FontIcon Glyph="&#xE710;" FontSize="12" />
-                            <TextBlock Text="新对话" FontSize="12" />
-                        </StackPanel>
-                    </Button>
-                </Grid>
-            </NavigationView.PaneHeader>
-            <NavigationView.MenuItemTemplate>
-                <DataTemplate x:DataType="n:SessionInfo">
-                    <Grid Margin="0,4" ColumnSpacing="8">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="{x:Bind DisplayTitle, Mode=OneWay}"
-                                       FontSize="13" TextTrimming="CharacterEllipsis" />
-                            <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       Text="{x:Bind Summary, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
-                        </StackPanel>
-                        <Button Grid.Column="1" Click="DeleteSession_Click" Tag="{x:Bind Id}"
-                                Background="Transparent" BorderThickness="0" Padding="4"
-                                ToolTipService.ToolTip="删除">
-                            <FontIcon Glyph="&#xE74D;" FontSize="12" />
-                        </Button>
-                    </Grid>
-                </DataTemplate>
-            </NavigationView.MenuItemTemplate>
-            <NavigationView.PaneFooter>
-                <Button Click="Settings_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
-                        Background="Transparent" BorderThickness="0" Padding="12,12">
-                    <StackPanel Orientation="Horizontal" Spacing="12">
-                        <FontIcon Glyph="&#xE713;" />
-                        <TextBlock Text="设置" />
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="260" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <!-- Ctrl+K → command palette -->
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="K" Modifiers="Control" Invoked="CtrlK_Invoked" />
+        </Grid.KeyboardAccelerators>
+
+        <!-- Sidebar -->
+        <Grid Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}" RowDefinitions="Auto,*,Auto">
+            <!-- Header -->
+            <Grid Grid.Row="0" Padding="12,10" ColumnDefinitions="*,Auto">
+                <TextBlock Text="会话" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <Button Grid.Column="1" Click="NewChat_Click" ToolTipService.ToolTip="新建对话 / 从场景开始">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <FontIcon Glyph="&#xE710;" FontSize="12" />
+                        <TextBlock Text="新建" FontSize="12" />
                     </StackPanel>
                 </Button>
-            </NavigationView.PaneFooter>
+            </Grid>
 
-            <views:ChatView x:Name="Chat" />
-        </NavigationView>
+            <!-- Scenarios + sessions -->
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+                    <!-- Scenarios section -->
+                    <StackPanel Orientation="Horizontal" Spacing="6" Padding="12,8,4,2">
+                        <TextBlock Text="场景" FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <Button Click="NewScenario_Click" Background="Transparent" BorderThickness="0" Padding="4,0"
+                                ToolTipService.ToolTip="新场景">
+                            <FontIcon Glyph="&#xE710;" FontSize="11" />
+                        </Button>
+                    </StackPanel>
+                    <ListView ItemsSource="{x:Bind Vm.AgentStore.Scenarios, Mode=OneWay}"
+                              SelectionMode="None" IsItemClickEnabled="True" ItemClick="Scenario_Click"
+                              Padding="0,0,0,4">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="vm:Scenario">
+                                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Padding="6,3">
+                                    <TextBlock Grid.Column="0" Text="{x:Bind Icon, Mode=OneWay}" FontSize="14"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind Name, Mode=OneWay}" FontSize="13"
+                                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                    <Button Grid.Column="2" Click="EditScenario_Click" Tag="{x:Bind Id, Mode=OneWay}"
+                                            Background="Transparent" BorderThickness="0" Padding="4,0"
+                                            ToolTipService.ToolTip="编辑场景">
+                                        <FontIcon Glyph="&#xE70F;" FontSize="11" />
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+
+                    <!-- Recent sessions section -->
+                    <StackPanel Orientation="Horizontal" Padding="12,8,4,2">
+                        <TextBlock Text="最近会话" FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    </StackPanel>
+                    <ListView x:Name="SessionList"
+                              ItemsSource="{x:Bind Vm.Sessions, Mode=OneWay}"
+                              SelectionMode="Single" IsItemClickEnabled="True"
+                              ItemClick="Session_Click" Padding="0,0,0,4">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="n:SessionInfo">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Padding="6,3">
+                                    <StackPanel Grid.Column="0" Spacing="2">
+                                        <TextBlock Text="{x:Bind DisplayTitle, Mode=OneWay}" FontSize="13"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock FontSize="11"
+                                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                   Text="{x:Bind Summary, Mode=OneWay}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Click="DeleteSession_Click" Tag="{x:Bind Id, Mode=OneWay}"
+                                            Background="Transparent" BorderThickness="0" Padding="4,0"
+                                            ToolTipService.ToolTip="删除">
+                                        <FontIcon Glyph="&#xE74D;" FontSize="11" />
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Footer: settings -->
+            <Button Grid.Row="2" Click="Settings_Click" HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Left" Background="Transparent" BorderThickness="0" Padding="12,10">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <FontIcon Glyph="&#xE713;" />
+                    <TextBlock Text="设置" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <!-- Chat -->
+        <views:ChatView x:Name="Chat" Grid.Column="1" />
     </Grid>
 </Window>

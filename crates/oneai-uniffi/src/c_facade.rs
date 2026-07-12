@@ -27,6 +27,7 @@ use std::sync::OnceLock;
 use crate::app::{OneAIApp, OneAISession};
 use crate::app_builder::OneAIAppBuilder;
 use crate::callback::ChatEventCallback;
+use crate::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
 use crate::types::{
     ChatEventView, MessageView, OneAIErrorView, ProviderConfigView, SessionInfoView,
 };
@@ -53,6 +54,65 @@ unsafe fn borrow_app(h: AppHandle) -> &'static std::sync::Arc<OneAIApp> {
 }
 unsafe fn borrow_session(h: SessionHandle) -> &'static std::sync::Arc<OneAISession> {
     &*(h as *const std::sync::Arc<OneAISession>)
+}
+
+// ─── Group-chat handle: heap-allocated Arc<OneAiGroupChatSession> ─────────
+type GroupSessionHandle = *mut std::sync::Arc<OneAiGroupChatSession>;
+
+unsafe fn borrow_group(h: GroupSessionHandle) -> &'static std::sync::Arc<OneAiGroupChatSession> {
+    &*(h as *const std::sync::Arc<OneAiGroupChatSession>)
+}
+
+// ─── Scenario JSON parser (no serde dep; reads serde_json::Value) ────────
+// Shape: {"members":[{"id","name","system_prompt","kind","model",
+//   "api_key"?,"base_url"?,"color"?,"avatar"?}],
+//   "turn_policy":"scripted"|"roundrobin"|"moderator",
+//   "script_order"?:[..], "moderator_id"?, "opener_agent_id"?,
+//   "opener_line"?, "title"?, "review_loop"?:{"reviewer_id","approve_marker","max_rounds"}}
+// Mirrors the uniffi `ScenarioSpecView`/`AgentSpecView` records the Swift/macOS
+// binding builds on the foreign side — so the C# Windows port constructs the
+// same JSON the macOS app constructs as a typed Record.
+fn parse_scenario(json: &str) -> Option<ScenarioSpecView> {
+    use crate::group_chat::{AgentSpecView, ReviewLoopSpecView};
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let members = v.get("members")?.as_array()?;
+    let mut agents = Vec::with_capacity(members.len());
+    for m in members {
+        let s = |k: &str| m.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let opt = |k: &str| m.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        agents.push(AgentSpecView {
+            id: s("id"),
+            name: s("name"),
+            system_prompt: s("system_prompt"),
+            kind: { let k = s("kind"); if k.is_empty() { "openai".to_string() } else { k } },
+            model: s("model"),
+            api_key: opt("api_key"),
+            base_url: opt("base_url"),
+            color: opt("color"),
+            avatar: opt("avatar"),
+        });
+    }
+    let opt_str = |k: &str| v.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let opt_strs = |k: &str| {
+        v.get(k).and_then(|x| x.as_array()).map(|a| {
+            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>()
+        })
+    };
+    let review_loop = v.get("review_loop").map(|r| {
+        let rs = |k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let max = r.get("max_rounds").and_then(|x| x.as_u64()).unwrap_or(1);
+        ReviewLoopSpecView { reviewer_id: rs("reviewer_id"), approve_marker: rs("approve_marker"), max_rounds: max }
+    });
+    Some(ScenarioSpecView {
+        members: agents,
+        turn_policy: opt_str("turn_policy").unwrap_or_else(|| "scripted".to_string()),
+        script_order: opt_strs("script_order"),
+        moderator_id: opt_str("moderator_id"),
+        opener_agent_id: opt_str("opener_agent_id"),
+        opener_line: opt_str("opener_line"),
+        title: opt_str("title"),
+        review_loop,
+    })
 }
 
 // ─── JSON helpers (views don't derive serde) ───────────────────────────
@@ -355,8 +415,131 @@ pub extern "C" fn oneai_session_interrupt(h: SessionHandle) {
     runtime().block_on(async move { s.interrupt().await });
 }
 
-// InterruptReason import kept honest — interrupt() is delegated to the
-// uniffi OneAISession, which builds the reason internally.
+// ─── Group-chat (multi-agent scenario) extern "C" surface ────────────────
+//
+// The macOS port consumes the high-level uniffi Swift binding for group chat
+// (ScenarioSpecView Record + createGroupSession/start/runTask/setScriptedOrder).
+// UniFFI 0.32 has no C# generator, so the Windows port P/Invokes these
+// `extern "C"` entry points instead. Every call is JSON-in / JSON-out + the
+// same `oneai_event_cb`; events carry a `speaker` id (see `push_speaker`) so
+// the foreign UI can route fragments to the correct member's bubble.
+// `oneai_group_run_task` / `oneai_group_start` BLOCK the caller for the whole
+// round (like `oneai_session_run_task`) and fire the callback on a worker
+// thread — marshal to the UI thread on the foreign side.
+
+/// Build a multi-agent group-chat session from a scenario JSON (see
+/// `parse_scenario` for the shape). Returns an opaque handle, or null on
+/// error (call `oneai_last_error`).
+#[no_mangle]
+pub extern "C" fn oneai_create_group_session(app: AppHandle, scenario_json: *const c_char) -> GroupSessionHandle {
+    if app.is_null() { set_last_error("null app".into()); return std::ptr::null_mut(); }
+    let spec = match cstr(scenario_json).and_then(parse_scenario) {
+        Some(s) => s,
+        None => { set_last_error("invalid scenario_json".into()); return std::ptr::null_mut(); }
+    };
+    let app = unsafe { borrow_app(app) };
+    match OneAiGroupChatSession::build(spec, &app.inner) {
+        Ok(gs) => Box::into_raw(Box::new(gs)),
+        Err(e) => { set_last_error(err_msg(e)); std::ptr::null_mut() }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn oneai_free_group_session(h: GroupSessionHandle) {
+    if !h.is_null() { unsafe { drop(Box::from_raw(h)); } }
+}
+
+/// Run the scenario's opener turn (if configured). Call before the first
+/// `oneai_group_run_task`. Blocks until complete; `cb` fires on a worker
+/// thread. Returns null on success, else an error message (caller frees).
+#[no_mangle]
+pub extern "C" fn oneai_group_start(
+    h: GroupSessionHandle,
+    cb: Option<EventCb>,
+    ctx: *mut c_void,
+) -> *mut c_char {
+    if h.is_null() { return return_string("null group session".into()); }
+    let cb = match cb { Some(f) => f, None => return return_string("no callback".into()) };
+    let gs = unsafe { borrow_group(h) };
+    let callback: std::sync::Arc<dyn ChatEventCallback> = std::sync::Arc::new(CCallback { cb, ctx });
+    match runtime().block_on(async move { gs.start(callback).await }) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => return_string(err_msg(e)),
+    }
+}
+
+/// Append the user's message and run the round's speakers per the turn policy
+/// until it's the user's turn again. Blocks; `cb` fires on a worker thread with
+/// `speaker`-labeled events. Returns null on success, else an error (caller frees).
+#[no_mangle]
+pub extern "C" fn oneai_group_run_task(
+    h: GroupSessionHandle,
+    user_input: *const c_char,
+    cb: Option<EventCb>,
+    ctx: *mut c_void,
+) -> *mut c_char {
+    if h.is_null() { return return_string("null group session".into()); }
+    let cb = match cb { Some(f) => f, None => return return_string("no callback".into()) };
+    let input = match cstr(user_input).map(|s| s.to_string()) {
+        Some(t) => t,
+        None => return return_string("invalid user_input".into()),
+    };
+    let gs = unsafe { borrow_group(h) };
+    let callback: std::sync::Arc<dyn ChatEventCallback> = std::sync::Arc::new(CCallback { cb, ctx });
+    match runtime().block_on(async move { gs.run_task(input, callback).await }) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => return_string(err_msg(e)),
+    }
+}
+
+/// Request the running member to interrupt at the next boundary.
+#[no_mangle]
+pub extern "C" fn oneai_group_interrupt(h: GroupSessionHandle) {
+    if h.is_null() { return; }
+    let gs = unsafe { borrow_group(h) };
+    runtime().block_on(async move { gs.interrupt().await });
+}
+
+/// Switch the turn policy to a fixed scripted order at runtime. `order_json`
+/// is a JSON string array `["id1","id2"]`. Used by scenarios that change
+/// speakers mid-conversation (e.g. interview debrief → coach-only).
+/// Returns null on success, else an error (caller frees).
+#[no_mangle]
+pub extern "C" fn oneai_group_set_scripted_order(h: GroupSessionHandle, order_json: *const c_char) -> *mut c_char {
+    if h.is_null() { return return_string("null group session".into()); }
+    let order: Vec<String> = match cstr(order_json).and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()) {
+        Some(o) => o,
+        None => return return_string("invalid order_json (expected [\"id\",..])".into()),
+    };
+    let gs = unsafe { borrow_group(h) };
+    runtime().block_on(async move { gs.set_scripted_order(order).await });
+    std::ptr::null_mut()
+}
+
+/// Snapshot the shared conversation as speaker-labeled message views (JSON
+/// array; caller frees). For replaying a resumed scenario session.
+#[no_mangle]
+pub extern "C" fn oneai_group_messages(h: GroupSessionHandle) -> *mut c_char {
+    if h.is_null() { return std::ptr::null_mut(); }
+    let gs = unsafe { borrow_group(h) };
+    let msgs = runtime().block_on(async move { gs.messages().await });
+    let mut out = String::from("[");
+    for (i, m) in msgs.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&message_to_json(m));
+    }
+    out.push(']');
+    return_string(out)
+}
+
+/// Persist the shared conversation immediately (no-op without SQLite
+/// persistence). `run_task` already auto-saves after each round.
+#[no_mangle]
+pub extern "C" fn oneai_group_save(h: GroupSessionHandle) -> bool {
+    if h.is_null() { return false; }
+    let gs = unsafe { borrow_group(h) };
+    runtime().block_on(async move { gs.save().await.is_ok() })
+}
 
 #[no_mangle]
 pub extern "C" fn oneai_free_string(p: *mut c_char) {
@@ -473,5 +656,75 @@ mod tests {
         ChatEventCallback::on_event(&adapter, ChatEventView::Thinking { text: "x".into(), speaker: None });
         assert_eq!(c.events.lock().unwrap().len(), 1);
         assert!(c.events.lock().unwrap()[0].contains("Thinking"));
+    }
+
+    #[test]
+    fn scenario_json_parses() {
+        let json = r##"{"members":[
+            {"id":"pro","name":"正方","system_prompt":"正方","kind":"openai","model":"gpt-4o","api_key":"sk-x","color":"#4D6BFE","avatar":"arrow.up"},
+            {"id":"con","name":"反方","system_prompt":"反方","kind":"ollama","model":"llama3","base_url":"127.0.0.1:11434"}
+        ],"turn_policy":"moderator","moderator_id":"pro","opener_agent_id":"pro","opener_line":"hi",
+        "title":"辩论","review_loop":{"reviewer_id":"con","approve_marker":"定稿","max_rounds":3}}"##;
+        let s = parse_scenario(json).expect("scenario parses");
+        assert_eq!(s.members.len(), 2);
+        assert_eq!(s.members[0].id, "pro");
+        assert_eq!(s.members[0].color.as_deref(), Some("#4D6BFE"));
+        assert_eq!(s.members[1].kind, "ollama");
+        assert_eq!(s.members[1].base_url.as_deref(), Some("127.0.0.1:11434"));
+        assert_eq!(s.turn_policy, "moderator");
+        assert_eq!(s.moderator_id.as_deref(), Some("pro"));
+        assert_eq!(s.opener_agent_id.as_deref(), Some("pro"));
+        assert_eq!(s.title.as_deref(), Some("辩论"));
+        let rl = s.review_loop.expect("review_loop");
+        assert_eq!(rl.reviewer_id, "con");
+        assert_eq!(rl.approve_marker, "定稿");
+        assert_eq!(rl.max_rounds, 3);
+    }
+
+    #[test]
+    fn create_group_session_builds_and_messages_empty() {
+        let db = tmp_db("group");
+        let cfg = format!(
+            "{{\"kind\":\"openai\",\"api_key\":\"sk-test\",\"model\":\"gpt-4o\",\"db_path\":\"{}\"}}",
+            db
+        );
+        let app = oneai_create_app(CString::new(cfg).unwrap().as_ptr());
+        assert!(!app.is_null());
+        // 2-member scripted scenario. build_member_provider constructs providers
+        // without touching the network, and GroupChatSession::new is pure setup —
+        // so create_group_session succeeds offline. (We do NOT call run_task.)
+        let sc = r#"{"members":[
+            {"id":"writer","name":"写手","system_prompt":"起草","kind":"openai","model":"gpt-4o","api_key":"sk-test"},
+            {"id":"editor","name":"编辑","system_prompt":"润色","kind":"openai","model":"gpt-4o","api_key":"sk-test"}
+        ],"turn_policy":"scripted","script_order":["writer","editor"]}"#;
+        let gs = oneai_create_group_session(app, CString::new(sc).unwrap().as_ptr());
+        assert!(!gs.is_null(), "create_group_session should succeed; err={:?}",
+            unsafe { CStr::from_ptr(oneai_last_error()) }.to_str().unwrap_or(""));
+        // Fresh group session has no messages yet.
+        let m_ptr = oneai_group_messages(gs);
+        let m = unsafe { CStr::from_ptr(m_ptr) }.to_str().unwrap().to_string();
+        oneai_free_string(m_ptr);
+        assert_eq!(m, "[]");
+        oneai_free_group_session(gs);
+        oneai_free_app(app);
+    }
+
+    #[test]
+    fn group_set_scripted_order_rejects_bad_json() {
+        let db = tmp_db("order");
+        let cfg = format!("{{\"kind\":\"openai\",\"api_key\":\"sk-test\",\"model\":\"gpt-4o\",\"db_path\":\"{}\"}}", db);
+        let app = oneai_create_app(CString::new(cfg).unwrap().as_ptr());
+        let sc = r#"{"members":[{"id":"a","name":"A","system_prompt":"x","kind":"openai","model":"gpt-4o","api_key":"sk-test"}],"turn_policy":"roundrobin"}"#;
+        let gs = oneai_create_group_session(app, CString::new(sc).unwrap().as_ptr());
+        assert!(!gs.is_null());
+        // Valid order array → null (success).
+        let err = oneai_group_set_scripted_order(gs, CString::new(r#"["a"]"#).unwrap().as_ptr());
+        assert!(err.is_null());
+        // Garbage → error string (non-null).
+        let err = oneai_group_set_scripted_order(gs, CString::new("not json").unwrap().as_ptr());
+        assert!(!err.is_null());
+        oneai_free_string(err);
+        oneai_free_group_session(gs);
+        oneai_free_app(app);
     }
 }

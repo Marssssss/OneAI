@@ -25,6 +25,29 @@ public abstract class ObservableObject : INotifyPropertyChanged
 
 public enum ChatKind { User, Assistant }
 
+/// <summary>Hex "#RRGGBB"/"RRGGBB" → Windows.UI.Color helpers, shared by
+/// ToolStep icons and the per-speaker accent colors.</summary>
+public static class ColorUtil
+{
+    public static Windows.UI.Color FromHex(string hex)
+    {
+        var s = hex?.Trim() ?? "";
+        if (s.StartsWith("#")) s = s[1..];
+        if (s.Length < 6) s = "888888";
+        byte r = Convert.ToByte(s.Substring(0, 2), 16);
+        byte g = Convert.ToByte(s.Substring(2, 2), 16);
+        byte b = Convert.ToByte(s.Substring(4, 2), 16);
+        return Windows.UI.Color.FromArgb(255, r, g, b);
+    }
+    public static SolidColorBrush BrushFromHex(string hex) => new SolidColorBrush(FromHex(hex));
+    /// <summary>The speaker color at ~18% alpha — for the role-pill background.</summary>
+    public static Windows.UI.Color FaintFromHex(string hex)
+    {
+        var c = FromHex(hex);
+        return Windows.UI.Color.FromArgb(46, c.R, c.G, c.B);
+    }
+}
+
 public abstract class ChatItem : ObservableObject
 {
     public ChatKind Kind { get; }
@@ -70,6 +93,15 @@ public class ToolStep : ObservableObject
 
 public class AssistantItem : ChatItem
 {
+    /// <summary>Which member produced this item. null = single-agent (legacy).</summary>
+    public string? SpeakerId { get; set; }
+    /// <summary>Speaker display name / color / avatar / role — populated by the VM
+    /// from ScenarioStore.SpeakerMeta when the item is created, so the bubble
+    /// template can bind them without reaching back into the VM.</summary>
+    public string SpeakerName { get; set; } = "";
+    public string SpeakerColor { get; set; } = "#8A8A8A";
+    public string SpeakerAvatar { get; set; } = "";
+    public string SpeakerRole { get; set; } = "";
     private string _thinking = "";
     public string Thinking { get => _thinking; set { SetProperty(ref _thinking, value); Raise(nameof(HasThinking)); } }
     private bool _thinkingActive;
@@ -79,20 +111,58 @@ public class AssistantItem : ChatItem
     private bool _thinkingExpanded;
     public bool ThinkingExpanded { get => _thinkingExpanded; set => SetProperty(ref _thinkingExpanded, value); }
     private string _text = "";
-    public string Text { get => _text; set { SetProperty(ref _text, value); Raise(nameof(ShowCursor)); } }
+    public string Text
+    {
+        get => _text;
+        set
+        {
+            SetProperty(ref _text, value);
+            Raise(nameof(ShowCursor));
+            Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis));
+            // Computed-from-Text views must refresh with each token.
+            Raise(nameof(StreamingDisplay)); Raise(nameof(StreamingWithCursor));
+        }
+    }
     private bool _streaming;
-    public bool Streaming { get => _streaming; set { SetProperty(ref _streaming, value); Raise(nameof(ShowCursor)); } }
+    public bool Streaming
+    {
+        get => _streaming;
+        set { SetProperty(ref _streaming, value); Raise(nameof(ShowCursor)); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); }
+    }
     private bool _done;
-    public bool Done { get => _done; set => SetProperty(ref _done, value); }
+    public bool Done
+    {
+        get => _done;
+        set { SetProperty(ref _done, value); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); }
+    }
     private string? _error;
     public string? Error { get => _error; set { SetProperty(ref _error, value); Raise(nameof(HasError)); Raise(nameof(ErrorWithPrefix)); } }
     public ObservableCollection<ToolStep> Steps { get; } = new();
     public AssistantItem() : base(ChatKind.Assistant) { }
 
     // UI helpers
+    /// <summary>True when this bubble belongs to a named group-chat member (show
+    /// the speaker header + left accent bar). False for single-agent turns.</summary>
+    public Visibility HasSpeaker => string.IsNullOrEmpty(SpeakerId) ? Visibility.Collapsed : Visibility.Visible;
+    public Windows.UI.Color SpeakerColorBrush => ColorUtil.FromHex(SpeakerColor);
+    public SolidColorBrush SpeakerBrush => ColorUtil.BrushFromHex(SpeakerColor);
+    public Windows.UI.Color SpeakerColorFaint => ColorUtil.FaintFromHex(SpeakerColor);
     public Visibility HasThinking => string.IsNullOrEmpty(Thinking) ? Visibility.Collapsed : Visibility.Visible;
     public string ThinkingHeader => ThinkingActive ? "思考中…" : "已深度思考";
+    /// <summary>Streaming partial text capped to the last `cap` chars. A plain
+    /// TextBlock re-lays-out its whole content every flush; capping bounds the
+    /// CoreText work so a long reply doesn't saturate the UI thread mid-stream.
+    /// The full markdown renders once on completion.</summary>
+    public const int StreamingCap = 1800;
+    public string StreamingDisplay => Text.Length <= StreamingCap ? Text : Text[^StreamingCap..];
+    /// <summary>Steady caret appended inline (a separate row reads as a blank line).</summary>
+    public string StreamingWithCursor => StreamingDisplay.Trim() + "▍";
     public Visibility ShowCursor => (Streaming && !string.IsNullOrEmpty(Text)) ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>While streaming, render plain Text (capped) — NOT MarkdownText:
+    /// re-parsing the growing markdown on every token floods the UI thread on
+    /// long replies. The full markdown renders once on Done.</summary>
+    public Visibility ShowStreamingTextVis => (Streaming && !Done) ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ShowMarkdownVis => (Streaming && !Done) ? Visibility.Collapsed : Visibility.Visible;
     public Visibility HasError => Error == null ? Visibility.Collapsed : Visibility.Visible;
     public string ErrorWithPrefix => "✗ " + (Error ?? "");
 }
