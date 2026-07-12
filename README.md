@@ -214,36 +214,79 @@ OneAI 暴露两个面向用户的前端，背后是同一套内核。
 
 ## 架构
 
+```mermaid
+flowchart TB
+    subgraph FE ["🖥️ 前端 · Frontends —— 两种前端，同一内核"]
+        direction LR
+        TUI["CLI / TUI<br/>oneai-cli · ratatui+crossterm<br/>通用 Agentic 执行 / 子系统探索"]
+        Native["原生 App<br/>macOS · Win · Linux<br/>Android · iOS · HarmonyOS<br/>场景化多 Agent 群聊"]
+    end
+
+    subgraph FFI ["🔌 FFI 层 · oneai-uniffi + oneai-platform-*"]
+        direction LR
+        UniFFI["UniFFI 绑定<br/>Kotlin · Swift · Python"]
+        CFacade["手写 extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON 过界，CJK 正确往返"]
+    end
+
+    subgraph App ["🧩 集成层 · oneai-app"]
+        Builder["AppBuilder → App → AppSession<br/>唯一组装入口 · 每个子系统可选、按需插装"]
+    end
+
+    subgraph Agent ["⚙️ 执行引擎 · oneai-agent（动态循环，非固定管线）"]
+        Loop["AgentLoop · 每轮迭代模型动态决策<br/>迭代上限由 TokenBudget 约束（非硬编码 max_iterations）"]
+        Loop -->|DirectAnswer| Done["返回最终答案 → 循环结束"]
+        Loop -->|ToolCalls| Exec["执行工具 → 回填结果 → 继续"]
+        Loop -->|Delegate| Sub["SubAgent<br/>Plan / Explore / Code / Review（可选 worktree 隔离）"]
+        Loop -->|SwitchParadigm| Paradigm["切换至 Plan / Reflect / Explore<br/>apply_paradigm_switch 内联升级<br/>system prompt + 工具过滤"]
+        Paradigm -. via meta_tool .-> Loop
+    end
+
+    Domain["🎨 oneai-domain · DomainPack 7 层<br/>① 工具+装饰器 ② ContextSource ③ PermissionProfile<br/>④ ParadigmStrategy ⑤ CompressionTemplate ⑥ Workflow+StateGraph ⑦ MemoryProfile<br/>+ 市场 + JSON Schema 规范校验器 — 横切声明式配置：一行切换、可合并、可校验、可共享"]
+
+    subgraph Features ["📦 特性层 · Feature Crates（按域分组，均依赖 oneai-core）"]
+        direction LR
+        subgraph F1 ["Provider 与解析"]
+            Prov["oneai-provider<br/>OpenAI/Anthropic/Gemini/Ollama<br/>ProviderPool 降级链 · SmartRouter 多因子路由 · 429 重试"]
+            Parser["oneai-parser<br/>3 层输出防御：约束解码→模糊修复→自纠重提示"]
+        end
+        subgraph F2 ["工具 · 技能 · RAG"]
+            Tool["oneai-tool<br/>Registry + 12 内置工具 + MCP 客户端 + InteractionGate"]
+            Skill["oneai-skill<br/>选择器 + 注册 + 约定目录发现"]
+            Rag["oneai-rag<br/>EmbeddingService + 混合检索 + 自动 embedding"]
+        end
+        subgraph F3 ["记忆 · 持久化 · 轨迹"]
+            Mem["oneai-memory<br/>Letta 三层(recall/core/archival) + 压缩增量抽取 + 持久化"]
+            Persist["oneai-persistence<br/>SQLite(会话/LTM/用量) + 渐进 Checkpoint"]
+            Trace["oneai-trace<br/>OpenInference 兼容 + OTEL 导出器"]
+        end
+        subgraph F4 ["编排 · 扩展"]
+            Wf["oneai-workflow<br/>DAG + StateGraph（与 AgentLoop 闭环）"]
+            Wasm["oneai-wasm<br/>Wasmtime 沙箱 + WasmTool"]
+            A2a["oneai-a2a<br/>Agent 间协议 SDK + 服务端宿主"]
+            Eval["oneai-eval<br/>6 指标 + 3 套件 + SWE-bench 三轴"]
+            Studio["oneai-studio<br/>axum HTTP+WS + D3 可视化"]
+            Mcp["oneai-mcp<br/>MCP 服务宿主 + 插件注册"]
+            Sched["oneai-scheduler<br/>内存任务调度"]
+        end
+    end
+
+    subgraph Core ["🧱 基础层 · oneai-core（无下游依赖）"]
+        CoreT["类型：ContentBlock · Message · Conversation · PermissionLevel · Budget<br/>ContextBudgetManager · PlatformCapabilities · ModelContextResolver<br/>核心 trait：LlmProvider · Tool · InteractionGate(5 决策点)<br/>EmbeddingService · UsageTracker · RateLimiter · CircuitBreaker · TokenCounter"]
+    end
+
+    Native --> UniFFI
+    Native --> CFacade
+    TUI --> Builder
+    UniFFI --> Builder
+    CFacade --> Builder
+    Builder --> Loop
+    Loop --> Features
+    Domain -. 横切领域配置 .-> Features
+    Features --> Core
+    Domain -. 复用核心 trait .-> Core
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        oneai-app（集成层）                           │
-│  AppBuilder → App → AppSession（唯一的组装入口）                      │
-├──────────┬──────────┬──────────┬──────────┬──────────┬──────────────┤
-│ oneai-   │ oneai-   │ oneai-   │ oneai-   │ oneai-   │ oneai-       │
-│ agent    │ workflow │ memory   │ tool     │ rag      │ skill        │
-│ AgentLoop│ DAG +    │ STM +    │ Registry │ Document │ Selector     │
-│ +SubAgent│ StateGrph│ LTM +    │ + MCP +  │ Index +  │ + Registry   │
-│ +ReAct   │ 编译→执行│ Compress │ Interact │ Embedding│ + Skills     │
-│ +Plan    │          │ +SQLite  │ +12工具   │ Retrieval│              │
-│ +Reflect │          │ 持久化    │          │          │              │
-├──────────┴──────────┴──────────┴──────────┴──────────┴──────────────┤
-│ oneai-domain（7 层 DomainPack + 市场 + 规范校验器）                     │
-│ oneai-a2a   oneai-wasm   oneai-eval   oneai-studio   oneai-mcp        │
-│ A2A SDK     Wasmtime     评测套件      Web UI        MCP 服务/宿主      │
-├──────────────────────────────────────────────────────────────────────┤
-│ oneai-provider：OpenAI/Anthropic/Gemini/Ollama + ProviderPool +     │
-│                 SmartRouter + 429 重试                                │
-│ oneai-parser（3 层）· oneai-persistence · oneai-trace · oneai-       │
-│   scheduler · oneai-uniffi · oneai-platform-{desktop,android,ios,  │
-│   harmony}                                                          │
-├──────────────────────────────────────────────────────────────────────┤
-│                     oneai-core（基础层）                             │
-│  ContentBlock, Message, Conversation, PermissionLevel, Budget,       │
-│  ContextBudgetManager, PlatformCapabilities, ModelContextResolver,   │
-│  全部核心 trait (LlmProvider, Tool, InteractionGate, EmbeddingService,│
-│   UsageTracker, RateLimiter, CircuitBreaker, TokenCounter)           │
-└─────────────────────────────────────────────────────────────────────┘
-```
+
+> 箭头方向 = 依赖 / 数据流向（上层依赖下层）。实线为编译期依赖与运行时调用，虚线为横切声明式配置。`oneai-domain` 不是某一层级，而是横切所有特性层的声明式配置层——`AppBuilder::domain_pack(...)` 一行即可切换整套领域行为。
 
 ---
 

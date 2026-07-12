@@ -214,36 +214,79 @@ Per-platform build & run instructions are in [Cross-platform: desktop & mobile](
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph FE ["🖥️ Frontends — two front ends, one core"]
+        direction LR
+        TUI["CLI / TUI<br/>oneai-cli · ratatui+crossterm<br/>general agentic execution / subsystem exploration"]
+        Native["Native App<br/>macOS · Win · Linux<br/>Android · iOS · HarmonyOS<br/>scenario-based multi-agent group chat"]
+    end
+
+    subgraph FFI ["🔌 FFI layer · oneai-uniffi + oneai-platform-*"]
+        direction LR
+        UniFFI["UniFFI bindings<br/>Kotlin · Swift · Python"]
+        CFacade["Hand-written extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON across boundary, CJK round-trips"]
+    end
+
+    subgraph App ["🧩 Integration layer · oneai-app"]
+        Builder["AppBuilder → App → AppSession<br/>single assembly entry · every subsystem optional, plug-in as needed"]
+    end
+
+    subgraph Agent ["⚙️ Execution engine · oneai-agent (dynamic loop, not a fixed pipeline)"]
+        Loop["AgentLoop · model decides per iteration<br/>bound governed by TokenBudget (no hardcoded max_iterations)"]
+        Loop -->|DirectAnswer| Done["return final answer → loop ends"]
+        Loop -->|ToolCalls| Exec["execute tools → feed back results → continue"]
+        Loop -->|Delegate| Sub["SubAgent<br/>Plan / Explore / Code / Review (optional worktree isolation)"]
+        Loop -->|SwitchParadigm| Paradigm["switch to Plan / Reflect / Explore<br/>apply_paradigm_switch inlines upgrade<br/>system prompt + tool filter"]
+        Paradigm -. via meta_tool .-> Loop
+    end
+
+    Domain["🎨 oneai-domain · DomainPack 7 layers<br/>① Tools+Decorators ② ContextSource ③ PermissionProfile<br/>④ ParadigmStrategy ⑤ CompressionTemplate ⑥ Workflow+StateGraph ⑦ MemoryProfile<br/>+ marketplace + JSON Schema spec validator — cross-cutting declarative config: one-line switch, composable, validatable, shareable"]
+
+    subgraph Features ["📦 Feature crates (grouped by domain, all depend on oneai-core)"]
+        direction LR
+        subgraph F1 ["Provider & parsing"]
+            Prov["oneai-provider<br/>OpenAI/Anthropic/Gemini/Ollama<br/>ProviderPool fallback chain · SmartRouter multi-factor routing · 429 retry"]
+            Parser["oneai-parser<br/>3-layer output defense: constrained decode → fuzzy repair → self-correct retry"]
+        end
+        subgraph F2 ["Tools · Skills · RAG"]
+            Tool["oneai-tool<br/>Registry + 12 built-in tools + MCP client + InteractionGate"]
+            Skill["oneai-skill<br/>selector + registry + convention-dir discovery"]
+            Rag["oneai-rag<br/>EmbeddingService + hybrid retrieval + auto embedding"]
+        end
+        subgraph F3 ["Memory · Persistence · Trace"]
+            Mem["oneai-memory<br/>Letta 3-tier (recall/core/archival) + compression-time extraction + persistence"]
+            Persist["oneai-persistence<br/>SQLite (sessions/LTM/usage) + incremental checkpoint"]
+            Trace["oneai-trace<br/>OpenInference-compatible + OTEL exporter"]
+        end
+        subgraph F4 ["Orchestration · Extensions"]
+            Wf["oneai-workflow<br/>DAG + StateGraph (closed loop with AgentLoop)"]
+            Wasm["oneai-wasm<br/>Wasmtime sandbox + WasmTool"]
+            A2a["oneai-a2a<br/>agent-to-agent protocol SDK + server host"]
+            Eval["oneai-eval<br/>6 metrics + 3 suites + SWE-bench three-axis"]
+            Studio["oneai-studio<br/>axum HTTP+WS + D3 visualization"]
+            Mcp["oneai-mcp<br/>MCP server host + plugin registry"]
+            Sched["oneai-scheduler<br/>in-memory task scheduling"]
+        end
+    end
+
+    subgraph Core ["🧱 Foundation · oneai-core (no downstream deps)"]
+        CoreT["Types: ContentBlock · Message · Conversation · PermissionLevel · Budget<br/>ContextBudgetManager · PlatformCapabilities · ModelContextResolver<br/>Core traits: LlmProvider · Tool · InteractionGate (5 decision points)<br/>EmbeddingService · UsageTracker · RateLimiter · CircuitBreaker · TokenCounter"]
+    end
+
+    Native --> UniFFI
+    Native --> CFacade
+    TUI --> Builder
+    UniFFI --> Builder
+    CFacade --> Builder
+    Builder --> Loop
+    Loop --> Features
+    Domain -. cross-cutting domain config .-> Features
+    Features --> Core
+    Domain -. reuses core traits .-> Core
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        oneai-app (integration layer)                │
-│  AppBuilder → App → AppSession (the single assembly entry point)    │
-├──────────┬──────────┬──────────┬──────────┬──────────┬──────────────┤
-│ oneai-   │ oneai-   │ oneai-   │ oneai-   │ oneai-   │ oneai-       │
-│ agent    │ workflow │ memory   │ tool     │ rag      │ skill        │
-│ AgentLoop│ DAG +    │ STM +    │ Registry │ Document │ Selector     │
-│ +SubAgent│ StateGrph│ LTM +    │ + MCP +  │ Index +  │ + Registry   │
-│ +ReAct   │ compile→ │ Compress │ Interact │ Embedding│ + Skills     │
-│ +Plan    │ execute  │ +SQLite  │ +12 tools│ Retrieval│              │
-│ +Reflect │          │ persist  │          │          │              │
-├──────────┴──────────┴──────────┴──────────┴──────────┴──────────────┤
-│ oneai-domain (7-layer DomainPack + market + spec validator)         │
-│ oneai-a2a   oneai-wasm   oneai-eval   oneai-studio   oneai-mcp      │
-│ A2A SDK     Wasmtime     eval suites   Web UI        MCP host/server │
-├──────────────────────────────────────────────────────────────────────┤
-│ oneai-provider: OpenAI/Anthropic/Gemini/Ollama + ProviderPool +    │
-│                 SmartRouter + 429 retry                              │
-│ oneai-parser (3-layer) · oneai-persistence · oneai-trace ·          │
-│   oneai-scheduler · oneai-uniffi · oneai-platform-{desktop,android,│
-│   ios,harmony}                                                      │
-├──────────────────────────────────────────────────────────────────────┤
-│                     oneai-core (foundation)                         │
-│  ContentBlock, Message, Conversation, PermissionLevel, Budget,     │
-│  ContextBudgetManager, PlatformCapabilities, ModelContextResolver,  │
-│  all core traits (LlmProvider, Tool, InteractionGate, EmbeddingService,│
-│   UsageTracker, RateLimiter, CircuitBreaker, TokenCounter)          │
-└─────────────────────────────────────────────────────────────────────┘
-```
+
+> Arrow direction = dependency / data flow (upper depends on lower). Solid lines are compile-time deps and runtime calls; dashed lines are cross-cutting declarative config. `oneai-domain` is not a layer — it is a cross-cutting declarative config layer over all feature crates; `AppBuilder::domain_pack(...)` switches the entire domain behavior in one line.
 
 ---
 
