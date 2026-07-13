@@ -64,6 +64,13 @@ pub struct EvalResult {
     #[serde(default)]
     pub metadata: HashMap<String, String>,
 
+    /// Efficiency axis: wall-clock + token decomposition derived from the
+    /// trace span tree (inference vs tool vs overhead, call counts, token
+    /// cost, prompt-cache hit ratio when A4 is wired). `None` when tracing
+    /// is disabled or no provider ran. See [`crate::EfficiencyProfile`].
+    #[serde(default)]
+    pub efficiency: Option<crate::efficiency::EfficiencyProfile>,
+
     /// Error that occurred during execution (if any).
     #[serde(default)]
     pub error: Option<String>,
@@ -84,6 +91,7 @@ impl EvalResult {
             prompt_tokens: 0,
             completion_tokens: 0,
             metadata: HashMap::new(),
+            efficiency: None,
             error: None,
         }
     }

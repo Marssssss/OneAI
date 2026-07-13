@@ -121,7 +121,7 @@ impl AgentLoopObserver for TuiObserver {
             completion: completion_tokens,
             total: prompt_tokens + completion_tokens,
             is_estimated: false,
-        };
+            ..Default::default()};
         // Accumulate into session total
         let _ = self.tx.send(ObserverEvent::TokenUsageUpdate(usage));
     }

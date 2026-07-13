@@ -1322,7 +1322,7 @@ mod tests {
                     message: Message::assistant(
                         "# Session Summary\n## Goal: refactor auth\n## Next Steps: add tests".to_string()
                     ),
-                    usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                    usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
                     model: "mock".to_string(),
                     metadata: HashMap::new(),
                 })

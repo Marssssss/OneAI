@@ -470,6 +470,54 @@ impl AppSession {
         Ok(result)
     }
 
+    /// Execute a StateGraph seeded with a user task.
+    ///
+    /// Like `execute_state_graph`, but injects the task as the initial user
+    /// message and `{{task}}` variable so entry LlmInfer nodes have input to
+    /// reason about. Mirrors `AgentLoop::run_with_state_graph`'s seeding
+    /// (agent_loop.rs). Uses the direct-provider executor (not the full
+    /// AgentLoop bridge) — sufficient for the CLI `graph run` demo path.
+    pub async fn execute_state_graph_with_task(
+        &mut self,
+        graph: &StateGraph,
+        task: &str,
+    ) -> Result<GraphExecutionResult> {
+        let provider = self.app.provider.as_ref()
+            .ok_or(oneai_core::error::OneAIError::Provider(
+                "No LLM provider configured. Cannot execute StateGraph.".to_string()
+            ))?;
+
+        let executor = StateGraphExecutor::with_direct_provider_defaults(
+            provider.clone(),
+            self.app.workflow_executor.tools_handle(),
+            Arc::new(NoopDelegateFactory),
+            self.app.interaction_gate.clone(),
+        );
+
+        let mut initial_state = oneai_workflow::GraphState::new();
+        initial_state.conversation.add_message(Message::user(task.to_string()));
+        initial_state.variables.insert("task".to_string(), task.to_string());
+        initial_state.active_paradigm = Some("react".to_string());
+        initial_state.token_budget_remaining = 100_000;
+
+        let result = executor.execute(graph, initial_state).await?;
+
+        self.workflow_history.push(WorkflowHistoryEntry {
+            name: graph.name.clone(),
+            kind: WorkflowKind::StateGraph,
+            success: result.completed,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            summary: format!(
+                "{} iterations, completed: {}, terminal: {}",
+                result.iterations,
+                result.completed,
+                result.terminal_node.as_deref().unwrap_or("none")
+            ),
+        });
+
+        Ok(result)
+    }
+
     /// Get the workflow execution history for this session.
     pub fn workflow_history(&self) -> &[WorkflowHistoryEntry] {
         &self.workflow_history

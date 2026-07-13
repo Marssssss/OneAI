@@ -451,7 +451,7 @@ fn safe_fallback_response(reason: &str) -> InferenceResponse {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-        },
+            ..Default::default()},
         model: String::new(),
         metadata: HashMap::new(),
     }
@@ -527,6 +527,11 @@ pub struct AgentLoopConfig {
     /// model it must produce a step-by-step plan rather than executing. This
     /// mirrors Claude Code's plan mode (read-only research/planning).
     pub plan_mode: bool,
+    /// Policy for provider-side prompt caching (Anthropic `cache_control` on
+    /// the stable system+tools prefix). Default `Auto` = caching on. Set `Off`
+    /// for A/B replay to measure the no-cache baseline (efficiency axis:
+    /// `EfficiencyProfile.cache_read_tokens` / `cache_hit_ratio`).
+    pub prompt_cache_policy: oneai_core::PromptCachePolicy,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -595,6 +600,7 @@ impl Default for AgentLoopConfig {
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None,
             plan_mode: false,
+            prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
         }
     }
 }
@@ -1074,7 +1080,13 @@ impl AgentLoop {
                 stop_sequences: self.config.stop_sequences.clone(),
                 constrained_output: self.build_constrained_output(),
                 thinking_budget: self.config.thinking_budget,
-                metadata: HashMap::new(),
+                metadata: HashMap::from([
+                    // Pass the prompt-cache policy to the provider via
+                    // metadata (providers don't depend on oneai-agent, so
+                    // they read this string key instead of the typed config).
+                    ("prompt_cache_policy".to_string(),
+                     self.config.prompt_cache_policy.as_str().to_string()),
+                ]),
             };
 
             // 3b. PreInfer interaction gate — the application layer can rewrite
@@ -1273,6 +1285,11 @@ impl AgentLoop {
                         ("llm.prompt_tokens".to_string(), serde_json::json!(response.usage.prompt_tokens)),
                         ("llm.completion_tokens".to_string(), serde_json::json!(response.usage.completion_tokens)),
                         ("llm.total_tokens".to_string(), serde_json::json!(response.usage.prompt_tokens + response.usage.completion_tokens)),
+                        // Prompt-caching usage — summed by EfficiencyProfile::from_tree
+                        // into cache_read_tokens / cache_creation_tokens for the cache
+                        // hit ratio on the efficiency axis.
+                        ("llm.cache_read_tokens".to_string(), serde_json::json!(response.usage.cache_read_tokens)),
+                        ("llm.cache_creation_tokens".to_string(), serde_json::json!(response.usage.cache_creation_tokens)),
                     ]));
                     ctx.exit_span(&infer_span_id, SpanStatus::Ok);
                 }
@@ -2949,7 +2966,7 @@ impl AgentLoop {
 
         // Use the IncrementalStreamParser for proper incremental parsing
         let mut parser = IncrementalStreamParser::new();
-        let mut usage = oneai_core::TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        let mut usage = oneai_core::TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()};
         let mut model = String::new();
 
         loop {

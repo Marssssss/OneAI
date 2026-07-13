@@ -404,7 +404,7 @@ mod closure_tests {
             };
             Ok(InferenceResponse {
                 message: Message::assistant(body),
-                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
                 model: "dual-mock".to_string(),
                 metadata: HashMap::new(),
             })

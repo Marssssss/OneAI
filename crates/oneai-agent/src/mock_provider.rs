@@ -69,7 +69,7 @@ impl ScriptedResponse {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -89,7 +89,7 @@ impl ScriptedResponse {
                 prompt_tokens: 200,
                 completion_tokens: 30,
                 total_tokens: 230,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -111,7 +111,7 @@ impl ScriptedResponse {
                 prompt_tokens: 200,
                 completion_tokens: 60,
                 total_tokens: 260,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -134,7 +134,7 @@ impl ScriptedResponse {
                 prompt_tokens: 150,
                 completion_tokens: 40,
                 total_tokens: 190,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -153,7 +153,7 @@ impl ScriptedResponse {
                 prompt_tokens: 100,
                 completion_tokens: 20,
                 total_tokens: 120,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -171,7 +171,7 @@ impl ScriptedResponse {
                 prompt_tokens: 100,
                 completion_tokens: 80, // thinking + answer
                 total_tokens: 180,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -192,7 +192,7 @@ impl ScriptedResponse {
                 prompt_tokens: 150,
                 completion_tokens: 60,
                 total_tokens: 210,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -223,7 +223,7 @@ impl ScriptedResponse {
                 prompt_tokens: 200,
                 completion_tokens: 80,
                 total_tokens: 280,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -239,7 +239,7 @@ impl ScriptedResponse {
                 prompt_tokens: 100,
                 completion_tokens: 0,
                 total_tokens: 100,
-            },
+            ..Default::default()},
             model: "mock-model".to_string(),
         }
     }
@@ -356,7 +356,7 @@ impl MockProvider {
                     prompt_tokens: 50,
                     completion_tokens: 20,
                     total_tokens: 70,
-                },
+            ..Default::default()},
                 model: "mock-model".to_string(),
                 metadata: HashMap::new(),
             }

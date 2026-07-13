@@ -612,6 +612,7 @@ fn build_member_loop(
         constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
         trace_context: None,
         plan_mode: false,
+        prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
     };
     let context_assembler = ContextAssembler::new();
     let stream_parser = IncrementalStreamParser::new();

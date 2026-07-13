@@ -294,11 +294,11 @@ impl GeminiProvider {
             prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        }).unwrap_or(TokenUsage {
+            ..Default::default()}).unwrap_or(TokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-        });
+            ..Default::default()});
 
         Ok(InferenceResponse {
             message: Message {
@@ -441,7 +441,7 @@ impl LlmProvider for GeminiProvider {
                                             prompt_tokens: prompt_tokens_from_start,
                                             completion_tokens: output_tokens,
                                             total_tokens: prompt_tokens_from_start + output_tokens,
-                                        };
+            ..Default::default()};
 
                                         let _ = tx.send(InferenceStreamChunk {
                                             content: vec![],

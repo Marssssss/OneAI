@@ -8,9 +8,12 @@
 //! - **TrajectoryMetric**: Tool call sequence validation
 //! - **CompositeMetric**: Weighted combination of multiple metrics
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
+use oneai_trace::{SpanKind, TraceMetrics, TraceTree};
 
 use crate::eval_case::ExpectedOutput;
 use crate::eval_metric::{EvalMetric, EvalScore};
@@ -212,16 +215,10 @@ impl EvalMetric for TrajectoryMetric {
     async fn score(&self, _input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore {
         match expected {
             ExpectedOutput::Trajectory { expected_tools, max_iterations: _ } => {
-                // In the current implementation, we check the actual output for
-                // tool call indicators. When running with traces, the EvalRunner
-                // would have the full span tree with tool call details.
-                //
-                // For metric-only scoring (without traces), we do a simple
-                // heuristic: check if tool names appear in the output text.
-                //
-                // TODO: When integrated with TraceContext, use trace metrics
-                // for accurate trajectory evaluation.
-
+                // Text-only fallback (metric-only mode, no trace). Checks tool
+                // names as substrings in the output text — unreliable, but
+                // the best we can do without the span tree. score_with_trace
+                // (below) does the real check when a trace is available.
                 let found: Vec<&str> = expected_tools.iter()
                     .filter(|tool| actual.contains(*tool))
                     .map(|s| s.as_str())
@@ -239,9 +236,9 @@ impl EvalMetric for TrajectoryMetric {
                 };
 
                 let reason = if missing.is_empty() {
-                    format!("All {} expected tools called", found.len())
+                    format!("All {} expected tools called (text heuristic)", found.len())
                 } else {
-                    format!("Found {} of {} expected tools. Missing: {}", found.len(), expected_tools.len(), missing.join(", "))
+                    format!("Found {} of {} expected tools (text heuristic). Missing: {}", found.len(), expected_tools.len(), missing.join(", "))
                 };
 
                 EvalScore::new(fraction, 1.0, reason, missing.is_empty())
@@ -261,6 +258,76 @@ impl EvalMetric for TrajectoryMetric {
             ExpectedOutput::Custom { .. } => {
                 EvalScore::new(0.0, 1.0, "Trajectory not applicable for Custom expected output", false)
             }
+        }
+    }
+
+    /// Real trajectory check using the trace span tree: walks TOOL spans,
+    /// extracts each tool's `tool.name` attribute, and verifies the expected
+    /// tool set was actually invoked. Also enforces the `max_iterations` bound
+    /// (previously an unused `_` — the TODO is now resolved). Falls back to
+    /// the text heuristic when no trace is available (metric-only mode).
+    async fn score_with_trace(
+        &self,
+        input: &str,
+        actual: &str,
+        expected: &ExpectedOutput,
+        tree: Option<&TraceTree>,
+    ) -> EvalScore {
+        match expected {
+            ExpectedOutput::Trajectory { expected_tools, max_iterations } => {
+                if let Some(tree) = tree {
+                    // Build the set of tools actually called from TOOL spans.
+                    let called: HashSet<String> = tree.root_span
+                        .spans_by_kind(SpanKind::TOOL)
+                        .iter()
+                        .filter_map(|s| s.attributes.get("tool.name"))
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+
+                    let found: Vec<&str> = expected_tools.iter()
+                        .filter(|t| called.contains(*t))
+                        .map(|s| s.as_str())
+                        .collect();
+                    let missing: Vec<&str> = expected_tools.iter()
+                        .filter(|t| !called.contains(*t))
+                        .map(|s| s.as_str())
+                        .collect();
+
+                    let tm = TraceMetrics::compute_from_tree(&tree.root_span);
+                    let iters = tm.avg_iterations.round() as usize;
+                    let within_bounds = *max_iterations == 0 || iters <= *max_iterations;
+
+                    let tool_frac = if expected_tools.is_empty() {
+                        1.0
+                    } else {
+                        found.len() as f64 / expected_tools.len() as f64
+                    };
+                    // Going over the iteration bound halves the score even if
+                    // the right tools were called.
+                    let value = if within_bounds { tool_frac } else { tool_frac * 0.5 };
+                    let passed = missing.is_empty() && within_bounds;
+
+                    let reason = format!(
+                        "trace: {}/{} expected tools called (of {} total calls), {} iters (max {}){}",
+                        found.len(),
+                        expected_tools.len(),
+                        called.len(),
+                        iters,
+                        max_iterations,
+                        if missing.is_empty() {
+                            String::new()
+                        } else {
+                            format!(". Missing: {}", missing.join(", "))
+                        }
+                    );
+                    EvalScore::new(value, 1.0, reason, passed)
+                } else {
+                    // No trace — fall back to the text heuristic.
+                    self.score(input, actual, expected).await
+                }
+            }
+            // Non-trajectory expected outputs: delegate to the text scorer.
+            _ => self.score(input, actual, expected).await,
         }
     }
 }
@@ -550,6 +617,109 @@ impl EvalMetric for CompositeMetric {
     }
 }
 
+// ─── EfficiencyMetric ──────────────────────────────────────────────────────
+
+/// Efficiency-axis metric — scores token+latency cost (quality-agnostic).
+///
+/// Computes `1 / (1 + 0.1·log10(1+tokens) + 0.1·log10(1+latency_ms))` from
+/// the trace span tree, so a cheap, fast run scores near 1.0 and an
+/// expensive, slow run scores lower. This is the "efficiency" component of
+/// the three-axis evaluation (能力×成本×效率); the quality axis comes from a
+/// correctness metric and is folded in by the CLI `--profile` report via
+/// [`crate::EfficiencyProfile::three_axis_score`].
+///
+/// Pass/fail thresholds are configurable (`max_tokens`, `max_latency_ms`);
+/// `0` means "no limit on this dimension".
+pub struct EfficiencyMetric {
+    /// Max tokens for a pass (0 = no limit).
+    pub max_tokens: u64,
+    /// Max agent latency (ms) for a pass (0 = no limit).
+    pub max_latency_ms: u64,
+}
+
+impl Default for EfficiencyMetric {
+    fn default() -> Self {
+        Self { max_tokens: 0, max_latency_ms: 0 }
+    }
+}
+
+impl EfficiencyMetric {
+    /// Create with no pass/fail thresholds (score only).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create with explicit pass thresholds.
+    pub fn with_limits(max_tokens: u64, max_latency_ms: u64) -> Self {
+        Self { max_tokens, max_latency_ms }
+    }
+}
+
+#[async_trait]
+impl EvalMetric for EfficiencyMetric {
+    fn name(&self) -> &str { "efficiency" }
+
+    fn description(&self) -> &str {
+        "Efficiency axis: token+latency cost from the trace (quality-agnostic); \
+         1/(1+0.1·log(1+tokens)+0.1·log(1+latency))"
+    }
+
+    async fn score(&self, _input: &str, _actual: &str, _expected: &ExpectedOutput) -> EvalScore {
+        // No trace available in metric-only mode — efficiency is unmeasurable.
+        EvalScore::new(
+            0.0,
+            1.0,
+            "efficiency requires trace data — run with a provider + tracing".to_string(),
+            false,
+        )
+    }
+
+    async fn score_with_trace(
+        &self,
+        _input: &str,
+        _actual: &str,
+        _expected: &ExpectedOutput,
+        tree: Option<&TraceTree>,
+    ) -> EvalScore {
+        let tree = match tree {
+            Some(t) => t,
+            None => {
+                return EvalScore::new(
+                    0.0, 1.0,
+                    "no trace — efficiency not measurable".to_string(),
+                    false,
+                )
+            }
+        };
+
+        let tm = TraceMetrics::compute_from_tree(&tree.root_span);
+        let tokens = tm.total_tokens;
+        let latency_ms = tm.total_session_duration_ms;
+        let iters = tm.avg_iterations.round() as usize;
+        let tool_calls = tm.tool_call_count;
+
+        let value = 1.0
+            / (1.0
+                + 0.1 * log10_1p(tokens as f64)
+                + 0.1 * log10_1p(latency_ms as f64));
+
+        let within_tokens = self.max_tokens == 0 || tokens <= self.max_tokens;
+        let within_latency = self.max_latency_ms == 0 || latency_ms <= self.max_latency_ms;
+        let passed = within_tokens && within_latency;
+
+        let reason = format!(
+            "{} tokens, {}ms latency, {} iters, {} tool calls (efficiency={:.3})",
+            tokens, latency_ms, iters, tool_calls, value
+        );
+        EvalScore::new(value, 1.0, reason, passed)
+    }
+}
+
+/// log10(1+x), floored at 0 so non-positive inputs don't NaN.
+fn log10_1p(x: f64) -> f64 {
+    if x <= 0.0 { 0.0 } else { (1.0 + x).log10() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,6 +858,84 @@ mod tests {
         ).await;
         assert!(!score.passed);
         assert_eq!(score.value, 1.0 / 3.0); // 1 of 3 found
+    }
+
+    #[tokio::test]
+    async fn test_trajectory_metric_uses_trace_tool_names() {
+        // score_with_trace walks TOOL spans for `tool.name` instead of
+        // substring-matching the output text. Build a synthetic tree with
+        // two tool calls (calculator + grep), neither mentioned in `actual`.
+        use std::collections::HashMap;
+        use oneai_trace::{Span, SpanKind, SpanStatus, TraceTree};
+
+        let mut root = Span::new(SpanKind::SESSION, "session", None);
+        root.end(SpanStatus::Ok);
+        let mut calc = Span::new(SpanKind::TOOL, "tool.calc", Some(&root.span_id));
+        calc.set_attribute("tool.name", serde_json::json!("calculator"));
+        calc.end(SpanStatus::Ok);
+        let mut grep = Span::new(SpanKind::TOOL, "tool.grep", Some(&root.span_id));
+        grep.set_attribute("tool.name", serde_json::json!("grep"));
+        grep.end(SpanStatus::Ok);
+
+        let mut spans = HashMap::new();
+        spans.insert(root.span_id.clone(), root.clone());
+        spans.insert(calc.span_id.clone(), calc);
+        spans.insert(grep.span_id.clone(), grep);
+        let tree = TraceTree::from_spans(spans, None);
+
+        let metric = TrajectoryMetric;
+        // expected {calculator, shell}: only calculator was called → 1/2, fail.
+        let score = metric.score_with_trace(
+            "in", "no tool names mentioned here",
+            &ExpectedOutput::trajectory(["calculator", "shell"], 10),
+            Some(&tree),
+        ).await;
+        assert!(!score.passed);
+        assert!(score.reason.contains("1/2"), "reason: {}", score.reason);
+
+        // expected {calculator, grep}: both called → pass.
+        let score2 = metric.score_with_trace(
+            "in", "no tool names mentioned here",
+            &ExpectedOutput::trajectory(["calculator", "grep"], 0),
+            Some(&tree),
+        ).await;
+        assert!(score2.passed, "reason: {}", score2.reason);
+    }
+
+    #[tokio::test]
+    async fn test_efficiency_metric_requires_trace() {
+        let metric = EfficiencyMetric::new();
+        // No trace → unmeasurable.
+        let s = metric.score_with_trace("in", "out", &ExpectedOutput::exact("x"), None).await;
+        assert!(!s.passed);
+        assert_eq!(s.value, 0.0);
+
+        // score() (text path) is also unmeasurable.
+        let s2 = metric.score("in", "out", &ExpectedOutput::exact("x")).await;
+        assert!(!s2.passed);
+        assert_eq!(s2.value, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_efficiency_metric_with_trace_scores() {
+        use std::collections::HashMap;
+        use oneai_trace::{Span, SpanKind, SpanStatus, TraceTree};
+
+        let mut root = Span::new(SpanKind::SESSION, "session", None);
+        // Give the session a measurable duration so latency > 0.
+        root.end(SpanStatus::Ok);
+        let mut llm = Span::new(SpanKind::LLM, "llm.call", Some(&root.span_id));
+        llm.end(SpanStatus::Ok);
+        let mut spans = HashMap::new();
+        spans.insert(root.span_id.clone(), root.clone());
+        spans.insert(llm.span_id.clone(), llm);
+        let tree = TraceTree::from_spans(spans, None);
+
+        let metric = EfficiencyMetric::new();
+        let s = metric.score_with_trace("in", "out", &ExpectedOutput::exact("x"), Some(&tree)).await;
+        // With (near-)zero tokens/latency the efficiency score is near 1.0.
+        assert!(s.value > 0.0, "value should be positive, got {}", s.value);
+        assert!(s.reason.contains("tokens"));
     }
 
     #[tokio::test]

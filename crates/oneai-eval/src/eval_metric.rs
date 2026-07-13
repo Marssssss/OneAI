@@ -135,6 +135,26 @@ pub trait EvalMetric: Send + Sync {
     ///
     /// Returns an `EvalScore` indicating the quality of the output.
     async fn score(&self, input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore;
+
+    /// Score with access to the full trace span tree (efficiency / trajectory
+    /// axis). Default delegates to [`EvalMetric::score`], ignoring the tree —
+    /// so metrics that only inspect output text are unaffected. Override to
+    /// use real trace data: e.g. `TrajectoryMetric` walks TOOL spans for the
+    /// actual tool-call sequence, `EfficiencyMetric` reads LLM/TOOL durations
+    /// + token/iteration counts.
+    ///
+    /// This is an additive, semver-minor extension: existing implementors
+    /// inherit the default and keep working.
+    async fn score_with_trace(
+        &self,
+        input: &str,
+        actual: &str,
+        expected: &ExpectedOutput,
+        tree: Option<&oneai_trace::TraceTree>,
+    ) -> EvalScore {
+        let _ = tree;
+        self.score(input, actual, expected).await
+    }
 }
 
 // ─── EvalJudge ───────────────────────────────────────────────────────────

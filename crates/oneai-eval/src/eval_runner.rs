@@ -28,9 +28,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use oneai_core::error::Result;
-use oneai_trace::TraceMetrics;
+use oneai_trace::{TraceMetrics, TraceTree};
 
 use crate::eval_case::{EvalCase, ExpectedOutput};
+use crate::efficiency::EfficiencyProfile;
 use crate::eval_metric::EvalMetric;
 use crate::eval_result::{EvalResult, EvalReport};
 use crate::eval_suite::EvalSuite;
@@ -159,19 +160,25 @@ impl EvalRunner {
         let start = Instant::now();
         let mut result = EvalResult::new(&case.id, &case.input, "");
 
-        // Run the agent if a provider is configured
-        if self.app.has_provider() {
-            self.run_agent_for_case(case, &mut result).await;
+        // Run the agent if a provider is configured. run_agent_for_case
+        // returns the trace tree (when tracing is on) so trace-aware metrics
+        // (TrajectoryMetric, EfficiencyMetric) can walk the span tree.
+        let tree = if self.app.has_provider() {
+            self.run_agent_for_case(case, &mut result).await
         } else {
             // No provider — can't run the agent, mark as error
             result.error = Some("No LLM provider configured".to_string());
-        }
+            None
+        };
 
         result.duration_ms = start.elapsed().as_millis() as u64;
 
-        // Apply each metric to score the output
+        // Apply each metric to score the output. Trace-aware metrics receive
+        // the span tree; text-only metrics ignore it via the default impl.
         for metric in metrics {
-            let score = metric.score(&case.input, &result.actual_output, &case.expected).await;
+            let score = metric
+                .score_with_trace(&case.input, &result.actual_output, &case.expected, tree.as_ref())
+                .await;
             result.add_score(metric.name(), score);
         }
 
@@ -181,23 +188,30 @@ impl EvalRunner {
     /// Run the agent loop for a single case and collect output + telemetry.
     ///
     /// Creates a fresh session with in-memory tracing, runs the agent, then
-    /// writes the final answer, trace metrics, and per-case cost into `result`.
+    /// writes the final answer, trace metrics, efficiency profile, and
+    /// per-case usage into `result`. Returns the trace tree (so trace-aware
+    /// metrics can walk the span tree) when tracing is enabled.
     ///
     /// Usage isolation: the session id is new per case, and we clear any prior
     /// records for it before running so concurrent/sequential cases don't bleed
     /// usage into each other. A single `session_usage` call yields api_calls
     /// + token breakdown (the UsageSummary aggregates the UsageRecords the
     /// AgentLoop already records after each inference).
-    async fn run_agent_for_case(&self, case: &EvalCase, result: &mut EvalResult) {
+    async fn run_agent_for_case(&self, case: &EvalCase, result: &mut EvalResult) -> Option<TraceTree> {
         let mut session = self.app.create_session();
         let session_id = session.session_id().to_string();
+        let mut tree_out: Option<TraceTree> = None;
 
         // Isolate this case's usage accounting.
         if let Some(ct) = &self.app.usage_tracker {
             let _ = ct.clear_session(&session_id).await;
         }
 
+        // Measure the agent wall-clock (excluding metric scoring) so the
+        // efficiency breakdown attributes overhead correctly.
+        let agent_start = Instant::now();
         let agent_result = session.run_agent_silent(&case.input).await;
+        let agent_dur_ms = agent_start.elapsed().as_millis() as u64;
 
         match agent_result {
             Ok(loop_result) => {
@@ -211,6 +225,20 @@ impl EvalRunner {
                     if let Some(ctx) = session.trace_context() {
                         let tree = ctx.build_tree();
                         result.trace_metrics = TraceMetrics::compute_from_tree(&tree.root_span);
+                        // Efficiency axis: decompose the agent wall-clock into
+                        // inference vs tool vs overhead straight from the span
+                        // tree (generalized from the SWE-bench runner). Token +
+                        // cache fields filled from usage below; cache stays 0
+                        // until A4 wires cache_read_input_tokens.
+                        result.efficiency = Some(EfficiencyProfile::from_tree(
+                            &tree.root_span,
+                            agent_dur_ms,
+                            0, // total_tokens set below after usage fetch
+                            0,
+                            0,
+                            result.trace_metrics.avg_iterations.round() as usize,
+                        ));
+                        tree_out = Some(tree);
                     }
                 }
             }
@@ -229,8 +257,15 @@ impl EvalRunner {
                 result.estimated_calls = summary.estimated_call_count;
                 result.prompt_tokens = summary.prompt_tokens;
                 result.completion_tokens = summary.completion_tokens;
+                // Backfill token totals into the efficiency profile now that
+                // usage is known.
+                if let Some(p) = result.efficiency.as_mut() {
+                    p.total_tokens = summary.prompt_tokens + summary.completion_tokens;
+                }
             }
         }
+
+        tree_out
     }
 
     /// Run metrics only (no agent execution) — for re-scoring pre-collected outputs.

@@ -150,11 +150,11 @@ impl LlmProvider for OllamaProvider {
             prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        }).unwrap_or(TokenUsage {
+            ..Default::default()}).unwrap_or(TokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-        });
+            ..Default::default()});
 
         Ok(InferenceResponse {
             message: Message {

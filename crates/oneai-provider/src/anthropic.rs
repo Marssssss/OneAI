@@ -178,14 +178,21 @@ impl AnthropicProvider {
         // Use Anthropic prompt caching — mark system prompt and tools
         // with cache_control: ephemeral to avoid re-sending static context every turn.
         // Anthropic's prompt caching requires the system field to be an array of content blocks.
+        // `Off` policy (set via InferenceRequest.metadata["prompt_cache_policy"]) strips the
+        // breakpoints — used by the replay harness to measure the no-cache baseline.
+        let cache_on = req.metadata.get("prompt_cache_policy").map(|v| v != "off").unwrap_or(true);
+        let cache_control = || serde_json::json!({ "type": "ephemeral" });
         if !system_text.is_empty() {
-            body["system"] = serde_json::json!([
-                {
-                    "type": "text",
-                    "text": system_text.trim(),
-                    "cache_control": { "type": "ephemeral" }
+            let mut sys_block = serde_json::json!({
+                "type": "text",
+                "text": system_text.trim(),
+            });
+            if cache_on {
+                if let Some(obj) = sys_block.as_object_mut() {
+                    obj.insert("cache_control".to_string(), cache_control());
                 }
-            ]);
+            }
+            body["system"] = serde_json::json!([sys_block]);
         }
 
         if let Some(max_tokens) = req.max_tokens {
@@ -246,12 +253,15 @@ impl AnthropicProvider {
             // cache breakpoint that covers the entire system + tools prefix.
             // On subsequent turns with the same system+tools prefix, Anthropic
             // reuses the cached prefix tokens, reducing cost and latency.
-            if let Some(last_tool) = tools_json.last_mut() {
-                if let Some(obj) = last_tool.as_object_mut() {
-                    obj.insert(
-                        "cache_control".to_string(),
-                        serde_json::json!({ "type": "ephemeral" })
-                    );
+            // Skipped when PromptCachePolicy::Off (baseline measurement).
+            if cache_on {
+                if let Some(last_tool) = tools_json.last_mut() {
+                    if let Some(obj) = last_tool.as_object_mut() {
+                        obj.insert(
+                            "cache_control".to_string(),
+                            cache_control()
+                        );
+                    }
                 }
             }
 
@@ -569,11 +579,16 @@ impl AnthropicProvider {
             completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
                 + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        }).unwrap_or(TokenUsage {
+            // Anthropic prompt-caching usage — populates the efficiency axis
+            // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
+            // runs. 0 when caching isn't used or the field is absent.
+            cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            cache_creation_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            ..Default::default()}).unwrap_or(TokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-        });
+            ..Default::default()});
 
         let stop_reason = json.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("end_turn");
 
@@ -777,7 +792,9 @@ impl AnthropicProvider {
                                         prompt_tokens: prompt_tokens_from_start,
                                         completion_tokens: output_tokens,
                                         total_tokens: prompt_tokens_from_start + output_tokens,
-                                    };
+                                        cache_read_tokens: usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                        cache_creation_tokens: usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            ..Default::default()};
 
                                     let _ = tx.send(InferenceStreamChunk {
                                         content: vec![],
@@ -895,11 +912,16 @@ impl AnthropicProvider {
             completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
                 + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        }).unwrap_or(TokenUsage {
+            // Anthropic prompt-caching usage — populates the efficiency axis
+            // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
+            // runs. 0 when caching isn't used or the field is absent.
+            cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            cache_creation_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            ..Default::default()}).unwrap_or(TokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-        });
+            ..Default::default()});
 
         let stop_reason = json.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
 
@@ -1066,7 +1088,9 @@ impl AnthropicProvider {
                                         prompt_tokens: prompt_tokens_from_start,
                                         completion_tokens: output_tokens,
                                         total_tokens: prompt_tokens_from_start + output_tokens,
-                                    };
+                                        cache_read_tokens: usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                        cache_creation_tokens: usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            ..Default::default()};
                                     let _ = tx.send(InferenceStreamChunk {
                                         content: vec![],
                                         is_final: true,
@@ -1123,5 +1147,56 @@ mod probe_tests {
     fn test_parse_anthropic_missing_field() {
         let resp = json!({ "id": "claude-opus-4-8" });
         assert_eq!(parse_anthropic_context_window(&resp), None);
+    }
+
+    /// PromptCachePolicy::Off must strip every `cache_control` breakpoint;
+    /// default (Auto) keeps them on system + last tool (the efficiency lever).
+    #[test]
+    fn test_prompt_cache_policy_strips_breakpoints() {
+        use oneai_core::{Conversation, Message, ToolDefinition};
+        use std::collections::HashMap;
+
+        fn build_req(policy: Option<&str>) -> InferenceRequest {
+            let mut conv = Conversation::new();
+            conv.add_message(Message::system("You are a helpful assistant."));
+            conv.add_message(Message::user("hi"));
+            let mut meta = HashMap::new();
+            if let Some(p) = policy {
+                meta.insert("prompt_cache_policy".to_string(), p.to_string());
+            }
+            InferenceRequest {
+                conversation: conv,
+                tools: vec![ToolDefinition {
+                    name: "calc".into(),
+                    description: "calculator".into(),
+                    parameters_schema: json!({"type": "object", "properties": {}}),
+                }],
+                max_tokens: Some(128),
+                temperature: None,
+                top_p: None,
+                stop_sequences: vec![],
+                constrained_output: None,
+                thinking_budget: None,
+                metadata: meta,
+            }
+        }
+
+        let provider = AnthropicProvider::new(ModelConfig::default());
+
+        // Default (Auto) — cache_control present on system + last tool.
+        let on = provider.to_anthropic_request(&build_req(None));
+        let sys = on["system"].as_array().unwrap()[0].as_object().unwrap();
+        assert!(sys.contains_key("cache_control"), "system block should be cached by default");
+        let tools = on["tools"].as_array().unwrap();
+        assert!(tools.last().unwrap().as_object().unwrap().contains_key("cache_control"),
+            "last tool should be cached by default");
+
+        // Off — no cache_control anywhere.
+        let off = provider.to_anthropic_request(&build_req(Some("off")));
+        let sys_off = off["system"].as_array().unwrap()[0].as_object().unwrap();
+        assert!(!sys_off.contains_key("cache_control"), "system block must NOT be cached when policy=off");
+        let tools_off = off["tools"].as_array().unwrap();
+        assert!(!tools_off.last().unwrap().as_object().unwrap().contains_key("cache_control"),
+            "last tool must NOT be cached when policy=off");
     }
 }

@@ -635,6 +635,40 @@ pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Input tokens served from the prompt cache (Anthropic
+    /// `cache_read_input_tokens`). 0 for providers without prompt caching.
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+    /// Input tokens written into the cache (`cache_creation_input_tokens`).
+    #[serde(default)]
+    pub cache_creation_tokens: u32,
+}
+
+impl Default for TokenUsage {
+    fn default() -> Self {
+        Self {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        }
+    }
+}
+
+impl TokenUsage {
+    /// Construct usage with prompt + completion tokens (total auto-computed)
+    /// and zero cache tokens. Convenience for providers that don't report
+    /// cache stats.
+    pub fn new(prompt: u32, completion: u32) -> Self {
+        Self {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        }
+    }
 }
 
 // ─── InferenceStream ──────────────────────────────────────────────────────────
@@ -1037,6 +1071,40 @@ pub enum ConstrainedOutputPolicy {
     Always,
     /// Force-disable constrained decoding even when the provider would opt in.
     Never,
+}
+
+/// Policy for provider-side prompt caching (Anthropic `cache_control`).
+///
+/// Agent loops re-send a growing stable prefix (system prompt + tools +
+/// pinned context) on every iteration; caching that prefix is the single
+/// biggest efficiency lever. This policy lets a run opt in / out — useful
+/// for A/B replay (C2) measuring the cache hit ratio with caching on vs off.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PromptCachePolicy {
+    /// Use the provider's default caching behavior (Anthropic: cache the
+    /// system + tools prefix). This is the default — caching ON.
+    #[default]
+    Auto,
+    /// Force cache breakpoints on the stable prefix even if the provider
+    /// would otherwise skip them. (Same as Auto for Anthropic today.)
+    On,
+    /// Force-disable prompt caching — strip all `cache_control` breakpoints.
+    /// Used by the replay harness to measure the no-cache baseline.
+    Off,
+}
+
+impl PromptCachePolicy {
+    /// String form, stashed into `InferenceRequest.metadata["prompt_cache_policy"]`
+    /// so providers (which don't depend on oneai-agent) can read the policy.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
 }
 
 // ─── ParsedOutput ─────────────────────────────────────────────────────────────

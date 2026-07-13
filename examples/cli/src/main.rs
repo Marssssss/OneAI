@@ -57,6 +57,12 @@
 //!   oneai swarm config <p> — Show swarm configuration
 //!   oneai swarm agents <p> — Show swarm agent capabilities
 //!   oneai swarm run <task> — Execute a swarm task
+//!   oneai workflow list  — List DAG workflows + state graphs in the active pack
+//!   oneai workflow show <n> — Render a workflow DAG as ASCII
+//!   oneai workflow run <n> [task] — Execute a DAG workflow with a real LLM
+//!   oneai graph list     — List state graphs
+//!   oneai graph show <n> — Render a state graph as ASCII
+//!   oneai graph run <n> <task> — Execute a state graph with a real LLM
 
 mod config;
 mod cmd_chat;
@@ -80,6 +86,7 @@ mod cmd_token;
 mod cmd_team;
 mod cmd_handoff;
 mod cmd_swarm;
+mod cmd_workflow;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -215,6 +222,19 @@ enum Commands {
         #[command(subcommand)]
         action: SwarmAction,
     },
+    /// DAG workflows and cyclic StateGraphs — list/show/run the predefined
+    /// workflows and state graphs embedded in the active DomainPack
+    /// (e.g. CodingPack's code_review/debug/refactor/test workflows + the
+    /// react/plan/reflect/explore state graphs).
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
+    },
+    /// State graph commands — list/show/run cyclic StateGraphs
+    Graph {
+        #[command(subcommand)]
+        action: GraphAction,
+    },
     /// Show version information
     Version,
     /// Generate a project-instruction file (ONEAI.md / AGENTS.md / CLAUDE.md)
@@ -290,11 +310,29 @@ enum EvalAction {
         /// Output format (markdown, json, compact)
         #[arg(long, default_value = "markdown")]
         format: String,
+        /// Emit the efficiency axis: per-case inference/tool/overhead
+        /// wall-clock, tokens, iterations, cache hit ratio + three-axis
+        /// score (quality×tokens×latency).
+        #[arg(long)]
+        profile: bool,
+        /// Record the first case's trajectory (provider responses + tool-call
+        /// sequence + iteration count) to <path> as JSON, for later
+        /// `oneai eval replay <path>` determinism checks.
+        #[arg(long)]
+        record: Option<String>,
     },
     /// Run metrics only (no agent execution — uses expected answers as outputs)
     Score {
         /// Suite name
         name: String,
+    },
+    /// Replay a recorded trajectory (ghost replay) — re-runs the agent with a
+    /// frozen provider (no live LLM) and checks determinism: same tool calls
+    /// in the same order, within the recorded iteration count. The loop-test
+    /// primitive from Loop Engineering.
+    Replay {
+        /// Path to a recorded trajectory JSON file.
+        path: String,
     },
     /// Run SWE-bench instances (能力×成本×效率 three-axis eval).
     ///
@@ -718,6 +756,75 @@ enum SwarmAction {
     },
 }
 
+#[derive(Subcommand)]
+enum WorkflowAction {
+    /// List available DAG workflows and state graphs in the active domain pack
+    List {
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Render a workflow DAG as ASCII and list its steps
+    Show {
+        /// Workflow name
+        name: String,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Execute a DAG workflow end-to-end with a real LLM provider
+    Run {
+        /// Workflow name
+        name: String,
+        /// Optional task input (some workflows read {{task}}; others are
+        /// self-contained shell/prompt chains)
+        task: Option<String>,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// User id — namespaces cross-session memory/habits
+        #[arg(long)]
+        user: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphAction {
+    /// List available state graphs in the active domain pack
+    List {
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Render a state graph as ASCII
+    Show {
+        /// State graph name
+        name: String,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Execute a state graph with a task using a real LLM provider
+    Run {
+        /// State graph name
+        name: String,
+        /// The task to execute
+        task: String,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// User id
+        #[arg(long)]
+        user: Option<String>,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -756,13 +863,17 @@ fn main() {
         Some(Commands::Eval { action }) => {
             match action {
                 EvalAction::List => cmd_eval::cmd_eval_list(),
-                EvalAction::Run { name, format } => {
+                EvalAction::Run { name, format, profile, record } => {
                     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
-                    rt.block_on(cmd_eval::cmd_eval_run(&name, &format));
+                    rt.block_on(cmd_eval::cmd_eval_run(&name, &format, profile, record));
                 }
                 EvalAction::Score { name } => {
                     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
                     rt.block_on(cmd_eval::cmd_eval_score(&name));
+                }
+                EvalAction::Replay { path } => {
+                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                    rt.block_on(cmd_eval::cmd_eval_replay(&path));
                 }
                 EvalAction::Swebench {
                     dataset,
@@ -958,6 +1069,46 @@ fn main() {
                 SwarmAction::Agents { preset } => cmd_swarm::cmd_swarm_agents(&preset),
                 SwarmAction::Run { task, routing, preset, budget } => {
                     cmd_swarm::cmd_swarm_run(&task, &routing, preset.as_deref(), budget.as_deref());
+                }
+            }
+        }
+        Some(Commands::Workflow { action }) => {
+            match action {
+                WorkflowAction::List { domain } => {
+                    cmd_workflow::cmd_workflow_list(&config, domain.as_deref());
+                }
+                WorkflowAction::Show { name, domain } => {
+                    cmd_workflow::cmd_workflow_show(&name, &config, domain.as_deref());
+                }
+                WorkflowAction::Run { name, task, domain, model, user } => {
+                    cmd_workflow::cmd_workflow_run(
+                        &name,
+                        task.as_deref(),
+                        &config,
+                        domain.as_deref(),
+                        model.as_deref(),
+                        user.as_deref(),
+                    );
+                }
+            }
+        }
+        Some(Commands::Graph { action }) => {
+            match action {
+                GraphAction::List { domain } => {
+                    cmd_workflow::cmd_graph_list(&config, domain.as_deref());
+                }
+                GraphAction::Show { name, domain } => {
+                    cmd_workflow::cmd_graph_show(&name, &config, domain.as_deref());
+                }
+                GraphAction::Run { name, task, domain, model, user } => {
+                    cmd_workflow::cmd_graph_run(
+                        &name,
+                        &task,
+                        &config,
+                        domain.as_deref(),
+                        model.as_deref(),
+                        user.as_deref(),
+                    );
                 }
             }
         }

@@ -211,7 +211,7 @@ mod tests {
         async fn infer(&self, _req: InferenceRequest) -> Result<InferenceResponse> {
             Ok(InferenceResponse {
                 message: Message::assistant(self.response.clone()),
-                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
                 model: "mock-extractor".to_string(),
                 metadata: HashMap::new(),
             })

@@ -23,6 +23,7 @@ use std::time::Instant;
 use oneai_core::error::Result;
 use oneai_trace::TraceMetrics;
 
+use crate::efficiency::EfficiencyProfile;
 use crate::eval_result::{EvalReport, EvalResult};
 use crate::eval_metric::EvalJudge;
 use crate::swebench::instance::SwebenchInstance;
@@ -271,14 +272,24 @@ impl SwebenchRunner {
                 if let Some(ctx) = session.trace_context() {
                     let tree = ctx.build_tree();
                     result.trace_metrics = TraceMetrics::compute_from_tree(&tree.root_span);
-                    // 效率 axis detail: split the agent's wall-clock into
-                    // inference vs tool vs overhead, straight from the span tree.
-                    // (Only available now that trace_context is wired into the
-                    // loop — previously the tree held only the SESSION span.)
-                    let tb = trace_timing_breakdown(&tree.root_span, dur_agent_ms);
-                    if let Ok(json) = serde_json::to_string(&tb) {
+                    // 效率 axis: decompose the agent's wall-clock into inference
+                    // vs tool vs overhead straight from the span tree. Now uses
+                    // the shared `EfficiencyProfile` (generalized out of this
+                    // runner so every suite gets the efficiency axis), and is
+                    // also stamped into metadata["timing"] for the report +
+                    // leaderboard (backward-compatible field names).
+                    let prof = EfficiencyProfile::from_tree(
+                        &tree.root_span,
+                        dur_agent_ms as u64,
+                        0, // total_tokens backfilled after usage fetch below
+                        0,
+                        0,
+                        result.trace_metrics.avg_iterations.round() as usize,
+                    );
+                    if let Ok(json) = serde_json::to_string(&prof) {
                         result.set_metadata("timing", &json);
                     }
+                    result.efficiency = Some(prof);
                 }
             }
             Err(e) => {
@@ -293,48 +304,11 @@ impl SwebenchRunner {
                 result.estimated_calls = summary.estimated_call_count;
                 result.prompt_tokens = summary.prompt_tokens;
                 result.completion_tokens = summary.completion_tokens;
+                if let Some(p) = result.efficiency.as_mut() {
+                    p.total_tokens = summary.prompt_tokens + summary.completion_tokens;
+                }
             }
         }
-    }
-}
-
-/// Per-instance timing breakdown — wall-clock split of the run + a
-/// trace-derived decomposition of the agent's time.
-///
-/// `dur_agent_ms` is the measured wall-clock of the whole agent drive.
-/// `inference_ms` / `tool_ms` are summed from the trace span tree (LLM and
-/// TOOL spans respectively); `overhead_ms` is the agent time not attributable
-/// to either (context assembly, parsing, compression, etc.). Stamped into
-/// `EvalResult.metadata["timing"]` as JSON for the report + leaderboard.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct TimingBreakdown {
-    inference_ms: u64,
-    inference_calls: usize,
-    tool_ms: u64,
-    tool_calls: usize,
-    overhead_ms: u64,
-    dur_agent_ms: u64,
-}
-
-/// Sum LLM/TOOL span durations from the trace tree to decompose agent time.
-fn trace_timing_breakdown(root: &oneai_trace::Span, dur_agent_ms: u128) -> TimingBreakdown {
-    use oneai_trace::SpanKind;
-    let sum_kind = |kind: SpanKind| -> (u64, usize) {
-        let spans = root.spans_by_kind(kind);
-        let total: u64 = spans.iter().filter_map(|s| s.duration_ms).sum();
-        (total, spans.len())
-    };
-    let (inference_ms, inference_calls) = sum_kind(SpanKind::LLM);
-    let (tool_ms, tool_calls) = sum_kind(SpanKind::TOOL);
-    let attributed = inference_ms + tool_ms;
-    let overhead_ms = dur_agent_ms.saturating_sub(attributed as u128) as u64;
-    TimingBreakdown {
-        inference_ms,
-        inference_calls,
-        tool_ms,
-        tool_calls,
-        overhead_ms,
-        dur_agent_ms: dur_agent_ms as u64,
     }
 }
 
@@ -496,10 +470,13 @@ mod tests {
         // trace_context is wired into the loop. The mock runs one direct_answer
         // inference → at least one LLM span recorded.
         let timing = r.metadata.get("timing").expect("timing metadata present");
-        let tb: TimingBreakdown =
+        let tb: EfficiencyProfile =
             serde_json::from_str(timing).expect("timing JSON parses");
         assert!(tb.inference_calls >= 1, "expected ≥1 inference span, got {}", tb.inference_calls);
-        assert!(tb.dur_agent_ms > 0, "agent wall-clock should be > 0");
+        // NOTE: we deliberately do not assert `dur_ms > 0` — the mock provider
+        // returns in <1ms, so the agent wall-clock can round to 0ms. Real runs
+        // take seconds. The inference_calls ≥ 1 check above is the real signal
+        // that trace_context is wired into the loop.
         // The trace tree now holds LLM spans (inference_calls >= 1 above) — i.e.
         // trace_context is wired into the loop. We do NOT assert on
         // avg_inference_latency_ms here because the mock provider returns
@@ -584,7 +561,7 @@ mod tests {
         // 效率 axis: the domain branch must hand trace_context to the loop so
         // LLM spans land in the tree (previously infer=0ms×0 in real runs).
         let timing = r.metadata.get("timing").expect("timing metadata present");
-        let tb: TimingBreakdown =
+        let tb: EfficiencyProfile =
             serde_json::from_str(timing).expect("timing JSON parses");
         assert!(tb.inference_calls >= 1,
             "domain branch should produce ≥1 LLM span, got {}", tb.inference_calls);
@@ -609,7 +586,7 @@ mod tests {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-        };
+            ..Default::default()};
         let provider: std::sync::Arc<dyn oneai_core::traits::LlmProvider> =
             std::sync::Arc::new(oneai_agent::mock_provider::MockProvider::from_script(
                 vec![oneai_agent::mock_provider::ScriptedResponse::custom(

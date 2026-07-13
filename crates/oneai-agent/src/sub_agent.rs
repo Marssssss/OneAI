@@ -703,6 +703,7 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None, // Sub-agents inherit trace from parent loop
             plan_mode: false, // Sub-agents never run in plan mode
+            prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
         };
 
         // Create a basic context assembler (no domain sources for sub-agents)

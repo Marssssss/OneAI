@@ -1521,11 +1521,24 @@ impl AppBuilder {
             interaction_gate.clone(),
         ));
 
-        // Build workflow executor with the tool registry
-        let workflow_executor = Arc::new(WorkflowExecutor::new(
-            Arc::new(std::collections::HashMap::new()),
-            interaction_gate.clone(),
-        ));
+        // Build workflow executor with the tool registry. When a direct LLM
+        // provider is set, attach it so prompt-based DAG steps run real
+        // inference (otherwise prompt steps only emit interpolated text).
+        // The provider_pool-config auto-build path resolves later (below), so
+        // pool-only configs still get a provider at the App level — but DAG
+        // prompt-steps there fall back to no-inference until a later pass.
+        let workflow_executor = if let Some(provider) = &self.provider {
+            Arc::new(WorkflowExecutor::with_provider(
+                Arc::new(std::collections::HashMap::new()),
+                interaction_gate.clone(),
+                provider.clone(),
+            ))
+        } else {
+            Arc::new(WorkflowExecutor::new(
+                Arc::new(std::collections::HashMap::new()),
+                interaction_gate.clone(),
+            ))
+        };
 
         // Eagerly register domain pack tools at build time
         if let Some(domain) = &merged_domain_pack {

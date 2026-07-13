@@ -1507,7 +1507,7 @@ tokio = { version = "1", features = ["full"] }
         async fn infer(&self, _req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
             Ok(InferenceResponse {
                 message: Message::assistant(self.reply.clone()),
-                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
                 model: "stub".to_string(),
                 metadata: std::collections::HashMap::new(),
             })

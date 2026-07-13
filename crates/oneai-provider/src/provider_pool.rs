@@ -860,7 +860,7 @@ mod tests {
                     prompt_tokens: 100,
                     completion_tokens: 50,
                     total_tokens: 150,
-                },
+            ..Default::default()},
                 model: self.config.model_name.clone().unwrap_or_default(),
                 metadata: HashMap::new(),
             })
