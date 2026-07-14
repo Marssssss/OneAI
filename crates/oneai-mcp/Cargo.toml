@@ -3,6 +3,7 @@ name = "oneai-mcp"
 description = "OneAI MCP — MCP Server hosting and Plugin Registry for the Model Context Protocol ecosystem"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
 license.workspace = true
 
 [dependencies]

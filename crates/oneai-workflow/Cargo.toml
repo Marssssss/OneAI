@@ -3,6 +3,8 @@ name = "oneai-workflow"
 description = "OneAI workflow compiler, DAG, validator, executor, StateGraph, and StateGraphExecutor"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

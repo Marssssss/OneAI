@@ -5,9 +5,10 @@
 > **One AI, Every Platform** — A cross-platform AI agent framework built in Rust: modular, type-safe, domain-pluggable, evaluable, natively multi-agent. One Rust core, six native targets.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Crates: 24](https://img.shields.io/badge/Crates-24-orange.svg)]()
-[![Tests: 1378](https://img.shields.io/badge/Tests-1378-green.svg)]()
-[![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-blue.svg)]()
+[![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
+[![Crates: 25](https://img.shields.io/badge/Crates-25-orange.svg)]()
+[![Tests: 1461](https://img.shields.io/badge/Tests-1461-green.svg)]()
+[![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-blue.svg)]()
 [![Rust: 1.74+](https://img.shields.io/badge/Rust-edition%202021-dea584.svg)]()
 [![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
 
@@ -51,6 +52,12 @@
 
 ## Quick start (CLI — 30 seconds)
 
+### 0. Download the macOS app (native, no build)
+
+Grab `OneAI-1.0.0-macos.zip` from [GitHub Releases](https://github.com/Marssssss/OneAI/releases), unzip, and drop `OneAI.app` into Applications.
+
+> The .app is **unsigned / un-notarized** (universal arm64 + x86_64, macOS 13+). The first launch trips Gatekeeper: in Finder, **right-click → Open**, confirm, and it launches normally. To build from source: `./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`.
+
 ### 1. Configure a provider
 
 OneAI works with any **OpenAI-compatible endpoint** (OpenAI, Anthropic, Gemini, Ollama, plus DashScope, DeepSeek, vLLM, …). Set credentials via env vars or a config file — env vars win.
@@ -86,8 +93,8 @@ theme = "dark"
 ### 2. Launch the TUI
 
 ```bash
-cargo run -p oneai-cli-demo
-# or: cargo install --path examples/cli  then just:  oneai
+cargo run -p oneai-cli
+# or install the release: cargo install oneai-cli, then just: oneai
 ```
 
 Drop into the interactive agent. Type a task and watch the full pipeline run live: streaming thinking bubbles, tool calls, plan checklist, usage/token stats, trace logs.
@@ -176,7 +183,7 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 
 **Core principles:**
 
-- **Modular** — 24 independent crates, each with one job; use what you need.
+- **Modular** — 25 independent crates, each with one job; use what you need.
 - **Type-safe** — sealed-enum hierarchies (every public enum is `#[non_exhaustive]`), trait-driven abstractions, no stringly-typed config.
 - **Domain-pluggable** — the DomainPack system makes domain knowledge declarative, composable, and one-line switchable; it can be validated against a JSON Schema and shared via a pack market.
 - **Natively multi-agent** — SubAgent, Team coordination (Coordinate/Route/Collaborate/Debate), Handoff protocol, Swarm orchestration (capability-driven routing); plus an engine-level **GroupChat primitive** powering scenario-based multi-role conversations.
@@ -294,31 +301,31 @@ flowchart TB
 
 | Crate | What it does | Tests |
 |-------|--------------|-------|
-| `oneai-core` | core types, traits, PermissionLevel, Budget, PlatformCapabilities | 259 |
-| `oneai-provider` | LLM providers (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter | 95 |
-| `oneai-parser` | 3-layer output-parse defense | 12 |
-| `oneai-memory` | memory system (STM, LTM, compression, HNSW, MemoryManager + persistence) | 59 |
-| `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 12 tools | 56 |
-| `oneai-skill` | skill selector + registry + built-in domain skills | 8 |
-| `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127 |
-| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 194 |
-| `oneai-rag` | RAG + EmbeddingService (OpenAI/Anthropic/Voyage/Ollama/FastEmbed) | 61 |
-| `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44 |
-| `oneai-scheduler` | in-memory task scheduler | 6 |
-| `oneai-persistence` | progressive checkpoints + SQLite (session/usage) backends | 40 |
-| `oneai-a2a` | A2A protocol SDK — client + server host + DomainPack→AgentCard | 88 |
-| `oneai-wasm` | WASM sandbox engine — Wasmtime + WasmTool + module registry | 95 |
-| `oneai-eval` | eval framework — cases/metrics/runner/3 suites + SWE-bench three-axis | 86 |
-| `oneai-studio` | Studio Web UI — axum HTTP+WS + D3.js StateGraph viz + checkpoint time-travel | 34 |
-| `oneai-mcp` | MCP ecosystem — host + plugin registry + config | 57 |
-| `oneai-app` | app integration layer (AppBuilder) | 19 |
-| `oneai-trace` | OpenInference-compatible tracer | 14 |
-| `oneai-uniffi` | UniFFI binding definitions + hand-written `extern "C"` facade (reused by C#/Windows, C++/HarmonyOS) | 18 |
-| `oneai-platform-desktop` | desktop platform (macOS/Windows/Linux) | 2 |
-| `oneai-platform-android` | Android platform | 2 |
-| `oneai-platform-ios` | iOS platform | 1 |
-| `oneai-platform-harmony` | HarmonyOS platform | 1 |
-| **Total** | | **1378** |
+| `oneai-core` | core types, traits, PermissionLevel, Budget, PlatformCapabilities | 262|
+| `oneai-provider` | LLM providers (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter | 111|
+| `oneai-parser` | 3-layer output-parse defense | 12|
+| `oneai-memory` | memory system (STM, LTM, compression, HNSW, MemoryManager + persistence) | 60|
+| `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 12 tools | 63|
+| `oneai-skill` | skill selector + registry + built-in domain skills | 8|
+| `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127|
+| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 219|
+| `oneai-rag` | RAG + EmbeddingService (OpenAI/Anthropic/Voyage/Ollama/FastEmbed) | 61|
+| `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44|
+| `oneai-scheduler` | in-memory task scheduler | 6|
+| `oneai-persistence` | progressive checkpoints + SQLite (session/usage) backends | 46|
+| `oneai-a2a` | A2A protocol SDK — client + server host + DomainPack→AgentCard | 88|
+| `oneai-wasm` | WASM sandbox engine — Wasmtime + WasmTool + module registry | 95|
+| `oneai-eval` | eval framework — cases/metrics/runner/3 suites + SWE-bench three-axis | 95|
+| `oneai-studio` | Studio Web UI — axum HTTP+WS + D3.js StateGraph viz + checkpoint time-travel | 34|
+| `oneai-mcp` | MCP ecosystem — host + plugin registry + config | 57|
+| `oneai-app` | app integration layer (AppBuilder) | 19|
+| `oneai-trace` | OpenInference-compatible tracer | 14|
+| `oneai-uniffi` | UniFFI binding definitions + hand-written `extern "C"` facade (reused by C#/Windows, C++/HarmonyOS) | 34|
+| `oneai-platform-desktop` | desktop platform (macOS/Windows/Linux) | 2|
+| `oneai-platform-android` | Android platform | 2|
+| `oneai-platform-ios` | iOS platform | 1|
+| `oneai-platform-harmony` | HarmonyOS platform | 1|
+| **Total** | | **1461** |
 
 > Plus `oneai-staticlib` (a crate-type=staticlib packaging crate, built only by the Apple/Windows build scripts, excluded from `default-members`, so not counted in the 24).
 
@@ -725,7 +732,7 @@ oneai/
 
 ```bash
 cargo build                      # build the whole workspace
-cargo test                       # all 1378 tests (24 crates)
+cargo test                       # all 1461 tests (25 crates)
 cargo test -p oneai-agent        # tests for a single crate
 cargo test -p oneai-agent plan   # a single test/module
 cargo clippy --workspace --all-targets   # keep lints clean

@@ -1,11 +1,16 @@
 [package]
-name = "oneai-cli-demo"
+name = "oneai-cli"
 description = "OneAI CLI — interactive REPL and non-interactive inference"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["ai", "agent", "cli", "tui", "llm"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "oneai-cli"
+name = "oneai"
 path = "src/main.rs"
 
 [dependencies]

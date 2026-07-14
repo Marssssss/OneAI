@@ -3,6 +3,7 @@ name = "oneai-studio"
 description = "OneAI Studio — Playground/Studio Web UI for visualizing agent execution, StateGraphs, and checkpoint time-travel"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
 license.workspace = true
 
 [dependencies]

@@ -3,6 +3,8 @@ name = "oneai-agent"
 description = "OneAI agent paradigms (Plan, ReAct, Reflection, Parallel)"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

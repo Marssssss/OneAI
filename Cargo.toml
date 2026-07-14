@@ -68,10 +68,15 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/oneai-project/oneai"
+repository = "https://github.com/Marssssss/OneAI"
+homepage = "https://github.com/Marssssss/OneAI"
+readme = "README.md"
+rust-version = "1.74"
+keywords = ["ai", "agent", "llm", "framework", "cross-platform"]
+categories = ["api-bindings", "development-tools", "science::robotics"]
 
 [workspace.dependencies]
 # Core
@@ -136,31 +141,41 @@ rmcp = "0.1"
 # is library-only, which blocked library-mode binding generation).
 uniffi = "0.32"
 
-# Internal crates (shared)
-oneai-core = { path = "crates/oneai-core" }
-oneai-provider = { path = "crates/oneai-provider" }
-oneai-agent = { path = "crates/oneai-agent" }
-oneai-workflow = { path = "crates/oneai-workflow" }
-oneai-memory = { path = "crates/oneai-memory" }
-oneai-tool = { path = "crates/oneai-tool" }
-oneai-skill = { path = "crates/oneai-skill" }
-oneai-parser = { path = "crates/oneai-parser" }
-oneai-rag = { path = "crates/oneai-rag" }
-oneai-scheduler = { path = "crates/oneai-scheduler" }
-oneai-persistence = { path = "crates/oneai-persistence" }
-oneai-app = { path = "crates/oneai-app" }
-oneai-uniffi = { path = "crates/oneai-uniffi" }
-oneai-platform-desktop = { path = "crates/oneai-platform-desktop" }
-oneai-platform-android = { path = "crates/oneai-platform-android" }
-oneai-platform-ios = { path = "crates/oneai-platform-ios" }
-oneai-platform-harmony = { path = "crates/oneai-platform-harmony" }
-oneai-trace = { path = "crates/oneai-trace" }
-oneai-domain = { path = "crates/oneai-domain" }
-oneai-a2a = { path = "crates/oneai-a2a" }
-oneai-wasm = { path = "crates/oneai-wasm" }
-oneai-eval = { path = "crates/oneai-eval" }
-oneai-studio = { path = "crates/oneai-studio" }
-oneai-mcp = { path = "crates/oneai-mcp" }
+# Internal crates (shared) — `version` is REQUIRED so `cargo publish` rewrites
+# the path dependency into a registry requirement (path deps without a version
+# are rejected by `cargo publish`). Bump in lockstep with [workspace.package].
+oneai-core = { path = "crates/oneai-core", version = "1.0.0" }
+oneai-provider = { path = "crates/oneai-provider", version = "1.0.0" }
+oneai-agent = { path = "crates/oneai-agent", version = "1.0.0" }
+oneai-workflow = { path = "crates/oneai-workflow", version = "1.0.0" }
+oneai-memory = { path = "crates/oneai-memory", version = "1.0.0" }
+oneai-tool = { path = "crates/oneai-tool", version = "1.0.0" }
+oneai-skill = { path = "crates/oneai-skill", version = "1.0.0" }
+oneai-parser = { path = "crates/oneai-parser", version = "1.0.0" }
+oneai-rag = { path = "crates/oneai-rag", version = "1.0.0" }
+oneai-scheduler = { path = "crates/oneai-scheduler", version = "1.0.0" }
+oneai-persistence = { path = "crates/oneai-persistence", version = "1.0.0" }
+oneai-app = { path = "crates/oneai-app", version = "1.0.0" }
+oneai-uniffi = { path = "crates/oneai-uniffi", version = "1.0.0" }
+oneai-platform-desktop = { path = "crates/oneai-platform-desktop", version = "1.0.0" }
+oneai-platform-android = { path = "crates/oneai-platform-android", version = "1.0.0" }
+oneai-platform-ios = { path = "crates/oneai-platform-ios", version = "1.0.0" }
+oneai-platform-harmony = { path = "crates/oneai-platform-harmony", version = "1.0.0" }
+oneai-trace = { path = "crates/oneai-trace", version = "1.0.0" }
+oneai-domain = { path = "crates/oneai-domain", version = "1.0.0" }
+oneai-a2a = { path = "crates/oneai-a2a", version = "1.0.0" }
+oneai-wasm = { path = "crates/oneai-wasm", version = "1.0.0" }
+oneai-eval = { path = "crates/oneai-eval", version = "1.0.0" }
+oneai-studio = { path = "crates/oneai-studio", version = "1.0.0" }
+oneai-mcp = { path = "crates/oneai-mcp", version = "1.0.0" }
 
 # WASM
 wasmtime = "45"
+
+# Release profile — smaller/faster binaries for the TUI (`oneai-cli`) and the
+# staticlib consumed by native apps. Harmless for lib crates (crates.io ships
+# source, not artifacts).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -3,6 +3,8 @@ name = "oneai-platform-desktop"
 description = "OneAI desktop platform adapter — native UI approval gates for macOS, Windows, and Linux"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 oneai-core = { workspace = true }

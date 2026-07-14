@@ -3,6 +3,8 @@ name = "oneai-skill"
 description = "OneAI SKILL system with progressive disclosure and lightweight selector"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

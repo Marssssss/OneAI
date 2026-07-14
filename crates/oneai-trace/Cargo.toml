@@ -3,6 +3,8 @@ name = "oneai-trace"
 description = "OneAI Trajectory Logger — OpenInference-compatible trace mechanism for agent evaluation"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = ["trace"]

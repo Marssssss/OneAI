@@ -3,6 +3,9 @@ name = "oneai-channel-demo"
 description = "Rust example demonstrating direct ChannelApprovalGate usage with manual approval flow"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
 
 [[bin]]
 name = "oneai-channel-demo"

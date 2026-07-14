@@ -3,6 +3,8 @@ name = "oneai-uniffi"
 description = "OneAI UniFFI binding definitions for cross-platform foreign-language interfaces"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [lib]
 # Name `oneai` so the cdylib is `liboneai.so` / `liboneai.dylib` — matches

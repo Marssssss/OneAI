@@ -3,6 +3,8 @@ name = "oneai-memory"
 description = "OneAI memory system (short-term, long-term, context compression)"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

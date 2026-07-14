@@ -3,6 +3,8 @@ name = "oneai-scheduler"
 description = "OneAI task scheduling with platform heartbeat"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

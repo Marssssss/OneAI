@@ -3,6 +3,8 @@ name = "oneai-app"
 description = "OneAI application integration layer — wires all modules together"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

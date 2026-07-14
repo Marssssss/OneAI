@@ -43,21 +43,49 @@ mkdir -p "$BUILD_DIR/OneAI.app/Contents/MacOS" "$BUILD_DIR/headers"
 cp "$ONEAI_ROOT/bindings/swift/oneaiFFI.h"         "$BUILD_DIR/headers/oneaiFFI.h"
 cp "$ONEAI_ROOT/bindings/swift/oneaiFFI.modulemap" "$BUILD_DIR/headers/module.modulemap"
 
-echo "── Compiling ${#SOURCES[@]} Swift sources [$PROFILE]"
-swiftc \
-  -target arm64-apple-macos13 \
-  "${SWIFT_OPTS[@]}" \
-  -sdk "$(xcrun --show-sdk-path --sdk macosx)" \
-  -I "$BUILD_DIR/headers" \
-  -L "$APPLE_DIR/lib" -loneai \
-  -lz -lresolv -lc++ \
-  -framework AppKit -framework SwiftUI -framework Foundation \
-  -framework SystemConfiguration -framework CoreFoundation -framework Security -framework CFNetwork \
-  -framework Speech -framework AVFoundation \
-  -module-name OneAI \
-  -emit-executable \
-  "${SOURCES[@]}" \
-  -o "$BUILD_DIR/OneAI.app/Contents/MacOS/OneAI" 2>&1 | tail -60
+APP_EXE="$BUILD_DIR/OneAI.app/Contents/MacOS/OneAI"
+mkdir -p "$(dirname "$APP_EXE")"
+SDK="$(xcrun --show-sdk-path --sdk macosx)"
+
+# Universal (arm64 + x86_64) executable. liboneai.a is already universal
+# (staged by scripts/build_apple.sh), so we compile Swift per-arch and
+# `lipo -create` a fat binary. Either arch failing is non-fatal — the other
+# slice still ships a working app.
+MAC_ARCHS=(arm64 x86_64)
+SLICES=()
+for arch in "${MAC_ARCHS[@]}"; do
+  echo "── Compiling ${#SOURCES[@]} Swift sources [$PROFILE / $arch]"
+  if swiftc \
+        -target "${arch}-apple-macos13" \
+        "${SWIFT_OPTS[@]}" \
+        -sdk "$SDK" \
+        -I "$BUILD_DIR/headers" \
+        -L "$APPLE_DIR/lib" -loneai \
+        -lz -lresolv -lc++ \
+        -framework AppKit -framework SwiftUI -framework Foundation \
+        -framework SystemConfiguration -framework CoreFoundation -framework Security -framework CFNetwork \
+        -framework Speech -framework AVFoundation \
+        -module-name OneAI \
+        -emit-executable \
+        "${SOURCES[@]}" \
+        -o "$BUILD_DIR/OneAI.$arch" >"$BUILD_DIR/swiftc-$arch.log" 2>&1; then
+    SLICES+=("$BUILD_DIR/OneAI.$arch")
+  else
+    echo "  ⚠ $arch slice failed (see $BUILD_DIR/swiftc-$arch.log):"
+    tail -40 "$BUILD_DIR/swiftc-$arch.log"
+  fi
+done
+
+if [[ ${#SLICES[@]} -eq 0 ]]; then
+  echo "ERROR: no architecture compiled successfully" >&2
+  exit 1
+fi
+if [[ ${#SLICES[@]} -eq 1 ]]; then
+  cp "${SLICES[0]}" "$APP_EXE"
+else
+  lipo -create "${SLICES[@]}" -output "$APP_EXE"
+fi
+rm -f "$BUILD_DIR/OneAI."*
 
 cp "$MACOS_DIR/Info.plist" "$BUILD_DIR/OneAI.app/Contents/Info.plist"
 
@@ -71,6 +99,18 @@ else
   echo "  (no OneAI.icns — icon falls back to default; generate via iconutil)"
 fi
 
+# — Distribution zip (unsigned) —————————————————————————————
+# The app is NOT code-signed or notarized. Users must right-click → Open on
+# first launch to bypass Gatekeeper's "unidentified developer" quarantine.
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MACOS_DIR/Info.plist" 2>/dev/null || echo "1.0.0")"
+ZIP_NAME="OneAI-${APP_VERSION}-macos.zip"
+
 echo ""
-echo "── Built $BUILD_DIR/OneAI.app"
-echo "   Run: open $BUILD_DIR/OneAI.app"
+echo "── Packaging $ZIP_NAME (unsigned — right-click → Open on first launch)"
+( cd "$BUILD_DIR" && rm -f "$ZIP_NAME" && zip -rSYq "$ZIP_NAME" OneAI.app -x '*.DS_Store' )
+
+echo ""
+echo "── Built $BUILD_DIR/OneAI.app  (+ $BUILD_DIR/$ZIP_NAME)"
+echo "   Run:     open $BUILD_DIR/OneAI.app"
+echo "   Distrib: $BUILD_DIR/$ZIP_NAME  (unsigned; Gatekeeper: right-click → Open)"
+echo "   Slices:  $(lipo -archs "$APP_EXE" 2>/dev/null || echo '?')"

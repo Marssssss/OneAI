@@ -3,6 +3,8 @@ name = "oneai-tool"
 description = "OneAI tool management, registry, MCP integration, and approval gates"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
