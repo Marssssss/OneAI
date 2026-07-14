@@ -10,10 +10,10 @@
 #   pwsh ./scripts/build_windows.ps1 -Debug
 #
 # NOTE: uniffi-bindgen 0.32 has NO C# generator (only kotlin/swift/python/
-# ruby). The C# binding is therefore NOT auto-generated here. Phase 3 picks
-# one of: (a) uniffi-bindgen-cs third-party generator, or (b) a hand-rolled
-# `extern "C"` JSON facade P/Invoked from C#. See bindings/csharp/README.md.
-# This script only builds the native oneai.dll that whichever route consumes.
+# ruby). The C# binding is therefore NOT auto-generated here. The app uses a
+# hand-rolled `extern "C"` JSON facade (crates/oneai-uniffi/src/c_facade.rs)
+# P/Invoked from C#. See bindings/csharp/README.md + platforms/windows/README.
+# This script only builds the native oneai.dll that the C# app consumes.
 # ──────────────────────────────────────────────────────────────────────
 [CmdletBinding()]
 param(
@@ -21,25 +21,50 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root   = Resolve-Path (Join-Path $PSScriptRoot "..")
-$WinDir = Join-Path $Root "platforms/windows"
-$Triple = "x86_64-pc-windows-msvc"
-$Profile = if ($Debug) { "debug" } else { "release" }
+$Root    = Resolve-Path (Join-Path $PSScriptRoot "..")
+$WinDir  = Join-Path $Root "platforms/windows"
+$Triple  = "x86_64-pc-windows-msvc"
+# NOTE: do NOT name this `$Profile` — PowerShell variables are case-insensitive
+# and `$PROFILE` is a read-only automatic variable (the profile-script path).
+# Assigning to it throws "Cannot overwrite variable Profile because it is
+# read-only or a constant", which (with $ErrorActionPreference=Stop) aborts
+# the script before cargo even runs. Hence the explicit `$BuildProfile` name.
+$BuildProfile = if ($Debug) { "debug" } else { "release" }
 
-Write-Host "-- Building oneai.dll for $Triple [$Profile]"
-cargo build "--$Profile" -p oneai-uniffi --target $Triple
+# --- prerequisites -----------------------------------------------------
+$ErrorActionPreference = "Stop"
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+  Throw "cargo not found on PATH. Install Rust (https://rustup.rs) and ensure the MSVC toolchain (Visual Studio with the 'Desktop development with C++' workload) is installed."
+}
+$installed = & rustup target list --installed 2>$null
+if (-not ($installed -contains $Triple)) {
+  Throw "Rust target $Triple is not installed. Run: rustup target add $Triple"
+}
 
-$Src = Join-Path $Root "target/$Triple/$Profile"
+# --- build -------------------------------------------------------------
+Write-Host "-- Building oneai.dll for $Triple [$BuildProfile]"
+cargo build "--$BuildProfile" -p oneai-uniffi --target $Triple
+if ($LASTEXITCODE -ne 0) { Throw "cargo build failed (exit $LASTEXITCODE)" }
+
+# --- stage -------------------------------------------------------------
+# On MSVC a cdylib named `oneai` emits oneai.dll (+ oneai.dll.lib import lib).
+$Src = Join-Path $Root "target/$Triple/$BuildProfile"
 $Dll = Join-Path $Src "oneai.dll"
-if (-not (Test-Path $Dll)) {
-  $Lib = Join-Path $Src "oneai.dll.lib"   # import lib, if any
-  if (-not (Test-Path $Lib)) { Throw "oneai.dll not found at $Src" }
+if (-not (Test-Path -LiteralPath $Dll)) {
+  $Lib = Join-Path $Src "oneai.dll.lib"   # import lib, present if any export
+  if (-not (Test-Path -LiteralPath $Lib)) {
+    Throw "oneai.dll not found at $Src — the build produced no artifact. Check cargo output above."
+  }
+  # Import lib exists but the dll itself doesn't — this shouldn't happen for a
+  # cdylib, but guard the copy below rather than failing with a confusing msg.
+  Throw "oneai.dll missing (only the import lib $Lib was produced). Re-run the build."
 }
 
 $Out = Join-Path $WinDir "native"
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
-Copy-Item -Force (Join-Path $Src "oneai.dll") $Out
+Copy-Item -Force -LiteralPath $Dll $Out
 Write-Host "-- Staged oneai.dll -> $Out"
 
 Write-Host ""
-Write-Host "-- Done. Open platforms/windows/OneAI.sln in Visual Studio to build the app."
+Write-Host "-- Done. Open platforms/windows/OneAI.sln in Visual Studio to build the app,"
+Write-Host "   or:  dotnet build platforms\windows\OneAI.sln -c Debug"

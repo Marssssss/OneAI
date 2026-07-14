@@ -1,36 +1,34 @@
-// Provider config persistence — Windows ApplicationData LocalSettings
+// Provider config persistence — a JSON file under %LOCALAPPDATA%\OneAI
 // (the counterpart of Android SharedPreferences / macOS UserDefaults).
+//
+// The app is unpackaged, so `Windows.Storage.ApplicationData.Current` is
+// unavailable (no package identity). Use a plain JSON file instead.
 
 using System;
-using Windows.Storage;
+using System.IO;
+using System.Text.Json;
 using OneAI.Native;
 
 namespace OneAI.Services;
 
 public static class ProviderStore
 {
-    private const string Container = "oneai_provider";
-    private static ApplicationDataContainer Settings =>
-        ApplicationData.Current.LocalSettings.CreateContainer(Container, ApplicationDataCreateDisposition.Always);
-
     public static ProviderConfig Load()
     {
-        var c = new ProviderConfig
+        try
         {
-            Kind = (string?)Settings.Values["kind"] ?? "openai",
-            Model = (string?)Settings.Values["model"] ?? "gpt-4o-mini",
-            ApiKey = (string?)Settings.Values["apiKey"] ?? "",
-            BaseUrl = (string?)Settings.Values["baseUrl"] ?? "",
-        };
-        return c;
+            var json = File.ReadAllText(AppPaths.ProviderConfigPath);
+            var c = JsonSerializer.Deserialize<ProviderConfig>(json);
+            if (c is { }) return c;
+        }
+        catch { /* first run / corrupt — fall through to defaults */ }
+        return new ProviderConfig();
     }
 
     public static void Save(ProviderConfig c)
     {
-        Settings.Values["kind"] = c.Kind;
-        Settings.Values["model"] = c.Model;
-        Settings.Values["apiKey"] = c.ApiKey ?? "";
-        Settings.Values["baseUrl"] = c.BaseUrl ?? "";
+        try { File.WriteAllText(AppPaths.ProviderConfigPath, JsonSerializer.Serialize(c)); }
+        catch { /* best-effort */ }
     }
 
     public static void ApplyPreset(ProviderConfig c, string newKind)
@@ -45,6 +43,5 @@ public static class ProviderStore
         }
     }
 
-    public static string DbPath =>
-        System.IO.Path.Combine(ApplicationData.Current.LocalFolder.Path, "oneai.db");
+    public static string DbPath => AppPaths.DbPath;
 }

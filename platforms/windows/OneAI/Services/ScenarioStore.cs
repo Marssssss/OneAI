@@ -1,12 +1,12 @@
 // ScenarioStore — CRUD + persistence for Agents & Scenarios, plus the built-in
 // preset scenarios (面试演练 / 语言伙伴 / 辩论 / 写作工坊 / 头脑风暴). Port of
-// macOS Sources/AgentStore.swift. Persists to LocalFolder/oneai_scenarios.json
-// so user-edited scenarios survive restarts.
+// macOS Sources/AgentStore.swift. Persists to %LOCALAPPDATA%\OneAI\
+// oneai_scenarios.json (unpackaged apps can't use ApplicationData) so
+// user-edited scenarios survive restarts.
 
 using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Windows.Storage;
 using OneAI.ViewModels;
 
 namespace OneAI.Services;
@@ -29,8 +29,7 @@ public class ScenarioStore : ObservableObject
 
     public ObservableCollection<Scenario> Scenarios { get; } = new();
 
-    private static string FileUrl =>
-        System.IO.Path.Combine(ApplicationData.Current.LocalFolder.Path, "oneai_scenarios.json");
+    private static string FileUrl => AppPaths.ScenariosPath;
 
     public ScenarioStore()
     {

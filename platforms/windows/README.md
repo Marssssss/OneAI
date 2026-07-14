@@ -40,7 +40,8 @@ OneAI/                      # the WinUI 3 app (net8.0-windows10.0.19041, unpacka
                             # ReviewLoopConfig / Scenario.SpecDto (per-member visibility →
                             # background fold) — port of macOS Models.swift
   Services/
-    ProviderStore.cs       # LocalSettings persistence + provider presets + db path
+    ProviderStore.cs       # JSON-file persistence (%LOCALAPPDATA%\OneAI) + provider presets + db path
+    AppPaths.cs             # %LOCALAPPDATA%\OneAI dir + provider/db/scenarios paths (unpackaged-safe)
     MarkdownHelper.cs      # splitMarkdown (code/heading/blockquote/ordered+unordered list/
                             # table) + inline bold/code — port of macOS Markdown.swift
     ScenarioStore.cs       # JSON persistence (schema-versioned) + 5 built-in presets
@@ -99,9 +100,10 @@ entry points + scenario JSON shape). JSON event shapes match `ChatEvent` in `Mod
   "已深度思考"), tool steps (`✓/✗/⚙ name(args)` + truncated result), retry-on-error,
   copy/share context menu, dark theme (follows system), first-run hint, stop button →
   `oneai_group_interrupt` / `oneai_session_interrupt`.
-- Provider settings (openai/anthropic/ollama presets) persisted in
-  `ApplicationData.Current.LocalSettings`; SQLite db at
-  `ApplicationData.Current.LocalFolder/oneai.db`; scenarios at `oneai_scenarios.json`.
+- Provider settings (openai/anthropic/ollama presets) persisted as a JSON file;
+  SQLite db and the scenarios file all live under `%LOCALAPPDATA%\OneAI\`
+  (`provider.json`, `oneai.db`, `oneai_scenarios.json`). The app is unpackaged, so
+  `Windows.Storage.ApplicationData` (needs package identity) is NOT used.
 - **Voice dictation deferred** — the input bar has a disabled mic placeholder button
   (WinRT speech recognition needs package identity in unpackaged WinUI 3; tracked as a
   follow-up).
