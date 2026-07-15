@@ -64,3 +64,44 @@ impl Default for SkillSelector {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oneai_core::SkillDescriptor;
+
+    #[tokio::test]
+    async fn test_skill_selector_keyword_matching() {
+        let selector = SkillSelector::new();
+        let skills = vec![
+            SkillDescriptor {
+                name: "shell".to_string(),
+                description: "Execute shell commands".to_string(),
+                prompt_template: "You can use shell.".to_string(),
+                trigger_keywords: vec!["shell".to_string(), "command".to_string()],
+                embedding: None,
+            },
+            SkillDescriptor {
+                name: "code_review".to_string(),
+                description: "Review code".to_string(),
+                prompt_template: "You can review code.".to_string(),
+                trigger_keywords: vec!["review".to_string(), "code".to_string()],
+                embedding: None,
+            },
+            SkillDescriptor {
+                name: "calculator".to_string(),
+                description: "Calculate numbers".to_string(),
+                prompt_template: "You can calculate.".to_string(),
+                trigger_keywords: vec!["calculate".to_string(), "math".to_string()],
+                embedding: None,
+            },
+        ];
+
+        let result = selector
+            .select_skills("I need to run a shell command", &skills)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "shell");
+    }
+}

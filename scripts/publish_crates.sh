@@ -1,62 +1,64 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────
-# OneAI crates.io publish — dependency-topological order.
+# OneAI crates.io publish — correct dependency-topological order
+# (normal + dev deps). Computed by Kahn's algorithm; edit only if the
+# crate graph changes.
 #
-# Run once after `cargo login` (paste your crates.io API token).
-# Each crate is published in order so downstream crates resolve their
-# already-published path-deps (rewritten to registry requirements).
+# Prereq: `cargo login` (paste your crates.io API token once).
 #
 #   cargo login
 #   ./scripts/publish_crates.sh
 #
-# Re-running is safe-ish: already-published crates error with
-# "already exists" and abort the run — comment them out or use --dry-run.
+# Idempotent: if a crate is already on the registry (e.g. re-running after
+# a partial failure), the script detects "already exists" and continues.
 # ──────────────────────────────────────────────────────────────────────
-set -euo pipefail
+set -uo pipefail
 
 CRATES=(
-  # 1. root
   oneai-core
-  # 2. leaves / mid (depend only on core + external)
-  oneai-trace
   oneai-parser
-  oneai-domain
-  oneai-memory
+  oneai-persistence
+  oneai-provider
   oneai-rag
+  oneai-scheduler
   oneai-skill
   oneai-tool
-  oneai-workflow
-  oneai-persistence
-  oneai-scheduler
-  oneai-provider
-  oneai-a2a
-  oneai-wasm
   oneai-mcp
-  oneai-eval
-  oneai-studio
-  oneai-platform-desktop
-  oneai-platform-android
-  oneai-platform-ios
-  oneai-platform-harmony
-  # 3. agent (depends on mid)
+  oneai-trace
+  oneai-workflow
+  oneai-domain
+  oneai-a2a
+  oneai-memory
   oneai-agent
-  # 4. SDK entry (depends on agent + mid; NOT on uniffi)
+  oneai-wasm
   oneai-app
-  # 5. uniffi (depends on app)
+  oneai-eval
+  oneai-platform-android
+  oneai-platform-desktop
+  oneai-platform-harmony
+  oneai-platform-ios
+  oneai-studio
   oneai-uniffi
-  # 6. TUI (depends on app + uniffi + others)
   oneai-cli
 )
 
 for c in "${CRATES[@]}"; do
   echo "── publishing $c"
-  if cargo publish -p "$c"; then
+  out=$(cargo publish -p "$c" 2>&1)
+  rc=$?
+  echo "$out" | tail -4
+  if [[ $rc -eq 0 ]]; then
     echo "   ✓ $c"
-  else
-    echo "   ⚠ $c failed — fix and re-run (comment out the ones already published)"
-    exit 1
+    continue
   fi
+  # Already-published crates are not a failure — skip and continue.
+  if echo "$out" | grep -qiE 'already exists|already been uploaded'; then
+    echo "   ↻ $c already published — skipping"
+    continue
+  fi
+  echo "   ⚠ $c FAILED — see above; fix and re-run (published ones auto-skip)"
+  exit 1
 done
 
 echo ""
-echo "✓ all $((${#CRATES[@]})) crates published to crates.io"
+echo "✓ all ${#CRATES[@]} crates published to crates.io"

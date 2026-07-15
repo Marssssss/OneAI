@@ -7,7 +7,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
 [![Crates: 25](https://img.shields.io/badge/Crates-25-orange.svg)]()
-[![Tests: 1461](https://img.shields.io/badge/Tests-1461-green.svg)]()
+[![Tests: 1457](https://img.shields.io/badge/Tests-1457-green.svg)]()
 [![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-blue.svg)]()
 [![Rust: 1.74+](https://img.shields.io/badge/Rust-edition%202021-dea584.svg)]()
 [![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
@@ -303,10 +303,10 @@ flowchart TB
 |-------|--------------|-------|
 | `oneai-core` | core types, traits, PermissionLevel, Budget, PlatformCapabilities | 262|
 | `oneai-provider` | LLM providers (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter | 111|
-| `oneai-parser` | 3-layer output-parse defense | 12|
+| `oneai-parser` | 3-layer output-parse defense | 7|
 | `oneai-memory` | memory system (STM, LTM, compression, HNSW, MemoryManager + persistence) | 60|
 | `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 12 tools | 63|
-| `oneai-skill` | skill selector + registry + built-in domain skills | 8|
+| `oneai-skill` | skill selector + registry + built-in domain skills | 9|
 | `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127|
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 219|
 | `oneai-rag` | RAG + EmbeddingService (OpenAI/Anthropic/Voyage/Ollama/FastEmbed) | 61|
@@ -325,7 +325,7 @@ flowchart TB
 | `oneai-platform-android` | Android platform | 2|
 | `oneai-platform-ios` | iOS platform | 1|
 | `oneai-platform-harmony` | HarmonyOS platform | 1|
-| **Total** | | **1461** |
+| **Total** | | **1457** |
 
 > Plus `oneai-staticlib` (a crate-type=staticlib packaging crate, built only by the Apple/Windows build scripts, excluded from `default-members`, so not counted in the 24).
 
@@ -732,7 +732,7 @@ oneai/
 
 ```bash
 cargo build                      # build the whole workspace
-cargo test                       # all 1461 tests (25 crates)
+cargo test                       # all 1457 tests (25 crates)
 cargo test -p oneai-agent        # tests for a single crate
 cargo test -p oneai-agent plan   # a single test/module
 cargo clippy --workspace --all-targets   # keep lints clean

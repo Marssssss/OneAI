@@ -17,10 +17,3 @@ futures = { workspace = true }
 regex = "1"
 async-trait = { workspace = true }
 oneai-core = { workspace = true }
-
-[dev-dependencies]
-tokio-test = "0.4"
-chrono = { workspace = true }
-oneai-memory = { workspace = true }
-oneai-agent = { workspace = true }
-oneai-skill = { workspace = true }

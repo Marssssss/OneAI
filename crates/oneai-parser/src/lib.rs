@@ -33,7 +33,6 @@ mod tests {
     use crate::three_layer::ThreeLayerParser;
     use oneai_core::traits::OutputParser;
     use oneai_core::ParsingLayer;
-    use std::collections::HashMap;
 
     #[test]
     fn test_fuzzy_repair_valid_json() {
@@ -96,112 +95,5 @@ mod tests {
         let valid_json = "{\"result\": \"success\"}";
         let result = parser.parse(valid_json, None).await.unwrap();
         assert_eq!(result.parsing_layer, ParsingLayer::FuzzyRepair);
-    }
-
-    #[test]
-    fn test_hybrid_scorer() {
-        use oneai_memory::HybridScorer;
-        let scorer = HybridScorer::new();
-        let score = scorer.score(0.9, 0.5);
-        assert!((score - (0.7 * 0.9 + 0.3 * 0.5)).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_hybrid_scorer_custom_weights() {
-        use oneai_memory::HybridScorer;
-        let scorer = HybridScorer::with_weights(0.5, 0.5);
-        let score = scorer.score(0.8, 0.6);
-        assert!((score - 0.7).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_short_term_memory() {
-        use oneai_memory::ShortTermMemory;
-        use oneai_core::MemoryEntry;
-
-        let mut stm = ShortTermMemory::new(3);
-        assert!(stm.is_empty());
-
-        stm.push(MemoryEntry {
-            id: "1".to_string(),
-            content: "First".to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: HashMap::new(),
-        });
-        stm.push(MemoryEntry {
-            id: "2".to_string(),
-            content: "Second".to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: HashMap::new(),
-        });
-        assert_eq!(stm.len(), 2);
-
-        stm.push(MemoryEntry {
-            id: "3".to_string(),
-            content: "Third".to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: HashMap::new(),
-        });
-        assert_eq!(stm.len(), 3);
-
-        stm.push(MemoryEntry {
-            id: "4".to_string(),
-            content: "Fourth".to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: HashMap::new(),
-        });
-        assert_eq!(stm.len(), 3);
-        assert_eq!(stm.entries().front().unwrap().content, "Second");
-    }
-
-    #[test]
-    fn test_scope_state() {
-        use oneai_agent::ScopeState;
-        use oneai_core::GlobalState;
-
-        let global = GlobalState::new();
-        let scope = ScopeState::from_global(&global);
-        assert!(scope.global_memory.is_empty());
-        assert!(scope.local_sandbox.is_empty());
-        assert!(scope.pending_reductions.is_empty());
-    }
-
-    #[test]
-    fn test_skill_selector_keyword_matching() {
-        use oneai_skill::SkillSelector;
-        use oneai_core::SkillDescriptor;
-
-        let selector = SkillSelector::new();
-        let skills = vec![
-            SkillDescriptor {
-                name: "shell".to_string(),
-                description: "Execute shell commands".to_string(),
-                prompt_template: "You can use shell.".to_string(),
-                trigger_keywords: vec!["shell".to_string(), "command".to_string()],
-                embedding: None,
-            },
-            SkillDescriptor {
-                name: "code_review".to_string(),
-                description: "Review code".to_string(),
-                prompt_template: "You can review code.".to_string(),
-                trigger_keywords: vec!["review".to_string(), "code".to_string()],
-                embedding: None,
-            },
-            SkillDescriptor {
-                name: "calculator".to_string(),
-                description: "Calculate numbers".to_string(),
-                prompt_template: "You can calculate.".to_string(),
-                trigger_keywords: vec!["calculate".to_string(), "math".to_string()],
-                embedding: None,
-            },
-        ];
-
-        let result = tokio_test::block_on(selector.select_skills("I need to run a shell command", &skills)).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "shell");
     }
 }

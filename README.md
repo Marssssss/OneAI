@@ -7,7 +7,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
 [![Crates: 25](https://img.shields.io/badge/Crates-25-orange.svg)]()
-[![Tests: 1461](https://img.shields.io/badge/Tests-1461-green.svg)]()
+[![Tests: 1457](https://img.shields.io/badge/Tests-1457-green.svg)]()
 [![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-blue.svg)]()
 [![Rust: 1.74+](https://img.shields.io/badge/Rust-edition%202021-dea584.svg)]()
 [![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
@@ -303,10 +303,10 @@ flowchart TB
 |-------|------|--------|
 | `oneai-core` | 核心类型、trait、PermissionLevel、Budget、PlatformCapabilities | 262|
 | `oneai-provider` | LLM Provider（OpenAI/Anthropic/Gemini/Ollama）+ ProviderPool + SmartRouter | 111|
-| `oneai-parser` | 3 层输出解析防御 | 12|
+| `oneai-parser` | 3 层输出解析防御 | 7|
 | `oneai-memory` | 记忆系统（STM、LTM、压缩、HNSW、MemoryManager + 持久化） | 60|
 | `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、12 工具 | 63|
-| `oneai-skill` | 技能选择器 + 注册 + 内置领域技能 | 8|
+| `oneai-skill` | 技能选择器 + 注册 + 内置领域技能 | 9|
 | `oneai-domain` | DomainPack 系统（7 层）、CodingPack、市场、规范校验器 | 127|
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 219|
 | `oneai-rag` | RAG + EmbeddingService（OpenAI/Anthropic/Voyage/Ollama/FastEmbed） | 61|
@@ -325,7 +325,7 @@ flowchart TB
 | `oneai-platform-android` | Android 平台 | 2|
 | `oneai-platform-ios` | iOS 平台 | 1|
 | `oneai-platform-harmony` | HarmonyOS 平台 | 1|
-| **总计** | | **1461** |
+| **总计** | | **1457** |
 
 > 另有 `oneai-staticlib`（crate-type=staticlib 的打包 crate，仅 Apple/Windows 构建脚本构建，排除在 `default-members` 之外，故不计入 24）。
 
@@ -732,7 +732,7 @@ oneai/
 
 ```bash
 cargo build                      # 构建整个 workspace
-cargo test                       # 全部 1461 测试（25 个 crate）
+cargo test                       # 全部 1457 测试（25 个 crate）
 cargo test -p oneai-agent        # 单个 crate 的测试
 cargo test -p oneai-agent plan   # 单个测试/模块
 cargo clippy --workspace --all-targets   # 保持 lint 干净
