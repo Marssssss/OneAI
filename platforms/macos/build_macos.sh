@@ -85,7 +85,10 @@ if [[ ${#SLICES[@]} -eq 1 ]]; then
 else
   lipo -create "${SLICES[@]}" -output "$APP_EXE"
 fi
-rm -f "$BUILD_DIR/OneAI."*
+# Clean up the per-arch temp executables. NB: use explicit names, NOT a
+# `OneAI.*` glob — that would also match the `OneAI.app` bundle dir and `rm -f`
+# would fail on the directory under `set -e`, aborting before the zip step.
+rm -f "$BUILD_DIR/OneAI.arm64" "$BUILD_DIR/OneAI.x86_64"
 
 cp "$MACOS_DIR/Info.plist" "$BUILD_DIR/OneAI.app/Contents/Info.plist"
 
@@ -107,7 +110,10 @@ ZIP_NAME="OneAI-${APP_VERSION}-macos.zip"
 
 echo ""
 echo "── Packaging $ZIP_NAME (unsigned — right-click → Open on first launch)"
-( cd "$BUILD_DIR" && rm -f "$ZIP_NAME" && zip -rSYq "$ZIP_NAME" OneAI.app -x '*.DS_Store' )
+# zip flags: -r recursive, -y store symlinks as-is, -q quiet, -x skip .DS_Store.
+# NOTE: macOS /usr/bin/zip does NOT support `-S` (Info-ZIP system-files flag) —
+# it errors with "short option 'S' not supported". Keep to -ryq.
+( cd "$BUILD_DIR" && rm -f "$ZIP_NAME" && zip -ryq "$ZIP_NAME" OneAI.app -x '*.DS_Store' )
 
 echo ""
 echo "── Built $BUILD_DIR/OneAI.app  (+ $BUILD_DIR/$ZIP_NAME)"
