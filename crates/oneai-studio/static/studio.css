@@ -182,6 +182,8 @@ h3 {
     padding: 8px;
     border-bottom: 1px solid var(--border);
     font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 .output-entry.direct-answer {
     background: var(--bg-card);
@@ -199,6 +201,88 @@ h3 {
     color: var(--text-muted);
     margin-bottom: 4px;
 }
+
+/* Conversation bubbles */
+.msg {
+    margin: 8px 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-width: 92%;
+    animation: fadein 0.15s ease;
+}
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+.msg.user {
+    background: var(--primary);
+    color: #fff;
+    align-self: flex-end;
+    margin-left: auto;
+}
+.msg.assistant {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    align-self: flex-start;
+}
+.msg.system {
+    background: transparent;
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 12px;
+    border: 1px dashed var(--border);
+}
+.msg .role-tag {
+    font-size: 10px;
+    color: var(--text-muted);
+    display: block;
+    margin-bottom: 2px;
+}
+.msg.assistant .role-tag { color: var(--success); }
+.msg.thinking .role-tag { color: var(--text-muted); }
+.cursor::after {
+    content: '▋';
+    color: var(--success);
+    animation: blink 1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Chat input bar */
+.chat-input-bar {
+    flex-shrink: 0;
+    display: flex;
+    gap: 8px;
+    padding: 8px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-panel);
+}
+.chat-input-bar textarea {
+    flex: 1;
+    resize: none;
+    max-height: 120px;
+    background: var(--bg-card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.4;
+}
+.chat-input-bar textarea:focus { outline: none; border-color: var(--primary); }
+.btn-send {
+    background: var(--primary);
+    color: #fff;
+    border: none;
+    padding: 0 18px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: bold;
+}
+.btn-send:hover { background: #5aa0ee; }
+.btn-send:disabled { background: var(--bg-card); color: var(--text-muted); cursor: not-allowed; }
 
 /* Footer */
 .studio-footer {

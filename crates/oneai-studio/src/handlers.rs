@@ -3,10 +3,11 @@
 use std::sync::Arc;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     Json,
-    response::Html,
+    response::{Html, IntoResponse, Response},
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -424,6 +425,111 @@ pub async fn index() -> Html<&'static str> {
 /// Static HTML for the Studio frontend, embedded in the Rust binary.
 static STUDIO_HTML: &str = include_str!("../static/index.html");
 
+// ─── Static Assets ────────────────────────────────────────────────────
+
+/// Embed the frontend assets directly into the binary so the Studio is
+/// fully self-contained (no dependency on a `static/` dir on disk at
+/// runtime — works from any CWD and in release distributions). Mirrors how
+/// `index.html` is embedded above.
+static STUDIO_CSS: &str = include_str!("../static/studio.css");
+static STUDIO_JS: &str = include_str!("../static/studio.js");
+static GRAPH_JS: &str = include_str!("../static/graph-render.js");
+
+/// Serve a frontend asset from `/static/{file}`. The old router only
+/// registered `/`, so the CSS/JS referenced by `index.html` 404'd and the
+/// page rendered as unstyled, JS-less HTML — i.e. unusable.
+pub async fn serve_static(Path(file): Path<String>) -> Response {
+    let (ctype, bytes): (&str, &'static [u8]) = match file.as_str() {
+        "studio.css" => ("text/css; charset=utf-8", STUDIO_CSS.as_bytes()),
+        "studio.js" => (
+            "application/javascript; charset=utf-8",
+            STUDIO_JS.as_bytes(),
+        ),
+        "graph-render.js" => (
+            "application/javascript; charset=utf-8",
+            GRAPH_JS.as_bytes(),
+        ),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    ([(header::CONTENT_TYPE, ctype)], bytes).into_response()
+}
+
+// ─── Run Task (interactive playground) ────────────────────────────────
+
+/// Request body for `POST /api/run` — a user prompt to drive the agent.
+#[derive(Debug, Deserialize)]
+pub struct RunRequest {
+    pub prompt: String,
+}
+
+/// Drive one agent turn from a user prompt. Returns immediately; the
+/// agent's iterations, tool calls, streaming chunks, and final answer
+/// stream to all WebSocket subscribers as `StudioEvent`s (the
+/// `StudioState` is the observer passed to `run_agent`).
+///
+/// The actual driving is delegated to a `StudioRunner` (implemented in
+/// the CLI layer, since `oneai-studio` sits below `oneai-app` and cannot
+/// hold an `AppSession`).
+pub async fn run_task(
+    State(state): State<Arc<StudioState>>,
+    Json(req): Json<RunRequest>,
+) -> (StatusCode, Json<Value>) {
+    let prompt = req.prompt.trim();
+    if prompt.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "accepted": false, "error": "empty prompt" })),
+        );
+    }
+
+    let runner = state.runner().await;
+    let runner = match runner {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "accepted": false,
+                    "error": "No agent runner attached. The Studio server was \
+                              started without an agent (e.g. `serve()` standalone). \
+                              Use `oneai studio` to get an interactive agent.",
+                })),
+            );
+        }
+    };
+
+    let status = runner.status();
+    if !status.has_provider {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "accepted": false,
+                "error": "No LLM provider configured. Set ONEAI_API_KEY and \
+                          ONEAI_BASE_URL (or configure ~/.oneai/config.toml) \
+                          and restart `oneai studio`.",
+            })),
+        );
+    }
+    if status.busy {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "accepted": false,
+                "error": "Agent is already running. Wait for it to finish.",
+            })),
+        );
+    }
+
+    // Spawn so the HTTP call returns immediately; events flow over /ws.
+    let task = prompt.to_string();
+    let observer = state.clone();
+    tokio::spawn(async move {
+        let _ = runner.run_task(&task, observer).await;
+    });
+
+    (StatusCode::ACCEPTED, Json(json!({ "accepted": true })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +585,58 @@ mod tests {
     async fn test_get_domain_pack_not_found() {
         let result = get_domain_pack(Path("nonexistent".to_string())).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_serve_static_assets() {
+        // Known assets resolve with the correct content-type.
+        for (file, expect_contains) in [
+            ("studio.css", "text/css"),
+            ("studio.js", "javascript"),
+            ("graph-render.js", "javascript"),
+        ] {
+            let resp = serve_static(Path(file.to_string())).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{} should be 200", file);
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .expect("content-type header")
+                .to_str()
+                .unwrap();
+            assert!(ct.contains(expect_contains), "{} -> {}", file, ct);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_serve_static_unknown_404() {
+        let resp = serve_static(Path("does-not-exist.css".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_run_task_rejects_empty_prompt() {
+        let state = Arc::new(StudioState::new_default());
+        let (code, Json(v)) = run_task(
+            State(state),
+            Json(RunRequest { prompt: "   ".to_string() }),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(v["accepted"], false);
+    }
+
+    #[tokio::test]
+    async fn test_run_task_no_runner_returns_503() {
+        // Standalone `serve()` has no runner attached → a non-empty prompt
+        // must surface a 503 with a hint, not spawn anything.
+        let state = Arc::new(StudioState::new_default());
+        let (code, Json(v)) = run_task(
+            State(state),
+            Json(RunRequest { prompt: "hello".to_string() }),
+        )
+        .await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(v["accepted"], false);
+        assert!(v["error"].as_str().unwrap().contains("runner"));
     }
 }

@@ -24,6 +24,7 @@ clap = { workspace = true }
 dirs = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["bracketed-paste"] }
+async-trait = { workspace = true }
 oneai-core = { workspace = true }
 oneai-app = { workspace = true }
 oneai-tool = { workspace = true }

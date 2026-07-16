@@ -12,6 +12,50 @@ use oneai_trace::{TraceContext, InMemoryCollector};
 use oneai_persistence::FilePersistence;
 use oneai_tool::ToolRegistry;
 
+// ─── StudioRunner ────────────────────────────────────────────────────
+
+/// Drives an agent turn in response to a `POST /api/run` request.
+///
+/// This lives in the feature crate only as a trait: `oneai-studio` sits
+/// *below* `oneai-app` in the layering and so cannot hold an `AppSession`
+/// or call `run_agent` directly. The CLI (`examples/cli/cmd_studio`)
+/// builds the real `App`/`AppSession` and supplies a `StudioRunner` impl;
+/// `StudioState` holds it (`set_runner`) and the `/api/run` handler calls
+/// it. The `observer` argument is the `StudioState` itself — passed
+/// per-call so the runner never stores a back-reference (no `Arc` cycle).
+#[async_trait::async_trait]
+pub trait StudioRunner: Send + Sync {
+    /// Whether the runner has a configured provider and is not currently
+    /// running a turn.
+    fn status(&self) -> RunnerStatus;
+
+    /// Run one agent turn for `task`. Iteration / tool-call / streaming /
+    /// completion events are pushed to all WebSocket subscribers through
+    /// `observer` (which implements `AgentLoopObserver`).
+    async fn run_task(&self, task: &str, observer: Arc<StudioState>) -> RunOutcome;
+}
+
+/// Snapshot of runner availability, surfaced to the `/api/run` handler.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunnerStatus {
+    /// A provider (API key/base URL) is configured.
+    pub has_provider: bool,
+    /// A turn is currently in flight.
+    pub busy: bool,
+}
+
+/// Outcome of a `run_task` call — used by the runner to report completion.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcome {
+    /// The turn completed (agent reached a final answer or exhausted budget).
+    Done { completed: bool, iterations: usize },
+    /// The runner could not start (e.g. no provider / still busy).
+    Rejected { reason: String },
+    /// The turn failed with an error.
+    Error { message: String },
+}
+
 // ─── StudioEvent ─────────────────────────────────────────────────────
 
 /// An event broadcast to all WebSocket subscribers.
@@ -125,6 +169,11 @@ pub struct StudioState {
     /// Broadcast channel for pushing events to WebSocket subscribers.
     /// Capacity: 1024 events (subscriber lag > 1024 = dropped).
     event_bus: broadcast::Sender<StudioEvent>,
+
+    /// Optional agent driver — set by the CLI (`cmd_studio`) so the
+    /// `/api/run` endpoint can launch real agent turns. `None` for the
+    /// standalone `serve()` server (read-only observer).
+    runner: RwLock<Option<Arc<dyn StudioRunner>>>,
 }
 
 impl StudioState {
@@ -142,6 +191,7 @@ impl StudioState {
             tool_registry,
             sessions: RwLock::new(HashMap::new()),
             event_bus,
+            runner: RwLock::new(None),
         }
     }
 
@@ -165,6 +215,23 @@ impl StudioState {
     pub fn broadcast(&self, event: StudioEvent) {
         // send() returns Err when there are no subscribers — that's OK
         let _ = self.event_bus.send(event);
+    }
+
+    /// Attach (or detach) the agent driver. Called by the CLI after
+    /// building the `App`/`AppSession` so `/api/run` can launch turns.
+    pub async fn set_runner(&self, runner: Option<Arc<dyn StudioRunner>>) {
+        *self.runner.write().await = runner;
+    }
+
+    /// Get a clone of the attached runner, if any.
+    pub async fn runner(&self) -> Option<Arc<dyn StudioRunner>> {
+        self.runner.read().await.clone()
+    }
+
+    /// Convenience: is a runner currently attached? (cheap — does not check
+    /// provider/busy; use `runner().status()` for that.)
+    pub async fn has_runner(&self) -> bool {
+        self.runner.read().await.is_some()
     }
 
     /// Get the trace context.

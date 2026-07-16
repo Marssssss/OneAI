@@ -48,12 +48,19 @@
             </div>
         </section>
 
-        <!-- Right Panel: Conversation Output -->
+        <!-- Right Panel: Conversation -->
         <section class="output-panel" id="output-panel">
-            <h3>Agent Output</h3>
+            <h3>Conversation</h3>
             <div class="output-content" id="output-content">
-                <div class="output-empty">Waiting for agent execution...</div>
+                <div class="output-empty" id="output-empty">
+                    Connect and send a message to start chatting with the agent.<br>
+                    Tool calls, reasoning, and trace events appear in the panels on the left and bottom.
+                </div>
             </div>
+            <form class="chat-input-bar" id="chat-form" autocomplete="off">
+                <textarea id="chat-input" rows="1" placeholder="Send a message to the agent…  (Enter to send, Shift+Enter for newline)"></textarea>
+                <button type="submit" class="btn-send" id="chat-send">Send</button>
+            </form>
         </section>
     </main>
 
@@ -76,8 +83,8 @@
                     <span class="metric-value" id="metric-tokens">0</span>
                 </div>
                 <div class="metric-card">
-                    <span class="metric-label">Cost</span>
-                    <span class="metric-value" id="metric-cost">$0.00</span>
+                    <span class="metric-label">Iterations</span>
+                    <span class="metric-value" id="metric-iters">0</span>
                 </div>
                 <div class="metric-card">
                     <span class="metric-label">Success Rate</span>

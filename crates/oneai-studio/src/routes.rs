@@ -34,8 +34,14 @@ pub fn build_router(state: Arc<StudioState>) -> Router {
         // Index page
         .route("/", get(handlers::index))
 
+        // Static frontend assets (CSS/JS) — embedded in the binary
+        .route("/static/{file}", get(handlers::serve_static))
+
         // WebSocket
         .route("/ws", get(ws::ws_handler))
+
+        // Drive the agent from a user prompt (interactive playground)
+        .route("/api/run", post(handlers::run_task))
 
         // Session APIs
         .route("/api/session", get(handlers::list_sessions))

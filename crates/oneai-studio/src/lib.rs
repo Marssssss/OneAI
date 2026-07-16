@@ -43,8 +43,9 @@ pub mod routes;
 pub mod ws;
 pub mod handlers;
 
-pub use state::{StudioState, StudioEvent, SessionView, SessionUpdate};
+pub use state::{StudioState, StudioEvent, SessionView, SessionUpdate, StudioRunner, RunnerStatus, RunOutcome};
 pub use server::{StudioConfig, serve, serve_with_state};
 pub use graph_dto::{GraphVisualization, NodeView, EdgeView};
 pub use trace_dto::{TraceTreeView, SpanView, EventView, MetricsView};
 pub use checkpoint_dto::{CheckpointListView, CheckpointDetailView, CheckpointEntryView};
+pub use handlers::{RunRequest};

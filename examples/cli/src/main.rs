@@ -141,6 +141,12 @@ enum Commands {
         /// Domain pack to use
         #[arg(long)]
         domain: Option<String>,
+        /// Model name override (overrides ONEAI_MODEL / config)
+        #[arg(long)]
+        model: Option<String>,
+        /// User identity for memory namespacing
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Manage domain packs
     Pack {
@@ -841,8 +847,8 @@ fn main() {
         Some(Commands::Run { prompt, domain, model, user }) => {
             cmd_run::cmd_run(&prompt, &config, domain.as_deref(), model.as_deref(), user.as_deref());
         }
-        Some(Commands::Studio { port, domain }) => {
-            cmd_studio::cmd_studio(port, domain.as_deref());
+        Some(Commands::Studio { port, domain, model, user }) => {
+            cmd_studio::cmd_studio(&config, port, domain.as_deref(), model.as_deref(), user.as_deref());
         }
         Some(Commands::Pack { action }) => {
             match action {
