@@ -58,6 +58,43 @@ pub struct ScriptedResponse {
     pub model: String,
 }
 
+/// One entry of a `delegate_batch` — a single `delegate` tool call within a
+/// turn that fans out several sub-agents. Used by
+/// [`ScriptedResponse::delegate_batch`].
+#[derive(Debug, Clone)]
+pub struct DelegateSpec {
+    pub task: String,
+    pub agent_type: String,
+    pub budget_tokens: u32,
+    pub id: String,
+    pub depends_on: Vec<String>,
+}
+
+impl DelegateSpec {
+    /// A delegation with no dependencies (runs in parallel with its peers).
+    pub fn new(id: impl Into<String>, task: impl Into<String>, agent_type: impl Into<String>) -> Self {
+        Self {
+            task: task.into(),
+            agent_type: agent_type.into(),
+            budget_tokens: 5000,
+            id: id.into(),
+            depends_on: Vec::new(),
+        }
+    }
+
+    /// Add dependency edges. `deps` are ids of other specs in the same batch.
+    pub fn depends_on(mut self, deps: &[&str]) -> Self {
+        self.depends_on = deps.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub fn with_budget(mut self, budget: u32) -> Self {
+        self.budget_tokens = budget;
+        self
+    }
+}
+
+
 impl ScriptedResponse {
     /// Create a DirectAnswer response — the model produces a final text answer.
     ///
@@ -120,20 +157,76 @@ impl ScriptedResponse {
     ///
     /// This triggers SubAgentFactory::create() and SubAgent::run().
     pub fn delegate(task: &str, agent_type: &str, budget_tokens: u32) -> Self {
+        Self::delegate_with_deps(task, agent_type, budget_tokens, None, &[])
+    }
+
+    /// Create a single-delegate response with an explicit id and/or depends_on.
+    ///
+    /// Used to build dependency edges between delegations issued across turns
+    /// or as one entry of a `delegate_batch`.
+    pub fn delegate_with_deps(
+        task: &str,
+        agent_type: &str,
+        budget_tokens: u32,
+        id: Option<&str>,
+        depends_on: &[&str],
+    ) -> Self {
+        let mut args = serde_json::json!({
+            "task": task,
+            "agent_type": agent_type,
+            "budget_tokens": budget_tokens,
+        });
+        if let Some(id) = id {
+            args["id"] = serde_json::json!(id);
+        }
+        if !depends_on.is_empty() {
+            args["depends_on"] = serde_json::json!(depends_on);
+        }
         Self {
             content: vec![ContentBlock::ToolCall {
                 id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
                 name: "delegate".to_string(),
-                args: serde_json::to_string(&serde_json::json!({
-                    "task": task,
-                    "agent_type": agent_type,
-                    "budget_tokens": budget_tokens,
-                })).unwrap_or_else(|_| "{}".to_string()),
+                args: serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
             }],
             usage: TokenUsage {
                 prompt_tokens: 150,
                 completion_tokens: 40,
                 total_tokens: 190,
+            ..Default::default()},
+            model: "mock-model".to_string(),
+        }
+    }
+
+    /// Create a single response containing *multiple* `delegate` blocks — i.e.
+    /// the model fans out several sub-agents in one turn. Each spec becomes one
+    /// `delegate` tool call. Independent specs (no `depends_on`) run in parallel;
+    /// a spec whose `depends_on` references another spec's `id` runs after it.
+    ///
+    /// `DelegateSpec` is a plain test value type; ids are required here so the
+    /// caller controls the DAG explicitly.
+    pub fn delegate_batch(specs: Vec<DelegateSpec>) -> Self {
+        let content: Vec<ContentBlock> = specs.into_iter().map(|spec| {
+            let mut args = serde_json::json!({
+                "task": spec.task,
+                "agent_type": spec.agent_type,
+                "budget_tokens": spec.budget_tokens,
+                "id": spec.id,
+            });
+            if !spec.depends_on.is_empty() {
+                args["depends_on"] = serde_json::json!(spec.depends_on);
+            }
+            ContentBlock::ToolCall {
+                id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                name: "delegate".to_string(),
+                args: serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
+            }
+        }).collect();
+        Self {
+            content,
+            usage: TokenUsage {
+                prompt_tokens: 200,
+                completion_tokens: 80,
+                total_tokens: 280,
             ..Default::default()},
             model: "mock-model".to_string(),
         }

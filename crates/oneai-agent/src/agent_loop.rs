@@ -111,6 +111,34 @@ pub trait AgentLoopObserver: Send + Sync {
 
 // ─── AgentDecision ──────────────────────────────────────────────────────────
 
+/// One delegation request parsed out of a `delegate` meta-tool call.
+///
+/// A single turn may contain several `delegate` calls — the model fans them
+/// out by emitting multiple `delegate` blocks in one inference response, and
+/// `parse_decision` collects them into an `AgentDecision::Delegate` batch.
+/// `id` + `depends_on` let the model express a DAG: tasks with no
+/// `depends_on` run in parallel; a task whose `depends_on` ids have not yet
+/// completed waits for them, and its `task` text is automatically prefixed
+/// with their summaries before the sub-agent starts (so dependent sub-agents
+/// receive upstream results without the model re-stating them).
+#[derive(Debug, Clone)]
+pub struct DelegateTask {
+    /// Stable identifier for dependency resolution. When the model omits it,
+    /// `parse_decision` falls back to the tool-call id (e.g. `call_abc123`)
+    /// so every delegation has a usable key.
+    pub id: String,
+    /// The self-contained subtask. For dependent tasks this is the *original*
+    /// text — the scheduler prepends dependency summaries at run time.
+    pub task: String,
+    /// The specialized sub-agent kind to spawn.
+    pub agent_type: SubAgentKind,
+    /// Token budget cap for this sub-agent.
+    pub budget: oneai_core::budget::TokenBudget,
+    /// Ids of delegations in the same batch that must complete first.
+    /// References to unknown ids are dropped (with a warning) at parse time.
+    pub depends_on: Vec<String>,
+}
+
 /// The decision type produced by parsing the model's output each loop iteration.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -121,11 +149,12 @@ pub enum AgentDecision {
     /// The model wants to invoke one or more tools.
     ToolCalls { calls: Vec<ToolCallRequest> },
 
-    /// The model wants to delegate a subtask to a specialized sub-agent.
+    /// The model wants to delegate one or more subtasks to specialized
+    /// sub-agents. All `delegate` calls in the turn are collected here as a
+    /// batch; the scheduler runs independent tasks in parallel and honors
+    /// `depends_on` ordering (see [`DelegateTask`]).
     Delegate {
-        task: String,
-        agent_type: SubAgentKind,
-        budget: oneai_core::budget::TokenBudget,
+        tasks: Vec<DelegateTask>,
     },
 
     /// The model wants to switch to a different paradigm.
@@ -1410,7 +1439,7 @@ impl AgentLoop {
                 match &decision {
                     AgentDecision::DirectAnswer { .. } => "DirectAnswer".to_string(),
                     AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
-                    AgentDecision::Delegate { .. } => "Delegate".to_string(),
+                    AgentDecision::Delegate { tasks } => format!("Delegate({} tasks)", tasks.len()),
                     AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
                 },
                 response.message.content.len(),
@@ -1503,7 +1532,7 @@ impl AgentLoop {
                     match &decision {
                         AgentDecision::DirectAnswer { .. } => "DirectAnswer".to_string(),
                         AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
-                        AgentDecision::Delegate { .. } => "Delegate".to_string(),
+                        AgentDecision::Delegate { tasks } => format!("Delegate({} tasks)", tasks.len()),
                         AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
                     },
                     retry_response.message.content.len(),
@@ -2000,14 +2029,26 @@ impl AgentLoop {
                         state.is_complete()
                     );
                 }
-                AgentDecision::Delegate { task, agent_type, budget } => {
-                    observer.on_delegate(&task, &agent_type);
+                AgentDecision::Delegate { tasks } => {
+                    // One `on_delegate` per task so the UI shows each sub-agent's
+                    // lifecycle (start → completion) even when several are
+                    // delegated in the same turn.
+                    for task in &tasks {
+                        observer.on_delegate(&task.task, &task.agent_type);
+                    }
 
-                    // ─── Trace: log delegation event ──────────────────────
+                    // ─── Trace: log delegation batch event ──────────────
                     if let Some(ctx) = &self.config.trace_context {
                         ctx.log_event(EventKind::WorkflowStepStart, "agent.delegate", HashMap::from([
-                            ("agent.delegate_task".to_string(), serde_json::json!(task)),
-                            ("agent.delegate_type".to_string(), serde_json::json!(format!("{:?}", agent_type))),
+                            ("agent.delegate_count".to_string(), serde_json::json!(tasks.len())),
+                            ("agent.delegate_tasks".to_string(), serde_json::json!(
+                                tasks.iter().map(|t| serde_json::json!({
+                                    "id": t.id,
+                                    "task": t.task,
+                                    "agent_type": format!("{:?}", t.agent_type),
+                                    "depends_on": t.depends_on,
+                                })).collect::<Vec<_>>()
+                            )),
                         ]));
                     }
                     // For delegate/switch_paradigm, these are internal meta-commands,
@@ -2018,9 +2059,14 @@ impl AgentLoop {
                     if !text_content.is_empty() {
                         state.conversation.add_message(Message::assistant(&text_content));
                     }
-                    let summary = self.spawn_sub_agent(task, agent_type, budget).await?;
-                    state.feed_sub_agent_result(summary.clone());
-                    observer.on_delegate_complete(&summary);
+                    // Schedule the batch: independent tasks run concurrently,
+                    // dependent tasks run after their deps and receive the deps'
+                    // summaries prepended to their task text.
+                    let summaries = self.spawn_sub_agents_batch(tasks).await?;
+                    for summary in &summaries {
+                        state.feed_sub_agent_result(summary.clone());
+                        observer.on_delegate_complete(summary);
+                    }
                 }
                 AgentDecision::SwitchParadigm { paradigm } => {
                     observer.on_paradigm_switch(paradigm);
@@ -2321,6 +2367,11 @@ impl AgentLoop {
     fn parse_decision(&self, response: &InferenceResponse) -> Result<AgentDecision> {
         let mut tool_calls = Vec::new();
         let mut text_parts = Vec::new();
+        // All `delegate` calls in this turn are accumulated into a batch so the
+        // model can fan out several sub-agents per iteration. They are resolved
+        // into an `AgentDecision::Delegate` *after* the loop, once every id is
+        // known (so `depends_on` references can be validated against the full set).
+        let mut delegate_tasks: Vec<DelegateTask> = Vec::new();
 
         for block in &response.message.content {
             match block {
@@ -2333,12 +2384,33 @@ impl AgentLoop {
                                 .and_then(|v| v.as_str()).unwrap_or("Code");
                             let budget_tokens = args_value.get("budget_tokens")
                                 .and_then(|v| v.as_u64()).unwrap_or(5000);
-                            return Ok(AgentDecision::Delegate {
+                            // Prefer the model-supplied id; fall back to the
+                            // tool-call id so every delegation has a stable key.
+                            let task_id = args_value.get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| id.clone());
+                            let depends_on: Vec<String> = args_value
+                                .get("depends_on")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            delegate_tasks.push(DelegateTask {
+                                id: task_id,
                                 task: task.to_string(),
                                 agent_type: SubAgentKind::from_str(agent_type_str),
                                 budget: oneai_core::budget::TokenBudget::new(budget_tokens as u32),
+                                depends_on,
                             });
                         }
+                        // A `delegate` block is never dispatched to the
+                        // ToolExecutor — it is intercepted here. Continue scanning
+                        // for further delegate calls in the same turn.
+                        continue;
                     }
                     if name == "switch_paradigm" {
                         if let Some(p) = args_value.get("paradigm").and_then(|v| v.as_str()) {
@@ -2359,6 +2431,35 @@ impl AgentLoop {
                 ContentBlock::Text { text } => { text_parts.push(text.clone()); }
                 _ => {}
             }
+        }
+
+        if !delegate_tasks.is_empty() {
+            // Validate `depends_on` against the known id set. References to
+            // unknown ids are dropped (with a warning) rather than failing the
+            // turn — the model's output is unreliable, and a partial DAG is
+            // more useful than an error.
+            let known_ids: std::collections::HashSet<String> =
+                delegate_tasks.iter().map(|t| t.id.clone()).collect();
+            for task in &mut delegate_tasks {
+                let before = task.depends_on.len();
+                task.depends_on.retain(|dep| {
+                    let known = known_ids.contains(dep);
+                    if !known {
+                        tracing::warn!(
+                            "Delegate '{}' depends_on unknown id '{}' — dropping dependency",
+                            task.id, dep
+                        );
+                    }
+                    known
+                });
+                if task.depends_on.len() != before {
+                    tracing::info!(
+                        "Delegate '{}' depends_on trimmed from {} to {} valid references",
+                        task.id, before, task.depends_on.len()
+                    );
+                }
+            }
+            return Ok(AgentDecision::Delegate { tasks: delegate_tasks });
         }
         if !tool_calls.is_empty() {
             return Ok(AgentDecision::ToolCalls { calls: tool_calls });
@@ -2728,9 +2829,137 @@ impl AgentLoop {
         call
     }
 
-    async fn spawn_sub_agent(&self, task: String, agent_type: SubAgentKind, budget: oneai_core::budget::TokenBudget) -> Result<SubAgentSummary> {
-        let sub_agent = self.sub_agent_factory.create(agent_type.clone(), budget).await?;
-        sub_agent.run(&task).await
+    /// Schedule a batch of delegations with dependency-aware concurrency.
+    ///
+    /// Implements a wave-based (Kahn's algorithm) scheduler over the
+    /// `DelegateTask` DAG:
+    ///
+    /// - Each iteration selects the *wave* = all tasks whose `depends_on` ids
+    ///   are already in `completed`. These run **concurrently** via a tokio
+    ///   `JoinSet` — independent sub-agents execute in parallel.
+    /// - A task with unsatisfied dependencies is held back until its deps
+    ///   finish, so dependent tasks run **serially** after their upstream.
+    /// - Before a dependent task starts, its `task` text is prefixed with the
+    ///   summaries of its dependencies (one `[Dependency '<id>' result]: …`
+    ///   block each), so the dependent sub-agent receives upstream results
+    ///   without the model re-stating them.
+    /// - Cycles are detected (a wave that makes no progress with pending
+    ///   tasks left) and surfaced as an error rather than looping forever.
+    ///
+    /// Returns summaries in **input order** (the order tasks appeared in the
+    /// turn), regardless of completion order — this keeps the fed-back results
+    /// deterministic and matches the model's mental model of the batch.
+    async fn spawn_sub_agents_batch(&self, tasks: Vec<DelegateTask>) -> Result<Vec<SubAgentSummary>> {
+        use std::collections::HashMap;
+        use tokio::task::JoinSet;
+
+        if tasks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Preserve input order for deterministic result feed-back.
+        let order: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+
+        // Pending tasks keyed by id (clone-able for the spawned closure).
+        let mut pending: HashMap<String, DelegateTask> =
+            tasks.into_iter().map(|t| (t.id.clone(), t)).collect();
+
+        // id → completed summary.
+        let mut completed: HashMap<String, SubAgentSummary> = HashMap::new();
+
+        while !pending.is_empty() {
+            // Build the current wave: tasks whose every dependency is done.
+            let wave_ids: Vec<String> = pending
+                .iter()
+                .filter(|(_, t)| t.depends_on.iter().all(|dep| completed.contains_key(dep)))
+                .map(|(id, _)| id.clone())
+                .collect();
+
+            if wave_ids.is_empty() {
+                // No task can make progress → the remaining deps form a cycle.
+                let remaining: Vec<String> = pending.keys().cloned().collect();
+                return Err(oneai_core::error::OneAIError::Agent(format!(
+                    "Delegate batch has a dependency cycle among tasks: {}",
+                    remaining.join(", ")
+                )));
+            }
+
+            tracing::info!(
+                "Delegate batch: running wave of {} task(s) in parallel: [{}]",
+                wave_ids.len(),
+                wave_ids.join(", ")
+            );
+
+            let mut join_set: JoinSet<Result<(String, SubAgentSummary)>> = JoinSet::new();
+
+            for id in wave_ids {
+                let task = pending.remove(&id).expect("wave id present in pending");
+                // Prepend dependency summaries to the task text so the
+                // dependent sub-agent receives upstream results.
+                let mut augmented_task = String::new();
+                for dep in &task.depends_on {
+                    if let Some(dep_summary) = completed.get(dep) {
+                        augmented_task.push_str(&format!(
+                            "[Dependency '{}' result]: {}\n",
+                            dep, dep_summary.summary
+                        ));
+                        if !dep_summary.key_findings.is_empty() {
+                            augmented_task.push_str(&format!(
+                                "  Key findings: {}\n",
+                                dep_summary.key_findings.join("; ")
+                            ));
+                        }
+                        augmented_task.push('\n');
+                    }
+                }
+                if !augmented_task.is_empty() {
+                    augmented_task.push_str("Your task: ");
+                }
+                augmented_task.push_str(&task.task);
+
+                let agent_type = task.agent_type.clone();
+                let budget = task.budget.clone();
+                let factory = self.sub_agent_factory.clone();
+                let task_id = id.clone();
+
+                join_set.spawn(async move {
+                    let sub_agent = factory.create(agent_type.clone(), budget).await?;
+                    let summary = sub_agent.run(&augmented_task).await?;
+                    Ok((task_id, summary))
+                });
+            }
+
+            // Await the entire wave before advancing — dependent tasks in the
+            // next wave need *all* of this wave's results.
+            while let Some(join_result) = join_set.join_next().await {
+                match join_result {
+                    Ok(Ok((id, summary))) => {
+                        completed.insert(id, summary);
+                    }
+                    Ok(Err(e)) => {
+                        // A single sub-agent failure surfaces immediately rather
+                        // than silently dropping its result. Pending tasks that
+                        // depended on the failed one will trip the cycle guard on
+                        // the next wave — that's acceptable: a broken upstream
+                        // cannot be satisfied.
+                        return Err(e);
+                    }
+                    Err(join_err) => {
+                        return Err(oneai_core::error::OneAIError::Agent(format!(
+                            "Delegate sub-agent task panicked or was cancelled: {}",
+                            join_err
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Emit in input order.
+        let summaries = order
+            .iter()
+            .filter_map(|id| completed.get(id).cloned())
+            .collect();
+        Ok(summaries)
     }
 
     /// Apply a paradigm switch — produces real, observable behavior changes.

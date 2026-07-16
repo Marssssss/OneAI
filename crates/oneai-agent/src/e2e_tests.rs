@@ -380,6 +380,244 @@ async fn e2e_scenario_5_sub_agent_delegation() {
     assert_eq!(complete_events, 1, "expected exactly one DelegateComplete event for the Explore sub-agent");
 }
 
+// ─── Scenario 5b/5c: Parallel + dependency-aware multi-delegation ────────────
+//
+// The delegate meta-tool now collects *all* `delegate` calls in a turn into a
+// batch. Tasks with no `depends_on` run concurrently (wave); a task that lists
+// `depends_on` ids runs only after those finish, and its task text is prefixed
+// with their summaries. These tests verify both behaviors end-to-end.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+/// A sub-agent factory that records, across all sub-agents it spawns:
+/// - peak concurrency (`peak`) — proves parallel execution
+/// - the (kind, received-task-text) of each run, in start order — proves
+///   dependency ordering and that downstream received upstream summaries
+struct RecordingSubAgentFactory {
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    runs: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl RecordingSubAgentFactory {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+            runs: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+    fn peak(&self) -> usize { self.peak.load(Ordering::SeqCst) }
+    fn runs(&self) -> Vec<(String, String)> { self.runs.lock().unwrap().clone() }
+}
+
+#[async_trait::async_trait]
+impl SubAgentFactory for RecordingSubAgentFactory {
+    async fn create(&self, kind: SubAgentKind, _budget: TokenBudget) -> oneai_core::error::Result<Box<dyn crate::sub_agent::SubAgent>> {
+        Ok(Box::new(RecordingSubAgent {
+            kind,
+            active: self.active.clone(),
+            peak: self.peak.clone(),
+            runs: self.runs.clone(),
+        }))
+    }
+    fn available_kinds(&self) -> Vec<SubAgentKind> {
+        vec![SubAgentKind::Explore, SubAgentKind::Code]
+    }
+    fn is_available(&self, kind: &SubAgentKind) -> bool {
+        matches!(kind, SubAgentKind::Explore | SubAgentKind::Code)
+    }
+}
+
+/// A sub-agent that sleeps briefly while counted as active, then returns a
+/// deterministic summary (`RESULT-<kind>`). The sleep creates a real await
+/// point so concurrent wave-mates actually overlap.
+struct RecordingSubAgent {
+    kind: SubAgentKind,
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    runs: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::sub_agent::SubAgent for RecordingSubAgent {
+    async fn run(&self, task: &str) -> oneai_core::error::Result<SubAgentSummary> {
+        // Record start order + the (possibly dependency-augmented) task text.
+        {
+            let mut log = self.runs.lock().unwrap();
+            log.push((self.kind.name().to_string(), task.to_string()));
+        }
+        let cur = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        // Update peak via CAS loop.
+        let mut observed_peak = self.peak.load(Ordering::SeqCst);
+        while cur > observed_peak {
+            match self.peak.compare_exchange(observed_peak, cur, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(v) => observed_peak = v,
+            }
+        }
+        // Yield to the runtime so wave-mates overlap in time.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+
+        Ok(SubAgentSummary {
+            completed: true,
+            summary: format!("RESULT-{}", self.kind.name()),
+            key_findings: vec![task.to_string()],
+            budget_exceeded: false,
+            agent_kind: self.kind.clone(),
+            tokens_used: 1000,
+        })
+    }
+    fn kind(&self) -> &SubAgentKind { &self.kind }
+    fn budget(&self) -> &TokenBudget {
+        static BUDGET: TokenBudget = TokenBudget { total: 5000, consumed: 0 };
+        &BUDGET
+    }
+}
+
+/// Helper: build an AgentLoop wired to a given sub-agent factory.
+fn build_delegating_loop(
+    provider: MockProvider,
+    factory: Arc<dyn SubAgentFactory>,
+) -> AgentLoop {
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    AgentLoop::new(
+        Arc::new(provider),
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        factory,
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        None,
+        AgentLoopConfig {
+            auto_checkpoint: false,
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    )
+}
+
+/// Three independent delegations in one turn must run concurrently (peak
+/// concurrency > 1) and each must surface a Delegate + DelegateComplete event.
+#[tokio::test]
+async fn e2e_parallel_delegation() {
+    use crate::mock_provider::DelegateSpec;
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("p1", "explore module A", "Explore"),
+            DelegateSpec::new("p2", "explore module B", "Explore"),
+            DelegateSpec::new("p3", "explore module C", "Explore"),
+        ]),
+        ScriptedResponse::direct_answer("merged all three explorations"),
+    ]);
+
+    // A concrete handle kept for assertions; a clone (type-erased) goes to the
+    // loop. Both share the same inner counters/log.
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = build_delegating_loop(provider, factory.clone())
+        .run_with_observer("explore everything", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let events = observer.events.lock().unwrap();
+    let delegate_events = events.iter().filter(|e| matches!(e, TestEvent::Delegate(_, _))).count();
+    assert_eq!(delegate_events, 3, "expected 3 Delegate events (one per task)");
+    let complete_events = events.iter().filter(|e| matches!(e, TestEvent::DelegateComplete(_))).count();
+    assert_eq!(complete_events, 3, "expected 3 DelegateComplete events");
+    assert_eq!(result.sub_agent_results.len(), 3, "all 3 summaries fed back");
+
+    // The crux of parallelism: with 3 independent tasks, at least 2 must be
+    // active at the same instant. A serial implementation would peak at 1.
+    assert!(
+        factory.peak() >= 2,
+        "expected peak concurrency >= 2 for 3 independent delegates, got {}",
+        factory.peak()
+    );
+}
+
+/// Two delegations where B depends on A: A runs first, B runs only after A
+/// completes, and B's task text must contain A's summary (auto-injected).
+#[tokio::test]
+async fn e2e_dependency_delegation() {
+    use crate::mock_provider::DelegateSpec;
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("a", "explore the auth module", "Explore"),
+            DelegateSpec::new("b", "implement login using findings", "Code").depends_on(&["a"]),
+        ]),
+        ScriptedResponse::direct_answer("done implementing"),
+    ]);
+
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = build_delegating_loop(provider, factory.clone())
+        .run_with_observer("explore then implement", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+    assert_eq!(result.sub_agent_results.len(), 2, "both summaries fed back");
+
+    let runs = factory.runs();
+    assert_eq!(runs.len(), 2, "exactly two sub-agent runs recorded");
+    // Dependency ordering: A (explore) starts before B (code). Because waves
+    // are serialized, B cannot start until A finishes — so the start log is
+    // deterministically [explore, code].
+    assert_eq!(runs[0].0, "explore", "upstream A must start first");
+    assert_eq!(runs[1].0, "code", "dependent B must start after A");
+    // B's received task must contain A's auto-injected summary.
+    assert!(
+        runs[1].1.contains("RESULT-explore"),
+        "B's task must be prefixed with A's summary; got: {}",
+        runs[1].1
+    );
+}
+
+/// A dependency cycle among delegations must surface as an error rather than
+/// looping forever.
+#[tokio::test]
+async fn e2e_dependency_cycle_errors() {
+    use crate::mock_provider::DelegateSpec;
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::delegate_batch(vec![
+            DelegateSpec::new("x", "task x", "Explore").depends_on(&["y"]),
+            DelegateSpec::new("y", "task y", "Explore").depends_on(&["x"]),
+        ]),
+        ScriptedResponse::direct_answer("unreached"),
+    ]);
+
+    let factory = Arc::new(RecordingSubAgentFactory::new());
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let res = build_delegating_loop(provider, factory.clone())
+        .run_with_observer("cyclic", &observer)
+        .await;
+    assert!(
+        res.is_err(),
+        "a dependency cycle must error, not hang; got {:?}",
+        res.as_ref().err().map(|e| e.to_string())
+    );
+}
+
+
 // ─── Scenario 6: Approval gate — tool denied ──────────────────────────────────
 
 #[tokio::test]

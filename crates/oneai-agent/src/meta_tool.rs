@@ -46,12 +46,15 @@ pub fn meta_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
     vec![
         oneai_core::ToolDefinition {
             name: TOOL_DELEGATE.into(),
-            description: "Delegate a self-contained subtask to a specialized sub-agent that runs in \
-                its own context window, then returns a summary. Call this when: the subtask has a \
+            description: "Delegate one or more self-contained subtasks to specialized sub-agents that each run \
+                in their own context window, then return a summary. Call this when: the subtask has a \
                 clear boundary, the main loop does not need the intermediate steps, and you want to \
-                preserve the main context for the overall task. After calling, the main loop waits \
-                for the sub-agent's summary before continuing — do not also call other tools in the \
-                same turn.".into(),
+                preserve the main context for the overall task.\n\n\
+                You MAY call `delegate` multiple times in the same turn to fan out several subtasks. \
+                Subtasks with no `depends_on` run in parallel; a subtask that lists `depends_on` ids \
+                runs only after those subtasks finish, and its task description is automatically \
+                prefixed with their summaries — so a dependent subtask receives its upstream results \
+                without you re-stating them. Do not also call non-delegate tools in the same turn.".into(),
             parameters_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -68,6 +71,15 @@ pub fn meta_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
                         "type": "integer",
                         "description": "Token budget cap for the sub-agent (default 5000).",
                         "default": 5000
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Stable identifier for this delegation, so other delegations in the same turn can reference it via `depends_on`. If omitted, one is assigned automatically; supplying it is recommended whenever you set `depends_on` on any delegation."
+                    },
+                    "depends_on": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Ids of delegations in the same turn that must complete before this one starts. Their summaries are automatically prepended to this subtask. Omit (or leave empty) for subtasks that can run in parallel."
                     }
                 },
                 "required": ["task", "agent_type"]
@@ -126,6 +138,16 @@ mod tests {
             serde_json::json!(["task", "agent_type"])
         );
         assert_eq!(schema["properties"]["budget_tokens"]["default"], 5000);
+        // New dependency fields allow multi-delegate fan-out per turn.
+        assert_eq!(schema["properties"]["id"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["depends_on"]["type"],
+            "array"
+        );
+        assert_eq!(
+            schema["properties"]["depends_on"]["items"]["type"],
+            "string"
+        );
 
         let switch = defs.iter().find(|d| d.name == TOOL_SWITCH_PARADIGM).unwrap();
         let schema = &switch.parameters_schema;
