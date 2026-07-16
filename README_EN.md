@@ -128,26 +128,128 @@ oneai run "refactor the auth module to async" --domain coding --model gpt-4o
 
 ### 4. Drive every subsystem from the CLI
 
-OneAI exposes every subsystem as a CLI subcommand — drive it without writing code:
+OneAI exposes every subsystem as a CLI subcommand — drive it without writing code. The table below covers every subcommand of `oneai-cli` (`oneai` is `oneai-cli`; with no subcommand it launches the TUI):
 
 ```bash
-oneai pack list                      # browse DomainPacks
-oneai eval run coding-basic          # run an eval suite
-oneai eval swebench --dataset ./swe_bench_lite.jsonl --instances astropy__astropy-12907  # 3-axis SWE-bench eval
-oneai studio                         # launch the Web UI (StateGraph viz + checkpoint time-travel)
-oneai mcp serve                      # run as an MCP server (Claude Code / Cursor compatible)
-oneai provider status                # provider-pool health & degradation log
-oneai route                          # inspect SmartRouter's recent routing decisions
-oneai usage report                   # token usage report (prompt/completion/total/calls — tokens only)
-oneai token --prompt "..."           # count tokens, check context-window fit
-oneai team run code-review           # multi-agent team
-oneai swarm run --task "..."         # swarm orchestration
-oneai session list / resume <id>     # persistent sessions (SQLite)
-oneai wasm list / run <name>         # WASM sandbox modules
-oneai embed generate "text"          # generate vector embeddings
-oneai a2a serve                       # expose an agent over the A2A protocol
-oneai init [--format oneai|agents|claude] [--force] [--no-llm]  # scaffold project instruction files (model-synthesized if LLM configured, else heuristic)
+# ── Sessions & inference ──
+oneai                                  # launch the interactive TUI (default)
+oneai chat [--domain coding] [--model gpt-4o] [--user <id>]   # launch the TUI (explicit)
+oneai run "refactor auth module to async" [--domain coding] [--model ...] [--user <id>]  # non-interactive single-shot inference, prints to stdout
+oneai version                          # version info
+
+# ── DomainPacks (domain configuration packs) ──
+oneai pack list                        # browse built-in packs
+oneai pack show <name>                 # show pack details
+oneai pack install <path|git-url>      # install from a local path or git
+oneai pack validate spec.toml         # validate against the JSON Schema (structural + semantic)
+oneai pack spec                       # export the DomainPack spec as a JSON Schema
+oneai pack check <name>               # check an installed pack against the spec
+
+# ── Skills (discovered from convention dirs) ──
+oneai skill list                       # list skills discovered from .claude/.agents/.opencode/.oneai skills
+oneai skill show <name>                # show skill details
+
+# ── Eval framework (quality × usage × efficiency three axes) ──
+oneai eval list                        # list eval suites
+oneai eval run coding_basics [--format markdown|json|compact] [--profile] [--record <path>]  # run a suite (--profile emits efficiency axis, --record records trajectory)
+oneai eval score <suite>               # metrics only (no agent execution)
+oneai eval replay <path>              # ghost-replay a recorded trajectory, verify determinism
+oneai eval swebench --dataset ./swe_bench_lite.jsonl [--instances astropy__astropy-12907] [--limit N] [--modal]  # 3-axis SWE-bench eval
+
+# ── Workflows & state graphs (embedded in the DomainPack) ──
+oneai workflow list [--domain coding]  # list DAG workflows + state graphs
+oneai workflow show <name>             # render a workflow DAG as ASCII + list steps
+oneai workflow run <name> [task] [--domain ...] [--model ...] [--user <id>]  # execute a DAG workflow end-to-end
+oneai graph list [--domain coding]     # list state graphs (react/plan/reflect/explore)
+oneai graph show <name>                # render a state graph as ASCII
+oneai graph run <name> <task> [--domain ...] [--model ...] [--user <id>]   # run a state graph with a real provider
+
+# ── Multi-agent coordination ──
+oneai team strategies                  # list team strategies (Coordinate/Route/Collaborate/Debate)
+oneai team presets                     # list preset teams (code_review/research_route/dev_pipeline/arch_debate)
+oneai team info <id>                   # show team config details
+oneai team run "..." [--strategy coordinate] [--preset ...] [--budget 100000]  # run a team coordination task
+oneai handoff list                     # list handoff targets and presets
+oneai handoff targets <preset>         # show handoff target descriptions for a preset
+oneai handoff config [--preset ...]    # show handoff config
+oneai handoff run <target> <reason> [--preset ...]  # execute a handoff (demo mode)
+oneai swarm list                       # list swarm presets
+oneai swarm routing                    # list routing strategies (best-fit/load-balanced/cost-optimized/fastest)
+oneai swarm config <preset>            # show swarm config
+oneai swarm agents <preset>            # show agents & capabilities in a swarm preset
+oneai swarm run --task "..." [--routing best-fit] [--preset ...] [--budget 100000]  # swarm orchestration
+
+# ── Provider pool & smart routing ──
+oneai provider status                  # provider-pool status: active provider, health, circuit states
+oneai provider fallback-log [--limit 20]  # recent fallback events
+oneai provider test                     # connectivity-check every provider in the pool
+oneai provider route "task description" [--strategy balanced|cost|latency|quality]  # routing decision dry-run (cost/latency/quality analysis)
+oneai provider route-log [--limit 10]  # recent routing decisions with rationale
+oneai provider route-config             # current routing strategy and config
+
+# ── Token counting & context management ──
+oneai token count "text" [--model ...]  # count tokens
+oneai token estimate [--model ...]      # estimate tokens in a sample conversation
+oneai token context <model>            # show context-window profile for a model
+oneai token models                      # list known tokenizer profiles
+oneai token fits "text" --model <model> # check whether text fits a model's context window
+oneai token probe [--model ...]        # probe the provider's model-metadata endpoint (L2), show 3-layer resolution
+
+# ── Usage tracking (tokens only, no USD) ──
+oneai usage report                     # global usage summary (total tokens, calls, by-model breakdown)
+oneai usage session <id>               # per-session usage details
+oneai usage export [--format json|csv]  # export usage records
+
+# ── Memory (durable cross-session facts) ──
+oneai memory search <kw> [--user <id>] [--top_k 10]  # search durable facts by keyword
+oneai memory list [--user <id>] [--session <id>]      # list facts for a user/session
+
+# ── Persistent sessions (SQLite) ──
+oneai session list                     # list saved sessions
+oneai session resume <id>             # resume a session (show conversation history)
+oneai session delete <id>             # delete a session
+oneai session info <id>               # inspect session details
+
+# ── Embedding service ──
+oneai embed generate "text" [--model ...] [--service fastembed|ollama|openai|anthropic] [--api-key ...]  # generate an embedding
+oneai embed batch "t1,t2" [same opts]  # batch generate
+oneai embed list                       # list available embedding models
+oneai embed health [same opts]        # check embedding-service health
+oneai embed dimension [same opts]      # show vector dimension for a model
+
+# ── WASM sandbox ──
+oneai wasm list                        # list loaded modules
+oneai wasm load <name> <file.wasm>     # load a module
+oneai wasm run <name> [--input <json> | --input-file <path>]  # execute a module
+oneai wasm health [--name <name>]      # module health check
+oneai wasm unload <name>              # unload a module
+oneai wasm stats                        # resource-monitor statistics
+
+# ── MCP (client + server) ──
+oneai mcp serve [--domain coding]       # run as an MCP server (Claude Code / Cursor compatible)
+oneai mcp list                          # list configured MCP servers
+oneai mcp add <name> --transport stdio|sse|streamable_http [--command ...] [--url ...] [--args ...]  # add an MCP server
+oneai mcp remove <name>                # remove an MCP server
+oneai mcp connect <name>              # test connection and show discovered tools
+
+# ── A2A (agent-to-agent protocol) ──
+oneai a2a serve [--domain coding]       # start the A2A server, expose OneAI agent capabilities
+oneai a2a discover <url>               # discover a remote A2A agent's capabilities
+oneai a2a list                         # list configured A2A endpoints
+oneai a2a send <url> "task message"     # send a task to a remote A2A agent
+
+# ── Config ──
+oneai config show                      # show current config
+oneai config init                      # create the default config file
+
+# ── Web UI ──
+oneai studio [--port 3000] [--domain coding] [--model ...] [--user <id>]  # launch the Studio Web UI (StateGraph viz + checkpoint time-travel)
+
+# ── Project instruction files ──
+oneai init [--format oneai|agents|claude] [--path <dir>] [--force] [--no-llm]  # scaffold ONEAI.md/AGENTS.md/CLAUDE.md (model-synthesized if LLM configured, else heuristic)
 ```
+
+> Every subcommand comes from the clap definitions in `examples/cli/src/main.rs`; run `oneai --help` or `oneai <sub> --help` to see full options for any subcommand.
 
 ### 5. Minimal Rust program
 

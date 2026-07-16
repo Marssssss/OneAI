@@ -128,26 +128,128 @@ oneai run "把 auth 模块重构为 async" --domain coding --model gpt-4o
 
 ### 4. 通过 CLI 体验各子系统
 
-OneAI 把每个子系统都暴露为 CLI 子命令，无需写代码即可驱动：
+OneAI 把每个子系统都暴露为 CLI 子命令，无需写代码即可驱动。下表覆盖 `oneai-cli` 的全部子命令（`oneai` 即 `oneai-cli`，不带子命令时默认进入 TUI）：
 
 ```bash
-oneai pack list                      # 浏览 DomainPack
-oneai eval run coding-basic          # 运行评测套件
-oneai eval swebench --dataset ./swe_bench_lite.jsonl --instances astropy__astropy-12907  # SWE-bench 三轴评测
-oneai studio                         # 启动 Web UI（StateGraph 可视化 + Checkpoint 时间旅行）
-oneai mcp serve                      # 作为 MCP 服务器运行（兼容 Claude Code/Cursor）
-oneai provider status                # Provider 池健康与降级日志
-oneai route                          # 查看 SmartRouter 最近的路由决策
-oneai usage report                   # Token 用量报告（prompt/completion/total/calls，纯 token 维度）
-oneai token --prompt "..."           # 统计 Token、检查上下文窗口是否装得下
-oneai team run code-review           # 多 Agent 团队协作
-oneai swarm run --task "..."         # 群体编排
-oneai session list / resume <id>     # 持久化会话（SQLite）
-oneai wasm list / run <name>         # WASM 沙箱模块
-oneai embed generate "text"          # 生成向量 embedding
-oneai a2a serve                       # 通过 A2A 协议暴露 Agent
-oneai init [--format oneai|agents|claude] [--force] [--no-llm]  # 生成项目指令文件（已配置 LLM 时由模型综合生成，否则启发式）
+# ── 会话与推理 ──
+oneai                                  # 启动交互式 TUI（默认）
+oneai chat [--domain coding] [--model gpt-4o] [--user <id>]   # 启动 TUI（显式）
+oneai run "把 auth 模块重构为 async" [--domain coding] [--model ...] [--user <id>]  # 非交互单次推理，输出到 stdout
+oneai version                          # 版本信息
+
+# ── DomainPack（领域配置包）──
+oneai pack list                        # 浏览内置 pack
+oneai pack show <name>                 # 查看 pack 详情
+oneai pack install <path|git-url>      # 从本地路径或 git 安装
+oneai pack validate spec.toml         # 对照 JSON Schema 校验（结构 + 语义）
+oneai pack spec                       # 导出 DomainPack 规范为 JSON Schema
+oneai pack check <name>               # 对照规范检查已安装 pack
+
+# ── Skill（约定目录发现的技能）──
+oneai skill list                       # 列出从 .claude/.agents/.opencode/.oneai skills 发现的技能
+oneai skill show <name>                # 查看技能详情
+
+# ── 评测框架（能力 × 成本 × 效率 三轴）──
+oneai eval list                        # 列出评测套件
+oneai eval run coding_basics [--format markdown|json|compact] [--profile] [--record <path>]  # 运行套件（--profile 输出效率轴，--record 录制轨迹）
+oneai eval score <suite>               # 仅跑指标（不执行 agent）
+oneai eval replay <path>              # 幽灵重放录制轨迹，校验确定性
+oneai eval swebench --dataset ./swe_bench_lite.jsonl [--instances astropy__astropy-12907] [--limit N] [--modal]  # SWE-bench 三轴评测
+
+# ── 工作流与状态图（DomainPack 内嵌）──
+oneai workflow list [--domain coding]  # 列出 DAG 工作流 + 状态图
+oneai workflow show <name>             # ASCII 渲染工作流 DAG + 步骤
+oneai workflow run <name> [task] [--domain ...] [--model ...] [--user <id>]  # 端到端执行 DAG 工作流
+oneai graph list [--domain coding]     # 列出状态图（react/plan/reflect/explore）
+oneai graph show <name>                # ASCII 渲染状态图
+oneai graph run <name> <task> [--domain ...] [--model ...] [--user <id>]   # 用真实 Provider 执行状态图
+
+# ── 多 Agent 协作 ──
+oneai team strategies                  # 列出团队协作策略（Coordinate/Route/Collaborate/Debate）
+oneai team presets                     # 列出预设团队（code_review/research_route/dev_pipeline/arch_debate）
+oneai team info <id>                   # 查看团队配置详情
+oneai team run "..." [--strategy coordinate] [--preset ...] [--budget 100000]  # 执行团队协作任务
+oneai handoff list                     # 列出 handoff 目标与预设
+oneai handoff targets <preset>         # 查看预设的 handoff 目标描述
+oneai handoff config [--preset ...]    # 查看 handoff 配置
+oneai handoff run <target> <reason> [--preset ...]  # 执行 handoff（演示模式）
+oneai swarm list                       # 列出群体预设
+oneai swarm routing                    # 列出路由策略（best-fit/load-balanced/cost-optimized/fastest）
+oneai swarm config <preset>            # 查看群体配置
+oneai swarm agents <preset>            # 查看群体内的 agent 与能力
+oneai swarm run --task "..." [--routing best-fit] [--preset ...] [--budget 100000]  # 群体编排
+
+# ── Provider 池与智能路由 ──
+oneai provider status                  # Provider 池状态：活跃 provider、健康、熔断
+oneai provider fallback-log [--limit 20]  # 近期降级事件
+oneai provider test                     # 连通性检查池中所有 provider
+oneai provider route "任务描述" [--strategy balanced|cost|latency|quality]  # 路由决策 dry-run（成本/延迟/质量分析）
+oneai provider route-log [--limit 10]  # 近期路由决策及理由
+oneai provider route-config             # 当前路由策略与配置
+
+# ── Token 计数与上下文管理 ──
+oneai token count "文本" [--model ...]  # 统计 token 数
+oneai token estimate [--model ...]      # 估算样例对话的 token 数
+oneai token context <model>            # 查看模型上下文窗口画像
+oneai token models                      # 列出已知 tokenizer 画像
+oneai token fits "文本" --model <model> # 检查文本是否装得下上下文窗口
+oneai token probe [--model ...]        # 探测 Provider 模型元数据端点（L2），展示三层解析结果
+
+# ── 用量记录（纯 token 维度，无 USD）──
+oneai usage report                     # 全局用量汇总（总 token、调用次数、按模型拆分）
+oneai usage session <id>               # 单会话用量详情
+oneai usage export [--format json|csv]  # 导出用量记录
+
+# ── 记忆（跨会话持久事实）──
+oneai memory search <kw> [--user <id>] [--top_k 10]  # 关键词检索持久事实
+oneai memory list [--user <id>] [--session <id>]      # 列出某用户/会话的事实
+
+# ── 持久化会话（SQLite）──
+oneai session list                     # 列出已保存会话
+oneai session resume <id>             # 恢复会话（显示对话历史）
+oneai session delete <id>             # 删除会话
+oneai session info <id>               # 查看会话详情
+
+# ── Embedding 服务 ──
+oneai embed generate "text" [--model ...] [--service fastembed|ollama|openai|anthropic] [--api-key ...]  # 生成向量
+oneai embed batch "t1,t2" [同上选项]   # 批量生成
+oneai embed list                       # 列出可用 embedding 模型
+oneai embed health [同上选项]          # 检查 embedding 服务健康
+oneai embed dimension [同上选项]       # 查看模型向量维度
+
+# ── WASM 沙箱 ──
+oneai wasm list                        # 列出已加载模块
+oneai wasm load <name> <file.wasm>     # 加载模块
+oneai wasm run <name> [--input <json> | --input-file <path>]  # 执行模块
+oneai wasm health [--name <name>]      # 模块健康检查
+oneai wasm unload <name>              # 卸载模块
+oneai wasm stats                        # 资源监控统计
+
+# ── MCP（客户端 + 服务端）──
+oneai mcp serve [--domain coding]       # 作为 MCP 服务器运行（兼容 Claude Code/Cursor）
+oneai mcp list                          # 列出已配置 MCP 服务器
+oneai mcp add <name> --transport stdio|sse|streamable_http [--command ...] [--url ...] [--args ...]  # 添加 MCP 服务器
+oneai mcp remove <name>                # 移除 MCP 服务器
+oneai mcp connect <name>              # 测试连接并展示发现的工具
+
+# ── A2A（Agent-to-Agent 协议）──
+oneai a2a serve [--domain coding]       # 启动 A2A 服务器，暴露 OneAI agent 能力
+oneai a2a discover <url>               # 发现远程 A2A agent 能力
+oneai a2a list                         # 列出已配置 A2A 端点
+oneai a2a send <url> "任务消息"        # 向远程 A2A agent 发送任务
+
+# ── 配置 ──
+oneai config show                      # 查看当前配置
+oneai config init                      # 创建默认配置文件
+
+# ── Web UI ──
+oneai studio [--port 3000] [--domain coding] [--model ...] [--user <id>]  # 启动 Studio Web UI（StateGraph 可视化 + Checkpoint 时间旅行）
+
+# ── 项目指令文件 ──
+oneai init [--format oneai|agents|claude] [--path <dir>] [--force] [--no-llm]  # 生成 ONEAI.md/AGENTS.md/CLAUDE.md（已配置 LLM 时由模型综合生成，否则启发式）
 ```
+
+> 全部子命令均来自 `examples/cli/src/main.rs` 的 clap 定义；运行 `oneai --help` 或 `oneai <sub> --help` 可查看任意子命令的完整参数。
 
 ### 5. 最简 Rust 程序
 
