@@ -119,6 +119,7 @@ impl MemoryProfile {
                 strategy: RecallStrategy::Hybrid,
                 top_k: 5,
                 time_decay: true,
+                ..Default::default()
             })
             .core_budget_tokens(2048)
             .enable_memory_tools(true)
@@ -236,6 +237,7 @@ mod tests {
             strategy: RecallStrategy::KeywordFirst,
             top_k: 3,
             time_decay: false,
+            ..Default::default()
         });
         let b = MemoryProfile::new("b").recall(RecallConfig::default());
         let m = MemoryProfile::merge(&a, &b);

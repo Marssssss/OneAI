@@ -7,7 +7,7 @@
 //!   oneai embed health            — Check embedding service health
 //!   oneai embed dimension         — Show embedding dimension for configured model
 
-use oneai_core::{EmbeddingModel, EmbeddingServiceType, EmbeddingConfig};
+use oneai_core::{EmbeddingModel, EmbeddingConfig};
 use oneai_rag::EmbeddingConfigExt;
 
 /// Generate an embedding for a single text string.
@@ -21,7 +21,7 @@ pub fn cmd_embed_generate(text: &str, model: Option<&str>, service_type: Option<
                 match embedding {
                     Ok(vec) => {
                         println!("Embedding generated successfully.");
-                        println!("Model: {}", service.model().model_name());
+                        println!("Model: {}", service.model().as_str());
                         println!("Dimension: {}", vec.len());
                         println!("First 10 values: {:?}", &vec[..std::cmp::min(10, vec.len())]);
                         // Compute L2 norm
@@ -57,7 +57,7 @@ pub fn cmd_embed_batch(texts: &str, model: Option<&str>, service_type: Option<&s
                 match embeddings {
                     Ok(vecs) => {
                         println!("Batch embeddings generated successfully.");
-                        println!("Model: {}", service.model().model_name());
+                        println!("Model: {}", service.model().as_str());
                         println!("Count: {} embeddings", vecs.len());
                         for (i, vec) in vecs.iter().enumerate() {
                             println!("  [{}] dim={} first5={:?} norm={:.4}",
@@ -79,23 +79,29 @@ pub fn cmd_embed_batch(texts: &str, model: Option<&str>, service_type: Option<&s
     });
 }
 
-/// List available embedding models.
+/// List available embedding models + the auto-detection chain.
 pub fn cmd_embed_list() {
-    println!("Available embedding models:");
+    println!("Available embedding providers (--provider):");
     println!();
-    println!("  Local models (no API key needed):");
-    println!("    AllMiniLML6V2    — 384-dim, ~22MB, fast, good Chinese (FastEmbed default)");
-    println!("    BGEBaseENv15     — 768-dim, ~430MB, better English");
-    println!("    MxbaiEmbedLargeV1 — 1024-dim, ~670MB, high quality");
-    println!("    Ollama            — dim varies, local server required");
+    println!("  auto          — zero-config auto-detect (the default; see chain below)");
+    println!("  openai        — text-embedding-3-small (1536-dim) / 3-large (3072-dim); OPENAI_API_KEY");
+    println!("  voyage        — voyage-3 (1024-dim) / voyage-3-lite (512-dim); VOYAGE_API_KEY");
+    println!("  ollama        — nomic-embed-text default; local, no key; probes localhost:11434");
+    println!("  fastembed     — local ONNX, no key; auto-chain last resort (one-time ~22MB download, then offline)");
+    println!("  openai-compat — OpenAI-compatible relay; needs ONEAI_EMBEDDING_API_KEY + base_url");
     println!();
-    println!("  Cloud models (API key required):");
-    println!("    OpenAISmall       — 1536-dim, text-embedding-3-small ($0.02/1M tokens)");
-    println!("    OpenAILarge       — 3072-dim, text-embedding-3-large ($0.13/1M tokens)");
-    println!("    Voyage3           — 1024-dim, Anthropic/Voyage ($0.02/1M tokens)");
-    println!("    Voyage3Lite       — 512-dim, Anthropic/Voyage ($0.01/1M tokens)");
+    println!("  Embedding keys are independent of the LLM provider key (LLM has no embed method).");
     println!();
-    println!("  Service types: fastembed, ollama, openai, anthropic");
+    println!("  Auto-detection chain order:");
+    println!("    1. openai-compat  (ONEAI_EMBEDDING_API_KEY + ONEAI_EMBEDDING_BASE_URL)");
+    println!("    2. voyage         (VOYAGE_API_KEY)");
+    println!("    3. openai         (OPENAI_API_KEY, official api.openai.com)");
+    println!("    4. ollama         (localhost:11434 reachable + embedding model installed)");
+    println!("    5. fastembed      (local ONNX, no key; one-time download then offline)");
+    println!("    6. (none)         → memory recall falls back to keyword matching");
+    println!();
+    println!("  Models are free-form strings (--model text-embedding-3-small);");
+    println!("  unknown names are runtime-dimension-probed.");
 }
 
 /// Check embedding service health.
@@ -109,7 +115,7 @@ pub fn cmd_embed_health(model: Option<&str>, service_type: Option<&str>, api_key
                 match result {
                     Ok(()) => {
                         println!("✅ Embedding service is healthy.");
-                        println!("  Model: {}", service.model().model_name());
+                        println!("  Model: {}", service.model().as_str());
                         println!("  Dimension: {}", service.dimension());
                     }
                     Err(err) => {
@@ -135,14 +141,14 @@ pub fn cmd_embed_dimension(model: Option<&str>, service_type: Option<&str>, api_
                 match dim {
                     Ok(d) => {
                         println!("Embedding dimension: {}", d);
-                        println!("Model: {}", service.model().model_name());
+                        println!("Model: {}", service.model().as_str());
                     }
                     Err(err) => {
                         // For models with known dimension, just report it
                         let known_dim = service.model().dimension();
                         if known_dim > 0 {
                             println!("Embedding dimension: {}", known_dim);
-                            println!("Model: {}", service.model().model_name());
+                            println!("Model: {}", service.model().as_str());
                             eprintln!("Note: Could not verify via test embedding: {}", err);
                         } else {
                             eprintln!("Error determining dimension: {}", err);
@@ -163,32 +169,34 @@ fn create_embedding_service(
     service_type: Option<&str>,
     api_key: Option<&str>,
 ) -> oneai_core::error::Result<std::sync::Arc<dyn oneai_core::traits::EmbeddingService>> {
-    let st = service_type.unwrap_or("fastembed");
-    let service_type = match st {
-        "fastembed" => EmbeddingServiceType::FastEmbed,
-        "ollama" => EmbeddingServiceType::Ollama,
-        "openai" => EmbeddingServiceType::OpenAI,
-        "anthropic" => EmbeddingServiceType::Anthropic,
-        _ => return Err(oneai_core::error::OneAIError::Config(format!(
-            "Unknown embedding service type: '{}'. Use: fastembed, ollama, openai, anthropic", st
+    use oneai_core::traits::EmbeddingProvider;
+
+    let provider = match service_type.unwrap_or("auto") {
+        "auto" | "" => EmbeddingProvider::Auto,
+        "openai" => EmbeddingProvider::OpenAi,
+        "voyage" => EmbeddingProvider::Voyage,
+        "ollama" => EmbeddingProvider::Ollama,
+        "fastembed" => EmbeddingProvider::FastEmbed,
+        "openai-compat" | "openai_compat" | "openai-compatible" => EmbeddingProvider::OpenAiCompat,
+        other => return Err(oneai_core::error::OneAIError::Config(format!(
+            "Unknown embedding provider: '{}'. Use: auto, openai, voyage, ollama, fastembed, openai-compat", other
         ))),
     };
 
-    let embedding_model = match model {
-        Some("all-MiniLM-L6-v2") | Some("allminilm") | None => EmbeddingModel::AllMiniLML6V2,
-        Some("bge-base-en-v1.5") | Some("bge") => EmbeddingModel::BGEBaseENv15,
-        Some("mxbai-embed-large") | Some("mxbai") => EmbeddingModel::MxbaiEmbedLargeV1,
-        Some("text-embedding-3-small") | Some("openai-small") => EmbeddingModel::OpenAISmall,
-        Some("text-embedding-3-large") | Some("openai-large") => EmbeddingModel::OpenAILarge,
-        Some("voyage-3") | Some("voyage3") => EmbeddingModel::Voyage3,
-        Some("voyage-3-lite") | Some("voyage3-lite") => EmbeddingModel::Voyage3Lite,
-        Some("ollama") => EmbeddingModel::Ollama,
-        Some(m) => return Err(oneai_core::error::OneAIError::Config(format!(
-            "Unknown embedding model: '{}'", m
-        ))),
-    };
+    let mut config = EmbeddingConfig::default();
+    config.provider = provider;
+    if let Some(m) = model {
+        config.model = Some(EmbeddingModel::new(m));
+    }
+    if let Some(k) = api_key.filter(|k| !k.is_empty()) {
+        config.api_key = Some(k.to_string());
+    }
 
-    let config = EmbeddingConfig::from_parts(service_type, embedding_model, api_key.map(|s| s.to_string()));
-
-    config.build_service()
+    match config.build_service() {
+        Ok(Some(service)) => Ok(service),
+        Ok(None) => Err(oneai_core::error::OneAIError::Config(
+            "No embedding provider available — set an embedding key (VOYAGE_API_KEY/OPENAI_API_KEY) or run a local Ollama. Otherwise memory recall uses keyword matching.".to_string(),
+        )),
+        Err(e) => Err(e),
+    }
 }

@@ -40,6 +40,7 @@ pub fn cmd_chat(config: &OneaiConfig, domain_override: Option<&str>, model_overr
         Some(&domain_name),
         user,
         &config.generation,
+        &config.embedding,
     ) {
         eprintln!("Error: {}", e);
         std::process::exit(1);

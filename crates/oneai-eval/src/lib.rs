@@ -53,6 +53,7 @@ pub mod builtin_metrics;
 pub mod builtin_suites;
 pub mod report_format;
 pub mod swebench;
+pub mod memory;
 
 pub use eval_case::*;
 pub use eval_metric::*;

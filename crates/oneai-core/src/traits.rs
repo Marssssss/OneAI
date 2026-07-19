@@ -634,9 +634,9 @@ use std::collections::HashMap;
 ///
 /// Concrete implementations live in `oneai-rag`:
 /// - `OpenAIEmbeddingService` — OpenAI text-embedding API (cloud, high quality)
-/// - `AnthropicEmbeddingService` — Anthropic/Voyage embedding API (cloud, excellent quality)
+/// - `VoyageEmbeddingService` — Voyage embedding API (`api.voyageai.com`, `VOYAGE_API_KEY`)
 /// - `OllamaEmbeddingService` — Ollama local embedding API (local, no API key needed)
-/// - `FastEmbedService` — local ONNX model via fastembed crate (stub for now)
+/// - `FastEmbedService` — local ONNX model via fastembed crate
 #[async_trait]
 pub trait EmbeddingService: Send + Sync {
     /// Generate an embedding for a single text string.
@@ -650,6 +650,15 @@ pub trait EmbeddingService: Send + Sync {
 
     /// Get the embedding model being used.
     fn model(&self) -> EmbeddingModel;
+
+    /// The provider's effective max input size, in UTF-8 bytes used as a
+    /// conservative proxy for tokens (token count ≤ UTF-8 byte length).
+    ///
+    /// `None` means "no enforced limit"; the chunk splitter skips splitting
+    /// in that case. Providers with a known per-model cap override this.
+    fn max_input_tokens(&self) -> Option<usize> {
+        None
+    }
 
     /// Get the embedding dimension.
     fn dimension(&self) -> usize {
@@ -696,191 +705,305 @@ pub trait EmbeddingService: Send + Sync {
 
 // ─── EmbeddingModel ─────────────────────────────────────────────────────────
 
-/// Available embedding models.
+/// An embedding model, identified by its canonical model-name string.
 ///
-/// Each model has different characteristics (size, speed, quality, language support).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum EmbeddingModel {
-    /// AllMiniLML6V2 — lightweight, fast, good Chinese support. 384-dim.
-    AllMiniLML6V2,
-    /// BGEBaseENv15 — better English quality. 768-dim.
-    BGEBaseENv15,
-    /// MxbaiEmbedLargeV1 — high quality, larger. 1024-dim.
-    MxbaiEmbedLargeV1,
-    /// OpenAI text-embedding-3-small — cloud, excellent quality. 1536-dim.
-    OpenAISmall,
-    /// OpenAI text-embedding-3-large — cloud, best quality. 3072-dim.
-    OpenAILarge,
-    /// Anthropic/Voyage voyage-3 — cloud. 1024-dim.
-    Voyage3,
-    /// Anthropic/Voyage voyage-3-lite — lightweight, faster. 512-dim.
-    Voyage3Lite,
-    /// Ollama embedding model (runtime-determined dimension). 0-dim placeholder.
-    Ollama,
-}
+/// Newtype over `String`: adding a new model never requires changing an enum
+/// — just pass its name string, e.g. `EmbeddingModel::new("voyage-3")`. Known
+/// dimensions are looked up from [`KNOWN_EMBEDDING_DIMENSIONS`]; names absent
+/// from the table return `0` and are resolved at runtime via
+/// [`EmbeddingService::actual_dimension`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EmbeddingModel(pub String);
 
 impl EmbeddingModel {
-    /// Get the embedding dimension for this model.
+    /// Create a model identifier from any string-like input.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The canonical model-name string sent to provider APIs.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Look up the known vector dimension for this model.
     ///
-    /// For Ollama, returns 0 (dimension is determined by the Ollama model at runtime).
+    /// Returns `0` for models whose dimension is determined at runtime (e.g.
+    /// Ollama models, or names absent from [`KNOWN_EMBEDDING_DIMENSIONS`]);
+    /// callers should then use [`EmbeddingService::actual_dimension`].
     pub fn dimension(&self) -> usize {
-        match self {
-            Self::AllMiniLML6V2 => 384,
-            Self::BGEBaseENv15 => 768,
-            Self::MxbaiEmbedLargeV1 => 1024,
-            Self::OpenAISmall => 1536,
-            Self::OpenAILarge => 3072,
-            Self::Voyage3 => 1024,
-            Self::Voyage3Lite => 512,
-            Self::Ollama => 0,
-        }
+        KNOWN_EMBEDDING_DIMENSIONS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&self.0))
+            .map(|(_, d)| *d)
+            .unwrap_or(0)
     }
 
-    /// Whether this model requires an API key.
-    pub fn requires_api_key(&self) -> bool {
-        matches!(self, Self::OpenAISmall | Self::OpenAILarge | Self::Voyage3 | Self::Voyage3Lite)
-    }
+    // ── Built-in convenience constructors ──────────────────────────────────
 
-    /// Whether this model runs locally (no external API needed).
-    pub fn is_local(&self) -> bool {
-        matches!(self, Self::AllMiniLML6V2 | Self::BGEBaseENv15 | Self::MxbaiEmbedLargeV1 | Self::Ollama)
+    /// `text-embedding-3-small` (OpenAI, 1536-dim).
+    pub fn openai_small() -> Self {
+        Self::new("text-embedding-3-small")
     }
-
-    /// Get the canonical model name string for API calls.
-    pub fn model_name(&self) -> &str {
-        match self {
-            Self::AllMiniLML6V2 => "all-MiniLM-L6-v2",
-            Self::BGEBaseENv15 => "bge-base-en-v1.5",
-            Self::MxbaiEmbedLargeV1 => "mixedbread-embed-large-v1",
-            Self::OpenAISmall => "text-embedding-3-small",
-            Self::OpenAILarge => "text-embedding-3-large",
-            Self::Voyage3 => "voyage-3",
-            Self::Voyage3Lite => "voyage-3-lite",
-            Self::Ollama => "nomic-embed-text",
-        }
+    /// `text-embedding-3-large` (OpenAI, 3072-dim).
+    pub fn openai_large() -> Self {
+        Self::new("text-embedding-3-large")
     }
+    /// `voyage-3` (Voyage, 1024-dim).
+    pub fn voyage3() -> Self {
+        Self::new("voyage-3")
+    }
+    /// `voyage-3-lite` (Voyage, 512-dim).
+    pub fn voyage3_lite() -> Self {
+        Self::new("voyage-3-lite")
+    }
+    /// `nomic-embed-text` (Ollama, runtime-dim).
+    pub fn nomic_embed_text() -> Self {
+        Self::new("nomic-embed-text")
+    }
+    /// `all-MiniLM-L6-v2` (FastEmbed, 384-dim).
+    pub fn allminilm_l6_v2() -> Self {
+        Self::new("all-MiniLM-L6-v2")
+    }
+    /// `bge-base-en-v1.5` (FastEmbed, 768-dim).
+    pub fn bge_base_en_v15() -> Self {
+        Self::new("bge-base-en-v1.5")
+    }
+    /// `mixedbread-embed-large-v1` (FastEmbed, 1024-dim).
+    pub fn mxbai_embed_large_v1() -> Self {
+        Self::new("mixedbread-embed-large-v1")
+    }
+}
 
-    /// Get the service type that supports this model.
-    pub fn service_type(&self) -> EmbeddingServiceType {
-        match self {
-            Self::OpenAISmall | Self::OpenAILarge => EmbeddingServiceType::OpenAI,
-            Self::Voyage3 | Self::Voyage3Lite => EmbeddingServiceType::Anthropic,
-            Self::Ollama => EmbeddingServiceType::Ollama,
-            _ => EmbeddingServiceType::FastEmbed,
+impl From<String> for EmbeddingModel {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+impl From<&str> for EmbeddingModel {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+impl std::fmt::Display for EmbeddingModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Static table of known embedding-model dimensions.
+///
+/// Case-insensitive lookup; names not present resolve to `0` (runtime-probed
+/// via [`EmbeddingService::actual_dimension`]).
+pub static KNOWN_EMBEDDING_DIMENSIONS: &[(&str, usize)] = &[
+    ("all-MiniLM-L6-v2", 384),
+    ("bge-base-en-v1.5", 768),
+    ("mixedbread-embed-large-v1", 1024),
+    ("text-embedding-3-small", 1536),
+    ("text-embedding-3-large", 3072),
+    ("voyage-3", 1024),
+    ("voyage-3-lite", 512),
+];
+
+// ─── EmbeddingProvider ──────────────────────────────────────────────────────
+
+/// The embedding provider to use (or [`Auto`][Self::Auto] for zero-config
+/// auto-detection).
+///
+/// `Auto` walks the detection chain (embedding-specific keys, never reusing
+/// the LLM provider's key — embedding and chat are separate capabilities) and
+/// picks the first available provider; if none is available the resolved
+/// service is `None` and memory recall falls back to keyword matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum EmbeddingProvider {
+    /// Zero-config auto-detection (the default).
+    Auto,
+    /// OpenAI `text-embedding-3-*` (official API, `OPENAI_API_KEY`).
+    OpenAi,
+    /// Voyage `voyage-3*` (`api.voyageai.com`, `VOYAGE_API_KEY`).
+    Voyage,
+    /// Ollama local embedding API (no key; probes `localhost:11434`).
+    Ollama,
+    /// FastEmbed local ONNX (no key; available when implemented).
+    FastEmbed,
+    /// OpenAI-compatible relay/gateway (explicit `base_url` + key required).
+    OpenAiCompat,
+}
+
+impl EmbeddingProvider {
+    /// Parse a provider id from its serde form (case-insensitive, accepts
+    /// `openai-compat` / `openai_compat` / `openai-compatible`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "openai" => Some(Self::OpenAi),
+            "voyage" => Some(Self::Voyage),
+            "ollama" => Some(Self::Ollama),
+            "fastembed" => Some(Self::FastEmbed),
+            "openai-compat" | "openai_compat" | "openai-compatible" => Some(Self::OpenAiCompat),
+            _ => None,
         }
     }
 }
 
-// ─── EmbeddingServiceType ────────────────────────────────────────────────────
+impl Default for EmbeddingProvider {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
-/// The type of embedding service to create.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl std::fmt::Display for EmbeddingProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Auto => "auto",
+            Self::OpenAi => "openai",
+            Self::Voyage => "voyage",
+            Self::Ollama => "ollama",
+            Self::FastEmbed => "fastembed",
+            Self::OpenAiCompat => "openai-compat",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+// ─── InputType ──────────────────────────────────────────────────────────────
+
+/// Whether an embedding is for a search query or an indexed document.
+///
+/// Some providers (OpenAI, Voyage) optimize retrieval quality when the input
+/// type is declared; providers that ignore it simply do so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum EmbeddingServiceType {
-    /// FastEmbed (local ONNX) — recommended default. No API key needed.
-    FastEmbed,
-    /// Ollama embedding API — requires local Ollama server. No API key needed.
-    Ollama,
-    /// OpenAI embedding API — requires OpenAI API key. High quality.
-    OpenAI,
-    /// Anthropic/Voyage embedding API — requires Anthropic API key. Excellent quality.
-    Anthropic,
+pub enum InputType {
+    Query,
+    Document,
 }
 
 // ─── EmbeddingConfig ─────────────────────────────────────────────────────────
 
 /// Configuration for the embedding service.
 ///
-/// Used in AppBuilder to configure which embedding service to use
-/// and what model to use. Can build an EmbeddingService via `build_service()`.
-#[derive(Debug, Clone)]
+/// The default ([`EmbeddingConfig::default`]) is **zero-config**:
+/// `provider = Auto`, so the embedding service is auto-resolved at build time
+/// from environment-detectable signals (embedding-specific keys, a reachable
+/// local Ollama, etc.). Most users never touch this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EmbeddingConfig {
-    /// The embedding service type to use.
-    pub service_type: EmbeddingServiceType,
-    /// The model to use (if applicable).
-    pub model: EmbeddingModel,
-    /// API key (required for OpenAI and Anthropic service types).
+    /// Which provider to use (`Auto` = detect).
+    #[serde(default)]
+    pub provider: EmbeddingProvider,
+    /// Model-name override (None → the provider's default model).
+    #[serde(default)]
+    pub model: Option<EmbeddingModel>,
+    /// Embedding-specific API key. Sourced, in priority order, from this
+    /// field, `ONEAI_EMBEDDING_API_KEY`, or the provider's own env var
+    /// (`OPENAI_API_KEY` / `VOYAGE_API_KEY`). **Never** reused from the LLM
+    /// provider's key — embedding and chat are separate capabilities.
+    #[serde(default)]
     pub api_key: Option<String>,
-    /// Base URL override (for custom endpoints).
+    /// Base URL override (required for `OpenAiCompat` relays).
+    #[serde(default)]
     pub base_url: Option<String>,
-    /// Ollama model name (only used for Ollama service type).
-    pub ollama_model: Option<String>,
+    /// Fallback provider used if the primary fails to create or first-call
+    /// (build-time + runtime, sharing one `should_continue` classifier).
+    #[serde(default)]
+    pub fallback: Option<EmbeddingProvider>,
+    /// Query/Document input-type hint (OpenAI/Voyage retrieval optimization).
+    #[serde(default)]
+    pub input_type: Option<InputType>,
+    /// Provider output-dimensionality override (OpenAI `dimensions`).
+    #[serde(default)]
+    pub output_dimensionality: Option<usize>,
+    /// Hard cap on input size before byte-bisection chunking kicks in
+    /// (None → provider default table).
+    #[serde(default)]
+    pub max_input_tokens: Option<usize>,
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            service_type: EmbeddingServiceType::FastEmbed,
-            model: EmbeddingModel::AllMiniLML6V2,
+            provider: EmbeddingProvider::Auto,
+            model: None,
             api_key: None,
             base_url: None,
-            ollama_model: None,
+            fallback: None,
+            input_type: None,
+            output_dimensionality: None,
+            max_input_tokens: None,
         }
     }
 }
 
 impl EmbeddingConfig {
-    /// Create an OpenAI embedding config.
-    pub fn openai(api_key: String, model: EmbeddingModel) -> Self {
+    /// Zero-config (auto-detect) configuration — the recommended default.
+    pub fn auto() -> Self {
+        Self::default()
+    }
+
+    /// OpenAI embedding (official API, `OPENAI_API_KEY`).
+    pub fn openai(api_key: String) -> Self {
         Self {
-            service_type: EmbeddingServiceType::OpenAI,
-            model,
+            provider: EmbeddingProvider::OpenAi,
             api_key: Some(api_key),
-            base_url: None,
-            ollama_model: None,
+            ..Self::default()
         }
     }
 
-    /// Create an Anthropic/Voyage embedding config.
-    pub fn anthropic(api_key: String, model: EmbeddingModel) -> Self {
+    /// Voyage embedding (`api.voyageai.com`, `VOYAGE_API_KEY`).
+    pub fn voyage(api_key: String) -> Self {
         Self {
-            service_type: EmbeddingServiceType::Anthropic,
-            model,
+            provider: EmbeddingProvider::Voyage,
             api_key: Some(api_key),
-            base_url: None,
-            ollama_model: None,
+            ..Self::default()
         }
     }
 
-    /// Create an Ollama embedding config.
-    pub fn ollama(model_name: Option<String>) -> Self {
+    /// Ollama local embedding (no key; probes `localhost:11434`).
+    pub fn ollama() -> Self {
         Self {
-            service_type: EmbeddingServiceType::Ollama,
-            model: EmbeddingModel::Ollama,
-            api_key: None,
-            base_url: None,
-            ollama_model: model_name,
+            provider: EmbeddingProvider::Ollama,
+            ..Self::default()
         }
     }
 
-    /// Create a FastEmbed (local) config.
-    pub fn fastembed(model: EmbeddingModel) -> Self {
+    /// OpenAI-compatible relay (explicit `base_url` + key required).
+    pub fn openai_compat(api_key: String, base_url: String) -> Self {
         Self {
-            service_type: EmbeddingServiceType::FastEmbed,
-            model,
-            api_key: None,
-            base_url: None,
-            ollama_model: None,
+            provider: EmbeddingProvider::OpenAiCompat,
+            api_key: Some(api_key),
+            base_url: Some(base_url),
+            ..Self::default()
         }
     }
 
-    /// Create a config from service type, model, and optional API key.
-    ///
-    /// This is a general constructor for use in CLI and programmatic configuration.
-    pub fn from_parts(
-        service_type: EmbeddingServiceType,
-        model: EmbeddingModel,
-        api_key: Option<String>,
-    ) -> Self {
+    /// FastEmbed local ONNX (no key; available once implemented).
+    pub fn fastembed() -> Self {
         Self {
-            service_type,
-            model,
-            api_key,
-            base_url: None,
-            ollama_model: None,
+            provider: EmbeddingProvider::FastEmbed,
+            ..Self::default()
         }
+    }
+
+    /// Builder-style: set the model.
+    pub fn with_model(mut self, model: impl Into<EmbeddingModel>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+    /// Builder-style: set the base_url.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+    /// Builder-style: set the fallback provider.
+    pub fn with_fallback(mut self, fallback: EmbeddingProvider) -> Self {
+        self.fallback = Some(fallback);
+        self
     }
 }
 

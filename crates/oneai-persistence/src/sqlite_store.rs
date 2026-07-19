@@ -119,7 +119,9 @@ impl SqliteSessionStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 version INTEGER NOT NULL DEFAULT 1,
-                importance REAL NOT NULL DEFAULT 0.5
+                importance REAL NOT NULL DEFAULT 0.5,
+                superseded INTEGER NOT NULL DEFAULT 0,
+                superseded_at TEXT
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_key ON memories(user_id, subject, predicate);
             CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
@@ -134,6 +136,17 @@ impl SqliteSessionStore {
         // databases end up with the column.
         let _ = conn.execute(
             "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5",
+            [],
+        );
+        // Soft-invalidation columns for the Mem0/Zep-style supersede path
+        // (§12.2). `superseded` defaults to 0 (false); `superseded_at` is NULL
+        // while the fact is the current truth.
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN superseded_at TEXT",
             [],
         );
         // Same pattern for the `title` column on `conversations` (added for
@@ -701,15 +714,19 @@ impl MemoryPersistence for SqliteSessionStore {
         let metadata_json = serde_json::to_string(&fact.metadata).unwrap_or_else(|_| "{}".to_string());
         let created = fact.created_at.to_rfc3339();
         let updated = fact.updated_at.to_rfc3339();
+        let superseded_at = fact.superseded_at.map(|t| t.to_rfc3339());
 
         // Conflict-resolved upsert: same (user_id, subject, predicate) → update
         // content/embedding/metadata/fact_type/updated_at and bump version,
         // preserving the original id/created_at. Mirrors the in-memory
         // MemoryFactStore's Mem0 invariant so persistence and runtime agree.
+        // `superseded`/`superseded_at` flow through so a soft-invalidated fact
+        // stays invalidated across resume (and a fresh write un-sets them).
         conn.execute(
             "INSERT INTO memories (id, user_id, session_id, fact_type, subject, predicate, \
-             content, embedding_json, metadata_json, created_at, updated_at, version, importance) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+             content, embedding_json, metadata_json, created_at, updated_at, version, importance, \
+             superseded, superseded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
              ON CONFLICT(user_id, subject, predicate) DO UPDATE SET \
              content = excluded.content, \
              embedding_json = excluded.embedding_json, \
@@ -717,11 +734,14 @@ impl MemoryPersistence for SqliteSessionStore {
              fact_type = excluded.fact_type, \
              updated_at = excluded.updated_at, \
              version = memories.version + 1, \
-             importance = excluded.importance",
+             importance = excluded.importance, \
+             superseded = excluded.superseded, \
+             superseded_at = excluded.superseded_at",
             rusqlite::params![
                 fact.id, fact.user_id, fact.session_id, fact.fact_type.as_str(),
                 fact.subject, fact.predicate, fact.content, embedding_json, metadata_json,
                 created, updated, fact.version, fact.importance,
+                fact.superseded, superseded_at,
             ],
         ).map_err(|e| OneAIError::Persistence(format!("Failed to store fact: {}", e)))?;
         Ok(())
@@ -733,7 +753,8 @@ impl MemoryPersistence for SqliteSessionStore {
         // otherwise scope to that session.
         let mut stmt = conn.prepare(
             "SELECT id, user_id, session_id, fact_type, subject, predicate, content, \
-             embedding_json, metadata_json, created_at, updated_at, version, importance \
+             embedding_json, metadata_json, created_at, updated_at, version, importance, \
+             superseded, superseded_at \
              FROM memories WHERE user_id = ?1 AND (?2 = '' OR session_id = ?2)"
         ).map_err(|e| OneAIError::Persistence(format!("Failed to prepare fact query: {}", e)))?;
 
@@ -748,6 +769,10 @@ impl MemoryPersistence for SqliteSessionStore {
                 .map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
             let updated = chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
+            let superseded: i64 = row.get(13)?;
+            let superseded_at = row.get::<_, Option<String>>(14)?
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|d| d.with_timezone(&chrono::Utc));
             Ok(MemoryFact {
                 id: row.get(0)?,
                 user_id: row.get(1)?,
@@ -762,6 +787,8 @@ impl MemoryPersistence for SqliteSessionStore {
                 created_at: created,
                 updated_at: updated,
                 version: row.get(11)?,
+                superseded: superseded != 0,
+                superseded_at,
             })
         }).map_err(|e| OneAIError::Persistence(format!("Failed to query facts: {}", e)))?;
 
@@ -1261,6 +1288,8 @@ mod fact_tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version,
+            superseded: false,
+            superseded_at: None,
         }
     }
 

@@ -748,13 +748,13 @@ impl AppBuilder {
     /// ```ignore
     /// let app = AppBuilder::new()
     ///     .provider(provider)
-    ///     .embedding_config(EmbeddingConfig::default())  // ← FastEmbed default
+    ///     .embedding_config(EmbeddingConfig::default())  // ← zero-config auto-detect
     ///     .build()?;
     ///
     /// // Or with OpenAI:
     /// let app = AppBuilder::new()
     ///     .provider(provider)
-    ///     .embedding_config(EmbeddingConfig::openai("sk-...", EmbeddingModel::OpenAISmall))
+    ///     .embedding_config(EmbeddingConfig::openai("sk-...".to_string()))
     ///     .build()?;
     /// ```
     pub fn embedding_config(mut self, config: EmbeddingConfig) -> Self {
@@ -762,12 +762,15 @@ impl AppBuilder {
         self
     }
 
-    /// Use the default FastEmbed embedding service (local, no API key).
+    /// Use the zero-config embedding service (auto-detect from environment).
     ///
-    /// This is the simplest way to enable auto-embedding. Uses
-    /// AllMiniLML6V2 (384-dim, fast, good Chinese support).
+    /// Probes, in order: an explicit embedding relay (`ONEAI_EMBEDDING_API_KEY`
+    /// + `ONEAI_EMBEDDING_BASE_URL`), Voyage (`VOYAGE_API_KEY`), OpenAI
+    /// (`OPENAI_API_KEY`), a reachable local Ollama, then FastEmbed when
+    /// implemented. If nothing is available, resolves to `None` and memory
+    /// recall falls back to keyword matching — never hard-fails on a missing key.
     pub fn default_embedding_service(self) -> Self {
-        self.embedding_config(EmbeddingConfig::default())
+        self.embedding_config(EmbeddingConfig::auto())
     }
 
     // ─── Cost & Usage Management ────────────────────────────────────────────
@@ -1585,13 +1588,19 @@ impl AppBuilder {
             None
         };
 
-        // Resolve embedding service: use explicitly set service, or build from config
+        // Resolve embedding service: explicit injection wins; otherwise the
+        // config is auto-resolved (provider=Auto probes env/ollama; absent →
+        // None, and memory recall falls back to keyword matching).
         let embedding_service = self.embedding_service.or_else(|| {
             self.embedding_config.as_ref().and_then(|config| {
                 match config.build_service() {
-                    Ok(service) => Some(service),
+                    Ok(Some(service)) => Some(service),
+                    Ok(None) => {
+                        tracing::info!("No embedding provider resolved; memory recall uses keyword matching");
+                        None
+                    }
                     Err(err) => {
-                        tracing::warn!("Failed to build embedding service from config: {}", err);
+                        tracing::warn!("Failed to resolve embedding service from config: {}", err);
                         None
                     }
                 }
@@ -1617,8 +1626,9 @@ impl AppBuilder {
         if let Some(domain) = &merged_domain_pack {
             if domain.memory_profile.enable_memory_tools {
                 let mm = memory_manager.clone();
+                let recall_cfg = domain.memory_profile.recall.clone();
                 self.tool_registry
-                    .register(Arc::new(oneai_memory::MemorySearchTool::new(mm.clone())) as Arc<dyn Tool>)
+                    .register(Arc::new(oneai_memory::MemorySearchTool::with_recall_config(mm.clone(), recall_cfg)) as Arc<dyn Tool>)
                     .await?;
                 self.tool_registry
                     .register(Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone())) as Arc<dyn Tool>)
@@ -2196,6 +2206,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version: 1,
+            superseded: false,
+            superseded_at: None,
         };
         session.memory_manager().archive_facts(vec![fact]).await;
 

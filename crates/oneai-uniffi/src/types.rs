@@ -286,6 +286,74 @@ pub struct ProviderConfigView {
     pub port: Option<u16>,
 }
 
+// ─── EmbeddingConfigView ────────────────────────────────────────────
+
+/// Embedding configuration for foreign-language App construction.
+///
+/// Mirrors `oneai_core::EmbeddingConfig`. Foreign platforms normally **omit**
+/// this (passing nothing) to get zero-config auto-detection: the Rust side
+/// probes `ONEAI_EMBEDDING_API_KEY`/`VOYAGE_API_KEY`/`OPENAI_API_KEY`/a local
+/// Ollama, and resolves to `None` (keyword-recall fallback) if nothing is
+/// available. Only set this when the user explicitly chooses a provider/key in
+/// the platform settings UI.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct EmbeddingConfigView {
+    /// Provider id: `"auto"` (default), `"openai"`, `"voyage"`, `"ollama"`,
+    /// `"fastembed"`, or `"openai-compat"`.
+    pub provider: String,
+    /// Model name override (empty → provider default).
+    pub model: Option<String>,
+    /// Embedding-specific API key (independent of the LLM provider key).
+    pub api_key: Option<String>,
+    /// Base URL override (required for `"openai-compat"` relays).
+    pub base_url: Option<String>,
+    /// Fallback provider id (used if the primary fails to create/first-call).
+    pub fallback: Option<String>,
+}
+
+impl Default for EmbeddingConfigView {
+    fn default() -> Self {
+        Self {
+            provider: "auto".to_string(),
+            model: None,
+            api_key: None,
+            base_url: None,
+            fallback: None,
+        }
+    }
+}
+
+impl EmbeddingConfigView {
+    /// Convert to the engine-side `EmbeddingConfig`.
+    pub fn to_engine(&self) -> oneai_core::EmbeddingConfig {
+        let provider = oneai_core::EmbeddingProvider::parse(&self.provider)
+            .unwrap_or(oneai_core::EmbeddingProvider::Auto);
+        let mut cfg = oneai_core::EmbeddingConfig::default();
+        cfg.provider = provider;
+        if let Some(m) = &self.model {
+            if !m.is_empty() {
+                cfg.model = Some(oneai_core::EmbeddingModel::new(m));
+            }
+        }
+        if let Some(k) = &self.api_key {
+            if !k.is_empty() {
+                cfg.api_key = Some(k.clone());
+            }
+        }
+        if let Some(b) = &self.base_url {
+            if !b.is_empty() {
+                cfg.base_url = Some(b.clone());
+            }
+        }
+        if let Some(f) = &self.fallback {
+            if let Some(fb) = oneai_core::EmbeddingProvider::parse(f) {
+                cfg.fallback = Some(fb);
+            }
+        }
+        cfg
+    }
+}
+
 // ─── SessionInfoView ────────────────────────────────────────────────
 
 /// Metadata about a saved conversation (UniFFI-compatible view).

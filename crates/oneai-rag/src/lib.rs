@@ -22,8 +22,16 @@ pub mod document;
 pub mod index;
 pub mod retrieval;
 pub mod embedding;
+pub mod chunk_split;
+pub mod provider_adapter;
 
 pub use document::*;
 pub use index::*;
 pub use retrieval::*;
 pub use embedding::*;
+pub use chunk_split::*;
+pub use provider_adapter::{
+    EmbeddingProviderAdapter, EmbeddingProviderRegistry, EmbeddingResolver, EnvProbe,
+    Availability, OpenAiAdapter, VoyageAdapter, OllamaAdapter, FastEmbedAdapter,
+    OpenAiCompatAdapter,
+};

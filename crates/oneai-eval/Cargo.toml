@@ -24,6 +24,7 @@ oneai-trace = { workspace = true }
 oneai-app = { workspace = true }
 oneai-domain = { workspace = true }
 oneai-agent = { workspace = true }
+oneai-memory = { workspace = true }
 
 [lints.rust]
 # `skip_serde` is a bare cfg used to exclude a non-serializable field

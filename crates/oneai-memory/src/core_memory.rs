@@ -131,6 +131,8 @@ mod tests {
             created_at: updated,
             updated_at: updated,
             version: 1,
+            superseded: false,
+            superseded_at: None,
         }
     }
 

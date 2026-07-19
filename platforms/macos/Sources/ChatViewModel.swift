@@ -208,6 +208,16 @@ final class ChatViewModel: ObservableObject {
     @Published var apiKey: String
     @Published var baseUrl: String
 
+    // Embedding provider config (independent of the LLM provider key — the LLM
+    // has no embed method). Default "auto": probes VOYAGE_API_KEY / OPENAI_API_KEY
+    // / a local Ollama; nothing available → memory recall uses keyword matching.
+    // Most users leave provider=auto and never touch these fields.
+    private let embPrefs = UserDefaults(suiteName: "oneai_embedding") ?? .standard
+    @Published var embProvider: String
+    @Published var embModel: String
+    @Published var embApiKey: String
+    @Published var embBaseUrl: String
+
     @Published var items: [ChatEntry] = []
     @Published var sessions: [SessionInfoView] = []
     @Published var input = ""
@@ -266,6 +276,11 @@ final class ChatViewModel: ObservableObject {
         apiKey = p.string(forKey: "apiKey") ?? ""
         baseUrl = p.string(forKey: "baseUrl") ?? ""
         prefs.register(defaults: ["kind": "openai", "model": "gpt-4o-mini"])
+        embProvider = embPrefs.string(forKey: "provider") ?? "auto"
+        embModel = embPrefs.string(forKey: "model") ?? ""
+        embApiKey = embPrefs.string(forKey: "apiKey") ?? ""
+        embBaseUrl = embPrefs.string(forKey: "baseUrl") ?? ""
+        embPrefs.register(defaults: ["provider": "auto"])
     }
 
     // MARK: Provider config
@@ -286,6 +301,10 @@ final class ChatViewModel: ObservableObject {
         prefs.set(model, forKey: "model")
         prefs.set(apiKey, forKey: "apiKey")
         prefs.set(baseUrl, forKey: "baseUrl")
+        embPrefs.set(embProvider, forKey: "provider")
+        embPrefs.set(embModel, forKey: "model")
+        embPrefs.set(embApiKey, forKey: "apiKey")
+        embPrefs.set(embBaseUrl, forKey: "baseUrl")
     }
 
     private func providerConfigView() -> ProviderConfigView {
@@ -296,6 +315,22 @@ final class ChatViewModel: ObservableObject {
             model: model.isEmpty ? "gpt-4o-mini" : model,
             host: nil,
             port: nil
+        )
+    }
+
+    /// Build the embedding config view. Returns nil when provider=auto with no
+    /// key/base, so the Rust side falls through to zero-config auto-detection.
+    private func embeddingConfigView() -> EmbeddingConfigView? {
+        let provider = embProvider.isEmpty ? "auto" : embProvider
+        if provider == "auto" && embApiKey.isEmpty && embBaseUrl.isEmpty {
+            return nil
+        }
+        return EmbeddingConfigView(
+            provider: provider,
+            model: embModel.isEmpty ? nil : embModel,
+            apiKey: embApiKey.isEmpty ? nil : embApiKey,
+            baseUrl: embBaseUrl.isEmpty ? nil : embBaseUrl,
+            fallback: nil
         )
     }
 
@@ -316,6 +351,9 @@ final class ChatViewModel: ObservableObject {
         }
         do {
             var builder = OneAiAppBuilder()
+            if let emb = embeddingConfigView() {
+                builder = try builder.embeddingConfig(cfg: emb)
+            }
             builder = try builder.providerConfig(cfg: providerConfigView())
             builder = builder.defaultTools()
             builder = builder.sqlitePersistenceAt(path: dbPath)

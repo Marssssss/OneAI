@@ -81,6 +81,14 @@ pub struct AppSession {
     /// Plan mode flag — when true, the agent loop blocks tool execution and
     /// only produces a plan. Set by the TUI before `run_agent`.
     plan_mode: bool,
+    /// §12.3: cumulative importance of facts archived since the last mid-
+    /// session reflection (a proxy for "how much memory-worthy content has
+    /// accumulated"). Drives the Generative-Agents-style importance-sum
+    /// threshold for `reflect_if_threshold`.
+    accumulated_importance: f32,
+    /// §12.3: AgentLoop iterations elapsed since the last mid-session
+    /// reflection (floor against reflecting every turn).
+    turns_since_last_reflection: u32,
 }
 
 /// Shared resources for all sessions.
@@ -185,6 +193,8 @@ impl AppSession {
             trace_context,
             workflow_history: Vec::new(),
             plan_mode: false,
+            accumulated_importance: 0.0,
+            turns_since_last_reflection: 0,
         }
     }
 
@@ -622,12 +632,14 @@ impl AppSession {
         // (R1). Recall is routed through the CoreMemorySource (an
         // anti-compression ContextSource injected every iteration) instead of a
         // one-shot system message that could be summarized away. The core
-        // block also carries the agent's curated core-memory facts.
-        let recall_top_k = self.app.domain_pack.as_ref()
-            .map(|d| d.memory_profile.recall.top_k)
-            .unwrap_or(5);
+        // block also carries the agent's curated core-memory facts. §12.4: the
+        // full domain `RecallConfig` (weights, half-life, normalization) is
+        // threaded in so three-factor scoring is domain-tunable.
+        let recall_cfg = self.app.domain_pack.as_ref()
+            .map(|d| d.memory_profile.recall.clone())
+            .unwrap_or_else(oneai_core::RecallConfig::default);
         let recalled_facts = self.app.memory_manager
-            .recall_facts(task, recall_top_k).await?;
+            .recall_facts_with_config(task, &recall_cfg).await?;
 
         // Build the core memory source and populate its recall for this turn.
         let core_memory_source = std::sync::Arc::new(
@@ -818,12 +830,45 @@ impl AppSession {
         *interrupt_slot.lock().await = Some(agent_loop.clone());
 
         // Run with full conversation history (multi-turn)
+        // §12.3: snapshot the archival tier's cumulative importance before the
+        // loop so the per-run delta can feed the mid-session reflection
+        // threshold (Generative-Agents-style importance-sum gating).
+        let importance_before = self.app.memory_manager.fact_archive().all().await
+            .iter().map(|f| f.importance).sum::<f32>();
         let result = agent_loop.run_with_conversation(conversation, task, observer).await;
 
         // Clear the interrupt slot now that the run is over.
         *interrupt_slot.lock().await = None;
 
         let result = result?;
+
+        // §12.3: accumulate the importance of facts archived during this run
+        // (compression-coupled extraction / self-managed tools) and the
+        // iteration count, then attempt a mid-session reflection before the
+        // session-end one. This is the AppSession-level checkpoint — it does
+        // NOT inject into the AgentLoop's per-iteration loop, preserving the
+        // v0.2.0 boundary.
+        let importance_after = self.app.memory_manager.fact_archive().all().await
+            .iter().map(|f| f.importance).sum::<f32>();
+        self.accumulated_importance += (importance_after - importance_before).max(0.0);
+        self.turns_since_last_reflection += result.iterations as u32;
+        if self.app.memory_manager.reflection().is_some() {
+            match self.app.memory_manager
+                .reflect_if_threshold(&self.session_id, &self.conversation, self.accumulated_importance, self.turns_since_last_reflection)
+                .await
+            {
+                Ok(Some(episodic)) => {
+                    tracing::info!(
+                        "Mid-session reflection fired for session '{}': {} insights, {} decisions",
+                        self.session_id, episodic.key_insights.len(), episodic.decisions.len()
+                    );
+                    self.accumulated_importance = 0.0;
+                    self.turns_since_last_reflection = 0;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("Mid-session reflection failed (non-fatal): {}", e),
+            }
+        }
 
         // The assistant's final answer is already part of the loop's
         // conversation (merged below), so working memory captures it without a

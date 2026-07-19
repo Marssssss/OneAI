@@ -11,6 +11,7 @@ use oneai_eval::{
     EvalRunner, ScoreOnlyRunner,
     SuiteRegistry,
     builtin_suites,
+    memory::{builtin_suite, load_suite_jsonl, run_memory_eval, MemoryEvalConfig},
     replay::replay_trajectory,
     swebench::{
         load_instances_filtered, render_swebench_leaderboard, write_prediction_jsonl,
@@ -423,6 +424,75 @@ pub async fn cmd_eval_swebench(
     }
 
     // Report.
+    match format {
+        "json" => println!("{}", report.to_json().unwrap()),
+        "compact" => println!("{}", oneai_eval::render_compact(&report)),
+        "markdown" | _ => println!("{}", report.to_markdown()),
+    }
+}
+
+/// `oneai eval memory` — run the memory-subsystem eval suite.
+///
+/// Methodology aligned with LongMemEval (5 abilities), Mem0 (F1/BLEU-1),
+/// and MemBench (direct recall metrics). See docs/memory-mechanism.md §14.
+pub async fn cmd_eval_memory(
+    suite: &str,
+    data: Option<&str>,
+    metrics: &str,
+    no_embedding: bool,
+    k: usize,
+    format: &str,
+) {
+    let cases = match suite {
+        "builtin" => builtin_suite(),
+        "jsonl" => {
+            let Some(path) = data else {
+                eprintln!("--data <path> is required when --suite jsonl");
+                std::process::exit(1);
+            };
+            load_suite_jsonl(std::path::Path::new(path))
+        }
+        other => {
+            eprintln!("Unknown memory suite '{}'. Use --suite builtin|jsonl.", other);
+            std::process::exit(1);
+        }
+    };
+    if cases.is_empty() {
+        eprintln!("Memory eval suite is empty.");
+        std::process::exit(1);
+    }
+
+    let mut cfg = if no_embedding {
+        MemoryEvalConfig::no_embedding()
+    } else {
+        MemoryEvalConfig::with_deterministic_embedding()
+    };
+    cfg.k = k;
+    cfg.judge = metrics.split(',').any(|m| m.trim() == "judge");
+
+    let mode = if no_embedding { "keyword (no embedding)" } else { "semantic (deterministic embedding)" };
+    eprintln!("Running memory eval: suite={}, {} cases, k={}, mode={}", suite, cases.len(), k, mode);
+
+    let report = match run_memory_eval(&format!("memory_{}", suite), &cases, &cfg).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Memory eval failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Per-case recall@k + F1 summary — the headline §12.1 comparison axis
+    // (run once with --no-embedding and once without; the synonym
+    // anti-example should jump from recall=0.00 to recall>0).
+    eprintln!("\n== Recall@{} by case ==", k);
+    for r in &report.results {
+        let recall = r.scores.iter().find(|s| s.metric_name == "recall_at_k")
+            .map(|s| s.score.value).unwrap_or(0.0);
+        let f1 = r.scores.iter().find(|s| s.metric_name == "f1")
+            .map(|s| s.score.value).unwrap_or(0.0);
+        eprintln!("  {:<28} recall={:.2} f1={:.2}", r.case_id, recall, f1);
+    }
+
     match format {
         "json" => println!("{}", report.to_json().unwrap()),
         "compact" => println!("{}", oneai_eval::render_compact(&report)),

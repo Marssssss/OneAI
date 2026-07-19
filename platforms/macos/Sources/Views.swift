@@ -1210,6 +1210,28 @@ private struct SettingsSheet: View {
                 .font(.system(size: 13, design: .monospaced))
             Text("ollama 示例:kind=ollama, model=llama3, base url=127.0.0.1:11434。保存后重建 App(历史保留)。")
                 .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
+
+            Divider().padding(.vertical, 4)
+
+            Text("Embedding 设置(记忆语义召回;默认 auto,通常无需改动)").font(.oHeadline)
+            Picker("provider", selection: $vm.embProvider) {
+                ForEach(["auto", "openai", "voyage", "ollama", "fastembed", "openai-compat"], id: \.self) {
+                    Text($0).tag($0)
+                }
+            }
+            .pickerStyle(.menu)
+            TextField("model (空 = provider 默认)", text: $vm.embModel)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13, design: .monospaced))
+            SecureField("embedding api key (VOYAGE_API_KEY / OPENAI_API_KEY)", text: $vm.embApiKey)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13, design: .monospaced))
+            TextField("base url (openai-compat 必填;ollama → host:port)", text: $vm.embBaseUrl)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13, design: .monospaced))
+            Text("auto 探测链:openai-compat → voyage → openai → ollama → fastembed;全无可用时降级为关键词召回。embedding key 与主模型 key 相互独立。")
+                .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
+
             HStack {
                 Spacer()
                 Button("保存") {

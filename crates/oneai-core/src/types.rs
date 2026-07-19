@@ -1278,7 +1278,7 @@ pub enum MemoryScope {
 }
 
 /// Domain-level recall configuration, carried by `MemoryProfile`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecallConfig {
     /// Which recall strategy to use (keyword / semantic / hybrid).
     pub strategy: RecallStrategy,
@@ -1286,7 +1286,34 @@ pub struct RecallConfig {
     pub top_k: usize,
     /// Whether to apply time-decay weighting during recall.
     pub time_decay: bool,
+    /// Weight of the relevance factor in the three-factor scorer
+    /// (relevance + recency + importance, à la Generative Agents).
+    /// Defaults to `0.5`.
+    #[serde(default = "default_relevance_weight")]
+    pub relevance_weight: f32,
+    /// Weight of the recency factor. Defaults to `0.3`.
+    #[serde(default = "default_recency_weight")]
+    pub recency_weight: f32,
+    /// Weight of the importance factor. Defaults to `0.2`.
+    #[serde(default = "default_importance_weight")]
+    pub importance_weight: f32,
+    /// Half-life (seconds) for the exponential recency decay. Defaults to
+    /// `3600` (1 hour). Only consulted when `time_decay` is true.
+    #[serde(default = "default_recency_half_life_secs")]
+    pub recency_half_life_secs: u64,
+    /// Whether to min-max normalize the three factors across the candidate
+    /// set before weighting (Generative Agents requires this — cosine ∈
+    /// [-1,1], importance ∈ [0,1], recency ∈ (0,1] are otherwise
+    /// incomparable). Defaults to `true`.
+    #[serde(default = "default_normalize_factors")]
+    pub normalize_factors: bool,
 }
+
+fn default_relevance_weight() -> f32 { 0.5 }
+fn default_recency_weight() -> f32 { 0.3 }
+fn default_importance_weight() -> f32 { 0.2 }
+fn default_recency_half_life_secs() -> u64 { 3600 }
+fn default_normalize_factors() -> bool { true }
 
 impl Default for RecallConfig {
     fn default() -> Self {
@@ -1294,7 +1321,35 @@ impl Default for RecallConfig {
             strategy: RecallStrategy::Hybrid,
             top_k: 5,
             time_decay: true,
+            relevance_weight: default_relevance_weight(),
+            recency_weight: default_recency_weight(),
+            importance_weight: default_importance_weight(),
+            recency_half_life_secs: default_recency_half_life_secs(),
+            normalize_factors: default_normalize_factors(),
         }
+    }
+}
+
+/// Builder-style setter for the three-factor weights on a `RecallConfig`.
+impl RecallConfig {
+    /// Set all three factor weights at once (values are clamped to `[0,1]`).
+    pub fn weights(mut self, relevance: f32, recency: f32, importance: f32) -> Self {
+        self.relevance_weight = relevance.clamp(0.0, 1.0);
+        self.recency_weight = recency.clamp(0.0, 1.0);
+        self.importance_weight = importance.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set the recency half-life in seconds.
+    pub fn recency_half_life_secs(mut self, secs: u64) -> Self {
+        self.recency_half_life_secs = secs;
+        self
+    }
+
+    /// Toggle min-max normalization of the three factors.
+    pub fn normalize_factors(mut self, on: bool) -> Self {
+        self.normalize_factors = on;
+        self
     }
 }
 
@@ -1357,6 +1412,21 @@ pub struct MemoryFact {
     /// Monotonic version counter, incremented on each conflict-resolved update.
     #[serde(default = "default_version")]
     pub version: u32,
+
+    /// Whether this fact has been soft-invalidated (superseded). Zep-style
+    /// soft-fail: an invalidated fact is excluded from default recall (the
+    /// Mem0 "current truth" invariant is preserved by `upsert` overwriting the
+    /// live value; this flag covers explicit invalidation/deletion), but is
+    /// NOT physically removed — it remains auditable via the include-superseded
+    /// search path and the `_superseded_history` metadata log. Defaults to
+    /// `false`.
+    #[serde(default)]
+    pub superseded: bool,
+
+    /// When this fact was soft-invalidated, if ever. `None` while the fact is
+    /// still the current truth.
+    #[serde(default)]
+    pub superseded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_version() -> u32 {
@@ -1422,8 +1492,82 @@ pub enum SelectionMode {
 /// This is the standard keyword matching algorithm used across all OneAI
 /// search/retrieval subsystems. Previously implemented independently in
 /// short-term memory, long-term memory, content store, RAG index, and skill selector.
+///
+/// **Semantics**: whole-`keyword` substring containment. Use this when the
+/// `keyword` is a single term/phrase (skill selector, RAG single-keyword
+/// filter). For natural-language recall queries (multi-word questions like
+/// "which package manager does the user prefer"), use
+/// [`keyword_matches_any_token`] instead — a whole-sentence substring never
+/// matches short fact text, which is why keyword recall looked dead before
+/// embeddings; tokenized matching fixes that without needing an embedding model.
 pub fn keyword_matches(text: &str, keyword: &str) -> bool {
     text.to_lowercase().contains(&keyword.to_lowercase())
+}
+
+/// Tokenize text into lowercase terms for token-level keyword matching.
+///
+/// ASCII alphanumeric runs become one token; each CJK ideograph becomes its
+/// own single-char token (so Chinese text matches at character granularity —
+/// "包管理器" matches "包" / "管理"). Punctuation/whitespace split tokens.
+pub fn tokenize_keywords(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    for c in text.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            buf.push(c);
+        } else {
+            if !buf.is_empty() {
+                out.push(std::mem::take(&mut buf));
+            }
+            if ('\u{4e00}'..='\u{9fff}').contains(&c) {
+                out.push(c.to_string());
+            }
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+/// Common English stop-words filtered out of recall queries so a question like
+/// "which is the auth scheme" doesn't inflate recall by matching every fact
+/// containing "the" / "is" / "which".
+const STOPWORDS: &[&str] = &[
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "of", "to", "in", "on", "at", "for", "and", "or", "but", "not", "no",
+    "do", "does", "did", "what", "which", "who", "whom", "when", "where",
+    "why", "how", "this", "that", "these", "those", "it", "its", "as", "by",
+    "with", "from", "into", "your", "my", "our", "their", "his", "her",
+    "them", "they", "we", "you", "i", "me", "us", "please", "can", "could",
+    "would", "should", "will", "shall", "may", "might", "has", "have", "had",
+    "if", "then", "so", "about",
+];
+
+/// Token-level keyword match for natural-language recall queries.
+///
+/// Unlike [`keyword_matches`] (whole-query substring), this tokenizes the
+/// `query`, drops stop-words, and returns true if any remaining query term
+/// appears as a (case-insensitive) substring of `text`. This lets a multi-word
+/// question like "which package manager does the user prefer?" match fact text
+/// "user.package_manager" via the "package" / "manager" tokens — fixing the
+/// no-embedding recall weakness without requiring an embedding model.
+///
+/// CJK single-char tokens bypass the stop-word/length filter and match at
+/// character granularity, so Chinese queries match Chinese fact text.
+pub fn keyword_matches_any_token(text: &str, query: &str) -> bool {
+    let text_l = text.to_lowercase();
+    for tok in tokenize_keywords(query) {
+        if tok.is_empty() {
+            continue;
+        }
+        let is_cjk = tok.chars().all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+        let keep = is_cjk || !STOPWORDS.iter().any(|s| *s == tok);
+        if keep && text_l.contains(&tok) {
+            return true;
+        }
+    }
+    false
 }
 
 // ─── Lifecycle Hooks ──────────────────────────────────────────────────────────
@@ -1762,6 +1906,35 @@ impl GraphDecision {
 mod tests {
     use super::*;
 
+    #[test]
+    fn keyword_matches_any_token_matches_natural_language_query() {
+        // The §12.1 headline: a multi-word question matches short fact text
+        // via its meaningful tokens — the whole-sentence substring never did.
+        assert!(keyword_matches_any_token("user.package_manager", "which package manager does the user prefer"));
+        // "pnpm" content alone has no overlapping token with that query (it's
+        // matched via the subject "user.package_manager" instead).
+        assert!(!keyword_matches_any_token("pnpm", "which package manager does the user prefer"));
+        // But the fact as a whole (subject + content) is recalled via subject.
+        assert!(keyword_matches_any_token("use pnpm as the package manager", "which package manager"));
+        // Stop-words don't inflate: "the"/"which" alone shouldn't match clean text.
+        assert!(!keyword_matches_any_token("pnpm", "the which"));
+    }
+
+    #[test]
+    fn keyword_matches_any_token_cjk_char_granularity() {
+        // CJK splits per-char, so a Chinese query matches Chinese fact text.
+        assert!(keyword_matches_any_token("用户偏好包管理器", "包管理器"));
+        assert!(keyword_matches_any_token("用户偏好 pnpm", "用户"));
+        // Mixed: English token + CJK both work.
+        assert!(keyword_matches_any_token("使用 pnpm 管理依赖", "package manager pnpm"));
+    }
+
+    #[test]
+    fn keyword_matches_still_whole_substring_for_single_keywords() {
+        // Non-recall callers (skill selector, RAG) rely on whole-substring.
+        assert!(keyword_matches("please summarize this", "summarize"));
+        assert!(!keyword_matches("pnpm", "which package manager"));
+    }
     #[test]
     fn generation_config_builder_and_default() {
         let empty = GenerationConfig::new();

@@ -24,6 +24,11 @@ pub struct OneaiConfig {
     /// inherit the agent-loop's scenario default.
     #[serde(default)]
     pub generation: oneai_core::GenerationConfig,
+    /// Embedding provider configuration. Default is zero-config `provider =
+    /// "auto"` (probes env keys / local Ollama; absent → keyword-recall). Most
+    /// users leave this section out entirely.
+    #[serde(default)]
+    pub embedding: oneai_core::EmbeddingConfig,
 }
 
 /// LLM provider configuration.
@@ -101,6 +106,7 @@ impl Default for OneaiConfig {
             domain: DomainConfig::default(),
             ui: UiConfig::default(),
             generation: oneai_core::GenerationConfig::new(),
+            embedding: oneai_core::EmbeddingConfig::auto(),
         }
     }
 }
@@ -201,5 +207,37 @@ impl OneaiConfig {
     pub fn default_domain_pack(&self, domain_override: Option<&str>) -> String {
         domain_override.map(|s| s.to_string())
             .unwrap_or_else(|| self.domain.default_pack.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_section_round_trips() {
+        let toml_src = r#"
+[embedding]
+provider = "voyage"
+api_key = "pa-test"
+model = "voyage-3"
+fallback = "openai"
+"#;
+        let cfg: OneaiConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.embedding.provider, oneai_core::EmbeddingProvider::Voyage);
+        assert_eq!(cfg.embedding.api_key.as_deref(), Some("pa-test"));
+        assert_eq!(cfg.embedding.model.as_ref().unwrap().as_str(), "voyage-3");
+        assert_eq!(cfg.embedding.fallback, Some(oneai_core::EmbeddingProvider::OpenAi));
+        // re-serialize and parse back — stable round-trip
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let cfg2: OneaiConfig = toml::from_str(&s).unwrap();
+        assert_eq!(cfg2.embedding.provider, oneai_core::EmbeddingProvider::Voyage);
+    }
+
+    #[test]
+    fn missing_embedding_section_defaults_to_auto() {
+        let cfg: OneaiConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.embedding.provider, oneai_core::EmbeddingProvider::Auto);
+        assert!(cfg.embedding.api_key.is_none());
     }
 }

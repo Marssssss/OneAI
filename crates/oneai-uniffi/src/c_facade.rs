@@ -29,7 +29,8 @@ use crate::app_builder::OneAIAppBuilder;
 use crate::callback::ChatEventCallback;
 use crate::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
 use crate::types::{
-    ChatEventView, MessageView, OneAIErrorView, ProviderConfigView, SessionInfoView,
+    ChatEventView, EmbeddingConfigView, MessageView, OneAIErrorView, ProviderConfigView,
+    SessionInfoView,
 };
 
 // ─── Shared tokio runtime ─────────────────────────────────────────────
@@ -265,8 +266,9 @@ fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
 // ─── extern "C" surface ───────────────────────────────────────────────
 
 /// Create an app from a JSON config:
-/// `{"kind":"openai","api_key":"..","base_url":"..","model":"..","host":"..","port":11434,"db_path":"/path/oneai.db","default_tools":true}`
-/// Returns an opaque app handle, or null on error (call `oneai_last_error`).
+/// `{"kind":"openai","api_key":"..","base_url":"..","model":"..","host":"..","port":11434,"db_path":"/path/oneai.db","default_tools":true,"embedding":{...}}`
+/// The optional `embedding` object mirrors `EmbeddingConfigView`; omit it for
+/// zero-config auto-detection. Returns an opaque app handle, or null on error.
 #[no_mangle]
 pub extern "C" fn oneai_create_app(config_json: *const c_char) -> AppHandle {
     let cfg = match cstr(config_json) {
@@ -281,6 +283,12 @@ pub extern "C" fn oneai_create_app(config_json: *const c_char) -> AppHandle {
         let mut b = std::sync::Arc::new(OneAIAppBuilder::new());
         if cfg.default_tools { b = b.default_tools(); }
         if let Some(db) = cfg.db_path.as_ref() { b = b.sqlite_persistence_at(db.clone()); }
+        if let Some(emb) = cfg.embedding.as_ref() {
+            match b.embedding_config(emb.clone()) {
+                Ok(b2) => b = b2,
+                Err(e) => { set_last_error(err_msg(e)); return None; }
+            }
+        }
         match b.provider_config(cfg.provider) {
             Ok(b2) => match b2.build().await {
                 Ok(a) => Some(a),
@@ -561,7 +569,12 @@ pub extern "C" fn oneai_last_error() -> *const c_char {
 }
 
 // ─── config parsing (tiny, no serde dep) ──────────────────────────────
-struct Cfg { provider: ProviderConfigView, db_path: Option<String>, default_tools: bool }
+struct Cfg {
+    provider: ProviderConfigView,
+    db_path: Option<String>,
+    default_tools: bool,
+    embedding: Option<EmbeddingConfigView>,
+}
 
 fn parse_config(json: &str) -> Option<Cfg> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
@@ -573,10 +586,20 @@ fn parse_config(json: &str) -> Option<Cfg> {
     let port = v.get("port").and_then(|x| x.as_u64()).map(|p| p as u16);
     let db_path = v.get("db_path").and_then(|x| x.as_str()).map(|s| s.to_string());
     let default_tools = v.get("default_tools").and_then(|x| x.as_bool()).unwrap_or(true);
+    let embedding = v.get("embedding").and_then(parse_embedding);
     Some(Cfg {
         provider: ProviderConfigView { kind, api_key, base_url, model, host, port },
-        db_path, default_tools,
+        db_path, default_tools, embedding,
     })
+}
+
+fn parse_embedding(v: &serde_json::Value) -> Option<EmbeddingConfigView> {
+    let provider = v.get("provider").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
+    let model = v.get("model").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let api_key = v.get("api_key").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let base_url = v.get("base_url").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let fallback = v.get("fallback").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    Some(EmbeddingConfigView { provider, model, api_key, base_url, fallback })
 }
 
 #[cfg(test)]

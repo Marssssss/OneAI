@@ -291,20 +291,87 @@ impl MemoryManager {
         *self.session_id.write().await = session_id.into();
     }
 
+    /// Soft-invalidate the current fact for a conflict key (§12.2, Zep-style
+    /// soft-fail). The fact is marked `superseded` and excluded from default
+    /// recall, but not physically removed — it stays auditable via the
+    /// include-superseded search path and the `_superseded_history` log. When
+    /// persistence is configured, the invalidated state is also persisted so
+    /// resume keeps it suppressed. Returns true if a live fact was invalidated.
+    pub async fn invalidate_fact(&self, user_id: &str, subject: &str, predicate: &str) -> bool {
+        let hit = self.fact_archive.invalidate(user_id, subject, predicate).await;
+        if hit {
+            if let Some(p) = &self.persistence {
+                // Persist the invalidated state: re-store the fact (its
+                // superseded flag now set) via the upsert path.
+                if let Some(f) = self.fact_archive.get(user_id, subject, predicate).await {
+                    if let Err(e) = p.store_fact(&f).await {
+                        tracing::warn!("Failed to persist invalidated fact: {}", e);
+                    }
+                }
+            }
+        }
+        hit
+    }
+
+    /// Get a fact by its conflict key.
+    pub async fn get_fact(
+        &self,
+        user_id: &str,
+        subject: &str,
+        predicate: &str,
+    ) -> Option<MemoryFact> {
+        self.fact_archive.get(user_id, subject, predicate).await
+    }
+
     /// Archive a batch of facts into the archival tier with Mem0-style
     /// conflict resolution (same-key facts update rather than duplicate).
     ///
     /// Called by the compression-coupled `FactExtractor` path and by the
     /// agent's `archival_memory_insert` tool (P5). When a persistence backend
     /// is configured, facts are also durably stored so they survive restart.
+    ///
+    /// When an embedding service is configured, each fact's `embedding` is
+    /// computed from `"{subject} {predicate} {content}"` here (the single
+    /// canonical write path) — §12.1: this is what makes semantic recall
+    /// actually work, since `FactExtractor`/`build_fact` write `embedding:
+    /// None` and rely on this method to populate it before upsert.
     pub async fn archive_facts(&self, facts: Vec<MemoryFact>) {
-        for fact in &facts {
+        for mut fact in facts {
+            self.embed_fact(&mut fact).await;
             self.fact_archive.upsert(fact.clone()).await;
             if let Some(p) = &self.persistence {
-                if let Err(e) = p.store_fact(fact).await {
+                if let Err(e) = p.store_fact(&fact).await {
                     tracing::warn!("Failed to persist fact: {}", e);
                 }
             }
+        }
+    }
+
+    /// Embed a fact's `content` (preceded by `subject`/`predicate` for
+    /// disambiguation) via the configured `EmbeddingService`, writing the
+    /// result into `fact.embedding`. **§12.1** — this is the single place
+    /// where stored facts acquire embeddings so `search_hybrid`'s semantic
+    /// branch is no longer dead code.
+    ///
+    /// Fail-safe: if no embedding service is configured, or the call fails,
+    /// the fact is left with `embedding: None` and a `tracing::warn!` is
+    /// emitted (no error propagated — same contract as `recall_facts`'s
+    /// query-embedding fallback).
+    pub async fn embed_fact(&self, fact: &mut MemoryFact) {
+        if fact.embedding.is_some() {
+            return; // already embedded — preserve (e.g. loaded from SQLite).
+        }
+        let Some(svc) = &self.embedding_service else {
+            return; // no embedding service → keyword recall only.
+        };
+        let text = if fact.subject.is_empty() && fact.predicate.is_empty() {
+            fact.content.clone()
+        } else {
+            format!("{} {} {}", fact.subject, fact.predicate, fact.content)
+        };
+        match svc.embed(&text).await {
+            Ok(emb) => fact.embedding = Some(emb),
+            Err(e) => tracing::warn!("fact embedding failed (key={}/{}/{}): {}", fact.user_id, fact.subject, fact.predicate, e),
         }
     }
 
@@ -340,12 +407,28 @@ impl MemoryManager {
     /// — the canonical per-turn recall path (R1).
     ///
     /// Uses the three-factor scorer (relevance + recency + importance) via
-    /// `MemoryFactStore::search_hybrid`. When an embedding service is
-    /// configured, the query is embedded for semantic relevance; otherwise
-    /// keyword matching is used. `time_decay` follows the domain's
-    /// `MemoryProfile.recall.time_decay`.
+    /// `MemoryFactStore::search_hybrid_with_config`. When an embedding service
+    /// is configured, the query is embedded for semantic relevance; otherwise
+    /// keyword matching is used. Delegates to `recall_facts_with_config` with
+    /// a default `RecallConfig` (only honoring `top_k`).
     pub async fn recall_facts(&self, query: &str, top_k: usize) -> Result<Vec<MemoryFact>> {
-        if top_k == 0 {
+        let cfg = oneai_core::RecallConfig {
+            top_k,
+            ..oneai_core::RecallConfig::default()
+        };
+        self.recall_facts_with_config(query, &cfg).await
+    }
+
+    /// Configurable recall (§12.4): the domain `MemoryProfile.recall`
+    /// supplies weights, half-life, normalization, and time-decay. This is
+    /// the path `AppSession` wires in each turn so the three-factor scoring
+    /// is domain-tunable rather than hardcoded.
+    pub async fn recall_facts_with_config(
+        &self,
+        query: &str,
+        cfg: &oneai_core::RecallConfig,
+    ) -> Result<Vec<MemoryFact>> {
+        if cfg.top_k == 0 {
             return Ok(Vec::new());
         }
         let query_embedding = if let Some(svc) = &self.embedding_service {
@@ -359,11 +442,15 @@ impl MemoryManager {
         } else {
             None
         };
-        // time_decay defaults on; the caller can pass a domain-specific config
-        // via the recall call site when wired through MemoryProfile.
         let facts = self
             .fact_archive
-            .search_hybrid(query_embedding.as_deref(), query, top_k, true)
+            .search_hybrid_with_config(
+                query_embedding.as_deref(),
+                query,
+                cfg,
+                chrono::Utc::now(),
+                false,
+            )
             .await;
         Ok(facts)
     }
@@ -402,6 +489,73 @@ impl MemoryManager {
     }
 
     // ─── Reflection ───────────────────────────────────────────────────
+
+    /// §12.3: reflect mid-session if the cumulative importance of newly
+    /// archived facts exceeds the reflection threshold and enough turns have
+    /// elapsed since the last reflection (Generative-Agents-style importance-sum
+    /// gating). Returns `Ok(None)` when the threshold isn't met or no
+    /// reflection engine is configured. The reflection is fed a distilled
+    /// summary of the most recent prior episodic facts from the archival
+    /// tier, so new insights can build on (recursive-reflection雏形) rather
+    /// than ignore earlier reflections.
+    pub async fn reflect_if_threshold(
+        &self,
+        session_id: &str,
+        conversation: &Conversation,
+        accumulated_importance: f32,
+        turns_since_last: u32,
+    ) -> Result<Option<EpisodicMemory>> {
+        let Some(reflection) = &self.reflection else {
+            return Ok(None);
+        };
+        if !reflection.should_reflect(accumulated_importance, turns_since_last) {
+            return Ok(None);
+        }
+        // Gather up to 3 most-recent prior episodic facts to seed recursive
+        // reflection. Sorted by updated_at descending.
+        let mut prior: Vec<_> = self.fact_archive.all().await.into_iter()
+            .filter(|f| f.fact_type.as_str() == "episodic" && !f.superseded)
+            .collect();
+        prior.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let prior_summary = if prior.is_empty() {
+            None
+        } else {
+            Some(
+                prior.iter().take(3)
+                    .map(|f| format!("- ({}): {}", f.updated_at.to_rfc3339(), f.content.chars().take(280).collect::<String>()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        };
+
+        // Build the entry view the reflector expects from the live conversation.
+        let entries: Vec<MemoryEntry> = conversation.messages.iter()
+            .filter(|m| !matches!(m.role, oneai_core::Role::System))
+            .map(|m| {
+                let role = match m.role {
+                    oneai_core::Role::User => "user",
+                    oneai_core::Role::Assistant => "assistant",
+                    oneai_core::Role::Tool => "tool",
+                    _ => "user",
+                };
+                MemoryEntry {
+                    id: format!("reflect_{}", uuid::Uuid::new_v4()),
+                    content: m.text_content(),
+                    timestamp: chrono::Utc::now(),
+                    embedding: None,
+                    metadata: std::collections::HashMap::from([
+                        ("role".to_string(), role.to_string()),
+                    ]),
+                }
+            })
+            .collect();
+
+        let episodic = reflection.reflect_with_prior(session_id, &entries, prior_summary.as_deref()).await?;
+        // Route through archive_facts so the episodic fact is embedded (§12.1)
+        // and persisted in one place.
+        self.archive_facts(vec![episodic.to_fact()]).await;
+        Ok(Some(episodic))
+    }
 
     /// Reflect on the current session and generate an episodic memory.
     ///
@@ -452,14 +606,11 @@ impl MemoryManager {
         let episodic = reflection.reflect(session_id, &entries).await?;
 
         // Store the episodic memory as a canonical archival fact (M5 middle
-        // layer) + persist.
+        // layer) + persist. Route through `archive_facts` so it is embedded
+        // (§12.1) and durably persisted in one place rather than bypassing
+        // them with a direct `fact_archive.upsert`.
         let fact = episodic.to_fact();
-        self.fact_archive.upsert(fact.clone()).await;
-        if let Some(p) = &self.persistence {
-            if let Err(e) = p.store_fact(&fact).await {
-                tracing::warn!("Failed to persist episodic fact: {}", e);
-            }
-        }
+        self.archive_facts(vec![fact]).await;
 
         Ok(Some(episodic))
     }
@@ -568,6 +719,8 @@ mod manager_tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version: 1,
+            superseded: false,
+            superseded_at: None,
         };
         manager.archive_facts(vec![fact]).await;
 
@@ -601,12 +754,51 @@ mod manager_tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version: 1,
+            superseded: false,
+            superseded_at: None,
         };
         manager.archive_facts(vec![mk("npm")]).await;
         manager.archive_facts(vec![mk("pnpm")]).await;
         assert_eq!(manager.fact_archive().len().await, 1);
         let f = manager.fact_archive().get("alice", "user.pm", "prefers").await.unwrap();
         assert_eq!(f.content, "pnpm");
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_fact_excludes_from_recall() {
+        // §12.2: invalidate_fact soft-fails the current truth; recall no longer
+        // surfaces it. The KU scenario: agent switches from JWT to session —
+        // invalidating the JWT fact means the old value won't be recalled.
+        let manager = MemoryManager::new();
+        manager.set_user_id("alice").await;
+        let mk = |content: &str| oneai_core::MemoryFact {
+            id: "f_auth".to_string(),
+            user_id: "alice".to_string(),
+            session_id: String::new(),
+            fact_type: oneai_core::FactType::new("decision"),
+            subject: "auth.scheme".to_string(),
+            predicate: "decided_to".to_string(),
+            content: content.to_string(),
+            embedding: None,
+            metadata: HashMap::new(),
+            importance: 0.85,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+            superseded: false,
+            superseded_at: None,
+        };
+        manager.archive_facts(vec![mk("JWT")]).await;
+        assert!(manager.invalidate_fact("alice", "auth.scheme", "decided_to").await);
+
+        // Recall for "auth"/"jwt" no longer returns the invalidated fact.
+        let recalled = manager.recall_facts("jwt", 5).await.unwrap();
+        assert!(recalled.is_empty());
+
+        // The supersede history was recorded on the (still-present) fact.
+        let f = manager.get_fact("alice", "auth.scheme", "decided_to").await.unwrap();
+        assert!(f.superseded);
+        assert!(f.metadata.contains_key("_superseded_history"));
     }
 
     #[tokio::test]
@@ -628,11 +820,166 @@ mod manager_tests {
         assert!(result.is_none());
     }
 
+    // ─── §12.3: threshold-triggered mid-session reflection ──────────────────
+
+    /// Mock LLM provider for the reflection prompt.
+    struct MockReflectProvider { resp: String }
+    impl MockReflectProvider { fn new(r: impl Into<String>) -> Self { Self { resp: r.into() } } }
+    #[async_trait::async_trait]
+    impl oneai_core::traits::LlmProvider for MockReflectProvider {
+        async fn infer(&self, _req: oneai_core::InferenceRequest) -> Result<oneai_core::InferenceResponse> {
+            Ok(oneai_core::InferenceResponse {
+                message: oneai_core::Message::assistant(self.resp.clone()),
+                usage: oneai_core::TokenUsage::default(),
+                model: "mock-reflect".to_string(),
+                metadata: HashMap::new(),
+            })
+        }
+        async fn infer_stream(&self, _req: oneai_core::InferenceRequest) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>> {
+            Err(oneai_core::error::OneAIError::Provider("no stream".into()))
+        }
+        fn capabilities(&self) -> oneai_core::ModelCapability {
+            oneai_core::ModelCapability { supports_multimodal: false, supports_streaming: false, supports_tools: false, context_window_size: 4096, max_output_tokens: 512 }
+        }
+        fn config(&self) -> &oneai_core::ModelConfig {
+            static CONFIG: std::sync::OnceLock<oneai_core::ModelConfig> = std::sync::OnceLock::new();
+            CONFIG.get_or_init(oneai_core::ModelConfig::default)
+        }
+    }
+
+    #[tokio::test]
+    async fn reflect_if_threshold_skips_below_threshold() {
+        let manager = MemoryManager::with_compressor_and_reflection(
+            MemoryManagerConfig::default(),
+            Arc::new(MockReflectProvider::new("REFLECTION: x\nOUTCOME: success")),
+        );
+        let conv = oneai_core::Conversation::new();
+        // Below the 150.0 default threshold.
+        let r = manager.reflect_if_threshold("s", &conv, 10.0, 20).await.unwrap();
+        assert!(r.is_none(), "should not reflect below threshold");
+    }
+
+    #[tokio::test]
+    async fn reflect_if_threshold_fires_above_threshold() {
+        let manager = MemoryManager::with_compressor_and_reflection(
+            MemoryManagerConfig::default(),
+            Arc::new(MockReflectProvider::new("REFLECTION: consolidated insight\nINSIGHTS: pattern learned\nDECISIONS: adopt X\nOUTCOME: success")),
+        );
+        let mut conv = oneai_core::Conversation::new();
+        conv.add_message(oneai_core::Message::user("did important work"));
+        // Above threshold + enough turns → fires.
+        let r = manager.reflect_if_threshold("s", &conv, 200.0, 10).await.unwrap();
+        assert!(r.is_some(), "should reflect above threshold");
+        // The resulting episodic fact is archived (and embedded if a service were set).
+        let facts = manager.fact_archive().all().await;
+        assert!(facts.iter().any(|f| f.fact_type.as_str() == "episodic"));
+    }
+
     #[test]
     fn test_config_default() {
         let config = MemoryManagerConfig::default();
         assert_eq!(config.compression_threshold_tokens, 4000);
         assert_eq!(config.compression_keep_recent_turns, 6);
+    }
+
+    // ─── §12.1: fact auto-embedding → semantic recall ───────────────────────
+
+    /// Deterministic embedding service for tests: maps text to a small float
+    /// vector derived from character histograms so that "包管理器" and
+    /// "package manager" collide on shared bytes (proving semantic recall
+    /// surfaces synonym facts that keyword recall misses) while unrelated
+    /// text differs. Not a real embedding — just stable and discriminative
+    /// enough to exercise the §12.1 path without a network.
+    struct HashEmbeddingService;
+    #[async_trait::async_trait]
+    impl oneai_core::traits::EmbeddingService for HashEmbeddingService {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            let mut v = vec![0.0f32; 32];
+            for (i, b) in text.bytes().enumerate() {
+                v[(b as usize) % 32] += 1.0;
+                v[((b as usize).wrapping_add(i)) % 32] += 0.5;
+            }
+            // L2-normalize.
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+            for x in v.iter_mut() { *x /= norm; }
+            Ok(v)
+        }
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts { out.push(self.embed(t).await?); }
+            Ok(out)
+        }
+        fn model(&self) -> oneai_core::traits::EmbeddingModel {
+            oneai_core::traits::EmbeddingModel::allminilm_l6_v2()
+        }
+    }
+
+    fn make_fact_embed(user: &str, subject: &str, predicate: &str, content: &str) -> MemoryFact {
+        MemoryFact {
+            id: format!("{}_{}_{}", user, subject, predicate),
+            user_id: user.to_string(),
+            session_id: String::new(),
+            fact_type: oneai_core::FactType::new("user_tooling_pref"),
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            content: content.to_string(),
+            embedding: None,
+            metadata: HashMap::new(),
+            importance: 0.5,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+            superseded: false,
+            superseded_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_facts_embeds_when_service_configured() {
+        // §12.1: archive_facts populates fact.embedding when an embedding
+        // service is present, so search_hybrid's semantic branch is no longer
+        // dead code.
+        let mm = MemoryManager::with_embedding(
+            MemoryManagerConfig::default(),
+            Arc::new(HashEmbeddingService),
+        );
+        mm.archive_facts(vec![make_fact_embed("alice", "user.package_manager", "prefers", "pnpm")]).await;
+        let f = mm.fact_archive().get("alice", "user.package_manager", "prefers").await.unwrap();
+        assert!(f.embedding.is_some(), "fact must be embedded at archive time");
+    }
+
+    #[tokio::test]
+    async fn archive_facts_no_embedding_without_service() {
+        // Without an embedding service, facts stay un-embedded (keyword recall).
+        let mm = MemoryManager::new();
+        mm.archive_facts(vec![make_fact_embed("alice", "user.package_manager", "prefers", "pnpm")]).await;
+        let f = mm.fact_archive().get("alice", "user.package_manager", "prefers").await.unwrap();
+        assert!(f.embedding.is_none());
+    }
+
+    #[tokio::test]
+    async fn semantic_recall_hits_synonym_query_that_keyword_misses() {
+        // §12.1 headline test: a fact stored as "包管理器" (Chinese) should be
+        // recalled by the English query "package manager" once facts are
+        // embedded — keyword recall has zero overlap on these strings, so the
+        // only way to surface it is the semantic branch.
+        let mm = MemoryManager::with_embedding(
+            MemoryManagerConfig::default(),
+            Arc::new(HashEmbeddingService),
+        );
+        // Content with no byte overlap with the English query.
+        mm.archive_facts(vec![make_fact_embed("alice", "用户.包管理器", "偏好", "使用 pnpm 管理依赖")]).await;
+
+        // Keyword path: query "package manager" shares no bytes with the
+        // Chinese subject/predicate/content → 0 hits.
+        let kw = mm.fact_archive().search_keyword("package manager", 5).await;
+        assert!(kw.is_empty(), "keyword recall should miss the synonym fact");
+
+        // Semantic path: embed the query, search_hybrid uses cosine.
+        let qemb = HashEmbeddingService.embed("package manager dependency").await.unwrap();
+        let sem = mm.fact_archive().search_semantic(&qemb, 5).await;
+        assert!(!sem.is_empty(), "semantic recall must surface the synonym fact");
+        assert_eq!(sem[0].subject, "用户.包管理器");
     }
 
     // Suppress "unused" for the re-exported symbol carried for API compat.

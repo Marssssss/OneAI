@@ -49,6 +49,20 @@ pub struct MemoryReflectionConfig {
     /// If true, the raw entries are also stored in LTM (they may already be there
     /// from eviction, so this doubles them with the episodic marker).
     pub include_original_entries: bool,
+
+    /// Mid-session reflection trigger (§12.3, Generative-Agents-style):
+    /// when the cumulative importance of newly-archived facts since the last
+    /// reflection reaches this threshold AND `trigger_interval_turns` have
+    /// elapsed, reflect mid-session rather than only at session end. `0.0`
+    /// disables mid-session reflection (session-end-only, the legacy
+    /// behavior). Defaults to `150.0` (the Generative Agents importance-sum
+    /// threshold, scaled to OneAI's [0,1] importance × accumulated count).
+    pub reflectance_threshold: f32,
+
+    /// Minimum turns between two mid-session reflections (avoids reflecting
+    /// every turn once the threshold is met). Defaults to `10`. Only consulted
+    /// when `reflectance_threshold > 0.0`.
+    pub trigger_interval_turns: u32,
 }
 
 impl Default for MemoryReflectionConfig {
@@ -58,6 +72,8 @@ impl Default for MemoryReflectionConfig {
             max_reflection_tokens: 512,
             reflection_temperature: 0.0,
             include_original_entries: false,
+            reflectance_threshold: 150.0,
+            trigger_interval_turns: 10,
         }
     }
 }
@@ -178,6 +194,8 @@ impl EpisodicMemory {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             version: 1,
+            superseded: false,
+            superseded_at: None,
         }
     }
 }
@@ -226,6 +244,20 @@ impl MemoryReflection {
         &self.config
     }
 
+    /// §12.3: whether a mid-session reflection should fire now, based on the
+    /// cumulative importance of facts archived since the last reflection and
+    /// the turns elapsed since then. Mirrors Generative Agents' importance-sum
+    /// threshold gating (with a turn-interval floor to avoid every-turn
+    /// reflection). Mid-session reflection is disabled when
+    /// `reflectance_threshold <= 0.0`.
+    pub fn should_reflect(&self, accumulated_importance: f32, turns_since_last: u32) -> bool {
+        if self.config.reflectance_threshold <= 0.0 {
+            return false;
+        }
+        accumulated_importance >= self.config.reflectance_threshold
+            && turns_since_last >= self.config.trigger_interval_turns
+    }
+
     /// Reflect on a session's memory entries and generate an episodic memory.
     ///
     /// This method:
@@ -240,6 +272,21 @@ impl MemoryReflection {
         &self,
         session_id: &str,
         stm_entries: &[MemoryEntry],
+    ) -> Result<EpisodicMemory> {
+        self.reflect_with_prior(session_id, stm_entries, None).await
+    }
+
+    /// Reflect with an optional summary of prior episodic facts (§12.3
+    /// recursive-reflection雏形): when the manager has accumulated earlier
+    /// episodic memories in the archival tier, their distilled content is
+    /// fed in so the new reflection can build on (and reference) prior
+    /// insights instead of treating each reflection in isolation. This is
+    /// the seed of Generative-Agents-style recursive reflection trees.
+    pub async fn reflect_with_prior(
+        &self,
+        session_id: &str,
+        stm_entries: &[MemoryEntry],
+        prior_episodic_summary: Option<&str>,
     ) -> Result<EpisodicMemory> {
         if stm_entries.is_empty() {
             return Ok(EpisodicMemory {
@@ -263,7 +310,7 @@ impl MemoryReflection {
             .join("\n");
 
         // Build the reflection prompt
-        let reflection_prompt = "You are a memory reflection system. Analyze the conversation below \
+        let mut reflection_prompt = "You are a memory reflection system. Analyze the conversation below \
             and extract: (1) Key Insights — the most important facts, patterns, and learnings, \
             (2) Decisions — the key choices made during the session, \
             (3) Outcome — a brief summary of whether the session succeeded, partially succeeded, \
@@ -273,6 +320,15 @@ impl MemoryReflection {
             INSIGHTS: [comma-separated list]\n\
             DECISIONS: [comma-separated list]\n\
             OUTCOME: [success/partial/failure + brief description]".to_string();
+        if let Some(prior) = prior_episodic_summary {
+            if !prior.trim().is_empty() {
+                reflection_prompt.push_str(&format!(
+                    "\n\nYou have accumulated these earlier episodic reflections for this user. \
+                    Build on them — reference and extend prior insights rather than restating \
+                    them, and note how this session advances or revises them:\n{}", prior
+                ));
+            }
+        }
 
         // Request reflection from the LLM
         let mut reflection_conv = Conversation::new();
@@ -558,5 +614,46 @@ mod tests {
         assert_eq!(config.max_reflection_tokens, 512);
         assert_eq!(config.reflection_temperature, 0.0);
         assert!(!config.include_original_entries);
+        // §12.3 defaults
+        assert!((config.reflectance_threshold - 150.0).abs() < 1e-6);
+        assert_eq!(config.trigger_interval_turns, 10);
+    }
+
+    // ─── §12.3: threshold-triggered reflection ──────────────────────────────
+
+    #[test]
+    fn should_reflect_threshold_and_interval_gating() {
+        let mock = Arc::new(MockReflectionProvider::new("REFLECTION: x\nOUTCOME: success"));
+        let r = MemoryReflection::new(mock);
+
+        // Below threshold → no.
+        assert!(!r.should_reflect(10.0, 20));
+        // Threshold met but not enough turns → no.
+        assert!(!r.should_reflect(200.0, 5));
+        // Both met → yes.
+        assert!(r.should_reflect(200.0, 10));
+    }
+
+    #[test]
+    fn should_reflect_disabled_when_threshold_zero() {
+        let mock = Arc::new(MockReflectionProvider::new("REFLECTION: x\nOUTCOME: success"));
+        let mut r = MemoryReflection::new(mock);
+        r.config.reflectance_threshold = 0.0;
+        // Even huge accumulated importance doesn't trigger when disabled.
+        assert!(!r.should_reflect(10000.0, 100));
+    }
+
+    #[tokio::test]
+    async fn reflect_with_prior_includes_prior_summary() {
+        // Smoke: reflect_with_prior with a non-empty prior summary still parses
+        // the canned structured response (proves the augmented prompt path runs).
+        let mock = Arc::new(MockReflectionProvider::new(
+            "REFLECTION: Built on prior insight\nINSIGHTS: extended insight\nDECISIONS: refine approach\nOUTCOME: success"
+        ));
+        let r = MemoryReflection::new(mock);
+        let entries = vec![make_entry("1", "work", "user"), make_entry("2", "done", "assistant")];
+        let result = r.reflect_with_prior("s", &entries, Some("- prior episodic: decided Rust")).await.unwrap();
+        assert!(result.reflection.contains("Built on prior insight"));
+        assert_eq!(result.key_insights.len(), 1);
     }
 }

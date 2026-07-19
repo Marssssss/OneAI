@@ -374,6 +374,31 @@ enum EvalAction {
         #[arg(long, default_value = "oneai")]
         run_id: String,
     },
+    /// Run the memory-subsystem eval suite (LongMemEval 5-ability + Mem0
+    /// F1/BLEU-1 + Recall@k/NDCG@k). Aligned with docs/memory-mechanism.md §14.
+    /// The headline anchor: `--no-embedding` (keyword baseline) vs default
+    /// (semantic) on the synonym anti-example quantifies the §12.1 gain.
+    Memory {
+        /// Suite source: `builtin` (synthetic 5-ability suite) or `jsonl`
+        /// (load cases from --data, LoCoMo/LongMemEval-compatible JSONL).
+        #[arg(long, default_value = "builtin")]
+        suite: String,
+        /// Path to a JSONL suite file (when --suite jsonl).
+        #[arg(long)]
+        data: Option<String>,
+        /// Comma-separated metrics: recall_at_k,ndcg_at_k,f1,bleu1,abstention,judge.
+        #[arg(long, default_value = "recall_at_k,f1,bleu1")]
+        metrics: String,
+        /// Disable semantic recall (keyword-only baseline — the §12.1 control).
+        #[arg(long)]
+        no_embedding: bool,
+        /// k for Recall@k / NDCG@k.
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+        /// Output format (markdown, json, compact).
+        #[arg(long, default_value = "markdown")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -903,6 +928,19 @@ fn main() {
                         limit,
                         &format,
                         &run_id,
+                    ));
+                }
+                EvalAction::Memory {
+                    suite,
+                    data,
+                    metrics,
+                    no_embedding,
+                    k,
+                    format,
+                } => {
+                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                    rt.block_on(cmd_eval::cmd_eval_memory(
+                        &suite, data.as_deref(), &metrics, no_embedding, k, &format,
                     ));
                 }
             }

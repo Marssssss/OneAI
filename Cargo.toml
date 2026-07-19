@@ -68,7 +68,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Marssssss/OneAI"
@@ -90,6 +90,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 async-trait = "0.1"
+fastembed = "5"
 bytes = "1"
 base64 = "0.22"
 url = "2"

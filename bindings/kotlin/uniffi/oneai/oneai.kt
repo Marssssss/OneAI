@@ -702,6 +702,8 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_oneai_checksum_method_oneaiapp_create_group_session(
+    ): Int
     external fun uniffi_oneai_checksum_method_oneaiapp_create_session(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiapp_create_session_with_id(
@@ -742,6 +744,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_deny_all_interaction_gate(
     ): Int
+    external fun uniffi_oneai_checksum_method_oneaiappbuilder_embedding_config(
+    ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_memory_manager_with_config(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_noop_interaction_gate(
@@ -752,7 +756,21 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_oneai_checksum_method_oneaiappbuilder_sqlite_persistence_at(
     ): Int
+    external fun uniffi_oneai_checksum_method_oneaiappbuilder_system_prompt(
+    ): Int
     external fun uniffi_oneai_checksum_method_chateventcallback_on_event(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaigroupchatsession_interrupt(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaigroupchatsession_messages(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaigroupchatsession_run_task(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaigroupchatsession_save(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaigroupchatsession_set_scripted_order(
+    ): Int
+    external fun uniffi_oneai_checksum_method_oneaigroupchatsession_start(
     ): Int
     external fun uniffi_oneai_checksum_constructor_oneaiappbuilder_new(
     ): Int
@@ -791,6 +809,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_oneai_fn_free_oneaiapp(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_oneai_fn_method_oneaiapp_create_group_session(`ptr`: Long,`scenario`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_oneai_fn_method_oneaiapp_create_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_oneai_fn_method_oneaiapp_create_session_with_id(`ptr`: Long,`id`: RustBuffer.ByValue,
@@ -845,6 +865,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_oneai_fn_method_oneaiappbuilder_deny_all_interaction_gate(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_oneai_fn_method_oneaiappbuilder_embedding_config(`ptr`: Long,`cfg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_oneai_fn_method_oneaiappbuilder_memory_manager_with_config(`ptr`: Long,`thresholdTokens`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_oneai_fn_method_oneaiappbuilder_noop_interaction_gate(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -855,6 +877,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_oneai_fn_method_oneaiappbuilder_sqlite_persistence_at(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_oneai_fn_method_oneaiappbuilder_system_prompt(`ptr`: Long,`prompt`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_oneai_fn_clone_chateventcallback(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_oneai_fn_free_chateventcallback(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -863,6 +887,22 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_oneai_fn_method_chateventcallback_on_event(`ptr`: Long,`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_oneai_fn_clone_oneaigroupchatsession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_oneai_fn_free_oneaigroupchatsession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_oneai_fn_method_oneaigroupchatsession_interrupt(`ptr`: Long,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaigroupchatsession_messages(`ptr`: Long,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaigroupchatsession_run_task(`ptr`: Long,`userInput`: RustBuffer.ByValue,`callback`: Long,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaigroupchatsession_save(`ptr`: Long,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaigroupchatsession_set_scripted_order(`ptr`: Long,`order`: RustBuffer.ByValue,
+    ): Long
+    external fun uniffi_oneai_fn_method_oneaigroupchatsession_start(`ptr`: Long,`callback`: Long,
+    ): Long
     external fun ffi_oneai_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_oneai_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -982,6 +1022,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_oneai_checksum_method_oneaiapp_create_group_session() != 19108) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_oneai_checksum_method_oneaiapp_create_session() != 11717) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1042,6 +1085,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_deny_all_interaction_gate() != 33007) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_embedding_config() != 18319) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_memory_manager_with_config() != 45759) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1057,7 +1103,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_sqlite_persistence_at() != 59712) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_oneai_checksum_method_oneaiappbuilder_system_prompt() != 1384) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_oneai_checksum_method_chateventcallback_on_event() != 45403) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaigroupchatsession_interrupt() != 14580) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaigroupchatsession_messages() != 6744) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaigroupchatsession_run_task() != 51579) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaigroupchatsession_save() != 28711) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaigroupchatsession_set_scripted_order() != 36232) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_oneai_checksum_method_oneaigroupchatsession_start() != 49816) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_constructor_oneaiappbuilder_new() != 34161) {
@@ -2172,6 +2239,16 @@ public object FfiConverterTypeMemoryFactory: FfiConverter<MemoryFactory, Long> {
 public interface OneAiAppInterface {
     
     /**
+     * Build a multi-agent group-chat session from a scenario spec.
+     *
+     * Each member carries its own provider config (kind/model/api_key), so a
+     * scenario can mix models. The session streams `speaker`-labeled
+     * `ChatEventView`s through `run_task`'s callback. See
+     * [`OneAiGroupChatSession`](crate::group_chat::OneAiGroupChatSession).
+     */
+    fun `createGroupSession`(`scenario`: ScenarioSpecView): OneAiGroupChatSession
+    
+    /**
      * Create a new agent session.
      */
     fun `createSession`(): OneAiSession
@@ -2325,6 +2402,29 @@ open class OneAiApp: Disposable, AutoCloseable, OneAiAppInterface
             UniffiLib.uniffi_oneai_fn_clone_oneaiapp(handle, status)
         }
     }
+
+    
+    /**
+     * Build a multi-agent group-chat session from a scenario spec.
+     *
+     * Each member carries its own provider config (kind/model/api_key), so a
+     * scenario can mix models. The session streams `speaker`-labeled
+     * `ChatEventView`s through `run_task`'s callback. See
+     * [`OneAiGroupChatSession`](crate::group_chat::OneAiGroupChatSession).
+     */
+    @Throws(OneAiErrorView::class)override fun `createGroupSession`(`scenario`: ScenarioSpecView): OneAiGroupChatSession {
+            return FfiConverterTypeOneAiGroupChatSession.lift(
+    callWithHandle {
+    uniffiRustCallWithError(OneAiErrorView) { _status ->
+    UniffiLib.uniffi_oneai_fn_method_oneaiapp_create_group_session(
+        it,
+        
+        FfiConverterTypeScenarioSpecView.lower(`scenario`),_status)
+}
+    }
+    )
+    }
+    
 
     
     /**
@@ -2659,6 +2759,16 @@ public interface OneAiAppBuilderInterface {
     fun `denyAllInteractionGate`(): OneAiAppBuilder
     
     /**
+     * Set the embedding provider from a foreign-friendly config record.
+     *
+     * Foreign platforms normally skip this for zero-config auto-detection;
+     * call it only when the user explicitly chose a provider/key in settings.
+     * `provider = "auto"` resolves at build time (env keys / local Ollama;
+     * nothing available → `None`, memory recall falls back to keyword matching).
+     */
+    fun `embeddingConfig`(`cfg`: EmbeddingConfigView): OneAiAppBuilder
+    
+    /**
      * Set the memory manager with custom config.
      */
     fun `memoryManagerWithConfig`(`thresholdTokens`: kotlin.UInt): OneAiAppBuilder
@@ -2695,6 +2805,18 @@ public interface OneAiAppBuilderInterface {
      * so no explicit save call is needed from foreign code.
      */
     fun `sqlitePersistenceAt`(`path`: kotlin.String): OneAiAppBuilder
+    
+    /**
+     * Set the agent's base system prompt (persona / role instruction).
+     *
+     * This is the foreign-friendly way to give a single-agent app a persona
+     * without constructing a full `DomainPack`. It injects a lightweight
+     * `DomainPack` whose only non-default field is `system_prompt_template`,
+     * via the same `AppBuilder::domain_pack` path the engine uses. Call
+     * before `provider_config`/`build`; the latest call wins. Idempotent in
+     * the sense that each call replaces the pack (no accumulation).
+     */
+    fun `systemPrompt`(`prompt`: kotlin.String): OneAiAppBuilder
     
     companion object
 }
@@ -2904,6 +3026,29 @@ open class OneAiAppBuilder: Disposable, AutoCloseable, OneAiAppBuilderInterface
 
     
     /**
+     * Set the embedding provider from a foreign-friendly config record.
+     *
+     * Foreign platforms normally skip this for zero-config auto-detection;
+     * call it only when the user explicitly chose a provider/key in settings.
+     * `provider = "auto"` resolves at build time (env keys / local Ollama;
+     * nothing available → `None`, memory recall falls back to keyword matching).
+     */
+    @Throws(OneAiErrorView::class)override fun `embeddingConfig`(`cfg`: EmbeddingConfigView): OneAiAppBuilder {
+            return FfiConverterTypeOneAIAppBuilder.lift(
+    callWithHandle {
+    uniffiRustCallWithError(OneAiErrorView) { _status ->
+    UniffiLib.uniffi_oneai_fn_method_oneaiappbuilder_embedding_config(
+        it,
+        
+        FfiConverterTypeEmbeddingConfigView.lower(`cfg`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Set the memory manager with custom config.
      */override fun `memoryManagerWithConfig`(`thresholdTokens`: kotlin.UInt): OneAiAppBuilder {
             return FfiConverterTypeOneAIAppBuilder.lift(
@@ -2994,6 +3139,30 @@ open class OneAiAppBuilder: Disposable, AutoCloseable, OneAiAppBuilderInterface
         it,
         
         FfiConverterString.lower(`path`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Set the agent's base system prompt (persona / role instruction).
+     *
+     * This is the foreign-friendly way to give a single-agent app a persona
+     * without constructing a full `DomainPack`. It injects a lightweight
+     * `DomainPack` whose only non-default field is `system_prompt_template`,
+     * via the same `AppBuilder::domain_pack` path the engine uses. Call
+     * before `provider_config`/`build`; the latest call wins. Idempotent in
+     * the sense that each call replaces the pack (no accumulation).
+     */override fun `systemPrompt`(`prompt`: kotlin.String): OneAiAppBuilder {
+            return FfiConverterTypeOneAIAppBuilder.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_oneai_fn_method_oneaiappbuilder_system_prompt(
+        it,
+        
+        FfiConverterString.lower(`prompt`),_status)
 }
     }
     )
@@ -3963,6 +4132,456 @@ public object FfiConverterTypeOneAIToolWrapper: FfiConverter<OneAiToolWrapper, L
 
 
 /**
+ * Foreign wrapper over the engine `GroupChatSession`.
+ */
+public interface OneAiGroupChatSessionInterface {
+    
+    /**
+     * Request the running member to interrupt at the next iteration boundary.
+     */
+    suspend fun `interrupt`()
+    
+    /**
+     * Snapshot the shared conversation as speaker-labeled message views (for
+     * replaying a resumed scenario session).
+     */
+    suspend fun `messages`(): List<MessageView>
+    
+    /**
+     * Append the user's message and run the round's speakers per the turn
+     * policy until it's the user's turn again. Streams `speaker`-labeled
+     * events through `callback` (fires on the tokio worker thread — the
+     * foreign callback must marshal UI updates to the main thread).
+     */
+    suspend fun `runTask`(`userInput`: kotlin.String, `callback`: ChatEventCallback)
+    
+    /**
+     * Persist the shared conversation immediately (no-op when SQLite
+     * persistence is not enabled). `run_task` already auto-saves after each
+     * round; this is for mid-round saves.
+     */
+    suspend fun `save`()
+    
+    /**
+     * Switch the turn policy to a fixed scripted order at runtime. Used by
+     * scenarios that change speakers mid-conversation — e.g. an interview
+     * scenario calls this with `["coach"]` to drop the interviewer and go
+     * coach-only for the debrief phase (coach summarizes, then takes the
+     * user's follow-up questions). The next `run_task` honors the new order.
+     */
+    suspend fun `setScriptedOrder`(`order`: List<kotlin.String>)
+    
+    /**
+     * Run the opener turn (if the scenario configured one). No user message
+     * is added. Call before the first `run_task`. Emits speaker-labeled
+     * events through `callback`.
+     */
+    suspend fun `start`(`callback`: ChatEventCallback)
+    
+    companion object
+}
+
+/**
+ * Foreign wrapper over the engine `GroupChatSession`.
+ */
+open class OneAiGroupChatSession: Disposable, AutoCloseable, OneAiGroupChatSessionInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_oneai_fn_free_oneaigroupchatsession(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_oneai_fn_clone_oneaigroupchatsession(handle, status)
+        }
+    }
+
+    
+    /**
+     * Request the running member to interrupt at the next iteration boundary.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `interrupt`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaigroupchatsession_interrupt(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Snapshot the shared conversation as speaker-labeled message views (for
+     * replaying a resumed scenario session).
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `messages`() : List<MessageView> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaigroupchatsession_messages(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeMessageView.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Append the user's message and run the round's speakers per the turn
+     * policy until it's the user's turn again. Streams `speaker`-labeled
+     * events through `callback` (fires on the tokio worker thread — the
+     * foreign callback must marshal UI updates to the main thread).
+     */
+    @Throws(OneAiErrorView::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `runTask`(`userInput`: kotlin.String, `callback`: ChatEventCallback) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaigroupchatsession_run_task(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`userInput`),
+        FfiConverterTypeChatEventCallback.lower(`callback`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        OneAiErrorView.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Persist the shared conversation immediately (no-op when SQLite
+     * persistence is not enabled). `run_task` already auto-saves after each
+     * round; this is for mid-round saves.
+     */
+    @Throws(OneAiErrorView::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `save`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaigroupchatsession_save(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        OneAiErrorView.ErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Switch the turn policy to a fixed scripted order at runtime. Used by
+     * scenarios that change speakers mid-conversation — e.g. an interview
+     * scenario calls this with `["coach"]` to drop the interviewer and go
+     * coach-only for the debrief phase (coach summarizes, then takes the
+     * user's follow-up questions). The next `run_task` honors the new order.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `setScriptedOrder`(`order`: List<kotlin.String>) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaigroupchatsession_set_scripted_order(
+                uniffiHandle,
+                
+        FfiConverterSequenceString.lower(`order`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+    
+    /**
+     * Run the opener turn (if the scenario configured one). No user message
+     * is added. Call before the first `run_task`. Emits speaker-labeled
+     * events through `callback`.
+     */
+    @Throws(OneAiErrorView::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `start`(`callback`: ChatEventCallback) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_oneai_fn_method_oneaigroupchatsession_start(
+                uniffiHandle,
+                
+        FfiConverterTypeChatEventCallback.lower(`callback`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_oneai_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        OneAiErrorView.ErrorHandler,
+    )
+    }
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOneAiGroupChatSession: FfiConverter<OneAiGroupChatSession, Long> {
+    override fun lower(value: OneAiGroupChatSession): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): OneAiGroupChatSession {
+        return OneAiGroupChatSession(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): OneAiGroupChatSession {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: OneAiGroupChatSession) = 8UL
+
+    override fun write(value: OneAiGroupChatSession, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * A concrete LLM provider factory for foreign-language bindings.
  *
  * Since UniFFI can't handle `Arc<dyn LlmProvider>`, this factory
@@ -4367,6 +4986,109 @@ public object FfiConverterTypeToolFactory: FfiConverter<ToolFactory, Long> {
 
 
 /**
+ * One persona in a scenario.
+ */
+data class AgentSpecView (
+    /**
+     * Stable member id (referenced by turn policies / opener).
+     */
+    var `id`: kotlin.String
+    , 
+    /**
+     * Display name.
+     */
+    var `name`: kotlin.String
+    , 
+    /**
+     * Persona system prompt.
+     */
+    var `systemPrompt`: kotlin.String
+    , 
+    /**
+     * Provider kind: `"openai"` / `"anthropic"` / `"ollama"`.
+     */
+    var `kind`: kotlin.String
+    , 
+    /**
+     * Model name (e.g. `gpt-4o`, `claude-sonnet-4-6`).
+     */
+    var `model`: kotlin.String
+    , 
+    /**
+     * API key (required for openai/anthropic; ignored for ollama).
+     */
+    var `apiKey`: kotlin.String?
+    , 
+    /**
+     * Base URL override (OpenAI-compatible endpoints).
+     */
+    var `baseUrl`: kotlin.String?
+    , 
+    /**
+     * UI accent color hint (e.g. `"#4D6BFE"`). Opaque to the engine.
+     */
+    var `color`: kotlin.String?
+    , 
+    /**
+     * UI avatar SF-symbol hint. Opaque to the engine.
+     */
+    var `avatar`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAgentSpecView: FfiConverterRustBuffer<AgentSpecView> {
+    override fun read(buf: ByteBuffer): AgentSpecView {
+        return AgentSpecView(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AgentSpecView) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`systemPrompt`) +
+            FfiConverterString.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`model`) +
+            FfiConverterOptionalString.allocationSize(value.`apiKey`) +
+            FfiConverterOptionalString.allocationSize(value.`baseUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`color`) +
+            FfiConverterOptionalString.allocationSize(value.`avatar`)
+    )
+
+    override fun write(value: AgentSpecView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`systemPrompt`, buf)
+            FfiConverterString.write(value.`kind`, buf)
+            FfiConverterString.write(value.`model`, buf)
+            FfiConverterOptionalString.write(value.`apiKey`, buf)
+            FfiConverterOptionalString.write(value.`baseUrl`, buf)
+            FfiConverterOptionalString.write(value.`color`, buf)
+            FfiConverterOptionalString.write(value.`avatar`, buf)
+    }
+}
+
+
+
+/**
  * Approval request (UniFFI-compatible view).
  *
  * `args_json` is a JSON-encoded string of the tool arguments,
@@ -4441,6 +5163,85 @@ public object FfiConverterTypeApprovalRequestView: FfiConverterRustBuffer<Approv
 
 
 /**
+ * Embedding configuration for foreign-language App construction.
+ *
+ * Mirrors `oneai_core::EmbeddingConfig`. Foreign platforms normally **omit**
+ * this (passing nothing) to get zero-config auto-detection: the Rust side
+ * probes `ONEAI_EMBEDDING_API_KEY`/`VOYAGE_API_KEY`/`OPENAI_API_KEY`/a local
+ * Ollama, and resolves to `None` (keyword-recall fallback) if nothing is
+ * available. Only set this when the user explicitly chooses a provider/key in
+ * the platform settings UI.
+ */
+data class EmbeddingConfigView (
+    /**
+     * Provider id: `"auto"` (default), `"openai"`, `"voyage"`, `"ollama"`,
+     * `"fastembed"`, or `"openai-compat"`.
+     */
+    var `provider`: kotlin.String
+    , 
+    /**
+     * Model name override (empty → provider default).
+     */
+    var `model`: kotlin.String?
+    , 
+    /**
+     * Embedding-specific API key (independent of the LLM provider key).
+     */
+    var `apiKey`: kotlin.String?
+    , 
+    /**
+     * Base URL override (required for `"openai-compat"` relays).
+     */
+    var `baseUrl`: kotlin.String?
+    , 
+    /**
+     * Fallback provider id (used if the primary fails to create/first-call).
+     */
+    var `fallback`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEmbeddingConfigView: FfiConverterRustBuffer<EmbeddingConfigView> {
+    override fun read(buf: ByteBuffer): EmbeddingConfigView {
+        return EmbeddingConfigView(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EmbeddingConfigView) = (
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterOptionalString.allocationSize(value.`model`) +
+            FfiConverterOptionalString.allocationSize(value.`apiKey`) +
+            FfiConverterOptionalString.allocationSize(value.`baseUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`fallback`)
+    )
+
+    override fun write(value: EmbeddingConfigView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterOptionalString.write(value.`model`, buf)
+            FfiConverterOptionalString.write(value.`apiKey`, buf)
+            FfiConverterOptionalString.write(value.`baseUrl`, buf)
+            FfiConverterOptionalString.write(value.`fallback`, buf)
+    }
+}
+
+
+
+/**
  * A single conversation message (UniFFI-compatible view).
  *
  * Flattened to `role` + `text` — multimodal content blocks are reduced to
@@ -4459,6 +5260,13 @@ data class MessageView (
      * Concatenated text content of the message's text blocks.
      */
     var `text`: kotlin.String
+    , 
+    /**
+     * Which agent produced this message. `None` for single-agent sessions
+     * (or system/tool messages); in a group-chat session it carries the
+     * speaking member's id, read from `Message.metadata["speaker"]`.
+     */
+    var `speaker`: kotlin.String?
     
 ){
     
@@ -4477,17 +5285,20 @@ public object FfiConverterTypeMessageView: FfiConverterRustBuffer<MessageView> {
         return MessageView(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: MessageView) = (
             FfiConverterString.allocationSize(value.`role`) +
-            FfiConverterString.allocationSize(value.`text`)
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterOptionalString.allocationSize(value.`speaker`)
     )
 
     override fun write(value: MessageView, buf: ByteBuffer) {
             FfiConverterString.write(value.`role`, buf)
             FfiConverterString.write(value.`text`, buf)
+            FfiConverterOptionalString.write(value.`speaker`, buf)
     }
 }
 
@@ -4572,6 +5383,162 @@ public object FfiConverterTypeProviderConfigView: FfiConverterRustBuffer<Provide
             FfiConverterString.write(value.`model`, buf)
             FfiConverterOptionalString.write(value.`host`, buf)
             FfiConverterOptionalUShort.write(value.`port`, buf)
+    }
+}
+
+
+
+/**
+ * Review-revise loop config (e.g. writing workshop: writer drafts → editor
+ * reviews → writer revises → … until the editor approves or `max_rounds` is
+ * reached). The reviewer's persona prompt must instruct it to emit
+ * `approve_marker` when satisfied.
+ */
+data class ReviewLoopSpecView (
+    /**
+     * Member id that decides approval (e.g. `"editor"`).
+     */
+    var `reviewerId`: kotlin.String
+    , 
+    /**
+     * Substring the reviewer emits when satisfied (e.g. `"定稿"`).
+     */
+    var `approveMarker`: kotlin.String
+    , 
+    /**
+     * Total scripted passes to run at most (1 = no loop, just the initial pass).
+     */
+    var `maxRounds`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReviewLoopSpecView: FfiConverterRustBuffer<ReviewLoopSpecView> {
+    override fun read(buf: ByteBuffer): ReviewLoopSpecView {
+        return ReviewLoopSpecView(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ReviewLoopSpecView) = (
+            FfiConverterString.allocationSize(value.`reviewerId`) +
+            FfiConverterString.allocationSize(value.`approveMarker`) +
+            FfiConverterULong.allocationSize(value.`maxRounds`)
+    )
+
+    override fun write(value: ReviewLoopSpecView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`reviewerId`, buf)
+            FfiConverterString.write(value.`approveMarker`, buf)
+            FfiConverterULong.write(value.`maxRounds`, buf)
+    }
+}
+
+
+
+/**
+ * A multi-agent scenario spec handed to `OneAIApp::create_group_session`.
+ */
+data class ScenarioSpecView (
+    /**
+     * The cast (each member carries its own provider config).
+     */
+    var `members`: List<AgentSpecView>
+    , 
+    /**
+     * `"scripted"` | `"roundrobin"` | `"moderator"`.
+     */
+    var `turnPolicy`: kotlin.String
+    , 
+    /**
+     * `scripted` only — member ids to run in order after each user input.
+     */
+    var `scriptOrder`: List<kotlin.String>?
+    , 
+    /**
+     * `moderator` only — member id that picks the next speaker.
+     */
+    var `moderatorId`: kotlin.String?
+    , 
+    /**
+     * Member id that delivers the opening turn (`None` = user speaks first).
+     */
+    var `openerAgentId`: kotlin.String?
+    , 
+    /**
+     * Seed line for the opener.
+     */
+    var `openerLine`: kotlin.String?
+    , 
+    /**
+     * Optional conversation title (e.g. `"面试演练·前端工程师"`). Persisted into
+     * `Conversation.metadata["title"]` so the saved session is named after the
+     * scenario instead of falling back to "新对话".
+     */
+    var `title`: kotlin.String?
+    , 
+    /**
+     * Optional review-revise loop. When set, the scripted order repeats up to
+     * `max_rounds` until the reviewer emits `approve_marker`. `None` = single pass.
+     */
+    var `reviewLoop`: ReviewLoopSpecView?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeScenarioSpecView: FfiConverterRustBuffer<ScenarioSpecView> {
+    override fun read(buf: ByteBuffer): ScenarioSpecView {
+        return ScenarioSpecView(
+            FfiConverterSequenceTypeAgentSpecView.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalSequenceString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeReviewLoopSpecView.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ScenarioSpecView) = (
+            FfiConverterSequenceTypeAgentSpecView.allocationSize(value.`members`) +
+            FfiConverterString.allocationSize(value.`turnPolicy`) +
+            FfiConverterOptionalSequenceString.allocationSize(value.`scriptOrder`) +
+            FfiConverterOptionalString.allocationSize(value.`moderatorId`) +
+            FfiConverterOptionalString.allocationSize(value.`openerAgentId`) +
+            FfiConverterOptionalString.allocationSize(value.`openerLine`) +
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterOptionalTypeReviewLoopSpecView.allocationSize(value.`reviewLoop`)
+    )
+
+    override fun write(value: ScenarioSpecView, buf: ByteBuffer) {
+            FfiConverterSequenceTypeAgentSpecView.write(value.`members`, buf)
+            FfiConverterString.write(value.`turnPolicy`, buf)
+            FfiConverterOptionalSequenceString.write(value.`scriptOrder`, buf)
+            FfiConverterOptionalString.write(value.`moderatorId`, buf)
+            FfiConverterOptionalString.write(value.`openerAgentId`, buf)
+            FfiConverterOptionalString.write(value.`openerLine`, buf)
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterOptionalTypeReviewLoopSpecView.write(value.`reviewLoop`, buf)
     }
 }
 
@@ -4711,11 +5678,17 @@ public object FfiConverterTypeToolOutputView: FfiConverterRustBuffer<ToolOutputV
 
 
 /**
- * Streaming event surfaced to foreign code during `OneAISession::run_task`.
+ * Streaming event surfaced to foreign code during `OneAISession::run_task`
+ * (and `OneAiGroupChatSession::run_task`).
  *
  * The foreign side implements `ChatEventCallback` and receives these events
  * in real time (callback-driven, not polled). Each variant maps from the
  * corresponding `AgentLoopObserver` callback in `oneai-agent`.
+ *
+ * `speaker` identifies which agent produced the event. In single-agent
+ * `run_task` it is always `None` (the foreign UI treats it as the single
+ * assistant). In a group-chat session it carries the speaking member's id
+ * so the UI can route the fragment to that member's bubble.
  */
 sealed class ChatEventView {
     
@@ -4723,7 +5696,8 @@ sealed class ChatEventView {
      * A streamed text fragment from the model (typewriter effect).
      */
     data class StreamChunk(
-        val `text`: kotlin.String) : ChatEventView()
+        val `text`: kotlin.String, 
+        val `speaker`: kotlin.String?) : ChatEventView()
         
     {
         
@@ -4735,7 +5709,8 @@ sealed class ChatEventView {
      * A streamed thinking/reasoning fragment (extended-thinking models).
      */
     data class Thinking(
-        val `text`: kotlin.String) : ChatEventView()
+        val `text`: kotlin.String, 
+        val `speaker`: kotlin.String?) : ChatEventView()
         
     {
         
@@ -4749,7 +5724,8 @@ sealed class ChatEventView {
     data class ToolCall(
         val `id`: kotlin.String, 
         val `name`: kotlin.String, 
-        val `argsJson`: kotlin.String) : ChatEventView()
+        val `argsJson`: kotlin.String, 
+        val `speaker`: kotlin.String?) : ChatEventView()
         
     {
         
@@ -4764,7 +5740,8 @@ sealed class ChatEventView {
         val `callId`: kotlin.String, 
         val `toolName`: kotlin.String, 
         val `content`: kotlin.String, 
-        val `success`: kotlin.Boolean) : ChatEventView()
+        val `success`: kotlin.Boolean, 
+        val `speaker`: kotlin.String?) : ChatEventView()
         
     {
         
@@ -4776,7 +5753,8 @@ sealed class ChatEventView {
      * The model produced a final direct answer (loop will end).
      */
     data class DirectAnswer(
-        val `text`: kotlin.String) : ChatEventView()
+        val `text`: kotlin.String, 
+        val `speaker`: kotlin.String?) : ChatEventView()
         
     {
         
@@ -4788,7 +5766,8 @@ sealed class ChatEventView {
      * The agent loop completed with the final answer.
      */
     data class Complete(
-        val `finalText`: kotlin.String) : ChatEventView()
+        val `finalText`: kotlin.String, 
+        val `speaker`: kotlin.String?) : ChatEventView()
         
     {
         
@@ -4800,7 +5779,8 @@ sealed class ChatEventView {
      * The agent loop errored out.
      */
     data class Error(
-        val `message`: kotlin.String) : ChatEventView()
+        val `message`: kotlin.String, 
+        val `speaker`: kotlin.String?) : ChatEventView()
         
     {
         
@@ -4826,29 +5806,36 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
         return when(buf.getInt()) {
             1 -> ChatEventView.StreamChunk(
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             2 -> ChatEventView.Thinking(
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             3 -> ChatEventView.ToolCall(
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             4 -> ChatEventView.ToolResult(
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 FfiConverterBoolean.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             5 -> ChatEventView.DirectAnswer(
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             6 -> ChatEventView.Complete(
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             7 -> ChatEventView.Error(
                 FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -4860,6 +5847,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`text`)
+                + FfiConverterOptionalString.allocationSize(value.`speaker`)
             )
         }
         is ChatEventView.Thinking -> {
@@ -4867,6 +5855,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`text`)
+                + FfiConverterOptionalString.allocationSize(value.`speaker`)
             )
         }
         is ChatEventView.ToolCall -> {
@@ -4876,6 +5865,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterString.allocationSize(value.`name`)
                 + FfiConverterString.allocationSize(value.`argsJson`)
+                + FfiConverterOptionalString.allocationSize(value.`speaker`)
             )
         }
         is ChatEventView.ToolResult -> {
@@ -4886,6 +5876,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
                 + FfiConverterString.allocationSize(value.`toolName`)
                 + FfiConverterString.allocationSize(value.`content`)
                 + FfiConverterBoolean.allocationSize(value.`success`)
+                + FfiConverterOptionalString.allocationSize(value.`speaker`)
             )
         }
         is ChatEventView.DirectAnswer -> {
@@ -4893,6 +5884,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`text`)
+                + FfiConverterOptionalString.allocationSize(value.`speaker`)
             )
         }
         is ChatEventView.Complete -> {
@@ -4900,6 +5892,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`finalText`)
+                + FfiConverterOptionalString.allocationSize(value.`speaker`)
             )
         }
         is ChatEventView.Error -> {
@@ -4907,6 +5900,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`message`)
+                + FfiConverterOptionalString.allocationSize(value.`speaker`)
             )
         }
     }
@@ -4916,11 +5910,13 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
             is ChatEventView.StreamChunk -> {
                 buf.putInt(1)
                 FfiConverterString.write(value.`text`, buf)
+                FfiConverterOptionalString.write(value.`speaker`, buf)
                 Unit
             }
             is ChatEventView.Thinking -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.`text`, buf)
+                FfiConverterOptionalString.write(value.`speaker`, buf)
                 Unit
             }
             is ChatEventView.ToolCall -> {
@@ -4928,6 +5924,7 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterString.write(value.`name`, buf)
                 FfiConverterString.write(value.`argsJson`, buf)
+                FfiConverterOptionalString.write(value.`speaker`, buf)
                 Unit
             }
             is ChatEventView.ToolResult -> {
@@ -4936,21 +5933,25 @@ public object FfiConverterTypeChatEventView : FfiConverterRustBuffer<ChatEventVi
                 FfiConverterString.write(value.`toolName`, buf)
                 FfiConverterString.write(value.`content`, buf)
                 FfiConverterBoolean.write(value.`success`, buf)
+                FfiConverterOptionalString.write(value.`speaker`, buf)
                 Unit
             }
             is ChatEventView.DirectAnswer -> {
                 buf.putInt(5)
                 FfiConverterString.write(value.`text`, buf)
+                FfiConverterOptionalString.write(value.`speaker`, buf)
                 Unit
             }
             is ChatEventView.Complete -> {
                 buf.putInt(6)
                 FfiConverterString.write(value.`finalText`, buf)
+                FfiConverterOptionalString.write(value.`speaker`, buf)
                 Unit
             }
             is ChatEventView.Error -> {
                 buf.putInt(7)
                 FfiConverterString.write(value.`message`, buf)
+                FfiConverterOptionalString.write(value.`speaker`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -5605,6 +6606,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeReviewLoopSpecView: FfiConverterRustBuffer<ReviewLoopSpecView?> {
+    override fun read(buf: ByteBuffer): ReviewLoopSpecView? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeReviewLoopSpecView.read(buf)
+    }
+
+    override fun allocationSize(value: ReviewLoopSpecView?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeReviewLoopSpecView.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ReviewLoopSpecView?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeReviewLoopSpecView.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypePermissionLevelView: FfiConverterRustBuffer<PermissionLevelView?> {
     override fun read(buf: ByteBuffer): PermissionLevelView? {
         if (buf.get().toInt() == 0) {
@@ -5627,6 +6660,94 @@ public object FfiConverterOptionalTypePermissionLevelView: FfiConverterRustBuffe
         } else {
             buf.put(1)
             FfiConverterTypePermissionLevelView.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalSequenceString: FfiConverterRustBuffer<List<kotlin.String>?> {
+    override fun read(buf: ByteBuffer): List<kotlin.String>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceString.read(buf)
+    }
+
+    override fun allocationSize(value: List<kotlin.String>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<kotlin.String>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeAgentSpecView: FfiConverterRustBuffer<List<AgentSpecView>> {
+    override fun read(buf: ByteBuffer): List<AgentSpecView> {
+        val len = buf.getInt()
+        return List<AgentSpecView>(len) {
+            FfiConverterTypeAgentSpecView.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AgentSpecView>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeAgentSpecView.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AgentSpecView>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAgentSpecView.write(it, buf)
         }
     }
 }

@@ -14,8 +14,15 @@
 
 use std::collections::HashMap;
 
-use oneai_core::MemoryFact;
+use oneai_core::{MemoryFact, RecallConfig};
 use tokio::sync::RwLock;
+
+/// Metadata key under which the chain of superseded (Mem0/Zep-style) fact
+/// revisions is recorded. Each conflict-resolved update appends the previous
+/// `{content, embedding, fact_type, updated_at, version}` here as a JSON
+/// array element, so the decision evolution is auditable even though the
+/// "current truth" is the single live row (the Mem0 invariant).
+pub const SUPERSEDED_HISTORY_KEY: &str = "_superseded_history";
 
 /// Outcome of a conflict-resolved upsert.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,11 +66,15 @@ impl MemoryFactStore {
 
     /// Conflict-resolved upsert of a fact.
     ///
-    /// If a fact with the same `(user_id, subject, predicate)` key exists, its
-    /// `content`/`embedding`/`metadata` are replaced, `version` is bumped, and
-    /// `updated_at` is refreshed — returning `Updated`. Otherwise the fact is
-    /// inserted — returning `Inserted`. The fact's `id`/`created_at`/`version`
-    /// are normalized on insert.
+    /// If a fact with the same `(user_id, subject, predicate)` key exists, the
+    /// previous revision is first appended to `metadata["_superseded_history"]`
+    /// (§12.2 — decision evolution stays auditable), then its
+    /// `content`/`embedding`/`metadata`/`fact_type` are replaced, `version`
+    /// is bumped, and `updated_at` is refreshed — returning `Updated`.
+    /// Otherwise the fact is inserted — returning `Inserted`. The fact's
+    /// `id`/`created_at`/`version` are normalized on insert. `superseded` is
+    /// reset to `false` on update (a fresh write re-establishes the fact as
+    /// the current truth).
     pub async fn upsert(&self, mut fact: MemoryFact) -> UpsertOutcome {
         let key = (
             fact.user_id.clone(),
@@ -77,12 +88,31 @@ impl MemoryFactStore {
             let mut facts = self.facts.write().await;
             if let Some(prev) = facts.get_mut(&id) {
                 let previous_version = prev.version;
+                // §12.2: capture the outgoing revision BEFORE overwriting
+                // mutable fields, so the decision evolution is auditable.
+                let history_entry = serde_json::json!({
+                    "content": prev.content.clone(),
+                    "embedding": prev.embedding.clone(),
+                    "fact_type": prev.fact_type.as_str().to_string(),
+                    "updated_at": prev.updated_at.to_rfc3339(),
+                    "version": prev.version,
+                });
+                // Merge the new fact's metadata in (the incoming metadata may
+                // carry fresh provenance), then append the captured history
+                // entry so the supersede chain survives the update.
+                for (k, v) in fact.metadata.drain() {
+                    if k == SUPERSEDED_HISTORY_KEY { continue; } // never clobber history
+                    prev.metadata.insert(k, v);
+                }
+                append_history(prev, history_entry);
                 // Preserve identity and origin timestamps; update mutable fields.
                 prev.content = std::mem::take(&mut fact.content);
                 prev.embedding = fact.embedding.take();
-                prev.metadata = fact.metadata;
                 prev.fact_type = fact.fact_type;
                 prev.updated_at = fact.updated_at;
+                prev.importance = fact.importance;
+                prev.superseded = false;
+                prev.superseded_at = None;
                 prev.version = previous_version.saturating_add(1);
                 return UpsertOutcome::Updated { previous_version };
             }
@@ -96,6 +126,40 @@ impl MemoryFactStore {
         self.facts.write().await.insert(id.clone(), fact);
         self.key_index.write().await.insert(key, id);
         UpsertOutcome::Inserted
+    }
+
+    /// Soft-invalidate the current fact for a conflict key (Zep-style
+    /// soft-fail). The fact is NOT removed: it is marked `superseded=true`
+    /// with a timestamp, excluded from default recall, but remains auditable
+    /// via the include-superseded search variants and the history log.
+    /// Returns true if a live (non-superseded) fact was invalidated.
+    pub async fn invalidate(&self, user_id: &str, subject: &str, predicate: &str) -> bool {
+        let key = (user_id.to_string(), subject.to_string(), predicate.to_string());
+        let Some(id) = self.key_index.read().await.get(&key).cloned() else {
+            return false;
+        };
+        let now = chrono::Utc::now();
+        let mut facts = self.facts.write().await;
+        if let Some(prev) = facts.get_mut(&id) {
+            if prev.superseded {
+                return false; // already invalidated
+            }
+            let history_entry = serde_json::json!({
+                "content": prev.content.clone(),
+                "embedding": prev.embedding.clone(),
+                "fact_type": prev.fact_type.as_str().to_string(),
+                "updated_at": prev.updated_at.to_rfc3339(),
+                "version": prev.version,
+                "superseded": true,
+            });
+            append_history(prev, history_entry);
+            prev.superseded = true;
+            prev.superseded_at = Some(now);
+            prev.updated_at = now;
+            prev.version = prev.version.saturating_add(1);
+            return true;
+        }
+        false
     }
 
     /// Remove a fact by its conflict key. Returns true if a fact was removed.
@@ -122,10 +186,21 @@ impl MemoryFactStore {
     }
 
     /// Semantic search (cosine similarity over embeddings), top_k results.
+    /// Superseded facts are excluded by default.
     pub async fn search_semantic(&self, query_embedding: &[f32], top_k: usize) -> Vec<MemoryFact> {
+        self.search_semantic_with(query_embedding, top_k, false).await
+    }
+
+    async fn search_semantic_with(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        include_superseded: bool,
+    ) -> Vec<MemoryFact> {
         let facts = self.facts.read().await;
         let mut scored: Vec<(f32, MemoryFact)> = facts
             .values()
+            .filter(|f| include_superseded || !f.superseded)
             .filter_map(|f| f.embedding.as_ref().map(|emb| (cosine(query_embedding, emb), f.clone())))
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -133,14 +208,30 @@ impl MemoryFactStore {
     }
 
     /// Keyword search over fact content/subject/predicate, top_k results.
+    /// Superseded facts are excluded by default.
     pub async fn search_keyword(&self, query: &str, top_k: usize) -> Vec<MemoryFact> {
+        self.search_keyword_with(query, top_k, false).await
+    }
+
+    async fn search_keyword_with(
+        &self,
+        query: &str,
+        top_k: usize,
+        include_superseded: bool,
+    ) -> Vec<MemoryFact> {
         let facts = self.facts.read().await;
         let mut results: Vec<MemoryFact> = facts
             .values()
+            .filter(|f| include_superseded || !f.superseded)
             .filter(|f| {
-                oneai_core::keyword_matches(&f.content, query)
-                    || oneai_core::keyword_matches(&f.subject, query)
-                    || oneai_core::keyword_matches(&f.predicate, query)
+                // Token-level match (§: no-embedding recall upgrade): a
+                // natural-language query like "which package manager does the
+                // user prefer" matches fact text via its "package"/"manager"
+                // tokens, even though the whole sentence is never a substring
+                // of short fact content.
+                oneai_core::keyword_matches_any_token(&f.content, query)
+                    || oneai_core::keyword_matches_any_token(&f.subject, query)
+                    || oneai_core::keyword_matches_any_token(&f.predicate, query)
             })
             .cloned()
             .collect();
@@ -151,13 +242,9 @@ impl MemoryFactStore {
     }
 
     /// Three-factor hybrid search (Generative Agents): relevance + recency +
-    /// importance.
-    ///
-    /// `relevance` is cosine similarity when both query and fact have
-    /// embeddings, else a fixed keyword-match score. `recency` is exponential
-    /// decay over `updated_at` (disabled when `time_decay` is false).
-    /// `importance` is the fact's salience field. The weighted sum ranks
-    /// results; top_k are returned.
+    /// importance, with the legacy 4-arg signature delegating to
+    /// `search_hybrid_with_config` using a default `RecallConfig` and the
+    /// current time. Superseded facts are excluded.
     pub async fn search_hybrid(
         &self,
         query_embedding: Option<&[f32]>,
@@ -165,10 +252,42 @@ impl MemoryFactStore {
         top_k: usize,
         time_decay: bool,
     ) -> Vec<MemoryFact> {
-        let now = chrono::Utc::now();
+        let cfg = RecallConfig {
+            time_decay,
+            top_k,
+            ..RecallConfig::default()
+        };
+        self.search_hybrid_with_config(query_embedding, query_text, &cfg, chrono::Utc::now(), false)
+            .await
+    }
+
+    /// Configurable three-factor hybrid search (§12.4): weights and the
+    /// recency half-life come from `RecallConfig`, and (by default) the three
+    /// factors are min-max normalized across the candidate set before
+    /// weighting — Generative Agents requires this, otherwise cosine ∈
+    /// [-1,1], importance ∈ [0,1], recency ∈ (0,1] are not comparable.
+    ///
+    /// `relevance` is cosine similarity when both query and fact have
+    /// embeddings, else a fixed keyword-match score. `recency` is exponential
+    /// decay over `updated_at` (half-life = `cfg.recency_half_life_secs`,
+    /// disabled when `time_decay` is false). `importance` is the fact's
+    /// salience. Candidates with `relevance <= 0` are dropped. When
+    /// `include_superseded` is false, superseded facts are excluded.
+    pub async fn search_hybrid_with_config(
+        &self,
+        query_embedding: Option<&[f32]>,
+        query_text: &str,
+        cfg: &RecallConfig,
+        now: chrono::DateTime<chrono::Utc>,
+        include_superseded: bool,
+    ) -> Vec<MemoryFact> {
         let facts = self.facts.read().await;
-        let mut scored: Vec<(f32, MemoryFact)> = facts
+
+        // Pass 1: compute raw (relevance, recency, importance) per candidate,
+        // dropping zero-relevance and (optionally) superseded facts.
+        let mut candidates: Vec<(f32, f32, f32, MemoryFact)> = facts
             .values()
+            .filter(|f| include_superseded || !f.superseded)
             .filter_map(|f| {
                 let relevance = match query_embedding {
                     Some(emb) => f
@@ -177,9 +296,11 @@ impl MemoryFactStore {
                         .map(|fe| cosine(emb, fe))
                         .unwrap_or(0.0),
                     None => {
-                        if oneai_core::keyword_matches(&f.content, query_text)
-                            || oneai_core::keyword_matches(&f.subject, query_text)
-                            || oneai_core::keyword_matches(&f.predicate, query_text)
+                        // Token-level keyword match (no-embedding recall
+                        // upgrade): see `search_keyword_with` for rationale.
+                        if oneai_core::keyword_matches_any_token(&f.content, query_text)
+                            || oneai_core::keyword_matches_any_token(&f.subject, query_text)
+                            || oneai_core::keyword_matches_any_token(&f.predicate, query_text)
                         {
                             0.6
                         } else {
@@ -187,37 +308,102 @@ impl MemoryFactStore {
                         }
                     }
                 };
-                // Exclude non-matches: a zero-relevance fact (no keyword hit
-                // or orthogonal embedding) should not surface just because
-                // recency/importance give it a non-zero score.
                 if relevance <= 0.0 {
                     return None;
                 }
-                let recency = if time_decay { temporal_score_fact(&f.updated_at, &now) } else { 0.5 };
+                let recency = if cfg.time_decay {
+                    temporal_score_fact(&f.updated_at, &now, cfg.recency_half_life_secs)
+                } else {
+                    0.5
+                };
                 let importance = f.importance;
-                let score = 0.5 * relevance + 0.3 * recency + 0.2 * importance;
-                Some((score, f.clone()))
+                Some((relevance, recency, importance, f.clone()))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().map(|(_, f)| f).take(top_k).collect()
+        drop(facts);
+
+        // Pass 2: optional min-max normalization across the candidate set.
+        let (rmin, rmax) = minmax(candidates.iter().map(|(r, _, _, _)| *r));
+        let (cmin, cmax) = minmax(candidates.iter().map(|(_, c, _, _)| *c));
+        let (imin, imax) = minmax(candidates.iter().map(|(_, _, i, _)| *i));
+        for (r, c, i, _) in candidates.iter_mut() {
+            if cfg.normalize_factors {
+                *r = rescale(*r, rmin, rmax);
+                *c = rescale(*c, cmin, cmax);
+                *i = rescale(*i, imin, imax);
+            }
+        }
+
+        // Pass 3: weighted sum, rank, top_k.
+        for (r, c, i, _) in candidates.iter_mut() {
+            let score = cfg.relevance_weight * *r
+                + cfg.recency_weight * *c
+                + cfg.importance_weight * *i;
+            // Stash the final score in `relevance` (already consumed).
+            *r = score;
+        }
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.into_iter().map(|(_, _, _, f)| f).take(cfg.top_k).collect()
     }
+}
+
+/// Append a captured revision (a `serde_json::Value` object) to the fact's
+/// `_superseded_history` metadata (§12.2). The history is a JSON array of
+/// `{content, embedding, fact_type, updated_at, version}` snapshots, so the
+/// decision evolution is auditable even though the "current truth" is the
+/// single live row (the Mem0 invariant). Best-effort: malformed history is
+/// reset to a fresh array containing just the new entry.
+fn append_history(fact: &mut MemoryFact, entry: serde_json::Value) {
+    let existing = fact.metadata.get(SUPERSEDED_HISTORY_KEY).cloned().unwrap_or_default();
+    let mut arr: serde_json::Value = if existing.is_empty() {
+        serde_json::Value::Array(Vec::new())
+    } else {
+        serde_json::from_str(&existing).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+    };
+    if let Some(a) = arr.as_array_mut() {
+        a.push(entry);
+    } else {
+        // Corrupt non-array value → reset to a fresh array.
+        arr = serde_json::Value::Array(vec![entry]);
+    }
+    fact.metadata.insert(SUPERSEDED_HISTORY_KEY.to_string(), arr.to_string());
+}
+
+/// Min and max of an iterator of f32 (empty → (0,0)).
+fn minmax(it: impl Iterator<Item = f32>) -> (f32, f32) {
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for v in it {
+        if v < lo { lo = v; }
+        if v > hi { hi = v; }
+    }
+    if !lo.is_finite() { lo = 0.0; }
+    if !hi.is_finite() { hi = 0.0; }
+    (lo, hi)
+}
+
+/// Rescale `v` from [min,max] to [0,1]; degenerate range (min==max) → 1.0
+/// (a single candidate or constant factor shouldn't be zeroed out).
+fn rescale(v: f32, min: f32, max: f32) -> f32 {
+    if (max - min).abs() < 1e-9 { 1.0 } else { (v - min) / (max - min) }
 }
 
 /// Exponential recency decay over a fact's `updated_at`, in `[0.0, 1.0]`.
 ///
-/// Mirrors `long_term::EmbeddedVectorStore::temporal_score` but operates on
-/// fact timestamps (the canonical layer), so the three-factor scorer in
-/// `search_hybrid` can apply Generative-Agents-style recency weighting.
+/// §12.4: half-life is now configurable (was hardcoded 1 hour). Mirrors
+/// `long_term::EmbeddedVectorStore::temporal_score` but operates on fact
+/// timestamps (the canonical layer), so the three-factor scorer in
+/// `search_hybrid_with_config` can apply Generative-Agents-style recency
+/// weighting with a domain-tunable half-life.
 fn temporal_score_fact(
     entry_time: &chrono::DateTime<chrono::Utc>,
     reference_time: &chrono::DateTime<chrono::Utc>,
+    half_life_secs: u64,
 ) -> f32 {
     let diff = reference_time.timestamp() - entry_time.timestamp();
     if diff <= 0 {
         return 1.0;
     }
-    let half_life: f64 = 3600.0; // 1-hour half-life
+    let half_life = half_life_secs.max(1) as f64;
     let decay = std::cmp::min(diff, 365 * 24 * 3600) as f64;
     0.5_f64.powf(decay / half_life) as f32
 }
@@ -267,6 +453,8 @@ mod tests {
             created_at: now(),
             updated_at: now(),
             version: 1,
+            superseded: false,
+            superseded_at: None,
         }
     }
 
@@ -357,5 +545,96 @@ mod tests {
         // time_decay disabled → importance is the differentiator; high first.
         assert_eq!(results[0].subject, "auth.scheme");
         assert_eq!(results[1].subject, "auth.module");
+    }
+
+    // ─── §12.2: supersede history + soft-invalidate ─────────────────────────
+
+    #[tokio::test]
+    async fn upsert_records_superseded_history() {
+        // A contradicting update must preserve the prior revision in the
+        // _superseded_history metadata (auditable decision evolution).
+        let store = MemoryFactStore::new();
+        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "JWT")).await;
+        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "session")).await;
+
+        let f = store.get("alice", "auth.scheme", "decided_to").await.unwrap();
+        assert_eq!(f.content, "session"); // current truth = new value
+        assert_eq!(f.version, 2);
+        let history = f.metadata.get(super::SUPERSEDED_HISTORY_KEY).expect("history recorded");
+        let arr: serde_json::Value = serde_json::from_str(history).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["content"], "JWT");
+        assert_eq!(arr[0]["version"], 1);
+    }
+
+    #[tokio::test]
+    async fn invalidate_soft_fails_and_excludes_from_recall() {
+        // Soft-invalidate marks superseded=true; default search excludes it.
+        let store = MemoryFactStore::new();
+        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "JWT")).await;
+        assert!(store.invalidate("alice", "auth.scheme", "decided_to").await);
+
+        let f = store.get("alice", "auth.scheme", "decided_to").await.unwrap();
+        assert!(f.superseded);
+        assert!(f.superseded_at.is_some());
+
+        // Default hybrid/keyword search no longer surfaces it.
+        assert!(store.search_hybrid(None, "jwt", 5, true).await.is_empty());
+        assert!(store.search_keyword("jwt", 5).await.is_empty());
+
+        // But a re-upsert with a new value re-establishes the current truth.
+        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "OAuth")).await;
+        let f = store.get("alice", "auth.scheme", "decided_to").await.unwrap();
+        assert!(!f.superseded);
+        assert_eq!(f.content, "OAuth");
+        assert_eq!(f.version, 3); // insert(1) → invalidate(2) → update(3)
+    }
+
+    // ─── §12.4: configurable weights + normalization ───────────────────────
+
+    #[tokio::test]
+    async fn search_hybrid_with_config_respects_weights() {
+        // With recency weight cranked to 1.0 and others to 0, the
+        // most-recently-updated fact wins among two keyword-matching facts
+        // regardless of importance.
+        let store = MemoryFactStore::new();
+        let mut a = make_fact("alice", "a.mod", "decided_to", "jwt");
+        a.importance = 0.99;
+        a.updated_at = chrono::Utc::now();
+        let mut b = make_fact("alice", "b.mod", "decided_to", "jwt");
+        b.importance = 0.05;
+        b.updated_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+        store.upsert(a).await;
+        store.upsert(b).await;
+
+        let cfg = oneai_core::RecallConfig {
+            strategy: oneai_core::RecallStrategy::Hybrid,
+            top_k: 2,
+            time_decay: true,
+            relevance_weight: 0.0,
+            recency_weight: 1.0,
+            importance_weight: 0.0,
+            recency_half_life_secs: 3600,
+            normalize_factors: true,
+        };
+        let results = store
+            .search_hybrid_with_config(None, "jwt", &cfg, chrono::Utc::now() + chrono::Duration::seconds(120), false)
+            .await;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].subject, "b.mod"); // more recent wins
+    }
+
+    #[tokio::test]
+    async fn search_hybrid_with_config_normalization_keeps_single_candidate() {
+        // A single candidate factor range is degenerate → rescaled to 1.0
+        // (not zeroed out), so it still surfaces.
+        let store = MemoryFactStore::new();
+        store.upsert(make_fact("alice", "x.mod", "decided_to", "jwt")).await;
+        let cfg = oneai_core::RecallConfig::default();
+        let results = store
+            .search_hybrid_with_config(None, "jwt", &cfg, chrono::Utc::now(), false)
+            .await;
+        assert_eq!(results.len(), 1);
     }
 }

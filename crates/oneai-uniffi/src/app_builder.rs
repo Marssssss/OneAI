@@ -13,7 +13,7 @@ use oneai_core::traits::Tool;
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
 
-use crate::types::{OneAIErrorView, ProviderConfigView};
+use crate::types::{OneAIErrorView, ProviderConfigView, EmbeddingConfigView};
 use crate::app::OneAIApp;
 
 /// UniFFI-exported AppBuilder wrapper.
@@ -148,6 +148,22 @@ impl OneAIAppBuilder {
             }
         };
         let builder = self.take_inner().provider(provider);
+        Ok(Arc::new(Self::from_builder(builder, extras)))
+    }
+
+    /// Set the embedding provider from a foreign-friendly config record.
+    ///
+    /// Foreign platforms normally skip this for zero-config auto-detection;
+    /// call it only when the user explicitly chose a provider/key in settings.
+    /// `provider = "auto"` resolves at build time (env keys / local Ollama;
+    /// nothing available → `None`, memory recall falls back to keyword matching).
+    #[uniffi::method]
+    pub fn embedding_config(
+        self: Arc<Self>,
+        cfg: EmbeddingConfigView,
+    ) -> std::result::Result<Arc<Self>, OneAIErrorView> {
+        let extras = self.take_extra_tools();
+        let builder = self.take_inner().embedding_config(cfg.to_engine());
         Ok(Arc::new(Self::from_builder(builder, extras)))
     }
 

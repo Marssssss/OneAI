@@ -157,6 +157,8 @@ fn parse_facts(text: &str, schema: &[FactType], user_id: &str, session_id: &str)
                 created_at: now,
                 updated_at: now,
                 version: 1,
+                superseded: false,
+                superseded_at: None,
             }
         })
         .collect()

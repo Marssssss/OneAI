@@ -48,7 +48,8 @@ pub fn cmd_run(
             .provider(Arc::from(provider))
             .noop_interaction_gate()
             .default_parser()
-            .generation_config(config.generation.clone());
+            .generation_config(config.generation.clone())
+            .embedding_config(config.embedding.clone());
         let builder = if let Some(uid) = user {
             builder.user_id(uid)
         } else {

@@ -52,6 +52,7 @@ pub fn run_tui(
     domain_name: Option<&str>,
     user: Option<&str>,
     generation: &oneai_core::GenerationConfig,
+    embedding: &oneai_core::EmbeddingConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Setup panic hook to restore terminal state if we crash
     let original_hook = Arc::new(std::panic::take_hook());
@@ -117,6 +118,7 @@ pub fn run_tui(
             );
 
         let mut builder = builder.generation_config(generation.clone());
+        builder = builder.embedding_config(embedding.clone());
         if let Some(config) = provider_config {
             let provider = ProviderFactory::create(config);
             builder = builder.provider(Arc::from(provider));

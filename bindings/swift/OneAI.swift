@@ -1314,6 +1314,16 @@ public protocol OneAiAppBuilderProtocol: AnyObject, Sendable {
     func denyAllInteractionGate()  -> OneAiAppBuilder
     
     /**
+     * Set the embedding provider from a foreign-friendly config record.
+     *
+     * Foreign platforms normally skip this for zero-config auto-detection;
+     * call it only when the user explicitly chose a provider/key in settings.
+     * `provider = "auto"` resolves at build time (env keys / local Ollama;
+     * nothing available → `None`, memory recall falls back to keyword matching).
+     */
+    func embeddingConfig(cfg: EmbeddingConfigView) throws  -> OneAiAppBuilder
+    
+    /**
      * Set the memory manager with custom config.
      */
     func memoryManagerWithConfig(thresholdTokens: UInt32)  -> OneAiAppBuilder
@@ -1498,6 +1508,24 @@ open func denyAllInteractionGate() -> OneAiAppBuilder  {
         uniffiCallStatus in
     uniffi_oneai_fn_method_oneaiappbuilder_deny_all_interaction_gate(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Set the embedding provider from a foreign-friendly config record.
+     *
+     * Foreign platforms normally skip this for zero-config auto-detection;
+     * call it only when the user explicitly chose a provider/key in settings.
+     * `provider = "auto"` resolves at build time (env keys / local Ollama;
+     * nothing available → `None`, memory recall falls back to keyword matching).
+     */
+open func embeddingConfig(cfg: EmbeddingConfigView)throws  -> OneAiAppBuilder  {
+    return try  FfiConverterTypeOneAIAppBuilder_lift(try rustCallWithError(FfiConverterTypeOneAIErrorView_lift) {
+        uniffiCallStatus in
+    uniffi_oneai_fn_method_oneaiappbuilder_embedding_config(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeEmbeddingConfigView_lower(cfg),uniffiCallStatus
     )
 })
 }
@@ -2907,6 +2935,114 @@ public func FfiConverterTypeApprovalRequestView_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeApprovalRequestView_lower(_ value: ApprovalRequestView) -> RustBuffer {
     return FfiConverterTypeApprovalRequestView.lower(value)
+}
+
+
+/**
+ * Embedding configuration for foreign-language App construction.
+ *
+ * Mirrors `oneai_core::EmbeddingConfig`. Foreign platforms normally **omit**
+ * this (passing nothing) to get zero-config auto-detection: the Rust side
+ * probes `ONEAI_EMBEDDING_API_KEY`/`VOYAGE_API_KEY`/`OPENAI_API_KEY`/a local
+ * Ollama, and resolves to `None` (keyword-recall fallback) if nothing is
+ * available. Only set this when the user explicitly chooses a provider/key in
+ * the platform settings UI.
+ */
+public struct EmbeddingConfigView: Equatable, Hashable {
+    /**
+     * Provider id: `"auto"` (default), `"openai"`, `"voyage"`, `"ollama"`,
+     * `"fastembed"`, or `"openai-compat"`.
+     */
+    public var provider: String
+    /**
+     * Model name override (empty → provider default).
+     */
+    public var model: String?
+    /**
+     * Embedding-specific API key (independent of the LLM provider key).
+     */
+    public var apiKey: String?
+    /**
+     * Base URL override (required for `"openai-compat"` relays).
+     */
+    public var baseUrl: String?
+    /**
+     * Fallback provider id (used if the primary fails to create/first-call).
+     */
+    public var fallback: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Provider id: `"auto"` (default), `"openai"`, `"voyage"`, `"ollama"`,
+         * `"fastembed"`, or `"openai-compat"`.
+         */provider: String, 
+        /**
+         * Model name override (empty → provider default).
+         */model: String?, 
+        /**
+         * Embedding-specific API key (independent of the LLM provider key).
+         */apiKey: String?, 
+        /**
+         * Base URL override (required for `"openai-compat"` relays).
+         */baseUrl: String?, 
+        /**
+         * Fallback provider id (used if the primary fails to create/first-call).
+         */fallback: String?) {
+        self.provider = provider
+        self.model = model
+        self.apiKey = apiKey
+        self.baseUrl = baseUrl
+        self.fallback = fallback
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EmbeddingConfigView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEmbeddingConfigView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EmbeddingConfigView {
+        return
+            try EmbeddingConfigView(
+                provider: FfiConverterString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                apiKey: FfiConverterOptionString.read(from: &buf), 
+                baseUrl: FfiConverterOptionString.read(from: &buf), 
+                fallback: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EmbeddingConfigView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.apiKey, into: &buf)
+        FfiConverterOptionString.write(value.baseUrl, into: &buf)
+        FfiConverterOptionString.write(value.fallback, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmbeddingConfigView_lift(_ buf: RustBuffer) throws -> EmbeddingConfigView {
+    return try FfiConverterTypeEmbeddingConfigView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEmbeddingConfigView_lower(_ value: EmbeddingConfigView) -> RustBuffer {
+    return FfiConverterTypeEmbeddingConfigView.lower(value)
 }
 
 
@@ -4709,6 +4845,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaiappbuilder_deny_all_interaction_gate() != 33007) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaiappbuilder_embedding_config() != 18319) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaiappbuilder_memory_manager_with_config() != 45759) {

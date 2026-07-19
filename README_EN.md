@@ -211,11 +211,33 @@ oneai session delete <id>             # delete a session
 oneai session info <id>               # inspect session details
 
 # ── Embedding service ──
-oneai embed generate "text" [--model ...] [--service fastembed|ollama|openai|anthropic] [--api-key ...]  # generate an embedding
+oneai embed generate "text" [--model ...] [--provider auto|openai|voyage|ollama|fastembed|openai-compat] [--api-key ...]  # generate an embedding
 oneai embed batch "t1,t2" [same opts]  # batch generate
-oneai embed list                       # list available embedding models
+oneai embed list                       # list available providers + auto-detection chain
 oneai embed health [same opts]        # check embedding-service health
 oneai embed dimension [same opts]      # show vector dimension for a model
+
+### Embedding configuration (zero-burden)
+
+Embeddings power long-term-memory semantic recall. Default is **zero-config**: leaving every embedding field unset runs `auto` detection, picking the first available provider in this order; if none is available it falls back to keyword matching (no error):
+
+1. `openai-compat` — requires both `ONEAI_EMBEDDING_API_KEY` + `ONEAI_EMBEDDING_BASE_URL` (relay)
+2. `voyage` — set `VOYAGE_API_KEY` (`api.voyageai.com`)
+3. `openai` — set `OPENAI_API_KEY` (official `api.openai.com`)
+4. `ollama` — local `localhost:11434` reachable + an embedding model installed (e.g. `nomic-embed-text`)
+5. `fastembed` — local ONNX (`AllMiniLML6V2`, no key; one-time ~22MB download on first use, then offline)
+
+   On proxy networks hf-hub's download client may ignore the proxy and the first download fails. Run `./scripts/download_fastembed_models.sh` (uses curl, which honors proxy env) to pre-fetch the model into the hf-hub cache; fastembed then loads offline.
+6. none → keyword matching
+
+**Key: the embedding key is independent of the LLM provider key** — `LlmProvider` has no `embed` method; LLM and embedding are separate capabilities. `ANTHROPIC_API_KEY` (for Claude chat) is NOT an embedding key; Anthropic has no native embedding API — the real path is Voyage. A relay configured via `ONEAI_API_KEY` usually has no embedding endpoint, so auto never reuses the main model's key.
+
+Explicit overrides (any of three):
+- CLI: `oneai embed generate "x" --provider voyage --api-key pa-...`
+- `~/.oneai/config.toml`: `[embedding]` section (`provider`/`model`/`api_key`/`base_url`/`fallback`)
+- Platform apps: Settings → "Embedding settings" on macOS/Windows/Android; leave blank for auto
+
+Model names are free-form strings (`--model voyage-3`); unknown names are dimension-probed at runtime. The `fallback` field switches automatically if the primary provider fails to create/first-call (build-time + runtime, sharing one `should_continue` classifier: 429/5xx/transport/missing-key degrade, others raise). Over-long inputs are auto-split on UTF-8 byte boundaries.
 
 # ── WASM sandbox ──
 oneai wasm list                        # list loaded modules
@@ -411,7 +433,7 @@ flowchart TB
 | `oneai-skill` | skill selector + registry + built-in domain skills | 9|
 | `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127|
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 219|
-| `oneai-rag` | RAG + EmbeddingService (OpenAI/Anthropic/Voyage/Ollama/FastEmbed) | 61|
+| `oneai-rag` | RAG + EmbeddingService (OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat + auto-detect + fallback) | 61|
 | `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44|
 | `oneai-scheduler` | in-memory task scheduler | 6|
 | `oneai-persistence` | progressive checkpoints + SQLite (session/usage) backends | 46|
@@ -546,7 +568,7 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 - **Self-managed memory tools (domain opt-in)** — `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent curate its own memory → "gets better with use".
 - **Dual namespace + persistence** — `user_id` (cross-session habits) + `session_id` (this session's episodic); a unified `memories` table persists; `oneai memory search/list --user`. The `--user` flag namespaces cross-session memory.
 - **Short-term memory** — sliding window, auto-evicted to long-term.
-- **Long-term memory** — HNSW vector store + content store + hybrid scoring; **auto-embedded** via the configured `EmbeddingService`.
+- **Long-term memory** — HNSW vector store + content store + hybrid scoring; **auto-embedded** via the configured `EmbeddingService`. When unconfigured, auto-detection runs; if no provider is available, recall falls back to keyword matching.
 - **STM↔LTM closed loop** — `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`.
 - **Context compression** — auto-summarize when over token limit, keeping recent turns; `ContextBudgetManager` allocates per-turn budgets proportionally.
 - **Persistence** — `SqliteSessionStore` persists sessions/LTM/facts; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`, `oneai memory search <kw> --user <id> / list --user <id>`.
@@ -568,7 +590,7 @@ LLM output passes through 3 defensive layers: constrained decoding → fuzzy JSO
 
 ### RAG
 
-`EmbeddingService` trait with OpenAI/Anthropic/Voyage/Ollama/FastEmbed (local ONNX) implementations, `EmbeddingServiceRegistry` (cache + fallback), `AutoEmbeddingDocumentIndex` auto-embedding on `add_document()`. Chunking: SentenceBoundary/FixedSize/Paragraph.
+`EmbeddingService` trait with OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat implementations; `EmbeddingProviderAdapter` registry + `EmbeddingResolver` (auto-detection + build-time/runtime fallback sharing one `should_continue` error classifier); `EmbeddingServiceRegistry` (cache + primary→fallback runtime switch); UTF-8 byte-bisection input splitting; `AutoEmbeddingDocumentIndex` auto-embedding on `add_document()`. Chunking: SentenceBoundary/FixedSize/Paragraph. See [Embedding configuration](#embedding-configuration).
 
 ### A2A protocol, WASM sandbox, eval, Studio, MCP
 

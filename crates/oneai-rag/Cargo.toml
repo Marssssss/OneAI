@@ -18,3 +18,4 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 oneai-core = { workspace = true }
+fastembed = { workspace = true }

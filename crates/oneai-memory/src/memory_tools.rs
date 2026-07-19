@@ -38,6 +38,8 @@ async fn build_fact(mm: &MemoryManager, fact_type: String, subject: String, pred
         created_at: Utc::now(),
         updated_at: Utc::now(),
         version: 1,
+        superseded: false,
+        superseded_at: None,
     }
 }
 
@@ -65,12 +67,25 @@ fn default_tool_importance(fact_type: &str) -> f32 {
 /// `memory_search` — recall facts from the archival tier.
 pub struct MemorySearchTool {
     mm: Arc<MemoryManager>,
+    /// Domain recall config (weights, half-life, normalization). §12.4:
+    /// threaded in via AppBuilder so the tool's recall honors the active
+    /// MemoryProfile rather than hardcoded 0.5/0.3/0.2 weights.
+    recall: Arc<oneai_core::RecallConfig>,
 }
 
 impl MemorySearchTool {
+    /// Create with the manager and a default recall config.
     pub fn new(mm: Arc<MemoryManager>) -> Self {
-        Self { mm }
+        Self { mm, recall: Arc::new(oneai_core::RecallConfig::default()) }
     }
+
+    /// Create with an explicit domain recall config.
+    pub fn with_recall_config(mm: Arc<MemoryManager>, recall: oneai_core::RecallConfig) -> Self {
+        Self { mm, recall: Arc::new(recall) }
+    }
+
+    /// The recall config in use (for inspection / builder wiring).
+    pub fn recall_config(&self) -> &oneai_core::RecallConfig { &self.recall }
 }
 
 #[async_trait::async_trait]
@@ -103,8 +118,35 @@ impl Tool for MemorySearchTool {
             return Ok(ToolOutput { success: false, content: String::new(), error: Some("query is required".into()) });
         }
 
-        // Canonical path: three-factor search over the archival fact tier.
-        let facts = self.mm.fact_archive().search_hybrid(None, query, top_k, true).await;
+        // Canonical path: three-factor search over the archival fact tier,
+        // honoring the domain RecallConfig (weights, half-life, normalization).
+        // When an embedding service is configured on the manager, embed the
+        // query so the semantic branch engages (§12.1). The tool's `top_k`
+        // arg overrides the config's default when explicitly provided.
+        let mut cfg = (*self.recall).clone();
+        if let Some(k) = args.get("top_k").and_then(|v| v.as_u64()) {
+            cfg.top_k = k as usize;
+        }
+        let query_embedding = if let Some(svc) = self.mm.embedding_service() {
+            match svc.embed(query).await {
+                Ok(emb) => Some(emb),
+                Err(e) => {
+                    tracing::warn!("memory_search query embedding failed: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let facts = self.mm.fact_archive()
+            .search_hybrid_with_config(
+                query_embedding.as_deref(),
+                query,
+                &cfg,
+                chrono::Utc::now(),
+                false,
+            )
+            .await;
 
         if !facts.is_empty() {
             let content = facts.iter()
@@ -146,7 +188,9 @@ impl MemorySearchTool {
         conv.messages.iter()
             .filter_map(|m| {
                 let text = m.text_content();
-                if oneai_core::keyword_matches(&text, query) {
+                // Token-level match (no-embedding recall upgrade): a natural-
+                // language query matches transcript via its meaningful tokens.
+                if oneai_core::keyword_matches_any_token(&text, query) {
                     let role = match m.role {
                         oneai_core::Role::User => "user",
                         oneai_core::Role::Assistant => "assistant",
@@ -222,7 +266,11 @@ impl Tool for CoreMemoryEditTool {
             return Ok(ToolOutput { success: false, content: String::new(), error: Some("subject, predicate, and content are required".into()) });
         }
         let importance = read_importance(&args, &fact_type);
-        let fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
+        let mut fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
+        // §12.1: embed the fact at the write path so core-tier facts are
+        // semantically searchable and carry an embedding when evicted to
+        // archival. (build_fact is sync and can't await — embed here.)
+        self.mm.embed_fact(&mut fact).await;
         let outcome = self.mm.core_memory().upsert(fact).await;
         // Enforce the core budget — evicted facts go to archival (paging).
         let evicted = self.mm.core_memory().enforce_budget().await;
@@ -284,7 +332,11 @@ impl Tool for ArchivalInsertTool {
             return Ok(ToolOutput { success: false, content: String::new(), error: Some("subject, predicate, and content are required".into()) });
         }
         let importance = read_importance(&args, &fact_type);
-        let fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
+        let mut fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
+        // §12.1: archival insert goes through archive_facts, which embeds —
+        // but embed here too so the fact carries an embedding even if a future
+        // code path bypasses archive_facts.
+        self.mm.embed_fact(&mut fact).await;
         self.mm.archive_facts(vec![fact]).await;
         Ok(ToolOutput { success: true, content: "Fact archived.".to_string(), error: None })
     }
