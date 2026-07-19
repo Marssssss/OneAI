@@ -50,15 +50,45 @@
 
 ---
 
-## 快速上手（CLI，最快 30 秒）
+## 快速上手
 
-### 0. 下载 macOS App（原生，免编译）
+OneAI 暴露三条上手路径，按你的角色挑一条：
+
+| 路径 | 适合谁 |
+|------|--------|
+| **一、macOS App** | 想直接下载即用、玩场景化多 Agent 对话，不碰命令行 / 环境变量 |
+| **二、TUI / CLI** | 通用 Agentic 编程 / 任务执行、子系统探索 |
+| **三、集成 OneAI SDK** | 用 crates.io 上的 OneAI 构建自己的 Rust 应用 |
+
+### 一、macOS App（原生，免编译）
 
 从 [GitHub Releases](https://github.com/Marssssss/OneAI/releases) 下载 `OneAI-1.0.0-macos.zip`，解压得到 `OneAI.app`，拖入「应用程序」。
 
-> 该 .app **未签名 / 未公证**（universal arm64 + x86_64，macOS 13+）。首次打开会触发 Gatekeeper 拦截：在 Finder 里**右键 → 打开**，确认后即可正常启动。如需自行从源码构建：`./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`。
+> 该 .app **未签名 / 未公证**（universal arm64 + x86_64，macOS 13+）。首次打开会触发 Gatekeeper 拦截：在 Finder 里**右键 → 打开**，确认后即可正常启动。
 
-### 1. 配置 Provider
+#### 配置（App 内 Settings 面板）
+
+macOS App **不读环境变量或 `~/.oneai/config.toml`** —— Provider 与 Embedding 都在 App 内「设置」sheet 里配，持久化到 `~/Library/Application Support`。打开 OneAI.app 后从侧边栏或菜单唤出「设置」：
+
+- **Provider 类型**：选 `openai` / `anthropic` / `ollama`，或填自定义（`gemini` / `glm` / `dashscope` 等任意 OpenAI 兼容网关）。选 ollama 自动填 `127.0.0.1:11434`。
+- **API Key**：对应厂商的 key（ollama 无需填）。
+- **Base URL**：留空走官方端点；走中转站 / 自建网关填你的地址。
+- **Model**：如 `gpt-4o` / `claude-sonnet-4-6` / `llama3` / `qwen-plus`。
+- **Embedding 设置**：默认留空即 `auto` 探测（探测链与显式覆盖见[第二部分 Embedding 配置](#embedding-配置零负担)）。
+
+每个 Agent 还可在场景编辑器里单独覆写 model / key / base_url，混用多家厂商。
+
+#### 使用
+
+侧边栏「从场景开始」选 5 个内置预设之一（**面试演练 / 语言伙伴 / 辩论赛 / 写作工坊 / 头脑风暴**），或「编辑场景」拖拽式自建角色阵容、轮次策略、背景字段、复盘阶段。运行中：流式逐字渲染 + 思考气泡、`⌘K` 命令面板、语音输入、产物画布。场景与对话机制详见下文「两种使用方式 → B. 原生桌面 / 移动 App」。
+
+> 如需从源码构建：`./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`，然后 `open platforms/macos/build/OneAI.app`。
+
+### 二、TUI / CLI（通用 Agentic 执行）
+
+面向编程、任务执行、子系统探索。`examples/cli`（bin `oneai-cli`）是基于 ratatui+crossterm 的交互式 TUI。Provider 走环境变量或 `~/.oneai/config.toml`（环境变量优先级更高）。
+
+#### 配置 Provider
 
 OneAI 兼容任何 **OpenAI 兼容端点**（OpenAI、Anthropic、Gemini、Ollama，以及阿里百炼/DashScope、DeepSeek、vLLM 等自建网关）。通过环境变量或配置文件设置凭据——环境变量优先级更高。
 
@@ -90,7 +120,7 @@ theme = "dark"
 
 用 `oneai config create` 生成默认配置，`oneai config show` 查看。
 
-### 2. 启动 TUI
+#### 启动 TUI
 
 ```bash
 cargo run -p oneai-cli
@@ -120,13 +150,13 @@ cargo run -p oneai-cli
 
 **对话内斜杠命令**（输入 `/help` 查看完整列表）：`/skills` `/skill` `/tools` `/usage` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`。
 
-### 3. 非交互单次推理
+#### 非交互单次推理
 
 ```bash
 oneai run "把 auth 模块重构为 async" --domain coding --model gpt-4o
 ```
 
-### 4. 通过 CLI 体验各子系统
+#### 通过 CLI 体验各子系统
 
 OneAI 把每个子系统都暴露为 CLI 子命令，无需写代码即可驱动。下表覆盖 `oneai-cli` 的全部子命令（`oneai` 即 `oneai-cli`，不带子命令时默认进入 TUI）：
 
@@ -223,7 +253,7 @@ oneai embed list                       # 列出可用 provider + auto 探测链
 oneai embed health [同上选项]          # 检查 embedding 服务健康
 oneai embed dimension [同上选项]       # 查看模型向量维度
 
-### Embedding 配置(零负担)
+#### Embedding 配置(零负担)
 
 Embedding 用于长期记忆语义召回。默认 **零配置**:不填任何 embedding 字段即走 `auto` 探测,按以下顺序挑第一个可用 provider;全无可用时降级为关键词召回(不报错):
 
@@ -279,7 +309,47 @@ oneai init [--format oneai|agents|claude] [--path <dir>] [--force] [--no-llm]  #
 
 > 全部子命令均来自 `examples/cli/src/main.rs` 的 clap 定义；运行 `oneai --help` 或 `oneai <sub> --help` 可查看任意子命令的完整参数。
 
-### 5. 最简 Rust 程序
+### 三、集成 OneAI SDK 构建你自己的应用（crates.io）
+
+OneAI 的全部 crate 已发布到 [crates.io](https://crates.io/crates/oneai-app)（badge 反映最新版本），可直接作为依赖集成进你自己的 Rust 应用。
+
+#### 1. 添加依赖
+
+```bash
+cargo add oneai-app
+cargo add tokio --features full
+```
+
+或手写 `Cargo.toml`：
+
+```toml
+[dependencies]
+oneai-app = "1.0"        # 集成入口：AppBuilder → App → AppSession
+tokio = { version = "1", features = ["full"] }
+```
+
+#### 2. 按需选 crate
+
+所有 `oneai-*` crate 都在 crates.io 上、可单独依赖。**一般集成只需 `oneai-app`**（`AppBuilder` 会按调用的 builder 方法按需拉取 feature crate）；下列 crate 在你只要某个子系统、想缩小依赖面时单独引入：
+
+| crate | 何时单独依赖 |
+|------|-------------|
+| `oneai-core` | 只要核心类型 / trait（`Message` / `ContentBlock` / `LlmProvider` / `Tool` / `PermissionLevel` / `Budget`） |
+| `oneai-provider` | 只要 LLM Provider（OpenAI / Anthropic / Gemini / Ollama）+ `ProviderPool` / `SmartRouter` |
+| `oneai-domain` | 只要 DomainPack（`coding_pack` / `research_pack`，7 层领域配置） |
+| `oneai-tool` | 只要工具 Registry + 12 内置工具 + `InteractionGate` |
+| `oneai-memory` | 只要记忆系统（Letta 三层 + 压缩增量抽取 + 持久化） |
+| `oneai-rag` | 只要 RAG / `EmbeddingService`（OpenAI / Voyage / Ollama / FastEmbed + auto 探测） |
+| `oneai-workflow` | 只要 Workflow DAG + StateGraph |
+| `oneai-parser` | 只要 3 层输出解析防御 |
+| `oneai-persistence` | 只要 SQLite 持久化（会话 / LTM / 用量）+ 文件事件日志（working state） |
+| `oneai-skill` / `oneai-trace` / `oneai-scheduler` | 技能发现 / OpenInference 轨迹 / 内存任务调度 |
+| `oneai-a2a` / `oneai-wasm` / `oneai-eval` / `oneai-studio` / `oneai-mcp` | 只要对应子系统 |
+| `oneai-uniffi` | 跨平台 FFI 绑定（Kotlin / Swift / Python + 手写 `extern "C"` facade） |
+
+> 想直接跑起来交互式 Agent，可装 CLI：`cargo install oneai-cli`。
+
+#### 3. 最简 Rust 程序
 
 ```rust
 use oneai_app::AppBuilder;
@@ -303,7 +373,7 @@ async fn main() {
 }
 ```
 
-> **给 AI Agent 读者的提示**：本项目是 `cargo` workspace，集成入口是 `crates/oneai-app/src/builder.rs` 的 `AppBuilder`——每个子系统都是可选的、通过 builder 方法插装。要理解架构，读 [CLAUDE.md](CLAUDE.md)（crate 分层、DomainPack 7 层、AgentLoop 决策、权限模型）。要程序化驱动，从上面的「最简 Rust 程序」与 `examples/cli` 开始。
+> **给 AI Agent 读者的提示**：本项目是 `cargo` workspace，集成入口是 `crates/oneai-app/src/builder.rs` 的 `AppBuilder`——每个子系统都是可选的、通过 builder 方法插装（**LLM Provider 也是可选的**，纯工具 / 纯工作流用法无需 Provider）。要理解架构，读 [CLAUDE.md](CLAUDE.md)（crate 分层、DomainPack 7 层、AgentLoop 决策、权限模型）。要程序化驱动，从上面的「最简 Rust 程序」与 `examples/cli` 开始。
 
 ---
 

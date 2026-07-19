@@ -50,15 +50,45 @@
 
 ---
 
-## Quick start (CLI — 30 seconds)
+## Quick start
 
-### 0. Download the macOS app (native, no build)
+OneAI exposes three on-ramps — pick the one that matches your role:
+
+| Path | For whom |
+|------|----------|
+| **1. macOS app** | Want to download and go, run scenario-based multi-agent chats, no terminal / env vars |
+| **2. TUI / CLI** | General agentic coding / task execution, subsystem exploration |
+| **3. Integrate the OneAI SDK** | Build your own Rust app on top of OneAI from crates.io |
+
+### 1. macOS app (native, no build)
 
 Grab `OneAI-1.0.0-macos.zip` from [GitHub Releases](https://github.com/Marssssss/OneAI/releases), unzip, and drop `OneAI.app` into Applications.
 
-> The .app is **unsigned / un-notarized** (universal arm64 + x86_64, macOS 13+). The first launch trips Gatekeeper: in Finder, **right-click → Open**, confirm, and it launches normally. To build from source: `./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`.
+> The .app is **unsigned / un-notarized** (universal arm64 + x86_64, macOS 13+). The first launch trips Gatekeeper: in Finder, **right-click → Open**, confirm, and it launches normally.
 
-### 1. Configure a provider
+#### Configure (in-app Settings panel)
+
+The macOS app does **not** read env vars or `~/.oneai/config.toml` — Provider and Embedding are both configured in the in-app **Settings** sheet, persisted to `~/Library/Application Support`. Open OneAI.app and bring up Settings from the sidebar or menu:
+
+- **Provider type**: pick `openai` / `anthropic` / `ollama`, or type a custom one (`gemini` / `glm` / `dashscope` — any OpenAI-compatible gateway). Picking ollama auto-fills `127.0.0.1:11434`.
+- **API key**: the vendor's key (ollama needs none).
+- **Base URL**: leave blank for the official endpoint; fill in your relay / self-hosted gateway.
+- **Model**: e.g. `gpt-4o` / `claude-sonnet-4-6` / `llama3` / `qwen-plus`.
+- **Embedding settings**: leave blank for `auto` detection (detection chain and explicit overrides in [Part 2 — Embedding configuration](#embedding-configuration-zero-burden)).
+
+Each agent can also override model / key / base_url individually in the scenario editor to mix vendors.
+
+#### Use
+
+In the sidebar, **Start from a scenario** picks one of 5 built-in presets (**mock interview / language partner / debate / writing workshop / brainstorm**), or **Edit scenario** to drag-compose the cast, turn policy, background fields, and debrief phase. While running: token-by-token streaming with thinking bubbles, `⌘K` command palette, speech input, artifact canvas. The scenario and conversation model is detailed below in "Two ways to use OneAI → B. Native desktop / mobile app".
+
+> To build from source instead: `./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`, then `open platforms/macos/build/OneAI.app`.
+
+### 2. TUI / CLI (general agentic execution)
+
+For coding, task execution, subsystem exploration. `examples/cli` (bin `oneai-cli`) is a ratatui+crossterm interactive TUI. Provider config goes via env vars or `~/.oneai/config.toml` (env vars win).
+
+#### Configure a provider
 
 OneAI works with any **OpenAI-compatible endpoint** (OpenAI, Anthropic, Gemini, Ollama, plus DashScope, DeepSeek, vLLM, …). Set credentials via env vars or a config file — env vars win.
 
@@ -90,7 +120,7 @@ theme = "dark"
 
 `oneai config create` generates a default config; `oneai config show` prints it.
 
-### 2. Launch the TUI
+#### Launch the TUI
 
 ```bash
 cargo run -p oneai-cli
@@ -120,13 +150,13 @@ Drop into the interactive agent. Type a task and watch the full pipeline run liv
 
 **In-conversation slash commands** (`/help` for the full list): `/skills` `/skill` `/tools` `/usage` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`.
 
-### 3. One-shot non-interactive inference
+#### One-shot non-interactive inference
 
 ```bash
 oneai run "refactor the auth module to async" --domain coding --model gpt-4o
 ```
 
-### 4. Drive every subsystem from the CLI
+#### Drive every subsystem from the CLI
 
 OneAI exposes every subsystem as a CLI subcommand — drive it without writing code. The table below covers every subcommand of `oneai-cli` (`oneai` is `oneai-cli`; with no subcommand it launches the TUI):
 
@@ -223,7 +253,7 @@ oneai embed list                       # list available providers + auto-detecti
 oneai embed health [same opts]        # check embedding-service health
 oneai embed dimension [same opts]      # show vector dimension for a model
 
-### Embedding configuration (zero-burden)
+#### Embedding configuration (zero-burden)
 
 Embeddings power long-term-memory semantic recall. Default is **zero-config**: leaving every embedding field unset runs `auto` detection, picking the first available provider in this order; if none is available it falls back to keyword matching (no error):
 
@@ -279,7 +309,47 @@ oneai init [--format oneai|agents|claude] [--path <dir>] [--force] [--no-llm]  #
 
 > Every subcommand comes from the clap definitions in `examples/cli/src/main.rs`; run `oneai --help` or `oneai <sub> --help` to see full options for any subcommand.
 
-### 5. Minimal Rust program
+### 3. Integrate the OneAI SDK to build your own app (crates.io)
+
+Every OneAI crate is published on [crates.io](https://crates.io/crates/oneai-app) (the badge reflects the latest version) and can be pulled in as a dependency for your own Rust app.
+
+#### 1. Add the dependency
+
+```bash
+cargo add oneai-app
+cargo add tokio --features full
+```
+
+or hand-write `Cargo.toml`:
+
+```toml
+[dependencies]
+oneai-app = "1.0"        # integration entry: AppBuilder → App → AppSession
+tokio = { version = "1", features = ["full"] }
+```
+
+#### 2. Pick crates as needed
+
+All `oneai-*` crates are on crates.io and can be depended on individually. **For general integration you only need `oneai-app`** (`AppBuilder` pulls in the feature crates required by the builder methods you call); the crates below are for pulling in just one subsystem to slim your dependency footprint:
+
+| crate | When to depend on it alone |
+|------|----------------------------|
+| `oneai-core` | Just the core types / traits (`Message` / `ContentBlock` / `LlmProvider` / `Tool` / `PermissionLevel` / `Budget`) |
+| `oneai-provider` | Just the LLM providers (OpenAI / Anthropic / Gemini / Ollama) + `ProviderPool` / `SmartRouter` |
+| `oneai-domain` | Just the DomainPack (`coding_pack` / `research_pack`, 7-layer domain config) |
+| `oneai-tool` | Just the tool registry + 12 built-in tools + `InteractionGate` |
+| `oneai-memory` | Just the memory system (Letta 3-tier + incremental compression extraction + persistence) |
+| `oneai-rag` | Just RAG / `EmbeddingService` (OpenAI / Voyage / Ollama / FastEmbed + auto detection) |
+| `oneai-workflow` | Just Workflow DAG + StateGraph |
+| `oneai-parser` | Just the 3-layer output-parsing defense |
+| `oneai-persistence` | Just SQLite persistence (sessions / LTM / usage) + file event log (working state) |
+| `oneai-skill` / `oneai-trace` / `oneai-scheduler` | Skill discovery / OpenInference trace / in-memory task scheduling |
+| `oneai-a2a` / `oneai-wasm` / `oneai-eval` / `oneai-studio` / `oneai-mcp` | Just the named subsystem |
+| `oneai-uniffi` | Cross-platform FFI bindings (Kotlin / Swift / Python + hand-written `extern "C"` facade) |
+
+> To just run the interactive agent, install the CLI: `cargo install oneai-cli`.
+
+#### 3. Minimal Rust program
 
 ```rust
 use oneai_app::AppBuilder;
@@ -303,7 +373,7 @@ async fn main() {
 }
 ```
 
-> **For AI-agent readers of this repo**: this is a `cargo` workspace; the integration point is `AppBuilder` in `crates/oneai-app/src/builder.rs` — every subsystem is optional and plugged in via builder methods. For architecture, read [CLAUDE.md](CLAUDE.md) (crate layering, the 7-layer DomainPack, AgentLoop decisions, the permission model). To drive it programmatically, start from the minimal program above and `examples/cli`.
+> **For AI-agent readers of this repo**: this is a `cargo` workspace; the integration point is `AppBuilder` in `crates/oneai-app/src/builder.rs` — every subsystem is optional and plugged in via builder methods (the **LLM provider is optional too** — tool-only / workflow-only usage needs no provider). For architecture, read [CLAUDE.md](CLAUDE.md) (crate layering, the 7-layer DomainPack, AgentLoop decisions, the permission model). To drive it programmatically, start from the minimal program above and `examples/cli`.
 
 ---
 
