@@ -379,11 +379,6 @@ uint64_t uniffi_oneai_fn_method_oneaisession_run_task(uint64_t ptr, RustBuffer t
 uint64_t uniffi_oneai_fn_method_oneaisession_save(uint64_t ptr
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_SAVE_CHECKPOINT
-#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_SAVE_CHECKPOINT
-uint64_t uniffi_oneai_fn_method_oneaisession_save_checkpoint(uint64_t ptr
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_SEND_USER_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_SEND_USER_MESSAGE
 uint64_t uniffi_oneai_fn_method_oneaisession_send_user_message(uint64_t ptr, RustBuffer text
@@ -876,12 +871,6 @@ uint16_t uniffi_oneai_checksum_method_oneaisession_run_task(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_SAVE
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_SAVE
 uint16_t uniffi_oneai_checksum_method_oneaisession_save(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_SAVE_CHECKPOINT
-#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_SAVE_CHECKPOINT
-uint16_t uniffi_oneai_checksum_method_oneaisession_save_checkpoint(void
     
 );
 #endif

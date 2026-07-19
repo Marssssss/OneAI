@@ -721,6 +721,7 @@ mod manager_tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         };
         manager.archive_facts(vec![fact]).await;
 
@@ -756,6 +757,7 @@ mod manager_tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         };
         manager.archive_facts(vec![mk("npm")]).await;
         manager.archive_facts(vec![mk("pnpm")]).await;
@@ -787,6 +789,7 @@ mod manager_tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         };
         manager.archive_facts(vec![mk("JWT")]).await;
         assert!(manager.invalidate_fact("alice", "auth.scheme", "decided_to").await);
@@ -931,6 +934,7 @@ mod manager_tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         }
     }
 

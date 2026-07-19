@@ -22,6 +22,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+// for `writeln!` on String below
+use std::fmt::Write as _;
 
 use oneai_core::Conversation;
 use oneai_core::error::Result;
@@ -170,6 +172,25 @@ pub fn task_anchor_block(task: &str, metadata: &std::collections::HashMap<String
     }
 }
 
+/// Build the pinned `[Task Anchor]` block from the durable working-state
+/// projection. This is the canonical source — `working_state.goal` is the
+/// original goal persisted in the cross-session event log, unaffected by
+/// compaction or session restart. Falls back to the metadata-based block
+/// only when no working state is bound.
+pub fn task_anchor_block_from_working_state(ws: &oneai_core::WorkingState) -> String {
+    if ws.intent.is_empty() {
+        format!(
+            "[Task Anchor] (do not compress — original task)\n原始任务: {}",
+            ws.goal
+        )
+    } else {
+        format!(
+            "[Task Anchor] (do not compress — original task)\n原始任务: {}\n意图: {}",
+            ws.goal, ws.intent
+        )
+    }
+}
+
 /// Build the pinned `[Plan & Progress]` block injected every iteration when a
 /// live plan exists. The plan lives in `LoopState` (agent-side) and is also
 /// persisted to `Conversation::metadata["plan_state"]`, so it survives both
@@ -182,6 +203,67 @@ pub fn plan_progress_block(goal: &str, plan: &crate::plan_state::PlanState) -> S
         goal,
         plan.render_progress()
     )
+}
+
+/// Build the pinned `[Plan & Progress]` block from the durable working-state
+/// projection — the cross-session source of truth for the task list. Renders
+/// steps as ✅ done / 🔄 in progress / ⏳ pending / ✗ failed.
+pub fn plan_progress_block_from_working_state(ws: &oneai_core::WorkingState) -> String {
+    use oneai_core::StepStatus;
+    let mut out = String::from("[Plan & Progress] (do not compress — live task list)\n");
+    let _ = writeln!(out, "目标: {}", ws.goal);
+    if ws.steps.is_empty() {
+        let _ = writeln!(out, "(尚无计划步骤)");
+    } else {
+        // Stable order by `order` then id.
+        let mut steps: Vec<&oneai_core::Step> = ws.steps.iter().collect();
+        steps.sort_by(|a, b| a.order.cmp(&b.order).then(a.id.cmp(&b.id)));
+        for s in steps {
+            let icon = match s.status {
+                StepStatus::Pending => "⏳",
+                StepStatus::InProgress => "🔄",
+                StepStatus::Completed => "✅",
+                StepStatus::Failed => "✗",
+            };
+            let label = s.active_form.as_deref().unwrap_or(s.description.as_str());
+            let _ = writeln!(out, "{icon} [{}] {}", s.id, label);
+        }
+    }
+    out
+}
+
+/// Build the pinned `[Decisions Made]` block — the durable record of key
+/// decisions taken during this task, so the model doesn't re-litigate settled
+/// questions across compaction. Empty block is omitted (returns empty string).
+pub fn decisions_block(ws: &oneai_core::WorkingState) -> String {
+    if ws.decisions.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("[Decisions Made] (do not compress — settled decisions)\n");
+    for d in &ws.decisions {
+        let _ = writeln!(out, "• {} → {}", d.question, d.chosen);
+        if !d.rationale.is_empty() {
+            let _ = writeln!(out, "    理由: {}", d.rationale);
+        }
+    }
+    out
+}
+
+/// Build the pinned `[Blockers]` block — open 卡点 impeding progress, so the
+/// model always knows what's stuck. Resolved blockers are omitted. Empty
+/// block (no open blockers) returns empty string.
+pub fn blockers_block(ws: &oneai_core::WorkingState) -> String {
+    use oneai_core::BlockerStatus;
+    let open: Vec<&oneai_core::Blocker> =
+        ws.blockers.iter().filter(|b| b.status == BlockerStatus::Open).collect();
+    if open.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("[Blockers] (do not compress — open obstacles)\n");
+    for b in open {
+        let _ = writeln!(out, "⚠ {}: {}", b.id, b.description);
+    }
+    out
 }
 
 /// Build a runtime context block appended to the system prompt each session.

@@ -206,9 +206,15 @@ oneai memory list [--user <id>] [--session <id>]      # list facts for a user/se
 
 # ── Persistent sessions (SQLite) ──
 oneai session list                     # list saved sessions
-oneai session resume <id>             # resume a session (show conversation history)
+oneai session resume <id>             # preview a session's history (print-only; live continuation via tasks continue)
 oneai session delete <id>             # delete a session
 oneai session info <id>               # inspect session details
+
+# ── Working state (cross-session task continuation, file event log) ──
+oneai tasks list                       # list unfinished tasks (reads index.json)
+oneai tasks show <id>                  # show a task's goal/steps/decisions/blockers
+oneai tasks continue <id>             # bind a new session to this task, derive into memory, resume
+oneai tasks archive <id>              # archive a task (gzip the event log)
 
 # ── Embedding service ──
 oneai embed generate "text" [--model ...] [--provider auto|openai|voyage|ollama|fastembed|openai-compat] [--api-key ...]  # generate an embedding
@@ -387,7 +393,7 @@ flowchart TB
         end
         subgraph F3 ["Memory · Persistence · Trace"]
             Mem["oneai-memory<br/>Letta 3-tier (recall/core/archival) + compression-time extraction + persistence"]
-            Persist["oneai-persistence<br/>SQLite (sessions/LTM/usage) + incremental checkpoint"]
+            Persist["oneai-persistence<br/>SQLite (sessions/LTM/usage) + file event log (working state)"]
             Trace["oneai-trace<br/>OpenInference-compatible + OTEL exporter"]
         end
         subgraph F4 ["Orchestration · Extensions"]
@@ -436,7 +442,7 @@ flowchart TB
 | `oneai-rag` | RAG + EmbeddingService (OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat + auto-detect + fallback) | 61|
 | `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44|
 | `oneai-scheduler` | in-memory task scheduler | 6|
-| `oneai-persistence` | progressive checkpoints + SQLite (session/usage) backends | 46|
+| `oneai-persistence` | SQLite (session/LTM/usage) + file event log (working state / cross-session resume) | 46|
 | `oneai-a2a` | A2A protocol SDK — client + server host + DomainPack→AgentCard | 88|
 | `oneai-wasm` | WASM sandbox engine — Wasmtime + WasmTool + module registry | 95|
 | `oneai-eval` | eval framework — cases/metrics/runner/3 suites + SWE-bench three-axis | 95|
@@ -572,6 +578,39 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 - **STM↔LTM closed loop** — `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`.
 - **Context compression** — auto-summarize when over token limit, keeping recent turns; `ContextBudgetManager` allocates per-turn budgets proportionally.
 - **Persistence** — `SqliteSessionStore` persists sessions/LTM/facts; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`, `oneai memory search <kw> --user <id> / list --user <id>`.
+
+### Working-state system (cross-session task continuation)
+
+A task's goal / step list / progress / key decisions / blockers no longer live in the session transcript — they're persisted as a **per-task append-only event log** on disk, independent of any session. A brand-new session reads a lightweight index once and surfaces the previously unfinished work.
+
+- **File event log (source of truth)** — `FileWorkingStateStore` (`oneai-persistence`): one `{task_id}.jsonl` (append-only event stream) + `tasks.index.json` (lightweight index for cross-session discovery) per task. Coding scenarios land in-repo at `.oneai/tasks/` (`git diff`-able, committing = free durability + reconciliation source); assistant scenarios land at `~/.oneai/working-state/{user}/`.
+- **In-memory projection + zero-IO hot path** — derived once at session start into `LoopState.working_state`; per-turn `inject_pinned_blocks` reads only the in-memory cache, rendering `[Task Anchor]` / `[Plan & Progress]` / `[Decisions Made]` / `[Blockers]` blocks. The event log is the source of truth; the in-memory projection is rebuildable at any time.
+- **Per-step incremental persistence** — `append_event` is the only write path, invoked at plan-control-tool points (`exit_plan_mode` creates the task + adds steps, `task_update` changes step status, `request_plan_decision` records a decision, stuck/recovery records a blocker). A crash loses at most the last step (append-only → a partial trailing line is skipped on reload).
+- **Cross-session discovery** — a new session's first turn reads `list_open_tasks` (one index.json read) and injects an ephemeral `[Unfinished Work From Previous Sessions]` block listing unfinished tasks + progress summaries + open blockers, asking the user whether to continue one. **The old session's conversation is never read** (the transcript is not the source of working state).
+- **Scenario policy (DomainPack layer 7 `MemoryProfile.working_state`)** — `storage_root` (InRepo/HomeDir) / `checkpoint_granularity` (EveryStep/CriticalNodes/OnTaskBoundary) / `ground_truth_reconciliation` (Git/None) / `cross_session_surface` (AutoInject/OnDemand) / `retention` (ArchiveOnComplete/Keep) / `compaction` (threshold-fold into an in-log `Snapshot` event; gzip-archive on task completion). `CodingPack` = InRepo+EveryStep+Git+AutoInject+ArchiveOnComplete+Thin; `Assistant` = HomeDir+OnTaskBoundary+None+Keep+Thick.
+- **Ground-truth reconciliation** — under CodingPack, `GitReconciliationSource` (`OnResume`) runs `git status/log/diff .oneai/` at continue/resume and reconciles against the working state: on drift it records a `Reconciliation` event and marks the pinned block STALE; conflicts resolve in favor of the code.
+
+**Usage walkthrough (CLI):**
+
+```bash
+# 1. Run a long task in a project (create the task, run steps, exit before finishing)
+cd my-project
+oneai run "migrate the tests from jest to vitest"   # exit halfway — progress already in .oneai/tasks/*.jsonl
+
+# 2. Start a fresh session (does NOT read the old conversation); first turn shows unfinished work
+oneai run "continue the earlier migration"
+# → the model's first-turn context includes [Unfinished Work From Previous Sessions] + that task's goal/progress/open blockers
+
+# 3. Explicitly list / inspect / continue / archive
+oneai tasks list                              # list this user/project's unfinished tasks (reads index.json)
+oneai tasks show <id>                         # inspect the task's goal/steps/decisions/blockers
+oneai tasks continue <id>                     # bind this session to that task_id, derive into memory, resume
+oneai tasks archive <id>                      # archive when done (gzip the event log, keep a summary)
+```
+
+> For coding scenarios `.oneai/` lives in the repo — consider committing it to git: it's both free durability and a reconciliation source via `git diff .oneai/`. Full mechanism: `docs/working-state-mechanism.md`.
+>
+> Note: `oneai session resume <id>` is currently **print-only** (shows conversation history; it does not run the agent loop or rehydrate working state). Live continuation goes through `tasks continue <id>` (cross-session: a new session binds to that task_id and derives state into memory). Same-session `chat --resume` is not yet implemented.
 
 ### Usage & reliability
 
@@ -824,7 +863,7 @@ oneai/
 │   ├── oneai-rag/           # Document, Index, EmbeddingService, Retrieval
 │   ├── oneai-workflow/      # DAG, StateGraph, compiler, validator, executor
 │   ├── oneai-scheduler/     # InMemoryScheduler
-│   ├── oneai-persistence/   # Checkpoint + SQLite session/usage backends
+│   ├── oneai-persistence/   # SQLite session/usage backends + file event log (working state)
 │   ├── oneai-a2a/           # A2A protocol SDK (client + server host)
 │   ├── oneai-wasm/          # Wasmtime sandbox + WasmTool + module registry
 │   ├── oneai-eval/          # eval cases/metrics/runner/suites + SWE-bench three-axis

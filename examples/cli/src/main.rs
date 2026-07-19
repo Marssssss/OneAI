@@ -67,6 +67,7 @@
 mod config;
 mod cmd_chat;
 mod cmd_run;
+mod cmd_tasks;
 mod cmd_pack;
 mod cmd_skill;
 mod cmd_eval;
@@ -187,6 +188,13 @@ enum Commands {
     Session {
         #[command(subcommand)]
         action: SessionAction,
+    },
+    /// Manage durable working state — cross-session task continuation
+    /// (list/show/continue/archive unfinished tasks; the durable source is
+    /// independent of any session transcript)
+    Tasks {
+        #[command(subcommand)]
+        action: TasksAction,
     },
     /// Manage long-term memory — search/list durable facts (cross-session habits)
     Memory {
@@ -530,6 +538,53 @@ enum SessionAction {
     Info {
         /// Session ID to inspect
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TasksAction {
+    /// List open (unfinished) tasks for the current user/project
+    List {
+        /// User id (defaults to all)
+        #[arg(long)]
+        user: Option<String>,
+        /// Working-state root (default: ./.oneai)
+        #[arg(long)]
+        root: Option<String>,
+    },
+    /// Show a task's goal / steps / decisions / blockers
+    Show {
+        /// Task id
+        id: String,
+        /// Working-state root (default: ./.oneai)
+        #[arg(long)]
+        root: Option<String>,
+    },
+    /// Start a NEW session bound to an existing unfinished task (cross-session
+    /// continuation — does not read the old session's transcript)
+    Continue {
+        /// Task id to continue
+        id: String,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// User id — namespaces cross-session memory
+        #[arg(long)]
+        user: Option<String>,
+        /// Working-state root (default: ./.oneai)
+        #[arg(long)]
+        root: Option<String>,
+    },
+    /// Archive a task (mark done, gzip its event log)
+    Archive {
+        /// Task id to archive
+        id: String,
+        /// Working-state root (default: ./.oneai)
+        #[arg(long)]
+        root: Option<String>,
     },
 }
 
@@ -1006,6 +1061,16 @@ fn main() {
                 SessionAction::Info { id } => cmd_session::cmd_session_info(&id),
             }
         }
+        Some(Commands::Tasks { action }) => match action {
+            TasksAction::List { user, root } => {
+                cmd_tasks::cmd_tasks_list(user.as_deref(), root.as_deref())
+            }
+            TasksAction::Show { id, root } => cmd_tasks::cmd_tasks_show(&id, root.as_deref()),
+            TasksAction::Continue { id, domain, model, user, root } => cmd_tasks::cmd_tasks_continue(
+                &id, &config, domain.as_deref(), model.as_deref(), user.as_deref(), root.as_deref(),
+            ),
+            TasksAction::Archive { id, root } => cmd_tasks::cmd_tasks_archive(&id, root.as_deref()),
+        },
         Some(Commands::Memory { action }) => {
             match action {
                 MemoryAction::Search { query, user, top_k } => {

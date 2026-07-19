@@ -41,6 +41,14 @@ pub enum RefreshPolicy {
     /// Use for stable data like project config, database schema.
     OnceAtStart,
 
+    /// Fire once, on the first turn after a session **resumes or continues**
+    /// an existing task — the resume-time ground-truth reconciliation pass
+    /// (reference doc §8.2). Under the ephemeral re-injection model the
+    /// assembler calls `load()` every turn, so an `OnResume` source is itself
+    /// responsible for yielding its content once and then empty (the take
+    /// pattern, mirroring `UnfinishedWorkSource`).
+    OnResume,
+
     /// Refresh at a fixed time interval.
     /// Use for data that changes on a known schedule, like date/time.
     Periodic(Duration),

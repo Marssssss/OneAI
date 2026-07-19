@@ -218,11 +218,6 @@ public:
         return inner_.retrieve_memory(query, top_k);
     }
 
-    /// Save a checkpoint.
-    std::string save_checkpoint() {
-        return inner_.save_checkpoint();
-    }
-
 private:
     OneAISession inner_;
 };

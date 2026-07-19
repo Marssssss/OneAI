@@ -185,6 +185,29 @@ impl MemoryFactStore {
         self.facts.read().await.get(&id).cloned()
     }
 
+    /// Toggle a fact's `pinned` flag in place (no version bump, no
+    /// superseded-history entry — pinning is a curation signal, not a content
+    /// revision). Returns `true` if a fact matched the conflict key.
+    pub async fn set_pinned(
+        &self,
+        user_id: &str,
+        subject: &str,
+        predicate: &str,
+        pinned: bool,
+    ) -> bool {
+        let key = (user_id.to_string(), subject.to_string(), predicate.to_string());
+        let id = match self.key_index.read().await.get(&key).cloned() {
+            Some(id) => id,
+            None => return false,
+        };
+        if let Some(fact) = self.facts.write().await.get_mut(&id) {
+            fact.pinned = pinned;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Semantic search (cosine similarity over embeddings), top_k results.
     /// Superseded facts are excluded by default.
     pub async fn search_semantic(&self, query_embedding: &[f32], top_k: usize) -> Vec<MemoryFact> {
@@ -455,6 +478,7 @@ mod tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         }
     }
 

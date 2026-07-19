@@ -40,6 +40,7 @@ async fn build_fact(mm: &MemoryManager, fact_type: String, subject: String, pred
         version: 1,
         superseded: false,
         superseded_at: None,
+        pinned: false,
     }
 }
 

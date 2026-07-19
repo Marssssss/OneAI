@@ -730,8 +730,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_save(
     ): Int
-    external fun uniffi_oneai_checksum_method_oneaisession_save_checkpoint(
-    ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_send_user_message(
     ): Int
     external fun uniffi_oneai_checksum_method_oneaisession_session_id(
@@ -840,8 +838,6 @@ internal object UniffiLib {
     external fun uniffi_oneai_fn_method_oneaisession_run_task(`ptr`: Long,`task`: RustBuffer.ByValue,`callback`: Long,
     ): Long
     external fun uniffi_oneai_fn_method_oneaisession_save(`ptr`: Long,
-    ): Long
-    external fun uniffi_oneai_fn_method_oneaisession_save_checkpoint(`ptr`: Long,
     ): Long
     external fun uniffi_oneai_fn_method_oneaisession_send_user_message(`ptr`: Long,`text`: RustBuffer.ByValue,
     ): Long
@@ -1062,9 +1058,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaisession_save() != 42851) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_oneai_checksum_method_oneaisession_save_checkpoint() != 49179) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_oneai_checksum_method_oneaisession_send_user_message() != 53757) {
@@ -3369,11 +3362,6 @@ public interface OneAiSessionInterface {
     suspend fun `save`()
     
     /**
-     * Save a checkpoint.
-     */
-    suspend fun `saveCheckpoint`(): kotlin.String
-    
-    /**
      * Send a user message.
      *
      * Note: this only appends the message to the conversation — it does NOT
@@ -3670,30 +3658,6 @@ open class OneAiSession: Disposable, AutoCloseable, OneAiSessionInterface
         // lift function
         { Unit },
         
-        // Error FFI converter
-        OneAiErrorView.ErrorHandler,
-    )
-    }
-
-    
-    /**
-     * Save a checkpoint.
-     */
-    @Throws(OneAiErrorView::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `saveCheckpoint`() : kotlin.String {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_oneai_fn_method_oneaisession_save_checkpoint(
-                uniffiHandle,
-                
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_oneai_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_oneai_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_oneai_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterString.lift(it) },
         // Error FFI converter
         OneAiErrorView.ErrorHandler,
     )

@@ -118,6 +118,9 @@ indexmap = "2"
 # Regex
 regex = "1"
 
+# Compression — gzipping archived working-state event logs.
+flate2 = "1"
+
 # OpenTelemetry
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }

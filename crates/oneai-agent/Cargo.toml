@@ -31,3 +31,4 @@ oneai-trace = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
+tempfile = "3"

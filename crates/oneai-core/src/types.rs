@@ -896,6 +896,377 @@ impl PlanStepStatus {
     }
 }
 
+// ─── Working State (cross-session task continuation) ────────────────────────
+//
+// Working state is the agent's durable "what am I working on" object: goal,
+// active step list + progress, key decisions, blockers, and free-form notes.
+// It is persisted as an append-only event log on disk (per-task JSONL),
+// independent of any session transcript, so a brand-new session can discover
+// and continue an unfinished task from a previous session (reference doc §6.2).
+//
+// The in-memory `WorkingState` held in `LoopState` is a *projection* derived
+// from the event log — re-built on startup / crash recovery, never the source
+// of truth. The pinned `[Task Anchor]` / `[Plan & Progress]` / `[Decisions]`
+// / `[Blockers]` blocks read this in-memory projection (zero IO per turn).
+
+/// The full working state of one task — the derived projection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct WorkingState {
+    /// Unique task identifier.
+    pub task_id: String,
+
+    /// Owning user (cross-session namespace).
+    #[serde(default)]
+    pub user_id: String,
+
+    /// Project / cwd scope (per-project working state).
+    #[serde(default)]
+    pub project: String,
+
+    /// The original goal — the task's North Star. Re-injected as `[Task Anchor]`.
+    pub goal: String,
+
+    /// Distilled intent / handoff captured when the task started, if any.
+    #[serde(default)]
+    pub intent: String,
+
+    /// Lifecycle status of the task.
+    #[serde(default)]
+    pub status: TaskStatus,
+
+    /// Ordered task steps with live status — rendered as `[Plan & Progress]`.
+    #[serde(default)]
+    pub steps: Vec<Step>,
+
+    /// Key decisions made so far — rendered as `[Decisions Made]`.
+    #[serde(default)]
+    pub decisions: Vec<Decision>,
+
+    /// Open / resolved blockers — rendered as `[Blockers]`.
+    #[serde(default)]
+    pub blockers: Vec<Blocker>,
+
+    /// Free-form scratch notes (LEARNINGS-style).
+    #[serde(default)]
+    pub notes: Vec<Note>,
+
+    /// The last session that mutated this task.
+    #[serde(default)]
+    pub owner_session: String,
+
+    /// Creation timestamp (RFC3339).
+    #[serde(default)]
+    pub created_at: String,
+
+    /// Last-mutation timestamp (RFC3339).
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// Lifecycle status of a task.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TaskStatus {
+    /// Actively being worked on.
+    #[default]
+    Active,
+    /// Suspended by the user / agent (can be resumed).
+    Paused,
+    /// Finished successfully.
+    Completed,
+    /// Archived — out of the active set, retained for history.
+    Archived,
+}
+
+impl TaskStatus {
+    /// Whether this task should be surfaced in `[Unfinished Work]` on a new
+    /// session startup.
+    pub fn is_open(&self) -> bool {
+        matches!(self, TaskStatus::Active | TaskStatus::Paused)
+    }
+
+    /// Stable lowercase string tag for serialization / display.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskStatus::Active => "active",
+            TaskStatus::Paused => "paused",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Archived => "archived",
+        }
+    }
+}
+
+/// A single step in a task's plan — the working-state projection of `PlanStep`.
+///
+/// `PlanStep` (above) stays the workflow-internal representation; `Step` is
+/// the durable working-state record persisted to the event log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Step {
+    /// Step identifier (e.g. "step_1").
+    pub id: String,
+    /// What this step should accomplish.
+    pub description: String,
+    /// Execution status.
+    #[serde(default)]
+    pub status: StepStatus,
+    /// Step IDs this step depends on (coupled ordering).
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// Execution order (1-based).
+    #[serde(default)]
+    pub order: u32,
+    /// Present-continuous label for the spinner (e.g. "Running tests").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+    /// Last-mutation timestamp (RFC3339).
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// Execution status of a working-state step.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    /// Not started.
+    #[default]
+    Pending,
+    /// Currently in progress.
+    InProgress,
+    /// Finished successfully.
+    Completed,
+    /// Failed or aborted.
+    Failed,
+}
+
+impl From<PlanStepStatus> for StepStatus {
+    fn from(s: PlanStepStatus) -> Self {
+        match s {
+            PlanStepStatus::Pending => StepStatus::Pending,
+            PlanStepStatus::InProgress => StepStatus::InProgress,
+            PlanStepStatus::Completed => StepStatus::Completed,
+            PlanStepStatus::Failed => StepStatus::Failed,
+        }
+    }
+}
+
+/// A key decision made during the task — the durable "we decided X" record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Decision {
+    /// Unique decision identifier.
+    pub id: String,
+    /// The decision question.
+    pub question: String,
+    /// The option that was chosen.
+    pub chosen: String,
+    /// Rationale for the choice.
+    #[serde(default)]
+    pub rationale: String,
+    /// Alternatives that were considered but rejected.
+    #[serde(default)]
+    pub alternatives: Vec<String>,
+    /// The step this decision pertains to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    /// Timestamp (RFC3339).
+    pub ts: String,
+}
+
+/// A blocker / 卡点 — an unresolved obstacle impeding progress.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Blocker {
+    /// Unique blocker identifier.
+    pub id: String,
+    /// What's blocking progress.
+    pub description: String,
+    /// Open or resolved.
+    #[serde(default)]
+    pub status: BlockerStatus,
+    /// How it was resolved, once it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// The step this blocker pertains to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    /// Raised-at timestamp (RFC3339).
+    pub ts: String,
+}
+
+/// Status of a blocker.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockerStatus {
+    /// Still blocking.
+    #[default]
+    Open,
+    /// Resolved / no longer blocking.
+    Resolved,
+}
+
+/// A free-form scratch note (LEARNINGS-style).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Note {
+    /// Unique note identifier.
+    pub id: String,
+    /// The note content.
+    pub content: String,
+    /// Timestamp (RFC3339).
+    pub ts: String,
+}
+
+/// A lightweight summary of a task — the `index.json` entry, returned by
+/// `list_open_tasks` so a new session can surface unfinished work without
+/// deriving every task's full state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TaskBrief {
+    /// Unique task identifier.
+    pub task_id: String,
+    /// The goal (truncated for display).
+    #[serde(default)]
+    pub goal: String,
+    /// Lifecycle status.
+    #[serde(default)]
+    pub status: TaskStatus,
+    /// Count of steps not yet completed.
+    #[serde(default)]
+    pub open_step_count: u32,
+    /// Count of open blockers.
+    #[serde(default)]
+    pub open_blocker_count: u32,
+    /// Owning user.
+    #[serde(default)]
+    pub user_id: String,
+    /// Project / cwd scope.
+    #[serde(default)]
+    pub project: String,
+    /// Last-mutation timestamp (RFC3339).
+    #[serde(default)]
+    pub last_event_ts: String,
+    /// Relative file path of the task's event log.
+    #[serde(default)]
+    pub file: String,
+}
+
+// ─── Working State Events ────────────────────────────────────────────────────
+
+/// One append-only event in a task's event log — the source of truth from
+/// which `WorkingState` is derived.
+///
+/// Each line of `{task_id}.jsonl` is one serialized `TaskEvent`. The log is
+/// append-only; a partial final write is ignored on reload (crash safety,
+/// reference doc §8.1). A `Snapshot` event is a materialized checkpoint
+/// *inside* the log (not a parallel store), so state and events cannot drift
+/// (§8.4) — `derive_state` replays from the latest `Snapshot` + the tail.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskEvent {
+    /// Unique event identifier (UUID).
+    pub id: String,
+    /// The task this event belongs to.
+    pub task_id: String,
+    /// The session that emitted this event.
+    #[serde(default)]
+    pub session_id: String,
+    /// Parent event id — supports an audit / fork chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<String>,
+    /// What happened.
+    pub event_type: TaskEventType,
+    /// Event-specific payload (typed via `TaskEventPayload`).
+    pub payload: TaskEventPayload,
+    /// Schema version for forward migration (§7.3).
+    #[serde(default = "default_event_schema_version")]
+    pub schema_version: u32,
+    /// Timestamp (RFC3339).
+    pub ts: String,
+}
+
+/// Current event schema version.
+pub const TASK_EVENT_SCHEMA_VERSION: u32 = 1;
+
+fn default_event_schema_version() -> u32 {
+    TASK_EVENT_SCHEMA_VERSION
+}
+
+/// The kind of working-state event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TaskEventType {
+    /// Task created (carries goal + intent).
+    #[default]
+    TaskCreated,
+    /// Goal revised.
+    GoalRevised,
+    /// A step was added to the plan.
+    StepAdded,
+    /// A step's status changed.
+    StepStatusChanged,
+    /// A key decision was made.
+    DecisionMade,
+    /// A blocker was raised.
+    BlockerRaised,
+    /// A blocker was resolved.
+    BlockerResolved,
+    /// A free-form note was added.
+    NoteAdded,
+    /// Task suspended.
+    TaskPaused,
+    /// Task resumed.
+    TaskResumed,
+    /// Task finished.
+    TaskCompleted,
+    /// Task archived.
+    TaskArchived,
+    /// Ground-truth reconciliation detected drift on resume.
+    Reconciliation,
+    /// Materialized checkpoint — full derived state folded into the log.
+    Snapshot,
+}
+
+/// Typed event payload. Each variant pairs with a `TaskEventType`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TaskEventPayload {
+    /// `TaskCreated` / `GoalRevised`.
+    Task {
+        goal: String,
+        #[serde(default)]
+        intent: String,
+    },
+    /// `StepAdded`.
+    StepAdded { step: Step },
+    /// `StepStatusChanged`.
+    StepStatusChanged {
+        step_id: String,
+        status: StepStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_form: Option<String>,
+    },
+    /// `DecisionMade`.
+    DecisionMade { decision: Decision },
+    /// `BlockerRaised`.
+    BlockerRaised { blocker: Blocker },
+    /// `BlockerResolved`.
+    BlockerResolved {
+        blocker_id: String,
+        resolution: String,
+    },
+    /// `NoteAdded`.
+    NoteAdded { note: Note },
+    /// `TaskPaused` / `TaskResumed` / `TaskCompleted` / `TaskArchived`.
+    TaskStatus {},
+    /// `Reconciliation`.
+    Reconciliation {
+        /// What was detected as drifted.
+        summary: String,
+        #[serde(default)]
+        details: String,
+    },
+    /// `Snapshot` — the full derived state at compaction time.
+    Snapshot { state: WorkingState },
+}
+
 // ─── InteractionGate types ───────────────────────────────────────────────────
 //
 // Unified "agent loop suspends → asks the application layer → resumes with a
@@ -1229,7 +1600,7 @@ impl Default for RecallStrategy {
 ///
 /// Fact types that also appear in a profile's `habit_fact_types` are persisted
 /// under the **user** namespace and recalled across sessions ("越用越好用").
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FactType(pub String);
 
 impl FactType {
@@ -1361,7 +1732,7 @@ impl RecallConfig {
 /// fact **updates** the existing one (bumping `version` and `updated_at`)
 /// rather than appending a duplicate — the Mem0-style invariant that keeps
 /// archival memory from drifting into contradiction over long use.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MemoryFact {
     /// Unique identifier.
     pub id: String,
@@ -1427,6 +1798,14 @@ pub struct MemoryFact {
     /// still the current truth.
     #[serde(default)]
     pub superseded_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Whether this fact is pinned in core memory — pinned facts are never
+    /// evicted by `CoreMemory::enforce_budget`. This replaces the old
+    /// process-local `RwLock<Vec<String>>` pin set: pin state now travels with
+    /// the fact (survives serialization + SQLite round-trips) instead of being
+    /// lost on restart. Defaults to `false`.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 fn default_version() -> u32 {

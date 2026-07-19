@@ -19,7 +19,7 @@
 //! - Keyword search uses SQL `LIKE` (no FTS5 dependency)
 //! - Embedding search uses brute-force cosine similarity in Rust
 //!   (acceptable for <10K entries; future: use HNSW or FTS5 vector extension)
-//! - One database file for all tables (shared with `SqliteCheckpointBackend`)
+//! - One database file for all tables (sessions / STM / LTM / usage)
 
 use std::path::PathBuf;
 use std::collections::HashMap;
@@ -121,7 +121,8 @@ impl SqliteSessionStore {
                 version INTEGER NOT NULL DEFAULT 1,
                 importance REAL NOT NULL DEFAULT 0.5,
                 superseded INTEGER NOT NULL DEFAULT 0,
-                superseded_at TEXT
+                superseded_at TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_key ON memories(user_id, subject, predicate);
             CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
@@ -147,6 +148,13 @@ impl SqliteSessionStore {
         );
         let _ = conn.execute(
             "ALTER TABLE memories ADD COLUMN superseded_at TEXT",
+            [],
+        );
+        // Core-memory pin flag (folds the old process-local pin set onto the
+        // fact so pin state survives a restart + SQLite round-trip). Defaults
+        // to 0 (not pinned) for legacy rows.
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
             [],
         );
         // Same pattern for the `title` column on `conversations` (added for
@@ -725,8 +733,8 @@ impl MemoryPersistence for SqliteSessionStore {
         conn.execute(
             "INSERT INTO memories (id, user_id, session_id, fact_type, subject, predicate, \
              content, embedding_json, metadata_json, created_at, updated_at, version, importance, \
-             superseded, superseded_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+             superseded, superseded_at, pinned) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
              ON CONFLICT(user_id, subject, predicate) DO UPDATE SET \
              content = excluded.content, \
              embedding_json = excluded.embedding_json, \
@@ -736,12 +744,13 @@ impl MemoryPersistence for SqliteSessionStore {
              version = memories.version + 1, \
              importance = excluded.importance, \
              superseded = excluded.superseded, \
-             superseded_at = excluded.superseded_at",
+             superseded_at = excluded.superseded_at, \
+             pinned = excluded.pinned",
             rusqlite::params![
                 fact.id, fact.user_id, fact.session_id, fact.fact_type.as_str(),
                 fact.subject, fact.predicate, fact.content, embedding_json, metadata_json,
                 created, updated, fact.version, fact.importance,
-                fact.superseded, superseded_at,
+                fact.superseded, superseded_at, fact.pinned,
             ],
         ).map_err(|e| OneAIError::Persistence(format!("Failed to store fact: {}", e)))?;
         Ok(())
@@ -754,7 +763,7 @@ impl MemoryPersistence for SqliteSessionStore {
         let mut stmt = conn.prepare(
             "SELECT id, user_id, session_id, fact_type, subject, predicate, content, \
              embedding_json, metadata_json, created_at, updated_at, version, importance, \
-             superseded, superseded_at \
+             superseded, superseded_at, pinned \
              FROM memories WHERE user_id = ?1 AND (?2 = '' OR session_id = ?2)"
         ).map_err(|e| OneAIError::Persistence(format!("Failed to prepare fact query: {}", e)))?;
 
@@ -773,6 +782,7 @@ impl MemoryPersistence for SqliteSessionStore {
             let superseded_at = row.get::<_, Option<String>>(14)?
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                 .map(|d| d.with_timezone(&chrono::Utc));
+            let pinned: i64 = row.get(15)?;
             Ok(MemoryFact {
                 id: row.get(0)?,
                 user_id: row.get(1)?,
@@ -789,6 +799,7 @@ impl MemoryPersistence for SqliteSessionStore {
                 version: row.get(11)?,
                 superseded: superseded != 0,
                 superseded_at,
+                pinned: pinned != 0,
             })
         }).map_err(|e| OneAIError::Persistence(format!("Failed to query facts: {}", e)))?;
 
@@ -1290,6 +1301,7 @@ mod fact_tests {
             version,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         }
     }
 
@@ -1327,5 +1339,25 @@ mod fact_tests {
         assert_eq!(alice_s1[0].content, "pnpm");
         // Bob is separate.
         assert_eq!(s.load_facts("bob", "").await.unwrap().len(), 1);
+    }
+
+    /// The `pinned` flag (folded from CoreMemory's old process-local pin set
+    /// onto the fact itself) must survive a SQLite round-trip — that's the
+    /// whole point of moving pin state off the in-memory Vec: a pinned fact
+    /// stays pinned across a restart.
+    #[tokio::test]
+    async fn pinned_flag_survives_sqlite_roundtrip() {
+        let s = tmp_store();
+        let mut pinned = fact("f1", "alice", "s1", "user.pm", "pnpm", 1);
+        pinned.pinned = true;
+        s.store_fact(&pinned).await.unwrap();
+        // A non-pinned sibling for contrast.
+        s.store_fact(&fact("f2", "alice", "s1", "user.runner", "vitest", 1)).await.unwrap();
+
+        let loaded = s.load_facts("alice", "s1").await.unwrap();
+        let pm = loaded.iter().find(|f| f.subject == "user.pm").unwrap();
+        let runner = loaded.iter().find(|f| f.subject == "user.runner").unwrap();
+        assert!(pm.pinned, "pinned flag lost across SQLite round-trip");
+        assert!(!runner.pinned, "non-pinned flag flipped true");
     }
 }

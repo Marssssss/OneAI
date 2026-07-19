@@ -693,7 +693,6 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             thinking_budget: None,
             stop_sequences: Vec::new(),
             hard_max_iterations: Some(50),
-            auto_checkpoint: false,
             inject_skills: false, // Sub-agents don't need skill injection
             usage_tracker: None, // Sub-agents inherit usage tracker from parent loop
             rate_limiter: None, // Sub-agents inherit rate limiter from parent loop
@@ -726,7 +725,6 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             Arc::new(SubAgentFactoryNone), // Sub-agents don't spawn further sub-agents
             context_assembler,
             stream_parser,
-            None,
             config,
         );
 

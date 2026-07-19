@@ -303,8 +303,9 @@ mod tests {
         let builder = builder.persistence("/tmp/oneai_uniffi_test".to_string());
         let app = builder.build().await.expect("Build should succeed");
 
-        let session = app.inner.create_session();
-        let checkpoint_id = session.save_checkpoint().await.unwrap();
-        assert!(!checkpoint_id.is_empty());
+        // Persistence wires a StatePersistence layer at the App level; the
+        // per-session durable substrate is now the working-state event log,
+        // not full-state checkpoints. Just verify the session builds.
+        let _session = app.inner.create_session();
     }
 }

@@ -40,7 +40,6 @@ use oneai_core::budget::{
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
 use oneai_core::{Conversation, Message, Role};
-use oneai_persistence::ProgressiveCheckpointManager;
 use oneai_skill::SkillSelector;
 
 use crate::agent_loop::{
@@ -602,7 +601,6 @@ fn build_member_loop(
         // bound prevents a misbehaving turn from looping endlessly and flooding
         // the UI with stream events (which can beachball the main thread).
         hard_max_iterations: Some(15),
-        auto_checkpoint: false,
         inject_skills: false,
         usage_tracker: None,
         rate_limiter: None,
@@ -645,7 +643,6 @@ fn build_member_loop(
         Arc::new(SubAgentFactoryNone),
         context_assembler,
         stream_parser,
-        None::<Arc<ProgressiveCheckpointManager>>,
         config,
     )
 }

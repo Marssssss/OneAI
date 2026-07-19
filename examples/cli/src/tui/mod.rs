@@ -126,6 +126,10 @@ pub fn run_tui(
         if let Some(uid) = user {
             builder = builder.user_id(uid);
         }
+        // Enable durable working-state persistence (cross-session task
+        // continuation) + SQLite conversation persistence. The working-state
+        // root is in-repo `.oneai/` so it's git-trackable for coding domains.
+        builder = builder.sqlite_persistence().working_state("./.oneai");
 
         let app = builder.build().await.expect("App build failed");
 

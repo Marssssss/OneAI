@@ -10,7 +10,6 @@
 //! evicted to archival (the caller receives evicted facts to archive).
 
 use oneai_core::MemoryFact;
-use tokio::sync::RwLock;
 
 use crate::fact_store::{MemoryFactStore, UpsertOutcome};
 
@@ -18,8 +17,6 @@ use crate::fact_store::{MemoryFactStore, UpsertOutcome};
 pub struct CoreMemory {
     store: MemoryFactStore,
     budget_tokens: usize,
-    /// Facts explicitly pinned by the agent; never auto-evicted.
-    pinned: RwLock<Vec<String>>, // conflict keys "user|subject|predicate"
 }
 
 impl CoreMemory {
@@ -28,7 +25,6 @@ impl CoreMemory {
         Self {
             store: MemoryFactStore::new(),
             budget_tokens,
-            pinned: RwLock::new(Vec::new()),
         }
     }
 
@@ -42,9 +38,12 @@ impl CoreMemory {
         self.store.upsert(fact).await
     }
 
-    /// Pin a fact's conflict key so it survives budget eviction.
+    /// Pin a fact's conflict key so it survives budget eviction. The pin
+    /// flag lives on the fact itself (`MemoryFact.pinned`), so it travels
+    /// with the fact through serialization and SQLite round-trips — not in a
+    /// process-local set that's lost on restart.
     pub async fn pin(&self, user_id: &str, subject: &str, predicate: &str) {
-        self.pinned.write().await.push(conflict_key(user_id, subject, predicate));
+        self.store.set_pinned(user_id, subject, predicate, true).await;
     }
 
     /// Remove a fact by conflict key.
@@ -68,12 +67,11 @@ impl CoreMemory {
     /// core→archival paging loop). Pinned facts are never evicted.
     pub async fn enforce_budget(&self) -> Vec<MemoryFact> {
         let mut evicted = Vec::new();
-        let pinned = self.pinned.read().await.clone();
 
         while self.estimated_tokens().await > self.budget_tokens {
             let mut facts = self.facts().await;
             // Evict the least-recently-updated non-pinned fact.
-            facts.retain(|f| !pinned.contains(&conflict_key(&f.user_id, &f.subject, &f.predicate)));
+            facts.retain(|f| !f.pinned);
             if facts.is_empty() {
                 break; // only pinned facts left and still over budget — keep them.
             }
@@ -106,10 +104,6 @@ impl CoreMemory {
     }
 }
 
-fn conflict_key(user_id: &str, subject: &str, predicate: &str) -> String {
-    format!("{}|{}|{}", user_id, subject, predicate)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +127,7 @@ mod tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         }
     }
 

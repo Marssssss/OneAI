@@ -50,7 +50,7 @@ use oneai_mcp::{McpPluginRegistry, McpServerHost};
 
 use oneai_a2a::{A2AServerHost, TaskStore, AgentCard};
 
-use oneai_persistence::{SqliteSessionStore, SqliteCheckpointBackend, CheckpointBackend};
+use oneai_persistence::SqliteSessionStore;
 
 use crate::session::AppSession;
 
@@ -106,8 +106,6 @@ pub struct AppBuilder {
     a2a_server_agent_card: Option<AgentCard>,
     /// SQLite session store (for memory + conversation persistence).
     sqlite_store: Option<Arc<SqliteSessionStore>>,
-    /// Checkpoint backend (overrides default in-memory backend).
-    checkpoint_backend: Option<Arc<dyn CheckpointBackend>>,
     /// Embedding service (optional — enables auto-embedding for RAG and memory search).
     embedding_service: Option<Arc<dyn EmbeddingService>>,
     /// Embedding config (optional — for lazy embedding service creation).
@@ -163,6 +161,11 @@ pub struct AppBuilder {
     /// the `AgentLoopConfig`. Only takes effect when `structured_output` is
     /// also configured on the loop. Default `Auto`.
     constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
+    /// Durable working-state store root (optional). When set, the app builds a
+    /// `FileWorkingStateStore` rooted here so the agent persists goal/steps/
+    /// decisions/blockers to per-task append-only event logs — enabling crash
+    /// recovery and cross-session task continuation.
+    working_state_root: Option<std::path::PathBuf>,
 }
 
 impl AppBuilder {
@@ -192,7 +195,6 @@ impl AppBuilder {
             a2a_server_port: None,
             a2a_server_agent_card: None,
             sqlite_store: None,
-            checkpoint_backend: None,
             embedding_service: None,
             embedding_config: None,
             usage_tracker: None,
@@ -216,6 +218,7 @@ impl AppBuilder {
             swarm_config: None,
             generation_config: oneai_core::GenerationConfig::new(),
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
+            working_state_root: None,
         }
     }
 
@@ -1310,7 +1313,6 @@ impl AppBuilder {
     /// This enables:
     /// - Memory persistence (STM + LTM entries)
     /// - Conversation persistence (multi-turn session resume)
-    /// - Checkpoint persistence (via SqliteCheckpointBackend)
     ///
     /// **Usage**:
     /// ```ignore
@@ -1322,7 +1324,6 @@ impl AppBuilder {
     pub fn sqlite_persistence(mut self) -> Self {
         let store = Arc::new(SqliteSessionStore::with_defaults());
         self.sqlite_store = Some(store.clone());
-        self.checkpoint_backend = Some(Arc::new(SqliteCheckpointBackend::with_defaults()));
 
         // Wire SqliteSessionStore into the MemoryManager
         if self.memory_manager.is_none() {
@@ -1354,7 +1355,6 @@ impl AppBuilder {
     pub fn sqlite_persistence_at(mut self, path: &str) -> Self {
         let store = Arc::new(SqliteSessionStore::new(path));
         self.sqlite_store = Some(store.clone());
-        self.checkpoint_backend = Some(Arc::new(SqliteCheckpointBackend::new(path)));
 
         // Wire SqliteSessionStore into the MemoryManager
         if self.memory_manager.is_none() {
@@ -1364,6 +1364,30 @@ impl AppBuilder {
             ));
         }
 
+        self
+    }
+
+    // ─── Working State (cross-session task continuation) ─────────────────────────
+
+    /// Enable durable working-state persistence rooted at `root`. When set,
+    /// the agent persists goal/steps/decisions/blockers to per-task append-only
+    /// event logs under `<root>/tasks/`, so plan progress survives crashes and
+    /// a brand-new session can discover and continue an unfinished task from a
+    /// previous session.
+    ///
+    /// For coding domains, pass an in-repo path like `./.oneai` so the working
+    /// state is git-trackable (free durability + reconciliation source). For
+    /// assistant domains with no repo, pass `~/.oneai`.
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .working_state("./.oneai")  // ← durable working state
+    ///     .build()?;
+    /// ```
+    pub fn working_state(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.working_state_root = Some(root.into());
         self
     }
 
@@ -1811,6 +1835,25 @@ impl AppBuilder {
         // by the caller (CLI/TUI) and add rather than replace these.
         self.skill_registry.load_discovered().await;
 
+        // Working-state store: compaction thresholds come from the domain's
+        // `MemoryProfile.working_state.compaction` (CodingPack 200/50,
+        // assistant 500/100) so the persistence dimension is declarative
+        // per-domain, not hardcoded in the store. Precomputed here because
+        // `merged_domain_pack` is moved into the `App` literal below.
+        let working_state_store = self.working_state_root.as_ref().map(|root| {
+            let (event_threshold, keep_recent) = merged_domain_pack
+                .as_ref()
+                .map(|d| {
+                    let c = &d.memory_profile.working_state.compaction;
+                    (c.event_threshold, c.keep_recent)
+                })
+                .unwrap_or((200, 50));
+            std::sync::Arc::new(
+                oneai_persistence::FileWorkingStateStore::new(root.clone())
+                    .with_compaction(event_threshold, keep_recent),
+            ) as std::sync::Arc<dyn oneai_core::traits::WorkingStateStore>
+        });
+
         Ok(App {
             provider,
             tool_registry: self.tool_registry,
@@ -1853,6 +1896,7 @@ impl AppBuilder {
             swarm_orchestrator: self.swarm_orchestrator,
             generation_config: self.generation_config,
             constrained_output_policy: self.constrained_output_policy,
+            working_state_store,
         })
     }
 }
@@ -1950,6 +1994,13 @@ pub struct App {
     /// Layer-1 constrained-decoding policy — propagated into every `AgentLoopConfig`.
     /// See `AppBuilder::constrained_output_policy`.
     pub constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
+    /// Durable working-state store (optional) — the cross-session source of
+    /// truth for goal/steps/decisions/blockers, persisted as per-task append-only
+    /// event logs. When set, the agent loop persists plan progress incrementally
+    /// (so it survives crashes) and a brand-new session can discover and
+    /// continue an unfinished task from a previous session. See
+    /// `AppBuilder::working_state`.
+    pub working_state_store: Option<Arc<dyn oneai_core::traits::WorkingStateStore>>,
 }
 
 impl App {
@@ -2208,6 +2259,7 @@ mod tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         };
         session.memory_manager().archive_facts(vec![fact]).await;
 
@@ -2247,13 +2299,10 @@ mod tests {
             .await
             .expect("Build should succeed");
 
-        let session = app.create_session();
-
-        // Save a checkpoint
-        let checkpoint_id = session.save_checkpoint().await.unwrap();
-
-        // Verify it was saved
-        assert!(!checkpoint_id.is_empty());
+        // Persistence is wired at the App level (used by Studio's checkpoint
+        // browser); the per-session working-state event log (FileWorkingStateStore)
+        // is the durable substrate for task continuation, not full-state snapshots.
+        let _session = app.create_session();
     }
 
     #[tokio::test]

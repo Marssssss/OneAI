@@ -90,7 +90,6 @@ fn build_test_agent_loop(
         Arc::new(SubAgentFactoryNone), // Tests don't delegate by default
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None, // checkpoint manager
         config,
     )
 }
@@ -162,7 +161,6 @@ async fn e2e_scenario_1_direct_answer() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -190,7 +188,6 @@ async fn e2e_scenario_2_single_tool_call() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -225,7 +222,6 @@ async fn e2e_scenario_3_multi_tool_calls() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file), Arc::new(edit_file)], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -255,7 +251,6 @@ async fn e2e_scenario_4_paradigm_switch() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -346,9 +341,7 @@ async fn e2e_scenario_5_sub_agent_delegation() {
         Arc::new(MockSubAgentFactory), // Real sub-agent factory
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
-            auto_checkpoint: false,
             inject_skills: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
@@ -498,9 +491,7 @@ fn build_delegating_loop(
         factory,
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
-            auto_checkpoint: false,
             inject_skills: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
@@ -650,9 +641,7 @@ async fn e2e_scenario_6_approval_deny() {
         Arc::new(SubAgentFactoryNone),
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
-            auto_checkpoint: false,
             inject_skills: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
@@ -684,7 +673,6 @@ async fn e2e_scenario_7_streaming() {
     // observer receives stream chunks.
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         use_streaming: true,
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -743,9 +731,7 @@ async fn e2e_scenario_8_error_recovery() {
         Arc::new(SubAgentFactoryNone),
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
-            auto_checkpoint: false,
             inject_skills: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
@@ -781,7 +767,6 @@ async fn e2e_thinking_then_answer() {
     // and parse_decision extracts only text parts.
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         use_streaming: false,
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -807,7 +792,6 @@ async fn e2e_streaming_thinking() {
 
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
         use_streaming: true,
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -866,9 +850,7 @@ async fn e2e_hooks_pre_tool_use_deny() {
         Arc::new(SubAgentFactoryNone),
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
-            auto_checkpoint: false,
             inject_skills: false,
             hard_max_iterations: Some(10),
             ..AgentLoopConfig::default()
@@ -904,7 +886,6 @@ async fn e2e_hooks_audit_log() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -936,7 +917,6 @@ async fn e2e_interrupt_resume() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -964,7 +944,6 @@ async fn e2e_interrupt_resume() {
     ]);
 
     let new_agent_loop = build_test_agent_loop(new_provider, vec![], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         hard_max_iterations: Some(10),
         ..AgentLoopConfig::default()
@@ -999,7 +978,6 @@ async fn e2e_structured_output_valid() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         structured_output: Some(StructuredOutputConfig {
             schema: serde_json::json!({
@@ -1035,7 +1013,6 @@ async fn e2e_structured_output_invalid_then_valid() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         structured_output: Some(StructuredOutputConfig {
             schema: serde_json::json!({
@@ -1070,7 +1047,6 @@ async fn e2e_structured_output_max_retries_exhausted() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         structured_output: Some(StructuredOutputConfig {
             schema: serde_json::json!({"type": "object", "required": ["answer"]}),
@@ -1218,7 +1194,6 @@ async fn e2e_scenario_11_state_graph_react_loop() {
     ]);
 
     let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        auto_checkpoint: false,
         inject_skills: false,
         thinking_budget: None,
         hard_max_iterations: Some(10),
@@ -1556,11 +1531,9 @@ fn build_plan_mode_loop(
         Arc::new(SubAgentFactoryNone),
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
             plan_mode: true,
             use_streaming: false,
-            auto_checkpoint: false,
             inject_skills: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
@@ -1654,6 +1627,142 @@ async fn interaction_gate_plan_review_revise_keeps_plan_mode() {
     assert!(result.final_answer.contains("ok"));
 }
 
+// ─── Working State persistence (cross-session task continuation) ──────────
+
+/// `exit_plan_mode` + `task_update` must persist goal/steps/progress to the
+/// durable `WorkingStateStore` (cross-session event log), and the in-memory
+/// `working_state` projection must reflect it. This is the P1 foundation:
+/// the pinned blocks' durable source is no longer `Conversation::metadata`.
+#[tokio::test]
+async fn working_state_persists_plan_and_progress() {
+    use oneai_core::traits::WorkingStateStore;
+    use oneai_persistence::FileWorkingStateStore;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    let store: Arc<dyn WorkingStateStore> =
+        Arc::new(FileWorkingStateStore::new(tmp.path().to_path_buf()));
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call(
+            "exit_plan_mode",
+            serde_json::json!({
+                "plan": "ship feature X",
+                "steps": [
+                    {"id": "1", "description": "write code"},
+                    {"id": "2", "description": "write tests"},
+                ]
+            }),
+        ),
+        ScriptedResponse::tool_call(
+            "task_update",
+            serde_json::json!({"task_id": "1", "status": "completed"}),
+        ),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let gate = Arc::new(MockInteractionGate::new());
+    let loop_ = build_plan_mode_loop(provider, gate.clone())
+        .with_working_state_store(store.clone());
+    let result = loop_.run("ship feature X").await.unwrap();
+    assert!(result.final_answer.contains("done"));
+
+    // The store must hold exactly one task whose goal + 2 steps persisted, with
+    // step 1 completed (the task_update was folded into the event log).
+    let open = store.list_open_tasks("", "").await.unwrap();
+    assert_eq!(open.len(), 1, "exactly one open task should be persisted");
+    let task_id = open[0].task_id.clone();
+    let ws = store.get_task(&task_id).await.unwrap().unwrap();
+    assert_eq!(ws.goal, "ship feature X");
+    assert_eq!(ws.steps.len(), 2);
+    let s1 = ws.steps.iter().find(|s| s.id == "1").unwrap();
+    assert_eq!(s1.status, oneai_core::StepStatus::Completed);
+    let s2 = ws.steps.iter().find(|s| s.id == "2").unwrap();
+    assert_eq!(s2.status, oneai_core::StepStatus::Pending);
+}
+
+/// With no `WorkingStateStore` configured, the loop falls back to the legacy
+/// metadata-based pinned blocks and never touches the filesystem — the control
+/// tools still work (backward-compat / no-store path).
+#[tokio::test]
+async fn no_store_falls_back_to_legacy_pinned_blocks() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call(
+            "exit_plan_mode",
+            serde_json::json!({
+                "plan": "legacy",
+                "steps": [{"id": "1", "description": "a"}]
+            }),
+        ),
+        ScriptedResponse::direct_answer("ok"),
+    ]);
+    let gate = Arc::new(MockInteractionGate::new());
+    let loop_ = build_plan_mode_loop(provider, gate.clone()); // no with_working_state_store
+    let result = loop_.run("legacy").await.unwrap();
+    assert!(result.final_answer.contains("ok"));
+}
+
+/// L9 compaction triggering: when the per-task event log crosses the
+/// domain's compaction threshold, the agent-loop append path folds the old
+/// events into an in-log `Snapshot` (§7.3 / §8.4). Driving a plan with many
+/// steps through `exit_plan_mode` (which appends one `step_added` per step +
+/// calls `compact_if_needed`) must shrink the log while preserving the
+/// derived state (all steps still reconstructable from snapshot + tail).
+#[tokio::test]
+async fn working_state_compaction_fires_and_preserves_state() {
+    use oneai_core::traits::WorkingStateStore;
+    use oneai_persistence::FileWorkingStateStore;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    let tmp = TempDir::new().unwrap();
+    // Aggressive thresholds so a 5-step plan (1 task_created + 5 step_added
+    // = 6 events) crosses the threshold. keep_recent=1 → snapshot + 1 tail.
+    let store: Arc<dyn WorkingStateStore> =
+        Arc::new(FileWorkingStateStore::new(tmp.path().to_path_buf()).with_compaction(3, 1));
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call(
+            "exit_plan_mode",
+            serde_json::json!({
+                "plan": "big task",
+                "steps": [
+                    {"id": "1", "description": "s1"},
+                    {"id": "2", "description": "s2"},
+                    {"id": "3", "description": "s3"},
+                    {"id": "4", "description": "s4"},
+                    {"id": "5", "description": "s5"},
+                ]
+            }),
+        ),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let gate = Arc::new(MockInteractionGate::new());
+    let loop_ = build_plan_mode_loop(provider, gate.clone())
+        .with_working_state_store(store.clone());
+    let result = loop_.run("big task").await.unwrap();
+    assert!(result.final_answer.contains("done"));
+
+    let task_id = store.list_open_tasks("", "").await.unwrap()[0].task_id.clone();
+    let ws = store.get_task(&task_id).await.unwrap().unwrap();
+    // All 5 steps survived compaction (folded into the snapshot).
+    assert_eq!(ws.steps.len(), 5, "all steps must survive compaction; got {:?}", ws.steps);
+    assert_eq!(ws.goal, "big task");
+
+    // The log must have been compacted — far fewer than the 6 raw events.
+    // (Snapshot-in-log: 1 snapshot + 1 tail = 2.)
+    let log_path = tmp.path().join("tasks").join(format!("{}.jsonl", task_id));
+    let line_count = std::fs::read_to_string(&log_path).unwrap().lines()
+        .filter(|l| !l.trim().is_empty()).count();
+    assert!(
+        line_count <= 3,
+        "compaction should have shrunk the log; got {line_count} lines"
+    );
+    // First line must be the snapshot event (the compaction wrote it).
+    let first = std::fs::read_to_string(&log_path).unwrap();
+    assert!(first.lines().next().unwrap().contains("\"snapshot\""));
+}
+
 // ─── Meta-tool injection (delegate / switch_paradigm) ────────────────────────
 
 /// Helper: build a non-plan-mode AgentLoop, returning a cloned handle to the
@@ -1688,10 +1797,8 @@ fn build_meta_tool_loop(
         )),
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
             use_streaming: false,
-            auto_checkpoint: false,
             inject_skills: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
@@ -1765,11 +1872,9 @@ async fn e2e_meta_tools_not_injected_in_plan_mode() {
         Arc::new(SubAgentFactoryNone),
         ContextAssembler::new(),
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
             plan_mode: true,
             use_streaming: false,
-            auto_checkpoint: false,
             inject_skills: false,
             thinking_budget: None,
             hard_max_iterations: Some(10),
@@ -1846,7 +1951,6 @@ async fn e2e_assembled_context_and_task_anchor_reach_request() {
         Arc::new(SubAgentFactoryNone),
         context_assembler,
         IncrementalStreamParser::new(),
-        None,
         AgentLoopConfig {
             inject_skills: false,
             hard_max_iterations: Some(5),

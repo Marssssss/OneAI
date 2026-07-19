@@ -167,14 +167,6 @@ impl OneAISession {
             .map_err(OneAIErrorView::from)
     }
 
-    /// Save a checkpoint.
-    #[uniffi::method]
-    pub async fn save_checkpoint(&self) -> Result<String, OneAIErrorView> {
-        let inner = self.inner.lock().await;
-        inner.save_checkpoint().await
-            .map_err(OneAIErrorView::from)
-    }
-
     /// Run the agent loop for a task, streaming events to `callback`.
     ///
     /// This is the real inference entry point — `send_user_message` only seeds
@@ -330,6 +322,7 @@ mod tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         };
         {
             let inner = session.inner.lock().await;

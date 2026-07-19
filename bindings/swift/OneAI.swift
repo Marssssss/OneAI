@@ -1743,11 +1743,6 @@ public protocol OneAiSessionProtocol: AnyObject, Sendable {
     func save() async throws 
     
     /**
-     * Save a checkpoint.
-     */
-    func saveCheckpoint() async throws  -> String
-    
-    /**
      * Send a user message.
      *
      * Note: this only appends the message to the conversation — it does NOT
@@ -1960,25 +1955,6 @@ open func save()async throws   {
             completeFunc: ffi_oneai_rust_future_complete_void,
             freeFunc: ffi_oneai_rust_future_free_void,
             liftFunc: { $0 },
-            errorHandler: FfiConverterTypeOneAIErrorView_lift
-        )
-}
-    
-    /**
-     * Save a checkpoint.
-     */
-open func saveCheckpoint()async throws  -> String  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_oneai_fn_method_oneaisession_save_checkpoint(
-                        self.uniffiCloneHandle()
-                )
-            },
-            pollFunc: ffi_oneai_rust_future_poll_rust_buffer,
-            completeFunc: ffi_oneai_rust_future_complete_rust_buffer,
-            freeFunc: ffi_oneai_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeOneAIErrorView_lift
         )
 }
@@ -4824,9 +4800,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaisession_save() != 42851) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_oneai_checksum_method_oneaisession_save_checkpoint() != 49179) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaisession_send_user_message() != 53757) {

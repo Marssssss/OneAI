@@ -5,10 +5,11 @@
 //! workflow execution, and state persistence.
 
 use std::sync::Arc;
+// for `write!` on String in the [Unfinished Work] block
+use std::fmt::Write as _;
 
-use oneai_core::{Conversation, GlobalState, Message, MemoryEntry};
+use oneai_core::{Conversation, Message, MemoryEntry};
 use oneai_core::error::Result;
-use oneai_core::traits::StatePersistence;
 
 use oneai_memory::MemoryManager;
 use oneai_tool::ToolExecutor;
@@ -17,6 +18,69 @@ use oneai_workflow::{WorkflowConfig, WorkflowExecutor, WorkflowResult, StateGrap
 use oneai_persistence::FilePersistence;
 use oneai_persistence::SqliteSessionStore;
 use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
+
+
+/// A first-turn-only `ContextSource` that surfaces an unfinished task left by
+/// a previous session — the cross-session discovery surface (reference doc §6.2).
+///
+/// Holds a rendered `[Unfinished Work]` block and yields it exactly once
+/// (then empty) so it appears on the first turn of a fresh session and not
+/// thereafter. Injecting via a ContextSource (not a durable system message)
+/// keeps it on the ephemeral assembly — it won't suppress the loop's base
+/// system-prompt addition the way a durable System message would.
+pub(crate) struct UnfinishedWorkSource {
+    block: tokio::sync::Mutex<Option<String>>,
+}
+
+impl UnfinishedWorkSource {
+    pub(crate) fn new(block: String) -> Self {
+        Self {
+            block: tokio::sync::Mutex::new(if block.is_empty() { None } else { Some(block) }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl oneai_domain::ContextSource for UnfinishedWorkSource {
+    fn key(&self) -> &str {
+        "unfinished_work"
+    }
+    async fn load(&self) -> oneai_core::error::Result<String> {
+        Ok(self.block.lock().await.take().unwrap_or_default())
+    }
+    fn refresh_policy(&self) -> oneai_domain::context_source::RefreshPolicy {
+        // EveryIteration: load() is called each turn, but take() empties it
+        // after the first, so the block is injected only on turn 1.
+        oneai_domain::context_source::RefreshPolicy::EveryIteration
+    }
+    fn priority(&self) -> u32 {
+        5 // high priority — surface early, before git/file-tree sources
+    }
+}
+
+/// Render the `[Unfinished Work]` block from a set of open task briefs.
+fn render_unfinished_work(open: &[oneai_core::TaskBrief]) -> String {
+    if open.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from(
+        "[Unfinished Work From Previous Sessions] (do not compress — prior open tasks)\n\
+         你有以下未完成任务，可用 `oneai tasks continue <id>` 继续其中一个，或开始新任务：\n",
+    );
+    for b in open.iter().take(10) {
+        let _ = write!(
+            block,
+            "• [{}] {} (步骤剩余 {}, 状态 {}, 卡点 {}, 最后更新 {})\n",
+            b.task_id,
+            b.goal,
+            b.open_step_count,
+            b.status.as_str(),
+            b.open_blocker_count,
+            b.last_event_ts,
+        );
+    }
+    block
+}
 
 
 /// A record of a workflow execution in the session history.
@@ -89,6 +153,15 @@ pub struct AppSession {
     /// §12.3: AgentLoop iterations elapsed since the last mid-session
     /// reflection (floor against reflecting every turn).
     turns_since_last_reflection: u32,
+    /// Whether the `[Unfinished Work]` block has already been surfaced in this
+    /// session. It's injected once on the first run of a fresh session (when
+    /// no task is bound), so the model knows about prior unfinished work.
+    unfinished_work_surfaced: bool,
+    /// Whether the resume-time `[Reconciliation]` block has already been
+    /// surfaced for the bound task. Injected once on the first run after a
+    /// `continue_task` / resume, when the domain policy opts into git
+    /// reconciliation (reference doc §8.2).
+    reconciliation_surfaced: bool,
 }
 
 /// Shared resources for all sessions.
@@ -99,6 +172,7 @@ struct AppResources {
     interaction_gate: Arc<dyn oneai_core::traits::InteractionGate>,
     memory_manager: Arc<MemoryManager>,
     rag_index: Option<Arc<DocumentIndex>>,
+    #[allow(dead_code)]
     persistence: Option<Arc<FilePersistence>>,
     workflow_executor: Arc<WorkflowExecutor>,
     provider: Option<Arc<dyn oneai_core::traits::LlmProvider>>,
@@ -133,6 +207,14 @@ struct AppResources {
     generation_config: oneai_core::GenerationConfig,
     /// Layer-1 constrained-decoding policy — propagated into every AgentLoopConfig.
     constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
+    /// Durable working-state store — the cross-session source of truth for
+    /// goal/steps/decisions/blockers. When set, `run_agent` attaches it to the
+    /// loop (`.with_working_state_store`) so plan progress persists
+    /// incrementally, and injects `[Unfinished Work]` on a fresh session.
+    working_state_store: Option<Arc<dyn oneai_core::traits::WorkingStateStore>>,
+    /// The working-state project scope (cwd / repo). Threaded into the loop so
+    /// working-state events land in the right per-project namespace.
+    working_state_project: String,
 }
 
 impl AppSession {
@@ -187,6 +269,11 @@ impl AppSession {
                 probe_context_windows: app.probe_context_windows,
                 generation_config: app.generation_config.clone(),
                 constrained_output_policy: app.constrained_output_policy,
+                working_state_store: app.working_state_store.clone(),
+                working_state_project: std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.to_str().map(|s| s.to_string()))
+                    .unwrap_or_default(),
             }),
             conversation,
             session_id,
@@ -195,6 +282,8 @@ impl AppSession {
             plan_mode: false,
             accumulated_importance: 0.0,
             turns_since_last_reflection: 0,
+            unfinished_work_surfaced: false,
+            reconciliation_surfaced: false,
         }
     }
 
@@ -206,6 +295,33 @@ impl AppSession {
     /// Enable/disable plan mode for subsequent `run_agent` calls.
     pub fn set_plan_mode(&mut self, on: bool) {
         self.plan_mode = on;
+    }
+
+    /// The durable working-state store, if configured (`AppBuilder::working_state`).
+    pub fn working_state_store(&self) -> Option<Arc<dyn oneai_core::traits::WorkingStateStore>> {
+        self.app.working_state_store.clone()
+    }
+
+    /// The working-state project scope (cwd) for this session.
+    pub fn working_state_project(&self) -> &str {
+        &self.app.working_state_project
+    }
+
+    /// Bind this session to an existing durable working-state task — a
+    /// cross-session continuation. Sets `conversation.metadata["task_id"]` so
+    /// the next `run_agent` rehydrates the task's goal/steps/decisions/blockers
+    /// from the event log (the loop's `hydrate_working_state` reads the
+    /// pointer). Use `oneai tasks continue <id>`.
+    pub fn continue_task(&mut self, task_id: &str) {
+        self.conversation
+            .metadata
+            .insert("task_id".to_string(), task_id.to_string());
+        // Reset the unfinished-work surfacing flag so we don't inject the
+        // discovery block when the user has explicitly chosen a task.
+        self.unfinished_work_surfaced = true;
+        // Re-arm reconciliation so the next run re-checks git ground truth
+        // against the newly-bound (possibly stale) task.
+        self.reconciliation_surfaced = false;
     }
 
     /// Get the conversation.
@@ -533,31 +649,6 @@ impl AppSession {
         &self.workflow_history
     }
 
-    /// Save a checkpoint of the current session state.
-    pub async fn save_checkpoint(&self) -> Result<String> {
-        // Log checkpoint save event if tracing
-        if let Some(ctx) = &self.trace_context {
-            ctx.log_event(EventKind::CheckpointSave, "checkpoint.save", std::collections::HashMap::from([
-                ("checkpoint.session_id".to_string(), serde_json::json!(self.session_id)),
-            ]));
-        }
-
-        if let Some(persistence) = &self.app.persistence {
-            let state = oneai_core::AgentState {
-                session_id: self.session_id.clone(),
-                global_state: GlobalState::new(),
-                active_paradigm: "session".to_string(),
-                active_step: None,
-                timestamp: chrono::Utc::now(),
-            };
-            persistence.save_checkpoint(&state).await
-        } else {
-            Err(oneai_core::error::OneAIError::Persistence(
-                "No persistence layer configured".to_string()
-            ))
-        }
-    }
-
     /// Get the memory manager.
     pub fn memory_manager(&self) -> &Arc<MemoryManager> {
         &self.app.memory_manager
@@ -651,15 +742,91 @@ impl AppSession {
         // CoreMemorySource each iteration, not as a one-shot system message).
         let conversation = self.conversation.clone();
 
+        // ─── Unfinished-work surfacing (cross-session discovery) ─────────
+        // On the first run of a fresh session (no task bound), surface prior
+        // unfinished tasks via a first-turn-only ContextSource. Routed through
+        // a ContextSource (not a durable system message) so it lives on the
+        // ephemeral assembly and does not suppress the loop's base system
+        // prompt. No-op when no store is configured or a task is already bound.
+        let unfinished_work_source: Option<std::sync::Arc<dyn oneai_domain::ContextSource>> =
+            if let Some(store) = self.app.working_state_store.clone() {
+                let has_task = self.conversation.metadata.get("task_id")
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if !has_task && !self.unfinished_work_surfaced {
+                    self.unfinished_work_surfaced = true;
+                    let user = self.app.memory_manager.user_id().await;
+                    match store.list_open_tasks(&user, &self.app.working_state_project).await {
+                        Ok(open) if !open.is_empty() => {
+                            let block = render_unfinished_work(&open);
+                            Some(std::sync::Arc::new(UnfinishedWorkSource::new(block)))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        // ─── Resume-time ground-truth reconciliation (§8.2) ───────────────
+        // On the first run after a task is bound (continue / resume), and only
+        // when the domain opts into git reconciliation, inject a one-shot
+        // `GitReconciliationSource` that re-derives the bound task's working
+        // state and flags drift vs the actual repo (newer HEAD or a dirty
+        // `.oneai/`). The source appends a `Reconciliation` event on drift so
+        // the staleness survives compaction / cross-session resume.
+        let reconciliation_source: Option<std::sync::Arc<dyn oneai_domain::ContextSource>> =
+            if let Some(store) = self.app.working_state_store.clone() {
+                let task_id = self.conversation.metadata.get("task_id")
+                    .filter(|s| !s.is_empty())
+                    .cloned();
+                let wants_git = self.app.domain_pack.as_ref()
+                    .map(|d| d.memory_profile.working_state.ground_truth_reconciliation
+                        == oneai_domain::memory_profile::GroundTruthReconciliation::Git)
+                    .unwrap_or(false);
+                if !self.reconciliation_surfaced && wants_git {
+                    if let Some(task_id) = task_id {
+                        self.reconciliation_surfaced = true;
+                        Some(std::sync::Arc::new(
+                            oneai_domain::builtin_sources::GitReconciliationSource::new(
+                                self.app.working_state_project.clone(),
+                                store,
+                                task_id,
+                                self.session_id.clone(),
+                            ),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         // Build context assembler (core source first, then domain sources).
         let context_assembler = if let Some(domain) = &self.app.domain_pack {
             let mut sources = vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
             sources.extend(domain.context_sources.clone());
+            if let Some(uw) = unfinished_work_source {
+                sources.push(uw);
+            }
+            if let Some(rs) = reconciliation_source {
+                sources.push(rs);
+            }
             oneai_agent::ContextAssembler::with_context_sources(sources)
         } else {
-            oneai_agent::ContextAssembler::with_context_sources(
-                vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>]
-            )
+            let mut sources = vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
+            if let Some(uw) = unfinished_work_source {
+                sources.push(uw);
+            }
+            if let Some(rs) = reconciliation_source {
+                sources.push(rs);
+            }
+            oneai_agent::ContextAssembler::with_context_sources(sources)
         };
 
         // Propagate usage/rate/circuit from the App into the loop
@@ -741,7 +908,6 @@ impl AppSession {
                 )),
                 context_assembler,
                 oneai_agent::IncrementalStreamParser::new(),
-                None, // checkpoint manager — optional
                 config,
                 domain.clone(),
             )
@@ -815,7 +981,6 @@ impl AppSession {
                 )),
                 context_assembler,
                 oneai_agent::IncrementalStreamParser::new(),
-                None, // checkpoint manager — optional
                 config,
             )
             .with_skill_registry(
@@ -828,6 +993,23 @@ impl AppSession {
         // (Esc) without holding the session lock — the slot is a separate Arc.
         // Cloning the AgentLoop is cheap (all Arc fields).
         *interrupt_slot.lock().await = Some(agent_loop.clone());
+
+        // ─── Working State wiring (cross-session task continuation) ───────
+        // Attach the durable working-state store + per-run scope (user /
+        // project / session) to the loop, and — on the first run of a fresh
+        // session with no task bound — inject `[Unfinished Work]` so the model
+        // (and user) discover prior unfinished tasks. A session that resumed
+        // or continued an existing task carries `task_id` in conversation
+        // metadata; the loop's `hydrate_working_state` rehydrates the
+        // projection from the store at run start.
+        let agent_loop = if let Some(store) = self.app.working_state_store.clone() {
+            let user = self.app.memory_manager.user_id().await;
+            agent_loop
+                .with_working_state_store(store)
+                .with_working_state_scope(user, self.app.working_state_project.clone(), self.session_id.clone())
+        } else {
+            agent_loop
+        };
 
         // Run with full conversation history (multi-turn)
         // §12.3: snapshot the archival tier's cumulative importance before the

@@ -349,6 +349,26 @@ pub struct LoopState {
     /// control tools. None until a plan is created. Persists across iterations
     /// and interrupts (agent-side state, not model output).
     pub plan_state: Option<crate::plan_state::PlanState>,
+    /// The durable working-state projection (goal/steps/decisions/blockers/
+    /// notes), derived from the cross-session event log held by
+    /// `WorkingStateStore`. None when no store is configured OR no task has
+    /// been bound yet. The pinned `[Task Anchor]` / `[Plan & Progress]` /
+    /// `[Decisions]` / `[Blockers]` blocks read this in-memory projection
+    /// every turn (zero IO) — the durable source of truth is the event log,
+    /// not the conversation transcript.
+    pub working_state: Option<oneai_core::WorkingState>,
+    /// The task id bound to this loop run — set when a `WorkingStateStore` is
+    /// configured and `exit_plan_mode` (or a cross-session `continue`) creates
+    /// / binds a task. Carried in `conversation.metadata["task_id"]` so a
+    /// same-session resume can re-bind the working state.
+    pub task_id: Option<String>,
+    /// The session id this run belongs to (for working-state event audit).
+    /// Empty until the AppSession sets it; events still persist when empty.
+    pub session_id: String,
+    /// The owning user (cross-session namespace) for working-state events.
+    pub user_id: String,
+    /// The project / cwd scope for working-state events.
+    pub project: String,
 }
 
 impl LoopState {
@@ -373,6 +393,11 @@ impl LoopState {
             interrupt_points: Vec::new(),
             pending_interrupt: None,
             plan_state: None,
+            working_state: None,
+            task_id: None,
+            session_id: String::new(),
+            user_id: String::new(),
+            project: String::new(),
         }
     }
 
@@ -388,6 +413,14 @@ impl LoopState {
         // compacted session continues the in-flight task instead of losing it.
         let plan_state = conv.metadata.get("plan_state")
             .and_then(|s| crate::plan_state::PlanState::from_metadata_string(s));
+        // The durable working state is NOT rehydrated from metadata here — it
+        // lives in the cross-session event log (WorkingStateStore), read on
+        // session start / resume via the store. `task_id` (a pointer) is the
+        // only thing carried in metadata; the caller rehydrates `working_state`
+        // from the store using it. `original_task` keeps the new user message
+        // for the durable log; the pinned `[Task Anchor]` prefers the working
+        // state's `goal` when available (the canonical original goal).
+        let task_id = conv.metadata.get("task_id").cloned().filter(|s| !s.is_empty());
         Self {
             original_task: task.to_string(),
             conversation: conv,
@@ -402,6 +435,11 @@ impl LoopState {
             interrupt_points: Vec::new(),
             pending_interrupt: None,
             plan_state,
+            working_state: None,
+            task_id,
+            session_id: String::new(),
+            user_id: String::new(),
+            project: String::new(),
         }
     }
 
@@ -518,7 +556,6 @@ pub struct AgentLoopConfig {
     /// Stop sequences — generation halts when any is emitted.
     pub stop_sequences: Vec<String>,
     pub hard_max_iterations: Option<usize>,
-    pub auto_checkpoint: bool,
     pub inject_skills: bool,
     /// Usage tracker — records token usage after each inference call.
     /// When set, the loop automatically records token usage (no USD cost).
@@ -574,7 +611,6 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("thinking_budget", &self.thinking_budget)
             .field("stop_sequences", &self.stop_sequences)
             .field("hard_max_iterations", &self.hard_max_iterations)
-            .field("auto_checkpoint", &self.auto_checkpoint)
             .field("inject_skills", &self.inject_skills)
             .field("usage_tracker", &self.usage_tracker.as_ref().map(|_| "Arc<dyn UsageTracker>"))
             .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
@@ -619,7 +655,6 @@ impl Default for AgentLoopConfig {
             thinking_budget: None,
             stop_sequences: Vec::new(),
             hard_max_iterations: Some(200), // Safety guard: None = only budget constraint, Some(N) = budget + iteration limit
-            auto_checkpoint: true,
             inject_skills: true,
             usage_tracker: None,
             rate_limiter: None,
@@ -688,7 +723,21 @@ pub struct AgentLoop {
     async_task_runner: Option<Arc<crate::async_task_runner::AsyncTaskRunner>>,
     context_assembler: Arc<tokio::sync::RwLock<ContextAssembler>>,
     stream_parser: Arc<tokio::sync::RwLock<IncrementalStreamParser>>,
-    checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
+    /// Durable working-state store — the cross-session source of truth for
+    /// goal/steps/decisions/blockers/notes, persisted as a per-task append-only
+    /// event log independent of any session transcript. When `Some`, the loop
+    /// appends a working-state event at every plan-control-tool mutation
+    /// (exit_plan_mode / task_update / decision resolution) so progress
+    /// survives crashes (§8.1) and is discoverable by a brand-new session
+    /// (§6.2). The hot read path (pinned re-injection) uses the in-memory
+    /// `LoopState.working_state` projection, not this store — zero IO per turn.
+    working_state_store: Option<Arc<dyn oneai_core::traits::WorkingStateStore>>,
+    /// Per-run working-state scope (user / project / session) — threaded into
+    /// `LoopState` at the start of each run so working-state events are scoped
+    /// to the right cross-session namespace. Set via `with_working_state_scope`.
+    ws_user_id: String,
+    ws_project: String,
+    ws_session_id: String,
     recovery_manager: Option<Arc<crate::error_recovery::RecoveryManager>>,
     hook_registry: Arc<tokio::sync::RwLock<HookRegistry>>,
     interrupt_requested: Arc<AtomicBool>,
@@ -724,7 +773,10 @@ impl Clone for AgentLoop {
             async_task_runner: self.async_task_runner.clone(),
             context_assembler: self.context_assembler.clone(),
             stream_parser: self.stream_parser.clone(),
-            checkpoint_manager: self.checkpoint_manager.clone(),
+            working_state_store: self.working_state_store.clone(),
+            ws_user_id: self.ws_user_id.clone(),
+            ws_project: self.ws_project.clone(),
+            ws_session_id: self.ws_session_id.clone(),
             recovery_manager: self.recovery_manager.clone(),
             hook_registry: self.hook_registry.clone(),
             interrupt_requested: self.interrupt_requested.clone(),
@@ -774,13 +826,12 @@ impl AgentLoop {
         sub_agent_factory: Arc<dyn SubAgentFactory>,
         context_assembler: ContextAssembler,
         stream_parser: IncrementalStreamParser,
-        checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
         config: AgentLoopConfig,
     ) -> Self {
         Self { provider, tools, parser, interaction_gate, skill_selector, context_budget,
             sub_agent_factory, async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), working_state_store: None, ws_user_id: String::new(), ws_project: String::new(), ws_session_id: String::new(), recovery_manager: None,
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
@@ -802,14 +853,13 @@ impl AgentLoop {
         sub_agent_factory: Arc<dyn SubAgentFactory>,
         context_assembler: ContextAssembler,
         stream_parser: IncrementalStreamParser,
-        checkpoint_manager: Option<Arc<oneai_persistence::ProgressiveCheckpointManager>>,
         config: AgentLoopConfig,
         domain_pack: Arc<MergedDomainPack>,
     ) -> Self {
         Self { provider, tools, parser, interaction_gate, skill_selector, context_budget,
             sub_agent_factory, async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), checkpoint_manager, recovery_manager: None,
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), working_state_store: None, ws_user_id: String::new(), ws_project: String::new(), ws_session_id: String::new(), recovery_manager: None,
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
@@ -833,6 +883,76 @@ impl AgentLoop {
         self.skill_registry = registry;
         self.active_skill = active_skill;
         self
+    }
+
+    /// Attach a durable working-state store. When set, the loop appends a
+    /// working-state event at every plan-control-tool mutation (exit_plan_mode
+    /// / task_update / decision resolution) so progress survives crashes and
+    /// is discoverable by a brand-new session. The pinned blocks read the
+    /// in-memory `LoopState.working_state` projection (rehydrated on
+    /// startup/continue), not this store — zero IO per turn.
+    pub fn with_working_state_store(
+        mut self,
+        store: Arc<dyn oneai_core::traits::WorkingStateStore>,
+    ) -> Self {
+        self.working_state_store = Some(store);
+        self
+    }
+
+    /// Set the per-run working-state scope (user / project / session). These
+    /// are threaded into `LoopState` at run start so working-state events land
+    /// in the right cross-session namespace, and so a `chat --resume` /
+    /// `continue` can rehydrate the bound task's projection.
+    pub fn with_working_state_scope(
+        mut self,
+        user_id: impl Into<String>,
+        project: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.ws_user_id = user_id.into();
+        self.ws_project = project.into();
+        self.ws_session_id = session_id.into();
+        self
+    }
+
+    /// Thread the AgentLoop's scope into `LoopState`, and — when a task is
+    /// already bound (same-session resume / cross-session continue) — rehydrate
+    /// the in-memory `working_state` projection from the durable event log and
+    /// restore `original_task` from the task's `goal` (so the pinned
+    /// `[Task Anchor]` shows the canonical original goal, not the resume
+    /// prompt like "continue"). No-op when no store is configured.
+    async fn hydrate_working_state(&self, state: &mut LoopState) {
+        state.user_id = self.ws_user_id.clone();
+        state.project = self.ws_project.clone();
+        state.session_id = self.ws_session_id.clone();
+        let Some(store) = self.working_state_store.clone() else {
+            return;
+        };
+        if let Some(task_id) = state.task_id.clone() {
+            match store.get_task(&task_id).await {
+                Ok(Some(ws)) => {
+                    // Restore the canonical goal — fixes the §6 bug where
+                    // `from_conversation` overwrote original_task with the new
+                    // resume prompt.
+                    if !ws.goal.is_empty() {
+                        state.original_task = ws.goal.clone();
+                        state
+                            .conversation
+                            .metadata
+                            .insert("task_anchor".to_string(), ws.goal.clone());
+                    }
+                    state.working_state = Some(ws);
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "Working-state task '{}' not found in store; starting fresh",
+                        task_id
+                    );
+                    state.task_id = None;
+                }
+                Err(e) => tracing::warn!("Failed to rehydrate working state: {}", e),
+            }
+        }
     }
 
     /// Enable parallel sub-agent delegation with the AsyncTaskRunner.
@@ -893,6 +1013,7 @@ impl AgentLoop {
         observer: &dyn AgentLoopObserver,
     ) -> Result<AgentLoopResult> {
         let mut state = LoopState::new(task);
+        self.hydrate_working_state(&mut state).await;
 
         if !state.conversation.messages.iter().any(|m| m.role == Role::System) {
             // Append the runtime context block (current date/time + a nudge to use
@@ -925,6 +1046,7 @@ impl AgentLoop {
         observer: &dyn AgentLoopObserver,
     ) -> Result<AgentLoopResult> {
         let mut state = LoopState::from_conversation(conversation, task);
+        self.hydrate_working_state(&mut state).await;
 
         if !state.conversation.messages.iter().any(|m| m.role == Role::System) {
             // See run_with_observer: append current date/time + search guidance,
@@ -981,11 +1103,6 @@ impl AgentLoop {
                 state.interrupt_points.push(interrupt_point.clone());
                 state.pending_interrupt = Some(interrupt_point.clone());
                 observer.on_interrupt(&interrupt_point);
-
-                // Save checkpoint if checkpointing is enabled
-                if self.config.auto_checkpoint {
-                    self.auto_checkpoint(&state, state.iterations).await?;
-                }
 
                 // Return partial result — the loop is paused for human feedback
                 let result = state.into_result();
@@ -1757,6 +1874,7 @@ impl AgentLoop {
                             match resp {
                                 InteractionResponse::Proceed => {
                                     self.set_plan_mode(false);
+                                    self.ensure_working_state_task(&mut state, &steps, &plan_text).await;
                                     oneai_core::ToolOutput {
                                         success: true,
                                         content: "Plan approved — proceeding with execution. \
@@ -1769,10 +1887,11 @@ impl AgentLoop {
                                     if let InteractionModification::ReplacePlan { plan: new_plan, steps: new_steps } = modification {
                                         // Apply the user's edits to the tracked plan.
                                         let mut ps = state.plan_state.take().unwrap_or_default();
-                                        ps.set_steps(new_steps);
+                                        ps.set_steps(new_steps.clone());
                                         state.plan_state = Some(ps);
                                         observer.on_plan_update(state.plan_state.as_ref());
                                         self.set_plan_mode(false);
+                                        self.ensure_working_state_task(&mut state, &new_steps, &new_plan).await;
                                         oneai_core::ToolOutput {
                                             success: true,
                                             content: format!(
@@ -1783,6 +1902,7 @@ impl AgentLoop {
                                         }
                                     } else {
                                         self.set_plan_mode(false);
+                                        self.ensure_working_state_task(&mut state, &steps, &plan_text).await;
                                         oneai_core::ToolOutput {
                                             success: true,
                                             content: "Plan approved — proceeding with execution.".to_string(),
@@ -1844,6 +1964,44 @@ impl AgentLoop {
                                 InteractionResponse::Choose { option_id } => {
                                     let label = options.iter().find(|o| o.id == option_id)
                                         .map(|o| o.label.clone()).unwrap_or_default();
+                                    // Persist the settled decision to the
+                                    // working-state event log so it survives
+                                    // compaction / cross-session resume.
+                                    if let (Some(store), Some(task_id)) =
+                                        (self.working_state_store.clone(), state.task_id.clone())
+                                    {
+                                        let decision = oneai_core::Decision {
+                                            id: decision_id.clone(),
+                                            question: question.clone(),
+                                            chosen: label.clone(),
+                                            rationale: String::new(),
+                                            alternatives: options.iter()
+                                                .filter(|o| o.id != option_id)
+                                                .map(|o| o.label.clone())
+                                                .collect(),
+                                            step_id: None,
+                                            ts: String::new(),
+                                        };
+                                        if let Err(e) = store
+                                            .append_event(
+                                                &task_id,
+                                                &state.session_id,
+                                                None,
+                                                oneai_core::TaskEventType::DecisionMade,
+                                                oneai_core::TaskEventPayload::DecisionMade { decision },
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!("Failed to append decision_made event: {}", e);
+                                        }
+                                        // Bound the log's growth.
+                                        self.compact_working_state_if_needed(&task_id).await;
+                                        // Re-derive so [Decisions Made] pinned
+                                        // block reflects it next turn.
+                                        if let Ok(Some(ws)) = store.get_task(&task_id).await {
+                                            state.working_state = Some(ws);
+                                        }
+                                    }
                                     oneai_core::ToolOutput {
                                         success: true,
                                         content: format!("User chose {} ({}). Bake this into the final plan.", option_id, label),
@@ -1877,6 +2035,10 @@ impl AgentLoop {
                                 &call.args,
                             )
                         };
+                        // Sync the (possibly mutated) step statuses into the
+                        // durable working-state event log + re-derive the
+                        // in-memory projection. No-op when no store is bound.
+                        self.sync_step_status_to_working_state(&mut state).await;
                         // Now add the single tool_result message and notify the panel.
                         state.conversation.add_message(Message::tool_result(
                             call.id.clone(),
@@ -2089,11 +2251,12 @@ impl AgentLoop {
                 }
             }
 
-            // 7. Auto-checkpoint
-            if self.config.auto_checkpoint {
-                self.auto_checkpoint(&state, state.iterations).await?;
-                observer.on_checkpoint(state.iterations);
-            }
+            // 7. Per-iteration checkpoint tick. Working-state persistence now
+            // happens incrementally at control-tool points (exit_plan_mode /
+            // task_update / decision), not at the iteration boundary — so
+            // there's no full-state snapshot to save here. The observer tick
+            // is retained for UI continuity.
+            observer.on_checkpoint(state.iterations);
         }
 
         let result = state.into_result();
@@ -3320,17 +3483,151 @@ impl AgentLoop {
         })
     }
 
-    async fn auto_checkpoint(&self, state: &LoopState, _iteration: usize) -> Result<()> {
-        if let Some(ref _manager) = self.checkpoint_manager {
-            let _agent_state = oneai_core::traits::AgentState {
-                session_id: String::new(),
-                global_state: state.global_state.clone(),
-                active_paradigm: paradigm_name(&state.active_paradigm).to_string(),
-                active_step: None,
-                timestamp: chrono::Utc::now(),
-            };
+    /// Persist a working-state `task_created` + `step_added` events when the
+    /// model submits a plan via `exit_plan_mode`. Creates the durable task (in
+    /// the cross-session event log) the first time, binds `state.task_id`, and
+    /// re-derives the in-memory `working_state` projection so the pinned blocks
+    /// read the durable source of truth from the next turn. No-op when no
+    /// `WorkingStateStore` is configured. Errors are non-fatal (logged): a
+    /// persistence hiccup must not abort the agent loop.
+    async fn ensure_working_state_task(
+        &self,
+        state: &mut LoopState,
+        steps: &[oneai_core::PlanStep],
+        goal: &str,
+    ) {
+        let Some(store) = self.working_state_store.clone() else {
+            return;
+        };
+        // Create the task once per run.
+        if state.task_id.is_none() {
+            match store
+                .create_task(&state.user_id, &state.project, goal, "", &state.session_id)
+                .await
+            {
+                Ok(id) => {
+                    state.task_id = Some(id.clone());
+                    state
+                        .conversation
+                        .metadata
+                        .insert("task_id".to_string(), id);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create working-state task: {}", e);
+                    return;
+                }
+            }
         }
-        Ok(())
+        let task_id = match state.task_id.clone() {
+            Some(t) => t,
+            None => return,
+        };
+        // Append a step_added event per submitted step (the store dedups by id
+        // on derive, so re-submits are harmless).
+        for (i, s) in steps.iter().enumerate() {
+            let step = oneai_core::Step {
+                id: s.id.clone(),
+                description: s.description.clone(),
+                status: s.status.into(),
+                depends_on: s.depends_on.clone(),
+                order: (i + 1) as u32,
+                active_form: s.active_form.clone(),
+                updated_at: String::new(),
+            };
+            if let Err(e) = store
+                .append_event(
+                    &task_id,
+                    &state.session_id,
+                    None,
+                    oneai_core::TaskEventType::StepAdded,
+                    oneai_core::TaskEventPayload::StepAdded { step },
+                )
+                .await
+            {
+                tracing::warn!("Failed to append step_added event: {}", e);
+            }
+        }
+        // Bound the log's growth: fold into a snapshot past the threshold.
+        self.compact_working_state_if_needed(&task_id).await;
+        // Re-derive the in-memory projection so pinned blocks read the durable
+        // state from the next turn.
+        match store.get_task(&task_id).await {
+            Ok(Some(ws)) => state.working_state = Some(ws),
+            Ok(None) => tracing::warn!("Working-state task '{}' vanished after create", task_id),
+            Err(e) => tracing::warn!("Failed to re-derive working state: {}", e),
+        }
+    }
+
+    /// Sync `task_update` step-status changes into the durable working-state
+    /// event log. Diffs the live `plan_state` step statuses against the
+    /// in-memory `working_state.steps` and appends a `step_status_changed`
+    /// event for each that moved, then re-derives the projection. No-op when
+    /// no store is configured or no task is bound.
+    async fn sync_step_status_to_working_state(&self, state: &mut LoopState) {
+        let Some(store) = self.working_state_store.clone() else {
+            return;
+        };
+        let Some(task_id) = state.task_id.clone() else {
+            return;
+        };
+        let Some(plan) = state.plan_state.clone() else {
+            return;
+        };
+        let known: std::collections::HashMap<String, oneai_core::StepStatus> = state
+            .working_state
+            .as_ref()
+            .map(|ws| {
+                ws.steps
+                    .iter()
+                    .map(|s| (s.id.clone(), s.status))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for s in &plan.steps {
+            let new_status: oneai_core::StepStatus = s.status.into();
+            let old_status = known.get(&s.id).copied();
+            if old_status != Some(new_status) {
+                if let Err(e) = store
+                    .append_event(
+                        &task_id,
+                        &state.session_id,
+                        None,
+                        oneai_core::TaskEventType::StepStatusChanged,
+                        oneai_core::TaskEventPayload::StepStatusChanged {
+                            step_id: s.id.clone(),
+                            status: new_status,
+                            active_form: s.active_form.clone(),
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!("Failed to append step_status_changed event: {}", e);
+                }
+            }
+        }
+        // Bound the log's growth: fold into a snapshot past the threshold.
+        self.compact_working_state_if_needed(&task_id).await;
+        // Re-derive the projection.
+        match store.get_task(&task_id).await {
+            Ok(Some(ws)) => state.working_state = Some(ws),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("Failed to re-derive working state: {}", e),
+        }
+    }
+
+    /// Fold the per-task event log into a `Snapshot` once it crosses the
+    /// domain's compaction threshold (reference doc §7.3 / §8.4 — bounded
+    /// growth via in-log snapshots). Called after each working-state append
+    /// so the log never grows unbounded across a long task. No-op under the
+    /// threshold; errors are non-fatal (logged) — a compaction hiccup must
+    /// not abort the agent loop.
+    async fn compact_working_state_if_needed(&self, task_id: &str) {
+        let Some(store) = self.working_state_store.clone() else {
+            return;
+        };
+        if let Err(e) = store.compact_if_needed(task_id).await {
+            tracing::warn!("Working-state compaction failed for '{}': {}", task_id, e);
+        }
     }
 
     /// Build the tool-preference rules block dynamically from the actual tool
@@ -3619,19 +3916,45 @@ impl AgentLoop {
     /// original-task anchor (Q2), the live plan/progress (Q1), and the skill
     /// menu / active skill (progressive disclosure). These are re-injected
     /// every turn and are NOT written to the durable `state.conversation`, so
-    /// they survive compression by re-injection and don't accumulate. The
-    /// `plan_state` is also mirrored to `conversation.metadata["plan_state"]`
-    /// (persisted + copied by every compressor) for Q3 reseed on reload.
+    /// they survive compression by re-injection and don't accumulate.
+    ///
+    /// **Data source**: when `state.working_state` is bound (a
+    /// `WorkingStateStore` is configured and a task is active), the pinned
+    /// blocks read the in-memory working-state projection — the cross-session
+    /// source of truth held in `LoopState`, zero IO per turn. The durable
+    /// source is the event log, not the conversation transcript. When no
+    /// working state is bound, fall back to the legacy metadata-based blocks
+    /// (`task_anchor` from `original_task`, `plan_state` from the live plan).
+    /// The `plan_state` is also mirrored to `conversation.metadata["plan_state"]`
+    /// (persisted + copied by every compressor) for legacy Q3 reseed on reload.
     async fn inject_pinned_blocks(&self, conv: &mut Conversation, state: &LoopState) {
-        conv.add_message(Message::system(crate::context_assembler::task_anchor_block(
-            &state.original_task,
-            &state.conversation.metadata,
-        )));
-        if let Some(plan) = &state.plan_state {
-            conv.add_message(Message::system(crate::context_assembler::plan_progress_block(
+        if let Some(ws) = &state.working_state {
+            conv.add_message(Message::system(
+                crate::context_assembler::task_anchor_block_from_working_state(ws),
+            ));
+            conv.add_message(Message::system(
+                crate::context_assembler::plan_progress_block_from_working_state(ws),
+            ));
+            let decisions = crate::context_assembler::decisions_block(ws);
+            if !decisions.is_empty() {
+                conv.add_message(Message::system(decisions));
+            }
+            let blockers = crate::context_assembler::blockers_block(ws);
+            if !blockers.is_empty() {
+                conv.add_message(Message::system(blockers));
+            }
+        } else {
+            // Legacy path — no WorkingStateStore configured (or no task bound).
+            conv.add_message(Message::system(crate::context_assembler::task_anchor_block(
                 &state.original_task,
-                plan,
+                &state.conversation.metadata,
             )));
+            if let Some(plan) = &state.plan_state {
+                conv.add_message(Message::system(crate::context_assembler::plan_progress_block(
+                    &state.original_task,
+                    plan,
+                )));
+            }
         }
         if self.config.inject_skills {
             if let Some(menu) = self.build_skill_menu().await {
@@ -4552,7 +4875,6 @@ mod dynamic_tool_prompt_tests {
             Arc::new(SubAgentFactoryNone),
             ContextAssembler::new(),
             IncrementalStreamParser::new(),
-            None,
             config,
         )
     }
@@ -4582,7 +4904,6 @@ mod dynamic_tool_prompt_tests {
             Arc::new(SubAgentFactoryNone),
             ContextAssembler::new(),
             IncrementalStreamParser::new(),
-            None,
             config,
         )
     }

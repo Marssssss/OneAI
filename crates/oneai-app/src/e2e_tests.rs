@@ -280,3 +280,115 @@ async fn e2e_app_session_compact_too_short_is_noop() {
     assert_eq!(session.conversation().messages.len(), 1);
     assert_eq!(session.conversation().messages[0].text_content(), "only message");
 }
+
+// ─── Cross-session working-state continuation ─────────────────────────────────
+
+/// A brand-new session must discover and surface an unfinished task left by a
+/// *previous* session — the core cross-session continuation deliverable. The
+/// new session does NOT read the old session's transcript; it reads the
+/// durable working-state store.
+#[tokio::test]
+async fn cross_session_unfinished_work_surfaced() {
+    use oneai_core::traits::WorkingStateStore;
+    use oneai_core::{Step, StepStatus, TaskEventPayload, TaskEventType};
+    use oneai_persistence::FileWorkingStateStore;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("ws");
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    // Seed an unfinished task as if a previous session left it — directly in
+    // the durable store (the new session never reads that session's
+    // conversation; it reads only this store).
+    let seed_store: Arc<dyn WorkingStateStore> =
+        Arc::new(FileWorkingStateStore::new(root.clone()));
+    let task_id = seed_store
+        .create_task("alice", &project, "ship feature X", "", "old_session")
+        .await
+        .unwrap();
+    seed_store
+        .append_event(
+            &task_id,
+            "old_session",
+            None,
+            TaskEventType::StepAdded,
+            TaskEventPayload::StepAdded {
+                step: Step {
+                    id: "1".into(),
+                    description: "write code".into(),
+                    status: StepStatus::Pending,
+                    depends_on: vec![],
+                    order: 1,
+                    active_form: None,
+                    updated_at: String::new(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    // A brand-new session (new id, no prior conversation) — its first run
+    // must surface the prior unfinished task to the MODEL (via the ephemeral
+    // `[Context: unfinished_work]` block on the inference request).
+    let mock_b = Arc::new(MockProvider::always_answers("ok"));
+    let provider_b: Arc<dyn LlmProvider> = mock_b.clone();
+    let app_b = AppBuilder::new()
+        .provider(provider_b)
+        .noop_interaction_gate()
+        .default_parser()
+        .working_state(root.clone())
+        .build()
+        .await
+        .expect("Build should succeed");
+    let mut session_b = app_b.create_session();
+    let _ = session_b
+        .run_agent(
+            "hello",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
+    let logs = mock_b.call_log().await;
+    assert!(!logs.is_empty(), "the loop must have inferred");
+    let req_text: String = logs[0]
+        .request
+        .conversation
+        .messages
+        .iter()
+        .map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        req_text.contains("Unfinished Work From Previous Sessions"),
+        "the model must see the prior unfinished-work block; got: {req_text}"
+    );
+    assert!(
+        req_text.contains("ship feature X"),
+        "the surfaced block must include the prior task's goal"
+    );
+
+    // Binding the new session to the prior task (continue_task) must rehydrate
+    // the goal — `original_task` / `task_anchor` metadata restored from the
+    // durable store, not the "continue" prompt.
+    let mut session_c = app_b.create_session();
+    session_c.continue_task(&task_id);
+    let _ = session_c
+        .run_agent(
+            "continue",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
+    // The durable task's goal must now be the pinned task anchor, carried in
+    // conversation metadata (the loop's hydrate_working_state restored it).
+    assert_eq!(
+        session_c.conversation().metadata.get("task_anchor"),
+        Some(&"ship feature X".to_string()),
+        "continue_task must restore the canonical goal from the working-state store"
+    );
+}

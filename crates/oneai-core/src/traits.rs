@@ -364,6 +364,72 @@ pub trait StatePersistence: Send + Sync {
     async fn delete_checkpoint(&self, id: &str) -> Result<()>;
 }
 
+// ─── WorkingStateStore ──────────────────────────────────────────────────────
+
+/// Durable store for agent **working state** — the cross-session "what am I
+/// working on" object (goal, steps/progress, decisions, blockers, notes).
+///
+/// Unlike `StatePersistence` (which snapshots full `AgentState` per session),
+/// `WorkingStateStore` persists working state **independently of any session
+/// transcript**, as an append-only per-task event log. This is what lets a
+/// brand-new session discover and continue an unfinished task from a previous
+/// session (reference doc §6.2): the new session reads this store, not the old
+/// session's conversation.
+///
+/// The in-memory `WorkingState` held in `LoopState` is a *projection* derived
+/// from the event log; this store is the source of truth. `append_event` is
+/// the only write path; `derive_state` rebuilds a projection from events
+/// (used on startup / crash recovery). The hot read path (per-turn pinned
+/// re-injection) uses the in-memory projection, not this store — so there is
+/// zero IO per turn.
+#[async_trait]
+pub trait WorkingStateStore: Send + Sync {
+    /// Create a new task, appending a `TaskCreated` event. Returns the new
+    /// task id.
+    async fn create_task(
+        &self,
+        user_id: &str,
+        project: &str,
+        goal: &str,
+        intent: &str,
+        session_id: &str,
+    ) -> Result<String>;
+
+    /// Get the full derived working state for a task (rebuild from events).
+    async fn get_task(&self, task_id: &str) -> Result<Option<WorkingState>>;
+
+    /// List open (Active / Paused) tasks for a (user, project) — reads the
+    /// lightweight index, does not derive each task. Cross-session discovery.
+    async fn list_open_tasks(
+        &self,
+        user_id: &str,
+        project: &str,
+    ) -> Result<Vec<TaskBrief>>;
+
+    /// Append one event to the task's log. The only write path. Also updates
+    /// the index. Returns the event id.
+    async fn append_event(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        parent_event_id: Option<&str>,
+        event_type: TaskEventType,
+        payload: TaskEventPayload,
+    ) -> Result<String>;
+
+    /// Rebuild the working-state projection from the event log (latest
+    /// `Snapshot` + tail). Used on startup / crash recovery.
+    async fn derive_state(&self, task_id: &str) -> Result<WorkingState>;
+
+    /// Fold old events into a `Snapshot` event when the log exceeds the
+    /// threshold, keeping `keep_recent` recent events. Idempotent / no-op
+    /// when under threshold.
+    async fn compact_if_needed(&self, task_id: &str) -> Result<()>;
+
+    /// Archive a task: gzip the event log, mark it `Archived` in the index.
+    async fn archive_task(&self, task_id: &str) -> Result<()>;
+}
+
 // ─── AgentState / CheckpointInfo ──────────────────────────────────────────────
 
 /// The full state of an agent session, for checkpointing.

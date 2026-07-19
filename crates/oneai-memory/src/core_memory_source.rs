@@ -119,6 +119,7 @@ mod tests {
             version: 1,
             superseded: false,
             superseded_at: None,
+            pinned: false,
         }
     }
 
