@@ -11,6 +11,7 @@ public sealed partial class SettingsDialog : ContentDialog
     public SettingsDialog()
     {
         InitializeComponent();
+        PrimaryButtonClick += OnPrimaryButtonClick;
         Loaded += (_, _) => SyncFromVm();
     }
 
@@ -35,7 +36,7 @@ public sealed partial class SettingsDialog : ContentDialog
         BaseUrlBox.Text = _vm.Provider.BaseUrl ?? "";
     }
 
-    protected override async void OnPrimaryButtonClick(ContentDialogButtonClickEventArgs args)
+    private async void OnPrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
     {
         args.Cancel = true; // keep open until rebuild finishes
         if (_vm == null) return;

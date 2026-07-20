@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- OneAI Windows (WinUI 3) app. Consumes oneai.dll (C facade) via P/Invoke.
+<!-- OneAI Windows (WinUI 3) app. Consumes oneai_native.dll (C facade) via P/Invoke.
      Build on a Windows machine with Visual Studio + the WindowsAppSDK
-     workload. The native oneai.dll is produced by scripts/build_windows.ps1
-     and staged at ../native/oneai.dll (copied to output here). -->
+     workload. The native oneai_native.dll is produced by scripts/build_windows.ps1
+     and staged at ../native/oneai_native.dll (copied to output here). -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -11,6 +11,24 @@
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
     <UseWinUI>true</UseWinUI>
+    <!-- Self-contained: bundle the Windows App SDK runtime DLLs alongside the
+         exe so the app runs on mainstream Windows machines WITHOUT requiring
+         the user to pre-install the "Windows App Runtime" framework package
+         (the redistributable that matches this SDK's minor, e.g. v1.8). Without
+         this, an unpackaged app's bootstrap fails at startup with
+         "Required components of the Windows App Runtime are missing Version 1.8".
+         The runtime native DLLs (Microsoft.WinUI.dll + Microsoft.Windows.*.dll)
+         are already copied to the output by the SDK targets; this flag flips
+         the bootstrap's auto-init to load them from the app dir instead of
+         probing for the framework package. Build/publish with a RID so the
+         RID-gated native assets are staged:
+           dotnet publish -r win-x64 -c Release
+         (or `dotnet build -r win-x64` for the dev loop). -->
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- XAML files (App.xaml + Views/*.xaml) are NOT listed explicitly below —
+         the WindowsAppSDK 1.8 / WinUI targets auto-glob *.xaml (App.xaml as
+         ApplicationDefinition, the rest as Page). Listing them explicitly on
+         1.8 causes NETSDK1022 / WMC1012 (duplicate items). -->
     <WindowsPackageType>None</WindowsPackageType>
     <EnableMsixTooling>false</EnableMsixTooling>
     <Nullable>enable</Nullable>
@@ -22,13 +40,20 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.*" />
-    <PackageReference Include="Microsoft.Windows.SDK.Build.Ref" Version="10.0.22621.*" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.*" />
+    <!-- Note: do NOT add Microsoft.Windows.SDK.Build.Ref — that package ID was
+         never published to nuget.org (registration API returns 404), and the
+         net8.0-windows10.0.19041.0 TFM already provides the full WinRT
+         projection. WindowsAppSDK pulls any further SDK refs it needs. -->
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Staged by scripts/build_windows.ps1 → platforms/windows/native/oneai.dll -->
-    <None Include="..\native\oneai.dll" Condition="Exists('..\native\oneai.dll')">
+    <!-- Staged by scripts/build_windows.ps1 → platforms/windows/native/oneai_native.dll.
+         Renamed from the crate's `oneai.dll` to avoid an NTFS case-insensitive
+         collision with this project's managed assembly `OneAI.dll` (same path on
+         Windows), which otherwise clobbers the native DLL and breaks every
+         P/Invoke into the C facade. -->
+    <None Include="..\native\oneai_native.dll" Condition="Exists('..\native\oneai_native.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="app.manifest" />
@@ -40,16 +65,5 @@
     <Content Include="Assets\app.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-  </ItemGroup>
-
-  <ItemGroup>
-    <ApplicationDefinition Include="App.xaml" />
-    <Page Include="MainWindow.xaml" />
-    <Page Include="Views\ChatView.xaml" />
-    <Page Include="Views\SettingsDialog.xaml" />
-    <Page Include="Views\ScenarioEditor.xaml" />
-    <Page Include="Views\CommandPalette.xaml" />
-    <Page Include="Views\ArtifactCanvas.xaml" />
-    <Page Include="Views\MarkdownTextBlock.xaml" />
   </ItemGroup>
 </Project>

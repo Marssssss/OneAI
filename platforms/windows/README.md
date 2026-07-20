@@ -3,23 +3,33 @@
 Native C# chat app — the Windows port of `platforms/android` / `platforms/macos`.
 Consumes the Rust `oneai-uniffi` core through a **hand-rolled `extern "C"` JSON
 facade** (`crates/oneai-uniffi/src/c_facade.rs`) because `uniffi-bindgen` 0.32
-has no C# generator. P/Invokes `oneai.dll`; all strings cross as UTF-8 so CJK
-(thinking text, answers) round-trips correctly.
+has no C# generator. P/Invokes `oneai_native.dll`; all strings cross as UTF-8 so CJK
+(thinking text, answers) round-trips correctly. The native DLL is staged as
+`oneai_native.dll` (not the crate's `oneai.dll`) to avoid an NTFS case-insensitive
+collision with the managed assembly `OneAI.dll` in the output dir; the
+`OneAiNative` P/Invoke `Dll` constant is `"oneai_native"` to match.
 
-## Build (on a Windows machine with Visual Studio + WindowsAppSDK workload)
+## Build (on a Windows machine with Visual Studio + WindowsAppSDK 1.8 workload)
 
 ```powershell
 # 1. Build the native oneai.dll (cdylib — exports both the uniffi symbols AND
-#    the c_facade extern "C" symbols). Stages it at platforms/windows/native/.
+#    the c_facade extern "C" symbols). Stages it at platforms/windows/native/
+#    as oneai_native.dll (renamed to avoid colliding with OneAI.dll on NTFS).
 pwsh ./scripts/build_windows.ps1
+# (release; add -DebugBuild for a debug build — note the switch is NOT -Debug,
+#  which collides with [CmdletBinding()]'s implicit common parameter)
 # (requires: rustup target add x86_64-pc-windows-msvc)
 
-# 2. Build the app in Visual Studio (open OneAI.sln) or via dotnet:
-dotnet build platforms\windows\OneAI.sln -c Debug
-# oneai.dll is copied to the output dir by the csproj (../native/oneai.dll).
+# 2. Build the app in Visual Studio (open OneAI.sln) or via dotnet — pass a RID
+#    so the RID-gated WindowsAppSDK runtime native assets are staged:
+dotnet build -r win-x64 platforms\windows\OneAI.sln -c Debug
+# oneai_native.dll is copied to the output dir by the csproj
+# (../native/oneai_native.dll). WindowsAppSDKSelfContained=true bundles the
+# runtime DLLs alongside the exe so no separate "Windows App Runtime"
+# framework-package install is required on the target machine.
 
-# 3. Run (unpackaged) — Visual Studio F5, or:
-dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug
+# 3. Run (unpackaged, self-contained) — Visual Studio F5, or:
+dotnet run --project platforms\windows\OneAI\OneAI.csproj -r win-x64 -c Debug
 ```
 
 ## Architecture
@@ -27,7 +37,7 @@ dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug
 ```
 OneAI/                      # the WinUI 3 app (net8.0-windows10.0.19041, unpackaged)
   Native/
-    OneAiNative.cs          # P/Invoke of oneai.dll (UTF-8 string marshalling) — single +
+    OneAiNative.cs          # P/Invoke of oneai_native.dll (UTF-8 string marshalling) — single +
                             # group-chat sessions
     Models.cs              # ChatEvent(+speaker) / SessionInfo / ChatMessage(+speaker) /
                             # ProviderConfig / AgentSpecDto / ScenarioSpecDto / ReviewLoopSpecDto DTOs
@@ -63,7 +73,7 @@ OneAI/                      # the WinUI 3 app (net8.0-windows10.0.19041, unpacka
     SettingsDialog.xaml(.cs)
     ChatTemplateSelector.cs
   OneAI.csproj / App.xaml(.cs) / app.manifest
-native/oneai.dll           # staged by build_windows.ps1 (gitignored)
+native/oneai_native.dll   # staged by build_windows.ps1 (gitignored; renamed from oneai.dll)
 ```
 
 The `extern "C"` contract is documented in `bindings/c/oneai_c.h` (now incl. group-chat
@@ -114,7 +124,12 @@ entry points + scenario JSON shape). JSON event shapes match `ChatEvent` in `Mod
   toolchain. The Rust c_facade itself is unit-tested on macOS (`cargo test -p
   oneai-uniffi c_facade`) and its symbols are confirmed exported from the
   cdylib, so the interop surface is verified; only the C#/XAML build is not.
-- `Microsoft.WindowsAppSDK` version pin (`1.5.*`) — adjust to whatever is
-  installed in your workload.
+- `Microsoft.WindowsAppSDK` version pin (`1.8.*`) — adjust to whatever is
+  installed in your workload. The app is built self-contained
+  (`WindowsAppSDKSelfContained=true`), so build/publish with a RID
+  (`-r win-x64`) to stage the runtime native assets. Do NOT add
+  `Microsoft.Windows.SDK.Build.Ref` — that package ID was never published to
+  nuget.org; the `net8.0-windows10.0.19041.0` TFM already provides the full
+  WinRT projection.
 - Share uses `DataTransferManager`; in unpackaged mode it works but the share
   UI requires a registered window — if it misbehaves, copy still works.

@@ -68,7 +68,7 @@ public sealed partial class ChatView : UserControl
         }
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e) => _ = Vm.Stop();
+    private void Stop_Click(object sender, RoutedEventArgs e) => Vm.Stop();
     private void Mic_Click(object sender, RoutedEventArgs e) { /* placeholder — voice dictation deferred */ }
 
     private void InputBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -138,8 +138,8 @@ public sealed partial class ChatView : UserControl
             {
                 var dp = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
                 dp.SetText(text);
+                dp.Properties.Title = "OneAI 回答";
                 args.Request.Data = dp;
-                args.Request.Properties.Title = "OneAI 回答";
             };
             DataTransferManager.ShowShareUI();
         }

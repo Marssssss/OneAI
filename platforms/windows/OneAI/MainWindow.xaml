@@ -9,7 +9,10 @@
     xmlns:vm="using:OneAI.ViewModels"
     xmlns:n="using:OneAI.Native"
     xmlns:views="using:OneAI.Views"
-    Title="OneAI" MinWidth="720" MinHeight="480" Width="1000" Height="680">
+    Title="OneAI">
+
+    <!-- WinUI 3 Window has no Width/Height/MinWidth/MinHeight XAML members
+         (WMC0011); initial size is set in the constructor via AppWindow.Resize. -->
 
     <Grid>
         <Grid.ColumnDefinitions>

@@ -13,6 +13,7 @@ using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
+using Microsoft.UI.Xaml;
 using Windows.System;
 using OneAI.Native;
 using OneAI.Services;
@@ -21,7 +22,7 @@ namespace OneAI.ViewModels;
 
 public class ChatViewModel : ObservableObject
 {
-    private readonly DispatcherQueue _dq;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dq;
     private IntPtr _app = IntPtr.Zero;
     private IntPtr _session = IntPtr.Zero;
     /// <summary>Group-chat session when CurrentScenario != null.</summary>
@@ -132,9 +133,14 @@ public class ChatViewModel : ObservableObject
 
     private string? _lastUserTask;
 
-    public ChatViewModel()
+    public ChatViewModel(Microsoft.UI.Dispatching.DispatcherQueue dq)
     {
-        _dq = DispatcherQueue.GetForCurrentThread() ?? throw new InvalidOperationException("VM must be created on UI thread");
+        // The DispatcherQueue is captured upstream in App.OnLaunched (before the
+        // Window's XAML loads) and passed in: WinUI 3's GetForCurrentThread()
+        // returns null on the UI thread after a Window's InitializeComponent()
+        // loads its XAML, even though the queue is still valid. We hold the live
+        // reference; TryEnqueue still marshals to the UI thread.
+        _dq = dq ?? throw new InvalidOperationException("VM must be created on UI thread");
         Provider = ProviderStore.Load();
     }
 
@@ -547,13 +553,13 @@ public class ChatViewModel : ObservableObject
 internal sealed class StreamCoalescer
 {
     private readonly ChatViewModel _vm;
-    private readonly DispatcherQueue _dq;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dq;
     private readonly object _lock = new();
     private readonly Queue<ChatEvent> _pendingHot = new();
     private bool _flushScheduled;
     private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(50);
 
-    public StreamCoalescer(ChatViewModel vm, DispatcherQueue dq) { _vm = vm; _dq = dq; }
+    public StreamCoalescer(ChatViewModel vm, Microsoft.UI.Dispatching.DispatcherQueue dq) { _vm = vm; _dq = dq; }
 
     public void OnEvent(ChatEvent ev)
     {

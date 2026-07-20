@@ -19,6 +19,7 @@ public sealed partial class ScenarioEditor : ContentDialog
         InitializeComponent();
         _scenario = scenario;
         _store = store;
+        PrimaryButtonClick += OnPrimaryButtonClick;
         Loaded += (_, _) => Populate();
     }
 
@@ -140,7 +141,7 @@ public sealed partial class ScenarioEditor : ContentDialog
     private void Debrief_Toggled(object sender, RoutedEventArgs e) =>
         DebriefPanel.Visibility = DebriefToggle.IsOn ? Visibility.Visible : Visibility.Collapsed;
 
-    protected override void OnPrimaryButtonClick(ContentDialogButtonClickEventArgs args)
+    private void OnPrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
     {
         args.Cancel = true; // validate then close
         // Read all controls back into _scenario.
@@ -165,7 +166,7 @@ public sealed partial class ScenarioEditor : ContentDialog
                 Id = c.Field.Id,
                 Label = c.LabelBox.Text,
                 Placeholder = string.IsNullOrWhiteSpace(c.PlaceBox.Text) ? null : c.PlaceBox.Text,
-                VisibleTo = c.VisibilityCombo.SelectedIndex <= 0 ? null : new List<string> { c.VisibleMemberId },
+                VisibleTo = c.VisibilityCombo.SelectedIndex <= 0 ? null : new List<string> { c.VisibilityMemberId },
             }).ToList(),
         };
         sc.TurnPolicy = PolicyScripted.IsChecked == true ? TurnPolicy.Scripted
@@ -194,7 +195,7 @@ public sealed partial class ScenarioEditor : ContentDialog
 }
 
 /// <summary>One editable agent card.</summary>
-internal sealed class AgentCard : Border
+internal sealed class AgentCard : ContentControl
 {
     public string Id { get; }
     public TextBox NameBox { get; }
@@ -218,7 +219,7 @@ internal sealed class AgentCard : Border
         AvatarBox = new TextBox { PlaceholderText = "头像(emoji)", Text = a.Avatar };
         ColorCombo = new ComboBox { Header = "配色", ItemsSource = new List<string>(ScenarioEditor.Palette) };
         ColorCombo.SelectedIndex = Math.Max(0, Array.IndexOf(ScenarioEditor.Palette, a.Color));
-        var del = new Button { Content = "🗑", Background = new SolidColorBrush(Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
+        var del = new Button { Content = "🗑", Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
         del.Click += (_, _) => { (Parent as Panel)?.Children.Remove(this); Deleted?.Invoke(); };
         var header = new Grid { ColumnDefinitions = { new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = GridLength.Auto } } };
         Grid.SetColumn(NameBox, 0); header.Children.Add(NameBox);
@@ -232,12 +233,12 @@ internal sealed class AgentCard : Border
         Grid.SetColumn(ColorCombo, 1); colorRow.Children.Add(ColorCombo);
         sp.Children.Add(colorRow);
         sp.Children.Add(AvatarBox);
-        Child = sp;
+        Content = sp;
     }
 }
 
 /// <summary>One editable topic-field card.</summary>
-internal sealed class FieldCard : Border
+internal sealed class FieldCard : ContentControl
 {
     public TopicField Field { get; }
     public TextBox LabelBox { get; }
@@ -259,7 +260,7 @@ internal sealed class FieldCard : Border
         LabelBox = new TextBox { PlaceholderText = "字段名", Text = f.Label };
         PlaceBox = new TextBox { PlaceholderText = "占位提示(可选)", Text = f.Placeholder ?? "" };
         VisibilityCombo = new ComboBox { Header = "可见性" };
-        var del = new Button { Content = "🗑", Background = new SolidColorBrush(Windows.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
+        var del = new Button { Content = "🗑", Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
         del.Click += (_, _) => { (Parent as Panel)?.Children.Remove(this); Deleted?.Invoke(); };
         var row = new Grid { ColumnDefinitions = { new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }, new ColumnDefinition { Width = GridLength.Auto } } };
         Grid.SetColumn(LabelBox, 0); row.Children.Add(LabelBox);
@@ -268,7 +269,7 @@ internal sealed class FieldCard : Border
         var sp = new StackPanel { Spacing = 4 };
         sp.Children.Add(row);
         sp.Children.Add(VisibilityCombo);
-        Child = sp;
+        Content = sp;
         RefreshVisibility();
     }
 

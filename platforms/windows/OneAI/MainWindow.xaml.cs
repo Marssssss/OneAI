@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Dispatching;
 using OneAI.ViewModels;
 using OneAI.Native;
 using OneAI.Views;
@@ -11,10 +12,20 @@ public sealed partial class MainWindow : Window
 {
     public ChatViewModel Vm { get; }
 
-    public MainWindow()
+    public MainWindow(DispatcherQueue dq)
     {
         InitializeComponent();
-        Vm = new ChatViewModel();
+        // WinUI 3's Microsoft.UI.Xaml.Window has no settable Width/Height/
+        // MinWidth/MinHeight — size via the underlying AppWindow. (DPI scaling
+        // left as a future refinement; raw client px for now.)
+        try
+        {
+            this.AppWindow.Resize(new Windows.Graphics.SizeInt32 { Width = 1000, Height = 680 });
+        }
+        catch { /* AppWindow may be unavailable before the window is shown */ }
+        // dq captured upstream in OnLaunched (see comment there) and passed in
+        // — GetForCurrentThread() would return null here post-InitializeComponent.
+        Vm = new ChatViewModel(dq);
         Chat.SetVm(Vm);
         _ = InitAsync();
     }

@@ -30,7 +30,7 @@ public sealed partial class MarkdownTextBlock : UserControl
 
     /// <summary>Threshold above which a code block shows the "open in canvas" button.</summary>
     private const int ArtifactThreshold = 600;
-    private static readonly Brush Transparent = new SolidColorBrush(Windows.UI.Colors.Transparent);
+    private static readonly Brush Transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
 
     public MarkdownTextBlock()
     {
@@ -217,7 +217,7 @@ public sealed partial class MarkdownTextBlock : UserControl
             {
                 Background = (Brush)Application.Current.Resources["ControlFillColorDefaultBrush"],
                 Padding = new Thickness(6),
-                Child = new TextBlock { Text = t.Header[c], FontWeight = Windows.UI.Text.FontWeights.SemiBold, FontSize = 13, TextWrapping = TextWrapping.Wrap },
+                Child = new TextBlock { Text = t.Header[c], FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, FontSize = 13, TextWrapping = TextWrapping.Wrap },
             };
             Grid.SetRow(cell, 0); Grid.SetColumn(cell, c);
             grid.Children.Add(cell);

@@ -7,7 +7,7 @@
 # Run on a Windows machine with Visual Studio (MSVC) + the rust target:
 #   rustup target add x86_64-pc-windows-msvc
 #   pwsh ./scripts/build_windows.ps1            # release
-#   pwsh ./scripts/build_windows.ps1 -Debug
+#   pwsh ./scripts/build_windows.ps1 -DebugBuild
 #
 # NOTE: uniffi-bindgen 0.32 has NO C# generator (only kotlin/swift/python/
 # ruby). The C# binding is therefore NOT auto-generated here. The app uses a
@@ -17,7 +17,10 @@
 # ──────────────────────────────────────────────────────────────────────
 [CmdletBinding()]
 param(
-  [switch]$Debug
+  # NOTE: do NOT name this `Debug` — `[CmdletBinding()]` already provides an
+  # implicit `-Debug` common-parameter switch, so re-declaring `param([switch]$Debug)`
+  # throws "ParameterNameAlreadyExistsForCommand". Use a distinct name.
+  [switch]$DebugBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,7 +32,7 @@ $Triple  = "x86_64-pc-windows-msvc"
 # Assigning to it throws "Cannot overwrite variable Profile because it is
 # read-only or a constant", which (with $ErrorActionPreference=Stop) aborts
 # the script before cargo even runs. Hence the explicit `$BuildProfile` name.
-$BuildProfile = if ($Debug) { "debug" } else { "release" }
+$BuildProfile = if ($DebugBuild) { "debug" } else { "release" }
 
 # --- prerequisites -----------------------------------------------------
 $ErrorActionPreference = "Stop"
@@ -62,8 +65,13 @@ if (-not (Test-Path -LiteralPath $Dll)) {
 
 $Out = Join-Path $WinDir "native"
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
-Copy-Item -Force -LiteralPath $Dll $Out
-Write-Host "-- Staged oneai.dll -> $Out"
+# Stage as oneai_native.dll — NOT oneai.dll. The crate emits oneai.dll, but the
+# C# app's managed assembly is also OneAI.dll; on case-insensitive NTFS those
+# collide in the output dir and the managed one clobbers the native, breaking
+# every P/Invoke (the OneAiNative DllName is "oneai_native" to match).
+$Dst = Join-Path $Out "oneai_native.dll"
+Copy-Item -Force -LiteralPath $Dll $Dst
+Write-Host "-- Staged oneai.dll -> $Dst (renamed to avoid NTFS case collision with OneAI.dll)"
 
 Write-Host ""
 Write-Host "-- Done. Open platforms/windows/OneAI.sln in Visual Studio to build the app,"

@@ -1,4 +1,4 @@
-# Native oneai.dll is staged by scripts/build_windows.ps1 (run on Windows).
+# Native oneai_native.dll is staged by scripts/build_windows.ps1 (run on Windows).
 # Dotnet build output. A fresh checkout runs build_windows.ps1 to populate.
 native/
 OneAI/bin/
