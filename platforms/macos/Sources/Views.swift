@@ -15,7 +15,7 @@ import AppKit
 /// dimensional blocks rather than flat letters. Same 5×7 per-character bitmap
 /// and the same per-character gradient hues (`Brand.charColors`) so the brand
 /// stays consistent across surfaces.
-struct BrandLogo: View {
+struct BrandLogo: View, Equatable {
     /// Edge length of one pixel tile (width).
     var cell: CGFloat = 5
     /// Gap between tiles (and between rows).
@@ -29,6 +29,30 @@ struct BrandLogo: View {
     var aspect: CGFloat = 1.4
 
     private var h: CGFloat { cell * aspect }
+
+    /// Per-char precomputed tile palette: top-lit face gradient, extrusion
+    /// side color, and shadow color. Computing these in `tile`'s body meant
+    /// every render re-parsed the hex string (`Color(hex:)` → `Scanner`),
+    /// re-ran `mixedLight()` (an `NSColor` color-space conversion) and rebuilt
+    /// the `LinearGradient` — for ~85 filled tiles across 5 chars. The top-bar
+    /// logo re-evaluates its body on every `streamTick` flush (≈20 fps while
+    /// streaming) and on every window resize, so that per-tile work dominated
+    /// those passes. Precomputing once turns a render into pure shape work.
+    private struct TilePalette {
+        let face: LinearGradient
+        let side: Color
+        let shadow: Color
+    }
+    private static let palettes: [TilePalette] = Brand.charColors.indices.map { i in
+        let base = Color(hex: String(Brand.charColors[i], radix: 16))
+        let darker = base.opacity(0.55)
+        return TilePalette(
+            face: LinearGradient(colors: [base.mixedLight(), base, darker],
+                                 startPoint: .top, endPoint: .bottom),
+            side: darker,
+            shadow: base.opacity(0.35)
+        )
+    }
 
     /// 5 chars × 5 rows × 7 cols. Each char's leading column is empty, giving
     /// natural intra-word spacing (mirrors the TUI pattern verbatim).
@@ -86,33 +110,38 @@ struct BrandLogo: View {
         }
     }
 
+    // Params are constant at each call site, so equality holds across the
+    // parent's streamTick/resize re-renders → `.equatable()` skips `body`
+    // entirely after the first render. That's the win: 0 tile work per flush.
+    static func == (lhs: BrandLogo, rhs: BrandLogo) -> Bool {
+        lhs.cell == rhs.cell && lhs.gap == rhs.gap
+            && lhs.depth == rhs.depth && lhs.aspect == rhs.aspect
+    }
+
     /// One raised pixel: a darker "side" face offset below the front gradient
     /// face, plus a thin top highlight and a soft shadow. The two-layer ZStack
     /// is what turns a flat square into an extruded 3D block.
     private func tile(charIdx: Int, radius: CGFloat) -> some View {
-        let base = Brand.color(charIdx)
-        let darker = base.opacity(0.55)
-        let lighter = Color.white.opacity(0.35)
+        let p = Self.palettes[charIdx]
         return ZStack(alignment: .top) {
             // extrusion side — sits behind/below the front face
             RoundedRectangle(cornerRadius: radius)
-                .fill(darker)
+                .fill(p.side)
                 .frame(width: cell, height: h)
                 .offset(y: depth)
-            // front face with a top-lit gradient
+            // front face with a top-lit gradient (precomputed per char)
             RoundedRectangle(cornerRadius: radius)
-                .fill(LinearGradient(colors: [base.mixedLight(), base, darker],
-                                     startPoint: .top, endPoint: .bottom))
+                .fill(p.face)
                 .frame(width: cell, height: h)
                 .overlay(alignment: .top) {
                     RoundedRectangle(cornerRadius: radius)
-                        .fill(lighter)
+                        .fill(Color.white.opacity(0.35))
                         .frame(width: cell, height: h * 0.45)
                         .opacity(0.5)
                 }
         }
         .frame(width: cell, height: h + depth)
-        .shadow(color: base.opacity(0.35), radius: cell * 0.25, x: 0, y: depth)
+        .shadow(color: p.shadow, radius: cell * 0.25, x: 0, y: depth)
     }
 }
 
@@ -143,7 +172,7 @@ struct ChatScreen: View {
                     onDelete: { pendingDeleteId = $0 })
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } detail: {
-            ChatDetail(vm: vm, onOpenSettings: { showSettings = true })
+            ChatDetail(vm: vm, streamTick: vm.streamTick, onOpenSettings: { showSettings = true })
                 .environmentObject(artifacts)
         }
         .environmentObject(artifacts)
@@ -249,6 +278,7 @@ private struct Sidebar: View {
                 ScenarioRow(scenario: sc, isCurrent: vm.currentScenario?.id == sc.id) {
                     startScenario(sc)
                 }
+                .equatable()
                 .contextMenu {
                     Button("编辑场景") { sheet = .editScenario(sc) }
                     Button("删除场景", role: .destructive) { vm.agentStore.delete(sc) }
@@ -279,6 +309,7 @@ private struct Sidebar: View {
                     SessionRow(info: s, isCurrent: s.id == vm.currentSessionId,
                                onTap: { Task { await vm.loadSession(s.id) } },
                                onDelete: { onDelete(s.id) })
+                        .equatable()
                 }
             }
         }
@@ -348,11 +379,19 @@ private struct SidebarSection<Content: View>: View {
     }
 }
 
-private struct ScenarioRow: View {
+private struct ScenarioRow: View, Equatable {
     let scenario: Scenario
     let isCurrent: Bool
     let onTap: () -> Void
     @State private var hovered = false
+    // Equatable so `.equatable()` skips `body` when the row's data is unchanged
+    // — the Sidebar re-renders on any VM @Published change, but a scenario row
+    // only needs to re-render when ITS scenario or the current-selection flag
+    // changed. The closure isn't part of ==; it's recaptured only when the
+    // data DID change (so an edited scenario's tap uses the fresh value).
+    static func == (lhs: ScenarioRow, rhs: ScenarioRow) -> Bool {
+        lhs.scenario == rhs.scenario && lhs.isCurrent == rhs.isCurrent
+    }
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
@@ -462,12 +501,21 @@ struct TopicIntakeView: View {
     }
 }
 
-private struct SessionRow: View {
+private struct SessionRow: View, Equatable {
     let info: SessionInfoView
     let isCurrent: Bool
     let onTap: () -> Void
     let onDelete: () -> Void
     @State private var hovered = false
+    // Equatable so `.equatable()` skips `body` when the row is unchanged. The
+    // Sidebar re-renders on VM @Published changes; a session row only needs to
+    // re-render when ITS info (messageCount / updatedAtMs) or selection flag
+    // changed. SessionInfoView is Equatable (uniffi-generated). Closures aren't
+    // part of ==; recaptured only when info changes (so a re-sorted row's tap
+    // uses the fresh id).
+    static func == (lhs: SessionRow, rhs: SessionRow) -> Bool {
+        lhs.info == rhs.info && lhs.isCurrent == rhs.isCurrent
+    }
     var body: some View {
         Button(action: onTap) {
             HStack(alignment: .center) {
@@ -529,6 +577,10 @@ private struct ViewportBottomKey: PreferenceKey {
 
 private struct ChatDetail: View {
     @ObservedObject var vm: ChatViewModel
+    /// Observed in ADDITION to `vm` so the streaming bubble re-renders on
+    /// each token without firing `vm.objectWillChange` (which would re-render
+    /// the Sidebar too). See `StreamTick`.
+    @ObservedObject var streamTick: StreamTick
     @EnvironmentObject var artifacts: ArtifactStore
     let onOpenSettings: () -> Void
     @State private var stickToBottom = true
@@ -589,7 +641,7 @@ private struct ChatDetail: View {
                     // "会话" sidebar title is gone). 3D pixel tiles match the TUI
                     // brand; the slogan sits beside it.
                     HStack(spacing: 10) {
-                        BrandLogo(cell: 4.5, gap: 1, depth: 1)
+                        BrandLogo(cell: 4.5, gap: 1, depth: 1).equatable()
                         Text("One AI, Every Platform")
                             .font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
                     }
@@ -656,7 +708,7 @@ private struct ChatDetail: View {
                     else if dist < 80 { stickToBottom = true }
                 }
                 .onPreferenceChange(ViewportBottomKey.self) { viewportBottom = $0 }
-                .onChange(of: vm.streamTick) { _ in
+                .onChange(of: streamTick.value) { _ in
                     // Non-animated snap. `withAnimation` here stacks ~20×/sec
                     // during streaming and forces extra layout passes, which
                     // visibly jitters the chat (the "上下晃动" + scrollbar
@@ -719,22 +771,25 @@ private struct WelcomeScreen: View {
     @ObservedObject var vm: ChatViewModel
     let onOpenSettings: () -> Void
 
-    private struct Suggestion: Identifiable { let id = UUID(); let icon: String; let text: String }
+    private struct Suggestion: Identifiable { let id: UUID; let icon: String; let text: String }
 
-    private var suggestions: [Suggestion] {
-        [
-            .init(icon: "doc.text.magnifyingglass", text: "帮我总结一段笔记的核心要点"),
-            .init(icon: "hammer", text: "用 Rust 写一个读取 JSON 的命令行小工具"),
-            .init(icon: "globe", text: "解释一下 Agent 与 RAG 的区别"),
-            .init(icon: "sparkles", text: "把这段话改写得更简洁专业"),
-        ]
-    }
+    /// Stable across renders. A computed `var` with `let id = UUID()` minted
+    /// fresh UUIDs every body evaluation — and the welcome screen re-renders on
+    /// every keystroke in the input bar (vm.input is @Published), so the whole
+    /// suggestion list was rebuilt per character typed. A `static let` builds
+    /// it once.
+    private static let suggestions: [Suggestion] = [
+        .init(id: UUID(), icon: "doc.text.magnifyingglass", text: "帮我总结一段笔记的核心要点"),
+        .init(id: UUID(), icon: "hammer", text: "用 Rust 写一个读取 JSON 的命令行小工具"),
+        .init(id: UUID(), icon: "globe", text: "解释一下 Agent 与 RAG 的区别"),
+        .init(id: UUID(), icon: "sparkles", text: "把这段话改写得更简洁专业"),
+    ]
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
                 Color.clear.frame(height: 4)
-                BrandLogo(cell: 8, gap: 1.5, depth: 1.5)
+                BrandLogo(cell: 8, gap: 1.5, depth: 1.5).equatable()
                 VStack(spacing: 2) {
                     Text("One AI, Every Platform")
                         .font(.oSubheadline.weight(.semibold)).foregroundStyle(Theme.onBg)
@@ -750,11 +805,10 @@ private struct WelcomeScreen: View {
                     }
                     .buttonStyle(.plain).pointerCursor()
                 }
-                // 2-column grid so all suggestions fit above the input bar
-                // without scrolling on a default-size window.
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
-                                    GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    ForEach(suggestions) { s in
+                // Stacked vertically (one full-width row per suggestion) —
+                // not the old 2-column grid. Each row is a single prompt.
+                VStack(spacing: 8) {
+                    ForEach(Self.suggestions) { s in
                         Button {
                             let t = s.text
                             vm.input = ""
@@ -1430,15 +1484,29 @@ private struct SettingsSheet: View {
     @ObservedObject var vm: ChatViewModel
     let onClose: () -> Void
 
+    // Local @State mirrors of the provider/embedding config. Editing a
+    // @Published field directly on `vm` ($vm.baseUrl / $vm.apiKey / …) fired
+    // vm.objectWillChange on EVERY keystroke → the whole ChatScreen (sidebar +
+    // message list + every visible markdown bubble) re-rendered per character
+    // typed, which is the "设置弹框卡顿" the user saw. Local @State keeps
+    // keystroke churn inside this sheet; nothing reaches `vm` until 保存.
+    @State private var baseUrl = ""
+    @State private var apiKey = ""
+    @State private var model = ""
+    @State private var embProvider = "auto"
+    @State private var embModel = ""
+    @State private var embApiKey = ""
+    @State private var embBaseUrl = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Provider 设置").font(.oHeadline)
-            TextField("base url (如 https://api.openai.com/v1;留空=默认)", text: $vm.baseUrl)
+            TextField("base url (如 https://api.openai.com/v1;留空=默认)", text: $baseUrl)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
-            SecureField("api key (openai / anthropic)", text: $vm.apiKey).textFieldStyle(.roundedBorder)
+            SecureField("api key (openai / anthropic)", text: $apiKey).textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
-            TextField("model (如 gpt-4o-mini / claude-sonnet-4-6 / llama3)", text: $vm.model)
+            TextField("model (如 gpt-4o-mini / claude-sonnet-4-6 / llama3)", text: $model)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
             // The provider protocol (kind) is inferred from the base url so the
@@ -1451,19 +1519,19 @@ private struct SettingsSheet: View {
             Divider().padding(.vertical, 4)
 
             Text("Embedding 设置(记忆语义召回;默认 auto,通常无需改动)").font(.oHeadline)
-            Picker("provider", selection: $vm.embProvider) {
+            Picker("provider", selection: $embProvider) {
                 ForEach(["auto", "openai", "voyage", "ollama", "fastembed", "openai-compat"], id: \.self) {
                     Text($0).tag($0)
                 }
             }
             .pickerStyle(.menu)
-            TextField("model (空 = provider 默认)", text: $vm.embModel)
+            TextField("model (空 = provider 默认)", text: $embModel)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
-            SecureField("embedding api key (VOYAGE_API_KEY / OPENAI_API_KEY)", text: $vm.embApiKey)
+            SecureField("embedding api key (VOYAGE_API_KEY / OPENAI_API_KEY)", text: $embApiKey)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
-            TextField("base url (openai-compat 必填;ollama → host:port)", text: $vm.embBaseUrl)
+            TextField("base url (openai-compat 必填;ollama → host:port)", text: $embBaseUrl)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
             Text("auto 探测链:openai-compat → voyage → openai → ollama → fastembed;全无可用时降级为关键词召回。embedding key 与主模型 key 相互独立。")
@@ -1473,6 +1541,16 @@ private struct SettingsSheet: View {
                 Spacer()
                 Button("保存") {
                     Task {
+                        // Commit the local draft to the VM in one shot, then
+                        // rebuild — a single objectWillChange burst instead of
+                        // a per-keystroke flood.
+                        vm.baseUrl = baseUrl
+                        vm.apiKey = apiKey
+                        vm.model = model
+                        vm.embProvider = embProvider
+                        vm.embModel = embModel
+                        vm.embApiKey = embApiKey
+                        vm.embBaseUrl = embBaseUrl
                         vm.saveConfig()
                         await vm.rebuildApp()
                         onClose()
@@ -1483,5 +1561,16 @@ private struct SettingsSheet: View {
         }
         .frame(width: 460)
         .padding(16)
+        .onAppear {
+            // Seed the local fields once when the sheet opens. Subsequent
+            // edits stay local; only 保存 writes back.
+            baseUrl = vm.baseUrl
+            apiKey = vm.apiKey
+            model = vm.model
+            embProvider = vm.embProvider
+            embModel = vm.embModel
+            embApiKey = vm.embApiKey
+            embBaseUrl = vm.embBaseUrl
+        }
     }
 }

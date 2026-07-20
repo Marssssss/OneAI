@@ -200,6 +200,20 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
 
 // MARK: - View model
 
+/// High-frequency streaming tick, isolated on its OWN ObservableObject.
+///
+/// Why not a `@Published var streamTick` on `ChatViewModel` directly: every
+/// hot-path token (~20 fps while streaming) bumps it, and `@Published` would
+/// fire `ChatViewModel.objectWillChange` — which re-renders EVERY view that
+/// observes the VM: the Sidebar (all session + scenario rows) and the top bar,
+/// on every token. By isolating the tick, only views that explicitly observe
+/// `vm.streamTick` re-render on a token; the Sidebar (which observes the VM
+/// only) stays put during streaming. The streaming bubble still refreshes
+/// because `ChatDetail` observes `vm.streamTick` in addition to the VM.
+final class StreamTick: ObservableObject {
+    @Published var value: Int64 = 0
+}
+
 final class ChatViewModel: ObservableObject {
     private let prefs = UserDefaults(suiteName: "oneai_provider") ?? .standard
 
@@ -230,7 +244,10 @@ final class ChatViewModel: ObservableObject {
     @Published var input = ""
     @Published var running = false
     @Published var error: String? = nil
-    @Published var streamTick: Int64 = 0
+    /// High-frequency streaming tick. Isolated on `StreamTick` (not a
+    /// @Published field here) so token-driven bumps don't re-render the
+    /// Sidebar/top bar — see `StreamTick`.
+    let streamTick = StreamTick()
     @Published var currentSessionId: String? = nil
     /// Multi-agent scenario library (presets + user-edited).
     @Published var agentStore = AgentStore()
@@ -367,20 +384,48 @@ final class ChatViewModel: ObservableObject {
 
     func rebuildApp() async {
         let savedScenario = currentScenario
+        // The user may be sitting on the scenario topic-intake page
+        // (`pendingScenario` set, `currentScenario` not yet — it's only
+        // assigned once the intake is confirmed). Saving settings from EITHER
+        // surface must return there, not jump to `sessions.first`. Capture
+        // both; restore the intake page in place when it was open.
+        let savedPending = pendingScenario
+        // Was the user on a real conversation (history loaded / messages
+        // exchanged), or on the empty welcome screen? The cold-start `.task`
+        // deliberately opens a fresh single-agent chat — NOT the most recent
+        // history — so the welcome screen shows. rebuildApp must preserve that:
+        // saving settings from the welcome screen must NOT yank the user to
+        // `sessions.first` (the last history). We reload the SAME session only
+        // when a real conversation was open; otherwise we start fresh again.
+        let savedSessionId = currentSessionId
+        let hadConversation = !items.isEmpty
+        // Tear down ONLY the engine refs (app/session/groupSession) — these
+        // are not displayed, so nilling them is invisible. Visible state
+        // (items / currentScenario / currentSessionId / debriefActive / error)
+        // is left intact through the async rebuild so the screen does NOT flash
+        // to the welcome page mid-rebuild (macOS sheets dim-but-show the
+        // underlying content, so an `items.removeAll()` here was visible as a
+        // welcome-page flash before loadSession repopulated). The chosen route
+        // below replaces the visible state atomically once the new app is ready.
+        // Routes also clear pendingScenario themselves, so it's intentionally
+        // NOT cleared here — that's what lets the topic-intake page survive.
         app = nil
         session = nil
         groupSession = nil
-        currentSessionId = nil
-        currentScenario = nil
-        debriefActive = false
-        items.removeAll()
-        error = nil
         await ensureApp()
         await refreshSessions()
         if let saved = savedScenario {
             await newConversation(scenario: saved)
-        } else if let cur = sessions.first {
-            await loadSession(cur.id)
+        } else if savedPending != nil {
+            // The topic-intake page was open. pendingScenario was NOT cleared
+            // above, so `detailContent` keeps rendering TopicIntakeView across
+            // the rebuild — its half-filled @State survives because the view
+            // never left the hierarchy. Nothing to do here except NOT fall
+            // through to newConversation/loadSession (which would jump the
+            // user off the intake page).
+        } else if hadConversation, let id = savedSessionId,
+                  sessions.contains(where: { $0.id == id }) {
+            await loadSession(id)
         } else {
             await newConversation()
         }
@@ -519,28 +564,43 @@ final class ChatViewModel: ObservableObject {
         groupSession = nil
         debriefActive = false
         let s = await a.createSessionWithId(id: id)
-        session = s
-        currentSessionId = s.sessionId()
-        items.removeAll()
-        error = nil
-        lastUserTask = nil
         let msgs = await s.messages()
+        // Build the entry list off the main thread, then publish ONCE. Mutating
+        // `items` per message (N @Published sends + N ForEach diff passes) is
+        // what made switching to a long conversation stutter; a single
+        // assignment coalesces to one objectWillChange + one render.
+        var rebuilt: [ChatEntry] = []
+        var lastTask: String? = nil
+        rebuilt.reserveCapacity(msgs.count)
         for m in msgs {
             switch m.role {
             case "user":
-                if !m.text.isEmpty { items.append(.user(UserItem(text: m.text))); lastUserTask = m.text }
+                if !m.text.isEmpty {
+                    rebuilt.append(.user(UserItem(text: m.text)))
+                    lastTask = m.text
+                }
             case "assistant":
                 if !m.text.isEmpty {
                     let item = AssistantItem()
                     item.speakerId = m.speaker   // nil for single-agent
                     item.text = m.text
                     item.done = true
-                    items.append(.assistant(item))
+                    rebuilt.append(.assistant(item))
                 }
             default: break // system / tool — not replayed
             }
         }
-        streamTick += 1
+        // Publishing @Published state must land on the main thread; an async
+        // non-isolated method resumes on a generic executor after the awaits
+        // above, so hop back before touching UI state.
+        await MainActor.run {
+            session = s
+            currentSessionId = s.sessionId()
+            items = rebuilt
+            lastUserTask = lastTask
+            error = nil
+            streamTick.value += 1
+        }
     }
 
     func deleteSession(_ id: String) async {
@@ -641,7 +701,7 @@ final class ChatViewModel: ObservableObject {
         } else {
             lastStreamFlush = Date.distantPast   // reset window; next hot event flushes
         }
-        streamTick += 1
+        streamTick.value += 1
     }
 
     /// Extract the speaker id from any event variant (nil = single-agent).
