@@ -9,7 +9,13 @@ struct ScenarioEditor: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(spacing: 12) {
+            // Scrollable editor body — adding actors / fields / debrief can grow
+            // the form past the fixed sheet height; without a ScrollView the
+            // overflow was clipped (users couldn't reach fields off the bottom).
+            // The action row stays pinned below the scroll area.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
             HStack {
                 TextField("场景名", text: $scenario.name).textFieldStyle(.roundedBorder)
                 Picker("", selection: $scenario.icon) {
@@ -162,7 +168,10 @@ struct ScenarioEditor: View {
                 get: { scenario.openerLine ?? "" },
                 set: { scenario.openerLine = $0.isEmpty ? nil : $0 }
             )).textFieldStyle(.roundedBorder)
+                }   // close inner editor VStack
+            }   // close ScrollView
 
+            Divider()
             HStack {
                 Spacer()
                 Button("取消", role: .cancel, action: onClose).keyboardShortcut(.escape)

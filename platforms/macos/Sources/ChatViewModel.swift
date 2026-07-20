@@ -203,7 +203,14 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
 final class ChatViewModel: ObservableObject {
     private let prefs = UserDefaults(suiteName: "oneai_provider") ?? .standard
 
-    @Published var kind: String
+    /// Protocol inferred from `baseUrl` (issue 1: the user no longer picks a
+    /// `kind` in Settings — only base url / api key / model). Detection:
+    ///   • url mentions `anthropic`            → "anthropic"
+    ///   • url mentions `ollama` or `:11434`    → "ollama"
+    ///   • otherwise (incl. blank + OpenAI-compat relays) → "openai"
+    /// Blank base url + a key → openai default endpoint. A blank base url with
+    /// no key still reports openai so `needsKeyConfig` can prompt.
+    var kind: String { Self.inferKind(baseUrl: baseUrl) }
     @Published var model: String
     @Published var apiKey: String
     @Published var baseUrl: String
@@ -248,6 +255,14 @@ final class ChatViewModel: ObservableObject {
         (kind == "openai" || kind == "anthropic") && apiKey.isEmpty
     }
 
+    /// Map a base url to a provider kind. See `kind` for the rules.
+    static func inferKind(baseUrl: String) -> String {
+        let url = baseUrl.lowercased()
+        if url.contains("anthropic") { return "anthropic" }
+        if url.contains("ollama") || url.contains(":11434") { return "ollama" }
+        return "openai"
+    }
+
     private var lastUserTask: String? = nil
     private var app: OneAiApp? = nil
     private var session: OneAiSession? = nil
@@ -271,11 +286,10 @@ final class ChatViewModel: ObservableObject {
 
     init() {
         let p = UserDefaults(suiteName: "oneai_provider") ?? .standard
-        kind = p.string(forKey: "kind") ?? "openai"
         model = p.string(forKey: "model") ?? "gpt-4o-mini"
         apiKey = p.string(forKey: "apiKey") ?? ""
         baseUrl = p.string(forKey: "baseUrl") ?? ""
-        prefs.register(defaults: ["kind": "openai", "model": "gpt-4o-mini"])
+        prefs.register(defaults: ["model": "gpt-4o-mini"])
         embProvider = embPrefs.string(forKey: "provider") ?? "auto"
         embModel = embPrefs.string(forKey: "model") ?? ""
         embApiKey = embPrefs.string(forKey: "apiKey") ?? ""
@@ -285,19 +299,7 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Provider config
 
-    func applyProviderPreset(_ newKind: String) {
-        guard newKind != kind else { return }
-        kind = newKind
-        switch newKind {
-        case "openai":     model = "gpt-4o-mini"; baseUrl = ""
-        case "anthropic":  model = "claude-sonnet-4-6"; baseUrl = ""
-        case "ollama":     model = "llama3"; baseUrl = "127.0.0.1:11434"
-        default: break
-        }
-    }
-
     func saveConfig() {
-        prefs.set(kind, forKey: "kind")
         prefs.set(model, forKey: "model")
         prefs.set(apiKey, forKey: "apiKey")
         prefs.set(baseUrl, forKey: "baseUrl")
@@ -422,6 +424,10 @@ final class ChatViewModel: ObservableObject {
     /// round (e.g. writing workshop → writer drafts).
     func newConversation(scenario: Scenario?, topicValues: [String: String]?) async {
         guard let a = app else { return }
+        // Clear any pending scenario-intake page so navigating to a new chat
+        // (or loading history) doesn't leave the detail stuck on the topic
+        // form — `detailContent` renders the intake whenever this is non-nil.
+        pendingScenario = nil
         currentScenario = scenario
         groupSession = nil
         activeSpeakerItem = nil
@@ -506,6 +512,9 @@ final class ChatViewModel: ObservableObject {
     /// group chats are created fresh per conversation in v1).
     func loadSession(_ id: String) async {
         guard let a = app else { return }
+        // Same guard as newConversation: drop a pending scenario-intake page so
+        // the loaded history actually shows instead of the topic form.
+        pendingScenario = nil
         currentScenario = nil
         groupSession = nil
         debriefActive = false

@@ -32,6 +32,23 @@ enum Theme {
     static let errorC       = adaptive(light: 0xE5484D, dark: 0xFF6B6E)
 }
 
+// ── OneAI brand palette (mirrors the TUI's per-character gradient — see
+// examples/cli/src/tui/render/brand.rs + theme.rs). Same hues so the macOS app
+// and the TUI read as one brand; the macOS version renders each filled pixel as
+// an extruded 3D tile instead of a flat block.
+enum Brand {
+    /// Per-character gradient colors for "OneAI": O, n, e, A, I.
+    static let charColors: [UInt32] = [
+        0xD07C7C,  // O — coral
+        0x62B0BC,  // n — teal
+        0x6EA0C8,  // e — muted blue
+        0x96C47A,  // A — sage
+        0xD6B660,  // I — gold
+    ]
+    /// Solid brand color for a character index (used as the tile's base face).
+    static func color(_ idx: Int) -> Color { Color(hex: String(charColors[idx], radix: 16)) }
+}
+
 // ── Color(hex:) — parse "#RRGGBB" / "RRGGBB" hex strings (per-agent colors) ─
 extension Color {
     init(hex: String) {

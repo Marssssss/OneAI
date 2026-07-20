@@ -6,6 +6,121 @@
 import SwiftUI
 import AppKit
 
+// MARK: - 3D pixel-block brand logo
+
+/// The OneAI wordmark as extruded 3D pixel tiles — the macOS counterpart of the
+/// TUI's colorful block-art brand (examples/cli/src/tui/render/brand.rs). The
+/// TUI paints flat background-colored cells; here each filled cell is a raised
+/// tile (gradient face + offset depth side + shadow) so the logo reads as
+/// dimensional blocks rather than flat letters. Same 5×7 per-character bitmap
+/// and the same per-character gradient hues (`Brand.charColors`) so the brand
+/// stays consistent across surfaces.
+struct BrandLogo: View {
+    /// Edge length of one pixel tile.
+    var cell: CGFloat = 5
+    /// Gap between tiles (and between rows).
+    var gap: CGFloat = 1
+    /// Extrusion depth — how far the side face drops below the front face.
+    var depth: CGFloat = 1
+
+    /// 5 chars × 5 rows × 7 cols. Each char's leading column is empty, giving
+    /// natural intra-word spacing (mirrors the TUI pattern verbatim).
+    private static let patterns: [[[Bool]]] = [
+        // O
+        [[false,true, true, true, true, true, true ],
+         [false,true, true, false,false,true, true ],
+         [false,true, true, false,false,true, true ],
+         [false,true, true, false,false,true, true ],
+         [false,true, true, true, true, true, true ]],
+        // n
+        [[false,true, true, true, true, true, false],
+         [false,true, true, false,true, true, false],
+         [false,true, true, false,true, true, false],
+         [false,true, true, false,true, true, false],
+         [false,true, true, false,true, true, false]],
+        // e
+        [[false,true, true, true, true, true, true ],
+         [false,true, true, false,false,false,false],
+         [false,true, true, true, true, false,false],
+         [false,true, true, false,false,false,false],
+         [false,true, true, true, true, true, true ]],
+        // A
+        [[false,false,false,true, true, false,false],
+         [false,false,true, true, true, true, false],
+         [false,true, true, true, true, true, true ],
+         [false,true, true, false,false,true, true ],
+         [false,true, true, false,false,true, true ]],
+        // I
+        [[false,true, true, true, true, true, true ],
+         [false,false,false,true, true, false,false],
+         [false,false,false,true, true, false,false],
+         [false,false,false,true, true, false,false],
+         [false,true, true, true, true, true, true ]],
+    ]
+
+    var body: some View {
+        let r = cell * 0.22
+        VStack(spacing: gap) {
+            ForEach(0..<5, id: \.self) { row in
+                HStack(spacing: 0) {
+                    ForEach(0..<5, id: \.self) { ch in
+                        HStack(spacing: gap) {
+                            ForEach(0..<7, id: \.self) { col in
+                                if Self.patterns[ch][row][col] {
+                                    tile(charIdx: ch, radius: r)
+                                } else {
+                                    Color.clear.frame(width: cell, height: cell)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One raised pixel: a darker "side" face offset below the front gradient
+    /// face, plus a thin top highlight and a soft shadow. The two-layer ZStack
+    /// is what turns a flat square into an extruded 3D block.
+    private func tile(charIdx: Int, radius: CGFloat) -> some View {
+        let base = Brand.color(charIdx)
+        let darker = base.opacity(0.55)
+        let lighter = Color.white.opacity(0.35)
+        return ZStack(alignment: .top) {
+            // extrusion side — sits behind/below the front face
+            RoundedRectangle(cornerRadius: radius)
+                .fill(darker)
+                .frame(width: cell, height: cell)
+                .offset(y: depth)
+            // front face with a top-lit gradient
+            RoundedRectangle(cornerRadius: radius)
+                .fill(LinearGradient(colors: [base.mixedLight(), base, darker],
+                                     startPoint: .top, endPoint: .bottom))
+                .frame(width: cell, height: cell)
+                .overlay(alignment: .top) {
+                    RoundedRectangle(cornerRadius: radius)
+                        .fill(lighter)
+                        .frame(width: cell, height: cell * 0.45)
+                        .opacity(0.5)
+                }
+        }
+        .frame(width: cell, height: cell + depth)
+        .shadow(color: base.opacity(0.35), radius: cell * 0.25, x: 0, y: depth)
+    }
+}
+
+/// Mix a color toward white (used for the tile's top-lit gradient stop). SwiftUI
+/// has no public `mix(with:)`; this is a tiny manual blend.
+private extension Color {
+    func mixedLight(_ amount: CGFloat = 0.35) -> Color {
+        let ns = NSColor(self).usingColorSpace(.sRGB) ?? NSColor(self)
+        let r = ns.redComponent + (1 - ns.redComponent) * amount
+        let g = ns.greenComponent + (1 - ns.greenComponent) * amount
+        let b = ns.blueComponent + (1 - ns.blueComponent) * amount
+        return Color(NSColor(srgbRed: r, green: g, blue: b, alpha: 1))
+    }
+}
+
 // MARK: - Root screen
 
 struct ChatScreen: View {
@@ -40,11 +155,10 @@ struct ChatScreen: View {
         .task {
             await vm.ensureApp()
             await vm.refreshSessions()
-            if let mostRecent = vm.sessions.first {
-                await vm.loadSession(mostRecent.id)
-            } else {
-                await vm.newConversation()
-            }
+            // Cold start → a fresh single-agent conversation (not the most
+            // recent history). The empty chat renders the welcome screen; the
+            // user's past sessions remain reachable from the sidebar.
+            await vm.newConversation()
         }
         .sheet(isPresented: $showSettings) {
             SettingsSheet(vm: vm, onClose: { showSettings = false })
@@ -93,23 +207,30 @@ private struct Sidebar: View {
         }
     }
 
-    /// New-conversation menu: single-agent chat, or start from a scenario.
-    private var newConversationMenu: some View {
-        Menu {
-            Button("新对话(单 Agent)") { Task { await vm.newConversation() } }
-            Menu("从场景开始") {
-                ForEach(vm.agentStore.scenarios) { sc in
-                    Button(sc.name) { startScenario(sc) }
-                }
-            }
-        } label: {
-            Label("新建", systemImage: "plus")
-        }
-    }
-
-    /// The scrollable scenario + recent-session list.
+    /// The scrollable scenario + recent-session list, headed by the
+    /// full-width "新对话" action.
     private var sidebarList: some View {
         VStack(spacing: 0) {
+            // Primary action at the top of the list — a fresh single-agent chat.
+            // (Multi-agent chats start by tapping a scenario below.) Mirrors the
+            // affordance Doubao/Kimi put at the top of their sidebar.
+            Button {
+                Task { await vm.newConversation() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.oBody)
+                    Text("新对话").font(.oBody.weight(.semibold))
+                    Spacer()
+                }
+                .foregroundStyle(Theme.onBg)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Theme.primaryCont, in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+            .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 4)
+
             scenariosSection
             sessionsSection
         }
@@ -142,7 +263,7 @@ private struct Sidebar: View {
     private var sessionsSection: some View {
         SidebarSection(title: "最近会话") {
             if vm.sessions.isEmpty {
-                Text("还没有会话\n发一条消息开始吧")
+                Text("还没有会话\n点上方「新对话」开始吧")
                     .foregroundStyle(Theme.onSurfaceVar)
                     .font(.oFootnote)
                     .padding(.vertical, 8)
@@ -158,23 +279,31 @@ private struct Sidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("会话").font(.oHeadline)
-                Spacer()
-                newConversationMenu
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("新建对话 / 从场景开始")
-            }
-            // Leading inset clears the floating traffic-light buttons (the bar
-            // is hidden via .windowStyle(.hiddenTitleBar)); "会话" sits at the
-            // top, just right of the lights — no overlap, no wasted gap.
-            .padding(.leading, 76).padding(.trailing, 12).padding(.vertical, 10)
-            Divider()
+            // Top: just traffic-light clearance — the "会话" title moved out;
+            // the chat detail's top bar now carries the OneAI brand instead.
+            HStack { Spacer() }
+                .frame(height: 36)
+                .padding(.leading, 76).padding(.trailing, 12)
 
             ScrollView {
                 sidebarList
             }
+
+            // Settings live at the sidebar bottom now (it used to sit at the
+            // chat top bar's right edge — issue 3 moved it here so the top bar
+            // is brand-only and the gear is always reachable from the drawer).
+            Divider()
+            HStack {
+                Image(systemName: "gearshape")
+                    .foregroundStyle(Theme.onSurfaceVar)
+                Text("设置").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(Theme.surface)
+            .contentShape(Rectangle())
+            .onTapGesture { onOpenSettings() }
+            .pointerCursor()
         }
         .background(Theme.surface)
         .sheet(item: $sheet) { presented in
@@ -449,10 +578,13 @@ private struct ChatDetail: View {
                         .help("结束并进入总结阶段")
                     }
                 } else {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("OneAI").font(.oTitle2).foregroundStyle(Theme.onBg)
-                        Text("·").font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
-                        Text("One AI, Every Platform").font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
+                    // Single-agent: the brand lives in the top bar now (the old
+                    // "会话" sidebar title is gone). 3D pixel tiles match the TUI
+                    // brand; the slogan sits beside it.
+                    HStack(spacing: 10) {
+                        BrandLogo(cell: 4.5, gap: 1, depth: 1)
+                        Text("One AI, Every Platform")
+                            .font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
                     }
                 }
                 Spacer()
@@ -461,9 +593,6 @@ private struct ChatDetail: View {
                         .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                         .help("本轮约 token 数")
                 }
-                Button { onOpenSettings() } label: { Image(systemName: "gearshape") }
-                    .pointerCursor()
-                    .help("Provider 设置")
             }
             .padding(.horizontal, 16).padding(.vertical, 8)
             Divider()
@@ -476,6 +605,12 @@ private struct ChatDetail: View {
 
             if vm.needsKeyConfig {
                 FirstRunHint(onOpen: onOpenSettings).padding(.horizontal, 12).padding(.vertical, 6)
+            }
+
+            // Empty conversation → welcome screen (like Doubao/Kimi's default
+            // chat surface). Once the first message lands it disappears.
+            if vm.items.isEmpty && !vm.running {
+                WelcomeScreen(vm: vm, onOpenSettings: onOpenSettings)
             }
 
             // Message list
@@ -563,6 +698,81 @@ private struct ChatDetail: View {
                          !vm.running && !vm.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                      })
         }
+        .background(Theme.background)
+    }
+}
+
+// MARK: - Welcome screen (empty-conversation default surface)
+
+/// Default chat surface when a conversation has no messages yet — the macOS
+/// counterpart of Doubao/Kimi's landing screen. Tells the user what the app is
+/// and what they can ask, and offers one-tap starter prompts. Disappears the
+/// moment the first message lands (or a turn starts running).
+private struct WelcomeScreen: View {
+    @ObservedObject var vm: ChatViewModel
+    let onOpenSettings: () -> Void
+
+    private struct Suggestion: Identifiable { let id = UUID(); let icon: String; let text: String }
+
+    private var suggestions: [Suggestion] {
+        [
+            .init(icon: "doc.text.magnifyingglass", text: "帮我总结一段笔记的核心要点"),
+            .init(icon: "hammer", text: "用 Rust 写一个读取 JSON 的命令行小工具"),
+            .init(icon: "globe", text: "解释一下 Agent 与 RAG 的区别"),
+            .init(icon: "sparkles", text: "把这段话改写得更简洁专业"),
+        ]
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                Color.clear.frame(height: 4)
+                BrandLogo(cell: 8, gap: 1.5, depth: 1.5)
+                VStack(spacing: 2) {
+                    Text("One AI, Every Platform")
+                        .font(.oSubheadline.weight(.semibold)).foregroundStyle(Theme.onBg)
+                    Text("跨平台 AI Agent 框架 · 单 Agent 对话与多角色场景都在这里")
+                        .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
+                }
+                if vm.needsKeyConfig {
+                    Button(action: onOpenSettings) {
+                        Label("先配置 Provider 再开始", systemImage: "key.fill")
+                            .font(.oCaption)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Theme.primaryCont, in: Capsule())
+                    }
+                    .buttonStyle(.plain).pointerCursor()
+                }
+                // 2-column grid so all suggestions fit above the input bar
+                // without scrolling on a default-size window.
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                    GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(suggestions) { s in
+                        Button {
+                            let t = s.text
+                            vm.input = ""
+                            Task { await vm.runTask(t) }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: s.icon).foregroundStyle(Theme.primary)
+                                Text(s.text).font(.oFootnote).foregroundStyle(Theme.onBg)
+                                    .lineLimit(2)
+                                Spacer()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10).padding(.vertical, 9)
+                            .background(Theme.secondaryCont, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.plain).pointerCursor()
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+            .padding(.horizontal, 28).padding(.bottom, 12)
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
     }
 }
@@ -755,44 +965,66 @@ private struct ThinkingCard: View {
     var body: some View {
         if item.thinking.isEmpty { EmptyView() }
         else {
-            // Collapsed by default — don't stream the raw reasoning text into
-            // the bubble (it's the model's internal chain-of-thought, often
-            // starting "The user…"; showing it expanded looked like a glitch).
-            // Show "思考中…" + dots while active, "已深度思考" + chevron after,
-            // expand on click.
-            let expanded = item.thinkingExpanded
+            // Show the first 1-2 lines of the model's reasoning at all times —
+            // collapsed (default) or expanded. Previously the card showed only
+            // "思考中…" dots while active and nothing after, so during the long
+            // wait before the first answer token the chat looked frozen even
+            // though reasoning was streaming in. Surfacing the leading lines
+            // (and a caret while active) gives visible progress; the rest stays
+            // collapsed behind a chevron until the user expands it.
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
+                HStack(spacing: 6) {
                     Image(systemName: "brain.head.profile").foregroundStyle(Theme.primary)
-                    Text(item.thinkingActive ? "思考中…" : "已深度思考")
+                    Text(item.thinkingActive ? "思考中" : "已深度思考")
                         .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
-                    if item.thinkingActive {
-                        ThreeDots()
-                    } else {
-                        Spacer()
-                        Button {
-                            item.thinkingExpanded.toggle()
-                        } label: {
-                            Image(systemName: item.thinkingExpanded ? "chevron.down" : "chevron.right")
-                                .foregroundStyle(Theme.onSurfaceVar)
-                        }
-                        .buttonStyle(.plain)
-                        .pointerCursor()
+                    if item.thinkingActive { ThreeDots() }
+                    Spacer()
+                    Button {
+                        item.thinkingExpanded.toggle()
+                    } label: {
+                        Image(systemName: item.thinkingExpanded ? "chevron.down" : "chevron.right")
+                            .foregroundStyle(Theme.onSurfaceVar)
                     }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
                 }
-                if expanded {
-                    ScrollView { Text(item.thinking)
+                if item.thinkingExpanded {
+                    ScrollView {
+                        Text(item.thinking)
                             .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
                     .frame(maxHeight: 260)
+                } else {
+                    // Collapsed preview: first 1-2 lines. A steady caret while
+                    // active signals "still thinking" without the layout jump a
+                    // separate cursor row caused. Leading whitespace trimmed so a
+                    // partial first line doesn't render as an indent.
+                    Text(Self.preview(of: item.thinking, active: item.thinkingActive))
+                        .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                 }
             }
             .padding(10)
             .background(Theme.secondaryCont)
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
+    }
+
+    /// The collapsed-preview string: the first two lines of `thinking`, with a
+    /// caret appended while the model is still producing reasoning.
+    private static func preview(of thinking: String, active: Bool) -> String {
+        var lines = thinking.split(separator: "\n", omittingEmptySubsequences: false)
+        // Drop leading blank lines (a model often opens with one) so the first
+        // real line is what the user sees.
+        while lines.first == "" { lines.removeFirst() }
+        let head = lines.prefix(2).joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return active ? head + "▍" : head
     }
 }
 
@@ -1042,7 +1274,7 @@ private struct FirstRunHint: View {
     let onOpen: () -> Void
     var body: some View {
         Button(action: onOpen) {
-            Text("未配置 API Key,点击设置 → 填入 kind / model / key 后保存")
+            Text("未配置 API Key,点击设置 → 填入 base url / api key / model 后保存")
                 .foregroundStyle(Theme.onBg).font(.oCaption)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12).padding(.vertical, 8)
@@ -1190,25 +1422,23 @@ private final class InputFocusHolder: ObservableObject {
 private struct SettingsSheet: View {
     @ObservedObject var vm: ChatViewModel
     let onClose: () -> Void
-    private let kinds = ["openai", "anthropic", "ollama"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Provider 设置").font(.oHeadline)
-            Picker("kind", selection: Binding(
-                get: { vm.kind },
-                set: { vm.applyProviderPreset($0) })) {
-                ForEach(kinds, id: \.self) { Text($0).tag($0) }
-            }
-            .pickerStyle(.menu)
-            TextField("model", text: $vm.model).textFieldStyle(.roundedBorder)
+            TextField("base url (如 https://api.openai.com/v1;留空=默认)", text: $vm.baseUrl)
+                .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
             SecureField("api key (openai / anthropic)", text: $vm.apiKey).textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
-            TextField("base url override (blank = 默认; ollama → host:port)", text: $vm.baseUrl)
+            TextField("model (如 gpt-4o-mini / claude-sonnet-4-6 / llama3)", text: $vm.model)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13, design: .monospaced))
-            Text("ollama 示例:kind=ollama, model=llama3, base url=127.0.0.1:11434。保存后重建 App(历史保留)。")
+            // The provider protocol (kind) is inferred from the base url so the
+            // user never has to pick it: api.anthropic.com → anthropic,
+            // :11434 / 含 ollama → ollama, everything else (incl. OpenAI-compat
+            // relays) → openai. A blank base url + key → openai default.
+            Text("协议按 base url 自动识别：含 anthropic → anthropic；含 ollama 或 :11434 → ollama；其余按 openai 兼容。留空 base url 走各协议默认端点。保存后重建 App(历史保留)。")
                 .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
 
             Divider().padding(.vertical, 4)
