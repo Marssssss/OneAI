@@ -60,11 +60,11 @@ const BLOCK_ART_PATTERNS: [[[bool; 7]; 5]; 5] = [
     ],
     // n
     [
-        [false, true,  true,  true,  true,  true,  false],  //  █████
-        [false, true,  true,  false, true,  true,  false],  //  ██ ██
-        [false, true,  true,  false, true,  true,  false],  //  ██ ██
-        [false, true,  true,  false, true,  true,  false],  //  ██ ██
-        [false, true,  true,  false, true,  true,  false],  //  ██ ██
+        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true,  true,  false, false, true,  true ],  //  ██  ██
     ],
     // e
     [
