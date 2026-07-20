@@ -60,13 +60,32 @@ stage_a() {
 }
 
 # ─── macOS: build + lipo universal ────────────────────────────────────
-for t in "${MAC_TRIPLES[@]}"; do build_target "$t"; stage_a "$t" "macos-$t"; done
-echo "── lipo → universal macOS liboneai.a"
+# arm64 always builds. x86_64 is best-effort: ort-sys (ONNX Runtime, the
+# local FastEmbed embedding backend) does NOT ship prebuilt binaries for
+# x86_64-apple-darwin, so that slice fails to link. If it does, fall back to
+# an arm64-only liboneai.a — the .app then runs on Apple Silicon only, but
+# build_macos.sh can still proceed (the universal build is a nicety, not a
+# hard requirement, mirroring how iOS is skipped without Xcode below).
+build_target "${MAC_TRIPLES[0]}"; stage_a "${MAC_TRIPLES[0]}" "macos-${MAC_TRIPLES[0]}"
+X86_OK=0
+if build_target "${MAC_TRIPLES[1]}"; then
+    stage_a "${MAC_TRIPLES[1]}" "macos-${MAC_TRIPLES[1]}"
+    X86_OK=1
+else
+    echo "── x86_64-apple-darwin slice failed (ort-sys has no prebuilt ONNX Runtime for x86_64)."
+    echo "   Falling back to arm64-only liboneai.a — the .app will run on Apple Silicon only."
+fi
+
 mkdir -p "$APPLE_DIR/lib"
-lipo -create \
-    "$APPLE_DIR/build/macos-${MAC_TRIPLES[0]}/liboneai.a" \
-    "$APPLE_DIR/build/macos-${MAC_TRIPLES[1]}/liboneai.a" \
-    -output "$APPLE_DIR/lib/liboneai.a"
+if [[ $X86_OK -eq 1 ]]; then
+    echo "── lipo → universal macOS liboneai.a (arm64 + x86_64)"
+    lipo -create \
+        "$APPLE_DIR/build/macos-${MAC_TRIPLES[0]}/liboneai.a" \
+        "$APPLE_DIR/build/macos-${MAC_TRIPLES[1]}/liboneai.a" \
+        -output "$APPLE_DIR/lib/liboneai.a"
+else
+    cp "$APPLE_DIR/build/macos-${MAC_TRIPLES[0]}/liboneai.a" "$APPLE_DIR/lib/liboneai.a"
+fi
 
 # ─── Stage headers + raw Swift binding (the link surface for swiftc/Xcode) ──
 # The binding + FFI header live in bindings/swift/ (committed source, like the
@@ -105,7 +124,11 @@ fi
 rm -rf "$APPLE_DIR/build"
 
 echo ""
-echo "── Done. macOS artifacts in $APPLE_DIR/{lib,headers}"
+if [[ $X86_OK -eq 1 ]]; then
+    echo "── Done. Universal macOS artifacts in $APPLE_DIR/{lib,headers} (arm64 + x86_64)"
+else
+    echo "── Done. arm64-only macOS artifacts in $APPLE_DIR/{lib,headers}"
+fi
 echo "   Next: ./platforms/macos/build_macos.sh   # builds OneAI.app via swiftc"
 if have_xcode; then
     echo "   iOS:  open platforms/ios (xcodegen + xcodebuild) — uses OneAI.xcframework"

@@ -51,7 +51,17 @@ SDK="$(xcrun --show-sdk-path --sdk macosx)"
 # (staged by scripts/build_apple.sh), so we compile Swift per-arch and
 # `lipo -create` a fat binary. Either arch failing is non-fatal — the other
 # slice still ships a working app.
-MAC_ARCHS=(arm64 x86_64)
+#
+# Only compile slices that liboneai.a actually provides — build_apple.sh may
+# have produced an arm64-only staticlib (ort-sys has no x86_64 prebuilts), in
+# which case attempting x86_64 here just wastes a swiftc run and spews linker
+# errors. Probe the staticlib's archs and compile only the matching ones.
+LIB_ARCHS="$(lipo -archs "$A" 2>/dev/null || true)"
+MAC_ARCHS=()
+for arch in arm64 x86_64; do
+  [[ " $LIB_ARCHS " == *" $arch "* ]] && MAC_ARCHS+=("$arch")
+done
+[[ ${#MAC_ARCHS[@]} -gt 0 ]] || { echo "ERROR: could not determine archs of $A"; exit 1; }
 SLICES=()
 for arch in "${MAC_ARCHS[@]}"; do
   echo "── Compiling ${#SOURCES[@]} Swift sources [$PROFILE / $arch]"
