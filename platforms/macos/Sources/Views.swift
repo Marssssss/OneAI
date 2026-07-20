@@ -16,12 +16,19 @@ import AppKit
 /// and the same per-character gradient hues (`Brand.charColors`) so the brand
 /// stays consistent across surfaces.
 struct BrandLogo: View {
-    /// Edge length of one pixel tile.
+    /// Edge length of one pixel tile (width).
     var cell: CGFloat = 5
     /// Gap between tiles (and between rows).
     var gap: CGFloat = 1
     /// Extrusion depth — how far the side face drops below the front face.
     var depth: CGFloat = 1
+    /// Tile height / width. The per-character bitmap is 7 cols × 5 rows, so
+    /// square tiles make each letter wider than tall (the wordmark reads flat
+    /// / squished). 1.4 compensates: 5 × 1.4 = 7, so a char's bounding box
+    /// becomes square and the letters stand up instead of stretching wide.
+    var aspect: CGFloat = 1.4
+
+    private var h: CGFloat { cell * aspect }
 
     /// 5 chars × 5 rows × 7 cols. Each char's leading column is empty, giving
     /// natural intra-word spacing (mirrors the TUI pattern verbatim).
@@ -69,7 +76,7 @@ struct BrandLogo: View {
                                 if Self.patterns[ch][row][col] {
                                     tile(charIdx: ch, radius: r)
                                 } else {
-                                    Color.clear.frame(width: cell, height: cell)
+                                    Color.clear.frame(width: cell, height: h)
                                 }
                             }
                         }
@@ -90,21 +97,21 @@ struct BrandLogo: View {
             // extrusion side — sits behind/below the front face
             RoundedRectangle(cornerRadius: radius)
                 .fill(darker)
-                .frame(width: cell, height: cell)
+                .frame(width: cell, height: h)
                 .offset(y: depth)
             // front face with a top-lit gradient
             RoundedRectangle(cornerRadius: radius)
                 .fill(LinearGradient(colors: [base.mixedLight(), base, darker],
                                      startPoint: .top, endPoint: .bottom))
-                .frame(width: cell, height: cell)
+                .frame(width: cell, height: h)
                 .overlay(alignment: .top) {
                     RoundedRectangle(cornerRadius: radius)
                         .fill(lighter)
-                        .frame(width: cell, height: cell * 0.45)
+                        .frame(width: cell, height: h * 0.45)
                         .opacity(0.5)
                 }
         }
-        .frame(width: cell, height: cell + depth)
+        .frame(width: cell, height: h + depth)
         .shadow(color: base.opacity(0.35), radius: cell * 0.25, x: 0, y: depth)
     }
 }
