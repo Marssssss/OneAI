@@ -563,16 +563,29 @@ private func relativeTime(_ epochMs: Int64) -> String {
 
 // MARK: - Chat detail
 
-/// Bottom-of-content anchor's global maxY — used to detect how far the
-/// content bottom sits below the viewport (→ user scrolled up).
-private struct BottomAnchorKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+/// Content frame (top + bottom in global coords) of the scrollable VStack.
+/// Measured by one GeometryReader on the VStack's background so top and
+/// bottom come from the SAME layout pass (consistent for the dist calc).
+private struct ContentFrame: Equatable {
+    var minY: CGFloat
+    var maxY: CGFloat
+}
+private struct ContentFrameKey: PreferenceKey {
+    static var defaultValue = ContentFrame(minY: 0, maxY: 0)
+    static func reduce(value: inout ContentFrame, nextValue: () -> ContentFrame) { value = nextValue() }
 }
 /// ScrollView viewport's global maxY (its bottom edge).
 private struct ViewportBottomKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// Mutable scroll-tracking state held by reference (not a @State value) so
+/// writing to it from a per-frame preference callback does NOT trigger a
+/// re-render of the detail.
+private final class ScrollState {
+    /// Last measured content frame; `nil` until the first layout lands.
+    var lastFrame: ContentFrame? = nil
 }
 
 private struct ChatDetail: View {
@@ -585,9 +598,12 @@ private struct ChatDetail: View {
     let onOpenSettings: () -> Void
     @State private var stickToBottom = true
     /// ScrollView's bottom edge in global coordinates (updated by the
-    /// viewport GeometryReader). Read by the bottom-anchor preference change
+    /// viewport GeometryReader). Read by the content-frame preference change
     /// handler to compute "how far is the content bottom below the viewport".
     @State private var viewportBottom: CGFloat = 0
+    /// Holds the previous content frame across renders (reference type →
+    /// mutations don't re-render). See `ScrollState`.
+    @State private var scroller = ScrollState()
 
     var body: some View {
         if artifacts.visible {
@@ -702,35 +718,41 @@ private struct ChatDetail: View {
                             case .assistant(let a): AssistantBubble(item: a, scenario: vm.currentScenario, onRetry: { Task { await vm.retryLast() } })
                             }
                         }
+                        // Scroll target only — the content frame (top+bottom)
+                        // is measured by the VStack's background reader below,
+                        // so this anchor no longer carries a GeometryReader.
                         Color.clear.frame(height: 1).id("bottom")
-                            .background(GeometryReader { g in
-                                Color.clear.preference(key: BottomAnchorKey.self,
-                                                       value: g.frame(in: .global).maxY)
-                            })
                     }
                     .padding(12)
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: ContentFrameKey.self,
+                                               value: ContentFrame(minY: g.frame(in: .global).minY,
+                                                                  maxY: g.frame(in: .global).maxY))
+                    })
                 }
                 .background(GeometryReader { g in
                     Color.clear.preference(key: ViewportBottomKey.self,
                                            value: g.frame(in: .global).maxY)
                 })
-                // Smart stick-to-bottom via hysteresis on the content-bottom's
-                // distance below the viewport. The handler ONLY writes state at
-                // a threshold crossing — never every frame — so a plain scroll
-                // through the middle of the history doesn't re-render the
-                // detail (which would itself jitter the scrollbar).
-                //
-                // Thresholds are tighter than the old 200/80 (issue 7): per-flush
-                // answer-text growth while following is ~one line (~30pt), well
-                // under 80, so a `dist > 80` break won't trip on normal growth.
-                // But a real user scroll-up past 80pt DOES break — so reading
-                // markdown 80–200pt above the bottom during a stream no longer
-                // gets yanked back to the bottom each flush (the old 200pt zone
-                // kept auto-follow on and yanked those readers). Re-follow only
-                // when back at the very bottom (dist < 30). The scroll-to-bottom
-                // button resumes too.
-                .onPreferenceChange(BottomAnchorKey.self) { bottomY in
-                    let dist = bottomY - viewportBottom
+                // Stick-to-bottom decided on SCROLLS only — detected by the
+                // content TOP moving. A real scroll translates the whole
+                // content (top + bottom move together); content GROWTH (new
+                // tokens arriving) only extends the bottom, leaving the top
+                // fixed. So gating on a top-move lets growth through without
+                // touching stickiness — which is the fix for "after scrolling
+                // up then back to the bottom, new output no longer auto-follows":
+                // previously the bottom-only handler fired on growth too, and a
+                // flush adding >80pt flipped stickToBottom=false BEFORE the
+                // follow-scroll ran, breaking follow until the user scrolled
+                // again. (No programmatic-scroll flag needed: a follow-scroll
+                // also moves the top, but lands at dist≈0 → stickToBottom stays
+                // true; a user scroll-up moves the top and lands at dist>80 →
+                // false. Both correct.)
+                .onPreferenceChange(ContentFrameKey.self) { frame in
+                    let prev = scroller.lastFrame
+                    scroller.lastFrame = frame
+                    guard let prev = prev, abs(frame.minY - prev.minY) > 1 else { return }
+                    let dist = frame.maxY - viewportBottom
                     if dist < 30 { stickToBottom = true }
                     else if dist > 80 { stickToBottom = false }
                 }
