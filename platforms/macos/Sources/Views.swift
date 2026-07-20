@@ -694,20 +694,38 @@ private struct ChatDetail: View {
                     Color.clear.preference(key: ViewportBottomKey.self,
                                            value: g.frame(in: .global).maxY)
                 })
-                // Smart stick-to-bottom: track the content bottom's distance
-                // below the viewport. A real user scroll-up pushes it well
-                // past 200pt → break following so they can read history in
-                // peace. The hysteresis (false at >200, true at <80) plus the
-                // high false-threshold keeps a single per-flush content growth
-                // (a couple lines, well under 200pt) from tripping mid-stream
-                // and re-yanking a streaming reply back to the bottom. The
-                // scroll-to-bottom button offers a manual resume either way.
+                // Smart stick-to-bottom via hysteresis on the content-bottom's
+                // distance below the viewport. The handler ONLY writes state at
+                // a threshold crossing — never every frame — so a plain scroll
+                // through the middle of the history doesn't re-render the
+                // detail (which would itself jitter the scrollbar).
+                //
+                // Thresholds are tighter than the old 200/80 (issue 7): per-flush
+                // answer-text growth while following is ~one line (~30pt), well
+                // under 80, so a `dist > 80` break won't trip on normal growth.
+                // But a real user scroll-up past 80pt DOES break — so reading
+                // markdown 80–200pt above the bottom during a stream no longer
+                // gets yanked back to the bottom each flush (the old 200pt zone
+                // kept auto-follow on and yanked those readers). Re-follow only
+                // when back at the very bottom (dist < 30). The scroll-to-bottom
+                // button resumes too.
                 .onPreferenceChange(BottomAnchorKey.self) { bottomY in
                     let dist = bottomY - viewportBottom
-                    if dist > 200 { stickToBottom = false }
-                    else if dist < 80 { stickToBottom = true }
+                    if dist < 30 { stickToBottom = true }
+                    else if dist > 80 { stickToBottom = false }
                 }
                 .onPreferenceChange(ViewportBottomKey.self) { viewportBottom = $0 }
+                // A session was (re)loaded — force the viewport to the most
+                // recent message (issue 7). `onChange(of: items.count)` alone
+                // missed same-count loads and respected a stale stickToBottom.
+                .onChange(of: vm.scrollRequest) { _ in
+                    stickToBottom = true
+                    // Defer one runloop so the new items have laid out and the
+                    // "bottom" anchor resolves before the scroll.
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                }
                 .onChange(of: streamTick.value) { _ in
                     // Non-animated snap. `withAnimation` here stacks ~20×/sec
                     // during streaming and forces extra layout passes, which
@@ -935,43 +953,34 @@ private struct AssistantBubble: View {
             if !item.steps.isEmpty {
                 ToolStepsCard(steps: item.steps)
             }
-            if !item.text.isEmpty {
-                if item.streaming && !item.done {
-                    // During streaming, render the partial text as plain Text —
-                    // NOT MarkdownText. Re-parsing the growing markdown on every
-                    // token (splitMarkdown + buildInline, O(n²) over the stream)
-                    // floods the main thread and beachballs the app on long
-                    // replies. The full markdown render lands once on `.done`.
-                    //
-                    // Cap the displayed length: a plain `Text` re-lays-out its
-                    // ENTIRE content every flush (Core Text shapes/wraps the
-                    // whole growing string). For a long CJK reply the layout
-                    // cost grows past the flush interval and the main thread
-                    // saturates → persistent beachball mid-stream. Showing only
-                    // the tail keeps layout O(cap); the full text renders once
-                    // on completion.
-                    //
-                    // Inline steady caret "▍" appended to the SAME Text (not a
-                    // separate row): a separate BlinkingCursor row read as an
-                    // extra blank line + flicker. One flowable Text with a
-                    // steady caret at the tail avoids both. Trailing whitespace
-                    // trimmed so a partial trailing newline doesn't open an
-                    // empty line mid-stream.
-                    Text(Self.streamingDisplay(of: item.text)
-                            .trimmingCharacters(in: .whitespacesAndNewlines) + "▍")
-                        .foregroundStyle(Theme.onBg)
-                        .font(.oBody)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    MarkdownText(text: item.text.trimmingCharacters(in: .whitespacesAndNewlines))
-                        .equatable()
-                        .contextMenu {
-                            Button("重新生成") { onRetry() }
-                            Button("复制") { copyText(item.text) }
-                            Button("分享") { shareText(item.text) }
-                        }
+            // Pre-first-token placeholder. When a turn is running but no
+            // thinking, tool, or answer text has arrived yet, the bubble would
+            // otherwise be blank — so the long wait before the first answer
+            // token reads as a frozen app (issue 6). A "思考中" indicator gives
+            // visible progress; it disappears the moment thinking or text
+            // arrives (the ThinkingCard / MarkdownText take over).
+            if item.streaming && !item.done
+                && item.thinking.isEmpty && item.text.isEmpty && item.steps.isEmpty {
+                HStack(spacing: 6) {
+                    Text("思考中").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
+                    ThreeDots()
                 }
+            }
+            if !item.text.isEmpty {
+                // Render markdown LIVE while streaming (issue 8) — not a plain
+                // plain-text tail held back until `.done`. `MarkdownText` with
+                // `streaming: true` bounds per-flush work to the in-progress
+                // block via per-block `.equatable()`; the full uncapped render
+                // lands once on completion. The steady caret is folded into the
+                // last text block by `MarkdownText` itself.
+                MarkdownText(text: item.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                             streaming: item.streaming && !item.done)
+                    .equatable()
+                    .contextMenu {
+                        Button("重新生成") { onRetry() }
+                        Button("复制") { copyText(item.text) }
+                        Button("分享") { shareText(item.text) }
+                    }
             }
             if let msg = item.error {
                 HStack {
@@ -998,18 +1007,6 @@ private struct AssistantBubble: View {
         .padding(.top, item.speakerId != nil ? 8 : 0)
     }
 
-    /// The text to render while streaming, capped to the last `cap` characters.
-    /// A plain `Text` re-lays-out its whole content every flush; capping bounds
-    /// the Core Text work so a long reply doesn't saturate the main thread
-    /// mid-stream. The full text renders once on completion (MarkdownText).
-    /// No "…" prefix: it only appeared once the text crossed the cap, causing a
-    /// one-line layout jump mid-stream (the chat "晃动"). Showing the bare tail
-    /// keeps the row count stable across the cap boundary.
-    static let streamingCap = 1800
-    static func streamingDisplay(of text: String) -> String {
-        if text.count <= streamingCap { return text }
-        return String(text.suffix(streamingCap))
-    }
     private func copyText(_ s: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(s, forType: .string)
@@ -1154,67 +1151,59 @@ private struct StepLine: View {
 
 // MARK: - Markdown
 
-private struct MarkdownText: View, Equatable {
-    let text: String
-    @State private var copied: Bool = false
-    // Equatable so `.equatable()` skips re-parsing the markdown of unchanged
-    // bubbles. Without this, every streamTick flush re-evaluates EVERY visible
-    // AssistantBubble (AssistantItem is a plain class SwiftUI can't short-circuit)
-    // → every MarkdownText re-runs splitMarkdown/buildInline → O(N×parse) per
-    // flush → main thread drowns → beachball on long conversations. With this,
-    // only the bubble whose `text` actually changed re-parses.
-    static func == (lhs: MarkdownText, rhs: MarkdownText) -> Bool { lhs.text == rhs.text }
+private struct MarkdownBlockView: View, Equatable {
+    let block: MdBlock
+    // Equatable (synthesized — `MdBlock: Equatable`) so `.equatable()` skips a
+    // block whose source is unchanged. During streaming the growing bubble
+    // re-evaluates each flush; without per-block equality every block would
+    // re-run `buildInline` (→ `AttributedString(markdown:)`) every token.
+    // With it, only the LAST (in-progress) block re-parses — the work is
+    // bounded to one block per flush instead of the whole reply.
     var body: some View {
-        let blocks = splitMarkdown(text)
-        return VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .heading(let level, let body):
-                    Text(buildInline(body, codeBg: Theme.surfaceVar))
-                        .font(headingFont(level))
-                        .foregroundStyle(Theme.onBg)
-                        .textSelection(.enabled)
-                case .paragraph(let body):
-                    Text(buildInline(body, codeBg: Theme.surfaceVar))
-                        .foregroundStyle(Theme.onBg)
-                        .font(.oBody)
-                        .textSelection(.enabled)
-                case .blockquote(let body):
-                    HStack(alignment: .top, spacing: 8) {
-                        Rectangle().fill(Theme.primary.opacity(0.5)).frame(width: 3)
-                        Text(buildInline(body, codeBg: Theme.surfaceVar))
-                            .font(.oBodyItalic)
-                            .foregroundStyle(Theme.onSurfaceVar)
-                            .textSelection(.enabled)
+        switch block {
+        case .heading(let level, let body):
+            Text(buildInline(body, codeBg: Theme.surfaceVar))
+                .font(headingFont(level))
+                .foregroundStyle(Theme.onBg)
+                .textSelection(.enabled)
+        case .paragraph(let body):
+            Text(buildInline(body, codeBg: Theme.surfaceVar))
+                .foregroundStyle(Theme.onBg)
+                .font(.oBody)
+                .textSelection(.enabled)
+        case .blockquote(let body):
+            HStack(alignment: .top, spacing: 8) {
+                Rectangle().fill(Theme.primary.opacity(0.5)).frame(width: 3)
+                Text(buildInline(body, codeBg: Theme.surfaceVar))
+                    .font(.oBodyItalic)
+                    .foregroundStyle(Theme.onSurfaceVar)
+                    .textSelection(.enabled)
+            }
+        case .bulletList(let items):
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•")
+                        Text(buildInline(item, codeBg: Theme.surfaceVar))
+                            .foregroundStyle(Theme.onBg).font(.oBody).textSelection(.enabled)
                     }
-                case .bulletList(let items):
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text("•")
-                                Text(buildInline(item, codeBg: Theme.surfaceVar))
-                                    .foregroundStyle(Theme.onBg).font(.oBody).textSelection(.enabled)
-                            }
-                        }
-                    }
-                case .orderedList(let items):
-                    VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text("\(idx + 1).")
-                                Text(buildInline(item, codeBg: Theme.surfaceVar))
-                                    .foregroundStyle(Theme.onBg).font(.oBody).textSelection(.enabled)
-                            }
-                        }
-                    }
-                case .table(let header, let rows):
-                    MarkdownTable(header: header, rows: rows)
-                case .code(let lang, let code):
-                    CodeCard(lang: lang, code: code)
                 }
             }
+        case .orderedList(let items):
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("\(idx + 1).")
+                        Text(buildInline(item, codeBg: Theme.surfaceVar))
+                            .foregroundStyle(Theme.onBg).font(.oBody).textSelection(.enabled)
+                    }
+                }
+            }
+        case .table(let header, let rows):
+            MarkdownTable(header: header, rows: rows)
+        case .code(let lang, let code):
+            CodeCard(lang: lang, code: code)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -1224,6 +1213,57 @@ private struct MarkdownText: View, Equatable {
         case 3: return .headline
         default: return .subheadline.bold()
         }
+    }
+}
+
+private struct MarkdownText: View, Equatable {
+    let text: String
+    /// `true` while the model is still producing this reply. Renders the
+    /// partial markdown live (instead of holding back a plain-text tail until
+    /// `.done`) so the user sees formatted markdown stream in. Per-block
+    /// `.equatable()` on `MarkdownBlockView` bounds the per-flush work to the
+    /// last in-progress block; a runaway single-paragraph reply is itself
+    /// capped so Core Text layout stays bounded. The full, uncapped markdown
+    /// renders once on completion (when `streaming` flips false).
+    var streaming: Bool = false
+    // Top-level Equatable so a DONE bubble skips `body` entirely while a
+    // SIBLING is streaming (streamTick bumps re-evaluate every visible
+    // AssistantBubble; without this, every done bubble would re-parse its
+    // markdown on every token of the active reply). The streaming bubble's
+    // `text` changes each flush, so `==` is false and `body` runs — but the
+    // per-block `.equatable()` inside bounds that run to the last block.
+    static func == (lhs: MarkdownText, rhs: MarkdownText) -> Bool {
+        lhs.text == rhs.text && lhs.streaming == rhs.streaming
+    }
+
+    /// While streaming, cap a runaway last paragraph to its tail so a single
+    /// giant paragraph doesn't re-lay-out unbounded text every flush. The full
+    /// text renders once on `.done`.
+    private static let streamingCap = 1800
+
+    var body: some View {
+        var blocks = splitMarkdown(text)
+        if streaming, let last = blocks.last, case .paragraph(let p) = last, p.count > Self.streamingCap {
+            blocks[blocks.count - 1] = .paragraph(String(p.suffix(Self.streamingCap)))
+        }
+        // Append a steady inline caret to the last text-like block while
+        // streaming — a separate cursor row read as an extra blank line +
+        // flicker, so it's folded into the in-progress text instead.
+        if streaming, let last = blocks.last {
+            switch last {
+            case .paragraph(let p):
+                blocks[blocks.count - 1] = .paragraph(p + "▍")
+            case .heading(let level, let h):
+                blocks[blocks.count - 1] = .heading(level: level, text: h + "▍")
+            default: break
+            }
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                MarkdownBlockView(block: block).equatable()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

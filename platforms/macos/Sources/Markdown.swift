@@ -6,7 +6,7 @@
 
 import SwiftUI
 
-enum MdBlock {
+enum MdBlock: Equatable {
     case heading(level: Int, text: String)
     case paragraph(String)
     case code(lang: String, code: String)

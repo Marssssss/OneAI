@@ -267,6 +267,13 @@ final class ChatViewModel: ObservableObject {
     @Published var debriefActive: Bool = false
     /// Lightweight per-turn token estimate (chars/4) — surfaced in the top bar.
     @Published var lastTurnTokens: Int = 0
+    /// Bumped whenever a session is (re)loaded so the detail view can force a
+    /// scroll-to-bottom (issue 7). `onChange(of: items.count)` alone is
+    /// unreliable here: a loaded session with the same message count as the
+    /// previous one never fires, and `stickToBottom` may be false from a prior
+    /// scroll-up — so the history landed mid-conversation instead of at the
+    /// most recent message. This dedicated counter fires on every load.
+    @Published var scrollRequest: Int = 0
 
     var needsKeyConfig: Bool {
         (kind == "openai" || kind == "anthropic") && apiKey.isEmpty
@@ -600,6 +607,10 @@ final class ChatViewModel: ObservableObject {
             lastUserTask = lastTask
             error = nil
             streamTick.value += 1
+            // Force the detail to scroll to the most recent message (issue 7):
+            // a freshly loaded history must show the bottom, not wherever the
+            // previous session's scroll offset left the viewport.
+            scrollRequest += 1
         }
     }
 
