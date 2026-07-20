@@ -675,7 +675,27 @@ private struct ChatDetail: View {
             // Message list
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
+                    // NON-lazy VStack (not LazyVStack). Two reasons:
+                    //
+                    // 1. The trailing `Color.clear.id("bottom")` anchor must
+                    //    stay materialized at ALL scroll offsets so its
+                    //    `BottomAnchorKey` preference keeps reporting while the
+                    //    user scrolls — otherwise (LazyVStack) the anchor is
+                    //    deallocated once it scrolls far off-screen, the
+                    //    preference goes silent, `stickToBottom` never flips to
+                    //    false, and the streaming auto-follow yanks the user
+                    //    back to the bottom every flush (issues 1 & 4).
+                    //
+                    // 2. With all rows measured up front the document height is
+                    //    stable from the first layout, so a freshly loaded
+                    //    history lands at the true bottom (not a blank below
+                    //    un-materialized lazy cells — issue 2) and the scrollbar
+                    //    thumb doesn't grow/jitter as cells materialize mid-scroll
+                    //    (issue 3). Per-bubble work during streaming is still
+                    //    bounded: `MarkdownText` is `.equatable()` on its
+                    //    `text`, so done bubbles skip re-parse/layout and only
+                    //    the active bubble's last block re-renders each flush.
+                    VStack(alignment: .leading, spacing: 14) {
                         ForEach(vm.items) { entry in
                             switch entry {
                             case .user(let u): UserBubble(text: u.text, onEdit: { newText in Task { await vm.editAndResend(u, newText: newText) } })

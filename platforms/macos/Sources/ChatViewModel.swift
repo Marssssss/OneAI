@@ -468,6 +468,20 @@ final class ChatViewModel: ObservableObject {
         pendingScenario = nil
     }
 
+    /// Interrupt any in-flight stream on the CURRENT session/group-session and
+    /// reset the running flags. Called when leaving a conversation (starting a
+    /// new one or loading history) so a still-streaming previous turn doesn't
+    /// keep bumping `streamTick` — which would otherwise auto-scroll/yank the
+    /// newly shown conversation to its bottom on every flush (issue 4: switch
+    /// to a history while another conversation is streaming → can't scroll it).
+    private func interruptInFlight() async {
+        await session?.interrupt()
+        await groupSession?.interrupt()
+        running = false
+        activeSpeakerItem = nil
+        activeSpeakerId = nil
+    }
+
     /// Start a fresh conversation. When `scenario` is non-nil, a multi-agent
     /// group-chat session is created. The collected `topicValues` (keyed by
     /// field id) are folded into each member's system prompt as background
@@ -476,6 +490,9 @@ final class ChatViewModel: ObservableObject {
     /// round (e.g. writing workshop → writer drafts).
     func newConversation(scenario: Scenario?, topicValues: [String: String]?) async {
         guard let a = app else { return }
+        // Stop a still-streaming previous turn before swapping sessions — see
+        // `interruptInFlight` (issue 4).
+        await interruptInFlight()
         // Clear any pending scenario-intake page so navigating to a new chat
         // (or loading history) doesn't leave the detail stuck on the topic
         // form — `detailContent` renders the intake whenever this is non-nil.
@@ -564,6 +581,10 @@ final class ChatViewModel: ObservableObject {
     /// group chats are created fresh per conversation in v1).
     func loadSession(_ id: String) async {
         guard let a = app else { return }
+        // Stop a still-streaming previous turn first (issue 4): otherwise its
+        // `streamTick` bumps keep firing while the new history is on screen,
+        // yanking the scroll to the bottom every flush.
+        await interruptInFlight()
         // Same guard as newConversation: drop a pending scenario-intake page so
         // the loaded history actually shows instead of the topic form.
         pendingScenario = nil
