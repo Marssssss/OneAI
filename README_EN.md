@@ -13,41 +13,73 @@
 [![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
 
 <p align="center">
-  <img src="OneAI_icon.png" alt="OneAI" width="160">
+  <img src="assets/OneAI_icon.png" alt="OneAI" width="160">
 </p>
 
 <p align="center"><em>One Rust core (<code>oneai-core</code>) drives native apps on macOS / Windows / Linux / Android / iOS / HarmonyOS via UniFFI bindings plus a hand-written <code>extern "C"</code> facade.</em></p>
 
 ---
 
+## Table of contents
+
+- [At a glance](#at-a-glance)
+- [Quick start](#quick-start)
+  - [1. macOS app (native, no build)](#1-macos-app-native-no-build)
+  - [2. TUI / CLI (general agentic execution)](#2-tui--cli-general-agentic-execution)
+  - [3. Integrate the OneAI SDK](#3-integrate-the-oneai-sdk-to-build-your-own-app-cratesio)
+- [What is OneAI?](#what-is-oneai)
+- [Two ways to use it](#two-ways-to-use-it)
+- [Architecture](#architecture)
+- [Crate map](#crate-map)
+- [Core concepts](#core-concepts)
+  - [1. DomainPack system](#1-the-domainpack-system-domain-config-pack)
+  - [2. Agentic Loop (dynamic)](#2-the-agentic-loop-dynamic)
+  - [3. Agent paradigms](#3-agent-paradigms)
+  - [4. Permission model](#4-permission-model)
+  - [5. LLM providers, routing & 3-layer output parser](#5-llm-providers-routing--3-layer-output-parser)
+  - [6. Tool system](#6-tool-system)
+  - [7. Multi-agent collaboration](#7-multi-agent-collaboration)
+  - [8. Memory system](#8-memory-system)
+  - [9. Working-state system](#9-working-state-system-cross-session-task-continuation)
+  - [10. Usage & reliability](#10-usage--reliability)
+  - [11. Workflow engine](#11-workflow-engine)
+  - [12. RAG](#12-rag)
+  - [13. A2A protocol, WASM sandbox, eval, Studio, MCP](#13-a2a-protocol-wasm-sandbox-eval-studio-mcp)
+  - [14. Tracing](#14-tracing)
+- [SWE-bench eval (capability × usage × efficiency)](#swe-bench-eval-capability--usage--efficiency)
+- [Cross-platform: desktop & mobile](#cross-platform-desktop--mobile)
+- [License](#license)
+
+---
+
 ## At a glance
 
 <p align="center">
-  <img src="OneAI-main.png" alt="macOS app — default chat home" width="780">
+  <img src="assets/OneAI-main.png" alt="macOS app — default chat home" width="780">
 </p>
 
 <p align="center"><em>macOS native app · the default chat home — pixel brand logo + slogan + starter-prompt shortcuts; this is the empty-conversation landing page, tap a prompt to start.</em></p>
 
 <p align="center">
-  <img src="interview-opening-example.png" alt="macOS app — scenario intake" width="780">
+  <img src="assets/interview-opening-example.png" alt="macOS app — scenario intake" width="780">
 </p>
 
 <p align="center"><em>macOS native app · the <strong>mock interview</strong> scenario intake — before it starts you fill in position / target company / project history, and each field is injected into the right member's system prompt by <strong>per-member visibility</strong> (the interviewer never sees the project history; the coach uses it for project-level advice).</em></p>
 
 <p align="center">
-  <img src="interview-chat-example.png" alt="macOS app — multi-agent group chat" width="780">
+  <img src="assets/interview-chat-example.png" alt="macOS app — multi-agent group chat" width="780">
 </p>
 
 <p align="center"><em>macOS native app · multi-agent group chat — the interviewer (blue, asks) and coach (green, critiques) speak on a scripted turn order: user answers → coach critiques → interviewer follows up. Token-by-token streaming with collapsible thinking bubbles.</em></p>
 
 <p align="center">
-  <img src="new-scenario-example.png" alt="macOS app — visual scenario editor" width="780">
+  <img src="assets/new-scenario-example.png" alt="macOS app — visual scenario editor" width="780">
 </p>
 
 <p align="center"><em>macOS native app · visual scenario editor — compose the cast, background fields, turn policy (scripted / round-robin / moderator), opening line and debrief phase; persisted to <code>~/Library/Application Support</code>.</em></p>
 
 <p align="center">
-  <img src="oneai-tui-screenshot.jpg" alt="OneAI CLI — executing a complex task in Plan mode" width="880">
+  <img src="assets/oneai-tui-screenshot.jpg" alt="OneAI CLI — executing a complex task in Plan mode" width="880">
 </p>
 
 <p align="center"><em>Interactive CLI (<code>oneai-cli</code>) · executing a complex task in Plan mode — thinking bubbles, plan checklist panel, tool-call display, and the accept/reject approval dialog.</em></p>
@@ -86,7 +118,7 @@ Each agent can also override model / key / base_url individually in the scenario
 
 #### Use
 
-In the sidebar, **Start from a scenario** picks one of 5 built-in presets (**mock interview / language partner / debate / writing workshop / brainstorm**), or **Edit scenario** to drag-compose the cast, turn policy, background fields, and debrief phase. While running: token-by-token streaming with thinking bubbles, `⌘K` command palette, speech input, artifact canvas. The scenario and conversation model is detailed below in "Two ways to use OneAI → B. Native desktop / mobile app".
+In the sidebar, **Start from a scenario** picks one of 5 built-in presets (**mock interview / language partner / debate / writing workshop / brainstorm**), or **Edit scenario** to drag-compose the cast, turn policy, background fields, and debrief phase. While running: token-by-token streaming with thinking bubbles, `⌘K` command palette, speech input, artifact canvas. The scenario and conversation model is detailed below in [Two ways to use OneAI → B. Native desktop / mobile app](#b-native-desktop--mobile-app--scenario-based-multi-agent-chat).
 
 > To build from source instead: `./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`, then `open platforms/macos/build/OneAI.app`.
 
@@ -126,6 +158,15 @@ theme = "dark"
 
 `oneai config create` generates a default config; `oneai config show` prints it.
 
+#### Network proxy
+
+All outbound HTTP — LLM provider APIs, `web_search` / `web_fetch`, the A2A client, embedding services, MCP HTTP transport — goes through `reqwest::Client`, so proxy support is env-var-based and uniform everywhere:
+
+- `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` — proxy URL (auto-detected by reqwest on every client build; no code opt-in needed).
+- `NO_PROXY` — comma-separated exclusion list.
+- SOCKS5: `ALL_PROXY=socks5://host:port` (reqwest `socks` feature is on in the workspace `Cargo.toml`).
+- On macOS/Windows, reqwest's `system-proxy` feature also reads the OS GUI proxy settings; env vars always win.
+
 #### Launch the TUI
 
 ```bash
@@ -154,7 +195,27 @@ Drop into the interactive agent. Type a task and watch the full pipeline run liv
 | Mouse drag | Select text to copy · wheel scroll |
 | `Esc` | Vim mode / quit |
 
-**In-conversation slash commands** (`/help` for the full list): `/skills` `/skill` `/tools` `/usage` `/context` `/session` `/domain` `/compact` `/wf` `/new` `/init` `/clear` `/quit`.
+#### In-conversation slash commands
+
+Type a `/` prefix in the input box to trigger autocomplete. Full list (run `/help` anytime inside the TUI to see it):
+
+| Command | What it does |
+|------|------|
+| `/help` (or `/h`) | Show help and every available command |
+| `/tools` (or `/t`) | List registered tools |
+| `/skills` | List all available skills (built-in domain + convention-dir discovery) |
+| `/skill <name>` | Activate a skill; `/skill off` deactivates; `/skill add <name> <desc>` adds; `/skill search <kw>` searches |
+| `/tool <name> {json}` | Directly invoke a tool with JSON args (bypassing the model) |
+| `/usage` | Show this session's token usage (prompt / completion / total) and context usage |
+| `/context` | Detailed token breakdown of the context window by category (system prompt / tool defs / domain pack / conversation) |
+| `/session` | Show current session details (ID, provider, paradigm, context, usage) |
+| `/domain` | Show current DomainPack; `/domain <name>` switches (coding / research / general) |
+| `/compact` | Compact the current conversation context (triggers the compressor to extract and archive facts) |
+| `/wf list` / `/wf run <name>` / `/wf show <name>` / `/wf graph <name>` / `/wf status` / `/wf history` | Workflow commands: list / run / show steps / render DAG / status / history |
+| `/new` | Create a new session |
+| `/init [oneai\|agents\|claude] [--force] [--no-llm]` | Generate a project-instruction file (model-synthesized if a provider is configured, else heuristic) |
+| `/clear` | Clear the current conversation and start a new session |
+| `/quit` (or `/q`) | Exit the TUI |
 
 #### One-shot non-interactive inference
 
@@ -259,28 +320,6 @@ oneai embed list                       # list available providers + auto-detecti
 oneai embed health [same opts]        # check embedding-service health
 oneai embed dimension [same opts]      # show vector dimension for a model
 
-#### Embedding configuration (zero-burden)
-
-Embeddings power long-term-memory semantic recall. Default is **zero-config**: leaving every embedding field unset runs `auto` detection, picking the first available provider in this order; if none is available it falls back to keyword matching (no error):
-
-1. `openai-compat` — requires both `ONEAI_EMBEDDING_API_KEY` + `ONEAI_EMBEDDING_BASE_URL` (relay)
-2. `voyage` — set `VOYAGE_API_KEY` (`api.voyageai.com`)
-3. `openai` — set `OPENAI_API_KEY` (official `api.openai.com`)
-4. `ollama` — local `localhost:11434` reachable + an embedding model installed (e.g. `nomic-embed-text`)
-5. `fastembed` — local ONNX (`AllMiniLML6V2`, no key; one-time ~22MB download on first use, then offline)
-
-   On proxy networks hf-hub's download client may ignore the proxy and the first download fails. Run `./scripts/download_fastembed_models.sh` (uses curl, which honors proxy env) to pre-fetch the model into the hf-hub cache; fastembed then loads offline.
-6. none → keyword matching
-
-**Key: the embedding key is independent of the LLM provider key** — `LlmProvider` has no `embed` method; LLM and embedding are separate capabilities. `ANTHROPIC_API_KEY` (for Claude chat) is NOT an embedding key; Anthropic has no native embedding API — the real path is Voyage. A relay configured via `ONEAI_API_KEY` usually has no embedding endpoint, so auto never reuses the main model's key.
-
-Explicit overrides (any of three):
-- CLI: `oneai embed generate "x" --provider voyage --api-key pa-...`
-- `~/.oneai/config.toml`: `[embedding]` section (`provider`/`model`/`api_key`/`base_url`/`fallback`)
-- Platform apps: Settings → "Embedding settings" on macOS/Windows/Android; leave blank for auto
-
-Model names are free-form strings (`--model voyage-3`); unknown names are dimension-probed at runtime. The `fallback` field switches automatically if the primary provider fails to create/first-call (build-time + runtime, sharing one `should_continue` classifier: 429/5xx/transport/missing-key degrade, others raise). Over-long inputs are auto-split on UTF-8 byte boundaries.
-
 # ── WASM sandbox ──
 oneai wasm list                        # list loaded modules
 oneai wasm load <name> <file.wasm>     # load a module
@@ -315,6 +354,29 @@ oneai init [--format oneai|agents|claude] [--path <dir>] [--force] [--no-llm]  #
 
 > Every subcommand comes from the clap definitions in `examples/cli/src/main.rs`; run `oneai --help` or `oneai <sub> --help` to see full options for any subcommand.
 
+#### Embedding configuration (zero-burden)
+
+Embeddings power long-term-memory semantic recall. Default is **zero-config**: leaving every embedding field unset runs `auto` detection, picking the first available provider in this order; if none is available it falls back to keyword matching (no error):
+
+1. `openai-compat` — requires both `ONEAI_EMBEDDING_API_KEY` + `ONEAI_EMBEDDING_BASE_URL` (relay)
+2. `voyage` — set `VOYAGE_API_KEY` (`api.voyageai.com`)
+3. `openai` — set `OPENAI_API_KEY` (official `api.openai.com`)
+4. `ollama` — local `localhost:11434` reachable + an embedding model installed (e.g. `nomic-embed-text`)
+5. `fastembed` — local ONNX (`AllMiniLML6V2`, no key; one-time ~22MB download on first use, then offline)
+
+   On proxy networks hf-hub's download client may ignore the proxy and the first download fails. Run `./scripts/download_fastembed_models.sh` (uses curl, which honors proxy env) to pre-fetch the model into the hf-hub cache; fastembed then loads offline.
+6. none → keyword matching
+
+**Key: the embedding key is independent of the LLM provider key** — `LlmProvider` has no `embed` method; LLM and embedding are separate capabilities. `ANTHROPIC_API_KEY` (for Claude chat) is NOT an embedding key; Anthropic has no native embedding API — the real path is Voyage. A relay configured via `ONEAI_API_KEY` usually has no embedding endpoint, so auto never reuses the main model's key.
+
+Explicit overrides (any of three):
+
+- CLI: `oneai embed generate "x" --provider voyage --api-key pa-...`
+- `~/.oneai/config.toml`: `[embedding]` section (`provider` / `model` / `api_key` / `base_url` / `fallback`)
+- Platform apps: Settings → "Embedding settings" on macOS/Windows/Android; leave blank for auto
+
+Model names are free-form strings (`--model voyage-3`); unknown names are dimension-probed at runtime. The `fallback` field switches automatically if the primary provider fails to create/first-call (build-time + runtime, sharing one `should_continue` classifier: 429/5xx/transport/missing-key degrade, others raise). Over-long inputs are auto-split on UTF-8 byte boundaries.
+
 ### 3. Integrate the OneAI SDK to build your own app (crates.io)
 
 Every OneAI crate is published on [crates.io](https://crates.io/crates/oneai-app) (the badge reflects the latest version) and can be pulled in as a dependency for your own Rust app.
@@ -333,6 +395,8 @@ or hand-write `Cargo.toml`:
 oneai-app = "1.0"        # integration entry: AppBuilder → App → AppSession
 tokio = { version = "1", features = ["full"] }
 ```
+
+> Network proxy: all outbound HTTP in OneAI goes through `reqwest::Client`, so **proxy support is env-var-based and uniform everywhere** — `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` (proxy URL), `NO_PROXY` (exclusion list), `ALL_PROXY=socks5://host:port` (SOCKS5, `socks` feature is on). reqwest auto-detects on every client build, no code opt-in; macOS/Windows also read the OS GUI proxy, env vars always win. Do not wire a bespoke `reqwest::Client` into individual providers/tools — rely on the env vars.
 
 #### 2. Pick crates as needed
 
@@ -539,7 +603,7 @@ flowchart TB
 
 ## Core concepts
 
-### The DomainPack system (domain config pack)
+### 1. The DomainPack system (domain config pack)
 
 DomainPack is OneAI's key architectural innovation — it makes domain knowledge **declarative, pluggable, composable** instead of hard-coded. A DomainPack encapsulates 7 layers of domain-specific config:
 
@@ -572,7 +636,7 @@ oneai pack install ./my-pack     # install from a local path
 
 Modeled on Claude Code's workflow-embedding mechanism: 9 tools (FileRead, FileEdit, Shell, Grep, Glob, FileList, NotebookEdit, Environment, WebFetch), 8 tool decorators, 6 context sources with refresh policies, permission config (auto-approve reads, confirm edits/Shell, deny `rm -rf`/`mkfs`), 4 paradigm strategies, 3 sub-agent types (searcher / coder / reviewer).
 
-### The Agentic Loop (dynamic)
+### 2. The Agentic Loop (dynamic)
 
 The core execution engine is a **dynamic loop** — not a fixed pipeline. Each iteration the model decides the next step:
 
@@ -585,7 +649,7 @@ The core execution engine is a **dynamic loop** — not a fixed pipeline. Each i
 
 The iteration ceiling is governed by a **TokenBudget** (not a hardcoded `max_iterations`). `delegate` / `switch_paradigm` are injected as model-callable meta-tools via `meta_tool.rs` — the model can actively delegate or switch paradigm; `apply_paradigm_switch` + `AgentLoopGraphActionExecutor` inline-upgrade the paradigm (system prompt + tool filter). Built-in lifecycle hooks (`PreToolUse`/`PostToolUse`, …), interrupt/resume (`CancellationToken`), structured output.
 
-### Agent paradigms
+### 3. Agent paradigms
 
 | Paradigm | Pattern | Good for |
 |----------|---------|----------|
@@ -597,13 +661,38 @@ The iteration ceiling is governed by a **TokenBudget** (not a hardcoded `max_ite
 
 Paradigms are **model/workflow-driven** — the model calls `switch_paradigm`, or a StateGraph node emits `GraphDecision::SwitchParadigm`, and `apply_paradigm_switch` changes the system prompt + decision hint + tool filter. The user-side execution strategy is a separate **InteractionMode** (Normal/Auto/Plan, `Shift+Tab`).
 
-### Permission model
+### 4. Permission model
 
-Three tiers: `Read` (auto-approve), `Standard` (policy-dependent), `Full` (needs approval). Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → the tool's own `risk_level()`. Human interaction is guarded by the unified **`InteractionGate`** across 5 decision points: `PreInfer` (rewrite/skip before inference), `PostInfer` (validate/replace after inference), `ToolApproval` (gate high-risk tools, wired to native dialogs), `PlanDecision` (planning trade-off), `PlanReview` (final plan accept/reject/Revise). Built-in implementations: `NoopInteractionGate` (zero-latency pass on every point ≈ auto-approve), `ChannelInteractionGate` (mpsc+oneshot bridge to the UI thread, per-point configurable), `ThresholdInteractionGate` (auto-pass low-risk, the rest go through the channel), `DenyAllInteractionGate` (deny all). The platform-side `PlatformInteractionGate` handles `ToolApproval` with native NSAlert/MessageBox/AlertDialog/UIController/CommonDialog on macOS/Windows/Linux/Android/iOS/HarmonyOS. The old `ApprovalGate` / `on_plan_submitted` were removed.
+Three tiers:
 
-### LLM providers & routing
+- `Read` (auto-approve)
+- `Standard` (policy-dependent)
+- `Full` (needs approval)
 
-Built-in providers: **OpenAI, Anthropic, Gemini, Ollama**, unified under the `LlmProvider` trait (`infer` + `infer_stream`). On top sit two production-grade layers:
+Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → the tool's own `risk_level()`.
+
+Human interaction is guarded by the unified **`InteractionGate`** across 5 decision points:
+
+- **`PreInfer`** — rewrite/skip before inference
+- **`PostInfer`** — validate/replace after inference
+- **`ToolApproval`** — gate high-risk tools, wired to native dialogs
+- **`PlanDecision`** — planning trade-off
+- **`PlanReview`** — final plan accept/reject/Revise
+
+Built-in implementations:
+
+- `NoopInteractionGate` — zero-latency pass on every point ≈ auto-approve
+- `ChannelInteractionGate` — mpsc+oneshot bridge to the UI thread, per-point configurable
+- `ThresholdInteractionGate` — auto-pass low-risk, the rest go through the channel
+- `DenyAllInteractionGate` — deny all
+
+The platform-side `PlatformInteractionGate` handles `ToolApproval` with native NSAlert/MessageBox/AlertDialog/UIController/CommonDialog on macOS/Windows/Linux/Android/iOS/HarmonyOS. The old `ApprovalGate` / `on_plan_submitted` were removed.
+
+### 5. LLM providers, routing & 3-layer output parser
+
+Built-in providers: **OpenAI, Anthropic, Gemini, Ollama**, unified under the `LlmProvider` trait (`infer` + `infer_stream`).
+
+On top sit two production-grade layers:
 
 - **ProviderPool** — provider fallback chain; each provider has its own circuit breaker, rate limiter, and degradation rule (e.g. Anthropic→OpenAI→local). Handles 429/retry automatically, parses `Retry-After`.
 - **SmartRouter** — multi-factor routing (latency/quality/balanced/custom), scores providers and picks the best, with integrated circuit breaking / rate limiting / context constraints. Every decision is logged.
@@ -615,7 +704,13 @@ let app = AppBuilder::new()
     .build()?;
 ```
 
-### Tool system
+The **3-layer output parser** (`oneai-parser`) defends against unreliable LLM output — reuse it rather than parsing model output directly:
+
+1. **Constrained decoding** — structural constraints applied to tokens during streaming
+2. **Fuzzy JSON repair** — bracket completion, regex extraction, embedded-JSON detection
+3. **Fallback self-correction** — on parse failure, construct a self-correction prompt and let the model regenerate
+
+### 6. Tool system
 
 ```rust
 #[async_trait]
@@ -631,7 +726,7 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 
 **12 built-in tools:** ShellTool (safety blacklist + sandbox), FileReadTool (offset+limit paging), FileEditTool, FileWriteTool, FileListTool, GrepTool, GlobTool, EnvironmentTool, NotebookEditTool, FileDeleteTool, CalculatorTool, WebFetchTool. MCP client integration via `rmcp` (stdio/SSE/streamable-http); a **MCP server** mode lets OneAI itself expose tools to Claude Code/Cursor (`oneai mcp serve`).
 
-### Multi-agent collaboration
+### 7. Multi-agent collaboration
 
 | Mode | Mechanism |
 |------|-----------|
@@ -641,21 +736,41 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 | **Handoff** | `HandoffTool` (handoff-as-tool-call) + `HandoffManager` + 3 presets |
 | **Swarm** | dynamic agent pool, 3 routing strategies (BestFit/LoadBalanced/Fastest), task decomposition + quality checks + retries |
 
-### Memory system
+### 8. Memory system
 
-- **Three-tier memory (Letta-style)** — recall log (`Conversation`) / core (resident, token-budgeted, agent self-managed) / archival (full fact vector store, recalled on demand). `Conversation` is the only raw log; core holds only curated atomic facts, no redundant copies.
-- **MemoryProfile (DomainPack layer 7)** — declarative per-domain "extraction schema (what to remember) + recall strategy + core budget + whether to expose self-managed tools + habit-fact types (cross-session)", composable alongside `CompressionTemplate`/`ContextSource`. `CodingPack`/`ResearchPack` ship default profiles.
-- **Compression → archival incremental extraction** — before `ContextCompressor` drops old turns, it extracts atomic facts via `FactExtractor` per the domain schema, archived through `MemoryFactStore` with Mem0-style conflict updates (same subject+predicate → update, not append), plugging "compression = data loss".
-- **Compression-resistant injection** — `CoreMemorySource` (implements `ContextSource`, `EveryIteration`) injects the core block + recall context every turn; re-injected after compression.
-- **Self-managed memory tools (domain opt-in)** — `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent curate its own memory → "gets better with use".
-- **Dual namespace + persistence** — `user_id` (cross-session habits) + `session_id` (this session's episodic); a unified `memories` table persists; `oneai memory search/list --user`. The `--user` flag namespaces cross-session memory.
-- **Short-term memory** — sliding window, auto-evicted to long-term.
-- **Long-term memory** — HNSW vector store + content store + hybrid scoring; **auto-embedded** via the configured `EmbeddingService`. When unconfigured, auto-detection runs; if no provider is available, recall falls back to keyword matching.
-- **STM↔LTM closed loop** — `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`.
-- **Context compression** — auto-summarize when over token limit, keeping recent turns; `ContextBudgetManager` allocates per-turn budgets proportionally.
-- **Persistence** — `SqliteSessionStore` persists sessions/LTM/facts; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`, `oneai memory search <kw> --user <id> / list --user <id>`.
+**Three-tier memory (Letta-style):**
 
-### Working-state system (cross-session task continuation)
+- **recall log** — the raw `Conversation` log (the only raw source)
+- **core** — resident, token-budgeted, agent self-managed; holds only curated atomic facts, no redundant copies
+- **archival** — full fact vector store, recalled on demand
+
+`Conversation` is the only raw log; core holds only curated atomic facts, no redundant copies.
+
+**MemoryProfile (DomainPack layer 7):** declarative per-domain "extraction schema (what to remember) + recall strategy + core budget + whether to expose self-managed tools + habit-fact types (cross-session)", composable alongside `CompressionTemplate`/`ContextSource`. `CodingPack`/`ResearchPack` ship default profiles.
+
+**Compression → archival incremental extraction:** before `ContextCompressor` drops old turns, it extracts atomic facts via `FactExtractor` per the domain schema, archived through `MemoryFactStore` with Mem0-style conflict updates (same subject+predicate → update, not append), plugging "compression = data loss".
+
+**Compression-resistant injection:** `CoreMemorySource` (implements `ContextSource`, `EveryIteration`) injects the core block + recall context every turn; re-injected after compression.
+
+**Self-managed memory tools (domain opt-in):** `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent curate its own memory → "gets better with use".
+
+**Dual namespace + persistence:**
+
+- `user_id` (cross-session habits) + `session_id` (this session's episodic)
+- a unified `memories` table persists; `oneai memory search/list --user` namespaces cross-session memory
+
+**Short-term / long-term memory:**
+
+- Short-term — sliding window, auto-evicted to long-term
+- Long-term — HNSW vector store + content store + hybrid scoring; **auto-embedded** via the configured `EmbeddingService`. When unconfigured, auto-detection runs; if no provider is available, recall falls back to keyword matching
+
+**STM↔LTM closed loop** — `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`.
+
+**Context compression** — auto-summarize when over token limit, keeping recent turns; `ContextBudgetManager` allocates per-turn budgets proportionally.
+
+**Persistence** — `SqliteSessionStore` persists sessions/LTM/facts; `AppSession` auto-saves after each run. `oneai session list / resume <id> / delete / info`, `oneai memory search <kw> --user <id> / list --user <id>`.
+
+### 9. Working-state system (cross-session task continuation)
 
 A task's goal / step list / progress / key decisions / blockers no longer live in the session transcript — they're persisted as a **per-task append-only event log** on disk, independent of any session. A brand-new session reads a lightweight index once and surfaces the previously unfinished work.
 
@@ -688,26 +803,32 @@ oneai tasks archive <id>                      # archive when done (gzip the even
 >
 > Note: `oneai session resume <id>` is currently **print-only** (shows conversation history; it does not run the agent loop or rehydrate working state). Live continuation goes through `tasks continue <id>` (cross-session: a new session binds to that task_id and derives state into memory). Same-session `chat --resume` is not yet implemented.
 
-### Usage & reliability
+### 10. Usage & reliability
 
 - **Usage tracking (tokens only)** — `UsageTracker` trait + `UsageRecord`, with `InMemoryUsageTracker` and the persistent `SqliteUsageTracker` (`oneai-persistence`). After each inference the AgentLoop records prompt/completion/total tokens and call count — **no USD amounts or budgets tracked** (USD cost/budget management was removed). `oneai usage report / session <id> / export`.
 - **RateLimiter** (`TokenWindowRateLimiter`) + **CircuitBreaker** (`ThresholdCircuitBreaker`, Closed/Open/HalfOpen) — enforced inside the AgentLoop.
 - **Token counting** — `HeuristicTokenCounter` (per-provider, CJK-aware) + `ContextWindowProfile` + 4 trimming strategies + fits-in-window check — `oneai token`.
 
-### 3-layer output parser
-
-LLM output passes through 3 defensive layers: constrained decoding → fuzzy JSON repair (bracket completion, regex extraction, embedded-JSON detection) → fallback self-correction re-prompt. Reuse it rather than parsing model output directly.
-
-### Workflow engine
+### 11. Workflow engine
 
 - **WorkflowDag** — declarative DAG for parallel step orchestration.
 - **StateGraph** — cyclic directed graph for iterative agent flows (ReAct loops, conditional routing, breakpoints). StateGraph closes the loop with AgentLoop: graph nodes can emit `GraphDecision::SwitchParadigm`/`Delegate`/`ToolCalls`.
 
-### RAG
+### 12. RAG
 
-`EmbeddingService` trait with OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat implementations; `EmbeddingProviderAdapter` registry + `EmbeddingResolver` (auto-detection + build-time/runtime fallback sharing one `should_continue` error classifier); `EmbeddingServiceRegistry` (cache + primary→fallback runtime switch); UTF-8 byte-bisection input splitting; `AutoEmbeddingDocumentIndex` auto-embedding on `add_document()`. Chunking: SentenceBoundary/FixedSize/Paragraph. See [Embedding configuration](#embedding-configuration).
+`oneai-rag` provides embedding and retrieval, with these core components:
 
-### A2A protocol, WASM sandbox, eval, Studio, MCP
+- **`EmbeddingService` trait** — OpenAI / Voyage / Ollama / FastEmbed / OpenAI-compat implementations.
+- **`EmbeddingProviderAdapter` registry** — unifies differences across providers.
+- **`EmbeddingResolver`** — auto-detection + build-time/runtime fallback, sharing one `should_continue` error classifier (429/5xx/transport/missing-key degrade, others raise).
+- **`EmbeddingServiceRegistry`** — cache + primary→fallback runtime switch.
+- **`AutoEmbeddingDocumentIndex`** — auto-embeds on `add_document()`.
+- **Input splitting** — UTF-8 byte bisection, so multibyte (CJK) text never splits mid-character.
+- **Chunking** — SentenceBoundary / FixedSize / Paragraph.
+
+Configuration and the detection chain are detailed above in [Embedding configuration](#embedding-configuration-zero-burden).
+
+### 13. A2A protocol, WASM sandbox, eval, Studio, MCP
 
 - **A2A** (`oneai-a2a`) — agent-to-agent protocol SDK: client + axum JSON-RPC server host + DomainPack→AgentCard auto-exposure. `oneai a2a serve / discover / list / send`.
 - **WASM** (`oneai-wasm`) — Wasmtime sandbox for untrusted code: `WasmTool`, `WasmModuleRegistry`, resource monitor, WASI restricted access, Native↔Wasm execution modes. `oneai wasm list / load / run / health / stats`.
@@ -715,7 +836,7 @@ LLM output passes through 3 defensive layers: constrained decoding → fuzzy JSO
 - **Studio** (`oneai-studio`) — axum HTTP+WebSocket service, REST API, real-time event push, D3.js SVG StateGraph viz, checkpoint time-travel. `oneai studio`.
 - **MCP ecosystem** (`oneai-mcp`) — `McpServerHost` (JSON-RPC server) + `McpPluginRegistry` (discover/configure/connect) + TOML config + stdio transport. `oneai mcp serve / list / add / remove / connect`.
 
-### Tracing
+### 14. Tracing
 
 OpenInference-compatible traces for agent evaluation, plus OTEL exporters (`OtlpCollector` + `OtelMetricsProvider`):
 
@@ -920,98 +1041,6 @@ export OHOS_NDK_HOME=/path/to/harmony/native   # contains llvm/bin/clang
 ```
 
 See `platforms/harmony/README.md`. The streaming callback fires on a tokio worker thread via `napi_threadsafe_function` and is dispatched on the ArkTS thread.
-
----
-
-## Project structure
-
-```
-oneai/
-├── crates/
-│   ├── oneai-core/          # foundation: types, traits, PermissionLevel, Budget
-│   ├── oneai-provider/      # OpenAI/Anthropic/Gemini/Ollama + ProviderPool + SmartRouter
-│   ├── oneai-parser/        # 3-layer output parsing
-│   ├── oneai-memory/        # STM, LTM, compression, HNSW, MemoryManager + persistence
-│   ├── oneai-tool/          # registry, 12 tools, MCP client, approval, executor
-│   ├── oneai-skill/         # skill registry + selector + built-in domain skills
-│   ├── oneai-domain/        # DomainPack (7 layers), CodingPack, market, spec validator
-│   ├── oneai-agent/         # AgentLoop, SubAgent, paradigms, Team/Handoff/Swarm/GroupChat, StreamParser
-│   ├── oneai-rag/           # Document, Index, EmbeddingService, Retrieval
-│   ├── oneai-workflow/      # DAG, StateGraph, compiler, validator, executor
-│   ├── oneai-scheduler/     # InMemoryScheduler
-│   ├── oneai-persistence/   # SQLite session/usage backends + file event log (working state)
-│   ├── oneai-a2a/           # A2A protocol SDK (client + server host)
-│   ├── oneai-wasm/          # Wasmtime sandbox + WasmTool + module registry
-│   ├── oneai-eval/          # eval cases/metrics/runner/suites + SWE-bench three-axis
-│   ├── oneai-studio/        # Studio Web UI (axum + WS + D3 viz)
-│   ├── oneai-mcp/           # MCP server host + plugin registry
-│   ├── oneai-app/           # AppBuilder, App, AppSession
-│   ├── oneai-trace/         # OpenInference traces + OTEL exporters
-│   ├── oneai-uniffi/        # UniFFI binding definitions + hand-written extern "C" facade
-│   └── oneai-platform-{desktop,android,ios,harmony}/
-├── platforms/               # six native apps (SwiftUI / WinUI / Compose / ArkTS)
-│   ├── macos/               # reference implementation (SwiftUI, swiftc build)
-│   ├── windows/             # WinUI 3 / C#
-│   ├── android/             # Jetpack Compose / Kotlin
-│   ├── ios/                 # SwiftUI (Xcode xcframework)
-│   ├── harmony/             # ArkTS / ArkUI + NAPI
-│   └── apple/               # cross-compile staging: liboneai.a + headers + binding
-├── examples/
-│   ├── cli/                 # interactive TUI demo (ratatui + crossterm) — bin: oneai-cli
-│   ├── desktop-app/         # desktop approval-gate demo
-│   └── rust/                # channel approval-gate demo
-├── bindings/                # generated bindings (cpp/csharp/kotlin/swift + hand-written c/)
-├── scripts/                 # generate_bindings.sh + build_{apple,windows,android,harmony}.sh + swebench/
-└── Cargo.toml               # workspace root (resolver = "2", edition 2021, v0.2.0)
-```
-
----
-
-## Build, test, run
-
-```bash
-cargo build                      # build the whole workspace
-cargo test                       # all 1457 tests (25 crates)
-cargo test -p oneai-agent        # tests for a single crate
-cargo test -p oneai-agent plan   # a single test/module
-cargo clippy --workspace --all-targets   # keep lints clean
-cargo run -p oneai-cli-demo      # launch the interactive TUI (bin: oneai-cli)
-```
-
-The workspace uses `resolver = "2"`, `edition = "2021"`, shared version `0.2.0` (from `[workspace.package]`), with all shared dependencies pinned in `[workspace.dependencies]`. Public enums are `#[non_exhaustive]` as part of the v0.2.0 API-stability commitment.
-
-### Network proxy
-
-All outbound HTTP — LLM provider APIs, `web_search`/`web_fetch`, the A2A client, embedding services, MCP HTTP transport — goes through `reqwest::Client`, so proxy support is env-var-based and uniform everywhere:
-
-- `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` — proxy URL (auto-detected by reqwest on every client build; no code opt-in needed).
-- `NO_PROXY` — comma-separated exclusion list.
-- SOCKS5: `ALL_PROXY=socks5://host:port` (reqwest `socks` feature is on in the workspace `Cargo.toml`).
-- On macOS/Windows, reqwest's `system-proxy` feature also reads the OS GUI proxy settings; env vars always win.
-
----
-
-## Roadmap
-
-| Phase | Focus | Status |
-|-------|-------|--------|
-| 1–11 | core, provider, parser, paradigms, memory, tools, workflow, persistence, AppBuilder, UniFFI, platform UI, trace, DomainPack, TUI | ✅ done |
-| P2-1 | SubAgent + Worktree isolation + parallel execution | ✅ done |
-| P2-2 | StateGraph ↔ AgentLoop closed-loop execution | ✅ done |
-| P2-3/4 | OTEL observability + STM↔LTM closed loop | ✅ done |
-| P2-5 | A2A protocol SDK | ✅ done |
-| P2-6 | WASM sandbox engine | ✅ done |
-| P3-1 | API stabilization (`#[non_exhaustive]`, v0.2.0) | ✅ done |
-| P3-2/3 | DomainPack market + CLI polish (clap subcommands + config) | ✅ done |
-| P3-4/5 | eval framework + Studio Web UI | ✅ done |
-| P3-6 | MCP server ecosystem | ✅ done |
-| P4-1/2 | A2A server host + MCP client enhancements | ✅ done |
-| P4-3/4 | DomainPack spec validator + WASM runtime enhancements | ✅ done |
-| P5-1/2/3 | SQLite persistence + Embedding service + usage (token) management | ✅ done |
-| P6-1/2/3 | ProviderPool + SmartRouter + token counting / context management | ✅ done |
-| P7-1/2/3 | Team coordination + Handoff protocol + Swarm orchestration | ✅ done |
-| Native | six native apps: macOS/Windows/Android/iOS/HarmonyOS + scenario-based multi-agent chat | ✅ macOS/Windows/Android/Harmony · 🚧 iOS |
-| TUI | tool display, Plan-mode approval gate, skill disclosure, scroll perf, mouse selection | ✅ done |
 
 ---
 
