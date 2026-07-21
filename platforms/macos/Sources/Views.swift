@@ -162,54 +162,50 @@ private extension Color {
 struct ChatScreen: View {
     @StateObject private var vm = ChatViewModel()
     @StateObject private var artifacts = ArtifactStore()
-    @State private var showSettings = false
-    @State private var showCommandPalette = false
-    @State private var pendingDeleteId: String? = nil
 
     var body: some View {
-        NavigationSplitView {
-            Sidebar(vm: vm, onOpenSettings: { showSettings = true },
-                    onDelete: { pendingDeleteId = $0 })
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260)
-        } detail: {
-            ChatDetail(vm: vm, streamTick: vm.streamTick, onOpenSettings: { showSettings = true })
-                .environmentObject(artifacts)
-        }
-        .environmentObject(artifacts)
-        // Extend into the (now hidden) title-bar region so the chat + sidebar
-        // headers sit at the very top instead of below a large reserved gap.
-        .ignoresSafeArea(.container, edges: .top)
-        .background(
-            // ⌘K opens the command palette.
-            Button("") { showCommandPalette = true }
-                .keyboardShortcut("k", modifiers: .command)
-                .opacity(0)
-        )
-        .sheet(isPresented: $showCommandPalette) {
-            CommandPalette(vm: vm, isPresented: $showCommandPalette)
-        }
-        .task {
-            await vm.ensureApp()
-            await vm.refreshSessions()
-            // Cold start → a fresh single-agent conversation (not the most
-            // recent history). The empty chat renders the welcome screen; the
-            // user's past sessions remain reachable from the sidebar.
-            await vm.newConversation()
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsSheet(vm: vm, onClose: { showSettings = false })
-        }
-        .alert("删除会话", isPresented: Binding(
-            get: { pendingDeleteId != nil },
-            set: { if !$0 { pendingDeleteId = nil } })) {
-            Button("取消", role: .cancel) { pendingDeleteId = nil }
-            Button("删除", role: .destructive) {
-                if let id = pendingDeleteId { Task { await vm.deleteSession(id) } }
-                pendingDeleteId = nil
+        // In-page overlay layer sits ABOVE the split view — dialogs (settings /
+        // scenario editor / edit-message / ⌘K palette / delete-confirm) render
+        // here instead of as native .sheet/.alert. Native sheets rebuild their
+        // content tree on every open (heavy editors stuttered); an in-page
+        // layer is a state flip + cheap opacity transition, and it stays in
+        // the view hierarchy. Mirrors the `pendingScenario` topic-intake page.
+        ZStack {
+            NavigationSplitView {
+                Sidebar(vm: vm, agentStore: vm.agentStore,
+                        onOpenSettings: { vm.overlay = .settings },
+                        onDelete: { vm.overlay = .deleteSession($0) })
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+            } detail: {
+                ChatDetail(vm: vm, streamTick: vm.streamTick,
+                           onOpenSettings: { vm.overlay = .settings })
+                    .environmentObject(artifacts)
             }
-        } message: {
-            Text("确定删除这个会话?历史无法恢复。")
+            .environmentObject(artifacts)
+            // Extend into the (now hidden) title-bar region so the chat + sidebar
+            // headers sit at the very top instead of below a large reserved gap.
+            .ignoresSafeArea(.container, edges: .top)
+            .background(
+                // ⌘K opens the command palette.
+                Button("") { vm.overlay = .commandPalette }
+                    .keyboardShortcut("k", modifiers: .command)
+                    .opacity(0)
+            )
+            .task {
+                await vm.ensureApp()
+                await vm.refreshSessions()
+                // Cold start → a fresh single-agent conversation (not the most
+                // recent history). The empty chat renders the welcome screen; the
+                // user's past sessions remain reachable from the sidebar.
+                await vm.newConversation()
+            }
+
+            if let ov = vm.overlay {
+                OverlayLayer(overlay: ov, vm: vm)
+                    .transition(.opacity)
+            }
         }
+        .animation(.easeInOut(duration: 0.15), value: vm.overlay == nil)
     }
 }
 
@@ -217,20 +213,14 @@ struct ChatScreen: View {
 
 private struct Sidebar: View {
     @ObservedObject var vm: ChatViewModel
+    /// Observed DIRECTLY (not via `vm`) so scenario mutations (delete/upsert)
+    /// re-render this list. `AgentStore` is a nested `ObservableObject`; if the
+    /// Sidebar only observed `vm`, `vm.agentStore.delete(...)` would fire
+    // `AgentStore.objectWillChange` (not `ChatViewModel.objectWillChange`) and
+    // the row would stay visible until restart — the "场景无法删除" bug.
+    @ObservedObject var agentStore: AgentStore
     let onOpenSettings: () -> Void
     let onDelete: (String) -> Void
-    /// Single sheet source-of-truth. SwiftUI glitches when two `.sheet`
-    /// modifiers attach to the same view (empty/unclosable sheet); one
-    /// enum-driven sheet sidesteps that entirely.
-    private enum SidebarSheet: Identifiable {
-        case editScenario(Scenario)   // new or edit a scenario in the editor
-        var id: String {
-            switch self {
-            case .editScenario(let s): return "edit-\(s.id)"
-            }
-        }
-    }
-    @State private var sheet: SidebarSheet? = nil
 
     /// Start a scenario: scenarios with topic-intake fields route through the
     /// inline `pendingScenario` page (rendered in the chat detail) instead of a
@@ -274,15 +264,15 @@ private struct Sidebar: View {
 
     private var scenariosSection: some View {
         SidebarSection(title: "场景", trailing: newScenarioButton) {
-            ForEach(vm.agentStore.scenarios) { sc in
-                ScenarioRow(scenario: sc, isCurrent: vm.currentScenario?.id == sc.id) {
-                    startScenario(sc)
-                }
-                .equatable()
-                .contextMenu {
-                    Button("编辑场景") { sheet = .editScenario(sc) }
-                    Button("删除场景", role: .destructive) { vm.agentStore.delete(sc) }
-                }
+            ForEach(agentStore.scenarios) { sc in
+                ScenarioRow(scenario: sc, isCurrent: vm.currentScenario?.id == sc.id,
+                            onTap: { startScenario(sc) },
+                            onDelete: { agentStore.delete(sc) })
+                    .equatable()
+                    .contextMenu {
+                        Button("编辑场景") { vm.overlay = .scenarioEditor(sc) }
+                        Button("删除场景", role: .destructive) { agentStore.delete(sc) }
+                    }
             }
         }
     }
@@ -293,7 +283,7 @@ private struct Sidebar: View {
                               agents: [], turnPolicy: .scripted, scriptOrder: nil,
                               moderatorId: nil, openerAgentId: nil, openerLine: nil,
                               topicFields: nil, debrief: nil, reviewLoop: nil)
-            sheet = .editScenario(sc)
+            vm.overlay = .scenarioEditor(sc)
         } label: { Image(systemName: "plus") }
     }
 
@@ -344,13 +334,9 @@ private struct Sidebar: View {
             .pointerCursor()
         }
         .background(Theme.surface)
-        .sheet(item: $sheet) { presented in
-            switch presented {
-            case .editScenario(let sc):
-                ScenarioEditor(scenario: sc, store: vm.agentStore,
-                               onClose: { sheet = nil })
-            }
-        }
+        // No `.sheet` here — scenario editor + delete-confirm are in-page
+        // overlays driven by `vm.overlay` (see ChatScreen). The Sidebar only
+        // needs `agentStore` observation for live delete/upsert refresh.
     }
 }
 
@@ -383,11 +369,12 @@ private struct ScenarioRow: View, Equatable {
     let scenario: Scenario
     let isCurrent: Bool
     let onTap: () -> Void
+    let onDelete: () -> Void
     @State private var hovered = false
     // Equatable so `.equatable()` skips `body` when the row's data is unchanged
     // — the Sidebar re-renders on any VM @Published change, but a scenario row
     // only needs to re-render when ITS scenario or the current-selection flag
-    // changed. The closure isn't part of ==; it's recaptured only when the
+    // changed. The closures aren't part of ==; they're recaptured only when the
     // data DID change (so an edited scenario's tap uses the fresh value).
     static func == (lhs: ScenarioRow, rhs: ScenarioRow) -> Bool {
         lhs.scenario == rhs.scenario && lhs.isCurrent == rhs.isCurrent
@@ -403,6 +390,17 @@ private struct ScenarioRow: View, Equatable {
                     .fontWeight(isCurrent ? .semibold : .regular)
                     .lineLimit(1)
                 Spacer()
+                // Visible delete affordance (mirrors SessionRow). Without it
+                // deletion was only reachable via right-click context menu, and
+                // because the Sidebar didn't observe `agentStore` directly the
+                // row never disappeared (see Issue 3). Now both are fixed.
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundStyle(Theme.onSurfaceVar)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+                .help("删除场景")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 5)
@@ -563,29 +561,162 @@ private func relativeTime(_ epochMs: Int64) -> String {
 
 // MARK: - Chat detail
 
-/// Content frame (top + bottom in global coords) of the scrollable VStack.
-/// Measured by one GeometryReader on the VStack's background so top and
-/// bottom come from the SAME layout pass (consistent for the dist calc).
-private struct ContentFrame: Equatable {
-    var minY: CGFloat
-    var maxY: CGFloat
-}
-private struct ContentFrameKey: PreferenceKey {
-    static var defaultValue = ContentFrame(minY: 0, maxY: 0)
-    static func reduce(value: inout ContentFrame, nextValue: () -> ContentFrame) { value = nextValue() }
-}
-/// ScrollView viewport's global maxY (its bottom edge).
-private struct ViewportBottomKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+// ── Scroll control via the SwiftUI ScrollView's backing NSScrollView ─────────
+// Why not SwiftUI's preference-key + `onPreferenceChange`: that inferred "did
+// the user scroll?" from the DIRECTION of the content frame's movement — an
+// unobservable signal. `proxy.scrollTo(bottom)` (the per-flush auto-follow)
+// ALSO moves the content, in the same direction as a user scrolling back to the
+// bottom; during streaming the auto-follow's motion and a gentle user wheel-up
+// coalesce into one preference delivery, the net delta reads negative, the
+// logic re-truths stickToBottom, the next flush yanks the user down. Tug-of-
+// war, streaming (faster than the wheel) always won.
+//
+// Why not a hand-rolled NSScrollView + NSHostingView documentView (tried
+// first): NSHostingView in an NSScrollView mis-sizes DYNAMIC content — its
+// intrinsic height tracks the clip's PROPOSED (viewport) height, so tall
+// content gets squeezed (code blocks / ASCII diagrams collapse to one line,
+// the blockquote accent bar spans the viewport, no overflow to scroll); and
+// the manual sizeThatFits re-measure needed to fix that fed back into a
+// layout loop (freeze). SwiftUI's own ScrollView sizes its content correctly,
+// so we KEEP it for rendering and only take over scroll CONTROL.
+//
+// `ScrollController` (an NSViewRepresentable placed as the ScrollView's
+// `.background`) introspects the backing `NSScrollView` by walking its
+// superview chain, then uses the two clean signals SwiftUI can't:
+//   - synchronous, absolute `isAtBottom` from `documentVisibleRect` vs
+//     `documentView.bounds` — a per-frame STATE, never a delta;
+//   - a real "the user scrolled" event: a `boundsDidChange` on the clip view
+//     that we did NOT cause (gated by `programmaticScroll`), so auto-follow's
+//     own motion can never masquerade as a user gesture.
+// The at-bottom latch is updated ONLY from user-caused bounds changes; content
+// growth (documentView height change — does NOT fire the CLIP's boundsDidChange)
+// and programmatic snaps never touch it. This is the general macOS-native
+// pattern (iMessage/Telegram/Discord: isAtBottom latch + jump-to-latest +
+// suspend-during-gesture).
+
+/// Introspects and controls the enclosing `NSScrollView`. Attached as a
+/// `.background` of the SwiftUI `ScrollView`; on attach it walks the superview
+/// chain to find the backing `NSScrollView`, then observes its clip view.
+private final class ScrollControllerView: NSView {
+    var onAtBottomChange: ((Bool) -> Void)?
+    /// True when the content bottom is within the viewport. Source of truth for
+    /// auto-follow; updated ONLY from user-caused bounds changes.
+    private(set) var atBottom: Bool = true
+    /// Guards `boundsDidChange` notifications caused by our own snaps so
+    /// auto-follow never re-touches the latch. Set around a snap, cleared on
+    /// the next runloop (covers any deferred notification delivery).
+    private var programmaticScroll = false
+    private var boundsObserver: NSObjectProtocol?
+    private weak var scrollView: NSScrollView?
+    private let bottomEpsilon: CGFloat = 2
+
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); attachIfNeeded() }
+    override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); attachIfNeeded() }
+
+    /// Walk the superview chain to the enclosing `NSScrollView` (the SwiftUI
+    /// `ScrollView`'s AppKit backing on macOS), then observe its clip view.
+    /// Idempotent — safe to call from both move-to-window and move-to-superview.
+    func attachIfNeeded() {
+        guard scrollView == nil, window != nil else { return }
+        var ancestor: NSView? = superview
+        while let a = ancestor {
+            if let sv = a as? NSScrollView { scrollView = sv; break }
+            ancestor = a.superview
+        }
+        guard let sv = scrollView, let cv = sv.contentView as? NSClipView else { return }
+        cv.drawsBackground = false
+        cv.backgroundColor = .clear
+        cv.postsBoundsChangedNotifications = true
+        boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: cv, queue: .main
+        ) { [weak self] _ in self?.handleBoundsChanged() }
+    }
+
+    /// Absolute, per-frame "is the content bottom within the viewport".
+    /// Handles both flipped (SwiftUI's backing is flipped: bottom = max-y) and
+    /// non-flipped (bottom = min-y) document orientations.
+    private var isAtBottom: Bool {
+        guard let sv = scrollView, let doc = sv.documentView, doc.bounds.height > 0 else { return true }
+        let visH = sv.contentView.bounds.height
+        guard visH > 0 else { return true }
+        let vis = sv.documentVisibleRect
+        return doc.isFlipped
+            ? vis.maxY >= doc.bounds.height - bottomEpsilon
+            : vis.minY <= bottomEpsilon
+    }
+
+    private func handleBoundsChanged() {
+        guard !programmaticScroll else { return }   // our own snap — ignore
+        let now = isAtBottom
+        guard now != atBottom else { return }
+        atBottom = now
+        onAtBottomChange?(now)
+    }
+
+    /// Programmatic scroll to the content bottom. Guarded so the resulting
+    /// `boundsDidChange` does not flip the latch; truthes the latch because a
+    /// snap means "we are now at the bottom". `NSClipView.scroll(to:)` sets the
+    /// bounds origin AND updates the scroller knob (and stays in sync with the
+    /// SwiftUI ScrollView's backing).
+    func snapToBottom() {
+        guard let sv = scrollView, let doc = sv.documentView else { return }
+        programmaticScroll = true
+        atBottom = true
+        let cv = sv.contentView
+        let targetY = doc.isFlipped
+            ? max(0, doc.bounds.height - cv.bounds.height)
+            : min(0, cv.bounds.height - doc.bounds.height) // non-flipped: origin 0 = bottom
+        cv.scroll(to: NSPoint(x: 0, y: targetY))
+        DispatchQueue.main.async { [weak self] in self?.programmaticScroll = false }
+    }
+
+    deinit { if let o = boundsObserver { NotificationCenter.default.removeObserver(o) } }
 }
 
-/// Mutable scroll-tracking state held by reference (not a @State value) so
-/// writing to it from a per-frame preference callback does NOT trigger a
-/// re-render of the detail.
-private final class ScrollState {
-    /// Last measured content frame; `nil` until the first layout lands.
-    var lastFrame: ContentFrame? = nil
+/// `NSViewRepresentable` for `ScrollControllerView`. Drives auto-follow / force-
+/// snap via the backing `NSScrollView` (NOT SwiftUI's `ScrollViewReader` — its
+/// `scrollTo` is async and re-introduces the programmatic-vs-user ambiguity).
+private struct ScrollController: NSViewRepresentable {
+    /// Bumped to request an UNCONDITIONAL snap-to-bottom (session load,
+    /// "回到底部" button, send). Re-pins regardless of the current latch.
+    let forceToken: Int64
+    /// Bumped ~20fps during streaming + on a new bubble. Snap-to-bottom only
+    /// fires when the user is currently pinned (`view.atBottom`).
+    let followToken: Int64
+    /// Mirror of the latch — drives the "回到底部" overlay visibility.
+    @Binding var atBottom: Bool
+
+    func makeNSView(context: Context) -> ScrollControllerView {
+        let v = ScrollControllerView()
+        v.onAtBottomChange = { now in DispatchQueue.main.async { atBottom = now } }
+        context.coordinator.view = v
+        return v
+    }
+
+    func updateNSView(_ v: ScrollControllerView, context: Context) {
+        v.attachIfNeeded()   // superview chain may materialize after the first pass
+        let followChanged = followToken != context.coordinator.lastFollow
+        context.coordinator.lastFollow = followToken
+        if forceToken != context.coordinator.lastForce {
+            context.coordinator.lastForce = forceToken
+            // Force snaps are rare (load/button/send): snap now + after a tick so
+            // the post-layout document height is reflected (load: content hasn't
+            // laid out on the first pass — a non-streaming session has no follow
+            // tokens to self-correct).
+            DispatchQueue.main.async { v.snapToBottom() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { v.snapToBottom() }
+        } else if followChanged {
+            if v.atBottom { DispatchQueue.main.async { v.snapToBottom() } }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        weak var view: ScrollControllerView?
+        var lastForce: Int64 = -1
+        var lastFollow: Int64 = -1
+    }
 }
 
 private struct ChatDetail: View {
@@ -596,14 +727,14 @@ private struct ChatDetail: View {
     @ObservedObject var streamTick: StreamTick
     @EnvironmentObject var artifacts: ArtifactStore
     let onOpenSettings: () -> Void
-    @State private var stickToBottom = true
-    /// ScrollView's bottom edge in global coordinates (updated by the
-    /// viewport GeometryReader). Read by the content-frame preference change
-    /// handler to compute "how far is the content bottom below the viewport".
-    @State private var viewportBottom: CGFloat = 0
-    /// Holds the previous content frame across renders (reference type →
-    /// mutations don't re-render). See `ScrollState`.
-    @State private var scroller = ScrollState()
+    /// Bumped to request an UNCONDITIONAL scroll-to-bottom: session (re)load
+    /// (via `vm.scrollRequest`), the "回到底部" overlay button, and send. See
+    /// `NSScrollList` / `ChatScrollView` — a forced snap re-pins the latch.
+    @State private var bottomRequest: Int = 0
+    /// Mirror of the `ChatScrollView`'s at-bottom latch, used ONLY to drive the
+    /// "回到底部" overlay's visibility. The latch itself lives in the scroll
+    /// view (updated from user-caused bounds changes only).
+    @State private var atBottom: Bool = true
 
     var body: some View {
         if artifacts.visible {
@@ -688,113 +819,52 @@ private struct ChatDetail: View {
                 WelcomeScreen(vm: vm, onOpenSettings: onOpenSettings)
             }
 
-            // Message list
-            ScrollViewReader { proxy in
-                ScrollView {
-                    // NON-lazy VStack (not LazyVStack). Two reasons:
-                    //
-                    // 1. The trailing `Color.clear.id("bottom")` anchor must
-                    //    stay materialized at ALL scroll offsets so its
-                    //    `BottomAnchorKey` preference keeps reporting while the
-                    //    user scrolls — otherwise (LazyVStack) the anchor is
-                    //    deallocated once it scrolls far off-screen, the
-                    //    preference goes silent, `stickToBottom` never flips to
-                    //    false, and the streaming auto-follow yanks the user
-                    //    back to the bottom every flush (issues 1 & 4).
-                    //
-                    // 2. With all rows measured up front the document height is
-                    //    stable from the first layout, so a freshly loaded
-                    //    history lands at the true bottom (not a blank below
-                    //    un-materialized lazy cells — issue 2) and the scrollbar
-                    //    thumb doesn't grow/jitter as cells materialize mid-scroll
-                    //    (issue 3). Per-bubble work during streaming is still
-                    //    bounded: `MarkdownText` is `.equatable()` on its
-                    //    `text`, so done bubbles skip re-parse/layout and only
-                    //    the active bubble's last block re-renders each flush.
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(vm.items) { entry in
-                            switch entry {
-                            case .user(let u): UserBubble(text: u.text, onEdit: { newText in Task { await vm.editAndResend(u, newText: newText) } })
-                            case .assistant(let a): AssistantBubble(item: a, scenario: vm.currentScenario, onRetry: { Task { await vm.retryLast() } })
-                            }
+            // Message list — SwiftUI's `ScrollView` (sizes its own content
+            // correctly) with a non-lazy VStack + `.equatable()` bubbles for
+            // stable geometry + bounded per-flush cost. `ScrollController`
+            // (background of the VStack — INSIDE the scroll content, so its
+            // superview chain reaches the backing NSScrollView; an outer
+            // `.background` would land as a SIBLING of the NSScrollView and
+            // never find it) drives auto-follow / snap WITHOUT the old
+            // preference-key frame-direction logic (which couldn't tell a
+            // programmatic auto-follow from a user scrolling back, yanking the
+            // user down mid-stream). See `ScrollController` above.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(vm.items) { entry in
+                        switch entry {
+                        case .user(let u): UserBubble(text: u.text, item: u, vm: vm).equatable()
+                        case .assistant(let a): AssistantBubble(item: a, scenario: vm.currentScenario, onRetry: { Task { await vm.retryLast() } }).equatable()
                         }
-                        // Scroll target only — the content frame (top+bottom)
-                        // is measured by the VStack's background reader below,
-                        // so this anchor no longer carries a GeometryReader.
-                        Color.clear.frame(height: 1).id("bottom")
-                    }
-                    .padding(12)
-                    .background(GeometryReader { g in
-                        Color.clear.preference(key: ContentFrameKey.self,
-                                               value: ContentFrame(minY: g.frame(in: .global).minY,
-                                                                  maxY: g.frame(in: .global).maxY))
-                    })
-                }
-                .background(GeometryReader { g in
-                    Color.clear.preference(key: ViewportBottomKey.self,
-                                           value: g.frame(in: .global).maxY)
-                })
-                // Stick-to-bottom decided on SCROLLS only — detected by the
-                // content TOP moving. A real scroll translates the whole
-                // content (top + bottom move together); content GROWTH (new
-                // tokens arriving) only extends the bottom, leaving the top
-                // fixed. So gating on a top-move lets growth through without
-                // touching stickiness — which is the fix for "after scrolling
-                // up then back to the bottom, new output no longer auto-follows":
-                // previously the bottom-only handler fired on growth too, and a
-                // flush adding >80pt flipped stickToBottom=false BEFORE the
-                // follow-scroll ran, breaking follow until the user scrolled
-                // again. (No programmatic-scroll flag needed: a follow-scroll
-                // also moves the top, but lands at dist≈0 → stickToBottom stays
-                // true; a user scroll-up moves the top and lands at dist>80 →
-                // false. Both correct.)
-                .onPreferenceChange(ContentFrameKey.self) { frame in
-                    let prev = scroller.lastFrame
-                    scroller.lastFrame = frame
-                    guard let prev = prev, abs(frame.minY - prev.minY) > 1 else { return }
-                    let dist = frame.maxY - viewportBottom
-                    if dist < 30 { stickToBottom = true }
-                    else if dist > 80 { stickToBottom = false }
-                }
-                .onPreferenceChange(ViewportBottomKey.self) { viewportBottom = $0 }
-                // A session was (re)loaded — force the viewport to the most
-                // recent message (issue 7). `onChange(of: items.count)` alone
-                // missed same-count loads and respected a stale stickToBottom.
-                .onChange(of: vm.scrollRequest) { _ in
-                    stickToBottom = true
-                    // Defer one runloop so the new items have laid out and the
-                    // "bottom" anchor resolves before the scroll.
-                    DispatchQueue.main.async {
-                        proxy.scrollTo("bottom", anchor: .bottom)
                     }
                 }
-                .onChange(of: streamTick.value) { _ in
-                    // Non-animated snap. `withAnimation` here stacks ~20×/sec
-                    // during streaming and forces extra layout passes, which
-                    // visibly jitters the chat (the "上下晃动" + scrollbar
-                    // twitch). When the user scrolled up, stickToBottom is
-                    // false and this is a no-op.
-                    if stickToBottom { proxy.scrollTo("bottom", anchor: .bottom) }
-                }
-                .onChange(of: vm.items.count) { _ in
-                    if stickToBottom { proxy.scrollTo("bottom", anchor: .bottom) }
-                }
-                .overlay(alignment: .bottom) {
-                    if !stickToBottom && !vm.items.isEmpty {
-                        Button {
-                            withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
-                            stickToBottom = true
-                        } label: {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .font(.oTitle2)
-                                .foregroundStyle(Theme.primary, Theme.surface)
-                                .shadow(radius: 3)
-                        }
-                        .buttonStyle(.plain)
-                        .pointerCursor()
-                        .padding(.bottom, 8)
-                        .help("回到底部")
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(ScrollController(
+                    // Force-snap (re-pin) on session load (vm.scrollRequest) or
+                    // the "回到底部" button (bottomRequest).
+                    forceToken: Int64(vm.scrollRequest) + Int64(bottomRequest),
+                    // Follow-snap (only while pinned) on streaming flush
+                    // (streamTick.value) + new bubble (items.count).
+                    followToken: streamTick.value + Int64(vm.items.count),
+                    atBottom: $atBottom
+                ))
+            }
+            .overlay(alignment: .bottom) {
+                if !atBottom && !vm.items.isEmpty {
+                    Button {
+                        atBottom = true
+                        bottomRequest += 1
+                    } label: {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.oTitle2)
+                            .foregroundStyle(Theme.primary, Theme.surface)
+                            .shadow(radius: 3)
                     }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .padding(.bottom, 8)
+                    .help("回到底部")
                 }
             }
 
@@ -808,7 +878,7 @@ private struct ChatDetail: View {
                      onSend: {
                          let task = vm.input.trimmingCharacters(in: .whitespacesAndNewlines)
                          if !task.isEmpty && !vm.running {
-                             vm.input = ""; stickToBottom = true
+                             vm.input = ""; bottomRequest += 1
                              Task { await vm.runTask(task) }
                          }
                      },
@@ -900,11 +970,19 @@ private struct WelcomeScreen: View {
 
 // MARK: - Bubbles
 
-private struct UserBubble: View {
+private struct UserBubble: View, Equatable {
     let text: String
-    let onEdit: (String) -> Void
-    @State private var editing = false
-    @State private var draft = ""
+    let item: UserItem
+    // Plain `let` (not @ObservedObject): UserBubble reads no VM state in its
+    // body — it only calls `vm` methods on user action — so it doesn't need
+    // reactivity. Combined with `.equatable()` below this keeps done user
+    // bubbles from re-evaluating on every streamTick flush.
+    let vm: ChatViewModel
+
+    static func == (lhs: UserBubble, rhs: UserBubble) -> Bool {
+        lhs.text == rhs.text && lhs.item === rhs.item
+    }
+
     var body: some View {
         HStack { Spacer(minLength: 60)
             Text(text).font(.oBody).foregroundStyle(Theme.onBg)
@@ -913,26 +991,12 @@ private struct UserBubble: View {
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .frame(maxWidth: 360, alignment: .trailing)
                 .contextMenu {
-                    Button("编辑并重发") { draft = text; editing = true }
+                    Button("编辑并重发") { vm.overlay = .editMessage(item) }
                     Button("复制") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(text, forType: .string)
                     }
                 }
-        }
-        .sheet(isPresented: $editing) {
-            VStack(spacing: 12) {
-                Text("编辑消息").font(.oHeadline)
-                TextEditor(text: $draft)
-                    .font(.oBody).scrollContentBackground(.hidden)
-                    .background(Theme.surfaceVar).clipShape(RoundedRectangle(cornerRadius: 8))
-                    .frame(minHeight: 100, maxHeight: 240)
-                HStack {
-                    Spacer()
-                    Button("取消", role: .cancel) { editing = false }.keyboardShortcut(.escape)
-                    Button("重发") { let s = draft; editing = false; onEdit(s) }.keyboardShortcut(.defaultAction)
-                }
-            }.frame(width: 420).padding(16)
         }
     }
 }
@@ -981,10 +1045,36 @@ private struct TurnStatusBar: View {
     }
 }
 
-private struct AssistantBubble: View {
+private struct AssistantBubble: View, Equatable {
     let item: AssistantItem
     let scenario: Scenario?
     let onRetry: () -> Void
+    /// Per-render SNAPSHOT of `item.version` (a value, copied at init — NOT a
+    /// read-through). `.equatable()` compares this against the PREVIOUS render's
+    /// captured value: a done (idle) bubble's version is stable → `==` true →
+    /// `body` SKIPPED (just an Int compare); only the active streaming bubble
+    /// (version bumped in `handle()` on every token) re-renders. That bounds
+    /// the non-lazy VStack's per-flush cost to one bubble instead of O(all) —
+    /// the fix for the streaming freeze on long conversations. (Comparing
+    /// `item.version` directly through the shared reference would always read
+    /// the current value and never detect change — hence the snapshot.)
+    private let version: Int
+
+    init(item: AssistantItem, scenario: Scenario?, onRetry: @escaping () -> Void) {
+        self.item = item
+        self.scenario = scenario
+        self.onRetry = onRetry
+        self.version = item.version
+    }
+
+    static func == (lhs: AssistantBubble, rhs: AssistantBubble) -> Bool {
+        // Same item instance + unchanged version + same scenario → skip body.
+        // `onRetry` (a closure) isn't part of equality; it's recaptured only
+        // when the body DOES run (on change), which is fine — retry on a done
+        // bubble uses the last-captured closure (still calls vm.retryLast).
+        lhs.item === rhs.item && lhs.version == rhs.version && lhs.scenario == rhs.scenario
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             // Speaker header (group-chat only; single-agent shows nothing).
@@ -1062,6 +1152,12 @@ private struct AssistantBubble: View {
 
 private struct ThinkingCard: View {
     let item: AssistantItem
+    /// Local @State (NOT `item.thinkingExpanded`) so the chevron toggle works
+    /// even when `AssistantBubble.body` is skipped by `.equatable()` (done
+    /// bubbles). SwiftUI preserves @State across both skipped-body and
+    /// re-rendered-body passes by structural identity, matching
+    /// `ToolStepsCard`'s pattern.
+    @State private var expanded = false
     var body: some View {
         if item.thinking.isEmpty { EmptyView() }
         else {
@@ -1080,15 +1176,15 @@ private struct ThinkingCard: View {
                     if item.thinkingActive { ThreeDots() }
                     Spacer()
                     Button {
-                        item.thinkingExpanded.toggle()
+                        expanded.toggle()
                     } label: {
-                        Image(systemName: item.thinkingExpanded ? "chevron.down" : "chevron.right")
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
                             .foregroundStyle(Theme.onSurfaceVar)
                     }
                     .buttonStyle(.plain)
                     .pointerCursor()
                 }
-                if item.thinkingExpanded {
+                if expanded {
                     ScrollView {
                         Text(item.thinking)
                             .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
@@ -1654,5 +1750,120 @@ private struct SettingsSheet: View {
             embApiKey = vm.embApiKey
             embBaseUrl = vm.embBaseUrl
         }
+    }
+}
+
+// MARK: - In-page overlay layer (replaces .sheet/.alert)
+
+/// Full-coverage dimmed backdrop + the dialog card. Presented by `ChatScreen`
+/// whenever `vm.overlay != nil`. Tap-outside dismisses for non-destructive
+/// dialogs; the delete-confirm case requires its explicit button (so a stray
+/// tap can't drop a conversation). The card chrome (background + clip +
+/// shadow) is shared; `CommandPalette` supplies its own chrome + fixed size.
+struct OverlayLayer: View {
+    let overlay: AppOverlay
+    @ObservedObject var vm: ChatViewModel
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.35).ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    // Destructive confirm needs an explicit button — no dismiss.
+                    if case .deleteSession = overlay { return }
+                    vm.overlay = nil
+                }
+            content
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch overlay {
+        case .settings:
+            card { SettingsSheet(vm: vm, onClose: { vm.overlay = nil }) }
+        case .scenarioEditor(let sc):
+            card { ScenarioEditor(scenario: sc, store: vm.agentStore, onClose: { vm.overlay = nil }) }
+        case .editMessage(let u):
+            card { EditMessagePage(item: u, vm: vm) }
+        case .commandPalette:
+            // Has its own card chrome + fixed size; no shared wrapper.
+            CommandPalette(vm: vm)
+        case .deleteSession(let id):
+            card { DeleteConfirmOverlay(sessionId: id, vm: vm) }
+        }
+    }
+
+    /// Shared card chrome for the editor/confirm pages. Each page supplies its
+    /// own size (`.frame`); this adds the surface background, rounded clip,
+    /// hairline border, and drop shadow so the page reads as a raised card
+    /// over the dimmed backdrop.
+    @ViewBuilder private func card<C: View>(@ViewBuilder _ c: () -> C) -> some View {
+        c()
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.surfaceVar, lineWidth: 1))
+            .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
+    }
+}
+
+/// Edit-and-resend a user message — in-page replacement for the old
+/// `UserBubble` edit `.sheet`. Draft seeded from the message; 重发 closes the
+/// overlay and re-runs from the edited text via `vm.editAndResend`.
+private struct EditMessagePage: View {
+    let item: UserItem
+    @ObservedObject var vm: ChatViewModel
+    @State private var draft: String
+
+    init(item: UserItem, vm: ChatViewModel) {
+        self.item = item
+        self.vm = vm
+        _draft = State(initialValue: item.text)
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("编辑消息").font(.oHeadline)
+            TextEditor(text: $draft)
+                .font(.oBody).scrollContentBackground(.hidden)
+                .background(Theme.surfaceVar).clipShape(RoundedRectangle(cornerRadius: 8))
+                .frame(minHeight: 120, maxHeight: 260)
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { vm.overlay = nil }.keyboardShortcut(.escape)
+                Button("重发") {
+                    let s = draft
+                    vm.overlay = nil
+                    Task { await vm.editAndResend(item, newText: s) }
+                }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .frame(width: 460)
+        .padding(16)
+    }
+}
+
+/// Delete-session confirmation — in-page replacement for the old native
+/// `.alert`. Mirrors its copy ("删除会话" / "确定删除这个会话?历史无法恢复。").
+private struct DeleteConfirmOverlay: View {
+    let sessionId: String
+    @ObservedObject var vm: ChatViewModel
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("删除会话").font(.oHeadline)
+            Text("确定删除这个会话?历史无法恢复。")
+                .font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                Spacer()
+                Button("取消", role: .cancel) { vm.overlay = nil }.keyboardShortcut(.escape)
+                Button("删除", role: .destructive) {
+                    let id = sessionId
+                    vm.overlay = nil
+                    Task { await vm.deleteSession(id) }
+                }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20).frame(width: 360)
     }
 }

@@ -149,7 +149,12 @@ private func orderedListPrefix(_ l: String) -> Int? {
     }
     guard let d = dotIdx, s.distance(from: s.startIndex, to: d) >= 1 else { return nil }
     let after = s.index(after: d)
-    return s[after].isWhitespace ? s.distance(from: s.startIndex, to: after) : nil
+    // `after` may be `endIndex` (the line is a partial "N." mid-stream — the
+    // dot is the last char, nothing after it yet). Subscripting `s[after]`
+    // then traps (String index out of range). Treat "no char after the dot"
+    // as "not (yet) a list item".
+    guard after < s.endIndex, s[after].isWhitespace else { return nil }
+    return s.distance(from: s.startIndex, to: after)
 }
 
 /// Build an AttributedString for inline markdown via Foundation's parser
