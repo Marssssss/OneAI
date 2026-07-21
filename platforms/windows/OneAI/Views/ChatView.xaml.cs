@@ -60,9 +60,15 @@ public sealed partial class ChatView : UserControl
 
     private void Send_Click(object sender, RoutedEventArgs e)
     {
-        var task = Vm.Input?.Trim() ?? "";
+        // Read the live TextBox text when invoked from the key handler (Enter),
+        // else Vm.Input (now updated per keystroke via UpdateSourceTrigger=
+        // PropertyChanged). The original "Enter 无法发送" bug: x:Bind TwoWay on
+        // TextBox.Text defaults to LostFocus, so Vm.Input was stale until the
+        // field lost focus — Enter (no focus loss) sent an empty task.
+        string task = (sender is TextBox tb ? tb.Text : Vm.Input).Trim();
         if (!string.IsNullOrEmpty(task) && !Vm.Running)
         {
+            if (sender is TextBox box) box.Text = "";
             Vm.Input = "";
             _ = Vm.RunTask(task);
         }
@@ -78,6 +84,16 @@ public sealed partial class ChatView : UserControl
             var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift);
             bool shift = ctrl.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
             if (!shift) { e.Handled = true; Send_Click(sender!, e); }
+        }
+    }
+
+    /// <summary>Welcome-screen suggestion tap → send the prompt directly.</summary>
+    private void WelcomeSuggestion_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button b && b.Tag is string task && !string.IsNullOrWhiteSpace(task) && !Vm.Running)
+        {
+            Vm.Input = "";
+            _ = Vm.RunTask(task.Trim());
         }
     }
 

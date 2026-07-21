@@ -44,7 +44,7 @@ public class ChatViewModel : ObservableObject
     public bool Running
     {
         get => _running;
-        set { SetProperty(ref _running, value); Raise(nameof(SendButtonVis)); Raise(nameof(StopButtonVis)); Raise(nameof(TurnStatusLabel)); }
+        set { SetProperty(ref _running, value); Raise(nameof(SendButtonVis)); Raise(nameof(StopButtonVis)); Raise(nameof(TurnStatusLabel)); Raise(nameof(WelcomeVis)); }
     }
     private string? _error;
     public string? Error { get => _error; set { SetProperty(ref _error, value); Raise(nameof(HasErrorVis)); } }
@@ -60,7 +60,7 @@ public class ChatViewModel : ObservableObject
         set
         {
             SetProperty(ref _currentScenario, value);
-            Raise(nameof(HasScenarioVis)); Raise(nameof(DebriefButtonVis)); Raise(nameof(DebriefPhaseVis));
+            Raise(nameof(HasScenarioVis)); Raise(nameof(NoScenarioVis)); Raise(nameof(DebriefButtonVis)); Raise(nameof(DebriefPhaseVis));
             Raise(nameof(CurrentScenarioIcon)); Raise(nameof(CurrentScenarioName)); Raise(nameof(TurnStatusLabel));
         }
     }
@@ -75,7 +75,7 @@ public class ChatViewModel : ObservableObject
         set
         {
             SetProperty(ref _pendingScenario, value);
-            Raise(nameof(PendingScenarioVis)); Raise(nameof(NoPendingScenarioVis));
+            Raise(nameof(PendingScenarioVis)); Raise(nameof(NoPendingScenarioVis)); Raise(nameof(WelcomeVis));
             Raise(nameof(PendingScenarioIcon)); Raise(nameof(PendingScenarioName)); Raise(nameof(PendingScenarioFields));
         }
     }
@@ -104,6 +104,20 @@ public class ChatViewModel : ObservableObject
     }
     public string LastTurnTokensLabel => LastTurnTokens > 0 ? $"{LastTurnTokens} tok" : "";
 
+    /// <summary>Starter prompts shown on the welcome screen (mirrors macOS
+    /// WelcomeScreen.suggestions). The backing list is static (shared, never
+    /// mutated) but exposed as an instance property so x:Bind
+    /// `{x:Bind Vm.WelcomeSuggestions}` can reach it (x:Bind can't resolve a
+    /// static member through an instance reference).</summary>
+    private static readonly IReadOnlyList<WelcomeSuggestion> _welcomeSuggestions = new List<WelcomeSuggestion>
+    {
+        new() { Icon = "🔍", Text = "帮我总结一段笔记的核心要点" },
+        new() { Icon = "🔨", Text = "用 Rust 写一个读取 JSON 的命令行小工具" },
+        new() { Icon = "🌐", Text = "解释一下 Agent 与 RAG 的区别" },
+        new() { Icon = "✨", Text = "把这段话改写得更简洁专业" },
+    };
+    public IReadOnlyList<WelcomeSuggestion> WelcomeSuggestions => _welcomeSuggestions;
+
     public bool NeedsKeyConfig =>
         (Provider.Kind == "openai" || Provider.Kind == "anthropic") && string.IsNullOrEmpty(Provider.ApiKey);
 
@@ -115,10 +129,19 @@ public class ChatViewModel : ObservableObject
     public bool HasInput => !string.IsNullOrWhiteSpace(Input);
     /// <summary>Group-chat turn-status bar visibility.</summary>
     public Visibility HasScenarioVis => CurrentScenario != null ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>Inverse of HasScenarioVis — drives the single-agent brand logo /
+    /// slogan in the top bar (shown only when no scenario is active).</summary>
+    public Visibility NoScenarioVis => CurrentScenario == null ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>Inline topic-intake page takes over the detail when a scenario is
     /// picked but not yet confirmed.</summary>
     public Visibility PendingScenarioVis => PendingScenario != null ? Visibility.Visible : Visibility.Collapsed;
     public Visibility NoPendingScenarioVis => PendingScenario == null ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>Default chat surface (welcome screen) when a single-agent
+    /// conversation has no messages yet and isn't running — mirrors macOS
+    /// `WelcomeScreen`. Disappears the moment the first message lands or a turn
+    /// starts. Topic-intake page takes precedence (its own visibility).</summary>
+    public Visibility WelcomeVis =>
+        (PendingScenario == null && Items.Count == 0 && !Running) ? Visibility.Visible : Visibility.Collapsed;
     public Visibility DebriefButtonVis => (CurrentScenario?.Debrief != null && !DebriefActive) ? Visibility.Visible : Visibility.Collapsed;
     public Visibility DebriefPhaseVis => DebriefActive ? Visibility.Visible : Visibility.Collapsed;
     // Non-nullable projections of the (nullable) scenario for safe x:Bind.
@@ -142,6 +165,10 @@ public class ChatViewModel : ObservableObject
         // reference; TryEnqueue still marshals to the UI thread.
         _dq = dq ?? throw new InvalidOperationException("VM must be created on UI thread");
         Provider = ProviderStore.Load();
+        // Items is an ObservableCollection; add/remove fires CollectionChanged
+        // (not PropertyChanged), so the welcome-screen visibility (which reads
+        // Items.Count) wouldn't otherwise re-evaluate on the first/last message.
+        Items.CollectionChanged += (_, _) => Raise(nameof(WelcomeVis));
     }
 
     // ── App lifecycle ────────────────────────────────────────────────
@@ -541,7 +568,15 @@ public class ChatViewModel : ObservableObject
         if (_session != IntPtr.Zero) OneAiNative.SessionInterrupt(_session);
     }
 
-    public void SaveConfig() => ProviderStore.Save(Provider);
+    public void SaveConfig()
+    {
+        ProviderStore.Save(Provider);
+        // The Provider's ApiKey/Kind are mutated directly in SettingsDialog before
+        // this is called; NeedsKeyConfigVis is a computed read of them, so without
+        // a raise the x:Bind won't re-evaluate and the "未配置 API Key" hint stays
+        // visible after a successful save. Re-announce it now that the key is set.
+        Raise(nameof(NeedsKeyConfigVis));
+    }
 }
 
 /// <summary>Coalesces hot streaming events (StreamChunk/Thinking) into ~20fps

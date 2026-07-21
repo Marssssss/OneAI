@@ -24,7 +24,7 @@
         <!-- Assistant bubble: speaker header + thinking expander + tool steps +
              streaming plain text (capped) OR markdown + cursor + retry -->
         <DataTemplate x:Key="AssistantBubble" x:DataType="vm:AssistantItem">
-            <Grid ColumnDefinitions="3,*">
+            <Grid ColumnDefinitions="3,*" Margin="{x:Bind BubbleMargin, Mode=OneWay}">
                 <!-- Left accent bar in the speaker's color (group only) -->
                 <Border Grid.Column="0" Width="3" CornerRadius="1.5" Visibility="{x:Bind HasSpeaker, Mode=OneWay}">
                     <Border.Background>
@@ -93,8 +93,12 @@
                                Visibility="{x:Bind ShowStreamingTextVis, Mode=OneWay}"
                                Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
 
-                    <!-- Markdown answer (rendered once on completion) -->
-                    <views:MarkdownTextBlock Markdown="{x:Bind Text, Mode=OneWay}"
+                    <!-- Markdown answer (rendered once on completion).
+                         Bound to MarkdownText — raised ONLY on the Streaming/Done
+                         flips, NOT per token — so the growing Text during
+                         streaming never pushes a DP update → OnChanged → full
+                         Render() rebuild on every token (the streaming lag). -->
+                    <views:MarkdownTextBlock Markdown="{x:Bind MarkdownText, Mode=OneWay}"
                                               Visibility="{x:Bind ShowMarkdownVis, Mode=OneWay}">
                         <views:MarkdownTextBlock.ContextFlyout>
                             <MenuFlyout>
@@ -160,11 +164,14 @@
         <!-- Conversation -->
         <Grid Visibility="{x:Bind Vm.NoPendingScenarioVis, Mode=OneWay}" RowDefinitions="Auto,Auto,Auto,*,Auto,Auto">
             <!-- Top bar -->
-            <Grid Grid.Row="0" Padding="16,8" ColumnDefinitions="*,Auto,Auto">
+            <Grid Grid.Row="0" Padding="16,8" ColumnDefinitions="*,Auto">
                 <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <TextBlock x:Name="TopTitle" Text="OneAI" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
-                    <TextBlock Text="·" FontSize="14" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
-                    <TextBlock Text="One AI, Every Platform" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                    <!-- Single-agent: the 3D pixel-tile brand lives in the top bar
+                         (mirrors macOS — the old "会话" sidebar title is gone, the
+                         gear moved to the sidebar bottom). -->
+                    <views:BrandLogo Scale="4.5" VerticalAlignment="Center" Visibility="{x:Bind Vm.NoScenarioVis, Mode=OneWay}" />
+                    <TextBlock Text="One AI, Every Platform" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               VerticalAlignment="Center" Visibility="{x:Bind Vm.NoScenarioVis, Mode=OneWay}" />
                     <TextBlock Text="{x:Bind Vm.CurrentScenarioIcon, Mode=OneWay}" FontSize="16" Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}" />
                     <TextBlock Text="{x:Bind Vm.CurrentScenarioName, Mode=OneWay}" FontSize="16" FontWeight="SemiBold" Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}" />
                     <TextBlock Text="· 总结阶段" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Visibility="{x:Bind Vm.DebriefPhaseVis, Mode=OneWay}" VerticalAlignment="Center" />
@@ -172,13 +179,15 @@
                 </StackPanel>
                 <TextBlock Grid.Column="1" VerticalAlignment="Center" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                            Text="{x:Bind Vm.LastTurnTokensLabel, Mode=OneWay}" />
-                <Button Grid.Column="2" Click="Settings_Click" Background="Transparent" BorderThickness="0" Padding="8">
-                    <FontIcon Glyph="&#xE713;" />
-                </Button>
             </Grid>
+            <!-- Hairline below the top bar — structural division (issue: 苍茫). -->
+            <Border Grid.Row="0" VerticalAlignment="Bottom" Height="1"
+                    Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-            <!-- Turn-status bar (group only) -->
+            <!-- Turn-status bar (group only). Bottom hairline separates it from
+                 the message list (structural division — issue: 苍茫). -->
             <Border Grid.Row="1" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="16,5"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"
                     Visibility="{x:Bind Vm.HasScenarioVis, Mode=OneWay}">
                 <TextBlock Text="{x:Bind Vm.TurnStatusLabel, Mode=OneWay}" FontSize="12"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -191,7 +200,8 @@
                            Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
             </Border>
 
-            <!-- Message list + optional artifact canvas split -->
+            <!-- Message list + optional artifact canvas split. A welcome overlay
+                 sits on top (same row) for the empty single-agent conversation. -->
             <Grid Grid.Row="3" ColumnDefinitions="*,Auto">
                 <ListView x:Name="Messages" Grid.Column="0" Padding="12"
                           ItemsSource="{x:Bind Vm.Items, Mode=OneWay}"
@@ -199,6 +209,51 @@
                           SelectionMode="None" IsItemClickEnabled="False"
                           ScrollViewer.HorizontalScrollMode="Disabled"
                           ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
+
+                <!-- Welcome screen — shown when the conversation is empty, idle,
+                     and no topic-intake is pending (mirrors macOS WelcomeScreen).
+                     Disappears the moment the first message lands or a turn starts. -->
+                <ScrollViewer Grid.Column="0" Padding="28" Visibility="{x:Bind Vm.WelcomeVis, Mode=OneWay}"
+                              VerticalScrollBarVisibility="Auto">
+                    <StackPanel Spacing="16" MaxWidth="560" HorizontalAlignment="Center">
+                        <views:BrandLogo Scale="9" HorizontalAlignment="Center" />
+                        <StackPanel Spacing="2" HorizontalAlignment="Center">
+                            <TextBlock Text="One AI, Every Platform" FontSize="14" FontWeight="SemiBold"
+                                       HorizontalAlignment="Center" />
+                            <TextBlock Text="跨平台 AI Agent 框架 · 单 Agent 对话与多角色场景都在这里"
+                                       FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       HorizontalAlignment="Center" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Click="Settings_Click" Visibility="{x:Bind Vm.NeedsKeyConfigVis, Mode=OneWay}"
+                                HorizontalAlignment="Center" Padding="12,6">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE713;" FontSize="12" />
+                                <TextBlock Text="先配置 Provider 再开始" FontSize="12" />
+                            </StackPanel>
+                        </Button>
+                        <ItemsRepeater ItemsSource="{x:Bind Vm.WelcomeSuggestions, Mode=OneWay}">
+                            <ItemsRepeater.Layout>
+                                <StackLayout Spacing="8" Orientation="Vertical" />
+                            </ItemsRepeater.Layout>
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate x:DataType="vm:WelcomeSuggestion">
+                                    <Button Click="WelcomeSuggestion_Click" Tag="{x:Bind Text, Mode=OneWay}"
+                                            Padding="10,9" HorizontalAlignment="Stretch"
+                                            HorizontalContentAlignment="Left" Background="Transparent"
+                                            BorderThickness="1" CornerRadius="10"
+                                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <TextBlock Text="{x:Bind Icon, Mode=OneWay}" FontSize="14" />
+                                            <TextBlock Text="{x:Bind Text, Mode=OneWay}" FontSize="12"
+                                                       TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                    </Button>
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </StackPanel>
+                </ScrollViewer>
+
                 <Border Grid.Column="1" x:Name="CanvasHost" Width="420" Visibility="Collapsed"
                         BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1,0,0,0" />
             </Grid>
@@ -215,7 +270,7 @@
                         IsEnabled="False" ToolTipService.ToolTip="语音识别暂未支持">
                     <FontIcon Glyph="&#xE720;" />
                 </Button>
-                <TextBox Grid.Column="1" x:Name="InputBox" Text="{x:Bind Vm.Input, Mode=TwoWay}"
+                <TextBox Grid.Column="1" x:Name="InputBox" Text="{x:Bind Vm.Input, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          PlaceholderText="问点什么…" AcceptsReturn="True" MinHeight="40" MaxHeight="120"
                          TextWrapping="Wrap" KeyDown="InputBox_KeyDown" />
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">

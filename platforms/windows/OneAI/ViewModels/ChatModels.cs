@@ -25,6 +25,14 @@ public abstract class ObservableObject : INotifyPropertyChanged
 
 public enum ChatKind { User, Assistant }
 
+/// <summary>A starter prompt on the welcome screen (mirrors macOS
+/// WelcomeScreen.suggestions). Tapping it sends the text directly.</summary>
+public class WelcomeSuggestion
+{
+    public string Icon { get; init; } = "";
+    public string Text { get; init; } = "";
+}
+
 /// <summary>Hex "#RRGGBB"/"RRGGBB" → Windows.UI.Color helpers, shared by
 /// ToolStep icons and the per-speaker accent colors.</summary>
 public static class ColorUtil
@@ -127,14 +135,22 @@ public class AssistantItem : ChatItem
     public bool Streaming
     {
         get => _streaming;
-        set { SetProperty(ref _streaming, value); Raise(nameof(ShowCursor)); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); }
+        set { SetProperty(ref _streaming, value); Raise(nameof(ShowCursor)); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); Raise(nameof(MarkdownText)); }
     }
     private bool _done;
     public bool Done
     {
         get => _done;
-        set { SetProperty(ref _done, value); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); }
+        set { SetProperty(ref _done, value); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); Raise(nameof(MarkdownText)); }
     }
+    /// <summary>The text to render as markdown — read-through of <see cref="Text"/>,
+    /// but raised ONLY on the Streaming/Done flips (NOT on every Text/token change).
+    /// `ChatView.xaml` binds `MarkdownTextBlock.Markdown` to this (not to `Text`)
+    /// so the per-token Text growth during streaming doesn't push a new value into
+    /// the Markdown DP → OnChanged → full Render() rebuild on every token (the
+    /// streaming lag root cause — the control is Collapsed while streaming, but the
+    /// DP update + Render fires anyway). The full markdown renders once, on Done.</summary>
+    public string MarkdownText => Text;
     private string? _error;
     public string? Error { get => _error; set { SetProperty(ref _error, value); Raise(nameof(HasError)); Raise(nameof(ErrorWithPrefix)); } }
     public ObservableCollection<ToolStep> Steps { get; } = new();
@@ -144,6 +160,12 @@ public class AssistantItem : ChatItem
     /// <summary>True when this bubble belongs to a named group-chat member (show
     /// the speaker header + left accent bar). False for single-agent turns.</summary>
     public Visibility HasSpeaker => string.IsNullOrEmpty(SpeakerId) ? Visibility.Collapsed : Visibility.Visible;
+    /// <summary>Extra top gap for group-chat speaker bubbles so consecutive roles
+    /// (e.g. 指导员 → 面试官) read as distinct turns rather than one block —
+    /// mirrors the macOS AssistantBubble's `.padding(.top, 8)` for speaker items.</summary>
+    public Thickness BubbleMargin =>
+        string.IsNullOrEmpty(SpeakerId) ? new Thickness(0)
+                                         : new Thickness(6, 10, 6, 2);
     public Windows.UI.Color SpeakerColorBrush => ColorUtil.FromHex(SpeakerColor);
     public SolidColorBrush SpeakerBrush => ColorUtil.BrushFromHex(SpeakerColor);
     public Windows.UI.Color SpeakerColorFaint => ColorUtil.FaintFromHex(SpeakerColor);

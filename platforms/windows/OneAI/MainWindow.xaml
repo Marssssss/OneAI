@@ -26,16 +26,19 @@
 
         <!-- Sidebar -->
         <Grid Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}" RowDefinitions="Auto,*,Auto">
-            <!-- Header -->
-            <Grid Grid.Row="0" Padding="12,10" ColumnDefinitions="*,Auto">
-                <TextBlock Text="会话" FontWeight="SemiBold" VerticalAlignment="Center" />
-                <Button Grid.Column="1" Click="NewChat_Click" ToolTipService.ToolTip="新建对话 / 从场景开始">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon Glyph="&#xE710;" FontSize="12" />
-                        <TextBlock Text="新建" FontSize="12" />
-                    </StackPanel>
-                </Button>
-            </Grid>
+            <!-- Top: full-width "新对话" primary action (mirrors the macOS sidebar
+                 list head — the old "会话" title + small "新建" button is gone, the
+                 brand now lives in the chat detail's top bar). -->
+            <Button Grid.Row="0" Click="NewChat_Click" Margin="10,10,10,4" Padding="12,8"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                    CornerRadius="10" Background="{ThemeResource AccentFillColorDefaultBrush}"
+                    Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}"
+                    BorderThickness="0">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE710;" FontSize="14" />
+                    <TextBlock Text="新对话" FontSize="13" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
 
             <!-- Scenarios + sessions -->
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
@@ -101,9 +104,12 @@
                 </StackPanel>
             </ScrollViewer>
 
-            <!-- Footer: settings -->
+            <!-- Footer: settings (top hairline separates it from the list — the
+                 button is transparent so its own top border reads as the divider). -->
             <Button Grid.Row="2" Click="Settings_Click" HorizontalAlignment="Stretch"
-                    HorizontalContentAlignment="Left" Background="Transparent" BorderThickness="0" Padding="12,10">
+                    HorizontalContentAlignment="Left" Background="Transparent"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0"
+                    Padding="12,10">
                 <StackPanel Orientation="Horizontal" Spacing="12">
                     <FontIcon Glyph="&#xE713;" />
                     <TextBlock Text="设置" />
