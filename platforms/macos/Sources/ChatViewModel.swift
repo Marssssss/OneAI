@@ -94,6 +94,17 @@ final class AssistantItem: Identifiable {
     var streaming = false
     var done = false
     var error: String? = nil
+    /// Monotonic version, bumped on every mutation (in `handle()`). The macOS
+    /// message list is a NON-lazy VStack (stable document height — no
+    /// blank-on-send, no tiny-scrollbar, reliable stickiness geometry). That
+    /// re-evaluates the ForEach every ~20 fps flush; to bound the cost,
+    /// `AssistantBubble` is `.equatable()` and compares a per-render SNAPSHOT
+    /// of this version. Done bubbles' version is stable → body skipped (just
+    /// an Int compare); only the active streaming bubble (version bumped each
+    /// token) re-renders. Without this the non-lazy list re-ran every
+    /// bubble's body per flush → main-thread saturation (the streaming freeze)
+    /// on long conversations.
+    var version: Int = 0
 }
 
 enum ChatEntry: Identifiable {
@@ -198,6 +209,41 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     }
 }
 
+// MARK: - In-page overlay (replaces modal .sheet/.alert)
+
+/// The single source of truth for any in-page dialog. Rendering lives in
+/// `ChatScreen`'s top-level ZStack (`OverlayLayer`) — NOT in a native
+/// `.sheet`/`.alert`. Native sheets rebuild their content view tree from
+/// scratch on every open (and animate a modal presentation), which made the
+/// heavy dialogs (settings, scenario editor) stutter; an in-page overlay
+/// layer stays in the view hierarchy, so presenting it is just a state flip
+/// + a cheap opacity transition. Mirrors the `pendingScenario` topic-intake
+/// page pattern (a flatter flow than a modal sheet).
+enum AppOverlay: Equatable {
+    case settings
+    case scenarioEditor(Scenario)
+    case editMessage(UserItem)
+    case commandPalette
+    case deleteSession(String)
+
+    /// `UserItem` is a reference type with no Equatable; compare by identity
+    /// so `AppOverlay` can be Equatable for animation purposes.
+    static func == (lhs: AppOverlay, rhs: AppOverlay) -> Bool {
+        switch (lhs, rhs) {
+        case (.settings, .settings), (.commandPalette, .commandPalette):
+            return true
+        case (.scenarioEditor(let a), .scenarioEditor(let b)):
+            return a.id == b.id
+        case (.editMessage(let a), .editMessage(let b)):
+            return a === b
+        case (.deleteSession(let a), .deleteSession(let b)):
+            return a == b
+        default:
+            return false
+        }
+    }
+}
+
 // MARK: - View model
 
 /// High-frequency streaming tick, isolated on its OWN ObservableObject.
@@ -274,6 +320,10 @@ final class ChatViewModel: ObservableObject {
     /// scroll-up — so the history landed mid-conversation instead of at the
     /// most recent message. This dedicated counter fires on every load.
     @Published var scrollRequest: Int = 0
+    /// In-page dialog state (settings / scenario editor / edit-message /
+    /// command palette / delete-session confirm). Non-nil → `ChatScreen`
+    /// renders the overlay layer on top. See `AppOverlay`.
+    @Published var overlay: AppOverlay? = nil
 
     var needsKeyConfig: Bool {
         (kind == "openai" || kind == "anthropic") && apiKey.isEmpty
@@ -708,6 +758,12 @@ final class ChatViewModel: ObservableObject {
         case .error(let message, _):
             turn.error = message; turn.streaming = false; turn.done = true; running = false
         }
+        // Bump the per-item version so `.equatable()` on `AssistantBubble`
+        // re-renders THIS bubble's body on the next flush. Done (idle) bubbles
+        // are never mutated, so their version stays put → their body is skipped
+        // (just an Int compare) → the non-lazy list's per-flush cost is bounded
+        // to the active streaming bubble instead of O(all bubbles).
+        turn.version += 1
         bumpStreamTick(for: event)
     }
 

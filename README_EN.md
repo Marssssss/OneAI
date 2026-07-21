@@ -23,6 +23,12 @@
 ## At a glance
 
 <p align="center">
+  <img src="OneAI-main.png" alt="macOS app — default chat home" width="780">
+</p>
+
+<p align="center"><em>macOS native app · the default chat home — pixel brand logo + slogan + starter-prompt shortcuts; this is the empty-conversation landing page, tap a prompt to start.</em></p>
+
+<p align="center">
   <img src="interview-opening-example.png" alt="macOS app — scenario intake" width="780">
 </p>
 

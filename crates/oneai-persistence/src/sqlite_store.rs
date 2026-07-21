@@ -668,9 +668,23 @@ impl MemoryPersistence for SqliteSessionStore {
             let updated_at: String = row.get(2)?;
             let messages_json: String = row.get(3)?;
             let title: Option<String> = row.get(4)?;
-            // Count messages by parsing JSON
-            let count = serde_json::from_str::<Vec<serde_json::Value>>(&messages_json)
-                .map(|v| v.len())
+            // Count ONLY the messages a UI actually renders. The macOS/Android
+            // chat views replay user + non-empty-text assistant turns (system /
+            // tool / empty-assistant messages are filtered out — see the Swift
+            // `loadSession`). Counting every stored message here made the sidebar
+            // "N 条" diverge from the visible bubble count, especially in
+            // group-chat (multi-speaker) and tool-heavy turns. Parse as
+            // `Message` and mirror that render filter exactly so the listed
+            // count matches what the user sees, for every session.
+            let count = serde_json::from_str::<Vec<oneai_core::Message>>(&messages_json)
+                .map(|msgs| {
+                    msgs.iter()
+                        .filter(|m| {
+                            matches!(m.role, oneai_core::Role::User | oneai_core::Role::Assistant)
+                                && !m.text_content().trim().is_empty()
+                        })
+                        .count()
+                })
                 .unwrap_or(0);
             Ok((id, created_at, updated_at, count, title))
         }).map_err(|e| OneAIError::Persistence(

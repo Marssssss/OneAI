@@ -7,6 +7,12 @@ struct ScenarioEditor: View {
     @State var scenario: Scenario
     @ObservedObject var store: AgentStore
     let onClose: () -> Void
+    /// Inline validation message. When non-nil, the 保存 button refuses to
+    /// close — the user must fix the named problem first. Prevents saving a
+    /// malformed scenario (empty cast / empty prompts / dangling turn-order
+    /// ids) that the engine would later reject on launch as "场景启动失败"
+    /// and that the user couldn't recover from the list.
+    @State private var saveError: String? = nil
 
     var body: some View {
         VStack(spacing: 12) {
@@ -172,10 +178,27 @@ struct ScenarioEditor: View {
             }   // close ScrollView
 
             Divider()
+            // Inline validation message — shown when 保存 found a problem and
+            // refused to close. Names the first failing field so the user
+            // knows exactly what to fill in.
+            if let err = saveError {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Theme.errorC)
+                    Text(err).font(.oCaption).foregroundStyle(Theme.errorC)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Theme.errorC.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            }
             HStack {
                 Spacer()
                 Button("取消", role: .cancel, action: onClose).keyboardShortcut(.escape)
                 Button("保存") {
+                    if let err = Self.validate(scenario) {
+                        saveError = err
+                        return
+                    }
+                    saveError = nil
                     store.upsert(scenario)
                     onClose()
                 }.keyboardShortcut(.defaultAction)
@@ -183,6 +206,50 @@ struct ScenarioEditor: View {
         }
         .frame(width: 560, height: 640)
         .padding(16)
+    }
+
+    /// Validate a scenario before saving. Returns the first problem found, or
+    /// nil if the scenario is launchable. Mirrors the engine's own checks
+    /// (group_chat.rs: `members.is_empty()`, scripted order / moderator /
+    /// opener must reference existing members) so a saved scenario is always
+    /// startable from the sidebar without hitting "场景启动失败".
+    static func validate(_ sc: Scenario) -> String? {
+        if sc.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "请填写场景名。"
+        }
+        if sc.agents.isEmpty {
+            return "至少需要一个智能体(演员表不能为空)。"
+        }
+        let ids = Set(sc.agents.map { $0.id })
+        for (i, a) in sc.agents.enumerated() {
+            if a.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "第 \(i + 1) 个智能体缺少名字。"
+            }
+            if a.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "智能体「\(a.name)」缺少系统提示词。"
+            }
+        }
+        if let order = sc.scriptOrder {
+            for id in order where !ids.contains(id) {
+                return "轮次顺序引用了不存在的角色 id「\(id)」。"
+            }
+        }
+        if let mid = sc.moderatorId, !mid.isEmpty, !ids.contains(mid) {
+            return "主持人 id「\(mid)」不在演员表中。"
+        }
+        if let op = sc.openerAgentId, !op.isEmpty, !ids.contains(op) {
+            return "开场角色 id「\(op)」不在演员表中。"
+        }
+        if sc.turnPolicy == .moderator {
+            let mid = sc.moderatorId ?? ""
+            if mid.isEmpty {
+                return "主持人策略需要选择一个主持人。"
+            }
+        }
+        if let debrief = sc.debrief, !ids.contains(debrief.debriefMemberId) {
+            return "结束阶段的接管角色不在演员表中。"
+        }
+        return nil
     }
 
     /// One-line summary of a topic field's per-member visibility for the Menu label.

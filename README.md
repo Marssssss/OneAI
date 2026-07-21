@@ -23,6 +23,12 @@
 ## 一图看懂
 
 <p align="center">
+  <img src="OneAI-main.png" alt="macOS App — 默认对话主页" width="780">
+</p>
+
+<p align="center"><em>macOS 原生 App · 默认对话主页 —— 品牌像素 Logo + slogan + 推荐话题入口；空会话即此页，点话题即开聊。</em></p>
+
+<p align="center">
   <img src="interview-opening-example.png" alt="macOS App — 场景化入口" width="780">
 </p>
 

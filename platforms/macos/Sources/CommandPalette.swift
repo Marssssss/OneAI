@@ -1,12 +1,14 @@
 // CommandPalette — ⌘K palette: quick switch between scenarios / recent
-// sessions / models, and open settings. Fuzzy-filtered.
+// sessions / models, and open settings. Fuzzy-filtered. Presented in-page
+// (vm.overlay == .commandPalette) — the backdrop + centering come from
+// `OverlayLayer`; this view is just the card.
 
 import SwiftUI
 
 struct CommandPalette: View {
     @ObservedObject var vm: ChatViewModel
-    @Binding var isPresented: Bool
     @State private var query: String = ""
+    @FocusState private var focused: Bool
 
     private var filteredScenarios: [Scenario] {
         let q = query.lowercased()
@@ -26,8 +28,9 @@ struct CommandPalette: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(Theme.onSurfaceVar)
                 TextField("切换场景 / 会话 / 模型…", text: $query)
                     .textFieldStyle(.plain).font(.oBody)
-                    .onSubmit { isPresented = false }
-                Button("关闭") { isPresented = false }.buttonStyle(.borderless).keyboardShortcut(.escape)
+                    .focused($focused)
+                    .onSubmit { vm.overlay = nil }
+                Button("关闭") { vm.overlay = nil }.buttonStyle(.borderless).keyboardShortcut(.escape)
             }
             .padding(12)
             Divider()
@@ -38,7 +41,7 @@ struct CommandPalette: View {
                         ForEach(filteredScenarios) { sc in
                             cmdRow(icon: sc.icon, title: sc.name, subtitle: "\(sc.agents.count) 个智能体") {
                                 Task { await vm.newConversation(scenario: sc) }
-                                isPresented = false
+                                vm.overlay = nil
                             }
                         }
                     }
@@ -48,16 +51,18 @@ struct CommandPalette: View {
                             cmdRow(icon: "bubble.left", title: s.title?.isEmpty == false ? s.title! : "新对话",
                                    subtitle: "\(s.messageCount) 条") {
                                 Task { await vm.loadSession(s.id) }
-                                isPresented = false
+                                vm.overlay = nil
                             }
                         }
                     }
                     sectionHeader("操作")
                     cmdRow(icon: "plus.bubble", title: "新对话(单 Agent)", subtitle: nil) {
                         Task { await vm.newConversation() }
-                        isPresented = false
+                        vm.overlay = nil
                     }
-                    cmdRow(icon: "gearshape", title: "打开设置", subtitle: nil) { isPresented = false }
+                    cmdRow(icon: "gearshape", title: "打开设置", subtitle: nil) {
+                        vm.overlay = .settings
+                    }
                 }
                 .padding(.vertical, 6)
             }
@@ -66,8 +71,7 @@ struct CommandPalette: View {
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.surfaceVar, lineWidth: 1))
-        .padding(40)
-        .background(Color.black.opacity(0.3).ignoresSafeArea())
+        .onAppear { focused = true }
     }
 
     private func sectionHeader(_ t: String) -> some View {
