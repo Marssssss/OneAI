@@ -271,7 +271,7 @@ oneai handoff targets <preset>         # 查看预设的 handoff 目标描述
 oneai handoff config [--preset ...]    # 查看 handoff 配置
 oneai handoff run <target> <reason> [--preset ...]  # 执行 handoff（演示模式）
 oneai swarm list                       # 列出群体预设
-oneai swarm routing                    # 列出路由策略（best-fit/load-balanced/cost-optimized/fastest）
+oneai swarm routing                    # 列出路由策略（best-fit/load-balanced/fastest）
 oneai swarm config <preset>            # 查看群体配置
 oneai swarm agents <preset>            # 查看群体内的 agent 与能力
 oneai swarm run --task "..." [--routing best-fit] [--preset ...] [--budget 100000]  # 群体编排
@@ -407,7 +407,7 @@ tokio = { version = "1", features = ["full"] }
 | `oneai-core` | 只要核心类型 / trait（`Message` / `ContentBlock` / `LlmProvider` / `Tool` / `PermissionLevel` / `Budget`） |
 | `oneai-provider` | 只要 LLM Provider（OpenAI / Anthropic / Gemini / Ollama）+ `ProviderPool` / `SmartRouter` |
 | `oneai-domain` | 只要 DomainPack（`coding_pack` / `research_pack`，7 层领域配置） |
-| `oneai-tool` | 只要工具 Registry + 12 内置工具 + `InteractionGate` |
+| `oneai-tool` | 只要工具 Registry + 15 内置工具 + `InteractionGate` |
 | `oneai-memory` | 只要记忆系统（Letta 三层 + 压缩增量抽取 + 持久化） |
 | `oneai-rag` | 只要 RAG / `EmbeddingService`（OpenAI / Voyage / Ollama / FastEmbed + auto 探测） |
 | `oneai-workflow` | 只要 Workflow DAG + StateGraph |
@@ -527,7 +527,7 @@ flowchart TB
             Parser["oneai-parser<br/>3 层输出防御：约束解码→模糊修复→自纠重提示"]
         end
         subgraph F2 ["工具 · 技能 · RAG"]
-            Tool["oneai-tool<br/>Registry + 12 内置工具 + MCP 客户端 + InteractionGate"]
+            Tool["oneai-tool<br/>Registry + 15 内置工具 + MCP 客户端 + InteractionGate"]
             Skill["oneai-skill<br/>选择器 + 注册 + 约定目录发现"]
             Rag["oneai-rag<br/>EmbeddingService + 混合检索 + 自动 embedding"]
         end
@@ -575,7 +575,7 @@ flowchart TB
 | `oneai-provider` | LLM Provider（OpenAI/Anthropic/Gemini/Ollama）+ ProviderPool + SmartRouter | 111|
 | `oneai-parser` | 3 层输出解析防御 | 7|
 | `oneai-memory` | 记忆系统（STM、LTM、压缩、HNSW、MemoryManager + 持久化） | 60|
-| `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、12 工具 | 63|
+| `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、15 工具 | 63|
 | `oneai-skill` | 技能选择器 + 注册 + 内置领域技能 | 9|
 | `oneai-domain` | DomainPack 系统（7 层）、CodingPack、市场、规范校验器 | 127|
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 219|
@@ -605,7 +605,7 @@ flowchart TB
 
 ### 1. DomainPack 系统（领域配置包）
 
-DomainPack 是 OneAI 的关键架构创新——它让领域知识变为**声明式、可插拔、可组合**，而非硬编码。一个 DomainPack 封装 7 层领域专属配置：
+DomainPack 让领域知识变为**声明式、可插拔、可组合**而非硬编码，封装 7 层领域配置：
 
 | 层级 | 组件 | 作用 |
 |------|------|------|
@@ -634,68 +634,48 @@ oneai pack install ./my-pack     # 从本地路径安装
 
 #### CodingPack（内置）
 
-参照 Claude Code 的工作流嵌入机制：9 个工具（FileRead、FileEdit、Shell、Grep、Glob、FileList、NotebookEdit、Environment、WebFetch）、8 个工具装饰器、6 个带刷新策略的上下文源、权限配置（自动审批读取、确认编辑/Shell、拒绝 `rm -rf`/`mkfs`）、4 个范式策略、3 个子 Agent 类型（searcher / coder / reviewer）。
+参照 Claude Code 工作流嵌入：12 个工具（FileRead/FileEdit/FileWrite/ApplyPatch/Shell/Grep/Glob/FileList/NotebookEdit/Environment/WebFetch/WebSearch）、12 个工具装饰器、7 个带刷新策略的上下文源、权限配置（自动审批读、确认编辑/Shell、拒绝 `rm -rf`/`mkfs`）、4 个范式策略、3 个子 Agent 类型（searcher/coder/reviewer）。
 
 ### 2. Agentic Loop（动态循环）
 
-核心执行引擎是 **动态循环**——而非固定管线。每轮迭代模型动态决定下一步：
+核心执行引擎是**动态循环**而非固定管线。每轮模型返回之一：
 
-| 决策类型 | 行动 |
-|----------|------|
-| **DirectAnswer** | 模型给出最终答案 → 循环结束 |
-| **ToolCalls** | 模型调用工具 → 执行并回填结果 |
-| **Delegate** | 模型委托子任务给专门的子 Agent |
-| **SwitchParadigm** | 模型切换范式（Plan/Reflect/Explore）——会改 system prompt + 工具过滤 |
+| 决策 | 行动 |
+|------|------|
+| **DirectAnswer** | 给出最终答案 → 循环结束 |
+| **ToolCalls** | 调用工具 → 执行并回填 |
+| **Delegate** | 委托子任务给专门的子 Agent |
+| **SwitchParadigm** | 切换范式（Plan/Reflect/Explore）→ 改 system prompt + 工具过滤 |
 
-迭代上限由 **TokenBudget** 约束（而非硬编码 `max_iterations`）。`delegate` / `switch_paradigm` 由 `meta_tool.rs` 注入为模型可调用的 meta-tool——模型即可主动委托子 Agent 或切换范式，`apply_paradigm_switch` + `AgentLoopGraphActionExecutor` 内联升级范式（system prompt + 工具过滤）。内置生命周期钩子（`PreToolUse`/`PostToolUse` 等）、中断/恢复（`CancellationToken`）、结构化输出。
+迭代上限由 **TokenBudget** 约束（`hard_max_iterations` 仅作安全护栏）。`delegate`/`switch_paradigm` 由 `meta_tool.rs` 注入为模型可调 meta-tool；`apply_paradigm_switch` + `AgentLoopGraphActionExecutor` 内联升级范式。内置生命周期钩子（`PreToolUse`/`PostToolUse` 等）、`CancellationToken` 中断/恢复、结构化输出。
 
 ### 3. Agent 范式
 
+`ParadigmKind` 四种：
+
 | 范式 | 模式 | 适用场景 |
 |------|------|----------|
-| **ReAct** | 推理 → 行动 → 观察 循环 | 通用工具调用任务 |
-| **Plan** | 分解 → 有序步骤列表 | 复杂多步任务 |
-| **Reflection** | 验证 → 建议修正 | 质量保证、自检 |
-| **Parallel** | ScopeState 隔离 → 合并 | 独立子任务 |
+| **ReAct** | 推理 → 行动 → 观察 | 通用工具调用 |
+| **Plan** | 分解 → 有序步骤 | 复杂多步任务 |
+| **Reflect** | 验证 → 建议修正 | 质量保证、自检 |
 | **Explore** | 搜索 → 理解 → 概括 | 代码库/搜索探索 |
 
-范式是**模型/工作流驱动**的——模型调用 `switch_paradigm`，或 StateGraph 节点发出 `GraphDecision::SwitchParadigm`，`apply_paradigm_switch` 随即改变 system prompt + 决策提示 + 工具过滤。用户侧的执行策略则是独立的 **InteractionMode**（Normal/Auto/Plan，`Shift+Tab` 切换）。
+范式由模型调 `switch_paradigm` 或 StateGraph 节点发 `GraphDecision::SwitchParadigm` 触发，`apply_paradigm_switch` 改 system prompt + 决策提示 + 工具过滤。**并行委托**（`ScopeState` 隔离 → 合并）是独立执行机制，非范式。用户侧 `InteractionMode`（Normal/Auto/Plan，`Shift+Tab`）与之正交。
 
 ### 4. 权限模型
 
-三级权限：
+三级：`Read`（自动）/ `Standard`（视策略）/ `Full`（必审批）。解析序：`deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → 工具 `risk_level()`。
 
-- `Read`（自动审批）
-- `Standard`（视策略而定）
-- `Full`（需审批）
+统一 **`InteractionGate`** 把守 5 决策点：`PreInfer`（推理前改写/跳过）、`PostInfer`（推理后校验/替换）、`ToolApproval`（高风险工具放行，对接原生对话框）、`PlanDecision`（规划权衡）、`PlanReview`（最终计划 accept/reject/Revise）。
 
-解析顺序：`deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → 工具自身 `risk_level()`。
-
-人机交互由统一的 **`InteractionGate`** 把守 5 个决策点：
-
-- **`PreInfer`** — 推理前可改写请求/跳过
-- **`PostInfer`** — 推理后可校验/替换
-- **`ToolApproval`** — 高风险工具放行，对接原生对话框
-- **`PlanDecision`** — 规划权衡选择
-- **`PlanReview`** — 最终计划 accept/reject/Revise
-
-内置实现：
-
-- `NoopInteractionGate` — 全点零延迟放行，等价自动批准
-- `ChannelInteractionGate` — mpsc+oneshot 桥到 UI 线程，按点可配
-- `ThresholdInteractionGate` — 低风险自动放行、其余走通道
-- `DenyAllInteractionGate` — 全拒
-
-平台侧 `PlatformInteractionGate` 在 macOS/Windows/Linux/Android/iOS/HarmonyOS 用原生 NSAlert/MessageBox/AlertDialog/UIController/CommonDialog 处理 `ToolApproval`。旧的 `ApprovalGate` / `on_plan_submitted` 已移除。
+内置：`NoopInteractionGate`（全放行）、`ChannelInteractionGate`（mpsc+oneshot 桥 UI 线程，按点可配）、`ThresholdInteractionGate`（低风险放行、余走通道）、`DenyAllInteractionGate`（全拒）。平台侧 `PlatformInteractionGate` 用原生 NSAlert/MessageBox/AlertDialog/UIController/CommonDialog 处理 `ToolApproval`。
 
 ### 5. LLM Provider、路由与 3 层输出解析器
 
-内置 Provider：**OpenAI、Anthropic、Gemini、Ollama**，统一在 `LlmProvider` trait（`infer` + `infer_stream`）之下。
+内置 Provider：**OpenAI/Anthropic/Gemini/Ollama**，统一于 `LlmProvider`（`infer` + `infer_stream`）。其上两层：
 
-其上是两个生产级层：
-
-- **ProviderPool** — Provider 降级链，每个 Provider 自带熔断器、限流器和降级规则（如 Anthropic→OpenAI→本地）。自动处理 429/重试，解析 `Retry-After`。
-- **SmartRouter** — 多因子路由（延迟/质量/均衡/自定义），给 Provider 打分后挑最优，集成熔断/限流/上下文约束。每次决策都记录日志可供查看。
+- **ProviderPool** — 降级链，每 Provider 自带熔断器+限流器+降级规则（如 Anthropic→OpenAI→本地），自动 429 重试并解析 `Retry-After`
+- **SmartRouter** — 多因子路由（延迟/质量/均衡/自定义）打分选优，集成熔断/限流/上下文约束，每次决策留日志
 
 ```rust
 let app = AppBuilder::new()
@@ -704,11 +684,7 @@ let app = AppBuilder::new()
     .build()?;
 ```
 
-**3 层输出解析器**（`oneai-parser`）防御不可靠的 LLM 输出，复用它而非直接解析模型输出：
-
-1. **约束解码** — 流式增量阶段即对 token 施加结构约束
-2. **模糊 JSON 修复** — 括号补全、正则提取、嵌入式 JSON 检测
-3. **回退自纠重提示** — 解析失败时构造自纠提示让模型重新生成
+`oneai-parser` 3 层防御（复用它而非直接解析模型输出）：① 约束解码（流式增量结构约束）② 模糊 JSON 修复（括号补全/正则提取/嵌入式 JSON 检测）③ 回退自纠重提示（失败时构造自纠提示让模型重生）。
 
 ### 6. 工具系统
 
@@ -724,7 +700,7 @@ pub trait Tool: Send + Sync {
 pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLevel; }
 ```
 
-**内置 12 工具：** ShellTool（安全黑名单+沙箱）、FileReadTool（offset+limit 分页）、FileEditTool、FileWriteTool、FileListTool、GrepTool、GlobTool、EnvironmentTool、NotebookEditTool、FileDeleteTool、CalculatorTool、WebFetchTool。MCP 客户端通过 `rmcp` 集成（stdio/SSE/streamable-http）；**MCP 服务端**模式让 OneAI 自身向 Claude Code/Cursor 暴露工具（`oneai mcp serve`）。
+**内置 15 工具：** ShellTool（安全黑名单+沙箱）、FileReadTool（offset+limit 分页）、FileEditTool、FileWriteTool、ApplyPatchTool（多文件统一 diff）、FileListTool、FileDeleteTool、GrepTool、GlobTool、EnvironmentTool、NotebookEditTool、CalculatorTool、WebFetchTool、WebSearchTool、BrowserTool。MCP 客户端经 `rmcp`（stdio/SSE/streamable-http）；**MCP 服务端**模式让 OneAI 向 Claude Code/Cursor 暴露工具（`oneai mcp serve`）。
 
 ### 7. 多 Agent 协作
 
@@ -733,7 +709,7 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 | **GroupChat（场景）** | 引擎级 `GroupChatSession` 原语 + 场景系统（角色阵容/轮次策略/背景字段/复盘/审改循环），驱动 macOS/Windows 等端的多角色对话 |
 | **SubAgent** | 分层委托给专门的子 Agent（Plan/Explore/Code/Review/Custom），可选 worktree 隔离 |
 | **Team** | `TeamCoordinator` 4 策略——Coordinate/Route/Collaborate/Debate——加 4 预设（`code_review`/`research_route`/`dev_pipeline`/`arch_debate`） |
-| **Handoff** | `HandoffTool`（handoff-as-tool-call）+ `HandoffManager` + 3 预设 |
+| **Handoff** | `HandoffTool`（handoff-as-tool-call）+ `HandoffManager` + 3 预设（`development_chain`/`research_chain`/`support_routing`） |
 | **Swarm** | 动态 Agent 池，3 路由策略（BestFit/LoadBalanced/Fastest），任务分解 + 质量校验 + 重试 |
 
 ### 8. 记忆系统
@@ -741,18 +717,16 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 **三层记忆（Letta 式）：**
 
 - **recall log** — `Conversation` 原始对话日志（唯一原始源）
-- **core** — 常驻、有 token 预算、agent 自管理；只存策展过的原子事实，不再冗余副本
+- **core** — 常驻、有 token 预算、agent 自管理；只存策展过的原子事实，不冗余副本
 - **archival** — 全量事实向量库，按需召回
-
-`Conversation` 是唯一原始日志，core 只存策展过的原子事实，不再冗余副本。
 
 **MemoryProfile（DomainPack 第 7 层）：** 声明领域级「抽取 schema（记什么）+ 召回策略 + core 预算 + 是否暴露自管理工具 + 习惯事实类型（跨会话）」，与 `CompressionTemplate`/`ContextSource` 同级可合并。`CodingPack`/`ResearchPack` 内置默认 profile。
 
-**压缩 → 归档增量抽取：** `ContextCompressor` 丢弃旧轮次前，按领域 schema 用 `FactExtractor` 抽取原子事实，经 `MemoryFactStore` 的 Mem0 式冲突更新（同 subject+predicate 更新而非追加）归档，堵住"压缩即丢失"。
+**压缩 → 归档增量抽取：** `ContextCompressor` 丢旧轮次前按领域 schema 用 `FactExtractor` 抽取原子事实，经 `MemoryFactStore` Mem0 式冲突更新（同 subject+predicate→更新非追加）归档，堵"压缩即丢失"。
 
-**抗压缩注入：** `CoreMemorySource`（实现 `ContextSource`，`EveryIteration`）每轮注入 core 块 + 召回上下文，压缩后自动重注入。
+**抗压缩注入：** `CoreMemorySource`（`ContextSource`，`EveryIteration`）每轮注入 core + 召回上下文，压缩后自动重注入。
 
-**自管理记忆工具（领域 opt-in）：** `memory_search` / `core_memory_edit` / `archival_memory_insert`，让 agent 主动策展记忆 → "越用越好用"。
+**自管理工具（领域 opt-in）：** `memory_search`/`core_memory_edit`/`archival_memory_insert`，让 agent 主动策展记忆。
 
 **双命名空间 + 持久化：**
 
@@ -772,14 +746,14 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 
 ### 9. 工作状态系统（跨 session 任务续接）
 
-一个任务的目标 / 步骤清单 / 进度 / 关键决策 / 卡点，不再摊在 session transcript 里，而是作为 **per-task append-only 事件日志** 落到文件，独立于任何 session。新 session 启动时读一次轻量索引即可 surface 上次未完成的工作。
+任务的目标 / 步骤 / 进度 / 决策 / 卡点不再摊在 session transcript 里，而是作为 **per-task append-only 事件日志**落文件，独立于任何 session。新 session 读一次轻量索引即 surface 上次未完成工作。
 
-- **文件事件日志（source of truth）** — `FileWorkingStateStore`（`oneai-persistence`），每个 task 一个 `{task_id}.jsonl`（append-only 事件流）+ `tasks.index.json`（跨 session 发现用的轻量索引）。编码场景落在 in-repo `.oneai/tasks/`（可 `git diff` 人工审，git 提交即免费 durability + 对账 source）；助手场景落在 `~/.oneai/working-state/{user}/`。
-- **内存投影 + 零 IO 热路径** — session 启动 derive 一次进 `LoopState.working_state`；每轮 `inject_pinned_blocks` 只读内存缓存，渲染 `[Task Anchor]` / `[Plan & Progress]` / `[Decisions Made]` / `[Blockers]` 块。事件日志是 source of truth，内存投影随时可 rebuild。
-- **每步增量持久化** — `append_event` 是唯一写路径，在 plan 控制工具执行点（`exit_plan_mode` 建任务+加步骤、`task_update` 步骤状态变更、`request_plan_decision` 落定决策、stuck/恢复 记卡点）append 事件。崩溃最多丢最后一步（append-only → partial 末行 reload 时跳过）。
-- **跨 session 发现** — 新 session 首轮读 `list_open_tasks`（一次 index.json 读）注入 `[Unfinished Work From Previous Sessions]` ephemeral 块，列未完成任务 + 进度摘要 + open blockers，问用户是否继续某个。**不读旧 session conversation**（transcript 不是 working state 的 source）。
-- **场景策略（DomainPack 第 7 层 `MemoryProfile.working_state`）** — `storage_root`(InRepo/HomeDir) / `checkpoint_granularity`(EveryStep/CriticalNodes/OnTaskBoundary) / `ground_truth_reconciliation`(Git/None) / `cross_session_surface`(AutoInject/OnDemand) / `retention`(ArchiveOnComplete/Keep) / `compaction`（阈值折叠成日志内 `Snapshot` 事件，任务完成 gzip 归档）。`CodingPack` = InRepo+EveryStep+Git+AutoInject+ArchiveOnComplete+Thin；`Assistant` = HomeDir+OnTaskBoundary+None+Keep+Thick。
-- **Ground truth 对账** — CodingPack 下 `GitReconciliationSource`（`OnResume`）在 continue/resume 时跑 `git status/log/diff .oneai/`，与 working state 对账：drift 则记 `Reconciliation` 事件 + pinned 块标 STALE，冲突以代码为准。
+- **文件事件日志（source of truth）** — `FileWorkingStateStore`：每 task 一个 `{task_id}.jsonl`（append-only 事件流）+ `tasks.index.json`（跨 session 索引）。编码落 in-repo `.oneai/tasks/`（可 `git diff`，git 提交即免费 durability + 对账 source）；助手落 `~/.oneai/working-state/{user}/`。
+- **内存投影 + 零 IO 热路径** — session 启动 derive 一次进 `LoopState.working_state`；每轮 `inject_pinned_blocks` 只读内存，渲染 `[Task Anchor]`/`[Plan & Progress]`/`[Decisions Made]`/`[Blockers]`。事件日志是 source of truth，投影随时可 rebuild。
+- **每步增量持久化** — `append_event` 唯一写路径，在 plan 控制工具点（`exit_plan_mode`/`task_update`/`request_plan_decision`/stuck）落事件。崩溃最多丢最后一步（partial 末行 reload 跳过）。
+- **跨 session 发现** — 首轮读 `list_open_tasks`（一次 index.json 读）注入 `[Unfinished Work From Previous Sessions]`（列未完成任务 + 进度摘要 + open blockers）。**不读旧 transcript**。
+- **场景策略（`MemoryProfile.working_state`）** — `storage_root`(InRepo/HomeDir) / `checkpoint_granularity`(EveryStep/CriticalNodes/OnTaskBoundary) / `ground_truth_reconciliation`(Git/None) / `cross_session_surface`(AutoInject/OnDemand) / `retention`(ArchiveOnComplete/Keep) / `compaction`（阈值折叠成日志内 `Snapshot` 事件，完成 gzip 归档）。CodingPack=InRepo+EveryStep+Git+AutoInject+ArchiveOnComplete；Assistant=HomeDir+OnTaskBoundary+None+Keep。
+- **Ground truth 对账** — CodingPack 下 `GitReconciliationSource`（OnResume）跑 `git status/log/diff .oneai/` 对账，drift 记 `Reconciliation` 事件 + 标 STALE，冲突以代码为准。
 
 **使用走查（CLI）：**
 
@@ -805,46 +779,50 @@ oneai tasks archive <id>                      # 完成后归档（gzip 事件日
 
 ### 10. 用量与可靠性
 
-- **用量记录（纯 token 维度）** — `UsageTracker` trait + `UsageRecord`，内置 `InMemoryUsageTracker` 与持久化用的 `SqliteUsageTracker`（`oneai-persistence`）。每次推理后由 AgentLoop 记录 prompt/completion/total tokens 与调用次数，**不追踪任何 USD 金额或预算**（USD 成本/预算管理已移除）—— `oneai usage report / session <id> / export`。
-- **RateLimiter**（`TokenWindowRateLimiter`）+ **CircuitBreaker**（`ThresholdCircuitBreaker`，Closed/Open/HalfOpen）—— 在 AgentLoop 内强制执行。
-- **Token 计数** — `HeuristicTokenCounter`（按 Provider、CJK 感知）+ `ContextWindowProfile` + 4 种裁剪策略 + 装得下检查 —— `oneai token`。
+- **用量记录（纯 token 维度）** — `UsageTracker`+`UsageRecord`，`InMemoryUsageTracker` 与持久化用的 `SqliteUsageTracker`。AgentLoop 每次推理记 prompt/completion/total token + 调用次数，**无 USD 金额或预算**（已移除）→ `oneai usage report / session <id> / export`。
+- **限流 + 熔断** — `TokenWindowRateLimiter` + `ThresholdCircuitBreaker`（Closed/Open/HalfOpen），AgentLoop 内强制。
+- **Token 计数** — `HeuristicTokenCounter`（按 Provider、CJK 感知）+ `ContextWindowProfile` + 4 裁剪策略 + 装得下检查 → `oneai token`。
 
 ### 11. 工作流引擎
 
-- **WorkflowDag** — 声明式 DAG，用于并行步骤编排。
-- **StateGraph** — 有环有向图，用于需要迭代的 Agent 流程（ReAct 循环、条件路由、中断点）。StateGraph 与 AgentLoop 形成闭环：图节点可发出 `GraphDecision::SwitchParadigm`/`Delegate`/`ToolCalls`。
+- **WorkflowDag** — 声明式 DAG，并行步骤编排。
+- **StateGraph** — 有环有向图，迭代流程（ReAct 循环/条件路由/中断点）；与 AgentLoop 闭环——图节点可发 `GraphDecision::SwitchParadigm`/`Delegate`/`ToolCalls`。
 
 ### 12. RAG
 
-`oneai-rag` 提供 Embedding 与检索能力，核心组件：
+`oneai-rag` 核心：
 
-- **`EmbeddingService` trait** — 含 OpenAI / Voyage / Ollama / FastEmbed / OpenAI-compat 实现。
-- **`EmbeddingProviderAdapter` 注册表** — 统一各 provider 差异。
-- **`EmbeddingResolver`** — auto 探测 + 构建期/运行期 fallback，共享 `should_continue` 错误分类（429/5xx/传输错/缺 key 降级，其它报错）。
-- **`EmbeddingServiceRegistry`** — 缓存 + primary→fallback 运行期切换。
-- **`AutoEmbeddingDocumentIndex`** — 在 `add_document()` 时自动 embedding。
-- **输入切分** — 按 UTF-8 字节二分，保证多字节（CJK）不截断。
-- **分块策略** — SentenceBoundary / FixedSize / Paragraph。
+- **`EmbeddingService` trait** — OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat 实现
+- **`EmbeddingProviderAdapter` 注册表** — 统一 provider 差异
+- **`EmbeddingResolver`** — auto 探测 + 构建/运行期 fallback，共享 `should_continue`（429/5xx/传输/缺 key 降级，其它报错）
+- **`EmbeddingServiceRegistry`** — 缓存 + primary→fallback 运行期切换
+- **`AutoEmbeddingDocumentIndex`** — `add_document()` 时自动 embedding
+- **输入切分** — UTF-8 字节二分（CJK 不截断）
+- **`ChunkingStrategy`** — FixedSize / SentenceBoundary / ParagraphBoundary
 
 配置与探测链详见上方 [Embedding 配置](#embedding-配置零负担)。
 
 ### 13. A2A 协议、WASM 沙箱、评测、Studio、MCP
 
-- **A2A**（`oneai-a2a`）— Agent 间协议 SDK：客户端 + axum JSON-RPC 服务端宿主 + DomainPack→AgentCard 自动暴露。`oneai a2a serve / discover / list / send`。
-- **WASM**（`oneai-wasm`）— Wasmtime 沙箱执行不可信代码：`WasmTool`、`WasmModuleRegistry`、资源监控、WASI 受限访问、Native↔Wasm 执行模式。`oneai wasm list / load / run / health / stats`。
-- **Eval**（`oneai-eval`）— `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 内置指标 + 3 套件。`oneai eval run <suite>` / `eval score`。另含 **SWE-bench 三轴评测**（能力 resolved × 用量 usage × 效率 efficiency），见[下文专节](#swe-bench-评测能力用量效率三轴)。
-- **Studio**（`oneai-studio`）— axum HTTP+WebSocket 服务、REST API、实时事件推送、D3.js SVG StateGraph 可视化、Checkpoint 时间旅行。`oneai studio`。
-- **MCP 生态**（`oneai-mcp`）— `McpServerHost`（JSON-RPC 服务端）+ `McpPluginRegistry`（发现/配置/连接）+ TOML 配置 + stdio 传输。`oneai mcp serve / list / add / remove / connect`。
+- **A2A**（`oneai-a2a`）— Agent 间协议 SDK：客户端 + axum JSON-RPC 服务端宿主 + DomainPack→AgentCard 自动暴露
+- **WASM**（`oneai-wasm`）— Wasmtime 沙箱执行不可信代码：`WasmTool`/`WasmModuleRegistry`/资源监控/WASI 受限/Native↔Wasm 执行模式
+- **Eval**（`oneai-eval`）— `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 内置指标 + 3 套件；另含 **SWE-bench 三轴评测**（能力 resolved × 用量 × 效率），见[下文专节](#swe-bench-评测能力用量效率三轴)
+- **Studio**（`oneai-studio`）— axum HTTP+WS + REST API + 实时事件推送 + D3.js StateGraph 可视化 + Checkpoint 时间旅行
+- **MCP 生态**（`oneai-mcp`）— `McpServerHost`（JSON-RPC 服务端）+ `McpPluginRegistry`（发现/配置/连接）+ TOML 配置 + stdio 传输
+
+各子系统对应的 `oneai <sub>` 命令见上方[通过 CLI 体验各子系统](#通过-cli-体验各子系统)。
 
 ### 14. 轨迹日志（Trace）
 
-OpenInference 兼容轨迹用于 Agent 评测，外加 OTEL 导出器（`OtlpCollector` + `OtelMetricsProvider`）：
+OpenInference 兼容轨迹 + OTEL 导出器（`OtlpCollector` + `OtelMetricsProvider`）：
 
 ```rust
 let app = AppBuilder::new().trace_in_memory().build()?;
-session.end_session(SpanStatus::Ok);
-let tree = session.build_trace_tree();
-println!("成功率: {:.1}%", tree.metrics.success_rate * 100.0);
+// …运行 agent…
+if let Some(ctx) = session.trace_context() {
+    let tree = ctx.build_tree();                  // 组装 span 树 + 计算指标
+    println!("成功率: {:.1}%", tree.metrics.success_rate * 100.0);
+}
 ```
 
 ---

@@ -271,7 +271,7 @@ oneai handoff targets <preset>         # show handoff target descriptions for a 
 oneai handoff config [--preset ...]    # show handoff config
 oneai handoff run <target> <reason> [--preset ...]  # execute a handoff (demo mode)
 oneai swarm list                       # list swarm presets
-oneai swarm routing                    # list routing strategies (best-fit/load-balanced/cost-optimized/fastest)
+oneai swarm routing                    # list routing strategies (best-fit/load-balanced/fastest)
 oneai swarm config <preset>            # show swarm config
 oneai swarm agents <preset>            # show agents & capabilities in a swarm preset
 oneai swarm run --task "..." [--routing best-fit] [--preset ...] [--budget 100000]  # swarm orchestration
@@ -407,7 +407,7 @@ All `oneai-*` crates are on crates.io and can be depended on individually. **For
 | `oneai-core` | Just the core types / traits (`Message` / `ContentBlock` / `LlmProvider` / `Tool` / `PermissionLevel` / `Budget`) |
 | `oneai-provider` | Just the LLM providers (OpenAI / Anthropic / Gemini / Ollama) + `ProviderPool` / `SmartRouter` |
 | `oneai-domain` | Just the DomainPack (`coding_pack` / `research_pack`, 7-layer domain config) |
-| `oneai-tool` | Just the tool registry + 12 built-in tools + `InteractionGate` |
+| `oneai-tool` | Just the tool registry + 15 built-in tools + `InteractionGate` |
 | `oneai-memory` | Just the memory system (Letta 3-tier + incremental compression extraction + persistence) |
 | `oneai-rag` | Just RAG / `EmbeddingService` (OpenAI / Voyage / Ollama / FastEmbed + auto detection) |
 | `oneai-workflow` | Just Workflow DAG + StateGraph |
@@ -527,7 +527,7 @@ flowchart TB
             Parser["oneai-parser<br/>3-layer output defense: constrained decode → fuzzy repair → self-correct retry"]
         end
         subgraph F2 ["Tools · Skills · RAG"]
-            Tool["oneai-tool<br/>Registry + 12 built-in tools + MCP client + InteractionGate"]
+            Tool["oneai-tool<br/>Registry + 15 built-in tools + MCP client + InteractionGate"]
             Skill["oneai-skill<br/>selector + registry + convention-dir discovery"]
             Rag["oneai-rag<br/>EmbeddingService + hybrid retrieval + auto embedding"]
         end
@@ -575,7 +575,7 @@ flowchart TB
 | `oneai-provider` | LLM providers (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter | 111|
 | `oneai-parser` | 3-layer output-parse defense | 7|
 | `oneai-memory` | memory system (STM, LTM, compression, HNSW, MemoryManager + persistence) | 60|
-| `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 12 tools | 63|
+| `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 15 tools | 63|
 | `oneai-skill` | skill selector + registry + built-in domain skills | 9|
 | `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127|
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 219|
@@ -605,7 +605,7 @@ flowchart TB
 
 ### 1. The DomainPack system (domain config pack)
 
-DomainPack is OneAI's key architectural innovation — it makes domain knowledge **declarative, pluggable, composable** instead of hard-coded. A DomainPack encapsulates 7 layers of domain-specific config:
+DomainPack makes domain knowledge **declarative, pluggable, composable** instead of hard-coded, encapsulating 7 layers of domain-specific config:
 
 | Layer | Component | Purpose |
 |-------|-----------|---------|
@@ -634,67 +634,47 @@ oneai pack install ./my-pack     # install from a local path
 
 #### CodingPack (built-in)
 
-Modeled on Claude Code's workflow-embedding mechanism: 9 tools (FileRead, FileEdit, Shell, Grep, Glob, FileList, NotebookEdit, Environment, WebFetch), 8 tool decorators, 6 context sources with refresh policies, permission config (auto-approve reads, confirm edits/Shell, deny `rm -rf`/`mkfs`), 4 paradigm strategies, 3 sub-agent types (searcher / coder / reviewer).
+Modeled on Claude Code's workflow-embedding mechanism: 12 tools (FileRead/FileEdit/FileWrite/ApplyPatch/Shell/Grep/Glob/FileList/NotebookEdit/Environment/WebFetch/WebSearch), 12 tool decorators, 7 context sources with refresh policies, permission config (auto-approve reads, confirm edits/Shell, deny `rm -rf`/`mkfs`), 4 paradigm strategies, 3 sub-agent types (searcher/coder/reviewer).
 
 ### 2. The Agentic Loop (dynamic)
 
-The core execution engine is a **dynamic loop** — not a fixed pipeline. Each iteration the model decides the next step:
+The core execution engine is a **dynamic loop** — not a fixed pipeline. Each iteration the model returns one of:
 
 | Decision | Action |
 |----------|--------|
-| **DirectAnswer** | model gives the final answer → loop ends |
-| **ToolCalls** | model calls tools → execute and feed results back |
-| **Delegate** | model delegates a subtask to a specialized sub-agent |
-| **SwitchParadigm** | model switches paradigm (Plan/Reflect/Explore) — rewrites the system prompt + tool filter |
+| **DirectAnswer** | final answer → loop ends |
+| **ToolCalls** | call tools → execute and feed back |
+| **Delegate** | delegate a subtask to a specialized sub-agent |
+| **SwitchParadigm** | switch paradigm (Plan/Reflect/Explore) → rewrite system prompt + tool filter |
 
-The iteration ceiling is governed by a **TokenBudget** (not a hardcoded `max_iterations`). `delegate` / `switch_paradigm` are injected as model-callable meta-tools via `meta_tool.rs` — the model can actively delegate or switch paradigm; `apply_paradigm_switch` + `AgentLoopGraphActionExecutor` inline-upgrade the paradigm (system prompt + tool filter). Built-in lifecycle hooks (`PreToolUse`/`PostToolUse`, …), interrupt/resume (`CancellationToken`), structured output.
+The iteration ceiling is governed by a **TokenBudget** (`hard_max_iterations` is only a safety guard). `delegate`/`switch_paradigm` are injected as model-callable meta-tools via `meta_tool.rs`; `apply_paradigm_switch` + `AgentLoopGraphActionExecutor` inline-upgrade the paradigm. Built-in lifecycle hooks (`PreToolUse`/`PostToolUse`, …), `CancellationToken` interrupt/resume, structured output.
 
 ### 3. Agent paradigms
 
+`ParadigmKind` has four:
+
 | Paradigm | Pattern | Good for |
 |----------|---------|----------|
-| **ReAct** | reason → act → observe loop | general tool-using tasks |
+| **ReAct** | reason → act → observe | general tool-using tasks |
 | **Plan** | decompose → ordered step list | complex multi-step tasks |
-| **Reflection** | verify → suggest fixes | QA, self-checking |
-| **Parallel** | ScopeState isolation → merge | independent subtasks |
+| **Reflect** | verify → suggest fixes | QA, self-checking |
 | **Explore** | search → understand → summarize | codebase / search exploration |
 
-Paradigms are **model/workflow-driven** — the model calls `switch_paradigm`, or a StateGraph node emits `GraphDecision::SwitchParadigm`, and `apply_paradigm_switch` changes the system prompt + decision hint + tool filter. The user-side execution strategy is a separate **InteractionMode** (Normal/Auto/Plan, `Shift+Tab`).
+Paradigms are triggered by the model calling `switch_paradigm` or a StateGraph node emitting `GraphDecision::SwitchParadigm`; `apply_paradigm_switch` changes the system prompt + decision hint + tool filter. **Parallel delegation** (`ScopeState` isolation → merge) is a separate execution mechanism, not a paradigm. The user-side `InteractionMode` (Normal/Auto/Plan, `Shift+Tab`) is orthogonal.
 
 ### 4. Permission model
 
-Three tiers:
+Three tiers: `Read` (auto-approve) / `Standard` (policy-dependent) / `Full` (needs approval). Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → the tool's `risk_level()`.
 
-- `Read` (auto-approve)
-- `Standard` (policy-dependent)
-- `Full` (needs approval)
+The unified **`InteractionGate`** guards 5 decision points: `PreInfer` (rewrite/skip before inference), `PostInfer` (validate/replace after inference), `ToolApproval` (gate high-risk tools, wired to native dialogs), `PlanDecision` (planning trade-off), `PlanReview` (final plan accept/reject/Revise).
 
-Resolution order: `deny_by_default` → `permission_overrides` → `auto_approve` → `require_confirmation` → the tool's own `risk_level()`.
-
-Human interaction is guarded by the unified **`InteractionGate`** across 5 decision points:
-
-- **`PreInfer`** — rewrite/skip before inference
-- **`PostInfer`** — validate/replace after inference
-- **`ToolApproval`** — gate high-risk tools, wired to native dialogs
-- **`PlanDecision`** — planning trade-off
-- **`PlanReview`** — final plan accept/reject/Revise
-
-Built-in implementations:
-
-- `NoopInteractionGate` — zero-latency pass on every point ≈ auto-approve
-- `ChannelInteractionGate` — mpsc+oneshot bridge to the UI thread, per-point configurable
-- `ThresholdInteractionGate` — auto-pass low-risk, the rest go through the channel
-- `DenyAllInteractionGate` — deny all
-
-The platform-side `PlatformInteractionGate` handles `ToolApproval` with native NSAlert/MessageBox/AlertDialog/UIController/CommonDialog on macOS/Windows/Linux/Android/iOS/HarmonyOS. The old `ApprovalGate` / `on_plan_submitted` were removed.
+Built-in: `NoopInteractionGate` (pass-all), `ChannelInteractionGate` (mpsc+oneshot bridge to the UI thread, per-point configurable), `ThresholdInteractionGate` (auto-pass low-risk, rest through the channel), `DenyAllInteractionGate` (deny all). The platform-side `PlatformInteractionGate` handles `ToolApproval` with native NSAlert/MessageBox/AlertDialog/UIController/CommonDialog on macOS/Windows/Linux/Android/iOS/HarmonyOS.
 
 ### 5. LLM providers, routing & 3-layer output parser
 
-Built-in providers: **OpenAI, Anthropic, Gemini, Ollama**, unified under the `LlmProvider` trait (`infer` + `infer_stream`).
+Built-in providers: **OpenAI/Anthropic/Gemini/Ollama**, unified under `LlmProvider` (`infer` + `infer_stream`). On top sit two production-grade layers:
 
-On top sit two production-grade layers:
-
-- **ProviderPool** — provider fallback chain; each provider has its own circuit breaker, rate limiter, and degradation rule (e.g. Anthropic→OpenAI→local). Handles 429/retry automatically, parses `Retry-After`.
+- **ProviderPool** — fallback chain; each provider has its own circuit breaker, rate limiter, and degradation rule (e.g. Anthropic→OpenAI→local). Handles 429/retry automatically, parses `Retry-After`.
 - **SmartRouter** — multi-factor routing (latency/quality/balanced/custom), scores providers and picks the best, with integrated circuit breaking / rate limiting / context constraints. Every decision is logged.
 
 ```rust
@@ -704,11 +684,7 @@ let app = AppBuilder::new()
     .build()?;
 ```
 
-The **3-layer output parser** (`oneai-parser`) defends against unreliable LLM output — reuse it rather than parsing model output directly:
-
-1. **Constrained decoding** — structural constraints applied to tokens during streaming
-2. **Fuzzy JSON repair** — bracket completion, regex extraction, embedded-JSON detection
-3. **Fallback self-correction** — on parse failure, construct a self-correction prompt and let the model regenerate
+The `oneai-parser` 3-layer defense (reuse it rather than parsing model output directly): ① constrained decoding (structural constraints during streaming) ② fuzzy JSON repair (bracket completion, regex extraction, embedded-JSON detection) ③ fallback self-correction (on parse failure, construct a self-correction prompt and let the model regenerate).
 
 ### 6. Tool system
 
@@ -724,7 +700,7 @@ pub trait Tool: Send + Sync {
 pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLevel; }
 ```
 
-**12 built-in tools:** ShellTool (safety blacklist + sandbox), FileReadTool (offset+limit paging), FileEditTool, FileWriteTool, FileListTool, GrepTool, GlobTool, EnvironmentTool, NotebookEditTool, FileDeleteTool, CalculatorTool, WebFetchTool. MCP client integration via `rmcp` (stdio/SSE/streamable-http); a **MCP server** mode lets OneAI itself expose tools to Claude Code/Cursor (`oneai mcp serve`).
+**15 built-in tools:** ShellTool (safety blacklist + sandbox), FileReadTool (offset+limit paging), FileEditTool, FileWriteTool, ApplyPatchTool (multi-file unified diff), FileListTool, FileDeleteTool, GrepTool, GlobTool, EnvironmentTool, NotebookEditTool, CalculatorTool, WebFetchTool, WebSearchTool, BrowserTool. MCP client integration via `rmcp` (stdio/SSE/streamable-http); a **MCP server** mode lets OneAI itself expose tools to Claude Code/Cursor (`oneai mcp serve`).
 
 ### 7. Multi-agent collaboration
 
@@ -733,7 +709,7 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 | **GroupChat (scenarios)** | engine-level `GroupChatSession` primitive + scenario system (cast / turn policy / topic fields / debrief / review loop), driving multi-role chat on macOS/Windows/etc. |
 | **SubAgent** | hierarchical delegation to specialized sub-agents (Plan/Explore/Code/Review/Custom), optional worktree isolation |
 | **Team** | `TeamCoordinator` with 4 strategies — Coordinate/Route/Collaborate/Debate — plus 4 presets (`code_review`/`research_route`/`dev_pipeline`/`arch_debate`) |
-| **Handoff** | `HandoffTool` (handoff-as-tool-call) + `HandoffManager` + 3 presets |
+| **Handoff** | `HandoffTool` (handoff-as-tool-call) + `HandoffManager` + 3 presets (`development_chain`/`research_chain`/`support_routing`) |
 | **Swarm** | dynamic agent pool, 3 routing strategies (BestFit/LoadBalanced/Fastest), task decomposition + quality checks + retries |
 
 ### 8. Memory system
@@ -744,15 +720,13 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 - **core** — resident, token-budgeted, agent self-managed; holds only curated atomic facts, no redundant copies
 - **archival** — full fact vector store, recalled on demand
 
-`Conversation` is the only raw log; core holds only curated atomic facts, no redundant copies.
-
 **MemoryProfile (DomainPack layer 7):** declarative per-domain "extraction schema (what to remember) + recall strategy + core budget + whether to expose self-managed tools + habit-fact types (cross-session)", composable alongside `CompressionTemplate`/`ContextSource`. `CodingPack`/`ResearchPack` ship default profiles.
 
-**Compression → archival incremental extraction:** before `ContextCompressor` drops old turns, it extracts atomic facts via `FactExtractor` per the domain schema, archived through `MemoryFactStore` with Mem0-style conflict updates (same subject+predicate → update, not append), plugging "compression = data loss".
+**Compression → archival incremental extraction:** before `ContextCompressor` drops old turns it extracts atomic facts via `FactExtractor` per the domain schema, archived through `MemoryFactStore` with Mem0-style conflict updates (same subject+predicate → update, not append), plugging "compression = data loss".
 
-**Compression-resistant injection:** `CoreMemorySource` (implements `ContextSource`, `EveryIteration`) injects the core block + recall context every turn; re-injected after compression.
+**Compression-resistant injection:** `CoreMemorySource` (`ContextSource`, `EveryIteration`) injects the core block + recall context every turn; re-injected after compression.
 
-**Self-managed memory tools (domain opt-in):** `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent curate its own memory → "gets better with use".
+**Self-managed tools (domain opt-in):** `memory_search` / `core_memory_edit` / `archival_memory_insert`, letting the agent curate its own memory.
 
 **Dual namespace + persistence:**
 
@@ -774,12 +748,12 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 
 A task's goal / step list / progress / key decisions / blockers no longer live in the session transcript — they're persisted as a **per-task append-only event log** on disk, independent of any session. A brand-new session reads a lightweight index once and surfaces the previously unfinished work.
 
-- **File event log (source of truth)** — `FileWorkingStateStore` (`oneai-persistence`): one `{task_id}.jsonl` (append-only event stream) + `tasks.index.json` (lightweight index for cross-session discovery) per task. Coding scenarios land in-repo at `.oneai/tasks/` (`git diff`-able, committing = free durability + reconciliation source); assistant scenarios land at `~/.oneai/working-state/{user}/`.
-- **In-memory projection + zero-IO hot path** — derived once at session start into `LoopState.working_state`; per-turn `inject_pinned_blocks` reads only the in-memory cache, rendering `[Task Anchor]` / `[Plan & Progress]` / `[Decisions Made]` / `[Blockers]` blocks. The event log is the source of truth; the in-memory projection is rebuildable at any time.
-- **Per-step incremental persistence** — `append_event` is the only write path, invoked at plan-control-tool points (`exit_plan_mode` creates the task + adds steps, `task_update` changes step status, `request_plan_decision` records a decision, stuck/recovery records a blocker). A crash loses at most the last step (append-only → a partial trailing line is skipped on reload).
-- **Cross-session discovery** — a new session's first turn reads `list_open_tasks` (one index.json read) and injects an ephemeral `[Unfinished Work From Previous Sessions]` block listing unfinished tasks + progress summaries + open blockers, asking the user whether to continue one. **The old session's conversation is never read** (the transcript is not the source of working state).
-- **Scenario policy (DomainPack layer 7 `MemoryProfile.working_state`)** — `storage_root` (InRepo/HomeDir) / `checkpoint_granularity` (EveryStep/CriticalNodes/OnTaskBoundary) / `ground_truth_reconciliation` (Git/None) / `cross_session_surface` (AutoInject/OnDemand) / `retention` (ArchiveOnComplete/Keep) / `compaction` (threshold-fold into an in-log `Snapshot` event; gzip-archive on task completion). `CodingPack` = InRepo+EveryStep+Git+AutoInject+ArchiveOnComplete+Thin; `Assistant` = HomeDir+OnTaskBoundary+None+Keep+Thick.
-- **Ground-truth reconciliation** — under CodingPack, `GitReconciliationSource` (`OnResume`) runs `git status/log/diff .oneai/` at continue/resume and reconciles against the working state: on drift it records a `Reconciliation` event and marks the pinned block STALE; conflicts resolve in favor of the code.
+- **File event log (source of truth)** — `FileWorkingStateStore`: one `{task_id}.jsonl` (append-only event stream) + `tasks.index.json` (lightweight cross-session index) per task. Coding scenarios land in-repo at `.oneai/tasks/` (`git diff`-able, committing = free durability + reconciliation source); assistant scenarios land at `~/.oneai/working-state/{user}/`.
+- **In-memory projection + zero-IO hot path** — derived once at session start into `LoopState.working_state`; per-turn `inject_pinned_blocks` reads only the in-memory cache, rendering `[Task Anchor]` / `[Plan & Progress]` / `[Decisions Made]` / `[Blockers]`. The event log is the source of truth; the projection is rebuildable anytime.
+- **Per-step incremental persistence** — `append_event` is the only write path, invoked at plan-control-tool points (`exit_plan_mode`/`task_update`/`request_plan_decision`/stuck/recovery). A crash loses at most the last step (a partial trailing line is skipped on reload).
+- **Cross-session discovery** — a new session's first turn reads `list_open_tasks` (one index.json read) and injects an ephemeral `[Unfinished Work From Previous Sessions]` block (unfinished tasks + progress summaries + open blockers). **The old session's conversation is never read.**
+- **Scenario policy (`MemoryProfile.working_state`)** — `storage_root` (InRepo/HomeDir) / `checkpoint_granularity` (EveryStep/CriticalNodes/OnTaskBoundary) / `ground_truth_reconciliation` (Git/None) / `cross_session_surface` (AutoInject/OnDemand) / `retention` (ArchiveOnComplete/Keep) / `compaction` (threshold-fold into an in-log `Snapshot` event; gzip-archive on completion). `CodingPack` = InRepo+EveryStep+Git+AutoInject+ArchiveOnComplete; `Assistant` = HomeDir+OnTaskBoundary+None+Keep.
+- **Ground-truth reconciliation** — under CodingPack, `GitReconciliationSource` (`OnResume`) runs `git status/log/diff .oneai/` and reconciles against the working state: on drift it records a `Reconciliation` event and marks the pinned block STALE; conflicts resolve in favor of the code.
 
 **Usage walkthrough (CLI):**
 
@@ -805,46 +779,50 @@ oneai tasks archive <id>                      # archive when done (gzip the even
 
 ### 10. Usage & reliability
 
-- **Usage tracking (tokens only)** — `UsageTracker` trait + `UsageRecord`, with `InMemoryUsageTracker` and the persistent `SqliteUsageTracker` (`oneai-persistence`). After each inference the AgentLoop records prompt/completion/total tokens and call count — **no USD amounts or budgets tracked** (USD cost/budget management was removed). `oneai usage report / session <id> / export`.
-- **RateLimiter** (`TokenWindowRateLimiter`) + **CircuitBreaker** (`ThresholdCircuitBreaker`, Closed/Open/HalfOpen) — enforced inside the AgentLoop.
+- **Usage tracking (tokens only)** — `UsageTracker` + `UsageRecord`, `InMemoryUsageTracker` and the persistent `SqliteUsageTracker`. After each inference the AgentLoop records prompt/completion/total tokens + call count — **no USD amounts or budgets** (removed). `oneai usage report / session <id> / export`.
+- **Rate limiting + circuit breaking** — `TokenWindowRateLimiter` + `ThresholdCircuitBreaker` (Closed/Open/HalfOpen), enforced inside the AgentLoop.
 - **Token counting** — `HeuristicTokenCounter` (per-provider, CJK-aware) + `ContextWindowProfile` + 4 trimming strategies + fits-in-window check — `oneai token`.
 
 ### 11. Workflow engine
 
 - **WorkflowDag** — declarative DAG for parallel step orchestration.
-- **StateGraph** — cyclic directed graph for iterative agent flows (ReAct loops, conditional routing, breakpoints). StateGraph closes the loop with AgentLoop: graph nodes can emit `GraphDecision::SwitchParadigm`/`Delegate`/`ToolCalls`.
+- **StateGraph** — cyclic directed graph for iterative agent flows (ReAct loops, conditional routing, breakpoints); closes the loop with AgentLoop — graph nodes can emit `GraphDecision::SwitchParadigm`/`Delegate`/`ToolCalls`.
 
 ### 12. RAG
 
-`oneai-rag` provides embedding and retrieval, with these core components:
+`oneai-rag` core:
 
-- **`EmbeddingService` trait** — OpenAI / Voyage / Ollama / FastEmbed / OpenAI-compat implementations.
-- **`EmbeddingProviderAdapter` registry** — unifies differences across providers.
-- **`EmbeddingResolver`** — auto-detection + build-time/runtime fallback, sharing one `should_continue` error classifier (429/5xx/transport/missing-key degrade, others raise).
-- **`EmbeddingServiceRegistry`** — cache + primary→fallback runtime switch.
-- **`AutoEmbeddingDocumentIndex`** — auto-embeds on `add_document()`.
-- **Input splitting** — UTF-8 byte bisection, so multibyte (CJK) text never splits mid-character.
-- **Chunking** — SentenceBoundary / FixedSize / Paragraph.
+- **`EmbeddingService` trait** — OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat implementations
+- **`EmbeddingProviderAdapter` registry** — unifies differences across providers
+- **`EmbeddingResolver`** — auto-detection + build-time/runtime fallback, sharing one `should_continue` classifier (429/5xx/transport/missing-key degrade, others raise)
+- **`EmbeddingServiceRegistry`** — cache + primary→fallback runtime switch
+- **`AutoEmbeddingDocumentIndex`** — auto-embeds on `add_document()`
+- **Input splitting** — UTF-8 byte bisection (CJK never splits mid-character)
+- **`ChunkingStrategy`** — FixedSize / SentenceBoundary / ParagraphBoundary
 
 Configuration and the detection chain are detailed above in [Embedding configuration](#embedding-configuration-zero-burden).
 
 ### 13. A2A protocol, WASM sandbox, eval, Studio, MCP
 
-- **A2A** (`oneai-a2a`) — agent-to-agent protocol SDK: client + axum JSON-RPC server host + DomainPack→AgentCard auto-exposure. `oneai a2a serve / discover / list / send`.
-- **WASM** (`oneai-wasm`) — Wasmtime sandbox for untrusted code: `WasmTool`, `WasmModuleRegistry`, resource monitor, WASI restricted access, Native↔Wasm execution modes. `oneai wasm list / load / run / health / stats`.
-- **Eval** (`oneai-eval`) — `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 built-in metrics + 3 suites. `oneai eval run <suite>` / `eval score`. Plus the **SWE-bench three-axis eval** (capability resolved × usage × efficiency), see [the dedicated section below](#swe-bench-eval-capability--usage--efficiency).
-- **Studio** (`oneai-studio`) — axum HTTP+WebSocket service, REST API, real-time event push, D3.js SVG StateGraph viz, checkpoint time-travel. `oneai studio`.
-- **MCP ecosystem** (`oneai-mcp`) — `McpServerHost` (JSON-RPC server) + `McpPluginRegistry` (discover/configure/connect) + TOML config + stdio transport. `oneai mcp serve / list / add / remove / connect`.
+- **A2A** (`oneai-a2a`) — agent-to-agent protocol SDK: client + axum JSON-RPC server host + DomainPack→AgentCard auto-exposure
+- **WASM** (`oneai-wasm`) — Wasmtime sandbox for untrusted code: `WasmTool`/`WasmModuleRegistry`/resource monitor/WASI restricted access/Native↔Wasm execution modes
+- **Eval** (`oneai-eval`) — `EvalCase`/`ExpectedOutput`/`EvalMetric`/`EvalRunner` + 6 built-in metrics + 3 suites; plus the **SWE-bench three-axis eval** (capability resolved × usage × efficiency), see [the dedicated section below](#swe-bench-eval-capability--usage--efficiency)
+- **Studio** (`oneai-studio`) — axum HTTP+WebSocket + REST API + real-time event push + D3.js StateGraph viz + checkpoint time-travel
+- **MCP ecosystem** (`oneai-mcp`) — `McpServerHost` (JSON-RPC server) + `McpPluginRegistry` (discover/configure/connect) + TOML config + stdio transport
+
+The `oneai <sub>` commands for each subsystem are listed above under [Drive every subsystem from the CLI](#drive-every-subsystem-from-the-cli).
 
 ### 14. Tracing
 
-OpenInference-compatible traces for agent evaluation, plus OTEL exporters (`OtlpCollector` + `OtelMetricsProvider`):
+OpenInference-compatible traces + OTEL exporters (`OtlpCollector` + `OtelMetricsProvider`):
 
 ```rust
 let app = AppBuilder::new().trace_in_memory().build()?;
-session.end_session(SpanStatus::Ok);
-let tree = session.build_trace_tree();
-println!("success rate: {:.1}%", tree.metrics.success_rate * 100.0);
+// …run the agent…
+if let Some(ctx) = session.trace_context() {
+    let tree = ctx.build_tree();                  // assemble span tree + compute metrics
+    println!("success rate: {:.1}%", tree.metrics.success_rate * 100.0);
+}
 ```
 
 ---
