@@ -100,9 +100,12 @@ OneAI 暴露三条上手路径，按你的角色挑一条：
 
 ### 一、macOS App（原生，免编译）
 
-从 [GitHub Releases](https://github.com/Marssssss/OneAI/releases) 下载 `OneAI-1.0.0-macos.zip`，解压得到 `OneAI.app`，拖入「应用程序」。
+从 [GitHub Releases](https://github.com/Marssssss/OneAI/releases) 下载 `OneAI-1.1.0-macos.zip`，解压得到 `OneAI.app`，拖入「应用程序」。
 
-> 该 .app **未签名 / 未公证**（universal arm64 + x86_64，macOS 13+）。首次打开会触发 Gatekeeper 拦截：在 Finder 里**右键 → 打开**，确认后即可正常启动。
+> 该 .app **未签名 / 未公证**（arm64，仅 Apple Silicon；macOS 13+）。从浏览器下载的副本带 `com.apple.quarantine` 隔离标记，双击会被 Gatekeeper 拦。**macOS 13（尤其 15 Sequoia / 26 Tahoe）已不支持「右键 → 打开」绕过**，请二选一：
+>
+> - **终端一行（推荐，最省事）**：`xattr -cr /Applications/OneAI.app` —— 剥掉隔离标记后双击即可直接打开，无任何弹窗。
+> - **图形界面**：系统设置 → 隐私与安全性 → 滚到底部找到「已阻止 "OneAI"」→ 点「仍要打开」→ 再次点「打开」。
 
 #### 配置（App 内 Settings 面板）
 

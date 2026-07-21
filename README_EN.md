@@ -100,9 +100,12 @@ OneAI exposes three on-ramps — pick the one that matches your role:
 
 ### 1. macOS app (native, no build)
 
-Grab `OneAI-1.0.0-macos.zip` from [GitHub Releases](https://github.com/Marssssss/OneAI/releases), unzip, and drop `OneAI.app` into Applications.
+Grab `OneAI-1.1.0-macos.zip` from [GitHub Releases](https://github.com/Marssssss/OneAI/releases), unzip, and drop `OneAI.app` into Applications.
 
-> The .app is **unsigned / un-notarized** (universal arm64 + x86_64, macOS 13+). The first launch trips Gatekeeper: in Finder, **right-click → Open**, confirm, and it launches normally.
+> The .app is **unsigned / un-notarized** (arm64, Apple Silicon only; macOS 13+). A browser-downloaded copy carries the `com.apple.quarantine` flag, so a double-click is blocked by Gatekeeper. **macOS 13 (notably 15 Sequoia / 26 Tahoe) no longer offers the "right-click → Open" bypass** — pick one:
+>
+> - **One terminal line (recommended, easiest)**: `xattr -cr /Applications/OneAI.app` — strips the quarantine flag, then double-click opens directly with no prompt.
+> - **GUI**: System Settings → Privacy & Security → scroll to the bottom, find the ""OneAI" was blocked" notice → click "Open Anyway" → then "Open".
 
 #### Configure (in-app Settings panel)
 
