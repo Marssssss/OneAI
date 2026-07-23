@@ -24,7 +24,7 @@
 
 - [At a glance](#at-a-glance)
 - [Quick start](#quick-start)
-  - [1. macOS app (native, no build)](#1-macos-app-native-no-build)
+  - [1. Desktop app (macOS / Windows)](#1-desktop-app-macos--windows)
   - [2. TUI / CLI (general agentic execution)](#2-tui--cli-general-agentic-execution)
   - [3. Integrate the OneAI SDK](#3-integrate-the-oneai-sdk-to-build-your-own-app-cratesio)
 - [What is OneAI?](#what-is-oneai)
@@ -94,11 +94,17 @@ OneAI exposes three on-ramps — pick the one that matches your role:
 
 | Path | For whom |
 |------|----------|
-| **1. macOS app** | Want to download and go, run scenario-based multi-agent chats, no terminal / env vars |
+| **1. Desktop app** | Want to run scenario-based multi-agent chats from an app (macOS: download & go / Windows: build from source), no terminal / env vars |
 | **2. TUI / CLI** | General agentic coding / task execution, subsystem exploration |
 | **3. Integrate the OneAI SDK** | Build your own Rust app on top of OneAI from crates.io |
 
-### 1. macOS app (native, no build)
+### 1. Desktop app (macOS / Windows)
+
+The two native desktop apps share the same design, scenario system, and settings panel — macOS is SwiftUI, Windows is WinUI 3 / C#, feature-aligned. Pick your platform to install; **configuration and usage are identical** — only the install steps differ.
+
+#### Install
+
+**macOS (download & go)**
 
 Grab `OneAI-1.1.0-macos.zip` from [GitHub Releases](https://github.com/Marssssss/OneAI/releases), unzip, and drop `OneAI.app` into Applications.
 
@@ -107,9 +113,21 @@ Grab `OneAI-1.1.0-macos.zip` from [GitHub Releases](https://github.com/Marssssss
 > - **One terminal line (recommended, easiest)**: `xattr -cr /Applications/OneAI.app` — strips the quarantine flag, then double-click opens directly with no prompt.
 > - **GUI**: System Settings → Privacy & Security → scroll to the bottom, find the ""OneAI" was blocked" notice → click "Open Anyway" → then "Open".
 
+**Windows (build from source)**
+
+> No prebuilt Windows package is published yet — it's built from source for now (needs Windows + Visual Studio with the WindowsAppSDK 1.8 workload).
+
+```powershell
+rustup target add x86_64-pc-windows-msvc
+powershell ./scripts/build_windows.ps1                    # cross-compile oneai_native.dll
+dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug -r win-x64
+```
+
+`-r win-x64` is required (RID-gated WindowsAppSDK runtime native assets need it, or dotnet errors). See [`platforms/windows/README.md`](platforms/windows/README.md).
+
 #### Configure (in-app Settings panel)
 
-The macOS app does **not** read env vars or `~/.oneai/config.toml` — Provider and Embedding are both configured in the in-app **Settings** sheet, persisted to `~/Library/Application Support`. Open OneAI.app and bring up Settings from the sidebar or menu:
+The desktop app does **not** read env vars or `~/.oneai/config.toml` — Provider and Embedding are both configured in the in-app **Settings** panel, persisted to the platform's user-data dir (macOS: `~/Library/Application Support`; Windows: `%LOCALAPPDATA%\OneAI`). Open the app and bring up Settings from the sidebar bottom or menu:
 
 - **Provider type**: pick `openai` / `anthropic` / `ollama`, or type a custom one (`gemini` / `glm` / `dashscope` — any OpenAI-compatible gateway). Picking ollama auto-fills `127.0.0.1:11434`.
 - **API key**: the vendor's key (ollama needs none).
@@ -121,9 +139,9 @@ Each agent can also override model / key / base_url individually in the scenario
 
 #### Use
 
-In the sidebar, **Start from a scenario** picks one of 5 built-in presets (**mock interview / language partner / debate / writing workshop / brainstorm**), or **Edit scenario** to drag-compose the cast, turn policy, background fields, and debrief phase. While running: token-by-token streaming with thinking bubbles, `⌘K` command palette, speech input, artifact canvas. The scenario and conversation model is detailed below in [Two ways to use OneAI → B. Native desktop / mobile app](#b-native-desktop--mobile-app--scenario-based-multi-agent-chat).
+In the sidebar, **Start from a scenario** picks one of 5 built-in presets (**mock interview / language partner / debate / writing workshop / brainstorm**), or **Edit scenario** to drag-compose the cast, turn policy, background fields, and debrief phase. While running: token-by-token markdown streaming with thinking bubbles, command palette (macOS `⌘K` / Windows `Ctrl+K`), speech input, artifact canvas. The scenario and conversation model is detailed below in [Two ways to use OneAI → B. Native desktop / mobile app](#b-native-desktop--mobile-app--scenario-based-multi-agent-chat).
 
-> To build from source instead: `./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`, then `open platforms/macos/build/OneAI.app`.
+> To build the macOS app from source instead: `./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`, then `open platforms/macos/build/OneAI.app`.
 
 ### 2. TUI / CLI (general agentic execution)
 

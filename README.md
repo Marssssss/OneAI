@@ -24,7 +24,7 @@
 
 - [一图看懂](#一图看懂)
 - [快速上手](#快速上手)
-  - [一、macOS App（原生，免编译）](#一macos-app原生免编译)
+  - [一、桌面 App（macOS / Windows）](#一桌面-appmacos--windows)
   - [二、TUI / CLI（通用 Agentic 执行）](#二tui--cli通用-agentic-执行)
   - [三、集成 OneAI SDK 构建你自己的应用](#三集成-oneai-sdk-构建你自己的应用cratesio)
 - [OneAI 是什么？](#oneai-是什么)
@@ -94,11 +94,17 @@ OneAI 暴露三条上手路径，按你的角色挑一条：
 
 | 路径 | 适合谁 |
 |------|--------|
-| **一、macOS App** | 想直接下载即用、玩场景化多 Agent 对话，不碰命令行 / 环境变量 |
+| **一、桌面 App** | 想直接用 App 玩场景化多 Agent 对话（macOS 下载即用 / Windows 源码构建），不碰命令行 / 环境变量 |
 | **二、TUI / CLI** | 通用 Agentic 编程 / 任务执行、子系统探索 |
 | **三、集成 OneAI SDK** | 用 crates.io 上的 OneAI 构建自己的 Rust 应用 |
 
-### 一、macOS App（原生，免编译）
+### 一、桌面 App（macOS / Windows）
+
+两个原生桌面 App 共用同一套设计、场景系统与设置面板——macOS 为 SwiftUI、Windows 为 WinUI 3 / C#，功能对齐。挑你的平台安装，**配置与使用方式完全一致**，差异只在安装步骤。
+
+#### 安装
+
+**macOS（下载即用）**
 
 从 [GitHub Releases](https://github.com/Marssssss/OneAI/releases) 下载 `OneAI-1.1.0-macos.zip`，解压得到 `OneAI.app`，拖入「应用程序」。
 
@@ -107,9 +113,21 @@ OneAI 暴露三条上手路径，按你的角色挑一条：
 > - **终端一行（推荐，最省事）**：`xattr -cr /Applications/OneAI.app` —— 剥掉隔离标记后双击即可直接打开，无任何弹窗。
 > - **图形界面**：系统设置 → 隐私与安全性 → 滚到底部找到「已阻止 "OneAI"」→ 点「仍要打开」→ 再次点「打开」。
 
+**Windows（源码构建）**
+
+> Windows 预编译包暂未发布，当前从源码构建（需 Windows + Visual Studio 含 WindowsAppSDK 1.8 workload）。
+
+```powershell
+rustup target add x86_64-pc-windows-msvc
+powershell ./scripts/build_windows.ps1                    # 交叉编译 oneai_native.dll
+dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug -r win-x64
+```
+
+`-r win-x64` 不可省（RID-gated 的 WindowsAppSDK 运行时原生资产需要它，否则 dotnet 报错）。详见 [`platforms/windows/README.md`](platforms/windows/README.md)。
+
 #### 配置（App 内 Settings 面板）
 
-macOS App **不读环境变量或 `~/.oneai/config.toml`** —— Provider 与 Embedding 都在 App 内「设置」sheet 里配，持久化到 `~/Library/Application Support`。打开 OneAI.app 后从侧边栏或菜单唤出「设置」：
+桌面 App **不读环境变量或 `~/.oneai/config.toml`** —— Provider 与 Embedding 都在 App 内「设置」面板里配，持久化到各平台用户数据目录（macOS：`~/Library/Application Support`；Windows：`%LOCALAPPDATA%\OneAI`）。打开 App 后从侧边栏底部或菜单唤出「设置」：
 
 - **Provider 类型**：选 `openai` / `anthropic` / `ollama`，或填自定义（`gemini` / `glm` / `dashscope` 等任意 OpenAI 兼容网关）。选 ollama 自动填 `127.0.0.1:11434`。
 - **API Key**：对应厂商的 key（ollama 无需填）。
@@ -121,9 +139,9 @@ macOS App **不读环境变量或 `~/.oneai/config.toml`** —— Provider 与 E
 
 #### 使用
 
-侧边栏「从场景开始」选 5 个内置预设之一（**面试演练 / 语言伙伴 / 辩论赛 / 写作工坊 / 头脑风暴**），或「编辑场景」拖拽式自建角色阵容、轮次策略、背景字段、复盘阶段。运行中：流式逐字渲染 + 思考气泡、`⌘K` 命令面板、语音输入、产物画布。场景与对话机制详见下文[两种使用方式 → B. 原生桌面 / 移动 App](#b-原生桌面--移动-app--场景化多-agent-对话)。
+侧边栏「从场景开始」选 5 个内置预设之一（**面试演练 / 语言伙伴 / 辩论赛 / 写作工坊 / 头脑风暴**），或「编辑场景」拖拽式自建角色阵容、轮次策略、背景字段、复盘阶段。运行中：流式逐字渲染 markdown + 思考气泡、命令面板（macOS `⌘K` / Windows `Ctrl+K`）、语音输入、产物画布。场景与对话机制详见下文[两种使用方式 → B. 原生桌面 / 移动 App](#b-原生桌面--移动-app--场景化多-agent-对话)。
 
-> 如需从源码构建：`./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`，然后 `open platforms/macos/build/OneAI.app`。
+> 如需从源码构建 macOS：`./scripts/build_apple.sh && ./platforms/macos/build_macos.sh`，然后 `open platforms/macos/build/OneAI.app`。
 
 ### 二、TUI / CLI（通用 Agentic 执行）
 
