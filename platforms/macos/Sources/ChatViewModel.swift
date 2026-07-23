@@ -358,6 +358,15 @@ final class ChatViewModel: ObservableObject {
         return dir.appendingPathComponent("oneai.db").path
     }
 
+    /// Application Support dir (no trailing file) — passed to
+    /// `initOneaiLog` so the Rust `tracing` subscriber writes oneai_rust.log
+    /// next to oneai_stream.log / oneai.db.
+    var appSupportDir: String {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.path
+    }
+
     init() {
         let p = UserDefaults(suiteName: "oneai_provider") ?? .standard
         model = p.string(forKey: "model") ?? "gpt-4o-mini"
@@ -415,6 +424,11 @@ final class ChatViewModel: ObservableObject {
     func ensureApp() async {
         guard app == nil else { return }
         StreamLog.start()
+        // Install the Rust-side tracing subscriber → oneai_rust.log in the
+        // same dir. Pairs with StreamLog (oneai_stream.log) so create_session /
+        // save / run_task on the Rust side are locatable alongside the Swift
+        // sess/run events. Idempotent (OnceLock); safe across rebuildApp.
+        initOneaiLog(logDir: appSupportDir)
         // Main-thread heartbeat, driven by a self-rescheduling
         // DispatchQueue.main.asyncAfter chain (NOT a Timer — that earlier
         // attempt attached to the wrong runloop because this method runs off
@@ -540,6 +554,7 @@ final class ChatViewModel: ObservableObject {
     /// round (e.g. writing workshop → writer drafts).
     func newConversation(scenario: Scenario?, topicValues: [String: String]?) async {
         guard let a = app else { return }
+        StreamLog.log("sess", "newConversation entry scenario=\(scenario?.id ?? "nil") running=\(running) curId=\(currentSessionId ?? "nil") items=\(items.count)")
         // Stop a still-streaming previous turn before swapping sessions — see
         // `interruptInFlight` (issue 4).
         await interruptInFlight()
@@ -593,6 +608,7 @@ final class ChatViewModel: ObservableObject {
         } else {
             // Single-agent path.
             let s = a.createSession()
+            StreamLog.log("sess", "createSession (single) id=\(s.sessionId()) running=\(running) prevId=\(currentSessionId ?? "nil")")
             session = s
             currentSessionId = s.sessionId()
             items.removeAll()
@@ -631,6 +647,7 @@ final class ChatViewModel: ObservableObject {
     /// group chats are created fresh per conversation in v1).
     func loadSession(_ id: String) async {
         guard let a = app else { return }
+        StreamLog.log("sess", "loadSession id=\(id) running=\(running) curId=\(currentSessionId ?? "nil")")
         // Stop a still-streaming previous turn first (issue 4): otherwise its
         // `streamTick` bumps keep firing while the new history is on screen,
         // yanking the scroll to the bottom every flush.
@@ -642,6 +659,7 @@ final class ChatViewModel: ObservableObject {
         groupSession = nil
         debriefActive = false
         let s = await a.createSessionWithId(id: id)
+        StreamLog.log("sess", "createSessionWithId (resume) id=\(id) resolvedId=\(s.sessionId())")
         let msgs = await s.messages()
         // Build the entry list off the main thread, then publish ONCE. Mutating
         // `items` per message (N @Published sends + N ForEach diff passes) is
@@ -809,6 +827,7 @@ final class ChatViewModel: ObservableObject {
             return
         }
         guard let s = session else { self.error = "session not built"; return }
+        StreamLog.log("sess", "runTask entry id=\(s.sessionId()) running=\(running) items=\(items.count) len=\(task.count)")
         if addUserItem { items.append(.user(UserItem(text: task))) }
         let turn = AssistantItem()
         activeSpeakerItem = turn
@@ -817,6 +836,7 @@ final class ChatViewModel: ObservableObject {
         error = nil
 
         // Persist immediately so the new chat shows in the sidebar mid-turn.
+        StreamLog.log("sess", "save pre-run id=\(s.sessionId())")
         try? await s.save()
         await refreshSessions()
 
@@ -838,6 +858,7 @@ final class ChatViewModel: ObservableObject {
     /// events route to its own item via `handle`), stops at the user's turn.
     private func runGroupTask(_ task: String, addUserItem: Bool) async {
         guard let gs = groupSession else { return }
+        StreamLog.log("sess", "runGroupTask entry running=\(running) items=\(items.count) len=\(task.count)")
         if addUserItem { items.append(.user(UserItem(text: task))) }
         activeSpeakerItem = nil     // a new round starts; first event seeds item
         activeSpeakerId = nil

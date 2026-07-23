@@ -52,6 +52,10 @@ pub mod app_builder;
 pub mod app;
 pub mod group_chat;
 
+// Foreign-app debug-logging init (installs a global `tracing` subscriber
+// writing to oneai_rust.log). Foreign code calls `init_oneai_log` at start.
+pub mod rust_log;
+
 // `extern "C"` JSON facade for runtimes UniFFI 0.32 can't generate bindings
 // for (C# / NAPI-C++). Exported from the same cdylib alongside the uniffi
 // symbols. See c_facade.rs.

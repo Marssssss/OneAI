@@ -25,6 +25,7 @@ impl OneAIApp {
     pub fn create_session(&self) -> Arc<OneAISession> {
         let inner_session = self.inner.create_session();
         let session_id = inner_session.session_id().to_string();
+        tracing::info!("create_session (new uuid) id={}", session_id);
         Arc::new(OneAISession {
             session_id,
             inner: tokio::sync::Mutex::new(inner_session),
@@ -43,6 +44,7 @@ impl OneAIApp {
     pub async fn create_session_with_id(&self, id: String) -> Arc<OneAISession> {
         let inner_session = self.inner.create_session_with_id(&id).await;
         let session_id = inner_session.session_id().to_string();
+        tracing::info!("create_session_with_id (resume) requested_id={} resolved_id={}", id, session_id);
         Arc::new(OneAISession {
             session_id,
             inner: tokio::sync::Mutex::new(inner_session),
@@ -183,11 +185,16 @@ impl OneAISession {
         task: String,
         callback: Arc<dyn ChatEventCallback>,
     ) -> Result<(), OneAIErrorView> {
+        tracing::info!("run_task start id={} task_len={}", self.session_id, task.len());
         let observer = CallbackObserver::new(callback);
         let mut inner = self.inner.lock().await;
         match inner.run_agent(&task, &observer, self.interrupt_slot.clone()).await {
-            Ok(_result) => Ok(()),
+            Ok(_result) => {
+                tracing::info!("run_task end ok id={}", self.session_id);
+                Ok(())
+            }
             Err(e) => {
+                tracing::warn!("run_task end err id={} err={:?}", self.session_id, e);
                 // Surface the error both as a return value and as an event,
                 // so a foreign UI that only listens to events still sees it.
                 let view = OneAIErrorView::from(e);

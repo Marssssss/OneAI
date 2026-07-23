@@ -4744,6 +4744,22 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
+/**
+ * Install a global `tracing` subscriber writing to `<log_dir>/oneai_rust.log`.
+ *
+ * Foreign code (Swift `ensureApp`) calls this right after its own
+ * `StreamLog.start()`, passing the same Application Support directory the
+ * SQLite db and `oneai_stream.log` live in. The previous run's log is rolled
+ * to `oneai_rust.log.prev` so the file stays bounded; `RUST_LOG` is honored
+ * if set, otherwise the level defaults to `info`.
+ */
+public func initOneaiLog(logDir: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_oneai_fn_func_init_oneai_log(
+        FfiConverterString.lower(logDir),uniffiCallStatus
+    )
+}
+}
 
 private enum InitializationResult {
     case ok
@@ -4759,6 +4775,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_oneai_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_oneai_checksum_func_init_oneai_log() != 41003) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaiapp_create_group_session() != 19108) {
         return InitializationResult.apiChecksumMismatch

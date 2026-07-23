@@ -530,6 +530,11 @@ uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_set_scripted_order(uint64_
 uint64_t uniffi_oneai_fn_method_oneaigroupchatsession_start(uint64_t ptr, uint64_t callback
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_FUNC_INIT_ONEAI_LOG
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_FUNC_INIT_ONEAI_LOG
+void uniffi_oneai_fn_func_init_oneai_log(RustBuffer log_dir, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_ONEAI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_ONEAI_RUSTBUFFER_ALLOC
 RustBuffer ffi_oneai_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -788,6 +793,12 @@ void ffi_oneai_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_ONEAI_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_ONEAI_RUST_FUTURE_COMPLETE_VOID
 void ffi_oneai_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_FUNC_INIT_ONEAI_LOG
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_FUNC_INIT_ONEAI_LOG
+uint16_t uniffi_oneai_checksum_func_init_oneai_log(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAIAPP_CREATE_GROUP_SESSION
