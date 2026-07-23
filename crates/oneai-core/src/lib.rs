@@ -35,9 +35,6 @@ pub mod token_counter;
 pub mod context_manager;
 pub mod model_context;
 pub mod context_accounting;
-pub mod team;
-pub mod handoff;
-pub mod swarm;
 
 pub use types::*;
 pub use traits::*;
@@ -54,9 +51,6 @@ pub use token_counter::*;
 pub use context_manager::*;
 pub use model_context::*;
 pub use context_accounting::*;
-pub use team::*;
-pub use handoff::*;
-pub use swarm::*;
 
 #[cfg(test)]
 mod tests {

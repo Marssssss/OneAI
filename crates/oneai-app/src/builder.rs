@@ -142,16 +142,6 @@ pub struct AppBuilder {
     /// Only effective when a provider is configured and `model_context_resolver`
     /// is enabled (auto-created when any token/context component is configured).
     probe_context_windows: bool,
-    /// Team coordinator (optional — enables multi-agent team coordination).
-    team_coordinator: Option<Arc<oneai_agent::TeamCoordinator>>,
-    /// Handoff manager (optional — enables agent handoff-as-tool-call protocol).
-    handoff_manager: Option<Arc<oneai_agent::HandoffManager>>,
-    /// Handoff config (optional — for auto-creating handoff manager at build time).
-    handoff_config: Option<oneai_core::HandoffConfig>,
-    /// Swarm orchestrator (optional — enables dynamic agent pool orchestration).
-    swarm_orchestrator: Option<Arc<oneai_agent::SwarmOrchestrator>>,
-    /// Swarm config (optional — for auto-creating swarm orchestrator at build time).
-    swarm_config: Option<oneai_core::SwarmConfig>,
     /// Sampling / generation parameters (temperature, top_p, max_tokens,
     /// thinking_budget, stop_sequences). Propagated into the `AgentLoopConfig`
     /// that drives every inference call. Each `Some` field overrides the
@@ -211,11 +201,6 @@ impl AppBuilder {
             context_manager_config: None,
             model_context_resolver: None,
             probe_context_windows: true,
-            team_coordinator: None,
-            handoff_manager: None,
-            handoff_config: None,
-            swarm_orchestrator: None,
-            swarm_config: None,
             generation_config: oneai_core::GenerationConfig::new(),
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             working_state_root: None,
@@ -1139,173 +1124,6 @@ impl AppBuilder {
         self
     }
 
-    // ─── Team Coordinator ─────────────────────────────────────────────────────
-
-    /// Set a custom team coordinator for multi-agent team coordination.
-    ///
-    /// The team coordinator enables running multi-agent teams with different
-    /// strategies (Coordinate, Route, Collaborate, Debate).
-    ///
-    /// **Usage**:
-    /// ```ignore
-    /// let factory = Arc::new(DefaultSubAgentFactory::new(provider, parser, gate, tools));
-    /// let coordinator = Arc::new(TeamCoordinator::new(factory));
-    /// let app = AppBuilder::new()
-    ///     .provider(provider)
-    ///     .team_coordinator(coordinator)  // ← enable team coordination
-    ///     .build()?;
-    /// ```
-    pub fn team_coordinator(mut self, tc: Arc<oneai_agent::TeamCoordinator>) -> Self {
-        self.team_coordinator = Some(tc);
-        self
-    }
-
-    /// Use the default team coordinator (Coordinate strategy with all built-in agent kinds).
-    ///
-    /// Creates a TeamCoordinator with DefaultSubAgentFactory.
-    /// Requires a provider to be set (for creating sub-agent AgentLoop instances).
-    pub fn default_team_coordinator(self) -> Self {
-        // Team coordinator needs a provider, parser, approval gate, and tools
-        // to create sub-agent factory. If any are missing, we can't create it.
-        if self.provider.is_none() && self.provider_pool.is_none() && self.provider_pool_config.is_none() {
-            tracing::warn!("default_team_coordinator() called without provider — \
-                team coordinator will not be auto-created. Set a provider first.");
-            return self;
-        }
-
-        // This will be created at build time when provider and other components
-        // are resolved. For now, we just mark that it should be auto-created.
-        // The actual creation happens in the build() method.
-        self
-    }
-
-    // ─── Handoff Manager ────────────────────────────────────────────────────
-
-    /// Set a custom handoff manager for agent handoff-as-tool-call protocol.
-    ///
-    /// The handoff manager enables agents to transfer conversation control
-    /// to another agent via tool calls. When the model calls the "handoff"
-    /// tool, the HandoffManager processes the transfer.
-    ///
-    /// **Usage**:
-    /// ```ignore
-    /// let factory = Arc::new(DefaultSubAgentFactory::new(provider, parser, gate, tools));
-    /// let manager = Arc::new(HandoffManager::new(factory));
-    /// let app = AppBuilder::new()
-    ///     .provider(provider)
-    ///     .handoff_manager(manager)  // ← enable handoff protocol
-    ///     .build()?;
-    /// ```
-    pub fn handoff_manager(mut self, hm: Arc<oneai_agent::HandoffManager>) -> Self {
-        self.handoff_manager = Some(hm);
-        self
-    }
-
-    /// Configure handoff settings (for auto-creating handoff manager at build time).
-    ///
-    /// The handoff manager is created at build time using the given configuration
-    /// and the app's SubAgentFactory (from TeamCoordinator or default).
-    ///
-    /// **Usage**:
-    /// ```ignore
-    /// let app = AppBuilder::new()
-    ///     .provider(provider)
-    ///     .handoff_config(HandoffPresets::development_chain())  // ← enable handoffs
-    ///     .build()?;
-    /// ```
-    pub fn handoff_config(mut self, config: oneai_core::HandoffConfig) -> Self {
-        self.handoff_config = Some(config);
-        self
-    }
-
-    /// Use the default development handoff chain (main → coding → review).
-    ///
-    /// Creates a HandoffConfig with 3 targets (coding, review, research),
-    /// conversation transfer enabled, and max depth 3.
-    pub fn default_handoff_development(self) -> Self {
-        self.handoff_config(oneai_core::HandoffPresets::development_chain())
-    }
-
-    /// Use the default research handoff chain (main → research → analysis).
-    ///
-    /// Creates a HandoffConfig with 2 targets (research, analysis),
-    /// conversation transfer enabled, and max depth 2.
-    pub fn default_handoff_research(self) -> Self {
-        self.handoff_config(oneai_core::HandoffPresets::research_chain())
-    }
-
-    /// Use the default support routing handoff (triage → specialist).
-    ///
-    /// Creates a HandoffConfig with 3 targets (coding, research, review),
-    /// summary-only transfer, and max depth 1.
-    pub fn default_handoff_support(self) -> Self {
-        self.handoff_config(oneai_core::HandoffPresets::support_routing())
-    }
-
-    // ─── Swarm Orchestrator ────────────────────────────────────────────────────
-
-    /// Set a custom swarm orchestrator for dynamic agent pool orchestration.
-    ///
-    /// The swarm orchestrator enables dynamic agent pools where agents are
-    /// assigned tasks based on real-time capability assessment. Tasks are
-    /// routed to the best-suited agent, results are quality-validated,
-    /// and failed tasks are retried with alternative agents.
-    ///
-    /// **Usage**:
-    /// ```ignore
-    /// let factory = Arc::new(DefaultSubAgentFactory::new(provider, parser, gate, tools));
-    /// let orchestrator = Arc::new(SwarmOrchestrator::new(factory));
-    /// let app = AppBuilder::new()
-    ///     .provider(provider)
-    ///     .swarm_orchestrator(orchestrator)  // ← enable swarm orchestration
-    ///     .build()?;
-    /// ```
-    pub fn swarm_orchestrator(mut self, so: Arc<oneai_agent::SwarmOrchestrator>) -> Self {
-        self.swarm_orchestrator = Some(so);
-        self
-    }
-
-    /// Configure swarm settings (for auto-creating swarm orchestrator at build time).
-    ///
-    /// The swarm orchestrator is created at build time using the given configuration
-    /// and the app's SubAgentFactory (from TeamCoordinator or default).
-    ///
-    /// **Usage**:
-    /// ```ignore
-    /// let app = AppBuilder::new()
-    ///     .provider(provider)
-    ///     .swarm_config(SwarmPresets::code_analysis_swarm())  // ← enable swarm
-    ///     .build()?;
-    /// ```
-    pub fn swarm_config(mut self, config: oneai_core::SwarmConfig) -> Self {
-        self.swarm_config = Some(config);
-        self
-    }
-
-    /// Use the default code analysis swarm (BestFit routing with 4 agents).
-    ///
-    /// Creates a SwarmConfig with 4 agents (coder, researcher, reviewer, planner),
-    /// BestFit routing, quality threshold 0.7, and 120k token budget.
-    pub fn default_swarm_code_analysis(self) -> Self {
-        self.swarm_config(oneai_core::SwarmPresets::code_analysis_swarm())
-    }
-
-    /// Use the default fast research swarm (Fastest routing with 3 agents).
-    ///
-    /// Creates a SwarmConfig with 3 agents (researcher, planner, reviewer),
-    /// Fastest routing, quality threshold 0.6, and 60k token budget.
-    pub fn default_swarm_fast_research(self) -> Self {
-        self.swarm_config(oneai_core::SwarmPresets::fast_research_swarm())
-    }
-
-    /// Use the default balanced dev swarm (LoadBalanced routing with 4 agents).
-    ///
-    /// Creates a SwarmConfig with 4 agents, LoadBalanced routing,
-    /// quality threshold 0.7, and 100k token budget.
-    pub fn default_swarm_balanced_dev(self) -> Self {
-        self.swarm_config(oneai_core::SwarmPresets::balanced_dev_swarm())
-    }
-
     // ─── SQLite Persistence ────────────────────────────────────────────────
 
     /// Enable SQLite persistence (default path: ~/.oneai/oneai.db).
@@ -1891,9 +1709,6 @@ impl AppBuilder {
             context_manager: resolved_context_manager,
             model_context_resolver: resolved_resolver,
             probe_context_windows: self.probe_context_windows,
-            team_coordinator: self.team_coordinator,
-            handoff_manager: self.handoff_manager,
-            swarm_orchestrator: self.swarm_orchestrator,
             generation_config: self.generation_config,
             constrained_output_policy: self.constrained_output_policy,
             working_state_store,
@@ -1981,12 +1796,6 @@ pub struct App {
     pub model_context_resolver: Option<Arc<oneai_core::ModelContextResolver>>,
     /// Whether to probe the provider for context windows at warm-up.
     pub probe_context_windows: bool,
-    /// Team coordinator for multi-agent team coordination.
-    pub team_coordinator: Option<Arc<oneai_agent::TeamCoordinator>>,
-    /// Handoff manager for agent handoff-as-tool-call protocol.
-    pub handoff_manager: Option<Arc<oneai_agent::HandoffManager>>,
-    /// Swarm orchestrator for dynamic agent pool orchestration.
-    pub swarm_orchestrator: Option<Arc<oneai_agent::SwarmOrchestrator>>,
     /// Sampling / generation parameters — propagated into the `AgentLoopConfig`
     /// of every agent run (main loop, workflow nodes, sub-agents inherit via
     /// the parent). See `AppBuilder::generation_config`.
@@ -2174,21 +1983,6 @@ impl App {
     /// Get the smart router (if configured).
     pub fn smart_router(&self) -> Option<&Arc<SmartRouter>> {
         self.smart_router.as_ref()
-    }
-
-    /// Get the team coordinator (if configured).
-    pub fn team_coordinator(&self) -> Option<&Arc<oneai_agent::TeamCoordinator>> {
-        self.team_coordinator.as_ref()
-    }
-
-    /// Get the handoff manager (if configured).
-    pub fn handoff_manager(&self) -> Option<&Arc<oneai_agent::HandoffManager>> {
-        self.handoff_manager.as_ref()
-    }
-
-    /// Get the swarm orchestrator (if configured).
-    pub fn swarm_orchestrator(&self) -> Option<&Arc<oneai_agent::SwarmOrchestrator>> {
-        self.swarm_orchestrator.as_ref()
     }
 }
 

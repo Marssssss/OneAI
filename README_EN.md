@@ -283,19 +283,13 @@ oneai graph show <name>                # render a state graph as ASCII
 oneai graph run <name> <task> [--domain ...] [--model ...] [--user <id>]   # run a state graph with a real provider
 
 # ── Multi-agent coordination ──
-oneai team strategies                  # list team strategies (Coordinate/Route/Collaborate/Debate)
-oneai team presets                     # list preset teams (code_review/research_route/dev_pipeline/arch_debate)
-oneai team info <id>                   # show team config details
-oneai team run "..." [--strategy coordinate] [--preset ...] [--budget 100000]  # run a team coordination task
-oneai handoff list                     # list handoff targets and presets
-oneai handoff targets <preset>         # show handoff target descriptions for a preset
-oneai handoff config [--preset ...]    # show handoff config
-oneai handoff run <target> <reason> [--preset ...]  # execute a handoff (demo mode)
-oneai swarm list                       # list swarm presets
-oneai swarm routing                    # list routing strategies (best-fit/load-balanced/fastest)
-oneai swarm config <preset>            # show swarm config
-oneai swarm agents <preset>            # show agents & capabilities in a swarm preset
-oneai swarm run --task "..." [--routing best-fit] [--preset ...] [--budget 100000]  # swarm orchestration
+# Inside the main loop, the model-driven `delegate` meta-tool hierarchically
+# delegates to sub-agents (multiple delegations per turn + dependency-aware
+# parallel wave scheduling), and `switch_paradigm` enters Plan/Reflect/Explore
+# fixed graph flows; the engine-level GroupChat primitive powers scenario-based
+# multi-role conversations. No standalone Team/Swarm/Handoff orchestration
+# layer — aggregation/routing/debate patterns are expressed as deterministic
+# StateGraphs.
 
 # ── Provider pool & smart routing ──
 oneai provider status                  # provider-pool status: active provider, health, circuit states
@@ -477,7 +471,7 @@ OneAI is a full-stack agent framework written in Rust. It provides everything yo
 - **Modular** — 25 independent crates, each with one job; use what you need.
 - **Type-safe** — sealed-enum hierarchies (every public enum is `#[non_exhaustive]`), trait-driven abstractions, no stringly-typed config.
 - **Domain-pluggable** — the DomainPack system makes domain knowledge declarative, composable, and one-line switchable; it can be validated against a JSON Schema and shared via a pack market.
-- **Natively multi-agent** — SubAgent, Team coordination (Coordinate/Route/Collaborate/Debate), Handoff protocol, Swarm orchestration (capability-driven routing); plus an engine-level **GroupChat primitive** powering scenario-based multi-role conversations.
+- **Natively multi-agent** — model-driven SubAgent hierarchical delegation (`delegate` meta-tool: multiple delegations per turn + dependency-aware parallel wave scheduling) + paradigm switching (`switch_paradigm` entering Plan/Reflect/Explore graph flows) + an engine-level **GroupChat primitive** powering scenario-based multi-role conversations; aggregation/routing/debate patterns are expressed as deterministic StateGraphs.
 - **Production-grade infra** — ProviderPool fallback chain, SmartRouter multi-factor routing, usage tracking, rate limiting, circuit breaking, token-aware context management.
 - **Cross-platform** — macOS, Windows, Linux, Android, iOS, and HarmonyOS (Kotlin, Swift, C++, C#, ArkTS) off one Rust core via UniFFI + a hand-written `extern "C"` facade.
 - **Evaluable** — built-in OpenInference-compatible tracer + standalone eval framework (6 metrics, 3 suites + SWE-bench three-axis).
@@ -599,7 +593,7 @@ flowchart TB
 | `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 15 tools | 63|
 | `oneai-skill` | skill selector + registry + built-in domain skills | 9|
 | `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127|
-| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + Team/Handoff/Swarm + GroupChat | 219|
+| `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + delegate/switch_paradigm meta-tools + GroupChat | 219|
 | `oneai-rag` | RAG + EmbeddingService (OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat + auto-detect + fallback) | 61|
 | `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44|
 | `oneai-scheduler` | in-memory task scheduler | 6|
@@ -728,10 +722,10 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 | Mode | Mechanism |
 |------|-----------|
 | **GroupChat (scenarios)** | engine-level `GroupChatSession` primitive + scenario system (cast / turn policy / topic fields / debrief / review loop), driving multi-role chat on macOS/Windows/etc. |
-| **SubAgent** | hierarchical delegation to specialized sub-agents (Plan/Explore/Code/Review/Custom), optional worktree isolation |
-| **Team** | `TeamCoordinator` with 4 strategies — Coordinate/Route/Collaborate/Debate — plus 4 presets (`code_review`/`research_route`/`dev_pipeline`/`arch_debate`) |
-| **Handoff** | `HandoffTool` (handoff-as-tool-call) + `HandoffManager` + 3 presets (`development_chain`/`research_chain`/`support_routing`) |
-| **Swarm** | dynamic agent pool, 3 routing strategies (BestFit/LoadBalanced/Fastest), task decomposition + quality checks + retries |
+| **SubAgent delegation** | model-driven `delegate` meta-tool for hierarchical delegation to specialized sub-agents (Plan/Explore/Code/Review/Custom); multiple delegations per turn + dependency-aware Kahn wave parallel scheduling; optional worktree isolation |
+| **Paradigm switching** | the `switch_paradigm` meta-tool inline-upgrades into Plan/Reflect/Explore fixed graph flows; deterministic orchestration goes through DomainPack-predefined StateGraphs |
+
+> The historical Team/Swarm/Handoff orchestration layer has been removed — its aggregation/routing/debate patterns are directly expressible via `delegate` + deterministic StateGraphs, avoiding duplication with the main loop's delegation/paradigm mechanism.
 
 ### 8. Memory system
 

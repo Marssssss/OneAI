@@ -1,7 +1,7 @@
 //! GroupChatSession — shared-transcript multi-agent conversation primitive.
 //!
-//! Unlike [`TeamCoordinator`](crate::team), which *aggregates* (fan out to N
-//! agents → merge into one result), a group chat is a *dialogue*: N persona
+//! Unlike the agent loop's `delegate` (fan out to N sub-agents → merge into
+//! one result), a group chat is a *dialogue*: N persona
 //! agents take turns speaking inside ONE shared conversation, with a human in
 //! the loop. This is the AutoGen "GroupChat" / Coze multi-agent-conversation
 //! pattern, lifted into the engine so every native port gets it for free

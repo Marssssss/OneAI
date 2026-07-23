@@ -84,9 +84,6 @@ mod cmd_embed;
 mod cmd_usage;
 mod cmd_provider;
 mod cmd_token;
-mod cmd_team;
-mod cmd_handoff;
-mod cmd_swarm;
 mod cmd_workflow;
 mod tui;
 
@@ -220,21 +217,6 @@ enum Commands {
     Token {
         #[command(subcommand)]
         action: TokenAction,
-    },
-    /// Team coordination — multi-agent team strategies and execution
-    Team {
-        #[command(subcommand)]
-        action: TeamAction,
-    },
-    /// Handoff protocol — agent handoff-as-tool-call targets and configuration
-    Handoff {
-        #[command(subcommand)]
-        action: HandoffAction,
-    },
-    /// Swarm orchestration — dynamic agent pools with capability-driven routing
-    Swarm {
-        #[command(subcommand)]
-        action: SwarmAction,
     },
     /// DAG workflows and cyclic StateGraphs — list/show/run the predefined
     /// workflows and state graphs embedded in the active DomainPack
@@ -757,92 +739,6 @@ enum TokenAction {
 }
 
 #[derive(Subcommand)]
-enum TeamAction {
-    /// List available team coordination strategies
-    Strategies,
-    /// List preset team configurations (code_review, research_route, dev_pipeline, arch_debate)
-    Presets,
-    /// Show team configuration details
-    Info {
-        /// Team ID or preset name
-        id: String,
-    },
-    /// Run a team coordination task
-    Run {
-        /// The task to coordinate
-        task: String,
-        /// Team strategy: coordinate, route, collaborate, debate
-        #[arg(long, default_value = "coordinate")]
-        strategy: String,
-        /// Use a preset team configuration
-        #[arg(long)]
-        preset: Option<String>,
-        /// Total token budget for the team (default: 100000)
-        #[arg(long)]
-        budget: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum HandoffAction {
-    /// List available handoff targets and presets
-    List,
-    /// Show detailed handoff target descriptions for a preset
-    Targets {
-        /// Preset name (development_chain, research_chain, support_routing)
-        preset: String,
-    },
-    /// Show current handoff configuration
-    Config {
-        /// Preset name (optional — defaults to development_chain)
-        #[arg(long)]
-        preset: Option<String>,
-    },
-    /// Execute a handoff to a target agent (demo mode)
-    Run {
-        /// Target agent name
-        target: String,
-        /// Reason for handoff
-        reason: String,
-        /// Preset name (optional — defaults to development_chain)
-        #[arg(long)]
-        preset: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum SwarmAction {
-    /// List available swarm presets
-    List,
-    /// Show available routing strategies with descriptions
-    Routing,
-    /// Show swarm configuration details for a preset
-    Config {
-        /// Preset name (code_analysis, fast_research, balanced_dev)
-        preset: String,
-    },
-    /// Show agents and capabilities in a swarm preset
-    Agents {
-        /// Preset name
-        preset: String,
-    },
-    /// Execute a swarm task
-    Run {
-        /// The task to execute
-        task: String,
-        /// Routing strategy (best-fit, load-balanced, cost-optimized, fastest)
-        #[arg(long, default_value = "best-fit")]
-        routing: String,
-        /// Use a preset swarm configuration
-        #[arg(long)]
-        preset: Option<String>,
-        /// Total token budget for the swarm (default: 100000)
-        #[arg(long)]
-        budget: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
 enum WorkflowAction {
     /// List available DAG workflows and state graphs in the active domain pack
     List {
@@ -1147,37 +1043,6 @@ fn main() {
                 TokenAction::Probe { model } => {
                     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
                     rt.block_on(cmd_token::run_token_probe(model.as_deref(), &config));
-                }
-            }
-        }
-        Some(Commands::Team { action }) => {
-            match action {
-                TeamAction::Strategies => cmd_team::cmd_team_strategies(),
-                TeamAction::Presets => cmd_team::cmd_team_presets(),
-                TeamAction::Info { id } => cmd_team::cmd_team_info(&id),
-                TeamAction::Run { task, strategy, preset, budget } => {
-                    cmd_team::cmd_team_run(&task, &strategy, preset.as_deref(), budget.as_deref());
-                }
-            }
-        }
-        Some(Commands::Handoff { action }) => {
-            match action {
-                HandoffAction::List => cmd_handoff::cmd_handoff_list(),
-                HandoffAction::Targets { preset } => cmd_handoff::cmd_handoff_targets(&preset),
-                HandoffAction::Config { preset } => cmd_handoff::cmd_handoff_config(preset.as_deref()),
-                HandoffAction::Run { target, reason, preset } => {
-                    cmd_handoff::cmd_handoff_run(&target, &reason, preset.as_deref());
-                }
-            }
-        }
-        Some(Commands::Swarm { action }) => {
-            match action {
-                SwarmAction::List => cmd_swarm::cmd_swarm_list(),
-                SwarmAction::Routing => cmd_swarm::cmd_swarm_routing(),
-                SwarmAction::Config { preset } => cmd_swarm::cmd_swarm_config(&preset),
-                SwarmAction::Agents { preset } => cmd_swarm::cmd_swarm_agents(&preset),
-                SwarmAction::Run { task, routing, preset, budget } => {
-                    cmd_swarm::cmd_swarm_run(&task, &routing, preset.as_deref(), budget.as_deref());
                 }
             }
         }

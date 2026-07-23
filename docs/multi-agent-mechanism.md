@@ -1,5 +1,7 @@
 # OneAI 多 Agent 机制白皮书
 
+> ⚠ **更新说明（2026-07）**：本文原描述的 **Team/Swarm/Handoff** 三种编排原语已从代码库移除。它们与主 Loop 的 `delegate`（分层委托，一轮多委托 + 依赖感知并行波次）+ `switch_paradigm`（切换固定图流）+ 确定性 StateGraph 能力重复，且 Handoff 从未接入 AgentLoop、Swarm 的任务分解/质量评估为硬编码启发式。聚合/路由/辩论等编排模式现由 `delegate` + StateGraph 表达；引擎级 GroupChat 原语保留。下文涉及 Team/Swarm/Handoff 的章节仅作历史设计参考，不再对应可运行代码。
+>
 > 版本：对应代码库 `0.2.0` / 1.0.0 线。本文基于对 `crates/oneai-agent`、`oneai-workflow`、`oneai-domain`、`oneai-memory`、`oneai-core` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。文末与业界前沿多 Agent 系统（LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code 子代理 / Google A2A / MCP）对标。
 >
 > 说明：撰写时本环境无法联网检索，前沿对标部分基于截至 2025 年初的训练知识，已尽量标注可核对的论文/项目名；具体版本号以各项目最新发布为准。
