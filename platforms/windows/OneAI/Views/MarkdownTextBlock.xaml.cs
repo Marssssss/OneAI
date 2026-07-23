@@ -9,7 +9,21 @@ namespace OneAI.Views;
 /// <summary>Renders block + inline markdown (port of macOS MarkdownText view).
 /// Blocks: code fence (with copy + "open in canvas" buttons when long),
 /// heading, blockquote, ordered/unordered list, table, paragraph. Rebuilt in
-/// code-behind from <see cref="MarkdownHelper.Split"/> — no RichText deps.</summary>
+/// code-behind from <see cref="MarkdownHelper.Split"/> — no RichText deps.
+///
+/// Two rendering invariants:
+/// 1. <b>Single selectable prose run</b> — consecutive prose segments
+///    (paragraph/heading/blockquote/bullet/ordered) render as Paragraphs inside
+///    ONE <see cref="RichTextBlock"/> so drag-selection spans the whole prose
+///    (WinUI selection crosses Paragraphs within a single RichTextBlock, but
+///    NOT across separate controls). Code fences and tables stay as their own
+///    cards (each has a copy button; the whole-answer context menu copies all).
+/// 2. <b>Incremental rebuild</b> — <see cref="Render"/> caches the last segment
+///    list; when only the last segment's text grew (count + prefix unchanged,
+///    the common streaming case) it rebuilds ONLY the last child instead of
+///    clearing + rebuilding every child. This is the Windows analog of macOS's
+///    per-block <c>.equatable()</c> (re-parse only the in-progress block), so
+///    live-streaming markdown doesn't flood the UI thread on long replies.</summary>
 public sealed partial class MarkdownTextBlock : UserControl
 {
     public static readonly DependencyProperty MarkdownProperty =
@@ -32,6 +46,14 @@ public sealed partial class MarkdownTextBlock : UserControl
     private const int ArtifactThreshold = 600;
     private static readonly Brush Transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
 
+    /// <summary>Flattened segment list from the previous render (for the
+    /// incremental-rebuild prefix comparison).</summary>
+    private List<MdSeg>? _lastSegs;
+    /// <summary>Segments each Root child was built from, parallel to
+    /// <see cref="Root.Children"/>. Lets the incremental path rebuild just the
+    /// last child from its segment group.</summary>
+    private List<List<MdSeg>>? _childSegGroups;
+
     public MarkdownTextBlock()
     {
         InitializeComponent();
@@ -42,40 +64,168 @@ public sealed partial class MarkdownTextBlock : UserControl
 
     private void Render()
     {
-        Root.Children.Clear();
-        foreach (var seg in MarkdownHelper.Split(Markdown ?? ""))
+        var segs = MarkdownHelper.Split(Markdown ?? "");
+
+        // Incremental: during streaming the markdown grows token-by-token; the
+        // common case is "only the last segment's text grew, count + prefix
+        // unchanged". Rebuild ONLY the last child instead of clearing + rebuilding
+        // every child — re-parse work is bounded to the in-progress block.
+        if (_lastSegs != null && _childSegGroups != null
+            && segs.Count > 0 && segs.Count == _lastSegs.Count
+            && PrefixEqual(_lastSegs, segs))
         {
-            switch (seg.Kind)
+            var lastGroup = _childSegGroups[^1];
+            lastGroup[^1] = segs[^1];   // the changed segment, in place
+            Root.Children.RemoveAt(Root.Children.Count - 1);
+            Root.Children.Add(BuildGroup(lastGroup));
+            _lastSegs = segs;
+            return;
+        }
+
+        // Full rebuild.
+        Root.Children.Clear();
+        _childSegGroups = new();
+        foreach (var group in GroupSegments(segs))
+        {
+            _childSegGroups.Add(group);
+            Root.Children.Add(BuildGroup(group));
+        }
+        _lastSegs = segs;
+    }
+
+    /// <summary>True when every segment EXCEPT the last is equal between the two
+    /// lists (record equality on <see cref="MdSeg"/>, incl. the <see cref="MdTableSeg"/>
+    /// subclass). True ⇒ only the last segment may have changed ⇒ the incremental
+    /// path can rebuild just the last child.</summary>
+    private static bool PrefixEqual(List<MdSeg> a, List<MdSeg> b)
+    {
+        for (int i = 0; i < a.Count - 1; i++)
+            if (!a[i].Equals(b[i])) return false;
+        return true;
+    }
+
+    /// <summary>Group consecutive PROSE segments (paragraph/heading/blockquote/
+    /// bullet/ordered) into one group → rendered as a single selectable
+    /// RichTextBlock so drag-selection spans the whole prose run. Code fences and
+    /// tables each form their own singleton group → their own card.</summary>
+    private static List<List<MdSeg>> GroupSegments(List<MdSeg> segs)
+    {
+        var groups = new List<List<MdSeg>>();
+        List<MdSeg>? prose = null;
+        foreach (var seg in segs)
+        {
+            if (seg.Kind is MdSegKind.Code or MdSegKind.Table)
             {
-                case MdSegKind.Code:
-                    Root.Children.Add(BuildCode(seg.Lang, seg.Text));
-                    break;
-                case MdSegKind.Heading:
-                    Root.Children.Add(BuildParagraph(seg.Text, fontSize: HeadingSize(int.Parse(seg.Lang)), bold: true));
-                    break;
-                case MdSegKind.Blockquote:
-                    Root.Children.Add(BuildQuote(seg.Text));
-                    break;
-                case MdSegKind.BulletList:
-                    Root.Children.Add(BuildList(seg.Text.Split('\n'), ordered: false));
-                    break;
-                case MdSegKind.OrderedList:
-                    Root.Children.Add(BuildList(seg.Text.Split('\n'), ordered: true));
-                    break;
-                case MdSegKind.Table:
-                    if (seg is MdTableSeg t) Root.Children.Add(BuildTable(t));
-                    break;
-                default: // Paragraph
-                    Root.Children.Add(BuildParagraph(seg.Text, fontSize: 14, bold: false));
-                    break;
+                prose = null;   // structural block flushes the prose run
+                groups.Add(new List<MdSeg> { seg });
+            }
+            else
+            {
+                if (prose == null) { prose = new List<MdSeg>(); groups.Add(prose); }
+                prose.Add(seg);
             }
         }
+        return groups;
+    }
+
+    /// <summary>Build the UIElement for one segment group. A singleton code/table
+    /// group → its card; a prose group → one selectable RichTextBlock.</summary>
+    private UIElement BuildGroup(List<MdSeg> group)
+    {
+        if (group.Count == 1)
+        {
+            var seg = group[0];
+            if (seg.Kind == MdSegKind.Code) return BuildCode(seg.Lang, seg.Text);
+            if (seg.Kind == MdSegKind.Table && seg is MdTableSeg t) return BuildTable(t);
+        }
+        return BuildProse(group);
+    }
+
+    /// <summary>One selectable RichTextBlock holding a Paragraph per prose
+    /// segment, so selection spans the whole prose run. A 6px top margin on
+    /// every paragraph after the first preserves the inter-paragraph spacing
+    /// the old per-paragraph-RichTextBlock layout got from the StackPanel.</summary>
+    private UIElement BuildProse(List<MdSeg> group)
+    {
+        var rtb = new RichTextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
+        foreach (var seg in group)
+        {
+            Paragraph p = seg.Kind switch
+            {
+                MdSegKind.Heading => BuildParagraph(seg.Text, fontSize: HeadingSize(int.Parse(seg.Lang)), bold: true),
+                MdSegKind.Blockquote => BuildQuoteParagraph(seg.Text),
+                MdSegKind.BulletList => BuildListParagraph(seg.Text.Split('\n'), ordered: false),
+                MdSegKind.OrderedList => BuildListParagraph(seg.Text.Split('\n'), ordered: true),
+                _ => BuildParagraph(seg.Text, fontSize: 14, bold: false),
+            };
+            if (rtb.Blocks.Count > 0) p.Margin = new Thickness(0, 6, 0, 0);
+            rtb.Blocks.Add(p);
+        }
+        return rtb;
     }
 
     private static int HeadingSize(int level) => level switch
     {
         1 => 22, 2 => 20, 3 => 17, _ => 15,
     };
+
+    /// <summary>Append the inline-split runs of <paramref name="text"/> to a
+    /// paragraph. <paramref name="forceBold"/> wraps every run in Bold (used for
+    /// headings); otherwise Bold/Code markers come from <see cref="MarkdownHelper.InlineSplit"/>.</summary>
+    private static void AppendInlines(Paragraph p, string text, bool forceBold)
+    {
+        foreach (var seg in MarkdownHelper.InlineSplit(text))
+        {
+            var run = new Run { Text = seg.Text };
+            if (forceBold || seg.Kind == MarkdownHelper.Inline.Bold)
+                p.Inlines.Add(new Bold { Inlines = { run } });
+            else if (seg.Kind == MarkdownHelper.Inline.Code)
+            {
+                run.FontFamily = new FontFamily("Consolas");
+                p.Inlines.Add(run);
+            }
+            else p.Inlines.Add(run);
+        }
+    }
+
+    private static Paragraph BuildParagraph(string text, double fontSize, bool bold)
+    {
+        var p = new Paragraph { FontSize = fontSize };
+        AppendInlines(p, text, bold);
+        return p;
+    }
+
+    /// <summary>A blockquote as one italic paragraph (no left bar — it would
+    /// break the single selectable RichTextBlock run). Lines separated by
+    /// LineBreak, bold/code inlines preserved.</summary>
+    private static Paragraph BuildQuoteParagraph(string text)
+    {
+        var p = new Paragraph { FontStyle = Windows.UI.Text.FontStyle.Italic };
+        var lines = text.Replace("\r", "").Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (i > 0) p.Inlines.Add(new LineBreak());
+            AppendInlines(p, lines[i], false);
+        }
+        return p;
+    }
+
+    /// <summary>A list as one paragraph: each item prefixed ("•  " / "N.  "),
+    /// items separated by LineBreak. Folding into the prose run keeps selection
+    /// continuous across list items.</summary>
+    private static Paragraph BuildListParagraph(string[] items, bool ordered)
+    {
+        var p = new Paragraph { FontSize = 14 };
+        int n = 0;
+        foreach (var raw in items)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            if (p.Inlines.Count > 0) p.Inlines.Add(new LineBreak());
+            p.Inlines.Add(new Run { Text = ordered ? $"{++n}.  " : "•  " });
+            AppendInlines(p, raw, false);
+        }
+        return p;
+    }
 
     private UIElement BuildCode(string lang, string code)
     {
@@ -133,74 +283,6 @@ public sealed partial class MarkdownTextBlock : UserControl
         });
         border.Child = sp;
         return border;
-    }
-
-    private UIElement BuildParagraph(string text, double fontSize, bool bold)
-    {
-        var tb = new RichTextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
-        var p = new Paragraph { FontSize = fontSize };
-        foreach (var seg in MarkdownHelper.InlineSplit(text))
-        {
-            var run = new Run { Text = seg.Text };
-            if (bold) p.Inlines.Add(new Bold { Inlines = { run } });
-            else if (seg.Kind == MarkdownHelper.Inline.Code)
-            {
-                run.FontFamily = new FontFamily("Consolas");
-                p.Inlines.Add(run);
-            }
-            else p.Inlines.Add(run);
-        }
-        tb.Blocks.Add(p);
-        return tb;
-    }
-
-    private UIElement BuildQuote(string text)
-    {
-        var grid = new Grid { ColumnDefinitions = { new ColumnDefinition { Width = GridLength.Auto }, new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) } } };
-        var bar = new Border { Background = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"], Width = 3, CornerRadius = new CornerRadius(1.5) };
-        Grid.SetColumn(bar, 0);
-        grid.Children.Add(bar);
-        var tb = new RichTextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Margin = new Thickness(8, 0, 0, 0) };
-        var p = new Paragraph { FontStyle = Windows.UI.Text.FontStyle.Italic };
-        foreach (var line in text.Replace("\r", "").Split('\n'))
-        {
-            foreach (var seg in MarkdownHelper.InlineSplit(line))
-            {
-                var run = new Run { Text = seg.Text };
-                if (seg.Kind == MarkdownHelper.Inline.Bold) p.Inlines.Add(new Bold { Inlines = { run } });
-                else if (seg.Kind == MarkdownHelper.Inline.Code) { run.FontFamily = new FontFamily("Consolas"); p.Inlines.Add(run); }
-                else p.Inlines.Add(run);
-            }
-            p.Inlines.Add(new LineBreak());
-        }
-        tb.Blocks.Add(p);
-        Grid.SetColumn(tb, 1);
-        grid.Children.Add(tb);
-        return grid;
-    }
-
-    private UIElement BuildList(string[] items, bool ordered)
-    {
-        var sp = new StackPanel { Spacing = 3, Margin = new Thickness(0, 0, 0, 0) };
-        for (int i = 0; i < items.Length; i++)
-        {
-            if (string.IsNullOrWhiteSpace(items[i])) continue;
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            row.Children.Add(new TextBlock { Text = ordered ? $"{i + 1}." : "•", FontSize = 14 });
-            var tb = new RichTextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
-            var p = new Paragraph { FontSize = 14 };
-            foreach (var seg in MarkdownHelper.InlineSplit(items[i]))
-            {
-                var run = new Run { Text = seg.Text };
-                if (seg.Kind == MarkdownHelper.Inline.Bold) p.Inlines.Add(new Bold { Inlines = { run } });
-                else if (seg.Kind == MarkdownHelper.Inline.Code) { run.FontFamily = new FontFamily("Consolas"); p.Inlines.Add(run); }
-                else p.Inlines.Add(run);
-            }
-            tb.Blocks.Add(p);
-            row.Children.Add(tb);
-            sp.Children.Add(row);
-        }
-        return sp;
     }
 
     private UIElement BuildTable(MdTableSeg t)

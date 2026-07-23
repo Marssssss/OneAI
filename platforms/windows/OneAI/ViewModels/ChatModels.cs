@@ -126,31 +126,37 @@ public class AssistantItem : ChatItem
         {
             SetProperty(ref _text, value);
             Raise(nameof(ShowCursor));
-            Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis));
+            Raise(nameof(ShowMarkdownVis));
             // Computed-from-Text views must refresh with each token.
             Raise(nameof(StreamingDisplay)); Raise(nameof(StreamingWithCursor));
+            // Live markdown: re-render the (bounded) markdown each token so the
+            // user sees formatted output stream in, not a plain-text tail held
+            // back until Done. MarkdownTextBlock.Render() bounds the per-token
+            // cost to the last in-progress block (incremental rebuild).
+            Raise(nameof(DisplayMarkdown));
         }
     }
     private bool _streaming;
     public bool Streaming
     {
         get => _streaming;
-        set { SetProperty(ref _streaming, value); Raise(nameof(ShowCursor)); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); Raise(nameof(MarkdownText)); }
+        set { SetProperty(ref _streaming, value); Raise(nameof(ShowCursor)); Raise(nameof(ShowMarkdownVis)); Raise(nameof(DisplayMarkdown)); }
     }
     private bool _done;
     public bool Done
     {
         get => _done;
-        set { SetProperty(ref _done, value); Raise(nameof(ShowStreamingTextVis)); Raise(nameof(ShowMarkdownVis)); Raise(nameof(MarkdownText)); }
+        set { SetProperty(ref _done, value); Raise(nameof(ShowMarkdownVis)); Raise(nameof(DisplayMarkdown)); }
     }
-    /// <summary>The text to render as markdown — read-through of <see cref="Text"/>,
-    /// but raised ONLY on the Streaming/Done flips (NOT on every Text/token change).
-    /// `ChatView.xaml` binds `MarkdownTextBlock.Markdown` to this (not to `Text`)
-    /// so the per-token Text growth during streaming doesn't push a new value into
-    /// the Markdown DP → OnChanged → full Render() rebuild on every token (the
-    /// streaming lag root cause — the control is Collapsed while streaming, but the
-    /// DP update + Render fires anyway). The full markdown renders once, on Done.</summary>
-    public string MarkdownText => Text;
+    /// <summary>The markdown to render. Reads through <see cref="Text"/> but is
+    /// raised per token (in the Text setter) AND on the Streaming/Done flips.
+    /// While streaming, a steady caret is folded into the in-progress text
+    /// (mirrors macOS <c>MarkdownText(streaming:)</c>). `ChatView.xaml` binds
+    /// <c>MarkdownTextBlock.Markdown</c> to this so the formatted answer renders
+    /// live; `MarkdownTextBlock.Render()</c> bounds the per-token work via an
+    /// incremental last-block rebuild (Windows analog of macOS per-block
+    /// <c>.equatable()</c>).</summary>
+    public string DisplayMarkdown => (Streaming && !Done) ? Text + "▍" : Text;
     private string? _error;
     public string? Error { get => _error; set { SetProperty(ref _error, value); Raise(nameof(HasError)); Raise(nameof(ErrorWithPrefix)); } }
     public ObservableCollection<ToolStep> Steps { get; } = new();
@@ -183,8 +189,12 @@ public class AssistantItem : ChatItem
     /// <summary>While streaming, render plain Text (capped) — NOT MarkdownText:
     /// re-parsing the growing markdown on every token floods the UI thread on
     /// long replies. The full markdown renders once on Done.</summary>
-    public Visibility ShowStreamingTextVis => (Streaming && !Done) ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility ShowMarkdownVis => (Streaming && !Done) ? Visibility.Collapsed : Visibility.Visible;
+    /// <summary>Markdown renders live while streaming AND once done — the only
+    /// time it's hidden is before any answer text has arrived (so the pre-first-
+    /// token "思考中" indicator / thinking card isn't crowded by an empty markdown
+    /// block). Mirrors macOS <c>MarkdownText</c> which renders from the first
+    /// token.</summary>
+    public Visibility ShowMarkdownVis => string.IsNullOrEmpty(Text) ? Visibility.Collapsed : Visibility.Visible;
     public Visibility HasError => Error == null ? Visibility.Collapsed : Visibility.Visible;
     public string ErrorWithPrefix => "✗ " + (Error ?? "");
 }

@@ -967,13 +967,13 @@ Sources live in `platforms/macos/Sources/` (11 Swift files, ~3.3k lines): `OneAI
 rustup target add x86_64-pc-windows-msvc
 
 # 1) Cross-compile oneai.dll (cdylib — exports both uniffi symbols AND c_facade extern "C" symbols)
-pwsh ./scripts/build_windows.ps1
+powershell ./scripts/build_windows.ps1
 
 # 2) Build the app (open OneAI.sln in VS, or dotnet)
 dotnet build platforms\windows\OneAI.sln -c Debug
 
-# 3) Run (unpackaged)
-dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug
+# 3) Run (unpackaged) — an explicit RID is required, or dotnet fails to find a runtime
+dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug -r win-x64
 ```
 
 Sources in `platforms/windows/OneAI/` (Native/ViewModels/Services/Views); see `platforms/windows/README.md`.

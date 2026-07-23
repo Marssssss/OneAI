@@ -986,6 +986,7 @@ private struct UserBubble: View, Equatable {
     var body: some View {
         HStack { Spacer(minLength: 60)
             Text(text).font(.oBody).foregroundStyle(Theme.onBg)
+                .textSelection(.enabled)
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(Theme.primaryCont)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
@@ -1161,13 +1162,10 @@ private struct ThinkingCard: View {
     var body: some View {
         if item.thinking.isEmpty { EmptyView() }
         else {
-            // Show the first 1-2 lines of the model's reasoning at all times —
-            // collapsed (default) or expanded. Previously the card showed only
-            // "思考中…" dots while active and nothing after, so during the long
-            // wait before the first answer token the chat looked frozen even
-            // though reasoning was streaming in. Surfacing the leading lines
-            // (and a caret while active) gives visible progress; the rest stays
-            // collapsed behind a chevron until the user expands it.
+            // Collapsed = header row only (icon + "思考中"/"已深度思考" + dots
+            // while active + a right-side chevron). Mirrors the Windows thinking
+            // Expander: one line collapsed, full reasoning behind the chevron.
+            // (Previously macOS showed a 2-line preview when collapsed.)
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Image(systemName: "brain.head.profile").foregroundStyle(Theme.primary)
@@ -1175,9 +1173,7 @@ private struct ThinkingCard: View {
                         .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
                     if item.thinkingActive { ThreeDots() }
                     Spacer()
-                    Button {
-                        expanded.toggle()
-                    } label: {
+                    Button { withAnimation { expanded.toggle() } } label: {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
                             .foregroundStyle(Theme.onSurfaceVar)
                     }
@@ -1185,42 +1181,31 @@ private struct ThinkingCard: View {
                     .pointerCursor()
                 }
                 if expanded {
-                    ScrollView {
-                        Text(item.thinking)
-                            .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
+                    // Full reasoning in a scrollable, capped area. While the model
+                    // is still thinking, auto-scroll to keep the latest line in
+                    // view (mirrors Windows' "随着内容增加自动滚动"); once done,
+                    // stop pinning so the user can scroll freely.
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(item.thinking)
+                                .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                            Color.clear.frame(height: 1).id("bottom")
+                        }
+                        .frame(maxHeight: 260)
+                        .onChange(of: item.thinking.count) { _ in
+                            if item.thinkingActive {
+                                withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                            }
+                        }
                     }
-                    .frame(maxHeight: 260)
-                } else {
-                    // Collapsed preview: first 1-2 lines. A steady caret while
-                    // active signals "still thinking" without the layout jump a
-                    // separate cursor row caused. Leading whitespace trimmed so a
-                    // partial first line doesn't render as an indent.
-                    Text(Self.preview(of: item.thinking, active: item.thinkingActive))
-                        .foregroundStyle(Theme.onSurfaceVar).font(.oCaption)
-                        .lineLimit(2)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
                 }
             }
             .padding(10)
             .background(Theme.secondaryCont)
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
-    }
-
-    /// The collapsed-preview string: the first two lines of `thinking`, with a
-    /// caret appended while the model is still producing reasoning.
-    private static func preview(of thinking: String, active: Bool) -> String {
-        var lines = thinking.split(separator: "\n", omittingEmptySubsequences: false)
-        // Drop leading blank lines (a model often opens with one) so the first
-        // real line is what the user sees.
-        while lines.first == "" { lines.removeFirst() }
-        let head = lines.prefix(2).joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return active ? head + "▍" : head
     }
 }
 
@@ -1354,6 +1339,84 @@ private struct MarkdownBlockView: View, Equatable {
     }
 }
 
+private func mdHeadingFont(_ level: Int) -> Font {
+    switch level {
+    case 1: return .title2.bold()
+    case 2: return .title3.bold()
+    case 3: return .headline
+    default: return .subheadline.bold()
+    }
+}
+
+/// A maximal run of consecutive prose blocks (paragraph/heading/blockquote/
+/// bullet/ordered), OR a singleton code fence, OR a singleton table. Used to
+/// render a DONE answer so consecutive prose blocks collapse into ONE
+/// selectable `Text` (SwiftUI text selection doesn't cross sibling Text views,
+/// so folding prose into a single Text is what enables multi-line/multi-
+/// paragraph drag-selection). Code fences and tables stay as their own cards.
+private enum MdRun {
+    case prose([MdBlock])
+    case code(lang: String, code: String)
+    case table(header: [String], rows: [[String]])
+}
+
+private func proseRuns(_ blocks: [MdBlock]) -> [MdRun] {
+    var runs: [MdRun] = []
+    var prose: [MdBlock] = []
+    func flush() { if !prose.isEmpty { runs.append(.prose(prose)); prose = [] } }
+    for b in blocks {
+        switch b {
+        case .code(let lang, let code): flush(); runs.append(.code(lang: lang, code: code))
+        case .table(let header, let rows): flush(); runs.append(.table(header: header, rows: rows))
+        default: prose.append(b)
+        }
+    }
+    flush()
+    return runs
+}
+
+/// One prose block as a `Text` (inline formatting via `buildInline`, per-block
+/// font). `Text`'s `+` concatenation yields a single `Text`, so a run of these
+/// joined with `Text("\n\n")` is one selectable unit.
+private func proseBlockText(_ b: MdBlock) -> Text {
+    switch b {
+    case .heading(let level, let text):
+        return Text(buildInline(text, codeBg: Theme.surfaceVar)).font(mdHeadingFont(level))
+    case .paragraph(let text):
+        return Text(buildInline(text, codeBg: Theme.surfaceVar)).font(.oBody)
+    case .blockquote(let text):
+        return Text(buildInline(text, codeBg: Theme.surfaceVar)).font(.oBodyItalic)
+    case .bulletList(let items):
+        return proseListText(items, ordered: false)
+    case .orderedList(let items):
+        return proseListText(items, ordered: true)
+    default:
+        return Text("")
+    }
+}
+
+private func proseListText(_ items: [String], ordered: Bool) -> Text {
+    var result: Text?
+    for (i, item) in items.enumerated() {
+        let prefix = ordered ? "\(i + 1).  " : "•  "
+        let line = Text(prefix) + Text(buildInline(item, codeBg: Theme.surfaceVar))
+        if result == nil { result = line }
+        else { result = result! + Text("\n") + line }
+    }
+    return result ?? Text("")
+}
+
+/// Fold a run of prose blocks into ONE `Text` (blocks joined with a blank
+/// line) so the whole run is a single selectable unit.
+private func proseRunText(_ blocks: [MdBlock]) -> Text {
+    var result: Text?
+    for b in blocks {
+        if result == nil { result = proseBlockText(b) }
+        else { result = result! + Text("\n\n") + proseBlockText(b) }
+    }
+    return result ?? Text("")
+}
+
 private struct MarkdownText: View, Equatable {
     let text: String
     /// `true` while the model is still producing this reply. Renders the
@@ -1397,8 +1460,33 @@ private struct MarkdownText: View, Equatable {
             }
         }
         return VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                MarkdownBlockView(block: block).equatable()
+            if streaming {
+                // While streaming, keep per-block `.equatable()` so the per-
+                // flush parse work is bounded to the last in-progress block.
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    MarkdownBlockView(block: block).equatable()
+                }
+            } else {
+                // Done: group consecutive prose blocks into ONE selectable
+                // `Text` (via `proseRunText`) so drag-selection spans the whole
+                // prose answer — SwiftUI selection doesn't cross sibling Text
+                // views, so per-paragraph Texts (the old layout) only allowed
+                // per-block selection. Code fences and tables stay as their own
+                // cards (each has a copy button; the whole-answer context menu
+                // already copies everything).
+                ForEach(Array(proseRuns(blocks).enumerated()), id: \.offset) { _, run in
+                    switch run {
+                    case .prose(let prose):
+                        proseRunText(prose)
+                            .foregroundStyle(Theme.onBg)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    case .code(let lang, let code):
+                        CodeCard(lang: lang, code: code)
+                    case .table(let header, let rows):
+                        MarkdownTable(header: header, rows: rows)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

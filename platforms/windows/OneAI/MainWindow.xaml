@@ -14,12 +14,15 @@
     <!-- WinUI 3 Window has no Width/Height/MinWidth/MinHeight XAML members
          (WMC0011); initial size is set in the constructor via AppWindow.Resize. -->
 
-    <Grid>
+    <Grid KeyboardAcceleratorPlacementMode="Hidden">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="260" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
-        <!-- Ctrl+K → command palette -->
+        <!-- Ctrl+K → command palette. The root Grid carries the accelerator;
+             `KeyboardAcceleratorPlacementMode="Hidden"` suppresses the
+             auto-tooltip WinUI otherwise shows on hover (a persistent "Ctrl+K"
+             popup on every mouse move — the control fills the window). -->
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="K" Modifiers="Control" Invoked="CtrlK_Invoked" />
         </Grid.KeyboardAccelerators>

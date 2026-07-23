@@ -967,13 +967,13 @@ open platforms/macos/build/OneAI.app
 rustup target add x86_64-pc-windows-msvc
 
 # 1) 交叉编译 oneai.dll（cdylib，同时导出 uniffi 符号与 c_facade extern "C" 符号）
-pwsh ./scripts/build_windows.ps1
+powershell ./scripts/build_windows.ps1
 
 # 2) 构建 App（VS 打开 OneAI.sln，或 dotnet）
 dotnet build platforms\windows\OneAI.sln -c Debug
 
-# 3) 运行（unpackaged）
-dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug
+# 3) 运行（unpackaged）—— 需显式指定 RID，否则 dotnet 报错找不到运行时
+dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug -r win-x64
 ```
 
 源码在 `platforms/windows/OneAI/`（Native/ViewModels/Services/Views），README 见 `platforms/windows/README.md`。

@@ -15,7 +15,7 @@ collision with the managed assembly `OneAI.dll` in the output dir; the
 # 1. Build the native oneai.dll (cdylib — exports both the uniffi symbols AND
 #    the c_facade extern "C" symbols). Stages it at platforms/windows/native/
 #    as oneai_native.dll (renamed to avoid colliding with OneAI.dll on NTFS).
-pwsh ./scripts/build_windows.ps1
+powershell ./scripts/build_windows.ps1
 # (release; add -DebugBuild for a debug build — note the switch is NOT -Debug,
 #  which collides with [CmdletBinding()]'s implicit common parameter)
 # (requires: rustup target add x86_64-pc-windows-msvc)

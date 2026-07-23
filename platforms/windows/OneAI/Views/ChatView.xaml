@@ -16,6 +16,7 @@
             <StackPanel HorizontalAlignment="Right" MaxWidth="360">
                 <Border Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="14" Padding="12,8">
                     <TextBlock Text="{x:Bind Text}" FontSize="14" TextWrapping="Wrap"
+                               IsTextSelectionEnabled="True"
                                Foreground="{ThemeResource TextOnAccentFillColorDefaultBrush}" />
                 </Border>
             </StackPanel>
@@ -85,20 +86,15 @@
                         </ItemsRepeater.ItemTemplate>
                     </ItemsRepeater>
 
-                    <!-- Streaming partial text (plain, capped + steady caret).
-                         Re-parsing the growing markdown on every token floods
-                         the UI thread on long replies. -->
-                    <TextBlock Text="{x:Bind StreamingWithCursor, Mode=OneWay}" FontSize="14"
-                               TextWrapping="Wrap" IsTextSelectionEnabled="True"
-                               Visibility="{x:Bind ShowStreamingTextVis, Mode=OneWay}"
-                               Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-
-                    <!-- Markdown answer (rendered once on completion).
-                         Bound to MarkdownText — raised ONLY on the Streaming/Done
-                         flips, NOT per token — so the growing Text during
-                         streaming never pushes a DP update → OnChanged → full
-                         Render() rebuild on every token (the streaming lag). -->
-                    <views:MarkdownTextBlock Markdown="{x:Bind MarkdownText, Mode=OneWay}"
+                    <!-- Markdown answer — rendered LIVE while streaming
+                         (issue: markdown only appeared after completion). Bound to
+                         DisplayMarkdown, which is raised per token; the steady
+                         caret is folded into the in-progress text. MarkdownTextBlock
+                         bounds the per-token Render() cost via an incremental
+                         last-block rebuild (Windows analog of macOS per-block
+                         .equatable()), so re-parsing the growing markdown no longer
+                         floods the UI thread on long replies. -->
+                    <views:MarkdownTextBlock Markdown="{x:Bind DisplayMarkdown, Mode=OneWay}"
                                               Visibility="{x:Bind ShowMarkdownVis, Mode=OneWay}">
                         <views:MarkdownTextBlock.ContextFlyout>
                             <MenuFlyout>
