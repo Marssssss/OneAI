@@ -107,10 +107,13 @@ pub enum TurnPolicy {
     /// user input, then stop.
     #[default]
     RoundRobin,
-    /// A moderator member decides the next speaker after each turn. The
-    /// moderator runs its own agent loop over the transcript and returns a
-    /// member id (or `"user"` to hand back to the human). Stops at `"user"` or
-    /// after `max_turns` moderator picks (safety bound).
+    /// A moderator member decides the next speaker **one at a time**, then is
+    /// re-queried after that speaker finishes — each pick runs over the *live*
+    /// transcript so the moderator can react to what members actually said
+    /// (e.g. pick someone to rebut a point just made) rather than pre-planning
+    /// the whole sequence from a stale snapshot. Returns a member id or
+    /// `"user"` to hand back to the human. Stops at `"user"`, an unknown id,
+    /// or after `max_turns` member turns (safety bound).
     Moderator { moderator_id: String, max_turns: usize },
 }
 
@@ -310,43 +313,101 @@ impl GroupChatSession {
             conv.add_message(msg);
         }
 
-        // 2. Determine the speaker sequence for this round.
-        let speakers = self.speakers_for_round().await?;
-        let review_loop = self.config.review_loop.clone();
-        let max_rounds = review_loop.as_ref().map(|r| r.max_rounds).unwrap_or(1);
+        // 2. Run speakers per the turn policy. Moderator is driven dynamically
+        //    (pick one speaker → run it → re-pick from the *live* transcript so
+        //    the moderator can react to what was just said); Scripted /
+        //    RoundRobin use a fixed sequence, optionally review-looped.
+        let turn_policy = self.turn_policy.lock().await.clone();
+        match turn_policy {
+            TurnPolicy::Moderator { moderator_id, max_turns } => {
+                self.run_moderator_round(&moderator_id, max_turns, observer)
+                    .await?;
+            }
+            _ => {
+                let speakers = self.speakers_for_round().await?;
+                let review_loop = self.config.review_loop.clone();
+                let max_rounds = review_loop.as_ref().map(|r| r.max_rounds).unwrap_or(1);
 
-        // 3. Run the sequence, optionally repeating (review-revise loop) until
-        //    the reviewer approves or max_rounds is reached.
-        let mut first_ever = true;
-        for round in 0..max_rounds {
-            for member_id in &speakers {
-                if self.interrupt_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                // First speaker of the very first round responds directly to
-                // the user input (already in the transcript as the last user
-                // message). Subsequent turns get a role-nudge so they continue
-                // rather than re-answering — and, under a review loop, a
-                // revision/re-review nudge so the writer edits per feedback.
-                let task = self.turn_nudge(member_id, round, first_ever, &review_loop);
-                first_ever = false;
-                match self.run_member(member_id, task, observer).await {
-                    Ok(()) => {}
-                    Err(OneAIError::Other(msg)) if msg.contains("interrupted") => break,
-                    Err(e) => return Err(e),
-                }
-            }
-            if self.interrupt_flag.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Some(r) = &review_loop {
-                if self.reviewer_approved(r).await {
-                    break;
+                // Run the sequence, optionally repeating (review-revise loop)
+                // until the reviewer approves or max_rounds is reached.
+                let mut first_ever = true;
+                for round in 0..max_rounds {
+                    for member_id in &speakers {
+                        if self.interrupt_flag.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        // First speaker of the very first round responds
+                        // directly to the user input (already in the
+                        // transcript as the last user message). Subsequent
+                        // turns get a role-nudge so they continue rather than
+                        // re-answering — and, under a review loop, a
+                        // revision/re-review nudge so the writer edits per
+                        // feedback.
+                        let task = self.turn_nudge(member_id, round, first_ever, &review_loop);
+                        first_ever = false;
+                        match self.run_member(member_id, task, observer).await {
+                            Ok(()) => {}
+                            Err(OneAIError::Other(msg)) if msg.contains("interrupted") => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    if self.interrupt_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Some(r) = &review_loop {
+                        if self.reviewer_approved(r).await {
+                            break;
+                        }
+                    }
                 }
             }
         }
 
         self.persist().await;
+        Ok(())
+    }
+
+    /// Moderator-driven dynamic round: pick one speaker → run it → re-pick
+    /// with the *live* transcript (so the moderator reacts to what was just
+    /// said) → repeat. Stops when the moderator returns `"user"` or an unknown
+    /// id, or after `max_turns` member turns (safety bound). Unlike the
+    /// scripted / round-robin path, the moderator never pre-plans the whole
+    /// sequence — each pick is based on the actual conversation progress.
+    async fn run_moderator_round(
+        &self,
+        moderator_id: &str,
+        max_turns: usize,
+        observer: &dyn GroupChatObserver,
+    ) -> Result<()> {
+        let mut first_ever = true;
+        for _ in 0..max_turns {
+            if self.interrupt_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            // Snapshot the live transcript so the moderator sees what the last
+            // speaker actually said (not a pre-conversation snapshot). The
+            // guard is dropped before moderator_pick / run_member so we never
+            // hold the conversation lock across a member's agent-loop run.
+            let transcript = {
+                let guard = self.conversation.lock().await;
+                guard.clone()
+            };
+            let next = self.moderator_pick(moderator_id, &transcript).await?;
+            if next == "user" || next.is_empty() {
+                break;
+            }
+            if !self.config.members.iter().any(|m| m.id == next) {
+                // Unknown pick — stop to avoid a runaway loop.
+                break;
+            }
+            let task = self.turn_nudge(&next, 0, first_ever, &None);
+            first_ever = false;
+            match self.run_member(&next, task, observer).await {
+                Ok(()) => {}
+                Err(OneAIError::Other(msg)) if msg.contains("interrupted") => break,
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 
@@ -500,27 +561,12 @@ impl GroupChatSession {
                 }
                 Ok(out)
             }
-            TurnPolicy::Moderator { moderator_id, max_turns } => {
-                // Run the moderator repeatedly; it returns the next speaker id
-                // (or "user"). Each pick is one member turn. Bounded by
-                // max_turns to guarantee termination.
-                let mut out = Vec::new();
-                let guard = self.conversation.lock().await;
-                let transcript = guard.clone();
-                drop(guard);
-                for _ in 0..max_turns {
-                    let pick = self.moderator_pick(&moderator_id, &transcript).await?;
-                    if pick == "user" || pick.is_empty() {
-                        break;
-                    }
-                    if !self.config.members.iter().any(|m| m.id == pick) {
-                        // Unknown pick — stop to avoid a loop.
-                        break;
-                    }
-                    out.push(pick);
-                }
-                Ok(out)
-            }
+            // Moderator is driven dynamically by `run_moderator_round` (pick →
+            // run → re-pick from the *live* transcript), NOT by a precomputed
+            // sequence. This arm is unreachable from `run_task` (which branches
+            // to `run_moderator_round` for the Moderator policy); return empty
+            // so a future caller can't get a stale single-snapshot list.
+            TurnPolicy::Moderator { .. } => Ok(Vec::new()),
         }
     }
 
@@ -867,5 +913,189 @@ mod tests {
             4,
             "loop must cap at max_rounds without the marker"
         );
+    }
+
+    // ─── Moderator dynamic re-pick ──────────────────────────────────────────
+
+    /// A content-aware provider that proves the moderator re-reads the *live*
+    /// transcript after each turn. On a moderator pick call (task contains
+    /// "主持人") it counts how many non-moderator members have already spoken
+    /// and returns "a", then "b", then "user" (hand back to human). Under the
+    /// OLD pre-plan code (one snapshot taken before any member spoke), every
+    /// pick would see 0 spoken and return "a" forever → "b" never speaks. So
+    /// "b" speaking at all is the proof the moderator now reacts to the live
+    /// conversation instead of a stale snapshot.
+    struct ReactingModeratorProvider {
+        config: oneai_core::ModelConfig,
+    }
+
+    impl ReactingModeratorProvider {
+        fn new() -> Self {
+            Self {
+                config: oneai_core::ModelConfig::openai(
+                    "k".into(),
+                    "reacting-moderator".into(),
+                ),
+            }
+        }
+
+        fn respond(&self, req: &oneai_core::InferenceRequest) -> String {
+            let last_user = req
+                .conversation
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .map(|m| m.text_content())
+                .unwrap_or_default();
+            if last_user.contains("主持人") {
+                let spoken = req
+                    .conversation
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == Role::Assistant)
+                    .filter(|m| {
+                        matches!(
+                            m.metadata.get("speaker").map(|s| s.as_str()),
+                            Some("a") | Some("b")
+                        )
+                    })
+                    .count();
+                match spoken {
+                    0 => "a".into(),
+                    1 => "b".into(),
+                    _ => "user".into(),
+                }
+            } else {
+                // A member's speaking turn — say something.
+                "好的，我的看法是…".into()
+            }
+        }
+
+        fn text_response(&self, text: String) -> oneai_core::InferenceResponse {
+            oneai_core::InferenceResponse {
+                message: Message::assistant(text),
+                usage: oneai_core::TokenUsage::default(),
+                model: "reacting-moderator".into(),
+                metadata: HashMap::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ReactingModeratorProvider {
+        async fn infer(
+            &self,
+            req: oneai_core::InferenceRequest,
+        ) -> std::result::Result<oneai_core::InferenceResponse, OneAIError> {
+            Ok(self.text_response(self.respond(&req)))
+        }
+
+        async fn infer_stream(
+            &self,
+            req: oneai_core::InferenceRequest,
+        ) -> std::result::Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
+            OneAIError,
+        > {
+            let text = self.respond(&req);
+            let model = self
+                .config
+                .model_name
+                .clone()
+                .unwrap_or_else(|| "reacting-moderator".into());
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                tx.send(oneai_core::InferenceStreamChunk {
+                    content: vec![oneai_core::ContentBlock::Text { text }],
+                    is_final: false,
+                    usage: None,
+                    model: Some(model.clone()),
+                })
+                .await
+                .ok();
+                tx.send(oneai_core::InferenceStreamChunk {
+                    content: vec![],
+                    is_final: true,
+                    usage: Some(oneai_core::TokenUsage::default()),
+                    model: Some(model),
+                })
+                .await
+                .ok();
+            });
+            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+
+        fn capabilities(&self) -> oneai_core::ModelCapability {
+            oneai_core::ModelCapability::claude_class()
+        }
+
+        fn config(&self) -> &oneai_core::ModelConfig {
+            &self.config
+        }
+    }
+
+    fn moderator_resources(provider: Arc<dyn LlmProvider>) -> GroupChatResources {
+        let mut providers = HashMap::new();
+        for id in ["host", "a", "b"] {
+            providers.insert(id.to_string(), provider.clone());
+        }
+        GroupChatResources {
+            providers,
+            tools: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            parser: Arc::new(oneai_parser::ThreeLayerParser::new()),
+            interaction_gate: Arc::new(oneai_tool::NoopInteractionGate),
+        }
+    }
+
+    #[tokio::test]
+    async fn moderator_re_picks_from_live_transcript() {
+        // host = moderator; a, b = speakers. The moderator picks "a" first,
+        // then — only after seeing a's answer in the live transcript — "b",
+        // then "user" (stop). max_turns = 3 is a safety cap; the loop must
+        // stop at "user" before hitting it, with a then b each speaking once.
+        let provider = Arc::new(ReactingModeratorProvider::new());
+        let cfg = GroupChatConfig {
+            members: vec![
+                GroupChatMemberSpec { id: "host".into(), name: "主持人".into(), system_prompt: "你是主持人".into() },
+                GroupChatMemberSpec { id: "a".into(), name: "A".into(), system_prompt: "你是A".into() },
+                GroupChatMemberSpec { id: "b".into(), name: "B".into(), system_prompt: "你是B".into() },
+            ],
+            turn_policy: TurnPolicy::Moderator { moderator_id: "host".into(), max_turns: 3 },
+            opener_agent_id: None,
+            opener_line: None,
+            title: None,
+            review_loop: None,
+        };
+        let session = GroupChatSession::new(cfg, moderator_resources(provider)).unwrap();
+        let obs = Arc::new(RecordingObserver::new());
+        session
+            .run_task("开始讨论", obs.as_ref() as &dyn GroupChatObserver)
+            .await
+            .unwrap();
+
+        let conv = session.conversation().await;
+        let speakers: Vec<&str> = conv
+            .messages
+            .iter()
+            .filter_map(|m| m.metadata.get("speaker").map(|s| s.as_str()))
+            .collect();
+        // user + a + b. Crucially b spoke — the moderator only picks b after
+        // seeing a's answer, which the old single-snapshot pre-plan couldn't.
+        assert_eq!(speakers, vec!["user", "a", "b"]);
+        // Each non-moderator member spoke exactly once (not "a" 3× up to the
+        // max_turns cap, which is what the stale-snapshot code would do).
+        let a_count = conv
+            .messages
+            .iter()
+            .filter(|m| m.metadata.get("speaker").map(|s| s == "a").unwrap_or(false))
+            .count();
+        let b_count = conv
+            .messages
+            .iter()
+            .filter(|m| m.metadata.get("speaker").map(|s| s == "b").unwrap_or(false))
+            .count();
+        assert_eq!(a_count, 1, "a speaks once, not repeatedly up to max_turns");
+        assert_eq!(b_count, 1, "b speaks once — proof the moderator reacted to a's turn");
     }
 }
