@@ -589,12 +589,13 @@ flowchart TB
 | `oneai-core` | core types, traits, PermissionLevel, Budget, PlatformCapabilities | 262|
 | `oneai-provider` | LLM providers (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter | 111|
 | `oneai-parser` | 3-layer output-parse defense | 7|
-| `oneai-memory` | memory system (STM, LTM, compression, HNSW, MemoryManager + persistence) | 60|
+| `oneai-memory` | memory system (STM, LTM, compression, MemoryFactStore + VectorBackend on the default stack, MemoryManager + persistence) | 78|
 | `oneai-tool` | tool registry, MCP client, InteractionGate, executor, 15 tools | 63|
 | `oneai-skill` | skill selector + registry + built-in domain skills | 9|
 | `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator | 127|
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + delegate/switch_paradigm meta-tools + GroupChat | 219|
-| `oneai-rag` | RAG + EmbeddingService (OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat + auto-detect + fallback) | 61|
+| `oneai-rag` | RAG + EmbeddingService (OpenAI/Voyage/Ollama/FastEmbed/BgeM3/OpenAI-compat + auto-detect + fallback + default retrieval stack) | 73|
+| `oneai-vector` | default retrieval stack — InMemory/SqliteVec/usearch + Tantivy BM25 + BGE-M3/BGE reranker + StandardRetrievalPipeline (RRF) | 17|
 | `oneai-workflow` | Workflow DAG + StateGraph + compiler + executor | 44|
 | `oneai-scheduler` | in-memory task scheduler | 6|
 | `oneai-persistence` | SQLite (session/LTM/usage) + file event log (working state / cross-session resume) | 46|
@@ -603,14 +604,14 @@ flowchart TB
 | `oneai-eval` | eval framework — cases/metrics/runner/3 suites + SWE-bench three-axis | 95|
 | `oneai-studio` | Studio Web UI — axum HTTP+WS + D3.js StateGraph viz + checkpoint time-travel | 34|
 | `oneai-mcp` | MCP ecosystem — host + plugin registry + config | 57|
-| `oneai-app` | app integration layer (AppBuilder) | 19|
+| `oneai-app` | app integration layer (AppBuilder + default retrieval stack wiring) | 20|
 | `oneai-trace` | OpenInference-compatible tracer | 14|
 | `oneai-uniffi` | UniFFI binding definitions + hand-written `extern "C"` facade (reused by C#/Windows, C++/HarmonyOS) | 34|
 | `oneai-platform-desktop` | desktop platform (macOS/Windows/Linux) | 2|
 | `oneai-platform-android` | Android platform | 2|
 | `oneai-platform-ios` | iOS platform | 1|
 | `oneai-platform-harmony` | HarmonyOS platform | 1|
-| **Total** | | **1457** |
+| **Total** | | **1505** |
 
 > Plus `oneai-staticlib` (a crate-type=staticlib packaging crate, built only by the Apple/Windows build scripts, excluded from `default-members`, so not counted in the 24).
 
@@ -751,7 +752,7 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 **Short-term / long-term memory:**
 
 - Short-term — sliding window, auto-evicted to long-term
-- Long-term — HNSW vector store + content store + hybrid scoring; **auto-embedded** via the configured `EmbeddingService`. When unconfigured, auto-detection runs; if no provider is available, recall falls back to keyword matching
+- Long-term — `MemoryFactStore` (Mem0-style conflict resolution + three-factor recall) wired to the `oneai-vector` default stack `VectorBackend` (real ANN: InMemory/SqliteVec/usearch) for the dense leg; without a backend it falls back to brute-force cosine. **Auto-embedded** via the configured `EmbeddingService`. When unconfigured, auto-detection runs; if no provider is available, recall falls back to keyword matching
 
 **STM↔LTM closed loop** — `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`.
 
@@ -807,15 +808,17 @@ oneai tasks archive <id>                      # archive when done (gzip the even
 
 `oneai-rag` core:
 
-- **`EmbeddingService` trait** — OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat implementations
-- **`EmbeddingProviderAdapter` registry** — unifies differences across providers
+- **`EmbeddingService` trait** — OpenAI/Voyage/Ollama/FastEmbed/BgeM3(`ort` feature)/OpenAI-compat implementations
+- **`EmbeddingProviderAdapter` registry** — unifies differences across providers; auto-chain order OpenAiCompat→Voyage→OpenAI→Ollama→**BgeM3**(`ort`)→FastEmbed (last-resort fallback)
 - **`EmbeddingResolver`** — auto-detection + build-time/runtime fallback, sharing one `should_continue` classifier (429/5xx/transport/missing-key degrade, others raise)
 - **`EmbeddingServiceRegistry`** — cache + primary→fallback runtime switch
-- **`AutoEmbeddingDocumentIndex`** — auto-embeds on `add_document()`
+- **`DocumentIndex` dual backend** — ① legacy brute-force `VectorStore` (fallback); ② default retrieval stack `RetrievalBackend`: `search_by_keyword` runs real BM25 (tantivy-jieba CJK), `search_hybrid` runs dense+BM25→RRF. `with_default_stack(embedder, reranker)` wires it in one line
+- **`AutoEmbeddingDocumentIndex`** — `with_default_stack(embedder, reranker)` builds the default stack zero-config; auto-embeds on `add_document()`, `search_by_text()` runs hybrid
+- **`oneai_vector::StandardRetrievalPipeline`** — the framework's default retrieval stack (BM25 + dense → RRF(k=60) → optional rerank), composed from `InMemoryVectorBackend`/`SqliteVecBackend`/`UsearchBackend` + `TantivyBm25Backend` + `BgeM3Embedder`/`BgeRerankerOnnx`
 - **Input splitting** — UTF-8 byte bisection (CJK never splits mid-character)
 - **`ChunkingStrategy`** — FixedSize / SentenceBoundary / ParagraphBoundary
 
-Configuration and the detection chain are detailed above in [Embedding configuration](#embedding-configuration-zero-burden).
+Configuration and the detection chain are detailed above in [Embedding configuration](#embedding-configuration-zero-burden). The default stack is enabled with one `AppBuilder::default_retrieval_stack()` call (in-memory `InMemoryVectorBackend`; production can swap in `retrieval_backend()` for Qdrant etc.).
 
 ### 13. A2A protocol, WASM sandbox, eval, Studio, MCP
 

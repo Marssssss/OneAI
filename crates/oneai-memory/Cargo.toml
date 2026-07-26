@@ -19,3 +19,4 @@ async-trait = { workspace = true }
 oneai-core = { workspace = true }
 oneai-provider = { workspace = true }
 oneai-domain = { workspace = true }
+oneai-vector = { workspace = true }

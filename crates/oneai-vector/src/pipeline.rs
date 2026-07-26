@@ -43,6 +43,8 @@ use tracing::warn;
 
 use crate::fusion::{dbsf_fuse, rrf_fuse};
 use crate::merge_meta;
+#[cfg(feature = "tantivy")]
+use crate::{InMemoryVectorBackend, TantivyBm25Backend};
 
 /// Pipeline-level configuration.
 #[derive(Debug, Clone)]
@@ -89,6 +91,113 @@ impl StandardRetrievalPipeline {
             content: Mutex::new(HashMap::new()),
             config: StandardRetrievalPipelineConfig::default(),
         }
+    }
+
+    /// Build the framework's default in-memory retrieval stack as a
+    /// `RetrievalBackend`: a [`TantivyBm25Backend`] (CJK-aware BM25, in-memory)
+    /// for the lexical leg + an [`InMemoryVectorBackend`] sized to the
+    /// embedder's dimension for the dense leg + the optional reranker.
+    ///
+    /// This is the zero-config stack `oneai-rag`'s `HybridDocumentIndex` and
+    /// `oneai-memory`'s `MemoryFactStore` delegate to — real BM25 + dense →
+    /// RRF(k=60) → optional rerank, no network/backend deps beyond what the
+    /// chosen `EmbeddingService` needs.
+    ///
+    /// - `embedder = None` → keyword-only pipeline (no dense leg). The same
+    ///   "zero-burden" posture as the embedding rework: a caller with no
+    ///   embedding service still gets real BM25, never a hard error.
+    /// - `embedder = Some` → the dense leg's vector dimension is resolved via
+    ///   [`EmbeddingService::actual_dimension`] (BGE-M3 = 1024 fixed; FastEmbed
+    ///   `all-MiniLM-L6-v2` = 384 from the known-dimensions table; Ollama is
+    ///   probed by generating one test embedding).
+    pub async fn in_memory_default(
+        embedder: Option<Arc<dyn EmbeddingService>>,
+        reranker: Option<Arc<dyn RerankerProvider>>,
+    ) -> oneai_core::Result<Arc<dyn RetrievalBackend>> {
+        // Lexical leg is always available — tantivy + jieba, in-memory.
+        let keyword: Arc<dyn KeywordBackend> = Arc::new(TantivyBm25Backend::in_memory()?);
+
+        let mut builder = StandardRetrievalPipelineBuilder::default().keyword(keyword);
+
+        // Dense leg only when an embedder is configured AND its dimension is
+        // resolvable (>0). A zero-dim model (e.g. an uninitialized stub) is
+        // silently skipped so the pipeline degrades to keyword-only rather than
+        // erroring — matching the fail-safe contract documented above.
+        if let Some(e) = embedder.clone() {
+            let dim = e.actual_dimension().await?;
+            if dim > 0 {
+                let vector: Arc<dyn VectorBackend> = Arc::new(InMemoryVectorBackend::new(dim));
+                builder = builder.vector(vector).embedder(e);
+            } else {
+                tracing::warn!(
+                    "StandardRetrievalPipeline::in_memory_default: embedder reported dim=0; \
+                     building keyword-only pipeline"
+                );
+            }
+        }
+
+        if let Some(r) = reranker {
+            builder = builder.reranker(r);
+        }
+
+        Ok(Arc::new(builder.build()) as Arc<dyn RetrievalBackend>)
+    }
+
+    #[cfg(not(feature = "tantivy"))]
+    pub async fn in_memory_default(
+        _embedder: Option<Arc<dyn EmbeddingService>>,
+        _reranker: Option<Arc<dyn RerankerProvider>>,
+    ) -> oneai_core::Result<Arc<dyn RetrievalBackend>> {
+        // Without the `tantivy` feature there is no in-memory BM25 backend, so
+        // the default stack can't be assembled. Surface a clear error rather
+        // than silently building a dense-only pipeline that would mislead
+        // callers expecting hybrid retrieval.
+        Err(oneai_core::OneAIError::Rag(
+            "StandardRetrievalPipeline::in_memory_default requires the `tantivy` feature \
+             (on by default) — it provides the in-memory BM25 lexical leg"
+                .to_string(),
+        ))
+    }
+
+    /// Build the default in-memory retrieval stack with an explicit dense
+    /// dimension and **no pipeline-level embedder** — the dense leg is sized
+    /// to `dim` but embeddings must be supplied by the caller via
+    /// `upsert_chunk(.., Some(embedding))` and `RetrievalRequest::embedding`.
+    ///
+    /// Use this when the caller owns the `EmbeddingService` and wants to embed
+    /// once (e.g. `oneai-rag`'s `AutoEmbeddingDocumentIndex`, which embeds
+    /// chunks at add time and the query at search time). Use
+    /// [`in_memory_default`](Self::in_memory_default) instead when the pipeline
+    /// should auto-embed (zero-config app use).
+    ///
+    /// - `dim = None` or `0` → keyword-only pipeline (no dense leg).
+    /// - `dim = Some(d)` (d>0) → `InMemoryVectorBackend::new(d)` dense leg.
+    #[cfg(feature = "tantivy")]
+    pub async fn in_memory_default_with_dim(
+        dim: Option<usize>,
+        reranker: Option<Arc<dyn RerankerProvider>>,
+    ) -> oneai_core::Result<Arc<dyn RetrievalBackend>> {
+        let keyword: Arc<dyn KeywordBackend> = Arc::new(TantivyBm25Backend::in_memory()?);
+        let mut builder = StandardRetrievalPipelineBuilder::default().keyword(keyword);
+        if let Some(d) = dim.filter(|d| *d > 0) {
+            builder = builder.vector(Arc::new(InMemoryVectorBackend::new(d)));
+        }
+        if let Some(r) = reranker {
+            builder = builder.reranker(r);
+        }
+        Ok(Arc::new(builder.build()) as Arc<dyn RetrievalBackend>)
+    }
+
+    #[cfg(not(feature = "tantivy"))]
+    pub async fn in_memory_default_with_dim(
+        _dim: Option<usize>,
+        _reranker: Option<Arc<dyn RerankerProvider>>,
+    ) -> oneai_core::Result<Arc<dyn RetrievalBackend>> {
+        Err(oneai_core::OneAIError::Rag(
+            "StandardRetrievalPipeline::in_memory_default_with_dim requires the `tantivy` \
+             feature (on by default) — it provides the in-memory BM25 lexical leg"
+                .to_string(),
+        ))
     }
 }
 
@@ -401,5 +510,46 @@ mod tests {
         let req = RetrievalRequest::hybrid("alpha beta", emb, 5);
         let hits = pipe.search_hybrid(&req).await.unwrap();
         assert_eq!(hits[0].id, "d1");
+    }
+
+    #[tokio::test]
+    async fn in_memory_default_with_embedder_builds_dense_leg() {
+        // The default-stack constructor wires both legs + the embedder, so
+        // upsert_chunk(text, None) auto-embeds and a dense-only query returns
+        // the right doc.
+        let backend = StandardRetrievalPipeline::in_memory_default(
+            Some(Arc::new(StubEmbedder)),
+            None,
+        )
+        .await
+        .unwrap();
+        backend
+            .upsert_chunk("d1", "rust programming language", Metadata::new(), None)
+            .await
+            .unwrap();
+        let emb = StubEmbedder.embed("rust language").await.unwrap();
+        let req = RetrievalRequest::vector("rust", emb, 5);
+        let hits = backend.search_hybrid(&req).await.unwrap();
+        assert!(hits.iter().any(|h| h.id == "d1" && h.content.contains("rust")));
+    }
+
+    #[tokio::test]
+    async fn in_memory_default_without_embedder_degrades_to_keyword() {
+        // No embedder → keyword-only pipeline. Dense-only queries return nothing
+        // (no vector leg), keyword queries still hit via BM25.
+        let backend = StandardRetrievalPipeline::in_memory_default(None, None)
+            .await
+            .unwrap();
+        backend
+            .upsert_chunk("d1", "机器学习是人工智能的一个分支", Metadata::new(), None)
+            .await
+            .unwrap();
+        // Dense-only with a fabricated embedding → no vector leg → empty.
+        let req = RetrievalRequest::vector("人工智能", vec![0.0; 4], 5);
+        assert!(backend.search_hybrid(&req).await.unwrap().is_empty());
+        // Keyword path hits.
+        let req = RetrievalRequest::keyword("人工智能", 5);
+        let hits = backend.search_hybrid(&req).await.unwrap();
+        assert!(hits.iter().any(|h| h.content.contains("机器学习")));
     }
 }

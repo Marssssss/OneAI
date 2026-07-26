@@ -32,6 +32,7 @@ oneai-domain = { workspace = true }
 oneai-a2a = { workspace = true }
 oneai-wasm = { workspace = true }
 oneai-mcp = { workspace = true }
+oneai-vector = { workspace = true }
 
 [features]
 # OTEL tracing helpers (trace_otel / trace_otel_http / trace_otel_config).

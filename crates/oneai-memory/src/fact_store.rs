@@ -13,7 +13,9 @@
 //! contradiction as the agent accumulates facts across sessions.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use oneai_core::traits::VectorBackend;
 use oneai_core::{MemoryFact, RecallConfig};
 use tokio::sync::RwLock;
 
@@ -38,20 +40,66 @@ pub enum UpsertOutcome {
 ///
 /// Thread-safe via a `tokio::sync::RwLock`. Search is brute-force cosine
 /// similarity (over embeddings) plus keyword matching — acceptable for the
-/// <10K-entry scale OneAI targets; P5's SQLite backend may later accelerate it.
+/// <10K-entry scale OneAI targets. When a [`VectorBackend`] is attached via
+/// [`with_vector_backend`](Self::with_vector_backend), the dense leg delegates
+/// to it (real ANN — `InMemoryVectorBackend` / `SqliteVecBackend` / `UsearchBackend`
+/// from `oneai-vector`); without one, brute-force cosine over the HashMap is
+/// the zero-deps fallback. The three-factor scoring (relevance + recency +
+/// importance) is preserved either way.
 pub struct MemoryFactStore {
     facts: RwLock<HashMap<String, MemoryFact>>,
     /// Index: (user_id, subject, predicate) -> fact id, for O(1) conflict lookup.
     key_index: RwLock<HashMap<(String, String, String), String>>,
+    /// Optional dense-vector backend. When set, semantic recall delegates the
+    /// ANN search to it; when `None`, brute-force cosine over `facts` is used.
+    /// Behind a lock so the `MemoryManager` can attach it after construction
+    /// (once the embedding service's dimension is known).
+    vector_backend: RwLock<Option<Arc<dyn VectorBackend>>>,
 }
 
 impl MemoryFactStore {
-    /// Create an empty fact store.
+    /// Create an empty fact store (no vector backend — brute-force cosine
+    /// fallback for semantic recall).
     pub fn new() -> Self {
         Self {
             facts: RwLock::new(HashMap::new()),
             key_index: RwLock::new(HashMap::new()),
+            vector_backend: RwLock::new(None),
         }
+    }
+
+    /// Create with an attached [`VectorBackend`] so semantic recall delegates
+    /// the dense ANN search to it instead of brute-force cosine. The backend's
+    /// fixed dimension must match the embeddings produced by the configured
+    /// `EmbeddingService`.
+    pub fn with_vector_backend(backend: Arc<dyn VectorBackend>) -> Self {
+        Self {
+            facts: RwLock::new(HashMap::new()),
+            key_index: RwLock::new(HashMap::new()),
+            vector_backend: RwLock::new(Some(backend)),
+        }
+    }
+
+    /// Attach (or replace) the vector backend, re-indexing all facts that
+    /// carry an embedding into the new backend. Pass `None` to detach
+    /// (subsequent recall falls back to brute-force cosine).
+    pub async fn set_vector_backend(&self, backend: Option<Arc<dyn VectorBackend>>) {
+        // Re-index existing embedded facts into the new backend before
+        // publishing it, so a swap doesn't lose the dense index.
+        if let Some(b) = &backend {
+            let facts = self.facts.read().await;
+            for f in facts.values() {
+                if let Some(emb) = &f.embedding {
+                    let _ = b.upsert(&f.id, emb, fact_index_metadata(f)).await;
+                }
+            }
+        }
+        *self.vector_backend.write().await = backend;
+    }
+
+    /// Whether a vector backend is currently attached.
+    pub async fn has_vector_backend(&self) -> bool {
+        self.vector_backend.read().await.is_some()
     }
 
     /// Number of stored facts.
@@ -81,6 +129,11 @@ impl MemoryFactStore {
             fact.subject.clone(),
             fact.predicate.clone(),
         );
+
+        // Capture (id, embedding, metadata) for the vector backend index write
+        // that runs after the HashMap mutation. `None` when the fact has no
+        // embedding (keyword-only recall) — the dense leg is skipped.
+        let mut index_to_backend: Option<(String, Vec<f32>, HashMap<String, String>)> = None;
 
         // Check for an existing fact with the same conflict key.
         let existing_id = self.key_index.read().await.get(&key).cloned();
@@ -114,6 +167,12 @@ impl MemoryFactStore {
                 prev.superseded = false;
                 prev.superseded_at = None;
                 prev.version = previous_version.saturating_add(1);
+                if let Some(emb) = prev.embedding.as_ref() {
+                    index_to_backend = Some((id.clone(), emb.clone(), fact_index_metadata(prev)));
+                }
+                // Drop the facts lock before the (async) backend write below.
+                drop(facts);
+                self.index_to_backend(index_to_backend).await;
                 return UpsertOutcome::Updated { previous_version };
             }
         }
@@ -123,10 +182,29 @@ impl MemoryFactStore {
             fact.version = 1;
         }
         let id = fact.id.clone();
+        if let Some(emb) = fact.embedding.as_ref() {
+            index_to_backend = Some((id.clone(), emb.clone(), fact_index_metadata(&fact)));
+        }
         self.facts.write().await.insert(id.clone(), fact);
         self.key_index.write().await.insert(key, id);
+        self.index_to_backend(index_to_backend).await;
         UpsertOutcome::Inserted
     }
+
+    /// Best-effort push of a fact's embedding into the attached vector backend
+    /// (no-op when none is attached or the fact has no embedding). The dense
+    /// index is what makes `search_semantic` / `search_hybrid_with_config`'s
+    /// dense leg use real ANN instead of brute-force cosine.
+    async fn index_to_backend(&self, data: Option<(String, Vec<f32>, HashMap<String, String>)>) {
+        let Some((id, emb, meta)) = data else { return };
+        let backend = self.vector_backend.read().await.clone();
+        if let Some(b) = backend {
+            if let Err(e) = b.upsert(&id, &emb, meta).await {
+                tracing::warn!("vector_backend upsert failed for fact {id}: {e}");
+            }
+        }
+    }
+
 
     /// Soft-invalidate the current fact for a conflict key (Zep-style
     /// soft-fail). The fact is NOT removed: it is marked `superseded=true`
@@ -157,6 +235,16 @@ impl MemoryFactStore {
             prev.superseded_at = Some(now);
             prev.updated_at = now;
             prev.version = prev.version.saturating_add(1);
+            // Drop the facts lock before the (async) backend delete.
+            drop(facts);
+            // Remove from the vector backend so the dense leg no longer
+            // surfaces the invalidated fact (the HashMap row stays for audit).
+            let backend = self.vector_backend.read().await.clone();
+            if let Some(b) = backend {
+                if let Err(e) = b.delete(&id).await {
+                    tracing::warn!("vector_backend delete failed for fact {id}: {e}");
+                }
+            }
             return true;
         }
         false
@@ -167,7 +255,14 @@ impl MemoryFactStore {
         let key = (user_id.to_string(), subject.to_string(), predicate.to_string());
         let id = self.key_index.write().await.remove(&key);
         if let Some(id) = id {
-            self.facts.write().await.remove(&id).is_some()
+            let removed = self.facts.write().await.remove(&id).is_some();
+            if removed {
+                let backend = self.vector_backend.read().await.clone();
+                if let Some(b) = backend {
+                    let _ = b.delete(&id).await;
+                }
+            }
+            removed
         } else {
             false
         }
@@ -215,6 +310,41 @@ impl MemoryFactStore {
     }
 
     async fn search_semantic_with(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        include_superseded: bool,
+    ) -> Vec<MemoryFact> {
+        // Dense leg: delegate to the attached vector backend (real ANN) when
+        // configured; otherwise brute-force cosine over the HashMap.
+        let backend = self.vector_backend.read().await.clone();
+        if let Some(b) = backend {
+            // Fetch a wider pool than top_k so the superseded filter + the
+            // three-factor scorer (when called via search_hybrid) still have
+            // room. Pure semantic just truncates.
+            let fetch_k = top_k.max(50);
+            let hits = match b.search(query_embedding, fetch_k, None).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!("vector_backend search failed, falling back to brute-force: {e}");
+                    return self.search_semantic_bruteforce(query_embedding, top_k, include_superseded).await;
+                }
+            };
+            let facts = self.facts.read().await;
+            let mut out: Vec<MemoryFact> = hits
+                .into_iter()
+                .filter_map(|h| facts.get(&h.id).cloned())
+                .filter(|f| include_superseded || !f.superseded)
+                .collect();
+            out.truncate(top_k);
+            return out;
+        }
+        self.search_semantic_bruteforce(query_embedding, top_k, include_superseded).await
+    }
+
+    /// Brute-force cosine fallback (no vector backend). Computes cosine over
+    /// every fact's embedding, sorts descending, truncates to `top_k`.
+    async fn search_semantic_bruteforce(
         &self,
         query_embedding: &[f32],
         top_k: usize,
@@ -304,6 +434,33 @@ impl MemoryFactStore {
         now: chrono::DateTime<chrono::Utc>,
         include_superseded: bool,
     ) -> Vec<MemoryFact> {
+        // When a vector backend is attached and the query carries an embedding,
+        // precompute the dense top-N (id → cosine score) from it. This is the
+        // real-ANN path: facts outside the backend's top-N get relevance 0 and
+        // are dropped, exactly as a brute-force scan would drop them by score,
+        // but at O(log n) instead of O(n). Without a backend, relevance falls
+        // back to inline cosine over the HashMap.
+        let mut dense_map: HashMap<String, f32> = HashMap::new();
+        if let Some(qemb) = query_embedding {
+            let backend = self.vector_backend.read().await.clone();
+            if let Some(b) = backend {
+                let fetch_k = cfg.top_k.max(100);
+                match b.search(qemb, fetch_k, None).await {
+                    Ok(hits) => {
+                        for h in hits {
+                            dense_map.insert(h.id, h.score);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "vector_backend hybrid search failed, falling back to brute-force cosine: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        let use_backend = !dense_map.is_empty();
+
         let facts = self.facts.read().await;
 
         // Pass 1: compute raw (relevance, recency, importance) per candidate,
@@ -313,11 +470,21 @@ impl MemoryFactStore {
             .filter(|f| include_superseded || !f.superseded)
             .filter_map(|f| {
                 let relevance = match query_embedding {
-                    Some(emb) => f
-                        .embedding
-                        .as_ref()
-                        .map(|fe| cosine(emb, fe))
-                        .unwrap_or(0.0),
+                    Some(emb) => {
+                        if use_backend {
+                            // Dense ANN path: relevance comes from the
+                            // backend's precomputed top-N. Facts not in the
+                            // top-N get 0 → dropped (the long tail is
+                            // irrelevant at recall time).
+                            *dense_map.get(&f.id).unwrap_or(&0.0)
+                        } else {
+                            // No backend → inline brute-force cosine.
+                            f.embedding
+                                .as_ref()
+                                .map(|fe| cosine(emb, fe))
+                                .unwrap_or(0.0)
+                        }
+                    }
                     None => {
                         // Token-level keyword match (no-embedding recall
                         // upgrade): see `search_keyword_with` for rationale.
@@ -368,6 +535,19 @@ impl MemoryFactStore {
         candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         candidates.into_iter().map(|(_, _, _, f)| f).take(cfg.top_k).collect()
     }
+}
+
+/// Build the metadata map indexed alongside a fact's embedding in the vector
+/// backend. Carries the content + subject + predicate + user_id so a backend
+/// `search` with a metadata filter could refine by them (the framework's
+/// default `InMemoryVectorBackend` honors `Filter::metadata_eq`).
+fn fact_index_metadata(f: &MemoryFact) -> HashMap<String, String> {
+    let mut m = f.metadata.clone();
+    m.entry("content".to_string()).or_insert_with(|| f.content.clone());
+    m.entry("subject".to_string()).or_insert_with(|| f.subject.clone());
+    m.entry("predicate".to_string()).or_insert_with(|| f.predicate.clone());
+    m.entry("user_id".to_string()).or_insert_with(|| f.user_id.clone());
+    m
 }
 
 /// Append a captured revision (a `serde_json::Value` object) to the fact's
@@ -660,5 +840,99 @@ mod tests {
             .search_hybrid_with_config(None, "jwt", &cfg, chrono::Utc::now(), false)
             .await;
         assert_eq!(results.len(), 1);
+    }
+
+    // ─── Vector-backend (oneai-vector) path ─────────────────────────────────
+
+    /// `make_fact` + a 4-d embedding (deterministic, no model file).
+    fn make_fact_emb(user: &str, subject: &str, predicate: &str, content: &str) -> MemoryFact {
+        let mut f = make_fact(user, subject, predicate, content);
+        // Deterministic 4-d embedding derived from the content bytes.
+        let mut v = vec![0.0f32; 4];
+        for (i, b) in content.as_bytes().iter().enumerate() {
+            v[i % 4] += *b as f32;
+        }
+        let n = (v.iter().map(|x| x * x).sum::<f32>().sqrt()).max(1e-6);
+        v.iter_mut().for_each(|x| *x /= n);
+        f.embedding = Some(v);
+        f
+    }
+
+    #[tokio::test]
+    async fn vector_backend_indexes_facts_on_upsert() {
+        // An attached VectorBackend receives the embedding at upsert time, so
+        // search_semantic returns facts even when the HashMap scan is bypassed.
+        let backend = Arc::new(oneai_vector::InMemoryVectorBackend::new(4));
+        let store = MemoryFactStore::with_vector_backend(backend.clone());
+        store.upsert(make_fact_emb("alice", "user.package_manager", "prefers", "pnpm")).await;
+        store.upsert(make_fact_emb("bob", "user.editor", "prefers", "vim editor")).await;
+
+        // Query with the alice embedding → alice surfaces first.
+        let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
+        let results = store.search_semantic(&q, 5).await;
+        assert!(results.iter().any(|f| f.user_id == "alice"));
+    }
+
+    #[tokio::test]
+    async fn vector_backend_falls_back_to_bruteforce_when_detached() {
+        // No backend → brute-force cosine over the HashMap still works.
+        let store = MemoryFactStore::new();
+        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
+        let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
+        let results = store.search_semantic(&q, 5).await;
+        assert!(results.iter().any(|f| f.user_id == "alice"));
+    }
+
+    #[tokio::test]
+    async fn vector_backend_hybrid_uses_ann_scores() {
+        // search_hybrid_with_config delegates the dense leg to the backend; the
+        // three-factor scorer still ranks (recency/importance unchanged).
+        let backend = Arc::new(oneai_vector::InMemoryVectorBackend::new(4));
+        let store = MemoryFactStore::with_vector_backend(backend);
+        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
+        store.upsert(make_fact_emb("bob", "u.editor", "prefers", "vim editor far")).await;
+
+        let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
+        let cfg = oneai_core::RecallConfig::default();
+        let results = store
+            .search_hybrid_with_config(Some(&q), "pnpm", &cfg, chrono::Utc::now(), false)
+            .await;
+        // The fact whose embedding matched the query (alice/pnpm) surfaces.
+        assert!(results.iter().any(|f| f.user_id == "alice"));
+    }
+
+    #[tokio::test]
+    async fn invalidate_removes_from_vector_backend() {
+        // Soft-invalidate drops the fact from the dense index (recall excludes
+        // it) while the HashMap row stays for audit.
+        let backend = Arc::new(oneai_vector::InMemoryVectorBackend::new(4));
+        let store = MemoryFactStore::with_vector_backend(backend.clone());
+        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
+        assert!(store.has_vector_backend().await);
+
+        // Before invalidation: semantic recall finds the fact.
+        let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
+        assert!(!store.search_semantic(&q, 5).await.is_empty());
+
+        store.invalidate("alice", "u.pm", "prefers").await;
+        // After invalidation: excluded from recall.
+        assert!(store.search_semantic(&q, 5).await.is_empty());
+        // But the HashMap row is retained for audit.
+        assert_eq!(store.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn set_vector_backend_reindexes_existing_facts() {
+        // Attaching a backend after facts are already stored re-indexes them.
+        let store = MemoryFactStore::new();
+        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
+        // No backend yet → brute-force works.
+        let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
+        assert!(!store.search_semantic(&q, 5).await.is_empty());
+
+        // Attach a backend → existing facts are re-indexed into it.
+        store.set_vector_backend(Some(Arc::new(oneai_vector::InMemoryVectorBackend::new(4)))).await;
+        let results = store.search_semantic(&q, 5).await;
+        assert!(results.iter().any(|f| f.user_id == "alice"));
     }
 }

@@ -18,4 +18,13 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 oneai-core = { workspace = true }
+oneai-vector = { workspace = true }
 fastembed = { workspace = true }
+
+[features]
+# Local ONNX embedder/reranker via oneai-vector's `ort` stack (BGE-M3 +
+# bge-reranker-v2-m3). Off by default — `ort-sys` downloads a prebuilt
+# libonnxruntime blob and the embedder needs ONNX model files at runtime.
+# When enabled, `BgeM3Adapter` is registered ahead of `FastEmbedAdapter` in
+# the auto-chain (CJK-strong, pairs with tantivy-jieba BM25).
+ort = ["oneai-vector/ort"]

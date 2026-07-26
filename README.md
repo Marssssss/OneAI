@@ -586,12 +586,13 @@ flowchart TB
 | `oneai-core` | 核心类型、trait、PermissionLevel、Budget、PlatformCapabilities | 262|
 | `oneai-provider` | LLM Provider（OpenAI/Anthropic/Gemini/Ollama）+ ProviderPool + SmartRouter | 111|
 | `oneai-parser` | 3 层输出解析防御 | 7|
-| `oneai-memory` | 记忆系统（STM、LTM、压缩、HNSW、MemoryManager + 持久化） | 60|
+| `oneai-memory` | 记忆系统（STM、LTM、压缩、MemoryFactStore + VectorBackend 接默认栈、MemoryManager + 持久化） | 78|
 | `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、15 工具 | 63|
 | `oneai-skill` | 技能选择器 + 注册 + 内置领域技能 | 9|
 | `oneai-domain` | DomainPack 系统（7 层）、CodingPack、市场、规范校验器 | 127|
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect + StreamParser + ContextAssembler + delegate/switch_paradigm 元工具 + GroupChat | 219|
-| `oneai-rag` | RAG + EmbeddingService（OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat + auto 探测 + fallback） | 61|
+| `oneai-rag` | RAG + EmbeddingService（OpenAI/Voyage/Ollama/FastEmbed/BgeM3/OpenAI-compat + auto 探测 + fallback + 默认检索栈接入） | 73|
+| `oneai-vector` | 默认检索栈 — InMemory/SqliteVec/usearch + Tantivy BM25 + BGE-M3/BGE reranker + StandardRetrievalPipeline（RRF） | 17|
 | `oneai-workflow` | Workflow DAG + StateGraph + 编译器 + 执行器 | 44|
 | `oneai-scheduler` | 内存任务调度 | 6|
 | `oneai-persistence` | SQLite（会话/LTM/用量）+ 文件事件日志（working state / 跨 session 续接） | 46|
@@ -600,14 +601,14 @@ flowchart TB
 | `oneai-eval` | 评测框架 — 用例/指标/Runner/3 套件 + SWE-bench 三轴 | 95|
 | `oneai-studio` | Studio Web UI — axum HTTP+WS + D3.js StateGraph 可视化 + Checkpoint 时间旅行 | 34|
 | `oneai-mcp` | MCP 服务生态 — 宿主 + 插件注册 + 配置 | 57|
-| `oneai-app` | 应用集成层（AppBuilder） | 19|
+| `oneai-app` | 应用集成层（AppBuilder + 默认检索栈接线） | 20|
 | `oneai-trace` | OpenInference 兼容轨迹日志器 | 14|
 | `oneai-uniffi` | UniFFI 绑定定义 + 手写 `extern "C"` facade（C#/Windows、C++/HarmonyOS 复用） | 34|
 | `oneai-platform-desktop` | 桌面平台（macOS/Windows/Linux） | 2|
 | `oneai-platform-android` | Android 平台 | 2|
 | `oneai-platform-ios` | iOS 平台 | 1|
 | `oneai-platform-harmony` | HarmonyOS 平台 | 1|
-| **总计** | | **1457** |
+| **总计** | | **1505** |
 
 > 另有 `oneai-staticlib`（crate-type=staticlib 的打包 crate，仅 Apple/Windows 构建脚本构建，排除在 `default-members` 之外，故不计入 24）。
 
@@ -748,7 +749,7 @@ pub trait PermissionAwareTool: Tool { fn permission_level(&self) -> PermissionLe
 **短期 / 长期记忆：**
 
 - 短期 — 滑动窗口，自动驱逐到长期记忆
-- 长期 — HNSW 向量存储 + 内容存储 + 混合评分；通过配置的 `EmbeddingService` **自动 embedding**。未配置时 auto 探测，无可用 provider 则降级关键词召回
+- 长期 — `MemoryFactStore`（Mem0 式冲突解决 + 三因子召回）接 `oneai-vector` 默认栈 `VectorBackend`（真 ANN：InMemory/SqliteVec/usearch）做 dense 召回；无 backend 时回退 brute-force cosine。通过配置的 `EmbeddingService` **自动 embedding**。未配置时 auto 探测，无可用 provider 则降级关键词召回
 
 **STM↔LTM 闭环：** `MemoryReflection` + `inject_ltm_context` + `RecallStrategy`。
 
@@ -804,15 +805,17 @@ oneai tasks archive <id>                      # 完成后归档（gzip 事件日
 
 `oneai-rag` 核心：
 
-- **`EmbeddingService` trait** — OpenAI/Voyage/Ollama/FastEmbed/OpenAI-compat 实现
-- **`EmbeddingProviderAdapter` 注册表** — 统一 provider 差异
+- **`EmbeddingService` trait** — OpenAI/Voyage/Ollama/FastEmbed/BgeM3(`ort` feature)/OpenAI-compat 实现
+- **`EmbeddingProviderAdapter` 注册表** — 统一 provider 差异；auto-chain 顺序 OpenAiCompat→Voyage→OpenAI→Ollama→**BgeM3**(`ort`)→FastEmbed（末位 fallback）
 - **`EmbeddingResolver`** — auto 探测 + 构建/运行期 fallback，共享 `should_continue`（429/5xx/传输/缺 key 降级，其它报错）
 - **`EmbeddingServiceRegistry`** — 缓存 + primary→fallback 运行期切换
-- **`AutoEmbeddingDocumentIndex`** — `add_document()` 时自动 embedding
+- **`DocumentIndex` 双后端** — ① legacy brute-force `VectorStore`（回退）；② 默认检索栈 `RetrievalBackend`：`search_by_keyword` 走真 BM25（tantivy-jieba CJK），`search_hybrid` 走 dense+BM25→RRF。`with_default_stack(embedder, reranker)` 一行接入
+- **`AutoEmbeddingDocumentIndex`** — `with_default_stack(embedder, reranker)` 零配置建默认栈；`add_document()` 自动 embedding，`search_by_text()` 自动 hybrid
+- **`oneai_vector::StandardRetrievalPipeline`** — 框架默认检索栈（BM25 + dense → RRF(k=60) → 可选 rerank），由 `InMemoryVectorBackend`/`SqliteVecBackend`/`UsearchBackend` + `TantivyBm25Backend` + `BgeM3Embedder`/`BgeRerankerOnnx` 组合
 - **输入切分** — UTF-8 字节二分（CJK 不截断）
 - **`ChunkingStrategy`** — FixedSize / SentenceBoundary / ParagraphBoundary
 
-配置与探测链详见上方 [Embedding 配置](#embedding-配置零负担)。
+配置与探测链详见上方 [Embedding 配置](#embedding-配置零负担)。默认栈由 `AppBuilder::default_retrieval_stack()` 一行启用（内存 InMemory 后端；生产可显式切 `retrieval_backend()` 接 Qdrant 等）。
 
 ### 13. A2A 协议、WASM 沙箱、评测、Studio、MCP
 

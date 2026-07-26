@@ -35,3 +35,5 @@ pub use provider_adapter::{
     Availability, OpenAiAdapter, VoyageAdapter, OllamaAdapter, FastEmbedAdapter,
     OpenAiCompatAdapter,
 };
+#[cfg(feature = "ort")]
+pub use provider_adapter::BgeM3Adapter;

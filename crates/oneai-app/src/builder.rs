@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use oneai_core::error::Result;
-use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService, MemoryPersistence};
+use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService, MemoryPersistence, RetrievalBackend, RerankerProvider, VectorBackend};
 use oneai_core::{Conversation, SessionInfo};
 use oneai_core::EmbeddingConfig;
 use oneai_core::usage::{UsageTracker, InMemoryUsageTracker};
@@ -110,6 +110,17 @@ pub struct AppBuilder {
     embedding_service: Option<Arc<dyn EmbeddingService>>,
     /// Embedding config (optional — for lazy embedding service creation).
     embedding_config: Option<EmbeddingConfig>,
+    /// Whether to wire the framework's default in-memory retrieval stack
+    /// (`oneai_vector::StandardRetrievalPipeline`: BM25 + dense → RRF) into the
+    /// memory `MemoryFactStore` (real-ANN semantic recall) and an
+    /// `AutoEmbeddingDocumentIndex` RAG index (real BM25 hybrid retrieval).
+    /// Set by [`default_retrieval_stack`](AppBuilder::default_retrieval_stack).
+    enable_default_retrieval_stack: bool,
+    /// An app-supplied retrieval backend (e.g. Qdrant). When set, overrides
+    /// the default in-memory stack for RAG (memory still uses InMemoryVectorBackend).
+    retrieval_backend: Option<Arc<dyn RetrievalBackend>>,
+    /// Optional reranker for the default retrieval stack (e.g. BgeRerankerOnnx).
+    reranker: Option<Arc<dyn RerankerProvider>>,
     /// Usage tracker (optional — enables token-usage tracking for LLM inference calls).
     usage_tracker: Option<Arc<dyn UsageTracker>>,
     /// Rate limiter (optional — prevents exceeding provider API rate limits).
@@ -187,6 +198,9 @@ impl AppBuilder {
             sqlite_store: None,
             embedding_service: None,
             embedding_config: None,
+            enable_default_retrieval_stack: false,
+            retrieval_backend: None,
+            reranker: None,
             usage_tracker: None,
             rate_limiter: None,
             circuit_breaker: None,
@@ -761,6 +775,43 @@ impl AppBuilder {
         self.embedding_config(EmbeddingConfig::auto())
     }
 
+    // ─── Default Retrieval Stack (oneai-vector) ───────────────────────────────
+
+    /// Wire the framework's default in-memory retrieval stack into both the
+    /// memory subsystem (real-ANN semantic recall via `InMemoryVectorBackend`)
+    /// and, when an embedding service resolves, a default-stack RAG index
+    /// (`AutoEmbeddingDocumentIndex` over `StandardRetrievalPipeline`: BM25 +
+    /// dense → RRF). With no embedding service, memory recall stays keyword/
+    /// brute-force and the RAG index is keyword-only (real BM25).
+    ///
+    /// This is the one-line zero-config enabler for real hybrid retrieval.
+    /// Pass `oneai_vector::BgeRerankerOnnx` (or any `RerankerProvider`) via
+    /// [`retrieval_reranker`](AppBuilder::retrieval_reranker) to add the
+    /// second-stage rerank leg.
+    pub fn default_retrieval_stack(mut self) -> Self {
+        self.enable_default_retrieval_stack = true;
+        self
+    }
+
+    /// Attach an app-supplied [`RetrievalBackend`] (e.g. Qdrant, which does
+    /// dense + BM25 + RRF natively) for the RAG index. When set, it overrides
+    /// the default in-memory stack for RAG; memory recall still uses the
+    /// framework's `InMemoryVectorBackend` (or the backend wired via the
+    /// memory path) unless the app also wires memory separately.
+    pub fn retrieval_backend(mut self, backend: Arc<dyn RetrievalBackend>) -> Self {
+        self.retrieval_backend = Some(backend);
+        self
+    }
+
+    /// Attach a reranker for the default retrieval stack (applied at the last
+    /// pipeline stage: top-150 → top-K). `BgeRerankerOnnx` (under `ort`) is the
+    /// reference implementation; cloud rerankers (Cohere, Voyage) implement
+    /// `RerankerProvider` too.
+    pub fn retrieval_reranker(mut self, reranker: Arc<dyn RerankerProvider>) -> Self {
+        self.reranker = Some(reranker);
+        self
+    }
+
     // ─── Cost & Usage Management ────────────────────────────────────────────
 
     /// Set a custom usage tracker.
@@ -1321,7 +1372,7 @@ impl AppBuilder {
     /// This creates the App and eagerly registers all domain pack tools
     /// into the ToolRegistry and WorkflowExecutor, so they are ready
     /// before any session is created.
-    pub async fn build(self) -> Result<App> {
+    pub async fn build(mut self) -> Result<App> {
         // The unified interaction gate defaults to Noop (every point disabled,
         // zero latency) — production runs without a UI are not blocked. A TUI or
         // platform app wires a Channel/Threshold gate via the interaction_gate* builders.
@@ -1459,6 +1510,37 @@ impl AppBuilder {
                 Arc::new(MemoryManager::new())
             })
         };
+
+        // Default retrieval stack (oneai-vector): wire an InMemoryVectorBackend
+        // into the MemoryManager (real-ANN semantic recall, sized to the
+        // embedder's dim) and, when no RAG index was supplied, build a
+        // default-stack DocumentIndex (BM25 + dense → RRF). Pure opt-in —
+        // without `.default_retrieval_stack()`, memory recall stays
+        // brute-force and RAG is whatever the user supplied.
+        if self.enable_default_retrieval_stack {
+            if let Some(e) = &embedding_service {
+                let dim = e.actual_dimension().await?;
+                if dim > 0 {
+                    let backend: Arc<dyn VectorBackend> =
+                        Arc::new(oneai_vector::InMemoryVectorBackend::new(dim));
+                    memory_manager.set_vector_backend(Some(backend)).await;
+                }
+            } else {
+                // No embedder: still enable keyword-only BM25 for RAG (below);
+                // memory recall stays keyword/brute-force (no vector leg).
+            }
+            if self.rag_index.is_none() {
+                let index = if let Some(b) = self.retrieval_backend.clone() {
+                    DocumentIndex::with_defaults_and_backend(b)
+                } else {
+                    DocumentIndex::with_default_stack(
+                        embedding_service.clone(),
+                        self.reranker.clone(),
+                    ).await?
+                };
+                self.rag_index = Some(Arc::new(index));
+            }
+        }
 
         // P5: namespace memory by user id (cross-session habits) and register
         // self-managed memory tools when the active domain opts in.

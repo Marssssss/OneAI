@@ -479,7 +479,7 @@ impl AppSession {
     /// Retrieve relevant context from RAG (keyword-based).
     pub async fn retrieve_rag(&self, query: &str, top_k: usize) -> Result<String> {
         if let Some(rag_index) = &self.app.rag_index {
-            let results = rag_index.search_by_keyword(query, top_k);
+            let results = rag_index.search_by_keyword(query, top_k).await;
             Ok(assemble_context(&results, 2000))
         } else {
             Ok(String::new())

@@ -943,9 +943,47 @@ impl AutoEmbeddingDocumentIndex {
         }
     }
 
+    /// Create backed by the framework's default in-memory retrieval stack
+    /// (`oneai_vector::StandardRetrievalPipeline`: BM25 + dense → RRF → optional
+    /// rerank). The pipeline carries the dense leg sized to `embedding_service`'s
+    /// dimension but no pipeline-level embedder — this wrapper computes
+    /// embeddings explicitly (chunks at add time, the query at search time) so
+    /// there is no double-embedding. `search_by_text` runs hybrid (BM25+dense);
+    /// `search_by_keyword` runs real BM25.
+    ///
+    /// This is the recommended zero-config constructor — pass any
+    /// `EmbeddingService` (FastEmbed local, OpenAI/Voyage cloud, Ollama local,
+    /// or `oneai_vector::BgeM3Embedder` under the `ort` feature).
+    pub async fn with_default_stack(
+        embedding_service: Arc<dyn EmbeddingService>,
+        reranker: Option<Arc<dyn oneai_core::traits::RerankerProvider>>,
+    ) -> Result<Self> {
+        let index = crate::index::DocumentIndex::with_default_stack(
+            Some(embedding_service.clone()),
+            reranker,
+        ).await?;
+        Ok(Self {
+            index,
+            embedding_service,
+        })
+    }
+
+    /// Create with a caller-supplied [`RetrievalBackend`] (e.g. Qdrant, which
+    /// does hybrid natively). The wrapper still owns the embedding service and
+    /// computes embeddings for chunks/queries; the backend stores them.
+    pub fn with_retrieval_backend(
+        backend: Arc<dyn oneai_core::traits::RetrievalBackend>,
+        embedding_service: Arc<dyn EmbeddingService>,
+    ) -> Self {
+        Self {
+            index: crate::index::DocumentIndex::with_defaults_and_backend(backend),
+            embedding_service,
+        }
+    }
+
     /// Add a document with automatic embedding generation.
     pub async fn add_document(&mut self, document: crate::document::Document) -> Result<Vec<String>> {
-        let chunk_ids = self.index.add_document(document)?;
+        let chunk_ids = self.index.add_document(document).await?;
 
         let chunk_texts: Vec<String> = chunk_ids.iter()
             .filter_map(|id| self.index.get_chunk(id).map(|ic| ic.chunk.content.clone()))
@@ -965,9 +1003,19 @@ impl AutoEmbeddingDocumentIndex {
     }
 
     /// Search by text — automatically computes query embedding.
+    ///
+    /// When the underlying [`DocumentIndex`] is backed by a
+    /// [`RetrievalBackend`](oneai_core::traits::RetrievalBackend) (the default
+    /// stack), runs **hybrid** retrieval (BM25 + dense → RRF) using both the
+    /// query text and its embedding. Otherwise falls back to dense-only
+    /// [`DocumentIndex::search`].
     pub async fn search_by_text(&self, query_text: &str, top_k: usize) -> Result<Vec<crate::retrieval::RetrievalResult>> {
         let query_embedding = self.embedding_service.embed(query_text).await?;
-        self.index.search(query_embedding, top_k).await
+        if self.index.retrieval_backend().is_some() {
+            self.index.search_hybrid(query_text, query_embedding, top_k).await
+        } else {
+            self.index.search(query_embedding, top_k).await
+        }
     }
 
     /// Search by pre-computed embedding.
@@ -975,9 +1023,10 @@ impl AutoEmbeddingDocumentIndex {
         self.index.search(query_embedding, top_k).await
     }
 
-    /// Keyword search (no embedding needed).
-    pub fn search_by_keyword(&self, keyword: &str, top_k: usize) -> Vec<crate::retrieval::RetrievalResult> {
-        self.index.search_by_keyword(keyword, top_k)
+    /// Keyword search (no embedding needed). When a `RetrievalBackend` is
+    /// configured, this runs real BM25; otherwise substring matching.
+    pub async fn search_by_keyword(&self, keyword: &str, top_k: usize) -> Vec<crate::retrieval::RetrievalResult> {
+        self.index.search_by_keyword(keyword, top_k).await
     }
 
     /// Remove a document and all its chunks.

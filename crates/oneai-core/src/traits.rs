@@ -1257,6 +1257,9 @@ pub enum EmbeddingProvider {
     Ollama,
     /// FastEmbed local ONNX (no key; available when implemented).
     FastEmbed,
+    /// Local BGE-M3 ONNX embedder (no key; 1024-dim, CJK-strong; available
+    /// under `oneai-vector`'s `ort` feature when model files are present).
+    BgeM3,
     /// OpenAI-compatible relay/gateway (explicit `base_url` + key required).
     OpenAiCompat,
 }
@@ -1271,6 +1274,7 @@ impl EmbeddingProvider {
             "voyage" => Some(Self::Voyage),
             "ollama" => Some(Self::Ollama),
             "fastembed" => Some(Self::FastEmbed),
+            "bge-m3" | "bge_m3" | "bgem3" => Some(Self::BgeM3),
             "openai-compat" | "openai_compat" | "openai-compatible" => Some(Self::OpenAiCompat),
             _ => None,
         }
@@ -1291,6 +1295,7 @@ impl std::fmt::Display for EmbeddingProvider {
             Self::Voyage => "voyage",
             Self::Ollama => "ollama",
             Self::FastEmbed => "fastembed",
+            Self::BgeM3 => "bge-m3",
             Self::OpenAiCompat => "openai-compat",
         };
         write!(f, "{}", s)

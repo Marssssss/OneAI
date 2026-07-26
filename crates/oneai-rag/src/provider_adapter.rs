@@ -215,6 +215,9 @@ pub struct VoyageAdapter;
 pub struct OllamaAdapter;
 /// FastEmbed local ONNX.
 pub struct FastEmbedAdapter;
+/// Local BGE-M3 ONNX embedder (1024-dim, CJK-strong; `ort` feature only).
+#[cfg(feature = "ort")]
+pub struct BgeM3Adapter;
 /// OpenAI-compatible relay/gateway (explicit base_url + key).
 pub struct OpenAiCompatAdapter;
 
@@ -315,6 +318,56 @@ impl EmbeddingProviderAdapter for FastEmbedAdapter {
     }
 }
 
+#[cfg(feature = "ort")]
+impl EmbeddingProviderAdapter for BgeM3Adapter {
+    fn id(&self) -> EmbeddingProvider { EmbeddingProvider::BgeM3 }
+    fn default_model(&self) -> &str { "bge-m3" }
+    fn requires_api_key(&self) -> bool { false }
+    fn auth_env_var(&self) -> Option<&'static str> { None }
+    fn available(&self, probe: &EnvProbe, _config: &EmbeddingConfig) -> Availability {
+        // BGE-M3 is the auto-chain's preferred local embedder when the `ort`
+        // feature is on AND the model files are present on disk — CJK-strong,
+        // pairs with tantivy-jieba BM25. Without model files, skip to FastEmbed
+        // (the keyless last-resort that downloads lazily).
+        match bge_m3_model_dir(probe) {
+            Some(dir) if bge_m3_model_present(&dir) => Availability::Available,
+            _ => Availability::Missing("BGE_M3_DIR (or ~/.oneai/models/bge-m3 with model.onnx + tokenizer.json)"),
+        }
+    }
+    fn create(&self, _config: &EmbeddingConfig, probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>> {
+        let dir = bge_m3_model_dir(probe)
+            .ok_or_else(|| OneAIError::Embedding(
+                "BGE-M3 model dir not found — set BGE_M3_DIR or place model.onnx + tokenizer.json \
+                 under ~/.oneai/models/bge-m3".into()
+            ))?;
+        Ok(Arc::new(oneai_vector::BgeM3Embedder::new(&dir)?))
+    }
+}
+
+/// Resolve the BGE-M3 model directory: explicit `BGE_M3_DIR` env, then the
+/// conventional `~/.oneai/models/bge-m3`. Returns the first existing dir.
+#[cfg(feature = "ort")]
+fn bge_m3_model_dir(probe: &EnvProbe) -> Option<String> {
+    if let Some(d) = probe.env_get("BGE_M3_DIR").filter(|s| !s.is_empty()) {
+        return Some(d.to_string());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = std::path::PathBuf::from(&home).join(".oneai/models/bge-m3");
+        if dir.is_dir() {
+            return Some(dir.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Whether `dir` contains the BGE-M3 model files (`model.onnx` +
+/// `tokenizer.json`).
+#[cfg(feature = "ort")]
+fn bge_m3_model_present(dir: &str) -> bool {
+    let p = std::path::Path::new(dir);
+    p.join("model.onnx").is_file() && p.join("tokenizer.json").is_file()
+}
+
 impl EmbeddingProviderAdapter for OpenAiCompatAdapter {
     fn id(&self) -> EmbeddingProvider { EmbeddingProvider::OpenAiCompat }
     fn default_model(&self) -> &str { "text-embedding-3-small" }
@@ -352,12 +405,15 @@ pub struct EmbeddingProviderRegistry {
 }
 
 impl EmbeddingProviderRegistry {
-    /// The built-in adapter set (OpenAI / Voyage / Ollama / FastEmbed / OpenAI-compat).
+    /// The built-in adapter set (OpenAI / Voyage / Ollama / BgeM3 under `ort` /
+    /// FastEmbed / OpenAI-compat).
     pub fn builtin() -> Self {
         let mut adapters: HashMap<EmbeddingProvider, Box<dyn EmbeddingProviderAdapter>> = HashMap::new();
         adapters.insert(EmbeddingProvider::OpenAi, Box::new(OpenAiAdapter));
         adapters.insert(EmbeddingProvider::Voyage, Box::new(VoyageAdapter));
         adapters.insert(EmbeddingProvider::Ollama, Box::new(OllamaAdapter));
+        #[cfg(feature = "ort")]
+        adapters.insert(EmbeddingProvider::BgeM3, Box::new(BgeM3Adapter));
         adapters.insert(EmbeddingProvider::FastEmbed, Box::new(FastEmbedAdapter));
         adapters.insert(EmbeddingProvider::OpenAiCompat, Box::new(OpenAiCompatAdapter));
         Self { adapters }
@@ -381,12 +437,24 @@ fn builtin_registry() -> &'static EmbeddingProviderRegistry {
 ///
 /// Order rationale: explicit embedding relay > Voyage (independent key) >
 /// OpenAI official (key may double as chat key, so ranked after Voyage) >
-/// Ollama (local) > FastEmbed (offline, when implemented).
+/// Ollama (local) > BGE-M3 (local ONNX, CJK-strong — under `ort` only) >
+/// FastEmbed (offline last-resort, lazy download).
+#[cfg(not(feature = "ort"))]
 const AUTO_CHAIN: &[EmbeddingProvider] = &[
     EmbeddingProvider::OpenAiCompat,
     EmbeddingProvider::Voyage,
     EmbeddingProvider::OpenAi,
     EmbeddingProvider::Ollama,
+    EmbeddingProvider::FastEmbed,
+];
+
+#[cfg(feature = "ort")]
+const AUTO_CHAIN: &[EmbeddingProvider] = &[
+    EmbeddingProvider::OpenAiCompat,
+    EmbeddingProvider::Voyage,
+    EmbeddingProvider::OpenAi,
+    EmbeddingProvider::Ollama,
+    EmbeddingProvider::BgeM3,
     EmbeddingProvider::FastEmbed,
 ];
 

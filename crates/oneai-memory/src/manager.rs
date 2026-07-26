@@ -267,6 +267,20 @@ impl MemoryManager {
         &self.fact_archive
     }
 
+    /// Attach (or replace) the dense-vector backend backing the archival
+    /// tier's semantic recall. When `embedding_service` is also set, the
+    /// caller should pass an `InMemoryVectorBackend` (default stack) sized to
+    /// `embedding_service.actual_dimension()` — this is what `AppBuilder`'s
+    /// default-retrieval-stack wiring does. Pass `None` to detach (recall
+    /// falls back to brute-force cosine over the fact HashMap).
+    ///
+    /// Existing embedded facts are re-indexed into the new backend (see
+    /// [`MemoryFactStore::set_vector_backend`]), so this is safe to call after
+    /// `load_persisted_facts` has populated the archive from SQLite.
+    pub async fn set_vector_backend(&self, backend: Option<Arc<dyn oneai_core::traits::VectorBackend>>) {
+        self.fact_archive.set_vector_backend(backend).await;
+    }
+
     /// The owning user id (cross-session habit namespace). Empty if unset.
     pub async fn user_id(&self) -> String {
         self.user_id.read().await.clone()
