@@ -11,6 +11,9 @@
 //! - `StateReducer`: ScopeState reduction for parallel agents
 //! - `TaskScheduler`: Platform-independent task scheduling
 //! - `StatePersistence`: Checkpoint save/load for agent state recovery
+//! - `VectorStore` / `VectorBackend` / `KeywordBackend` / `RetrievalBackend`:
+//!   pluggable retrieval backends (legacy minimal vs. hybrid-with-filters)
+//! - `RerankerProvider`: second-stage cross-encoder rerank
 
 use crate::error::Result;
 use crate::types::*;
@@ -528,6 +531,365 @@ pub struct VectorSearchResult {
 
     /// Associated metadata.
     pub metadata: HashMap<String, String>,
+}
+
+// ─── Retrieval backend abstractions ─────────────────────────────────────────
+//
+// The legacy `VectorStore` trait above is intentionally minimal (upsert/search/
+// delete, no filters, no keyword path) and is preserved for backward
+// compatibility. The traits below supersede it for real retrieval work:
+//
+// - `VectorBackend`  — low-level dense vector ANN/KNN with metadata filtering
+// - `KeywordBackend`  — low-level lexical (BM25 / learned-sparse) search
+// - `RetrievalBackend`— composite hybrid retrieval (what app-supplied backends
+//                       like Qdrant implement directly, bypassing the
+//                       framework's RRF fusion when the backend does hybrid
+//                       natively)
+// - `RerankerProvider` — second-stage cross-encoder rerank
+//
+// Design principle: these traits MUST NOT leak storage-internal types (no
+// sqlite connection, no tantivy index handle, no ort session). An app that
+// brings its own Qdrant/Milvus/pgvector/Elasticsearch implements against the
+// public trait surface, not against framework internals.
+//
+// Non-negotiable default: the framework's reference pipeline
+// (`oneai_vector::StandardRetrievalPipeline`) runs BM25 + dense → RRF(k=60)
+// → rerank (top-150 → top-K), which Anthropic's "Contextual Retrieval"
+// evaluation showed cuts top-20 retrieval failure rate by 67%. An app that
+// implements its own `RetrievalBackend` and skips the keyword/sparse leg will
+// see measurable degradation on Chinese short queries and unique-identifier
+// lookups (error codes, proper nouns) — the trait docs say so explicitly so
+// that dropping BM25 is an informed decision, not a silent downgrade.
+
+/// Metadata attached to a stored vector or document — a flat string map.
+pub type Metadata = HashMap<String, String>;
+
+/// Metadata filter applied to a retrieval request.
+///
+/// All predicates are AND-combined. Empty filter = no filtering.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Filter {
+    /// Require `metadata[key] == value` for every entry.
+    pub metadata_eq: Metadata,
+    /// Require `metadata[key]` to be one of the listed values.
+    pub metadata_in: HashMap<String, Vec<String>>,
+}
+
+impl Filter {
+    /// Create an empty (match-all) filter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Require `metadata[key] == value`.
+    pub fn with_eq(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata_eq.insert(key.into(), value.into());
+        self
+    }
+
+    /// Require `metadata[key] ∈ values`.
+    pub fn with_in(mut self, key: impl Into<String>, values: Vec<String>) -> Self {
+        self.metadata_in.insert(key.into(), values);
+        self
+    }
+
+    /// Whether the filter matches a given metadata map.
+    pub fn matches(&self, meta: &Metadata) -> bool {
+        for (k, v) in &self.metadata_eq {
+            if meta.get(k) != Some(v) {
+                return false;
+            }
+        }
+        for (k, vs) in &self.metadata_in {
+            match meta.get(k) {
+                Some(mv) if vs.iter().any(|v| v == mv) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+/// Which retrieval legs to run for a [`RetrievalRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SearchMode {
+    /// Dense vector ANN/KNN only.
+    Vector,
+    /// Lexical (BM25 / sparse) only.
+    Keyword,
+    /// Run both legs and fuse (RRF by default).
+    #[default]
+    Hybrid,
+}
+
+/// How to fuse multi-leg retrieval results.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum FusionMode {
+    /// Reciprocal Rank Fusion (Cormack et al. 2009): `Σ 1/(k + rank)`.
+    ///
+    /// `k` defaults to 60 (the empirical constant from the original paper,
+    /// used by Weaviate/Milvus and Anthropic's reference pipeline). Per-leg
+    /// weights default to 1.0; supply weights to bias dense vs. lexical.
+    Rrf {
+        /// RRF constant. Default 60.
+        k: u32,
+        /// Optional per-leg weights, aligned with the legs' result order.
+        weights: Option<Vec<f32>>,
+    },
+    /// Distribution-Based Score Fusion (Qdrant v1.11): 3-sigma normalize each
+    /// leg's raw scores then sum. Only use when retrievers are well-calibrated
+    /// and an eval set confirms it beats weighted RRF.
+    Dbsf,
+}
+
+impl Default for FusionMode {
+    fn default() -> Self {
+        FusionMode::Rrf { k: 60, weights: None }
+    }
+}
+
+/// A single retrieval query — describes what to search for and how.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RetrievalRequest {
+    /// The text query (used for the lexical leg and, if no embedding is
+    /// supplied, as the basis for the dense leg by an external embedder).
+    pub text: String,
+    /// Optional pre-computed query embedding for the dense leg. `None` means
+    /// the caller expects the backend/pipeline to compute it via an
+    /// `EmbeddingService`; a backend that cannot will run keyword-only.
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+    /// Maximum results to return after fusion + rerank.
+    #[serde(default = "default_retrieval_top_k")]
+    pub top_k: usize,
+    /// Optional metadata filter (AND-combined).
+    #[serde(default)]
+    pub filter: Option<Filter>,
+    /// Which legs to run.
+    #[serde(default)]
+    pub mode: SearchMode,
+    /// How to fuse the legs.
+    #[serde(default)]
+    pub fusion: FusionMode,
+}
+
+fn default_retrieval_top_k() -> usize {
+    5
+}
+
+impl RetrievalRequest {
+    /// Keyword-only retrieval.
+    pub fn keyword(text: impl Into<String>, top_k: usize) -> Self {
+        Self {
+            text: text.into(),
+            embedding: None,
+            top_k,
+            filter: None,
+            mode: SearchMode::Keyword,
+            fusion: FusionMode::default(),
+        }
+    }
+
+    /// Vector-only retrieval with a pre-computed query embedding.
+    pub fn vector(text: impl Into<String>, embedding: Vec<f32>, top_k: usize) -> Self {
+        Self {
+            text: text.into(),
+            embedding: Some(embedding),
+            top_k,
+            filter: None,
+            mode: SearchMode::Vector,
+            fusion: FusionMode::default(),
+        }
+    }
+
+    /// Hybrid retrieval (dense + lexical, fused via RRF).
+    pub fn hybrid(text: impl Into<String>, embedding: Vec<f32>, top_k: usize) -> Self {
+        Self {
+            text: text.into(),
+            embedding: Some(embedding),
+            top_k,
+            filter: None,
+            mode: SearchMode::Hybrid,
+            fusion: FusionMode::default(),
+        }
+    }
+
+    /// Attach a metadata filter.
+    pub fn with_filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Override the fusion strategy.
+    pub fn with_fusion(mut self, fusion: FusionMode) -> Self {
+        self.fusion = fusion;
+        self
+    }
+}
+
+/// A raw hit from a single retrieval leg (vector or keyword).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorHit {
+    /// The stored vector/document ID.
+    pub id: String,
+    /// Leg-specific score (cosine similarity, BM25, etc. — not normalized).
+    pub score: f32,
+    /// Associated metadata.
+    pub metadata: Metadata,
+}
+
+/// A fused retrieval hit — content + score + optional embedding, ready for
+/// context injection or reranking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalHit {
+    /// The stored document/chunk ID.
+    pub id: String,
+    /// The retrieved text content.
+    pub content: String,
+    /// Fused relevance score (higher = more relevant).
+    pub score: f32,
+    /// The chunk's embedding, if the backend retains it (for downstream
+    /// reranking or visualization). `None` for keyword-only backends.
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+    /// Associated metadata.
+    pub metadata: Metadata,
+}
+
+/// A document to be reranked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankDoc {
+    /// The document/chunk ID.
+    pub id: String,
+    /// The document text.
+    pub content: String,
+}
+
+impl RerankDoc {
+    /// Create a rerank candidate.
+    pub fn new(id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self { id: id.into(), content: content.into() }
+    }
+}
+
+/// A reranked document with its new score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RankedDoc {
+    /// The document/chunk ID.
+    pub id: String,
+    /// The document text.
+    pub content: String,
+    /// Cross-encoder relevance score (higher = more relevant).
+    pub score: f32,
+}
+
+/// Low-level dense vector backend (ANN/KNN) with metadata filtering.
+///
+/// Implementations: `oneai_vector::InMemoryVectorBackend` (brute cosine),
+/// `SqliteVecBackend` (exact KNN, mobile/small), `UsearchBackend` (HNSW),
+/// and app-supplied backends (Qdrant, LanceDB, pgvector, …).
+///
+/// `dimension()` must be fixed for the lifetime of an instance — backends
+/// use it to size storage at construction.
+#[async_trait]
+pub trait VectorBackend: Send + Sync {
+    /// Upsert a vector with metadata. If `id` exists it is replaced.
+    async fn upsert(&self, id: &str, embedding: &[f32], metadata: Metadata) -> Result<()>;
+
+    /// Search for vectors similar to `query`, returning at most `top_k` hits
+    /// that satisfy `filter` (pre-filter where supported).
+    async fn search(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<VectorHit>>;
+
+    /// Delete a vector by ID. No-op if absent.
+    async fn delete(&self, id: &str) -> Result<()>;
+
+    /// The fixed dimension of vectors this backend accepts.
+    fn dimension(&self) -> usize;
+}
+
+/// Low-level lexical retrieval backend (BM25 / learned-sparse).
+///
+/// Implementations: `oneai_vector::TantivyBm25Backend` (Tantivy + jieba CJK),
+/// and app-supplied backends (Qdrant sparse, Elasticsearch, …).
+#[async_trait]
+pub trait KeywordBackend: Send + Sync {
+    /// Upsert a document's text + metadata for lexical indexing.
+    async fn upsert_doc(&self, id: &str, text: &str, metadata: Metadata) -> Result<()>;
+
+    /// Lexical search for `query`, returning at most `top_k` hits that satisfy
+    /// `filter`.
+    async fn search(
+        &self,
+        query: &str,
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<VectorHit>>;
+
+    /// Delete a document by ID. No-op if absent.
+    async fn delete(&self, id: &str) -> Result<()>;
+}
+
+/// Composite hybrid retrieval backend.
+///
+/// This is the trait an app-supplied backend (e.g. Qdrant, which does dense +
+/// BM25 + RRF natively) implements directly — in that case `search_hybrid`
+/// fuses internally and the framework's `StandardRetrievalPipeline` is not
+/// used. For embedded deployments, `oneai_vector::StandardRetrievalPipeline`
+/// composes a `VectorBackend` + `KeywordBackend` + optional `RerankerProvider`
+/// via RRF and implements this trait.
+///
+/// `upsert_chunk` does NOT take a `Chunk` type — it takes raw `content` +
+/// `metadata` + optional `embedding` so the trait stays free of `oneai-rag`
+/// types and both RAG documents and memory entries can share one backend.
+#[async_trait]
+pub trait RetrievalBackend: Send + Sync {
+    /// Run a hybrid/keyword/vector retrieval per [`RetrievalRequest`] and
+    /// return fused, ranked hits.
+    async fn search_hybrid(&self, req: &RetrievalRequest) -> Result<Vec<RetrievalHit>>;
+
+    /// Upsert a chunk: index its text for the lexical leg and, when an
+    /// embedding is supplied, store it for the dense leg.
+    async fn upsert_chunk(
+        &self,
+        id: &str,
+        content: &str,
+        metadata: Metadata,
+        embedding: Option<&[f32]>,
+    ) -> Result<()>;
+
+    /// Delete a chunk (both legs) by ID. No-op if absent.
+    async fn delete(&self, id: &str) -> Result<()>;
+}
+
+/// Second-stage cross-encoder reranker.
+///
+/// Implementations: `oneai_vector::BgeRerankerOnnx` (local ONNX, Apache-2.0
+/// `bge-reranker-v2-m3`), and app-supplied cloud rerankers (Cohere rerank-v4,
+/// Voyage rerank-2.5). Reranking is the last pipeline step and, per Anthropic's
+/// Contextual Retrieval evaluation, cuts retrieval failure rate by 67% on top
+/// of hybrid + BM25.
+#[async_trait]
+pub trait RerankerProvider: Send + Sync {
+    /// Rerank `docs` against `query`, returning the top `top_n` by
+    /// cross-encoder score.
+    async fn rerank(
+        &self,
+        query: &str,
+        docs: &[RerankDoc],
+        top_n: usize,
+    ) -> Result<Vec<RankedDoc>>;
+
+    /// The reranker model name (for logging/identification).
+    fn model(&self) -> &str;
 }
 
 // ─── MemoryPersistence ─────────────────────────────────────────────────────
