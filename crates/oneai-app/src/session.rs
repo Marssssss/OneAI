@@ -879,7 +879,7 @@ impl AppSession {
                 )
                 .with_fact_extraction(
                     domain.memory_profile.extraction_schema.clone(),
-                    self.app.memory_manager.fact_archive().clone(),
+                    self.app.memory_manager.clone(),
                     self.app.memory_manager.user_id().await,
                     self.session_id.clone(),
                 ));
@@ -952,7 +952,7 @@ impl AppSession {
                 )
                 .with_fact_extraction(
                     default_schema,
-                    self.app.memory_manager.fact_archive().clone(),
+                    self.app.memory_manager.clone(),
                     self.app.memory_manager.user_id().await,
                     self.session_id.clone(),
                 ));
@@ -1144,7 +1144,7 @@ impl AppSession {
             )
             .with_fact_extraction(
                 domain.memory_profile.extraction_schema.clone(),
-                self.app.memory_manager.fact_archive().clone(),
+                self.app.memory_manager.clone(),
                 self.app.memory_manager.user_id().await,
                 self.session_id.clone(),
             )
@@ -1156,7 +1156,7 @@ impl AppSession {
                     oneai_core::FactType::new("decision"),
                     oneai_core::FactType::new("open_task"),
                 ],
-                self.app.memory_manager.fact_archive().clone(),
+                self.app.memory_manager.clone(),
                 self.app.memory_manager.user_id().await,
                 self.session_id.clone(),
             )

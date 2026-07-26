@@ -681,6 +681,35 @@ impl Default for MemoryManager {
     }
 }
 
+// ─── FactSink ─────────────────────────────────────────────────────────────
+
+/// Sink for compression-extracted facts: routes them through the canonical
+/// embed → upsert → persist path ([`MemoryManager::archive_facts`]) rather
+/// than raw-upserting into the fact store.
+///
+/// **Why this exists (§12.1 fix):** the compression-coupled `FactExtractor`
+/// used to call `MemoryFactStore::upsert` directly, bypassing
+/// `MemoryManager::archive_facts`. That left extracted facts with
+/// `embedding: None` (invisible to semantic recall — the vector backend
+/// only indexes facts that carry an embedding) and never wrote them to the
+/// persistence backend (lost on restart). Routing through the manager makes
+/// extracted facts both semantically recallable and durable, closing the
+/// most severe single-point gap in the memory system.
+#[async_trait::async_trait]
+pub trait FactSink: Send + Sync {
+    /// Embed, conflict-resolve, and durably persist a batch of extracted facts.
+    async fn archive_facts(&self, facts: Vec<oneai_core::MemoryFact>);
+}
+
+#[async_trait::async_trait]
+impl FactSink for MemoryManager {
+    async fn archive_facts(&self, facts: Vec<oneai_core::MemoryFact>) {
+        // Delegate to the inherent method (fully-qualified to disambiguate
+        // from this trait method of the same name).
+        MemoryManager::archive_facts(self, facts).await;
+    }
+}
+
 // ─── ArchivalDiscardedSink ──────────────────────────────────────────────────
 
 /// `DiscardedSink` backed by a `MemoryManager`.

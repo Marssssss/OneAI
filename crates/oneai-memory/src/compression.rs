@@ -37,7 +37,9 @@ pub struct ContextCompressor {
     /// (the "压缩即丢失" closure). None → discarded turns are not extracted.
     fact_extractor: Option<Arc<crate::fact_extraction::FactExtractor>>,
     /// Archival sink for extracted facts. Required when `fact_extractor` is set.
-    archive: Option<Arc<crate::fact_store::MemoryFactStore>>,
+    /// Routed through `MemoryManager::archive_facts` (embed + persist) so
+    /// extracted facts are semantically recallable and survive restart.
+    fact_sink: Option<Arc<dyn crate::FactSink>>,
     /// Namespace context for extracted facts.
     user_id: String,
     session_id: String,
@@ -52,7 +54,7 @@ impl ContextCompressor {
             summarizer,
             compression_template: None,
             fact_extractor: None,
-            archive: None,
+            fact_sink: None,
             user_id: String::new(),
             session_id: String::new(),
         }
@@ -71,7 +73,7 @@ impl ContextCompressor {
             summarizer,
             compression_template: Some(template),
             fact_extractor: None,
-            archive: None,
+            fact_sink: None,
             user_id: String::new(),
             session_id: String::new(),
         }
@@ -79,12 +81,14 @@ impl ContextCompressor {
 
     /// Enable compression-coupled fact extraction: on each compression, the
     /// discarded (summarized-away) turns are run through a `FactExtractor`
-    /// guided by `schema`, and the resulting facts are conflict-resolved into
-    /// `archive`. Reuses this compressor's LLM provider for extraction.
+    /// guided by `schema`, and the resulting facts are routed through the
+    /// `FactSink` (the canonical embed → upsert → persist path) so they are
+    /// semantically recallable and survive restart. Reuses this compressor's
+    /// LLM provider for extraction.
     pub fn with_fact_extraction(
         mut self,
         schema: Vec<oneai_core::FactType>,
-        archive: Arc<crate::fact_store::MemoryFactStore>,
+        fact_sink: Arc<dyn crate::FactSink>,
         user_id: impl Into<String>,
         session_id: impl Into<String>,
     ) -> Self {
@@ -92,7 +96,7 @@ impl ContextCompressor {
             self.summarizer.clone(),
             schema,
         )));
-        self.archive = Some(archive);
+        self.fact_sink = Some(fact_sink);
         self.user_id = user_id.into();
         self.session_id = session_id.into();
         self
@@ -307,8 +311,8 @@ impl ContextCompressor {
         if discarded.is_empty() {
             return;
         }
-        let (extractor, archive) = match (&self.fact_extractor, &self.archive) {
-            (Some(ext), Some(arch)) => (ext.clone(), arch.clone()),
+        let (extractor, sink) = match (&self.fact_extractor, &self.fact_sink) {
+            (Some(ext), Some(sink)) => (ext.clone(), sink.clone()),
             _ => return, // extraction not configured
         };
         match extractor.extract(discarded, &self.user_id, &self.session_id).await {
@@ -319,9 +323,12 @@ impl ContextCompressor {
                         "archived facts extracted from {} discarded messages",
                         discarded.len()
                     );
-                    for fact in facts {
-                        archive.upsert(fact).await;
-                    }
+                    // Route through the FactSink (MemoryManager::archive_facts)
+                    // so extracted facts are embedded for semantic recall and
+                    // durably persisted — NOT raw-upserted (which left them
+                    // un-embedded, un-persisted, and invisible to semantic
+                    // recall after restart). §12.1.
+                    sink.archive_facts(facts).await;
                 }
             }
             Err(e) => {
@@ -436,11 +443,14 @@ mod closure_tests {
 
     #[tokio::test]
     async fn compression_archives_extracted_facts_from_discarded_turns() {
-        let archive = Arc::new(crate::fact_store::MemoryFactStore::new());
+        // Route through a real MemoryManager so the extracted facts traverse
+        // the canonical embed → upsert → persist path (FactSink), matching
+        // production — not a raw FactStore upsert that left facts un-embedded.
+        let manager = Arc::new(crate::manager::MemoryManager::new());
         let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider))
             .with_fact_extraction(
                 vec![FactType::new("user_tooling_pref")],
-                archive.clone(),
+                manager.clone(),
                 "alice",
                 "s1",
             );
@@ -449,7 +459,7 @@ mod closure_tests {
         // The discarded segment was non-empty and carried out.
         assert!(!result.discarded_messages.is_empty());
         // And its content was extracted + archived (not lost).
-        let facts = archive.all().await;
+        let facts = manager.fact_archive().all().await;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].subject, "user.package_manager");
         assert_eq!(facts[0].content, "pnpm");
@@ -458,11 +468,11 @@ mod closure_tests {
 
     #[tokio::test]
     async fn compression_without_extraction_does_not_archive() {
-        let archive = Arc::new(crate::fact_store::MemoryFactStore::new());
+        let manager = Arc::new(crate::manager::MemoryManager::new());
         // No with_fact_extraction → no archival side-effect.
         let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider));
         let _ = compressor.compress(&long_conversation()).await.unwrap();
-        assert!(archive.all().await.is_empty());
+        assert!(manager.fact_archive().all().await.is_empty());
     }
 
     #[tokio::test]
@@ -488,5 +498,49 @@ mod closure_tests {
         // The pinned first user message is NOT in the discarded segment.
         assert!(!result.discarded_messages.iter().any(|m| m.role == Role::User
             && m.text_content().contains("I use pnpm for package management.")));
+    }
+
+    /// Deterministic 4-d embedder for the routing regression below.
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl oneai_core::traits::EmbeddingService for StubEmbedder {
+        async fn embed(&self, text: &str) -> oneai_core::error::Result<Vec<f32>> {
+            Ok(vec![text.len() as f32, 1.0, 0.0, 0.0])
+        }
+        async fn embed_batch(&self, texts: &[String]) -> oneai_core::error::Result<Vec<Vec<f32>>> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts { out.push(self.embed(t).await?); }
+            Ok(out)
+        }
+        fn model(&self) -> oneai_core::traits::EmbeddingModel {
+            oneai_core::traits::EmbeddingModel::new("stub-4d")
+        }
+        fn dimension(&self) -> usize { 4 }
+    }
+
+    #[tokio::test]
+    async fn compression_routes_extracted_facts_through_embed_and_persist() {
+        // §12.1 regression: extracted facts must flow through the FactSink
+        // (MemoryManager::archive_facts → embed_fact), NOT a raw
+        // MemoryFactStore::upsert that left embedding: None (invisible to
+        // semantic recall + lost on restart). This is the single most severe
+        // memory gap; this test pins the fix.
+        let mm = Arc::new(crate::manager::MemoryManager::with_embedding(
+            crate::manager::MemoryManagerConfig::default(),
+            Arc::new(StubEmbedder),
+        ));
+        let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider))
+            .with_fact_extraction(
+                vec![FactType::new("user_tooling_pref")],
+                mm.clone(),
+                "alice",
+                "s1",
+            );
+        let _ = compressor.compress(&long_conversation()).await.unwrap();
+        let facts = mm.fact_archive().all().await;
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].embedding.is_some(),
+            "extracted fact must be embedded via FactSink → archive_facts, not raw-upserted");
+        assert_eq!(facts[0].user_id, "alice");
     }
 }
