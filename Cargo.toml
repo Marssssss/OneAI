@@ -26,6 +26,7 @@ members = [
     "crates/oneai-eval",
     "crates/oneai-studio",
     "crates/oneai-mcp",
+    "crates/oneai-vector",
     "examples/cli",
     "examples/desktop-app",
     "examples/rust",
@@ -62,6 +63,7 @@ default-members = [
     "crates/oneai-eval",
     "crates/oneai-studio",
     "crates/oneai-mcp",
+    "crates/oneai-vector",
     "examples/cli",
     "examples/desktop-app",
     "examples/rust",
@@ -114,6 +116,31 @@ indexmap = "2"
 
 # Vector search — embedded lightweight implementation (no external dependency)
 # We implement our own simple HNSW-like store in oneai-memory for maximum portability
+
+# Retrieval backend stack (oneai-vector). Versions pinned to the P0-spike-verified
+# set (2026-07-26, /tmp/oneai-spike) — see memory `rag-p0-spike-verified`.
+# sqlite-vec: static-registers vec0 via sqlite3_auto_extension (no rusqlite
+#   load_extension feature needed); exact KNN, mobile/small scale.
+# tantivy + tantivy-jieba: CJK-aware BM25 (jieba tokenizer, WithFreqsAndPositions).
+# usearch: HNSW + mmap + quantization + filtered_search (pre-filter callback).
+# ort + ndarray: ONNX runtime for BGE-M3 embedder + BGE reranker.
+# tokenizers: HuggingFace WordPiece for BGE-M3 / BGE reranker tokenization.
+sqlite-vec = "=0.1.9"
+tantivy = "0.26"
+tantivy-jieba = "0.20"
+ort = { version = "=2.0.0-rc.12", features = ["ndarray"] }
+ndarray = "0.17"
+usearch = "2.26"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+# Force `time` to 0.3.54 (the version the P0 spike lockfile used and compiled
+# clean). Lower 0.3.4x versions trip an orphan-rule E0119: their
+# `impl From<HourBase> for <HourBase as ModifierValue>::Type` (gated by the
+# `parsing` feature, on via `time`'s defaults) collides with tantivy-common's
+# blanket `impl<B> From<B> for FileSlice where B: StableDeref + Deref<Target=
+# [u8]>`. 0.3.54 restructured that impl so the collision no longer fires.
+# Tantivy 0.26 requires `time = "^0.3.47"`, so 0.3.54 satisfies it. Referenced
+# (optional, feature-gated) by oneai-vector solely to constrain the version.
+time = "=0.3.54"
 
 # Regex
 regex = "1"
@@ -172,6 +199,7 @@ oneai-wasm = { path = "crates/oneai-wasm", version = "1.0.0" }
 oneai-eval = { path = "crates/oneai-eval", version = "1.0.0" }
 oneai-studio = { path = "crates/oneai-studio", version = "1.0.0" }
 oneai-mcp = { path = "crates/oneai-mcp", version = "1.0.0" }
+oneai-vector = { path = "crates/oneai-vector", version = "1.0.0" }
 
 # WASM
 wasmtime = "45"

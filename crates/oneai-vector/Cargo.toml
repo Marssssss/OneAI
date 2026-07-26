@@ -1,0 +1,39 @@
+[package]
+name = "oneai-vector"
+description = "OneAI default retrieval backend stack — sqlite-vec / usearch / tantivy BM25 / BGE-M3 embedder / BGE reranker + RRF StandardRetrievalPipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oneai-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+# Storage backends (feature-gated). The default stack ships sqlite-vec (mobile
+# / small exact KNN), usearch (desktop/server HNSW), and tantivy (CJK BM25).
+# The ort embedder/reranker is opt-in because ort-sys downloads a prebuilt
+# libonnxruntime blob (~17s compile) and needs ONNX model files at runtime.
+sqlite-vec = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+usearch = { workspace = true, optional = true }
+tantivy = { workspace = true, optional = true }
+tantivy-jieba = { workspace = true, optional = true }
+# Transitive version pin only (not used directly) — forces tantivy's `time` to
+# 0.3.54 to dodge the orphan-rule E0119; see workspace Cargo.toml.
+time = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+
+[features]
+default = ["sqlite", "usearch", "tantivy"]
+sqlite = ["dep:sqlite-vec", "dep:rusqlite"]
+usearch = ["dep:usearch"]
+tantivy = ["dep:tantivy", "dep:tantivy-jieba", "dep:time"]
+ort = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
