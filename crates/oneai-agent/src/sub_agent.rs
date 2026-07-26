@@ -714,6 +714,10 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             structured_output: None, // Sub-agents don't have structured output validation
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None, // Sub-agents inherit trace from parent loop
+            // Sub-agents don't get their own metrics provider — they could
+            // share the parent's in a future improvement.
+            #[cfg(feature = "otel")]
+            metrics_provider: None,
             plan_mode: false, // Sub-agents never run in plan mode
             prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
         };

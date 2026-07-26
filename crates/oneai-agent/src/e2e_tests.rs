@@ -2305,3 +2305,42 @@ async fn e2e_recovery_retry_re_executes_transient_failure() {
     assert!(result.final_answer.contains("done reading"),
         "final answer should reflect the successful retry: {}", result.final_answer);
 }
+
+// ─── gap-analysis #4: OTEL metrics actually recorded during a run ────────────
+//
+// `OtelMetricsProvider` existed as bare AtomicU64 fields but was never
+// instantiated or wired into the loop — the counters stayed at zero forever.
+// This test wires one and proves inference + tool + token counters move off
+// zero during a normal tool-call → direct-answer run.
+
+#[cfg(feature = "otel")]
+#[tokio::test]
+async fn otel_metrics_recorded_during_run() {
+    let read_file = MockTool::read_file_mock();
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("read_file", serde_json::json!({"path": "/test.txt"})),
+        ScriptedResponse::direct_answer("done reading"),
+    ]);
+    let metrics = Arc::new(oneai_trace::OtelMetricsProvider::new());
+
+    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
+        inject_skills: false,
+        thinking_budget: None,
+        hard_max_iterations: Some(10),
+        metrics_provider: Some(metrics.clone()),
+        ..AgentLoopConfig::default()
+    });
+
+    let result = agent_loop.run("read /test.txt").await.unwrap();
+    assert!(result.completed, "run should complete normally");
+
+    let snap = metrics.snapshot();
+    assert!(snap.inference_request_count >= 1,
+        "inference counter must move off zero: {:?}", snap);
+    assert!(snap.total_tokens_used > 0,
+        "token counter must move off zero (MockProvider returns real usage): {:?}", snap);
+    assert!(snap.tool_call_count >= 1,
+        "tool-call counter must move off zero: {:?}", snap);
+    assert!(snap.tool_success_count >= 1,
+        "successful read_file should bump tool_success_count: {:?}", snap);
+}

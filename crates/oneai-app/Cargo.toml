@@ -35,9 +35,10 @@ oneai-mcp = { workspace = true }
 oneai-vector = { workspace = true }
 
 [features]
-# OTEL tracing helpers (trace_otel / trace_otel_http / trace_otel_config).
-# Off by default; enable to compile those builder methods.
-otel = []
+# OTEL tracing helpers (trace_otel / trace_otel_http / trace_otel_config /
+# otel_metrics). Off by default; enabling forwards to oneai-trace's `otel`
+# feature so the OTLP exporter + OtelMetricsProvider actually compile & wire.
+otel = ["oneai-trace/otel", "oneai-agent/otel"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -39,6 +39,11 @@ use crate::streaming::IncrementalStreamParser;
 use crate::hooks::{HookRegistry, ResolvedHookAction};
 use crate::structured_output::{validate_json_schema, build_retry_prompt};
 use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
+// OtelMetricsProvider is only exported by oneai-trace when its `otel` feature
+// is on (oneai-agent's `otel` feature forwards it). The metrics wiring below is
+// cfg-gated so the non-otel build stays zero-cost.
+#[cfg(feature = "otel")]
+use oneai_trace::OtelMetricsProvider;
 
 // ─── AgentLoopObserver ─────────────────────────────────────────────────────
 
@@ -610,6 +615,12 @@ pub struct AgentLoopConfig {
     /// paradigm switch, delegation, approval). When None, tracing is
     /// completely disabled (zero overhead).
     pub trace_context: Option<TraceContext>,
+    /// OTEL metrics provider — when set (and the `otel` feature is on), the
+    /// loop records real counters/histograms at the lifecycle hot paths:
+    /// inference requests + token usage, tool-call success/failure, errors.
+    /// Without the feature or when None, this is zero-cost (no field, no code).
+    #[cfg(feature = "otel")]
+    pub metrics_provider: Option<std::sync::Arc<OtelMetricsProvider>>,
     /// Plan mode — when true, tool execution is blocked entirely. Instead of
     /// running tools, the loop injects a synthetic tool result telling the
     /// model it must produce a step-by-step plan rather than executing. This
@@ -642,6 +653,8 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("context_manager", &self.context_manager.as_ref().map(|_| "Arc<ContextManager>"))
             .field("structured_output", &self.structured_output)
             .field("trace_context", &self.trace_context)
+            // metrics_provider (otel) holds atomics and is not Debug-rendered;
+            // the manual impl may omit fields, so it stays absent here.
             .field("plan_mode", &self.plan_mode)
             .finish()
     }
@@ -691,6 +704,10 @@ impl Default for AgentLoopConfig {
             structured_output: None,
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None,
+            // OTEL metrics are opt-in — AppBuilder wires the provider when the
+            // `otel` feature is on and the user enables metrics.
+            #[cfg(feature = "otel")]
+            metrics_provider: None,
             plan_mode: false,
             prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
         }
@@ -1490,6 +1507,12 @@ impl AgentLoop {
                         }
                     }
 
+                    // ─── OTEL metrics: count inference failures ────────
+                    #[cfg(feature = "otel")]
+                    if let Some(metrics) = &self.config.metrics_provider {
+                        metrics.record_error();
+                    }
+
                     // Other errors — propagate as before (terminates the loop)
                     return Err(other_err);
                 }
@@ -1510,6 +1533,15 @@ impl AgentLoop {
                     ]));
                     ctx.exit_span(&infer_span_id, SpanStatus::Ok);
                 }
+            }
+
+            // ─── OTEL metrics: record the inference + token usage ────
+            // Real counters (gap-analysis #4 — OtelMetricsProvider was never
+            // instantiated before). Cheap atomic adds; no-op when not wired.
+            #[cfg(feature = "otel")]
+            if let Some(metrics) = &self.config.metrics_provider {
+                metrics.record_inference_request();
+                metrics.record_tokens(response.usage.prompt_tokens, response.usage.completion_tokens);
             }
 
             // 4c. PostInfer interaction gate — the application layer can validate
@@ -2374,6 +2406,17 @@ impl AgentLoop {
                     let has_denied = results.iter().any(|r|
                         !r.output.success && r.output.error.as_deref().map_or(false, |e| e.starts_with("Denied"))
                     );
+
+                    // ─── OTEL metrics: record tool-call success/failure ──
+                    // Real counters per executed tool (gap-analysis #4). Borrows
+                    // `results` so the move into feed_tool_results still works.
+                    #[cfg(feature = "otel")]
+                    if let Some(metrics) = &self.config.metrics_provider {
+                        for r in &results {
+                            metrics.record_tool_call(&r.tool_name, r.output.success);
+                        }
+                    }
+
                     if has_denied {
                         state.set_final_answer("Task stopped: a required tool call was denied by the user.".to_string());
                         // Still feed results so the model sees the denial

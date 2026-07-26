@@ -81,6 +81,10 @@ pub struct AppBuilder {
     platform: Option<Platform>,
     /// Trace context (optional — for trajectory logging).
     trace_context: Option<TraceContext>,
+    /// OTEL metrics provider (optional — only when `otel` feature on).
+    /// Wired into the AgentLoop to record real counters/histograms.
+    #[cfg(feature = "otel")]
+    metrics_provider: Option<Arc<oneai_trace::OtelMetricsProvider>>,
     /// Domain packs (optional — for domain-specific configuration).
     domain_packs: Vec<DomainPack>,
     /// Owning user id (optional — namespaces cross-session habits/preferences
@@ -184,6 +188,8 @@ impl AppBuilder {
             persistence: None,
             platform: None,
             trace_context: None,
+            #[cfg(feature = "otel")]
+            metrics_provider: None,
             domain_packs: Vec::new(),
             user_id: None,
             a2a_client: None,
@@ -452,23 +458,29 @@ impl AppBuilder {
         self
     }
 
-    /// Enable OTEL tracing — exports spans to an OTEL backend via OTLP protocol.
+    /// Enable OTEL tracing — exports spans to an OTEL backend via OTLP/HTTP.
     ///
-    /// Creates an `OtlpCollector` that converts OneAI spans to OTEL format
-    /// and exports them to the specified endpoint (e.g., Jaeger, Grafana).
+    /// Creates an `OtlpCollector` backed by a real [`HttpOtlpExporter`] that
+    /// POSTs OTLP/JSON spans to `{endpoint}/v1/traces` (a standard OTEL
+    /// collector accepts these on port 4318). This used to construct a gRPC
+    /// config — which only ever warned and never delivered spans; the default
+    /// protocol is now OTLP/HTTP so spans actually reach the collector.
     ///
-    /// Requires the `otel` feature on `oneai-trace`.
+    /// Requires the `otel` feature on `oneai-trace` (forwarded by this
+    /// crate's `otel` feature).
     ///
     /// **Usage**:
     /// ```ignore
     /// let app = AppBuilder::new()
     ///     .provider(provider)
-    ///     .trace_otel("http://localhost:4317")
+    ///     .trace_otel("http://localhost:4318")
     ///     .build()?;
     /// ```
     #[cfg(feature = "otel")]
     pub fn trace_otel(mut self, endpoint: &str) -> Self {
-        let config = oneai_trace::OtlpConfig::grpc(endpoint, "oneai-agent");
+        // OTLP/HTTP — the protocol that actually exports. The endpoint should
+        // point at the collector's HTTP port (default 4318).
+        let config = oneai_trace::OtlpConfig::http(endpoint, "oneai-agent");
         let collector = oneai_trace::OtlpCollector::new(config);
         let ctx = TraceEmitter::global().create_context_with_collector(
             Arc::new(collector)
@@ -477,7 +489,8 @@ impl AppBuilder {
         self
     }
 
-    /// Enable OTEL tracing with HTTP protocol.
+    /// Enable OTEL tracing with explicit HTTP protocol (alias of `trace_otel`
+    /// now that the default is already HTTP — kept for API stability).
     #[cfg(feature = "otel")]
     pub fn trace_otel_http(mut self, endpoint: &str) -> Self {
         let config = oneai_trace::OtlpConfig::http(endpoint, "oneai-agent");
@@ -497,6 +510,27 @@ impl AppBuilder {
             Arc::new(collector)
         );
         self.trace_context = Some(ctx);
+        self
+    }
+
+    /// Wire an [`OtelMetricsProvider`] into the agent loop — the loop records
+    /// real OTEL counters/histograms at inference + tool-call + error hot
+    /// paths (gap-analysis #4: the provider existed but was never instantiated).
+    ///
+    /// Combine with `trace_otel(...)` for full OTEL observability (spans +
+    /// metrics). Without this call, metrics stay opt-in None (zero overhead).
+    ///
+    /// **Usage**:
+    /// ```ignore
+    /// let app = AppBuilder::new()
+    ///     .provider(provider)
+    ///     .trace_otel("http://localhost:4318")
+    ///     .otel_metrics(Arc::new(OtelMetricsProvider::new()))
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "otel")]
+    pub fn otel_metrics(mut self, provider: Arc<oneai_trace::OtelMetricsProvider>) -> Self {
+        self.metrics_provider = Some(provider);
         self
     }
 
@@ -1771,6 +1805,8 @@ impl AppBuilder {
             workflow_executor,
             platform,
             trace_context: self.trace_context,
+            #[cfg(feature = "otel")]
+            metrics_provider: self.metrics_provider,
             domain_pack: merged_domain_pack,
             a2a_client: self.a2a_client,
             wasm_runtime: self.wasm_runtime,
@@ -1838,6 +1874,10 @@ pub struct App {
     pub platform: Platform,
     /// Trace context (optional — for trajectory logging).
     pub trace_context: Option<TraceContext>,
+    /// OTEL metrics provider (only when `otel` feature on). Wired into the
+    /// AgentLoop config by AppSession.
+    #[cfg(feature = "otel")]
+    pub metrics_provider: Option<Arc<oneai_trace::OtelMetricsProvider>>,
     /// Domain pack (optional — for domain-specific configuration).
     pub domain_pack: Option<Arc<MergedDomainPack>>,
     /// A2A client (optional — for inter-agent communication).

@@ -231,6 +231,11 @@ struct AppResources {
     /// The working-state project scope (cwd / repo). Threaded into the loop so
     /// working-state events land in the right per-project namespace.
     working_state_project: String,
+    /// OTEL metrics provider — propagated into the AgentLoopConfig so the loop
+    /// records real counters/histograms (gap-analysis #4). Only present under
+    /// the `otel` feature.
+    #[cfg(feature = "otel")]
+    metrics_provider: Option<Arc<oneai_trace::OtelMetricsProvider>>,
 }
 
 impl AppSession {
@@ -291,6 +296,8 @@ impl AppSession {
                     .ok()
                     .and_then(|p| p.to_str().map(|s| s.to_string()))
                     .unwrap_or_default(),
+                #[cfg(feature = "otel")]
+                metrics_provider: app.metrics_provider.clone(),
             }),
             conversation,
             session_id,
@@ -880,6 +887,10 @@ impl AppSession {
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
+                // Wire OTEL metrics into the loop (gap-analysis #4) — the
+                // provider is built in AppBuilder via `otel_metrics(...)`.
+                #[cfg(feature = "otel")]
+                metrics_provider: self.app.metrics_provider.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
                 token_budget: Some(oneai_core::budget::TokenBudget::new(DEFAULT_RUN_TOKEN_BUDGET)),
                 ..AgentLoopConfig::default()
@@ -960,6 +971,10 @@ impl AppSession {
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
+                // Wire OTEL metrics into the loop (gap-analysis #4) — the
+                // provider is built in AppBuilder via `otel_metrics(...)`.
+                #[cfg(feature = "otel")]
+                metrics_provider: self.app.metrics_provider.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
                 token_budget: Some(oneai_core::budget::TokenBudget::new(DEFAULT_RUN_TOKEN_BUDGET)),
                 ..AgentLoopConfig::default()

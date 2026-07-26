@@ -9,7 +9,7 @@ repository.workspace = true
 [features]
 default = ["trace"]
 trace = []
-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+otel = ["dep:reqwest"]
 
 [dependencies]
 serde = { workspace = true }
@@ -19,9 +19,12 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-opentelemetry = { workspace = true, optional = true }
-opentelemetry_sdk = { workspace = true, optional = true }
-opentelemetry-otlp = { workspace = true, optional = true }
+# Only pulled when the `otel` feature is on — powers the real OTLP/HTTP exporter
+# (HttpOtlpExporter). All outbound HTTP goes through reqwest per CLAUDE.md so it
+# honors HTTPS_PROXY/NO_PROXY uniformly. The opentelemetry SDK deps are left in
+# the workspace for a future true-gRPC exporter; this crate uses reqwest for the
+# OTLP/JSON wire format directly.
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

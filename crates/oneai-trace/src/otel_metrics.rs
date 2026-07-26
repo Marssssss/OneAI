@@ -28,7 +28,7 @@
 //! When a real OTEL SDK pipeline is configured, the metrics can be exported
 //! via OTLP to Prometheus, Grafana, or other backends.
 
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 // ─── MetricsSnapshot ──────────────────────────────────────────────

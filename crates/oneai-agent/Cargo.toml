@@ -29,6 +29,11 @@ oneai-workflow = { workspace = true }
 oneai-tool = { workspace = true }
 oneai-trace = { workspace = true }
 
+[features]
+# OTEL metrics wiring (AgentLoopConfig.metrics_provider → OtelMetricsProvider).
+# Forwards to oneai-trace's `otel` feature so the provider type is available.
+otel = ["oneai-trace/otel"]
+
 [dev-dependencies]
 chrono = { workspace = true }
 tempfile = "3"

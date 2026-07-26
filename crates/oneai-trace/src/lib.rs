@@ -82,7 +82,11 @@ pub use metrics::TraceMetrics;
 
 // OTEL exports — available when both trace and otel features are enabled
 #[cfg(all(feature = "trace", feature = "otel"))]
-pub use otel_exporter::{OtlpCollector, OtlpConfig, OtlpProtocol, span_kind_to_otel, span_status_to_otel, event_kind_to_otel_name};
+pub use otel_exporter::{
+    OtlpCollector, OtlpConfig, OtlpProtocol, OtlpExporter, ExportBatch,
+    HttpOtlpExporter, InMemoryOtlpExporter,
+    span_kind_to_otel, span_status_to_otel, event_kind_to_otel_name,
+};
 #[cfg(all(feature = "trace", feature = "otel"))]
 pub use otel_metrics::{OtelMetricsProvider, MetricsSnapshot};
 
