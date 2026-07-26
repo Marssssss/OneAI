@@ -1738,6 +1738,19 @@ impl AgentLoop {
                     }
                 }
                 AgentDecision::ToolCalls { calls } => {
+                    // ─── Malformed-args feedback (Reflexion) ──────────────────
+                    // Drop tool calls whose args fail to parse and inject a
+                    // self-correction `tool_result` for each, so the model
+                    // retries with valid JSON instead of being silently
+                    // dispatched with empty args (the old
+                    // `unwrap_or(json!({}))` swallow — the "malformed output
+                    // not fed back" hot-path gap).
+                    let calls = self.filter_malformed_tool_args(
+                        calls,
+                        &mut state,
+                        &response.message.content,
+                    );
+
                     observer.on_tool_calls(&calls);
 
                     // ─── Trace: log tool calls ──────────────────────────
@@ -2539,8 +2552,21 @@ impl AgentLoop {
         for block in &response.message.content {
             match block {
                 ContentBlock::ToolCall { id, name, args } => {
-                    let args_value: serde_json::Value = serde_json::from_str(args)
-                        .unwrap_or_else(|_| serde_json::json!({}));
+                    // Parse tool args via the shared helper. Malformed args
+                    // fall back to empty `{}` here; the `ToolCalls` branch
+                    // re-derives the raw string and feeds a clear error back
+                    // to the model (Reflexion) rather than silently dispatching.
+                    let args_value: serde_json::Value = self
+                        .parse_tool_args(args)
+                        .unwrap_or_else(|err| {
+                            tracing::warn!(
+                                tool = %name,
+                                call_id = %id,
+                                error = %err,
+                                "malformed tool args at parse_decision"
+                            );
+                            serde_json::json!({})
+                        });
                     if name == "delegate" {
                         if let Some(task) = args_value.get("task").and_then(|v| v.as_str()) {
                             let agent_type_str = args_value.get("agent_type")
@@ -2628,6 +2654,74 @@ impl AgentLoop {
             return Ok(AgentDecision::ToolCalls { calls: tool_calls });
         }
         Ok(AgentDecision::DirectAnswer { text: text_parts.join("\n") })
+    }
+
+    /// Parse a tool-call's raw args string into a JSON value. Returns the
+    /// parse error string on failure. The single parse site for tool args —
+    /// a future fuzzy-repair layer (ThreeLayerParser) can be wired in here.
+    fn parse_tool_args(&self, raw: &str) -> std::result::Result<serde_json::Value, String> {
+        serde_json::from_str::<serde_json::Value>(raw).map_err(|e| e.to_string())
+    }
+
+    /// Re-derive the raw args string for a tool-call id from the response's
+    /// content blocks. `parse_decision` consumed the block into a parsed
+    /// `Value` (empty on failure); the `ToolCalls` branch re-reads the raw
+    /// string to detect malformed args for Reflexion feedback.
+    fn raw_args_for<'a>(content: &'a [oneai_core::ContentBlock], id: &str) -> Option<&'a str> {
+        content.iter().find_map(|block| match block {
+            oneai_core::ContentBlock::ToolCall { id: bid, args, .. } if bid == id => {
+                Some(args.as_str())
+            }
+            _ => None,
+        })
+    }
+
+    /// Drop tool calls whose args fail to parse, injecting a self-correction
+    /// `tool_result` for each (the Reflexion/SWE-agent "feed errors back"
+    /// pattern). The model learns its args were malformed and retries,
+    /// instead of the call being silently dispatched with empty args (the old
+    /// `serde_json::from_str(args).unwrap_or(json!({}))` swallow). Mirrors
+    /// the PreToolUse deny path's `tool_result` injection.
+    ///
+    /// Empty/absent raw args are treated as well-formed (explicit no-args
+    /// calls) to avoid false positives on tools that take no arguments.
+    fn filter_malformed_tool_args(
+        &self,
+        calls: Vec<ToolCallRequest>,
+        state: &mut LoopState,
+        content: &[oneai_core::ContentBlock],
+    ) -> Vec<ToolCallRequest> {
+        let mut kept = Vec::with_capacity(calls.len());
+        for call in calls {
+            let well_formed = match Self::raw_args_for(content, &call.id) {
+                None => true, // nothing to recheck — assume parse_decision accepted it
+                Some(raw) if raw.trim().is_empty() => true, // explicit no-args
+                Some(raw) => match self.parse_tool_args(raw) {
+                    Ok(_) => true,
+                    Err(err) => {
+                        tracing::warn!(
+                            tool = %call.name,
+                            call_id = %call.id,
+                            error = %err,
+                            "malformed tool args — feeding back to model for self-correction"
+                        );
+                        state.conversation.add_message(Message::tool_result(
+                            call.id.clone(),
+                            format!(
+                                "Error: malformed arguments for tool `{}` ({err}). \
+                                 Please reissue the `{}` tool call with valid JSON arguments.",
+                                call.name, call.name
+                            ),
+                        ));
+                        false
+                    }
+                },
+            };
+            if well_formed {
+                kept.push(call);
+            }
+        }
+        kept
     }
 
     async fn execute_tool_calls(&self, calls: Vec<ToolCallRequest>) -> Result<Vec<ToolCallResult>> {

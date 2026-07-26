@@ -206,6 +206,53 @@ async fn e2e_scenario_2_single_tool_call() {
     assert_eq!(log[0].args["path"], "/test.txt");
 }
 
+// ─── Malformed-args feedback (Reflexion) ────────────────────────────────────
+
+#[tokio::test]
+async fn malformed_tool_args_fed_back_not_silently_dispatched() {
+    // §agent-loop hot-path gap fix: a tool call with malformed JSON args
+    // must NOT be silently dispatched with empty args (the old
+    // `serde_json::from_str(args).unwrap_or(json!({}))` swallow). Instead a
+    // tool_result error is injected back into the conversation so the model
+    // can self-correct next iteration (Reflexion/SWE-agent pattern).
+    let read_file = MockTool::read_file_mock_with_content("should not be reached");
+    let read_file_log = read_file.call_log();
+
+    let provider = MockProvider::from_script(vec![
+        // Malformed args — not valid JSON. Must be dropped + fed back.
+        ScriptedResponse::raw_tool_call("read_file", "{path: /test.txt, trailing,}"),
+        // Model self-corrects and answers directly.
+        ScriptedResponse::direct_answer("recovered"),
+    ]);
+
+    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
+        inject_skills: false,
+        thinking_budget: None,
+        hard_max_iterations: Some(10),
+        ..AgentLoopConfig::default()
+    });
+
+    let result = agent_loop.run("read /test.txt").await.unwrap();
+    assert!(result.completed);
+
+    // The malformed call was NOT dispatched to the tool.
+    let log = read_file_log.lock().await;
+    assert!(log.is_empty(),
+        "malformed-args call must not be dispatched with empty args, got {log:?}");
+
+    // A feedback tool_result was injected into the conversation.
+    let feedback_injected = result.conversation.messages.iter()
+        .flat_map(|m| m.content.iter())
+        .any(|block| match block {
+            oneai_core::ContentBlock::ToolResult { content, .. } => {
+                content.to_lowercase().contains("malformed arguments")
+            }
+            _ => false,
+        });
+    assert!(feedback_injected,
+        "expected a 'malformed arguments' tool_result feedback in the conversation");
+}
+
 // ─── Scenario 3: Multi-step tool calls ───────────────────────────────────────
 
 #[tokio::test]

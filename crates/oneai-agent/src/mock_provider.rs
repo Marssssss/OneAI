@@ -131,6 +131,26 @@ impl ScriptedResponse {
         }
     }
 
+    /// Like `tool_call` but takes the raw args string verbatim — lets tests
+    /// inject MALFORMED args (invalid JSON) to exercise the AgentLoop's
+    /// malformed-args feedback path. Production tool calls always carry
+    /// valid JSON; this is a test-only seam.
+    pub fn raw_tool_call(tool_name: &str, args_str: &str) -> Self {
+        Self {
+            content: vec![ContentBlock::ToolCall {
+                id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                name: tool_name.to_string(),
+                args: args_str.to_string(),
+            }],
+            usage: TokenUsage {
+                prompt_tokens: 200,
+                completion_tokens: 30,
+                total_tokens: 230,
+            ..Default::default()},
+            model: "mock-model".to_string(),
+        }
+    }
+
     /// Create a response with multiple tool calls in parallel.
     pub fn tool_calls(calls: Vec<(String, serde_json::Value)>) -> Self {
         let content: Vec<ContentBlock> = calls.iter().map(|(name, args)| {
