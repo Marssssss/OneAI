@@ -36,6 +36,38 @@ use crate::state_graph::{
     StateGraph, GraphState, GraphEdge, NodeAction, EdgeCondition, GraphExecutionResult,
 };
 
+/// User-provided evaluator for an `EdgeCondition::Custom { name, .. }` variant.
+///
+/// Registered on `StateGraphExecutor` via `with_custom_condition` and looked up
+/// by `name` during edge routing. Receives the current `GraphState` and returns
+/// whether the edge should be taken.
+pub type CustomConditionFn = Arc<dyn Fn(&GraphState) -> bool + Send + Sync>;
+
+/// Evaluate a `Custom` edge condition against a registry of user callbacks.
+///
+/// Looks up `name` in `registry`; on hit, invokes the callback with `state`.
+/// Unregistered conditions log a warning and default to `false` (edges with no
+/// registered evaluator never fire — fail-closed). Factored out so the lookup
+/// can be unit-tested without constructing a full `StateGraphExecutor`.
+pub(crate) fn evaluate_custom_condition(
+    registry: &HashMap<String, CustomConditionFn>,
+    name: &str,
+    description: &str,
+    state: &GraphState,
+) -> bool {
+    match registry.get(name) {
+        Some(evaluator) => evaluator(state),
+        None => {
+            tracing::warn!(
+                "Custom condition '{}' ('{}') not registered. Defaulting to false.",
+                name,
+                description
+            );
+            false
+        }
+    }
+}
+
 // ─── Delegate Action Trait ────────────────────────────────────────────────────
 
 /// Trait for executing delegate actions in StateGraph nodes.
@@ -392,6 +424,9 @@ pub struct StateGraphExecutor {
     /// Maximum iterations through the graph (prevents infinite loops).
     /// Default: 50.
     max_iterations: usize,
+    /// Registered evaluators for `EdgeCondition::Custom { name, .. }`, keyed by
+    /// condition name. Unregistered custom conditions warn and default to false.
+    custom_conditions: HashMap<String, CustomConditionFn>,
 }
 
 impl StateGraphExecutor {
@@ -410,6 +445,7 @@ impl StateGraphExecutor {
             delegate_factory,
             interaction_gate,
             max_iterations,
+            custom_conditions: HashMap::new(),
         }
     }
 
@@ -420,6 +456,22 @@ impl StateGraphExecutor {
         interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
         Self::new(action_executor, delegate_factory, interaction_gate, 50)
+    }
+
+    /// Register a user-provided evaluator for `EdgeCondition::Custom { name, .. }`.
+    ///
+    /// When the graph routes along an edge whose condition is `Custom`, the
+    /// executor looks up the registered callback by `name` and evaluates it
+    /// against the current `GraphState`. Unregistered conditions warn and
+    /// default to `false`. Multiple registrations may be chained since this
+    /// consumes and returns `Self`.
+    pub fn with_custom_condition(
+        mut self,
+        name: impl Into<String>,
+        evaluator: CustomConditionFn,
+    ) -> Self {
+        self.custom_conditions.insert(name.into(), evaluator);
+        self
     }
 
     /// Create with direct provider + tools (backward-compatible constructor).
@@ -741,11 +793,12 @@ impl StateGraphExecutor {
             EdgeCondition::Always => Ok(true),
 
             EdgeCondition::Custom { name, description } => {
-                tracing::warn!(
-                    "Custom condition '{}' ('{}') not registered. Defaulting to false.",
-                    name, description
-                );
-                Ok(false)
+                Ok(evaluate_custom_condition(
+                    &self.custom_conditions,
+                    name,
+                    description,
+                    state,
+                ))
             }
 
             EdgeCondition::ParadigmEquals { paradigm } => {
@@ -1089,5 +1142,46 @@ mod tests {
         };
         assert!(!switch.is_final());
         assert!(!switch.has_tool_calls());
+    }
+
+    #[test]
+    fn test_custom_condition_registry_lookup() {
+        use std::sync::Arc;
+        let mut registry: HashMap<String, CustomConditionFn> = HashMap::new();
+        let mut state = GraphState::new();
+        state
+            .variables
+            .insert("attempts".to_string(), "3".to_string());
+
+        // Unregistered condition → fail-closed (false), no panic.
+        assert!(!evaluate_custom_condition(
+            &registry,
+            "not_registered",
+            "missing",
+            &state
+        ));
+
+        // Register a condition that inspects a state variable.
+        registry.insert(
+            "attempts_exhausted".to_string(),
+            Arc::new(|s: &GraphState| {
+                s.variables.get("attempts").map(|v| v == "3").unwrap_or(false)
+            }),
+        );
+        assert!(evaluate_custom_condition(
+            &registry,
+            "attempts_exhausted",
+            "tries >= 3",
+            &state
+        ));
+
+        // Same condition, different state → false.
+        let other_state = GraphState::new();
+        assert!(!evaluate_custom_condition(
+            &registry,
+            "attempts_exhausted",
+            "tries >= 3",
+            &other_state
+        ));
     }
 }
