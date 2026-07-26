@@ -253,6 +253,44 @@ async fn malformed_tool_args_fed_back_not_silently_dispatched() {
         "expected a 'malformed arguments' tool_result feedback in the conversation");
 }
 
+// ─── Token-budget termination guardrail ─────────────────────────────────────
+
+#[tokio::test]
+async fn token_budget_terminates_run_before_iteration_cap() {
+    // §agent-loop gap fix #2: a configured run-cost token budget must
+    // terminate the loop on exhaustion — IN ADDITION to hard_max_iterations
+    // — so a runaway model can't burn tokens indefinitely. Previously the
+    // budget was never checked or consumed; only hard_max_iterations bounded
+    // the run (and None → unbounded).
+    let read_file = MockTool::read_file_mock();
+    // Script more tool_calls than the budget allows — the budget must bind
+    // before the queue exhausts (MockProvider returns a default DirectAnswer
+    // on queue exhaustion, which would mask the budget termination).
+    let script: Vec<_> = (0..8).map(|_| {
+        ScriptedResponse::tool_call("read_file", serde_json::json!({"path": "/test.txt"}))
+    }).collect();
+    let provider = MockProvider::from_script(script);
+
+    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
+        inject_skills: false,
+        thinking_budget: None,
+        hard_max_iterations: Some(50), // high — budget must be the binding constraint
+        token_budget: Some(oneai_core::budget::TokenBudget::new(500)), // 500 / 230-per-iter ≈ 2 iters
+        ..AgentLoopConfig::default()
+    });
+
+    let result = agent_loop.run("read /test.txt repeatedly").await.unwrap();
+
+    // Budget exhausted, not natural completion.
+    assert!(!result.completed, "run must terminate on budget exhaustion, not complete");
+    // A clear budget-exhausted note was surfaced (not a silent empty result).
+    assert!(result.final_answer.contains("budget of 500 tokens exhausted"),
+        "expected budget-exhausted note, got: {}", result.final_answer);
+    // Budget bound well before the iteration cap.
+    assert!(result.iterations <= 3,
+        "budget should bind by ~3 iters (500 tokens / 230 per iter), got {}", result.iterations);
+}
+
 // ─── Scenario 3: Multi-step tool calls ───────────────────────────────────────
 
 #[tokio::test]

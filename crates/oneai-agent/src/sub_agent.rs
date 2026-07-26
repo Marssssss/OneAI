@@ -693,6 +693,12 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             thinking_budget: None,
             stop_sequences: Vec::new(),
             hard_max_iterations: Some(50),
+            // Sub-agent run-cost cap = the delegation budget. The loop
+            // terminates when the delegated token budget is exhausted,
+            // honoring the caller's `budget_tokens` cap (previously the
+            // budget was passed as max_tokens only, with no run-cost
+            // termination guardrail).
+            token_budget: Some(budget.clone()),
             inject_skills: false, // Sub-agents don't need skill injection
             usage_tracker: None, // Sub-agents inherit usage tracker from parent loop
             rate_limiter: None, // Sub-agents inherit rate limiter from parent loop

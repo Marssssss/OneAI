@@ -20,6 +20,18 @@ use oneai_persistence::SqliteSessionStore;
 use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
 
 
+/// Default run-cost token budget — a runaway guardrail that caps total
+/// tokens consumed across a whole run (prompt + completion), in addition
+/// to `hard_max_iterations`. Set on every `AppSession`-built `AgentLoop`
+/// so the documented "iteration limit is governed by TokenBudget" claim
+/// is actually enforced: previously no budget was checked or consumed, so
+/// a runaway model (esp. with `hard_max_iterations = None` → unbounded)
+/// could burn tokens without limit. 4M comfortably covers long legitimate
+/// runs (e.g. SWE-bench ~1-2M) while stopping true runaways. Override via
+/// `AgentLoopConfig::token_budget` directly.
+const DEFAULT_RUN_TOKEN_BUDGET: u32 = 4_000_000;
+
+
 /// A first-turn-only `ContextSource` that surfaces an unfinished task left by
 /// a previous session — the cross-session discovery surface (reference doc §6.2).
 ///
@@ -859,6 +871,7 @@ impl AppSession {
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
+                token_budget: Some(oneai_core::budget::TokenBudget::new(DEFAULT_RUN_TOKEN_BUDGET)),
                 ..AgentLoopConfig::default()
             };
             // Apply user-configured generation params (temperature/top_p/
@@ -929,6 +942,7 @@ impl AppSession {
                 // latency, tool_call_count, avg_iterations) is all zeros.
                 trace_context: self.trace_context.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
+                token_budget: Some(oneai_core::budget::TokenBudget::new(DEFAULT_RUN_TOKEN_BUDGET)),
                 ..AgentLoopConfig::default()
             };
             // Apply user-configured generation params on top of the defaults.

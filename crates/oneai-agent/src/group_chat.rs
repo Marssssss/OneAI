@@ -647,6 +647,7 @@ fn build_member_loop(
         // bound prevents a misbehaving turn from looping endlessly and flooding
         // the UI with stream events (which can beachball the main thread).
         hard_max_iterations: Some(15),
+        token_budget: None, // Persona turns are bounded by hard_max_iterations.
         inject_skills: false,
         usage_tracker: None,
         rate_limiter: None,

@@ -556,6 +556,16 @@ pub struct AgentLoopConfig {
     /// Stop sequences — generation halts when any is emitted.
     pub stop_sequences: Vec<String>,
     pub hard_max_iterations: Option<usize>,
+    /// Run-cost token budget — a cumulative cap on total tokens consumed
+    /// (prompt + completion) across the whole run. When set, the loop
+    /// terminates on exhaustion (see `run_loop`'s while condition) in
+    /// ADDITION to `hard_max_iterations`. `None` = no cost cap (only the
+    /// iteration limit guards against runaway). This makes the documented
+    /// "iteration limit is governed by TokenBudget" claim actually true —
+    /// previously `TokenBudget` existed but was never checked or consumed,
+    /// so a runaway model burned tokens indefinitely up to
+    /// `hard_max_iterations`.
+    pub token_budget: Option<oneai_core::budget::TokenBudget>,
     pub inject_skills: bool,
     /// Usage tracker — records token usage after each inference call.
     /// When set, the loop automatically records token usage (no USD cost).
@@ -611,6 +621,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("thinking_budget", &self.thinking_budget)
             .field("stop_sequences", &self.stop_sequences)
             .field("hard_max_iterations", &self.hard_max_iterations)
+            .field("token_budget", &self.token_budget)
             .field("inject_skills", &self.inject_skills)
             .field("usage_tracker", &self.usage_tracker.as_ref().map(|_| "Arc<dyn UsageTracker>"))
             .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
@@ -655,6 +666,9 @@ impl Default for AgentLoopConfig {
             thinking_budget: None,
             stop_sequences: Vec::new(),
             hard_max_iterations: Some(200), // Safety guard: None = only budget constraint, Some(N) = budget + iteration limit
+            // No run-cost token cap by default (opt-in). AppSession wires a
+            // conservative runaway guardrail when building the loop.
+            token_budget: None,
             inject_skills: true,
             usage_tracker: None,
             rate_limiter: None,
@@ -1087,7 +1101,15 @@ impl AgentLoop {
             String::new()
         };
 
-        while !state.is_complete() && state.iterations < self.config.hard_max_iterations.unwrap_or(usize::MAX) {
+        // Run-cost token budget — consumed after each inference and checked
+        // in the while condition as a cost guardrail. `None` (default) means
+        // no cost cap; only `hard_max_iterations` guards against runaway.
+        let mut run_budget = self.config.token_budget.clone();
+
+        while !state.is_complete()
+            && state.iterations < self.config.hard_max_iterations.unwrap_or(usize::MAX)
+            && run_budget.as_ref().is_none_or(|b| b.remaining() > 0)
+        {
             // ─── Check for external interrupt request ──────────────────────
             if self.interrupt_requested.load(Ordering::Relaxed) {
                 self.interrupt_requested.store(false, Ordering::Relaxed);
@@ -1545,6 +1567,15 @@ impl AgentLoop {
             // 4d. Record circuit breaker success (if configured)
             if let Some(circuit_breaker) = &self.config.circuit_breaker {
                 circuit_breaker.record_success(&self.provider_name());
+            }
+
+            // 4e. Consume the run-cost token budget (termination guardrail).
+            // Uses the same resolved prompt/completion counts as the usage
+            // tracker above. When the budget is set, exhaustion terminates the
+            // loop at the next while-check — closing the gap where a runaway
+            // model burned tokens indefinitely up to hard_max_iterations.
+            if let Some(b) = run_budget.as_mut() {
+                b.record_usage(prompt_tokens, completion_tokens);
             }
 
             // 5. Parse decision
@@ -2270,6 +2301,25 @@ impl AgentLoop {
             // there's no full-state snapshot to save here. The observer tick
             // is retained for UI continuity.
             observer.on_checkpoint(state.iterations);
+        }
+
+        // If the loop exited due to token-budget exhaustion (not natural
+        // completion), surface a clear note instead of a silent empty result
+        // — so a cost-capped termination is distinguishable from a bug.
+        if !state.is_complete {
+            if let Some(b) = &run_budget {
+                if b.remaining() == 0 {
+                    state.final_answer = Some(format!(
+                        "[Token budget of {} tokens exhausted. Run terminated to limit cost after {} iterations.]",
+                        b.total, state.iterations
+                    ));
+                    tracing::warn!(
+                        total = b.total,
+                        iterations = state.iterations,
+                        "run-cost token budget exhausted — terminating loop"
+                    );
+                }
+            }
         }
 
         let result = state.into_result();
