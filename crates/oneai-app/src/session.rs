@@ -8,7 +8,7 @@ use std::sync::Arc;
 // for `write!` on String in the [Unfinished Work] block
 use std::fmt::Write as _;
 
-use oneai_core::{Conversation, Message, MemoryEntry};
+use oneai_core::{Conversation, Message, MemoryEntry, ContextManager};
 use oneai_core::error::Result;
 
 use oneai_memory::MemoryManager;
@@ -210,6 +210,9 @@ struct AppResources {
     /// Token counter — propagated into the AgentLoop for client-side token
     /// estimation when the provider returns no usage (streaming fallback).
     token_counter: Option<Arc<dyn oneai_core::TokenCounter>>,
+    /// Model-aware context manager — propagated into the AgentLoop so its 4
+    /// trimming strategies are invoked pre-inference (gap-analysis #3).
+    context_manager: Option<Arc<ContextManager>>,
     /// 3-layer model context resolver — used by `warm_model_context` to probe
     /// the provider for context-window sizes and cache them for the sync path.
     model_context_resolver: Option<Arc<oneai_core::ModelContextResolver>>,
@@ -278,6 +281,7 @@ impl AppSession {
                 rate_limiter: app.rate_limiter.clone(),
                 circuit_breaker: app.circuit_breaker.clone(),
                 token_counter: app.token_counter.clone(),
+                context_manager: app.context_manager.clone(),
                 model_context_resolver: app.model_context_resolver.clone(),
                 probe_context_windows: app.probe_context_windows,
                 generation_config: app.generation_config.clone(),
@@ -866,6 +870,11 @@ impl AppSession {
                 rate_limiter,
                 circuit_breaker,
                 token_counter,
+                // Wire the model-aware ContextManager so its 4 trimming
+                // strategies are actually invoked pre-inference (gap-analysis
+                // #3). Without this the AppBuilder-constructed ContextManager
+                // was dead code — only ContextCompressor keep-recent ran.
+                context_manager: self.app.context_manager.clone(),
                 // Hand the loop the SAME trace context the session holds (Arc-backed,
                 // cheap clone) so its per-iteration/inference/tool spans land in the
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call
@@ -943,6 +952,9 @@ impl AppSession {
                 rate_limiter,
                 circuit_breaker,
                 token_counter,
+                // Wire the model-aware ContextManager (gap-analysis #3) —
+                // same rationale as the domain branch above.
+                context_manager: self.app.context_manager.clone(),
                 // Hand the loop the SAME trace context the session holds (Arc-backed,
                 // cheap clone) so its per-iteration/inference/tool spans land in the
                 // tree compute_from_tree reads. Without this the 效率 axis (per-call

@@ -426,6 +426,15 @@ impl MockProvider {
         self.call_log.lock().await.clone()
     }
 
+    /// Get a shared handle to the call-log so a test can inspect the
+    /// inference requests AFTER the provider has been moved into the
+    /// `AgentLoop` (e.g. to assert the per-request conversation was
+    /// trimmed by the `ContextManager` before inference). The returned
+    /// `Arc` is the same one the provider writes to on every `infer`.
+    pub fn call_log_handle(&self) -> Arc<Mutex<Vec<InferenceCallLog>>> {
+        Arc::clone(&self.call_log)
+    }
+
     /// Get the number of inference calls made.
     pub async fn call_count(&self) -> usize {
         self.call_log.lock().await.len()

@@ -653,6 +653,7 @@ fn build_member_loop(
         rate_limiter: None,
         circuit_breaker: None,
         token_counter: None,
+        context_manager: None, // Group-chat members are bounded by hard_max_iterations.
         structured_output: None,
         constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
         trace_context: None,

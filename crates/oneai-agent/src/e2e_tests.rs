@@ -288,6 +288,102 @@ async fn malformed_args_fuzzy_repaired_then_dispatched() {
     assert_eq!(log[0].args["path"], "/test.txt");
 }
 
+#[tokio::test]
+async fn context_manager_trims_oversized_request_before_inference() {
+    // §context gap fix #3: when a `ContextManager` is attached with a small
+    // window for the target model, the loop trims the per-request
+    // conversation to fit BEFORE inference (here: TruncateOldest keeps system
+    // + recent 2 turns). Previously the AppBuilder-constructed ContextManager
+    // was never invoked from the hot path — only the ContextCompressor
+    // keep-recent path ran, so the 4 model-aware strategies were dead code.
+    //
+    // We drive several read_file calls whose ~600-char results accumulate
+    // past the tiny window, then assert the LAST inference request the
+    // provider received was trimmed (fewer messages than the full durable
+    // log accumulated).
+    use oneai_core::token_counter::{HeuristicTokenCounter, ModelTokenizerProfile};
+    use oneai_core::{ContextManager, ContextTrimmingStrategy, ContextWindowProfile};
+
+    // ~600-char tool body — a few of these exceed the tiny window.
+    let big_body = "x".repeat(600);
+    let read_file = MockTool::read_file_mock_with_content(big_body);
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("read_file", serde_json::json!({"path":"/a"})),
+        ScriptedResponse::tool_call("read_file", serde_json::json!({"path":"/b"})),
+        ScriptedResponse::tool_call("read_file", serde_json::json!({"path":"/c"})),
+        ScriptedResponse::tool_call("read_file", serde_json::json!({"path":"/d"})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let call_log = provider.call_log_handle();
+
+    // Build the counter with a tiny window for "mock-model".
+    // `ContextManager.fits_context_window` delegates the window lookup to the
+    // token counter's own profile map (not the ContextWindowProfile's
+    // context_window_tokens), so the window must be registered HERE.
+    let counter = {
+        let mut c = HeuristicTokenCounter::new();
+        let mut p = ModelTokenizerProfile::from_model_name("mock-model");
+        p.context_window_tokens = 400; // 400 × 0.8 = 320 effective ≈ 1280 chars
+        c.add_profile(p);
+        c
+    };
+    let cm = ContextManager::new(
+        Arc::new(counter),
+        ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 2 },
+    );
+    // Register the strategy on the ContextManager profile too (trim_for_model
+    // reads trimming_strategy from here).
+    let cm = {
+        let mut cm = cm;
+        cm.add_profile(ContextWindowProfile::new(
+            "mock-model",
+            400,
+            100,
+            0.8,
+            ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 2 },
+        ));
+        Arc::new(cm)
+    };
+
+    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
+        inject_skills: false,
+        context_manager: Some(cm),
+        hard_max_iterations: Some(20),
+        ..AgentLoopConfig::default()
+    });
+
+    let result = agent_loop.run("read several files").await.unwrap();
+    assert!(result.completed, "run must complete; got: {:?}", result.final_answer);
+
+    // Inspect the inference requests the provider actually received.
+    let calls = call_log.lock().await.clone();
+    assert!(calls.len() >= 2, "expected multiple inference calls, got {}", calls.len());
+
+    // The durable log accumulated many messages (4 tool calls + results).
+    let durable_len = result.conversation.messages.len();
+    assert!(durable_len > 6, "durable log should have accumulated many messages, got {durable_len}");
+
+    // The LAST inference request must have been trimmed to fit the window —
+    // far fewer messages than the durable log. TruncateOldest keeps system +
+    // recent 2 turns (each turn ≈ user-tool-result pair), so the request is
+    // bounded (well under the durable log's length).
+    let last_req_msgs = calls.last().unwrap().request.conversation.messages.len();
+    assert!(
+        last_req_msgs < durable_len,
+        "last request ({last_req_msgs} msgs) must be trimmed below durable log ({durable_len}) \
+         — ContextManager wasn't invoked on the hot path"
+    );
+    // Direct proof the TruncateOldest path ran: it appends a
+    // "[Context trimmed: ...]" system marker when it actually drops messages.
+    let trimmed_marker_present = calls.last().unwrap()
+        .request.conversation.messages.iter()
+        .any(|m| m.text_content().contains("Context trimmed"));
+    assert!(trimmed_marker_present,
+        "expected the TruncateOldest '[Context trimmed]' marker in the last request — \
+         ContextManager.trim_for_model did not run");
+}
+
 // ─── Token-budget termination guardrail ─────────────────────────────────────
 
 #[tokio::test]

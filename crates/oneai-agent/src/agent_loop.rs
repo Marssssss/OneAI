@@ -582,6 +582,18 @@ pub struct AgentLoopConfig {
     /// silently zero. Matches the litellm/aider pattern: API usage authoritative
     /// when present, client-side estimate otherwise.
     pub token_counter: Option<Arc<dyn oneai_core::TokenCounter>>,
+    /// Model-aware context manager — when set, the loop checks each
+    /// inference request against the target model's context window and, if
+    /// it doesn't fit, applies the configured trimming strategy
+    /// (`TruncateOldest` / `ImportanceRanked` / `CompressMiddle` /
+    /// `SmartSummary`) to the per-request conversation. This makes the
+    /// 4-strategy `ContextManager` reachable on the hot path — previously it
+    /// was constructed by `AppBuilder` but never invoked, so only the
+    /// `ContextCompressor` keep-recent path ran (gap-analysis #3).
+    /// Trimming is applied to the per-request `conv_for_inference` clone,
+    /// not the durable log, so it is lossy only for the request (the full
+    /// durable log persists for later turns / replay).
+    pub context_manager: Option<Arc<oneai_core::ContextManager>>,
     /// Structured output configuration — when set, the model's final
     /// answer is validated against a JSON Schema. If validation fails,
     /// the model is re-prompted with the error for self-correction (ModelRetry).
@@ -627,6 +639,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
             .field("circuit_breaker", &self.circuit_breaker.as_ref().map(|_| "Arc<dyn CircuitBreaker>"))
             .field("token_counter", &self.token_counter.as_ref().map(|_| "Arc<dyn TokenCounter>"))
+            .field("context_manager", &self.context_manager.as_ref().map(|_| "Arc<ContextManager>"))
             .field("structured_output", &self.structured_output)
             .field("trace_context", &self.trace_context)
             .field("plan_mode", &self.plan_mode)
@@ -674,6 +687,7 @@ impl Default for AgentLoopConfig {
             rate_limiter: None,
             circuit_breaker: None,
             token_counter: None,
+            context_manager: None,
             structured_output: None,
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             trace_context: None,
@@ -1213,6 +1227,41 @@ impl AgentLoop {
                 state.conversation = self.context_budget.compress(state.conversation.clone()).await?;
                 conv_for_inference = self.context_assembler.write().await.assemble(&state)?;
                 self.inject_pinned_blocks(&mut conv_for_inference, &state).await;
+            }
+
+            // Model-aware context-fit guard (gap-analysis #3). The durable
+            // compression above is budget-driven (keeps the log bounded +
+            // extracts facts); this is the complementary model-window guard.
+            // When a `ContextManager` is attached and `auto_trim` is on, check
+            // the per-request conversation against the target model's window
+            // and, if it doesn't fit, apply the configured trimming strategy
+            // (TruncateOldest / ImportanceRanked / CompressMiddle /
+            // SmartSummary) to the per-request clone. Previously the
+            // `ContextManager` was constructed by `AppBuilder` but never
+            // invoked — its 4 strategies were unreachable, so only the
+            // `ContextCompressor` keep-recent path ran.
+            //
+            // Trimming is applied to `conv_for_inference` (the per-request
+            // clone), NOT `state.conversation` — the durable log stays full
+            // for persistence / replay; only this request is shrunk to fit.
+            if let Some(cm) = &self.config.context_manager {
+                if cm.auto_trim() {
+                    let model = self.provider.config().model_name.clone().unwrap_or_default();
+                    let fit = cm.fits_context_window(&conv_for_inference, &model);
+                    if !fit.fits {
+                        tracing::debug!(
+                            model = %model,
+                            total_tokens = fit.total_tokens,
+                            window = fit.context_window,
+                            strategy = cm.profile_for_model(&model).trimming_strategy.name(),
+                            "context doesn't fit model window; trimming per-request"
+                        );
+                        match cm.trim_for_model(&conv_for_inference, &model).await {
+                            Ok(trimmed) => conv_for_inference = trimmed,
+                            Err(e) => tracing::warn!(error = %e, "context-manager trim failed; sending untrimmed"),
+                        }
+                    }
+                }
             }
 
             // Sync the live plan_state into the durable log's metadata so it
