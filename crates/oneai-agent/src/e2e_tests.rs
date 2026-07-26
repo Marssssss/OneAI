@@ -2066,3 +2066,111 @@ async fn e2e_assembled_context_and_task_anchor_reach_request() {
     assert!(req_text.contains("STUB-MARKER-CONTENT"),
         "ContextSource content missing from request: {req_text}");
 }
+
+// ─── Recovery: transient tool failure → real retry with backoff ───────────────
+//
+// RecoveryManager's Retry strategy must actually RE-EXECUTE the tool with
+// jittered backoff (not just inject a "retry scheduled" system message). This
+// test wires a RecoveryManager and a read-only (Low-risk) tool that fails with
+// a transient "timeout" error on the first calls, then succeeds — and asserts
+// the call count reflects the retries and the loop completes with success.
+
+use crate::error_recovery::RecoveryManager;
+
+/// A read-only mock tool that fails its first `fail_until` calls with a
+/// transient "timeout" error, then succeeds. Shared atomic counter lets the
+/// test assert how many times execute() was actually invoked.
+struct FlakyReadTool {
+    calls: Arc<AtomicUsize>,
+    fail_until: usize,
+}
+
+impl FlakyReadTool {
+    fn new(fail_until: usize) -> Self {
+        Self { calls: Arc::new(AtomicUsize::new(0)), fail_until }
+    }
+    fn call_count(&self) -> Arc<AtomicUsize> {
+        self.calls.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl oneai_core::traits::Tool for FlakyReadTool {
+    fn name(&self) -> &str { "read_file" }
+    fn description(&self) -> &str { "Read a file (flaky for testing recovery retry)" }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]})
+    }
+    fn risk_level(&self) -> oneai_core::RiskLevel { oneai_core::RiskLevel::Low }
+    async fn execute(&self, _args: serde_json::Value) -> oneai_core::error::Result<ToolOutput> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if n <= self.fail_until {
+            Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("Connection timeout".to_string()),
+            })
+        } else {
+            Ok(ToolOutput {
+                success: true,
+                content: "file contents".to_string(),
+                error: None,
+            })
+        }
+    }
+}
+
+#[tokio::test]
+async fn e2e_recovery_retry_re_executes_transient_failure() {
+    // Fails the first call with a transient "timeout", succeeds on the retry.
+    let tool = FlakyReadTool::new(1);
+    let call_count = tool.call_count();
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("read_file", serde_json::json!({"path": "x"})),
+        ScriptedResponse::direct_answer("done reading"),
+    ]);
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
+        let mut map = HashMap::new();
+        map.insert("read_file".to_string(), Arc::new(tool) as Arc<dyn oneai_core::traits::Tool>);
+        Arc::new(tokio::sync::RwLock::new(map))
+    };
+
+    // Attach a RecoveryManager so transient failures are genuinely retried with
+    // backoff (select_recovery_strategy → Retry → RetryScheduled).
+    let rm = Arc::new(RecoveryManager::new());
+
+    let agent_loop = AgentLoop::new(
+        Arc::new(provider),
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    )
+    .with_recovery_manager(rm);
+
+    let result = agent_loop.run("Read the file").await.unwrap();
+
+    assert!(result.completed, "loop should complete after recovery retry succeeds");
+    // 1 initial failure + 1 retry that succeeds = 2 calls. Proves the tool was
+    // re-executed rather than the failure merely being announced.
+    assert_eq!(call_count.load(Ordering::SeqCst), 2,
+        "recovery should have re-executed the tool after the transient failure");
+    assert!(result.final_answer.contains("done reading"),
+        "final answer should reflect the successful retry: {}", result.final_answer);
+}

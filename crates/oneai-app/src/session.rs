@@ -138,6 +138,7 @@ pub struct CompactOutcome {
 
 use oneai_agent::{AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult,
     ParadigmKind, ToolCallRequest, SubAgentKind};
+use oneai_agent::error_recovery::RecoveryManager;
 
 /// A running agent session with conversation context and memory.
 ///
@@ -928,6 +929,12 @@ impl AppSession {
                 self.app.skill_registry.clone(),
                 active_skill.clone(),
             )
+            // Attach a default RecoveryManager so transient tool-call failures
+            // (timeout/network/rate_limit) are genuinely re-executed with
+            // jittered backoff rather than merely announced as a system
+            // message. Read-only tools retry; non-idempotent tools are gated
+            // (see AgentLoop recovery handler).
+            .with_recovery_manager(std::sync::Arc::new(RecoveryManager::new()))
         } else {
             let mut config = AgentLoopConfig {
                 use_streaming: true,
@@ -1001,6 +1008,7 @@ impl AppSession {
                 self.app.skill_registry.clone(),
                 active_skill.clone(),
             )
+            .with_recovery_manager(std::sync::Arc::new(RecoveryManager::new()))
         };
 
         // Register the running AgentLoop so the TUI can request an interrupt

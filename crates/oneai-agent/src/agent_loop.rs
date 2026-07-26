@@ -2097,6 +2097,16 @@ impl AgentLoop {
                     }
                     filtered_calls = regular_calls;
 
+                    // Snapshot the regular calls' args by call_id so the
+                    // recovery handler below can re-execute a transiently-failed
+                    // tool call with backoff (RecoveryManager::Retry strategy).
+                    // Plan-mode synthetic results never fail, so the snapshot
+                    // only matters for the real-execution branch.
+                    let recovery_args_by_call_id: std::collections::HashMap<String, serde_json::Value> =
+                        filtered_calls.iter()
+                            .map(|c| (c.id.clone(), c.args.clone()))
+                            .collect();
+
                     // Plan mode — block tool execution entirely. Instead of running
                     // the tools, inject a synthetic result telling the model it must
                     // produce a plan, not execute. The model then stops calling tools
@@ -2158,32 +2168,139 @@ impl AgentLoop {
                     }
 
                     // Error recovery: check for failed tool calls.
-                    // This addresses the "RecoveryManager 未接线" gap.
-                    // Previously, only a tracing::warn! was emitted. Now, if a
-                    // RecoveryManager is wired in, failed calls trigger strategy
-                    // evaluation and recovery feedback is injected into the conversation.
-                    let failed_calls: Vec<_> = results.iter()
-                        .filter(|r| !r.output.success)
-                        .collect();
-                    if !failed_calls.is_empty() {
+                    //
+                    // Transient failures (timeout / network / rate_limit) are
+                    // *re-executed* here with jittered backoff — not merely
+                    // announced as a system message. Other strategies
+                    // (Escalate / ExternalFeedback) remain informational
+                    // injections since they require model-level decisions.
+                    let failed_count = results.iter().filter(|r| !r.output.success).count();
+                    if failed_count > 0 {
                         tracing::warn!("{} tool calls failed in iteration {}",
-                            failed_calls.len(), state.iterations);
+                            failed_count, state.iterations);
 
-                        // If RecoveryManager is available, evaluate recovery strategies
-                        if let Some(rm) = &self.recovery_manager {
-                            for failed in &failed_calls {
-                                let strategy = self.select_recovery_strategy(failed);
+                        if let Some(rm) = self.recovery_manager.clone() {
+                            // Snapshot the tool registry so we can re-execute by
+                            // name; dropped before any await to avoid holding the
+                            // read guard across tool.execute().
+                            let tool_by_name: std::collections::HashMap<String, std::sync::Arc<dyn oneai_core::traits::Tool>> = {
+                                let tools_map = self.tools.read().await;
+                                results.iter()
+                                    .filter(|r| !r.output.success)
+                                    .filter_map(|r| {
+                                        tools_map.get(&r.tool_name).map(|t| (r.tool_name.clone(), t.clone()))
+                                    })
+                                    .collect()
+                            };
+
+                            for r in results.iter_mut().filter(|r| !r.output.success) {
+                                let strategy = self.select_recovery_strategy(r);
                                 let context = crate::error_recovery::ValidationContext {
                                     task: state.original_task.clone(),
-                                    result: failed.output.error.as_deref().unwrap_or("Unknown error").to_string(),
+                                    result: r.output.error.as_deref().unwrap_or("Unknown error").to_string(),
                                     variables: std::collections::HashMap::from([
-                                        ("tool_name".to_string(), "unknown".to_string()),
+                                        ("tool_name".to_string(), r.tool_name.clone()),
                                         ("iteration".to_string(), state.iterations.to_string()),
                                     ]),
                                 };
 
                                 let outcome = rm.apply(&strategy, &context).await?;
                                 match outcome {
+                                    crate::error_recovery::RecoveryOutcome::RetryScheduled { max_retries } => {
+                                        // Actually re-execute the tool with jittered
+                                        // backoff — gated by the policy's
+                                        // should_retry so non-transient errors
+                                        // aren't pointlessly retried.
+                                        let policy = crate::error_recovery::RetryPolicy {
+                                            max_retries,
+                                            ..crate::error_recovery::RetryPolicy::default()
+                                        };
+                                        let Some(args) = recovery_args_by_call_id.get(&r.call_id) else {
+                                            // No args snapshot (e.g. plan-mode
+                                            // synthetic or control tool) — can't
+                                            // re-execute; surface honestly.
+                                            state.conversation.add_message(Message::system(
+                                                format!("Recovery: cannot retry '{}' (no args snapshot)", r.tool_name)
+                                            ));
+                                            continue;
+                                        };
+                                        let Some(tool) = tool_by_name.get(&r.tool_name) else {
+                                            continue; // tool no longer registered
+                                        };
+
+                                        // Safety gate: only retry idempotent,
+                                        // read-only tools (RiskLevel::Low). A
+                                        // "timeout" on a state-mutating tool is
+                                        // ambiguous — the side effect may have
+                                        // applied but the response was lost — so
+                                        // re-execution could double-apply. Don't
+                                        // risk it; surface the error instead.
+                                        if tool.risk_level() != oneai_core::RiskLevel::Low {
+                                            state.conversation.add_message(Message::system(
+                                                format!(
+                                            "Recovery: transient error on '{}' (non-idempotent, risk={:?}) not retried to avoid side effects: {}",
+                                                    r.tool_name, tool.risk_level(),
+                                                    r.output.error.as_deref().unwrap_or("unknown"))
+                                            ));
+                                            continue;
+                                        }
+
+                                        let mut last_error = r.output.error.clone().unwrap_or_default();
+                                        for attempt in 0..max_retries {
+                                            if !policy.should_retry(&last_error) {
+                                                break;
+                                            }
+                                            tracing::info!(
+                                                "Recovery retry {} for '{}' (attempt {}/{})",
+                                                r.tool_name, r.tool_name, attempt + 1, max_retries
+                                            );
+                                            tokio::time::sleep(policy.compute_delay(attempt)).await;
+                                            match tool.execute(args.clone()).await {
+                                                Ok(out) => {
+                                                    if out.success {
+                                                        r.output = out;
+                                                        tracing::info!(
+                                            "Recovery: '{}' succeeded after {} retries",
+                                            r.tool_name, attempt + 1
+                                                        );
+                                                        break;
+                                                    }
+                                                    last_error = out.error.clone().unwrap_or_default();
+                                                    r.output = out;
+                                                }
+                                                Err(e) => {
+                                                    last_error = e.to_string();
+                                                    r.output = oneai_core::ToolOutput {
+                                                        success: false,
+                                                        content: String::new(),
+                                                        error: Some(last_error.clone()),
+                                                    };
+                                                }
+                                            }
+                                        }
+                                        if !r.output.success {
+                                            state.conversation.add_message(Message::system(
+                                                format!("Recovery: '{}' failed after {} retries: {}",
+                                                    r.tool_name, max_retries,
+                                                    r.output.error.as_deref().unwrap_or("unknown"))
+                                            ));
+                                        }
+                                    }
+                                    crate::error_recovery::RecoveryOutcome::RollbackTo { checkpoint_id } => {
+                                        // The checkpoint system was removed in favor
+                                        // of the append-only working-state event log
+                                        // (see docs/working-state-mechanism.md).
+                                        // State rollback is not available — fail
+                                        // honestly rather than pretending.
+                                        tracing::warn!(
+                                            "Recovery rollback to checkpoint '{}' requested, but the \
+                                            checkpoint system has been removed; skipping rollback.",
+                                            checkpoint_id
+                                        );
+                                        state.conversation.add_message(Message::system(
+                                            format!("Recovery: rollback to checkpoint '{}' unavailable (checkpoint system removed); re-derive state from the task event log instead.", checkpoint_id)
+                                        ));
+                                    }
                                     crate::error_recovery::RecoveryOutcome::ValidationFailed { feedback } => {
                                         state.conversation.add_message(Message::system(
                                             format!("Recovery feedback: {}", feedback)
@@ -2192,16 +2309,6 @@ impl AgentLoop {
                                     crate::error_recovery::RecoveryOutcome::Escalated { summary } => {
                                         state.conversation.add_message(Message::system(
                                             format!("Error escalated: {}", summary)
-                                        ));
-                                    }
-                                    crate::error_recovery::RecoveryOutcome::RetryScheduled { max_retries } => {
-                                        state.conversation.add_message(Message::system(
-                                            format!("Recovery: retry scheduled (max {} attempts)", max_retries)
-                                        ));
-                                    }
-                                    crate::error_recovery::RecoveryOutcome::RollbackTo { checkpoint_id } => {
-                                        state.conversation.add_message(Message::system(
-                                            format!("Recovery: rollback to checkpoint {}", checkpoint_id)
                                         ));
                                     }
                                     _ => {

@@ -142,6 +142,53 @@ impl Default for RetryPolicy {
     }
 }
 
+impl RetryPolicy {
+    /// Whether an error message should trigger a retry.
+    ///
+    /// Matches the error (case-insensitively) against `retry_on_patterns`.
+    /// Empty patterns → retry nothing (caller decides).
+    pub fn should_retry(&self, error: &str) -> bool {
+        if self.retry_on_patterns.is_empty() {
+            return false;
+        }
+        let lower = error.to_lowercase();
+        self.retry_on_patterns
+            .iter()
+            .any(|p| lower.contains(&p.to_lowercase()))
+    }
+
+    /// Compute the delay before the next retry attempt, including jitter.
+    ///
+    /// `attempt` is 0-indexed (0 = delay before the first retry). The base
+    /// delay follows the `BackoffStrategy`; jitter (up to 25% of the base,
+    /// derived from wall-clock nanos so no `rand` dependency is needed) is
+    /// added to desynchronize retry-storms across concurrent callers. The
+    /// result is capped by `max_delay_secs`.
+    pub fn compute_delay(&self, attempt: usize) -> std::time::Duration {
+        let base_secs = match &self.backoff {
+            BackoffStrategy::Fixed => self.initial_delay_secs as f64,
+            BackoffStrategy::Linear { increment_secs } => {
+                self.initial_delay_secs as f64
+                    + *increment_secs as f64 * attempt as f64
+            }
+            BackoffStrategy::Exponential { factor } => {
+                self.initial_delay_secs as f64 * factor.powi(attempt as i32)
+            }
+        };
+        let base_secs = base_secs.min(self.max_delay_secs as f64);
+
+        // Jitter: 0..=25% of base, from wall-clock nanos (no `rand` dep).
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let jitter_secs = (base_secs * 0.25) * (nanos % 4) as f64 / 3.0;
+
+        let total = (base_secs + jitter_secs).min(self.max_delay_secs as f64);
+        std::time::Duration::from_secs_f64(total.max(0.0))
+    }
+}
+
 // ─── BackoffStrategy ────────────────────────────────────────────────────
 
 /// Backoff strategy for retry delays.
@@ -348,4 +395,58 @@ pub enum RecoveryOutcome {
     ValidatorNotFound { name: String },
     /// Error escalated to main agent.
     Escalated { summary: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_retry_matches_patterns_case_insensitively() {
+        let policy = RetryPolicy::default(); // patterns: ["timeout", "rate_limit"]
+        assert!(policy.should_retry("Connection timeout"));
+        assert!(policy.should_retry("RATE_LIMIT exceeded"));
+        assert!(!policy.should_retry("Tool not found"));
+        assert!(!policy.should_retry("Denied by policy"));
+    }
+
+    #[test]
+    fn should_retry_false_when_no_patterns() {
+        let policy = RetryPolicy {
+            retry_on_patterns: vec![],
+            ..RetryPolicy::default()
+        };
+        assert!(!policy.should_retry("timeout"));
+    }
+
+    #[test]
+    fn compute_delay_grows_with_attempt_and_caps_at_max() {
+        let policy = RetryPolicy {
+            initial_delay_secs: 1,
+            backoff: BackoffStrategy::Exponential { factor: 2.0 },
+            max_delay_secs: 10,
+            ..RetryPolicy::default()
+        };
+        let d0 = policy.compute_delay(0);
+        let d3 = policy.compute_delay(3);
+        // Base grows 1, 2, 4, 8 → attempt 3 base is 8s (jitter adds a bit, but capped at 10s).
+        assert!(d0.as_secs_f64() >= 1.0 && d0.as_secs_f64() < 2.0);
+        assert!(d3.as_secs_f64() >= 8.0);
+        assert!(d3.as_secs_f64() <= 10.0 + f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_delay_fixed_backoff_is_constant() {
+        let policy = RetryPolicy {
+            initial_delay_secs: 2,
+            backoff: BackoffStrategy::Fixed,
+            max_delay_secs: 30,
+            ..RetryPolicy::default()
+        };
+        for attempt in 0..5 {
+            let d = policy.compute_delay(attempt);
+            // Base is fixed 2s; jitter adds 0..~0.5s.
+            assert!(d.as_secs_f64() >= 2.0 && d.as_secs_f64() < 3.0);
+        }
+    }
 }
