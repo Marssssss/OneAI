@@ -43,7 +43,7 @@ use tokio::sync::RwLock;
 use oneai_core::{
     InferenceRequest, InferenceResponse, InferenceStreamChunk, ModelCapability, ModelConfig,
     CircuitBreaker, RateLimiter, UsageTracker,
-    FallbackEvent, FallbackReason, FallbackLog, InMemoryFallbackLog,
+    DegradationRule, FallbackEvent, FallbackReason, FallbackLog, InMemoryFallbackLog,
     ProviderPoolConfig,
     ProviderPoolStatus, ProviderHealthStatus,
 };
@@ -51,6 +51,10 @@ use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::LlmProvider;
 use crate::ProviderFactory;
 use crate::SmartRouter;
+
+/// Injectable factory closure that builds a fresh `LlmProvider` from a
+/// `ModelConfig` (used by within-family model degradation).
+type ProviderBuilder = Arc<dyn Fn(&ModelConfig) -> Box<dyn LlmProvider> + Send + Sync>;
 
 // ─── ProviderEntry ─────────────────────────────────────────────────────────────
 
@@ -173,6 +177,20 @@ pub struct ProviderPool {
 
     /// Fallback event log — audit trail for observability.
     fallback_log: Arc<dyn FallbackLog>,
+
+    /// Builder for degraded providers from a (model-swapped) `ModelConfig`.
+    ///
+    /// Used by within-family model degradation: clones the failing entry's
+    /// `ModelConfig`, swaps `model_name` to the next degraded tier, and builds
+    /// a fresh provider through this builder. Defaults to `ProviderFactory`;
+    /// injectable (via `with_provider_builder`) for testing or alternate
+    /// factory wiring.
+    provider_builder: ProviderBuilder,
+}
+
+/// Default degraded-provider builder — delegates to `ProviderFactory::create`.
+fn default_provider_builder(cfg: &ModelConfig) -> Box<dyn LlmProvider> {
+    ProviderFactory::create(cfg.clone())
 }
 
 impl ProviderPool {
@@ -191,6 +209,7 @@ impl ProviderPool {
             smart_router: None,
             active_index: AtomicU32::new(0),
             fallback_log: Arc::new(InMemoryFallbackLog::new()),
+            provider_builder: Arc::new(default_provider_builder),
         }
     }
 
@@ -254,6 +273,20 @@ impl ProviderPool {
     /// Set a custom fallback log (for OTEL / database integration).
     pub fn with_fallback_log(mut self, log: Arc<dyn FallbackLog>) -> Self {
         self.fallback_log = log;
+        self
+    }
+
+    /// Override the provider builder used for within-family model degradation.
+    ///
+    /// The default builds a fresh provider via `ProviderFactory::create` from
+    /// the failing entry's `ModelConfig` (with `model_name` swapped to the
+    /// degraded tier). Inject a custom builder for testing or to route
+    /// degraded construction through a different factory.
+    pub fn with_provider_builder<F>(mut self, builder: F) -> Self
+    where
+        F: Fn(&ModelConfig) -> Box<dyn LlmProvider> + Send + Sync + 'static,
+    {
+        self.provider_builder = Arc::new(builder);
         self
     }
 
@@ -346,6 +379,188 @@ impl ProviderPool {
 
         ProviderPoolStatus::new(active_name, active_model, self.entries.len())
             .into_status_with_health(provider_health, recent_fallback_count, last_fallback)
+    }
+
+    // ─── Within-family model degradation ──────────────────────────────────────
+
+    /// Compute the within-family degraded model chain for an entry.
+    ///
+    /// Returns the ordered list of degraded models to try *excluding* the
+    /// entry's current model. Empty when `degrade_on_fallback` is disabled,
+    /// no degradation rules are configured, or the entry's name has no
+    /// matching rule (the entry name doubles as the provider family).
+    fn degradation_chain(&self, entry_idx: usize) -> Vec<String> {
+        if !self.config.degrade_on_fallback || self.config.degradation_rules.is_empty() {
+            return Vec::new();
+        }
+        let Some(entry) = self.entries.get(entry_idx) else {
+            return Vec::new();
+        };
+        let Some(rule) =
+            DegradationRule::find_for_provider(&self.config.degradation_rules, &entry.name)
+        else {
+            return Vec::new();
+        };
+        let mut chain = Vec::new();
+        let mut current = entry.model_name().to_string();
+        while let Some(next) = rule.next_degraded_model(&current) {
+            chain.push(next.clone());
+            current = next;
+        }
+        chain
+    }
+
+    /// Build a fresh degraded provider for `entry_idx` with `model_name` swapped in.
+    ///
+    /// Clones the entry's own `ModelConfig` (preserving api key, base_url,
+    /// provider kind) and overrides only `model_name`, then constructs the
+    /// provider through the injectable `provider_builder`.
+    fn build_degraded_provider(
+        &self,
+        entry_idx: usize,
+        model_name: &str,
+    ) -> Option<Box<dyn LlmProvider>> {
+        let entry = self.entries.get(entry_idx)?;
+        let mut cfg = entry.provider.config().clone();
+        cfg.model_name = Some(model_name.to_string());
+        Some((self.provider_builder)(&cfg))
+    }
+
+    /// Try within-family model degradation after the primary model failed.
+    ///
+    /// Iterates the degradation chain, building a fresh provider for each
+    /// degraded tier and retrying inference. On the first success: logs a
+    /// `ModelDegradation` fallback event (same provider, lower tier),
+    /// records success in the circuit breaker, clears cooldown, records
+    /// usage, and returns the response. Returns `None` when no degraded
+    /// model is configured or every degraded tier also failed — in which
+    /// case the caller proceeds to cross-provider fallback.
+    async fn attempt_degradation(
+        &self,
+        entry_idx: usize,
+        request: &InferenceRequest,
+    ) -> Option<InferenceResponse> {
+        let entry = self.entries.get(entry_idx)?;
+        let from_model = entry.model_name().to_string();
+        let chain = self.degradation_chain(entry_idx);
+        if chain.is_empty() {
+            return None;
+        }
+
+        for next_model in chain {
+            let Some(degraded) = self.build_degraded_provider(entry_idx, &next_model) else {
+                continue;
+            };
+            tracing::info!(
+                "Attempting within-family degradation for {}: {} → {}",
+                entry.name,
+                from_model,
+                next_model
+            );
+            match degraded.infer(request.clone()).await {
+                Ok(response) => {
+                    tracing::info!(
+                        "Inference succeeded on degraded model {} (family {})",
+                        next_model,
+                        entry.name
+                    );
+                    self.fallback_log.log_fallback(FallbackEvent::new(
+                        entry.name.clone(),
+                        entry.name.clone(),
+                        FallbackReason::ModelDegradation {
+                            from_model: from_model.clone(),
+                            to_model: next_model.clone(),
+                        },
+                        from_model.clone(),
+                        next_model.clone(),
+                    ));
+                    if let Some(cb) = &self.circuit_breaker {
+                        cb.record_success(&entry.name);
+                    }
+                    entry.clear_cooldown().await;
+                    if let Some(ct) = &self.usage_tracker {
+                        let record = oneai_core::UsageRecord::new(
+                            request.conversation.id.clone(),
+                            response.model.clone(),
+                            entry.name.clone(),
+                            response.usage.prompt_tokens,
+                            response.usage.completion_tokens,
+                        );
+                        let _ = ct.record_usage(record).await;
+                    }
+                    self.active_index.store(entry_idx as u32, Ordering::Relaxed);
+                    return Some(response);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Degraded model {} also failed for {}: {}",
+                        next_model,
+                        entry.name,
+                        e
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    /// Streaming counterpart of `attempt_degradation`.
+    ///
+    /// Same chain walk, but opens a stream rather than a blocking response.
+    /// Like the cross-provider streaming path, degradation only triggers when
+    /// `infer_stream` itself fails — a mid-stream error propagates as-is.
+    async fn attempt_degradation_stream(
+        &self,
+        entry_idx: usize,
+        request: &InferenceRequest,
+    ) -> Option<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>> {
+        let entry = self.entries.get(entry_idx)?;
+        let from_model = entry.model_name().to_string();
+        let chain = self.degradation_chain(entry_idx);
+        if chain.is_empty() {
+            return None;
+        }
+
+        for next_model in chain {
+            let Some(degraded) = self.build_degraded_provider(entry_idx, &next_model) else {
+                continue;
+            };
+            tracing::info!(
+                "Attempting within-family degradation (stream) for {}: {} → {}",
+                entry.name,
+                from_model,
+                next_model
+            );
+            match degraded.infer_stream(request.clone()).await {
+                Ok(stream) => {
+                    self.fallback_log.log_fallback(FallbackEvent::new(
+                        entry.name.clone(),
+                        entry.name.clone(),
+                        FallbackReason::ModelDegradation {
+                            from_model: from_model.clone(),
+                            to_model: next_model.clone(),
+                        },
+                        from_model.clone(),
+                        next_model.clone(),
+                    ));
+                    if let Some(cb) = &self.circuit_breaker {
+                        cb.record_success(&entry.name);
+                    }
+                    entry.clear_cooldown().await;
+                    self.active_index.store(entry_idx as u32, Ordering::Relaxed);
+                    return Some(stream);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Degraded model {} (stream) also failed for {}: {}",
+                        next_model,
+                        entry.name,
+                        e
+                    );
+                }
+            }
+        }
+        None
     }
 
     /// Try inference with fallback chain.
@@ -491,7 +706,7 @@ impl ProviderPool {
                     return Ok(response);
                 }
                 Err(error) => {
-                    // Failure — record and try next provider
+                    // Failure — record and try degradation, then cross-provider fallback
                     tracing::warn!("Inference failed with provider {}: {}", entry.name, error);
 
                     // Record failure in circuit breaker
@@ -502,7 +717,12 @@ impl ProviderPool {
                     // Record failure time for cooldown
                     entry.record_failure_time().await;
 
-                    // Check if there's a next provider for the fallback log
+                    // ── Within-family model degradation (same provider, lower tier)
+                    if let Some(response) = self.attempt_degradation(idx, &request).await {
+                        return Ok(response);
+                    }
+
+                    // ── Cross-provider fallback — log and continue to next entry
                     let next_idx = self.entries.iter().position(|e| e.priority > entry.priority);
                     let (next_name, next_model) = if let Some(idx) = next_idx {
                         (self.entries[idx].name.clone(), self.entries[idx].model_name().to_string())
@@ -641,7 +861,7 @@ impl ProviderPool {
                     return Ok(stream);
                 }
                 Err(error) => {
-                    // Failure — record and try next
+                    // Failure — record and try degradation, then cross-provider fallback
                     tracing::warn!("Streaming inference failed with provider {}: {}", entry.name, error);
 
                     if let Some(cb) = &self.circuit_breaker {
@@ -649,6 +869,12 @@ impl ProviderPool {
                     }
                     entry.record_failure_time().await;
 
+                    // ── Within-family model degradation (same provider, lower tier)
+                    if let Some(stream) = self.attempt_degradation_stream(idx, &request).await {
+                        return Ok(stream);
+                    }
+
+                    // ── Cross-provider fallback — log and continue to next entry
                     let next_idx = self.entries.iter().position(|e| e.priority > entry.priority);
                     let (next_name, next_model) = if let Some(idx) = next_idx {
                         (self.entries[idx].name.clone(), self.entries[idx].model_name().to_string())
@@ -824,6 +1050,25 @@ mod tests {
 
         fn failing(message: &str) -> Self {
             let mut provider = Self::new("mock", "mock-failing-model");
+            *provider.should_fail.lock().unwrap() = true;
+            provider.fail_message = message.to_string();
+            provider
+        }
+
+        /// Build a succeeding TestProvider straight from a ModelConfig — used by
+        /// the injectable degraded-provider builder in degradation tests.
+        fn from_config(config: ModelConfig) -> Self {
+            Self {
+                config,
+                should_fail: std::sync::Mutex::new(false),
+                fail_message: "Provider error".to_string(),
+                call_count: std::sync::Mutex::new(0),
+            }
+        }
+
+        /// Build a failing TestProvider from a ModelConfig.
+        fn from_config_failing(config: ModelConfig, message: &str) -> Self {
+            let mut provider = Self::from_config(config);
             *provider.should_fail.lock().unwrap() = true;
             provider.fail_message = message.to_string();
             provider
@@ -1332,5 +1577,106 @@ mod tests {
         // Should be sorted by priority
         let names = pool.provider_names();
         assert_eq!(names, vec!["anthropic", "openai"]);
+    }
+
+    // ─── Degradation wiring tests ─────────────────────────────────────────────
+
+    /// Primary model fails → within-family degradation recovers on the next
+    /// tier (Opus → Sonnet), no cross-provider fallback needed.
+    #[tokio::test]
+    async fn degradation_recovers_within_family_when_primary_fails() {
+        // Primary: an Anthropic-family Opus provider that always fails.
+        let primary = TestProvider::new("anthropic", "claude-opus-4-8");
+        primary.set_failing(true);
+
+        let pool = ProviderPool::new(
+            vec![ProviderEntry::new("anthropic", Arc::new(primary), 0)],
+            ProviderPoolConfig::default().with_default_degradation(),
+        )
+        // Degraded providers are built by the factory from the swapped config;
+        // inject a builder that returns a succeeding TestProvider so the chain
+        // recovers deterministically without real HTTP.
+        .with_provider_builder(|cfg: &ModelConfig| {
+            Box::new(TestProvider::from_config(cfg.clone()))
+        });
+
+        let response = pool.infer(test_request()).await.expect("degradation should recover");
+        assert_eq!(response.model, "claude-sonnet-4-6-20250514");
+        assert_eq!(pool.active_provider_name(), "anthropic");
+
+        // Exactly one fallback event — ModelDegradation Opus → Sonnet.
+        assert_eq!(pool.fallback_log_count(), 1);
+        let event = &pool.fallback_log_recent(1)[0];
+        assert_eq!(event.from_provider, "anthropic");
+        assert_eq!(event.to_provider, "anthropic");
+        assert_eq!(
+            event.reason,
+            FallbackReason::ModelDegradation {
+                from_model: "claude-opus-4-8".to_string(),
+                to_model: "claude-sonnet-4-6-20250514".to_string(),
+            }
+        );
+        assert_eq!(event.model_before, "claude-opus-4-8");
+        assert_eq!(event.model_after, "claude-sonnet-4-6-20250514");
+    }
+
+    /// Primary fails AND every degraded tier also fails → fall through to the
+    /// next cross-provider (no spurious recovery, ModelDegradation not logged).
+    #[tokio::test]
+    async fn degradation_falls_through_to_cross_provider_when_chain_exhausted() {
+        let primary = TestProvider::new("anthropic", "claude-opus-4-8");
+        primary.set_failing(true);
+        let secondary = openai_test_provider();
+
+        let pool = ProviderPool::new(
+            vec![
+                ProviderEntry::new("anthropic", Arc::new(primary), 0),
+                ProviderEntry::new("openai", secondary, 1),
+            ],
+            ProviderPoolConfig::default().with_default_degradation(),
+        )
+        // Every degraded tier also fails → degradation exhausts the chain.
+        .with_provider_builder(|cfg: &ModelConfig| {
+            Box::new(TestProvider::from_config_failing(cfg.clone(), "degraded tier failed"))
+        });
+
+        let response = pool.infer(test_request()).await.expect("cross-provider fallback should recover");
+        assert_eq!(response.model, "gpt-4o");
+        assert_eq!(pool.active_provider_name(), "openai");
+
+        // No ModelDegradation event — degraded attempts all failed, so only the
+        // cross-provider ProviderError event is logged.
+        assert_eq!(pool.fallback_log_count(), 1);
+        let event = &pool.fallback_log_recent(1)[0];
+        assert!(matches!(event.reason, FallbackReason::ProviderError(_)));
+        assert_eq!(event.from_provider, "anthropic");
+        assert_eq!(event.to_provider, "openai");
+    }
+
+    /// Streaming counterpart — primary stream setup fails, degraded tier opens.
+    #[tokio::test]
+    async fn degradation_stream_recovers_within_family_when_primary_fails() {
+        let primary = TestProvider::new("anthropic", "claude-opus-4-8");
+        primary.set_failing(true);
+
+        let pool = ProviderPool::new(
+            vec![ProviderEntry::new("anthropic", Arc::new(primary), 0)],
+            ProviderPoolConfig::default().with_default_degradation(),
+        )
+        .with_provider_builder(|cfg: &ModelConfig| {
+            Box::new(TestProvider::from_config(cfg.clone()))
+        });
+
+        use futures::StreamExt;
+        let mut stream = pool.infer_stream(test_request()).await.expect("degraded stream should open");
+        // Drain to completion to ensure the degraded stream is live.
+        while stream.next().await.is_some() {}
+
+        assert_eq!(pool.active_provider_name(), "anthropic");
+        assert_eq!(pool.fallback_log_count(), 1);
+        assert!(matches!(
+            pool.fallback_log_recent(1)[0].reason,
+            FallbackReason::ModelDegradation { .. }
+        ));
     }
 }
