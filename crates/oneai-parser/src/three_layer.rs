@@ -129,6 +129,22 @@ impl Default for ThreeLayerParser {
 
 #[async_trait]
 impl OutputParser for ThreeLayerParser {
+    /// Layer 2 fuzzy repair entry point for raw tool-args strings.
+    ///
+    /// Overrides the trait default (strict `serde_json::from_str`) so that
+    /// mildly-malformed args — unclosed braces, trailing prose, embedded JSON
+    /// — are recovered via `FuzzyJsonRepair` instead of failing outright. The
+    /// agent loop's `parse_tool_args` routes every tool-call's args through
+    /// here, making Layer 2 reachable on the hot path (the gap analysis found
+    /// it was bypassed). Truly unrepairable args still error, which the agent
+    /// loop feeds back to the model as a self-correction prompt (Layer 3).
+    fn repair_tool_args(
+        &self,
+        raw: &str,
+    ) -> std::result::Result<serde_json::Value, OneAIError> {
+        self.fuzzy.repair_and_parse(raw)
+    }
+
     async fn parse<'a>(
         &self,
         raw_output: &str,

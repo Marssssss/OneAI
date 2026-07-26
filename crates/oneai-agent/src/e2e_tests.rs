@@ -253,6 +253,41 @@ async fn malformed_tool_args_fed_back_not_silently_dispatched() {
         "expected a 'malformed arguments' tool_result feedback in the conversation");
 }
 
+#[tokio::test]
+async fn malformed_args_fuzzy_repaired_then_dispatched() {
+    // §parser gap fix #9: a tool call whose args are mildly malformed —
+    // recoverable by Layer 2 fuzzy repair (here: an unclosed brace) — must be
+    // repaired by the injected ThreeLayerParser and dispatched normally,
+    // rather than being fed back to the model as an error. Previously
+    // `parse_tool_args` did a bare `serde_json::from_str`, so any deviation
+    // from strict JSON was treated as malformed even when the fuzzy layer
+    // could recover it — Layer 2 was unreachable on the hot path.
+    let read_file = MockTool::read_file_mock();
+    let read_file_log = read_file.call_log();
+
+    let provider = MockProvider::from_script(vec![
+        // Unclosed-brace args — fuzzy repair closes the brace and recovers
+        // {"path": "/test.txt"}. Must be dispatched, not fed back.
+        ScriptedResponse::raw_tool_call("read_file", "{\"path\": \"/test.txt\""),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+
+    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
+        inject_skills: false,
+        thinking_budget: None,
+        hard_max_iterations: Some(10),
+        ..AgentLoopConfig::default()
+    });
+
+    let result = agent_loop.run("read /test.txt").await.unwrap();
+    assert!(result.completed);
+
+    // The repaired call WAS dispatched to the tool.
+    let log = read_file_log.lock().await;
+    assert_eq!(log.len(), 1, "fuzzy-repaired call must be dispatched, got {log:?}");
+    assert_eq!(log[0].args["path"], "/test.txt");
+}
+
 // ─── Token-budget termination guardrail ─────────────────────────────────────
 
 #[tokio::test]

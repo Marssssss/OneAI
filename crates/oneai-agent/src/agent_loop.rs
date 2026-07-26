@@ -2814,10 +2814,15 @@ impl AgentLoop {
     }
 
     /// Parse a tool-call's raw args string into a JSON value. Returns the
-    /// parse error string on failure. The single parse site for tool args —
-    /// a future fuzzy-repair layer (ThreeLayerParser) can be wired in here.
+    /// parse/repair error string on failure. Routes through the injected
+    /// `OutputParser` so Layer 2 fuzzy repair (closing unclosed brackets,
+    /// extracting embedded JSON) recovers mildly-malformed args instead of
+    /// failing outright — the gap-analysis hot-path fix that makes the
+    /// ThreeLayerParser's Layer 2 actually reachable. Unrepairable args
+    /// still error; the caller (`filter_malformed_tool_args`) feeds that
+    /// error back to the model as a Reflexion-style self-correction prompt.
     fn parse_tool_args(&self, raw: &str) -> std::result::Result<serde_json::Value, String> {
-        serde_json::from_str::<serde_json::Value>(raw).map_err(|e| e.to_string())
+        self.parser.repair_tool_args(raw).map_err(|e| e.to_string())
     }
 
     /// Re-derive the raw args string for a tool-call id from the response's

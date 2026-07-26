@@ -212,6 +212,23 @@ pub trait OutputParser: Send + Sync {
     /// 2. If not, attempt fuzzy repair (Layer 2).
     /// 3. If repair fails, trigger fallback self-correction (Layer 3).
     async fn parse<'a>(&self, raw_output: &str, schema: Option<&'a serde_json::Value>) -> Result<ParsedOutput>;
+
+    /// Repair a raw tool-args JSON string (Layer 2 fuzzy repair).
+    ///
+    /// The agent loop calls this on every tool-call's raw args before dispatch.
+    /// The default implementation is a strict `serde_json::from_str`; the
+    /// `ThreeLayerParser` overrides it to run Layer 2 fuzzy repair (closing
+    /// unclosed brackets, extracting embedded JSON) so mildly-malformed args
+    /// are recovered instead of being fed back to the model as errors.
+    /// Truly unrepairable args still return `Err` — the agent loop surfaces
+    /// that as a Reflexion-style self-correction prompt (Layer 3).
+    fn repair_tool_args(&self, raw: &str) -> Result<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(raw).map_err(|e| {
+            crate::error::OneAIError::Parser(crate::error::ParserError::FuzzyRepairFailed(
+                e.to_string(),
+            ))
+        })
+    }
 }
 
 // ─── ConstrainedDecoder ───────────────────────────────────────────────────────
