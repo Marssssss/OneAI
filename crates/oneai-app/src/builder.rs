@@ -1649,6 +1649,15 @@ impl AppBuilder {
         if let Some(uid) = &self.user_id {
             memory_manager.set_user_id(uid.clone()).await;
         }
+        // Phase 2.4 — thread the merged DomainPack's decay policy into the
+        // memory manager (mirrors set_user_id). `enabled=false` (coding
+        // default) makes `run_decay` a no-op, so existing behavior is
+        // unchanged unless the domain opts in (research / assistant).
+        if let Some(domain) = &merged_domain_pack {
+            memory_manager
+                .set_decay_policy(Some(domain.memory_profile.decay.clone()))
+                .await;
+        }
         if let Some(domain) = &merged_domain_pack {
             if domain.memory_profile.enable_memory_tools {
                 let mm = memory_manager.clone();

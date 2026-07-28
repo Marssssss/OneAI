@@ -88,6 +88,11 @@ pub struct MemoryManager {
     /// Per-session id (episodic namespace). Interior-mutable so it can be
     /// updated each run through the shared `Arc<MemoryManager>`.
     session_id: tokio::sync::RwLock<String>,
+    /// Memory decay / forgetting policy (Phase 2.4). Interior-mutable so the
+    /// `AppBuilder` can set it from the merged DomainPack's `MemoryProfile.decay`
+    /// after the shared `Arc<MemoryManager>` is constructed (mirrors
+    /// `user_id`/`session_id`). `None` = decay disabled.
+    decay: tokio::sync::RwLock<Option<oneai_core::DecayPolicy>>,
 }
 
 impl MemoryManager {
@@ -106,6 +111,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -120,6 +126,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -141,6 +148,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -158,6 +166,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -180,6 +189,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -201,6 +211,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -219,6 +230,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -243,6 +255,7 @@ impl MemoryManager {
             fact_archive: Arc::new(crate::fact_store::MemoryFactStore::new()),
             user_id: tokio::sync::RwLock::new(String::new()),
             session_id: tokio::sync::RwLock::new(String::new()),
+            decay: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -308,6 +321,18 @@ impl MemoryManager {
         *self.session_id.write().await = session_id.into();
     }
 
+    /// Set the decay / forgetting policy (Phase 2.4). Threaded in by
+    /// `AppBuilder` from the merged DomainPack's `MemoryProfile.decay`.
+    /// `None` or `enabled=false` disables decay (no-op `run_decay`).
+    pub async fn set_decay_policy(&self, policy: Option<oneai_core::DecayPolicy>) {
+        *self.decay.write().await = policy;
+    }
+
+    /// The configured decay policy (if any).
+    pub async fn decay(&self) -> Option<oneai_core::DecayPolicy> {
+        self.decay.read().await.clone()
+    }
+
     /// Soft-invalidate the current fact for a conflict key (§12.2, Zep-style
     /// soft-fail). The fact is marked `superseded` and excluded from default
     /// recall, but not physically removed — it stays auditable via the
@@ -364,6 +389,93 @@ impl MemoryManager {
                     tracing::warn!("Failed to persist fact: {}", e);
                 }
             }
+        }
+    }
+
+    // ─── Phase 2.4: memory decay / forgetting (gap P2 #16) ────────────────────
+
+    /// Run the decay pass — evict low-salience core facts to the archive, and
+    /// soft-invalidate stale low-salience archival facts ("forgotten but
+    /// auditable", preserving the Mem0 audit invariant). No-op when no policy
+    /// is set or `enabled=false`.
+    ///
+    /// Effective salience = `importance * temporal_score(updated_at, now,
+    /// recency_half_life_secs)` (reusing the three-factor recall's decay).
+    /// Pinned facts are never evicted/invalidated. Superseded facts are
+    /// skipped (already forgotten). Never physically deletes — the archival
+    /// tier's `invalidate_id` only flips `superseded` + drops the vector-backend
+    /// index row, so the fact stays auditable via `include_superseded` recall.
+    pub async fn run_decay(&self, now: chrono::DateTime<chrono::Utc>) -> DecayReport {
+        let Some(policy) = self.decay().await else {
+            return DecayReport::default();
+        };
+        if !policy.enabled {
+            return DecayReport::default();
+        }
+
+        // Snapshot the archive-forget candidates BEFORE paging core facts to
+        // the archive — otherwise a just-paged core fact (low-salience) would
+        // be freshly present in `fact_archive.all()` and soft-invalidated in
+        // the same sweep, conflating "page out" with "forget". Paging is
+        // reversible; forgetting is softer — a fact paged this sweep stays
+        // live in the archive this pass and is eligible for forget next sweep.
+        let ttl = chrono::Duration::seconds(policy.archive_ttl_secs as i64);
+        let half_life = policy.recency_half_life_secs;
+        let forget_floor = policy.archive_forget_salience;
+        let now_for_candidates = now;
+        let forget_candidates: Vec<oneai_core::MemoryFact> = self
+            .fact_archive
+            .all()
+            .await
+            .into_iter()
+            .filter(|f| {
+                !f.superseded && !f.pinned && (now_for_candidates - f.updated_at) > ttl && {
+                    let salience = f.importance
+                        * crate::fact_store::temporal_score_fact(
+                            &f.updated_at,
+                            &now_for_candidates,
+                            half_life,
+                        );
+                    salience < forget_floor
+                }
+            })
+            .collect();
+
+        // 1. Core tier → archive (paging, not loss). evict_below_salience
+        //    removes from core + returns the victims; archive_facts embeds +
+        //    persists them in the archival tier.
+        let evicted = self
+            .core_memory
+            .evict_below_salience(policy.min_salience, policy.recency_half_life_secs, now)
+            .await;
+        let core_evicted: Vec<String> = evicted.iter().map(|f| f.subject.clone()).collect();
+        if !evicted.is_empty() {
+            self.archive_facts(evicted).await;
+        }
+
+        // 2. Archive tier → soft-invalidate the pre-snapshotted dregs.
+        let mut archive_forgotten = Vec::new();
+        for mut fact in forget_candidates {
+            if self.fact_archive.invalidate_id(&fact.id, now).await {
+                // Refresh the local copy to the invalidated state so the
+                // persisted row reflects superseded=true (store_fact upserts
+                // on conflict). The in-memory store is already updated.
+                fact.superseded = true;
+                fact.superseded_at = Some(now);
+                fact.updated_at = now;
+                fact.version = fact.version.saturating_add(1);
+                if let Some(p) = &self.persistence {
+                    if let Err(e) = p.store_fact(&fact).await {
+                        tracing::warn!("Failed to persist decayed fact '{}': {}", fact.id, e);
+                    }
+                }
+                archive_forgotten.push(fact.subject.clone());
+            }
+        }
+
+        DecayReport {
+            core_evicted,
+            archive_forgotten,
         }
     }
 
@@ -540,23 +652,72 @@ impl MemoryManager {
         if !reflection.should_reflect(accumulated_importance, turns_since_last) {
             return Ok(None);
         }
-        // Gather up to 3 most-recent prior episodic facts to seed recursive
-        // reflection. Sorted by updated_at descending.
-        let mut prior: Vec<_> = self
+        // §2.4 recursive reflection: retrieve prior episodic facts by
+        // **relevance** (three-factor: relevance + recency + importance), not
+        // recency alone. The query is the recent conversation text — so a new
+        // reflection surfaces the prior insights it can build on / revise
+        // (Generative-Agents "insight cites insight" reflection tree). Falls
+        // back to recency-sorted `take(3)` when the search returns nothing
+        // (no embedding service + keyword miss) — graceful degradation to the
+        // legacy behavior, never an empty prior when priors exist.
+        let query = conversation
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| !matches!(m.role, oneai_core::Role::System))
+            .take(3)
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let recall_cfg = oneai_core::RecallConfig {
+            top_k: 5,
+            ..oneai_core::RecallConfig::default()
+        };
+        let now = chrono::Utc::now();
+        let query_embedding = if let Some(svc) = &self.embedding_service {
+            match svc.embed(&query).await {
+                Ok(emb) => Some(emb),
+                Err(e) => {
+                    tracing::warn!("prior-reflect embedding failed, keyword fallback: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut prior: Vec<oneai_core::MemoryFact> = self
             .fact_archive
-            .all()
+            .search_hybrid_with_config(
+                query_embedding.as_deref(),
+                &query,
+                &recall_cfg,
+                now,
+                false, // exclude superseded — only live priors seed the tree
+            )
             .await
             .into_iter()
-            .filter(|f| f.fact_type.as_str() == "episodic" && !f.superseded)
+            .filter(|f| f.fact_type.as_str() == "episodic")
+            .take(5)
             .collect();
-        prior.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
+        if prior.is_empty() {
+            // Fallback: recency-sorted (the legacy path) so we never hand the
+            // reflector an empty prior when priors exist.
+            prior = self
+                .fact_archive
+                .all()
+                .await
+                .into_iter()
+                .filter(|f| f.fact_type.as_str() == "episodic" && !f.superseded)
+                .collect();
+            prior.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
+            prior.truncate(3);
+        }
         let prior_summary = if prior.is_empty() {
             None
         } else {
             Some(
                 prior
                     .iter()
-                    .take(3)
                     .map(|f| {
                         format!(
                             "- ({}): {}",
@@ -709,6 +870,16 @@ impl MemoryManager {
             Ok(())
         }
     }
+}
+
+/// Result of a `run_decay` pass (Phase 2.4). Returned so the caller (AppSession
+/// / `oneai session decay`) can surface what was paged out + forgotten.
+#[derive(Debug, Clone, Default)]
+pub struct DecayReport {
+    /// Core-tier subjects paged to the archival tier (low effective salience).
+    pub core_evicted: Vec<String>,
+    /// Archival-tier subjects soft-invalidated ("forgotten but auditable").
+    pub archive_forgotten: Vec<String>,
 }
 
 impl Default for MemoryManager {
@@ -920,21 +1091,48 @@ mod manager_tests {
 
     // ─── §12.3: threshold-triggered mid-session reflection ──────────────────
 
-    /// Mock LLM provider for the reflection prompt.
+    /// Mock LLM provider for the reflection prompt. Optionally captures the
+    /// last request's user-message text so tests can assert the augmented
+    /// prompt (e.g. the prior-episodic summary that §2.4 recursive reflection
+    /// folds in).
     struct MockReflectProvider {
         resp: String,
+        captured: Option<Arc<std::sync::Mutex<String>>>,
     }
     impl MockReflectProvider {
         fn new(r: impl Into<String>) -> Self {
-            Self { resp: r.into() }
+            Self {
+                resp: r.into(),
+                captured: None,
+            }
+        }
+        fn new_capturing(r: impl Into<String>, captured: Arc<std::sync::Mutex<String>>) -> Self {
+            Self {
+                resp: r.into(),
+                captured: Some(captured),
+            }
         }
     }
     #[async_trait::async_trait]
     impl oneai_core::traits::LlmProvider for MockReflectProvider {
         async fn infer(
             &self,
-            _req: oneai_core::InferenceRequest,
+            req: oneai_core::InferenceRequest,
         ) -> Result<oneai_core::InferenceResponse> {
+            if let Some(c) = &self.captured {
+                // The prior-episodic summary is folded into the SYSTEM prompt
+                // (reflect_with_prior appends it there), so capture the system
+                // message text — not the user message.
+                let sys_text = req
+                    .conversation
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| matches!(m.role, oneai_core::Role::System))
+                    .map(|m| m.text_content())
+                    .unwrap_or_default();
+                *c.lock().unwrap() = sys_text;
+            }
             Ok(oneai_core::InferenceResponse {
                 message: oneai_core::Message::assistant(self.resp.clone()),
                 usage: oneai_core::TokenUsage::default(),
@@ -1005,6 +1203,224 @@ mod manager_tests {
         let config = MemoryManagerConfig::default();
         assert_eq!(config.compression_threshold_tokens, 4000);
         assert_eq!(config.compression_keep_recent_turns, 6);
+    }
+
+    // ─── §2.4: recursive reflection (relevance-based prior) ────────────────
+
+    /// Build an episodic fact (the type `reflect_if_threshold` filters priors
+    /// on) with a set `updated_at` so we can control recency vs. relevance.
+    /// `subject` is derived from `content` so each fact has a unique conflict
+    /// key (otherwise Mem0 upsert overwrites).
+    fn episodic_fact(
+        content: &str,
+        importance: f32,
+        updated: chrono::DateTime<chrono::Utc>,
+    ) -> oneai_core::MemoryFact {
+        oneai_core::MemoryFact {
+            id: format!("epi_{}", uuid::Uuid::new_v4()),
+            user_id: String::new(),
+            session_id: "s".to_string(),
+            fact_type: oneai_core::FactType::new("episodic"),
+            subject: content.to_string(),
+            predicate: "reflects".to_string(),
+            content: content.to_string(),
+            embedding: None,
+            metadata: HashMap::new(),
+            importance,
+            created_at: updated,
+            updated_at: updated,
+            version: 1,
+            superseded: false,
+            superseded_at: None,
+            pinned: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn reflect_if_threshold_prior_by_keyword_relevance() {
+        // No embedding service → keyword leg. Seed two episodic priors: one
+        // whose content shares keywords with the live conversation ("pnpm"),
+        // one that doesn't ("vim"). The relevance path must surface the
+        // keyword-matching prior; the augmented prompt carries its content.
+        let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let manager = MemoryManager::with_compressor_and_reflection(
+            MemoryManagerConfig::default(),
+            Arc::new(MockReflectProvider::new_capturing(
+                "REFLECTION: built on pnpm prior\nOUTCOME: success",
+                captured.clone(),
+            )),
+        );
+        // Older but keyword-relevant.
+        let old = chrono::Utc::now() - chrono::Duration::days(10);
+        // Newer but irrelevant.
+        let new = chrono::Utc::now();
+        manager
+            .archive_facts(vec![
+                episodic_fact("decided to use pnpm as the package manager", 0.8, old),
+                episodic_fact("user prefers vim as the editor", 0.8, new),
+            ])
+            .await;
+
+        let mut conv = oneai_core::Conversation::new();
+        conv.add_message(oneai_core::Message::user("configure pnpm for this project"));
+        let r = manager
+            .reflect_if_threshold("s", &conv, 200.0, 10)
+            .await
+            .unwrap();
+        assert!(r.is_some());
+
+        let prompt = captured.lock().unwrap().clone();
+        assert!(
+            prompt.contains("pnpm"),
+            "relevance path must surface the keyword-matching prior: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reflect_if_threshold_prior_fallback_recency_when_search_empty() {
+        // No embedding + a query that matches no prior keywords → search
+        // returns empty → fallback to recency-sorted `take(3)`. The most
+        // recent prior surfaces regardless of relevance.
+        let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let manager = MemoryManager::with_compressor_and_reflection(
+            MemoryManagerConfig::default(),
+            Arc::new(MockReflectProvider::new_capturing(
+                "REFLECTION: recency fallback\nOUTCOME: success",
+                captured.clone(),
+            )),
+        );
+        let old = chrono::Utc::now() - chrono::Duration::days(10);
+        let new = chrono::Utc::now();
+        manager
+            .archive_facts(vec![
+                episodic_fact("zzz unrelated old content", 0.8, old),
+                episodic_fact("yyy unrelated new content", 0.8, new),
+            ])
+            .await;
+
+        let mut conv = oneai_core::Conversation::new();
+        conv.add_message(oneai_core::Message::user("query about something else"));
+        let r = manager
+            .reflect_if_threshold("s", &conv, 200.0, 10)
+            .await
+            .unwrap();
+        assert!(r.is_some());
+        let prompt = captured.lock().unwrap().clone();
+        // Recency fallback surfaces the newest prior.
+        assert!(
+            prompt.contains("yyy unrelated new content"),
+            "recency fallback must surface the most recent prior: {prompt}"
+        );
+    }
+
+    // ─── §2.4: memory decay / forgetting ────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_decay_disabled_is_noop() {
+        // Default policy = disabled. Seed facts, run_decay, nothing changes.
+        let manager = MemoryManager::new();
+        let now = chrono::Utc::now();
+        let stale = now - chrono::Duration::days(30);
+        manager
+            .core_memory()
+            .upsert(episodic_fact("noise", 0.01, stale))
+            .await;
+        let report = manager.run_decay(now).await;
+        assert!(report.core_evicted.is_empty());
+        assert!(report.archive_forgotten.is_empty());
+        assert_eq!(manager.core_memory().facts().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_decay_core_evicts_and_archive_forgets() {
+        let manager = MemoryManager::new();
+        manager
+            .set_decay_policy(Some(oneai_core::DecayPolicy {
+                enabled: true,
+                min_salience: 0.05,
+                archive_forget_salience: 0.02,
+                archive_ttl_secs: 1, // 1 second — eligible almost immediately
+                recency_half_life_secs: 7 * 24 * 3600,
+                sweep_on_reflect: true,
+            }))
+            .await;
+        let now = chrono::Utc::now();
+        let stale = now - chrono::Duration::days(30);
+
+        // Core: a low-importance stale fact (effective ≈ 0.1 * ~0.05 ≈ 0.005
+        // < 0.05 → evicted to archive) + a fresh high-importance fact (kept).
+        manager
+            .core_memory()
+            .upsert(episodic_fact("core-noise", 0.1, stale))
+            .await;
+        manager
+            .core_memory()
+            .upsert(episodic_fact("core-keep", 0.9, now))
+            .await;
+
+        // Archive: a low-salience stale fact eligible for soft-invalidation
+        // (age > ttl, salience < 0.02) + a high-importance fact (kept).
+        manager
+            .archive_facts(vec![episodic_fact("archive-dreg", 0.01, stale)])
+            .await;
+        manager
+            .archive_facts(vec![episodic_fact("archive-keep", 0.9, stale)])
+            .await;
+
+        let report = manager.run_decay(now).await;
+        assert_eq!(report.core_evicted, vec!["core-noise".to_string()]);
+        assert_eq!(report.archive_forgotten, vec!["archive-dreg".to_string()]);
+
+        // Core still has the fresh high-importance fact.
+        let core: Vec<_> = manager
+            .core_memory()
+            .facts()
+            .await
+            .into_iter()
+            .map(|f| f.content)
+            .collect();
+        assert!(core.contains(&"core-keep".to_string()));
+        assert!(!core.contains(&"core-noise".to_string()));
+
+        // The evicted core fact was paged to the archive (now superseded=false,
+        // still live there — only the dreg was forgotten).
+        let archive_all = manager.fact_archive().all().await;
+        assert!(
+            archive_all
+                .iter()
+                .any(|f| f.content == "core-noise" && !f.superseded),
+            "evicted core fact paged to archive (still live)"
+        );
+        // The dreg is superseded (forgotten) but still present for audit.
+        let dreg = archive_all.iter().find(|f| f.content == "archive-dreg");
+        assert!(dreg.is_some(), "forgotten fact remains for audit");
+        let dreg_id = dreg.unwrap().id.clone();
+        assert!(dreg.unwrap().superseded);
+        // Default recall excludes the dreg (by id); include_superseded
+        // surfaces it. (Asserting by id, not `is_empty`, because the query
+        // tokenizes — "archive" also matches the unrelated "archive-keep".)
+        let default_hits = manager
+            .fact_archive()
+            .search_keyword("archive-dreg", 20)
+            .await;
+        assert!(
+            !default_hits.iter().any(|f| f.id == dreg_id),
+            "forgotten fact must be excluded from default recall"
+        );
+        let with_super = manager
+            .fact_archive()
+            .search_hybrid_with_config(
+                None,
+                "archive-dreg",
+                &oneai_core::RecallConfig::default(),
+                now,
+                true,
+            )
+            .await;
+        assert!(
+            with_super.iter().any(|f| f.id == dreg_id),
+            "forgotten fact remains auditable via include_superseded"
+        );
     }
 
     // ─── §12.1: fact auto-embedding → semantic recall ───────────────────────

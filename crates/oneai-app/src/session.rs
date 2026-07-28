@@ -1262,6 +1262,30 @@ impl AppSession {
             }
         }
 
+        // Phase 2.4 — decay pass (gap P2 #16). Runs in sync with the
+        // mid-session reflection cadence (both are closed-loop maintenance;
+        // the importance threshold gate already fired above). No-op unless
+        // the merged DomainPack's `MemoryProfile.decay.enabled` is true
+        // (coding keeps facts forever; research/assistant opt in). Failures
+        // are swallowed — decay must never break the turn.
+        let now = chrono::Utc::now();
+        let decay = self.app.memory_manager.decay().await;
+        if decay
+            .as_ref()
+            .is_some_and(|d| d.enabled && d.sweep_on_reflect)
+        {
+            let report = self.app.memory_manager.run_decay(now).await;
+            if !report.core_evicted.is_empty() || !report.archive_forgotten.is_empty() {
+                tracing::info!(
+                    "Memory decay swept for session '{}': {} core fact(s) paged to archive, \
+                     {} archival fact(s) forgotten (superseded, auditable)",
+                    self.session_id,
+                    report.core_evicted.len(),
+                    report.archive_forgotten.len()
+                );
+            }
+        }
+
         // The assistant's final answer is already part of the loop's
         // conversation (merged below), so working memory captures it without a
         // parallel STM write (M1 single-source).

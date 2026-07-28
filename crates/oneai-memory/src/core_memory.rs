@@ -91,6 +91,50 @@ impl CoreMemory {
         evicted
     }
 
+    /// Evict non-pinned facts whose **effective salience**
+    /// (`importance * temporal_score(updated_at, now, half_life)`) falls below
+    /// `min_salience` — the Phase 2.4 importance-threshold decay pass (gap
+    /// P2 #16). Unlike `enforce_budget` (LRU on token overflow), this evicts
+    /// by salience even when under budget, so low-salience noise doesn't squat
+    /// in the always-in-context block. Pinned facts are never evicted.
+    /// Returns the evicted facts so the caller can page them to the archive.
+    pub async fn evict_below_salience(
+        &self,
+        min_salience: f32,
+        half_life_secs: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<MemoryFact> {
+        let facts = self.facts().await;
+        let mut victims: Vec<MemoryFact> = facts
+            .into_iter()
+            .filter(|f| {
+                !f.pinned && !f.superseded && {
+                    let score = f.importance
+                        * crate::fact_store::temporal_score_fact(
+                            &f.updated_at,
+                            &now,
+                            half_life_secs,
+                        );
+                    score < min_salience
+                }
+            })
+            .collect();
+        for v in &victims {
+            self.store
+                .remove(&v.user_id, &v.subject, &v.predicate)
+                .await;
+        }
+        victims.sort_by(|a, b| {
+            // Evict lowest-salience first (stable-ish order for the report).
+            let sa = a.importance
+                * crate::fact_store::temporal_score_fact(&a.updated_at, &now, half_life_secs);
+            let sb = b.importance
+                * crate::fact_store::temporal_score_fact(&b.updated_at, &now, half_life_secs);
+            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        victims
+    }
+
     /// Render the core memory as a labeled, injection-ready block.
     ///
     /// Format:
@@ -139,6 +183,19 @@ mod tests {
         }
     }
 
+    /// Like `fact` but with a set importance + a far-past timestamp so the
+    /// temporal decay makes its effective salience near `importance * ~0`.
+    fn fact_with_importance(
+        subject: &str,
+        content: &str,
+        importance: f32,
+        updated: chrono::DateTime<chrono::Utc>,
+    ) -> MemoryFact {
+        let mut f = fact(subject, content, updated);
+        f.importance = importance;
+        f
+    }
+
     #[tokio::test]
     async fn render_empty_when_no_facts() {
         let cm = CoreMemory::new(2048);
@@ -185,6 +242,37 @@ mod tests {
         assert!(!evicted.iter().any(|f| f.subject == "user.pm"));
         let remaining: Vec<_> = cm.facts().await.into_iter().map(|f| f.subject).collect();
         assert!(remaining.contains(&"user.pm".to_string()));
+    }
+
+    #[tokio::test]
+    async fn evict_below_salience_drops_low_keeps_pinned_high() {
+        // Large budget — this test is about salience, not token overflow.
+        let cm = CoreMemory::new(8192);
+        let now = chrono::Utc::now();
+        // 30 days ago → with 7-day half-life, temporal_score ≈ 0.5^(30/7) ≈ 0.052.
+        let stale = now - chrono::Duration::days(30);
+        // A low-importance stale fact → effective ≈ 0.1 * 0.052 ≈ 0.005 (below 0.05).
+        cm.upsert(fact_with_importance("low", "noise", 0.1, stale))
+            .await;
+        // A high-importance stale fact → effective ≈ 0.9 * 0.052 ≈ 0.047 (still
+        // below 0.05, but we pin it to prove pinning overrides salience).
+        let high = fact_with_importance("high", "core", 0.9, stale);
+        cm.upsert(high.clone()).await;
+        cm.pin("alice", "high", "prefers").await;
+        // A fresh high-importance fact → effective ≈ 0.9 * 1.0 = 0.9 (kept).
+        cm.upsert(fact_with_importance("fresh", "recent", 0.9, now))
+            .await;
+
+        let evicted = cm.evict_below_salience(0.05, 7 * 24 * 3600, now).await;
+        // Only the low-salience non-pinned fact is evicted.
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].subject, "low");
+        let remaining: Vec<_> = cm.facts().await.into_iter().map(|f| f.subject).collect();
+        assert!(remaining.contains(&"high".to_string()), "pinned survives");
+        assert!(
+            remaining.contains(&"fresh".to_string()),
+            "fresh high survives"
+        );
     }
 
     #[tokio::test]

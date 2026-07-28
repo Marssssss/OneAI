@@ -140,7 +140,17 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **How**：把生成式 catalog 作三层解析的 L3 权威替代，probe 降级可选覆盖（仅 catalog 缺失时）。`Api`/`Provider` 分缝是更大重构（留 Phase 4 P3-3），先上 Compat 标志 + catalog。
 - **Effort**：中。**Fit**：高，现代化 provider 层、喂 SmartRouter 能力感知路由。**类型**：新增能力+修漂移。
 
-### 2.4 记忆衰减 + 递归反思（gap P2 #16，喂 2.1）
+### 2.4 记忆衰减 + 递归反思（gap P2 #16，喂 2.1）✅
+> **进度**：全完成（2026-07-29）。两块：
+> 1. **记忆衰减**（importance 阈值驱逐 + 软失效遗忘）：
+>    - `oneai-core`：`DecayPolicy`{enabled(默认 false opt-in)/min_salience(0.05)/archive_forget_salience(0.02)/archive_ttl_secs(90d)/recency_half_life_secs(7d)/sweep_on_reflect}（serde default 向后兼容，在 RecallConfig 旁）。
+>    - `oneai-domain/memory_profile.rs`：`MemoryProfile.decay` 折进 layer 7（对标 working_state/skill_lifecycle）；coding 默认关（事实永久保留，向后兼容）、research 开（"随你成长"域才衰减）；merge strictest-wins（enabled=OR、阈值/half-life/ttl 取 min 更保守驱逐、sweep=AND）。
+>    - `oneai-memory`：`CoreMemory::evict_below_salience(min, half_life, now)`（effective salience = importance × temporal_score_fact < min → 驱逐到 archive，pinned 豁免，对标 enforce_budget 但按 salience 不按 token 超额）+ `MemoryFactStore::invalidate_id(id, now)`（invalidate 的 by-id 变体，软失效 superseded=true + vector backend delete，保留 Mem0 审计不变量）+ `MemoryManager::run_decay(now) -> DecayReport{core_evicted, archive_forgotten}`（**先快照 archive-forget 候选再 page core→archive**，否则刚 page 的低 salience core fact 会在同 sweep 被 forget——conflate page 与 forget；forget 候选需 age>ttl + salience<archive_forget_salience + !superseded + !pinned；persist superseded 状态复用 store_fact upsert-on-conflict）+ `set_decay_policy`/`decay()` accessor（对标 set_user_id，interior-mutable）。
+>    - `oneai-app`：`AppBuilder.build()` 从 merged pack `set_decay_policy`（line ~1650）；`AppSession` 在 `reflect_if_threshold` 旁若 `decay.enabled && sweep_on_reflect` 跑 `run_decay`（两者同是 closed-loop 维护，importance 阈值门已算过免额外 cadence，失败 swallowed）。
+>    - CLI `oneai session decay --user --domain`（provider-less App + SQLite persistence + domain pack；load_facts(user,"") 载入持久 fact base → run_decay → superseded 落 SQLite；coding 提示 disabled、research 跑）。
+> 2. **递归反思**（relevance-based prior 检索）：`reflect_if_threshold` 取 prior episodic fact 由 `sort_by_key(updated_at desc).take(3)`（recency）改为 `search_hybrid_with_config(query_embedding, query, recall_cfg, now, false)` filter `fact_type==episodic` take 5——relevance 领先 recency 的三因子检索，query 取最近 ≤3 条 user/assistant 消息；无 embedding service + keyword 也无命中 → 回退 recency-sorted take(3) 优雅退化。`reflect_with_prior` prompt（"Build on them — reference and extend prior insights"）雏形已有，prior 改 relevance 后才真生效。无改 prompt 文案。
+> - **取舍**：不物理删除（软失效保留 Mem0 审计不变量，superseded 可 include_superseded 召回）；`iterations` 不动；bi-temporal/时序知识图/实体中心（Zep/Graphiti 式）留 Phase 4+；decay 持久化复用现有 `memories` 表 store_fact upsert 不加新表。
+> - 测试：oneai-domain +2（merge strictest-wins + coding off/research on）、oneai-memory core_memory +1（evict_below_salience）、fact_store +1（invalidate_id by-id）、manager +4（run_decay core-evict+archive-forget / disabled noop / reflect prior keyword relevance / fallback recency）。**1472 workspace tests 绿**（1464 baseline +8），fmt+clippy 清。
 - **What**：importance 阈值驱逐 archival（事实不再永久累积）；反思按相关性检索 prior 而非最近 N 条（Generative Agents 式"洞察引用洞察"反思树）。
 - **Why**：闭环学习（2.1）依赖一个会衰减、会递归反思的记忆，否则 curator 归并无据、reflect 子代理只看最近 3 条。两者同源，应配套。
 - **How**：`crates/oneai-memory` 的 `manager.rs`/`compression.rs`（`extract_and_archive` 已修通，可在此加衰减驱逐）+ `reflection_agent.rs` 改相关性检索。

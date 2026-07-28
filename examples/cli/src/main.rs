@@ -576,6 +576,18 @@ enum SessionAction {
         /// Session ID to inspect
         id: String,
     },
+    /// Phase 2.4 memory decay pass (gap P2 #16) — page low-salience core
+    /// facts to the archive + soft-invalidate stale low-salience archival
+    /// facts ("forgotten but auditable"). Needs SQLite persistence + a
+    /// domain whose `MemoryProfile.decay.enabled` is true (research/assistant).
+    Decay {
+        /// User id whose durable fact base to sweep (default: "default")
+        #[arg(long)]
+        user: Option<String>,
+        /// Domain pack (drives the decay policy; default: coding)
+        #[arg(long)]
+        domain: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1091,6 +1103,14 @@ fn main() {
             SessionAction::Resume { id } => cmd_session::cmd_session_resume(&id),
             SessionAction::Delete { id } => cmd_session::cmd_session_delete(&id),
             SessionAction::Info { id } => cmd_session::cmd_session_info(&id),
+            SessionAction::Decay { user, domain } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_session::cmd_session_decay(
+                    &config,
+                    user.as_deref(),
+                    domain.as_deref(),
+                ));
+            }
         },
         Some(Commands::Tasks { action }) => match action {
             TasksAction::List { user, root } => {

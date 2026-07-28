@@ -158,3 +158,90 @@ pub fn cmd_session_info(session_id: &str) {
         }
     }
 }
+
+/// `oneai session decay` — Phase 2.4 memory decay pass (gap P2 #16).
+///
+/// Builds a provider-less App with SQLite persistence + the domain pack's
+/// `MemoryProfile.decay` policy, loads the user's durable fact base from
+/// SQLite into the in-memory archive, runs `MemoryManager::run_decay`, and
+/// the superseded state persists (store_fact upserts on conflict). No LLM
+/// required — decay is a pure-function + embedding pass (embeddings are
+/// preserved from SQLite; no re-embed without a service).
+pub async fn cmd_session_decay(
+    config: &crate::config::OneaiConfig,
+    user: Option<&str>,
+    domain: Option<&str>,
+) {
+    use oneai_app::AppBuilder;
+    use oneai_domain::coding_pack;
+
+    let domain_name = config.default_domain_pack(domain);
+    let pack =
+        crate::cmd_pack::get_builtin_pack(&domain_name, ".").unwrap_or_else(|| coding_pack("."));
+    let uid = user.unwrap_or("default").to_string();
+
+    let app = AppBuilder::new()
+        .noop_interaction_gate()
+        .default_parser()
+        .generation_config(config.generation.clone())
+        .domain_pack(pack)
+        .sqlite_persistence()
+        .user_id(uid.clone())
+        .build()
+        .await
+        .expect("session decay App build failed");
+
+    let mm = &app.memory_manager;
+    let policy = mm.decay().await;
+    let Some(policy) = policy else {
+        eprintln!("No decay policy configured (no domain pack).");
+        return;
+    };
+    if !policy.enabled {
+        eprintln!(
+            "Decay is disabled for the '{}' domain (facts are kept forever). \
+             Enable via MemoryProfile.decay.enabled (research/assistant presets do).",
+            domain_name
+        );
+        return;
+    }
+
+    // Load the user's durable fact base into the in-memory archive so the
+    // sweep operates on persisted facts (empty session_id -> cross-session).
+    let Some(p) = mm.persistence() else {
+        eprintln!("No SQLite persistence wired — nothing durable to decay.");
+        return;
+    };
+    let facts = match p.load_facts(&uid, "").await {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to load facts for user '{uid}': {e}");
+            std::process::exit(1);
+        }
+    };
+    let loaded = facts.len();
+    mm.archive_facts(facts).await;
+
+    let now = chrono::Utc::now();
+    let report = mm.run_decay(now).await;
+    println!(
+        "🧹 Memory decay pass complete (user '{}', domain '{}').\n",
+        uid, domain_name
+    );
+    println!("  loaded {} durable fact(s) from SQLite", loaded);
+    if report.core_evicted.is_empty() && report.archive_forgotten.is_empty() {
+        println!("  (no facts crossed the decay threshold this pass)");
+    }
+    if !report.core_evicted.is_empty() {
+        println!(
+            "  📦 core->archive (paged, still live): {}",
+            report.core_evicted.join(", ")
+        );
+    }
+    if !report.archive_forgotten.is_empty() {
+        println!(
+            "  🗞️  archive forgotten (superseded, auditable via include-superseded): {}",
+            report.archive_forgotten.join(", ")
+        );
+    }
+}

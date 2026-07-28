@@ -25,7 +25,7 @@
 
 use std::time::Duration;
 
-use oneai_core::{FactType, RecallConfig, RecallStrategy};
+use oneai_core::{DecayPolicy, FactType, RecallConfig, RecallStrategy};
 
 // ─── WorkingStatePolicy ──────────────────────────────────────────────────────
 
@@ -378,6 +378,14 @@ pub struct MemoryProfile {
     /// automatically, how many backups to keep. Folded in, mirroring
     /// `working_state`.
     pub skill_lifecycle: SkillLifecyclePolicy,
+
+    /// Memory decay / forgetting policy (Phase 2.4, gap P2 #16) — the
+    /// "don't-accumulate-forever" dimension: importance-threshold eviction
+    /// (core→archive) + soft-invalidation of stale low-salience archival
+    /// facts. Default-off / opt-in (coding keeps facts forever; the
+    /// "grow-with-you" domains enable it). Folded in, mirroring
+    /// `working_state` / `skill_lifecycle`.
+    pub decay: DecayPolicy,
 }
 
 impl MemoryProfile {
@@ -392,6 +400,7 @@ impl MemoryProfile {
             habit_fact_types: Vec::new(),
             working_state: WorkingStatePolicy::coding(),
             skill_lifecycle: SkillLifecyclePolicy::coding(),
+            decay: DecayPolicy::default(),
         }
     }
 
@@ -422,6 +431,12 @@ impl MemoryProfile {
     /// Set the habit (cross-session, user-namespace) fact types.
     pub fn habit_fact_types(mut self, types: Vec<FactType>) -> Self {
         self.habit_fact_types = types;
+        self
+    }
+
+    /// Set the decay / forgetting policy (Phase 2.4).
+    pub fn decay(mut self, decay: DecayPolicy) -> Self {
+        self.decay = decay;
         self
     }
 
@@ -480,6 +495,12 @@ impl MemoryProfile {
             ])
             .working_state(WorkingStatePolicy::assistant())
             .skill_lifecycle(SkillLifecyclePolicy::assistant())
+            // Research is a "grow-with-you" domain — enable decay so the
+            // fact base doesn't accumulate stale low-salience noise forever.
+            .decay(DecayPolicy {
+                enabled: true,
+                ..DecayPolicy::default()
+            })
     }
 }
 
@@ -525,6 +546,28 @@ impl MemoryProfile {
                 &primary.skill_lifecycle,
                 &other.skill_lifecycle,
             ),
+            // Decay: strictest-wins. enabled=OR (any domain opting in
+            // enables decay); thresholds/half-life take the min (more
+            // aggressive eviction wins, mirroring permission strictest-wins);
+            // ttl takes the min (earliest-eligible forget wins); sweep=AND
+            // (both must opt into sync-sweep — conservative).
+            decay: DecayPolicy {
+                enabled: primary.decay.enabled || other.decay.enabled,
+                min_salience: primary.decay.min_salience.min(other.decay.min_salience),
+                archive_forget_salience: primary
+                    .decay
+                    .archive_forget_salience
+                    .min(other.decay.archive_forget_salience),
+                archive_ttl_secs: primary
+                    .decay
+                    .archive_ttl_secs
+                    .min(other.decay.archive_ttl_secs),
+                recency_half_life_secs: primary
+                    .decay
+                    .recency_half_life_secs
+                    .min(other.decay.recency_half_life_secs),
+                sweep_on_reflect: primary.decay.sweep_on_reflect && other.decay.sweep_on_reflect,
+            },
         }
     }
 }
@@ -596,6 +639,45 @@ mod tests {
         let m = MemoryProfile::merge(&a, &b);
         assert_eq!(m.recall.strategy, RecallStrategy::KeywordFirst);
         assert_eq!(m.recall.top_k, 3);
+    }
+
+    #[test]
+    fn test_merge_decay_strictest_wins() {
+        // a: enabled, aggressive (low threshold, short ttl, sweep on)
+        let a = MemoryProfile::new("a").decay(DecayPolicy {
+            enabled: true,
+            min_salience: 0.05,
+            archive_forget_salience: 0.02,
+            archive_ttl_secs: 90 * 24 * 3600,
+            recency_half_life_secs: 7 * 24 * 3600,
+            sweep_on_reflect: true,
+        });
+        // b: disabled, lenient (high threshold, long ttl, sweep off)
+        let b = MemoryProfile::new("b").decay(DecayPolicy {
+            enabled: false,
+            min_salience: 0.2,
+            archive_forget_salience: 0.1,
+            archive_ttl_secs: 365 * 24 * 3600,
+            recency_half_life_secs: 30 * 24 * 3600,
+            sweep_on_reflect: false,
+        });
+        let m = MemoryProfile::merge(&a, &b);
+        // enabled = OR (a opts in)
+        assert!(m.decay.enabled);
+        // thresholds/half-life = min (more aggressive wins)
+        assert!((m.decay.min_salience - 0.05).abs() < 1e-6);
+        assert!((m.decay.archive_forget_salience - 0.02).abs() < 1e-6);
+        assert_eq!(m.decay.archive_ttl_secs, 90 * 24 * 3600);
+        assert_eq!(m.decay.recency_half_life_secs, 7 * 24 * 3600);
+        // sweep = AND (b opted out → off)
+        assert!(!m.decay.sweep_on_reflect);
+    }
+
+    #[test]
+    fn test_coding_decay_off_research_on() {
+        // Coding keeps facts forever (backward-compat); research enables decay.
+        assert!(!MemoryProfile::coding().decay.enabled);
+        assert!(MemoryProfile::research().decay.enabled);
     }
 
     #[test]

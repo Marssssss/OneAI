@@ -277,6 +277,44 @@ impl MemoryFactStore {
         }
     }
 
+    /// Soft-invalidate a fact by its id (Zep-style soft-fail), the by-id
+    /// variant of [`invalidate`] used by the Phase 2.4 decay pass (which
+    /// selects victims by id, not conflict key). Accepts an explicit `now`
+    /// so decay sweeps are deterministic in tests. The fact is NOT removed:
+    /// marked `superseded=true`, excluded from default recall, remains
+    /// auditable via `include_superseded`. Returns true if a live fact was
+    /// invalidated.
+    pub async fn invalidate_id(&self, id: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+        let mut facts = self.facts.write().await;
+        let Some(prev) = facts.get_mut(id) else {
+            return false;
+        };
+        if prev.superseded {
+            return false; // already invalidated
+        }
+        let history_entry = serde_json::json!({
+            "content": prev.content.clone(),
+            "embedding": prev.embedding.clone(),
+            "fact_type": prev.fact_type.as_str().to_string(),
+            "updated_at": prev.updated_at.to_rfc3339(),
+            "version": prev.version,
+            "superseded": true,
+        });
+        append_history(prev, history_entry);
+        prev.superseded = true;
+        prev.superseded_at = Some(now);
+        prev.updated_at = now;
+        prev.version = prev.version.saturating_add(1);
+        drop(facts);
+        let backend = self.vector_backend.read().await.clone();
+        if let Some(b) = backend {
+            if let Err(e) = b.delete(id).await {
+                tracing::warn!("vector_backend delete failed for fact {id}: {e}");
+            }
+        }
+        true
+    }
+
     /// Snapshot all facts (cloned).
     pub async fn all(&self) -> Vec<MemoryFact> {
         self.facts.read().await.values().cloned().collect()
@@ -648,7 +686,7 @@ fn rescale(v: f32, min: f32, max: f32) -> f32 {
 /// timestamps (the canonical layer), so the three-factor scorer in
 /// `search_hybrid_with_config` can apply Generative-Agents-style recency
 /// weighting with a domain-tunable half-life.
-fn temporal_score_fact(
+pub(crate) fn temporal_score_fact(
     entry_time: &chrono::DateTime<chrono::Utc>,
     reference_time: &chrono::DateTime<chrono::Utc>,
     half_life_secs: u64,
@@ -934,6 +972,39 @@ mod tests {
         assert!(!f.superseded);
         assert_eq!(f.content, "OAuth");
         assert_eq!(f.version, 3); // insert(1) → invalidate(2) → update(3)
+    }
+
+    #[tokio::test]
+    async fn invalidate_id_soft_invalidates_by_id() {
+        // The decay pass selects victims by id; invalidate_id is the by-id
+        // variant of invalidate. Two facts, invalidate one by id, the other
+        // must be untouched + the invalidated one still auditable.
+        let store = MemoryFactStore::new();
+        store.upsert(make_fact("alice", "a", "is", "1")).await;
+        store.upsert(make_fact("alice", "b", "is", "2")).await;
+        let now = chrono::Utc::now();
+        assert!(store.invalidate_id("alice_a_is", now).await);
+        // Idempotent — second call returns false (already invalidated).
+        assert!(!store.invalidate_id("alice_a_is", now).await);
+        // Unknown id returns false.
+        assert!(!store.invalidate_id("nope", now).await);
+
+        let a = store.get("alice", "a", "is").await.unwrap();
+        assert!(a.superseded);
+        assert_eq!(a.version, 2); // insert(1) → invalidate(2)
+        let b = store.get("alice", "b", "is").await.unwrap();
+        assert!(!b.superseded, "other fact untouched");
+
+        // Default recall excludes the invalidated fact; include_superseded
+        // still surfaces it (audit invariant).
+        assert!(store.search_keyword("1", 5).await.is_empty());
+        let with_superseded = store
+            .search_hybrid_with_config(None, "1", &oneai_core::RecallConfig::default(), now, true)
+            .await;
+        assert!(
+            with_superseded.iter().any(|f| f.subject == "a"),
+            "superseded fact remains auditable via include_superseded"
+        );
     }
 
     // ─── §12.4: configurable weights + normalization ───────────────────────

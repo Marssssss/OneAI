@@ -1751,6 +1751,77 @@ impl RecallConfig {
     }
 }
 
+/// Memory decay / forgetting policy (Phase 2.4, gap P2 #16). Folded into
+/// `MemoryProfile` as a layer-7 sub-config (mirrors `WorkingStatePolicy` /
+/// `SkillLifecyclePolicy`). Default-off / opt-in: an unset or `enabled=false`
+/// policy leaves the fact base untouched (facts never physically deleted —
+/// only soft-invalidated, preserving the Mem0 audit invariant).
+///
+/// A fact's **effective salience** = `importance * temporal_score(updated_at,
+/// now, recency_half_life_secs)` (reusing the same exponential decay the
+/// three-factor recall scorer uses). The decay pass:
+/// 1. evicts core-tier facts with salience `< min_salience` to the archival
+///    tier (paging, not loss),
+/// 2. soft-invalidates (`superseded=true`) archival-tier facts with salience
+///    `< archive_forget_salience` AND age `> archive_ttl_secs` — "forgotten
+///    but auditable" (still surfaceable via `include_superseded` recall).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecayPolicy {
+    /// Master switch. Default `false` — opt-in, backward-compatible.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Core→archive eviction threshold on effective salience. Default `0.05`.
+    #[serde(default = "default_min_salience")]
+    pub min_salience: f32,
+    /// Archival soft-invalidate threshold (lower — only the dregs forget).
+    /// Default `0.02`.
+    #[serde(default = "default_archive_forget_salience")]
+    pub archive_forget_salience: f32,
+    /// Minimum age (seconds) before an archival fact is eligible for
+    /// soft-invalidation — protects freshly-learned facts from premature
+    /// forget. Default 90 days.
+    #[serde(default = "default_archive_ttl_secs")]
+    pub archive_ttl_secs: u64,
+    /// Half-life (seconds) for the effective-salience decay. Longer than the
+    /// recall half-life — forgetting operates on a slower scale than
+    /// retrieval down-weighting. Default 7 days.
+    #[serde(default = "default_decay_half_life_secs")]
+    pub recency_half_life_secs: u64,
+    /// Sweep decay in sync with `reflect_if_threshold` (the closed-loop
+    /// maintenance already fires at the importance threshold). Default `true`.
+    #[serde(default = "default_sweep_on_reflect")]
+    pub sweep_on_reflect: bool,
+}
+
+fn default_min_salience() -> f32 {
+    0.05
+}
+fn default_archive_forget_salience() -> f32 {
+    0.02
+}
+fn default_archive_ttl_secs() -> u64 {
+    90 * 24 * 3600
+}
+fn default_decay_half_life_secs() -> u64 {
+    7 * 24 * 3600
+}
+fn default_sweep_on_reflect() -> bool {
+    true
+}
+
+impl Default for DecayPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_salience: default_min_salience(),
+            archive_forget_salience: default_archive_forget_salience(),
+            archive_ttl_secs: default_archive_ttl_secs(),
+            recency_half_life_secs: default_decay_half_life_secs(),
+            sweep_on_reflect: default_sweep_on_reflect(),
+        }
+    }
+}
+
 /// An atomic memory fact — the unit of long-term / archival memory.
 ///
 /// Extracted from conversation by the (compression-coupled) `FactExtractor`,
