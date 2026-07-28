@@ -18,7 +18,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::{InteractionGate, LlmProvider, Tool};
+use oneai_core::traits::{InteractionGate, LlmProvider, PermissionResolver, Tool};
 use oneai_core::{Conversation, InferenceRequest, Message};
 
 use crate::config::{RetryPolicy, WorkflowConfig};
@@ -169,6 +169,12 @@ pub struct WorkflowExecutor {
     /// the provider for actual inference. When None, prompt steps
     /// just return the interpolated prompt text.
     provider: Option<Arc<dyn LlmProvider>>,
+    /// Optional domain permission resolver. When present, a tool step is
+    /// checked against domain policy (`deny_by_default` / `require_confirmation`
+    /// / `auto_approve`) BEFORE dispatch — closing the workflow-path bypass of
+    /// gap-analysis P1, where tool steps previously called `tool.execute()`
+    /// directly with no permission check. `None` = pre-existing behaviour.
+    permission_resolver: Option<Arc<dyn PermissionResolver>>,
 }
 
 impl WorkflowExecutor {
@@ -182,6 +188,7 @@ impl WorkflowExecutor {
             tools: Arc::new(tokio::sync::RwLock::new((*tools).clone())),
             interaction_gate,
             provider: None,
+            permission_resolver: None,
         }
     }
 
@@ -192,6 +199,7 @@ impl WorkflowExecutor {
             tools: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             interaction_gate,
             provider: None,
+            permission_resolver: None,
         }
     }
 
@@ -206,7 +214,18 @@ impl WorkflowExecutor {
             tools: Arc::new(tokio::sync::RwLock::new((*tools).clone())),
             interaction_gate,
             provider: Some(provider),
+            permission_resolver: None,
         }
+    }
+
+    /// Attach a domain permission resolver so tool steps honour DomainPack
+    /// `deny_by_default` / `require_confirmation` policy on this path.
+    pub fn with_permission_resolver(
+        mut self,
+        resolver: Arc<dyn PermissionResolver>,
+    ) -> Self {
+        self.permission_resolver = Some(resolver);
+        self
     }
 
     /// Set the LLM provider for prompt-based steps.
@@ -309,6 +328,7 @@ impl WorkflowExecutor {
                 let interaction_gate = self.interaction_gate.clone();
                 let context_snapshot = context.clone();
                 let provider = self.provider.clone();
+                let permission_resolver = self.permission_resolver.clone();
 
                 level_futures.push(tokio::spawn(async move {
                     execute_step(
@@ -319,6 +339,7 @@ impl WorkflowExecutor {
                         interaction_gate,
                         context_snapshot,
                         provider,
+                        permission_resolver,
                     )
                     .await
                 }));
@@ -376,14 +397,16 @@ impl WorkflowExecutor {
 /// When a provider is available, prompt-based steps (no tool, just prompt)
 /// execute actual LLM inference. When no provider is set, they return
 /// the interpolated prompt text.
+#[allow(clippy::too_many_arguments)]
 async fn execute_step(
-    step: crate::config::StepConfig,
+    mut step: crate::config::StepConfig,
     retry_policy: RetryPolicy,
     timeout_secs: Option<u64>,
     tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     interaction_gate: Arc<dyn InteractionGate>,
     context: WorkflowContext,
     provider: Option<Arc<dyn LlmProvider>>,
+    permission_resolver: Option<Arc<dyn PermissionResolver>>,
 ) -> Result<StepResult> {
     let start_time = std::time::Instant::now();
     let step_id = step.id.clone();
@@ -403,6 +426,62 @@ async fn execute_step(
         let interpolated = interpolate_template(&json_str, &context);
         serde_json::from_str(&interpolated).unwrap_or_else(|_| a.clone())
     });
+
+    // ─── Domain permission gate (highest priority) ─────────────────────────
+    // Close the workflow-path bypass of gap-analysis P1: tool steps used to
+    // call `tool.execute()` directly with no permission check, so a DomainPack
+    // `deny_by_default` pattern was silently ignored here. When a resolver is
+    // wired, a `Deny` short-circuits before any approval/execution; other
+    // outcomes fall through to the existing per-step approval flow.
+    if let (Some(resolver), Some(tool_name)) =
+        (permission_resolver.as_ref(), step.tool.as_ref())
+    {
+        let check_args = interpolated_tool_args
+            .clone()
+            .or_else(|| step.tool_args.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        match resolver.resolve(tool_name, &check_args) {
+            oneai_core::PermissionAction::Deny { reason } => {
+                tracing::warn!(
+                    "Workflow step '{}' (tool '{}') denied by domain policy: {}",
+                    step_id,
+                    tool_name,
+                    reason
+                );
+                return Ok(StepResult {
+                    step_id,
+                    status: StepStatus::Failed,
+                    output: None,
+                    error: Some(format!("Denied by domain policy: {}", reason)),
+                    retries_used: 0,
+                    execution_time_ms: Some(start_time.elapsed().as_millis() as u64),
+                });
+            }
+            oneai_core::PermissionAction::AutoApprove => {
+                // Domain has no objection — recorded for audit. The per-step
+                // `requires_approval` flag is an orthogonal, author-requested
+                // confirmation and is left as-is.
+                tracing::info!(
+                    "Workflow step '{}' (tool '{}') auto-approved by domain policy",
+                    step_id,
+                    tool_name
+                );
+            }
+            oneai_core::PermissionAction::RequireConfirmation => {
+                // Domain demands confirmation — force the per-step approval gate
+                // on even if the step author didn't request it.
+                tracing::info!(
+                    "Workflow step '{}' (tool '{}') requires confirmation by domain policy",
+                    step_id,
+                    tool_name
+                );
+                step.requires_approval = true;
+            }
+            oneai_core::PermissionAction::UseDefaultPermission { .. } => {
+                // No domain rule — fall through to existing approval flow.
+            }
+        }
+    }
 
     // If this step requires approval, request it
     if step.requires_approval {
@@ -686,5 +765,152 @@ mod interpolation_tests {
         let context = WorkflowContext::from_config(&WorkflowConfig::new("test", vec![]));
         let result = interpolate_template("No variables here {{unknown}}", &context);
         assert_eq!(result, "No variables here {{unknown}}");
+    }
+}
+
+#[cfg(test)]
+mod permission_resolver_tests {
+    //! Regression tests for the gap-analysis P1 fix: workflow tool steps used
+    //! to call `tool.execute()` directly, bypassing DomainPack
+    //! `deny_by_default`. Now a `PermissionResolver` short-circuits a Deny
+    //! before dispatch.
+    use super::*;
+    use crate::compiler::compile;
+    use crate::config::StepConfig;
+    use oneai_core::error::Result;
+    use oneai_core::traits::{InteractionGate, PermissionResolver, Tool};
+    use oneai_core::{
+        InteractionRequest, InteractionResponse, PermissionAction, RiskLevel, ToolOutput,
+    };
+
+    /// A tool that echoes its `value` arg — stands in for any domain tool.
+    struct EchoTool;
+    #[async_trait::async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "echo the value"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::Low
+        }
+        async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput {
+                success: true,
+                content: args
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ok")
+                    .to_string(),
+                error: None,
+            })
+        }
+    }
+
+    /// A no-op gate (Proceed) that disables every point — never reached when
+    /// the resolver denies, but required to construct the executor.
+    struct NoopGate;
+    #[async_trait::async_trait]
+    impl InteractionGate for NoopGate {
+        async fn request(&self, _req: InteractionRequest) -> Result<InteractionResponse> {
+            Ok(InteractionResponse::Proceed)
+        }
+        fn enabled(&self, _point: oneai_core::InteractionPoint) -> bool {
+            false
+        }
+    }
+
+    /// A resolver that denies a named tool, auto-approves everything else.
+    struct DenyResolver {
+        denied: String,
+    }
+    impl PermissionResolver for DenyResolver {
+        fn resolve(&self, tool_name: &str, _args: &serde_json::Value) -> PermissionAction {
+            if tool_name == self.denied {
+                PermissionAction::Deny {
+                    reason: "forbidden by domain policy".to_string(),
+                }
+            } else {
+                PermissionAction::AutoApprove
+            }
+        }
+    }
+
+    fn step(id: &str, tool: &str) -> StepConfig {
+        StepConfig {
+            id: id.to_string(),
+            description: String::new(),
+            depends_on: vec![],
+            tool: Some(tool.to_string()),
+            tool_args: Some(serde_json::json!({"value": "ran"})),
+            prompt: None,
+            requires_approval: false,
+            timeout_secs: None,
+            retry_policy: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_by_default_short_circuits_a_tool_step() {
+        // The fix: a domain-deny must stop the step BEFORE tool.execute().
+        let config = WorkflowConfig::new("deny-test", vec![step("s1", "echo")]);
+        let dag = compile(&config);
+
+        let executor = WorkflowExecutor::new_empty(Arc::new(NoopGate))
+            .with_permission_resolver(Arc::new(DenyResolver {
+                denied: "echo".to_string(),
+            }));
+        // Register the tool — the deny check runs before lookup, so even
+        // unregistered tools are denied; we register to prove execution would
+        // have run without the resolver.
+        executor.register_tool(Arc::new(EchoTool)).await;
+
+        let result = executor.execute(&dag, &config).await.unwrap();
+        let step_result = result.step_results.get("s1").expect("step result present");
+        assert_eq!(step_result.status, StepStatus::Failed);
+        let err = step_result.error.as_ref().expect("error present");
+        assert!(err.contains("Denied by domain policy"));
+        assert!(err.contains("forbidden by domain policy"));
+    }
+
+    #[tokio::test]
+    async fn auto_approve_allows_a_tool_step_to_run() {
+        // Positive control: with the resolver not denying `echo`, the step
+        // runs and produces the tool's output.
+        let config = WorkflowConfig::new("allow-test", vec![step("s1", "echo")]);
+        let dag = compile(&config);
+
+        let executor = WorkflowExecutor::new_empty(Arc::new(NoopGate))
+            .with_permission_resolver(Arc::new(DenyResolver {
+                denied: "not_echo".to_string(),
+            }));
+        executor.register_tool(Arc::new(EchoTool)).await;
+
+        let result = executor.execute(&dag, &config).await.unwrap();
+        let step_result = result.step_results.get("s1").expect("step result present");
+        assert_eq!(step_result.status, StepStatus::Completed);
+        assert_eq!(step_result.output.as_deref(), Some("ran"));
+    }
+
+    #[tokio::test]
+    async fn no_resolver_preserves_legacy_behaviour() {
+        // No resolver wired → the step runs exactly as before (the bypass
+        // "fix" doesn't break the no-domain-pack case).
+        let config = WorkflowConfig::new("legacy-test", vec![step("s1", "echo")]);
+        let dag = compile(&config);
+
+        let executor = WorkflowExecutor::new_empty(Arc::new(NoopGate));
+        executor.register_tool(Arc::new(EchoTool)).await;
+
+        let result = executor.execute(&dag, &config).await.unwrap();
+        let step_result = result.step_results.get("s1").expect("step result present");
+        assert_eq!(step_result.status, StepStatus::Completed);
+        assert_eq!(step_result.output.as_deref(), Some("ran"));
     }
 }

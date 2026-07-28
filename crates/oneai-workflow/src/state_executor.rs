@@ -29,8 +29,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::{InteractionGate, LlmProvider, Tool};
-use oneai_core::{InferenceRequest, InferenceResponse, Message, Role};
+use oneai_core::traits::{InteractionGate, LlmProvider, PermissionResolver, Tool};
+use oneai_core::{
+    InferenceRequest, InferenceResponse, Message, PermissionAction, Role,
+};
 
 use crate::state_graph::{
     EdgeCondition, GraphEdge, GraphExecutionResult, GraphState, NodeAction, StateGraph,
@@ -196,6 +198,11 @@ pub trait GraphActionExecutor: Send + Sync {
 pub struct DirectProviderActionExecutor {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    /// Optional domain permission resolver. When present, a `ToolCall` node is
+    /// checked against domain policy before `tool.execute()` — closing the
+    /// stateless-graph bypass of gap-analysis P1. `None` = pre-existing
+    /// "no permission, no hooks" behaviour.
+    permission_resolver: Option<Arc<dyn PermissionResolver>>,
 }
 
 impl DirectProviderActionExecutor {
@@ -204,7 +211,21 @@ impl DirectProviderActionExecutor {
         provider: Arc<dyn LlmProvider>,
         tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     ) -> Self {
-        Self { provider, tools }
+        Self {
+            provider,
+            tools,
+            permission_resolver: None,
+        }
+    }
+
+    /// Attach a domain permission resolver so `ToolCall` nodes honour DomainPack
+    /// `deny_by_default` policy on this stateless path too.
+    pub fn with_permission_resolver(
+        mut self,
+        resolver: Arc<dyn PermissionResolver>,
+    ) -> Self {
+        self.permission_resolver = Some(resolver);
+        self
     }
 }
 
@@ -316,6 +337,37 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
         args: &serde_json::Value,
         state: &mut GraphState,
     ) -> Result<ActionResult> {
+        // Domain permission gate (highest priority). Closes the stateless-graph
+        // bypass of gap-analysis P1: this path used to call `tool.execute()`
+        // directly with no permission check, ignoring DomainPack
+        // `deny_by_default`.
+        if let Some(resolver) = self.permission_resolver.as_ref() {
+            match resolver.resolve(tool_name, args) {
+                PermissionAction::Deny { reason } => {
+                    tracing::warn!(
+                        "ToolCall node '{}' denied by domain policy: {}",
+                        tool_name,
+                        reason
+                    );
+                    return Ok(ActionResult {
+                        output: format!("Denied by domain policy: {}", reason),
+                        error: Some(format!("Denied by domain policy: {}", reason)),
+                    });
+                }
+                PermissionAction::AutoApprove => {
+                    tracing::info!(
+                        "ToolCall node '{}' auto-approved by domain policy",
+                        tool_name
+                    );
+                }
+                // No interaction gate on this stateless path — RequireConfirmation
+                // and UseDefaultPermission both fall through to direct execution
+                // (the stateless executor is the "no AgentLoop" fallback; full
+                // confirmation gating requires the AgentLoopGraphActionExecutor).
+                _ => {}
+            }
+        }
+
         let tools_map = self.tools.read().await;
         let tool = tools_map.get(tool_name).ok_or_else(|| {
             OneAIError::Workflow(format!("Tool '{}' not found for ToolCall node", tool_name))

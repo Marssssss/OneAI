@@ -104,6 +104,27 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput>;
 }
 
+// ─── PermissionResolver ──────────────────────────────────────────────────────
+
+/// Resolve the domain-level permission action for a tool call.
+///
+/// This is the seam by which a `PermissionProfile` (defined in `oneai-domain`,
+/// which depends on `oneai-tool`) is injected into the **tool-execution
+/// paths** that live below it — `ToolExecutor` (`oneai-tool`) and the workflow
+/// `execute_step` path (`oneai-workflow`) — without inverting the dependency
+/// direction. The holder (executor) calls `resolve()` before dispatch; a
+/// `Deny` short-circuits, `AutoApprove` skips the interaction gate,
+/// `RequireConfirmation` forces it, and `UseDefaultPermission` falls back to
+/// the tool's own permission level.
+///
+/// Implementations: `PermissionProfile` (and `MergedDomainPack` via its
+/// `resolve_permission`). When `None`, executors fall back to per-tool
+/// `risk_level()` — the pre-existing behaviour.
+pub trait PermissionResolver: Send + Sync {
+    /// Resolve the permission action for a `(tool_name, args)` call.
+    fn resolve(&self, tool_name: &str, args: &serde_json::Value) -> PermissionAction;
+}
+
 // ─── MemoryStore ──────────────────────────────────────────────────────────────
 
 /// Abstraction for both short-term and long-term memory.

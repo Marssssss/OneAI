@@ -814,6 +814,32 @@ pub struct ApprovalRequest {
     pub justification: String,
 }
 
+// ─── PermissionAction ───────────────────────────────────────────────────────
+
+/// The action determined by a [`PermissionResolver`](crate::PermissionResolver)
+/// for a tool call.
+///
+/// This is the result of resolving the 5-step permission decision chain:
+/// `deny_by_default → auto_approve → require_confirmation → permission_overrides
+/// → default_threshold`. Defined in `oneai-core` (and re-exported by
+/// `oneai-domain`) so that `oneai-tool` / `oneai-workflow` can honour domain
+/// permission policy without depending on `oneai-domain` (which depends on
+/// them — the dependency direction is `oneai-domain → oneai-tool`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionAction {
+    /// Always deny this tool call — matches a deny pattern.
+    Deny { reason: String },
+
+    /// Auto-approve this tool call — skip the approval gate entirely.
+    AutoApprove,
+
+    /// Require human confirmation — route through the approval gate.
+    RequireConfirmation,
+
+    /// No domain-specific rule — fall back to the tool's own permission level.
+    UseDefaultPermission { level: PermissionLevel },
+}
+
 // ─── PlanStep / PlanStepStatus ───────────────────────────────────────────────
 //
 // `PlanStep` lives in `oneai-core` (not `oneai-agent`) so that

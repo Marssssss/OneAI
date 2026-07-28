@@ -16,7 +16,7 @@ use oneai_core::platform::{Platform, PlatformAdapter};
 use oneai_core::rate_limiter::{RateLimitConfig, RateLimiter, TokenWindowRateLimiter};
 use oneai_core::traits::{
     EmbeddingService, InteractionGate, LlmProvider, MemoryPersistence, OutputParser,
-    RerankerProvider, RetrievalBackend, Tool, VectorBackend,
+    PermissionResolver, RerankerProvider, RetrievalBackend, Tool, VectorBackend,
 };
 use oneai_core::usage::{InMemoryUsageTracker, UsageTracker};
 use oneai_core::ContextManager;
@@ -1460,10 +1460,31 @@ impl AppBuilder {
             }
         });
 
-        let tool_executor = Arc::new(ToolExecutor::with_interaction_gate(
-            self.tool_registry.clone(),
-            interaction_gate.clone(),
-        ));
+        // Domain permission resolver — the merged DomainPack's
+        // `PermissionProfile`, exposed via the core-level `PermissionResolver`
+        // trait so the ToolExecutor / WorkflowExecutor (which live below
+        // oneai-domain in the dep graph) honour DomainPack `deny_by_default`
+        // / `require_confirmation` policy. Closes the gap-analysis P1 bypass
+        // where tool-execution paths diverged from the agent-loop's permission
+        // checks. `None` when no domain pack is configured.
+        let permission_resolver: Option<Arc<dyn PermissionResolver>> = merged_domain_pack
+            .as_ref()
+            .map(|dp| {
+                Arc::new(dp.permission_profile.clone())
+                    as Arc<dyn PermissionResolver>
+            });
+
+        let tool_executor = {
+            let exec = ToolExecutor::with_interaction_gate(
+                self.tool_registry.clone(),
+                interaction_gate.clone(),
+            );
+            let exec = match &permission_resolver {
+                Some(r) => exec.with_permission_resolver(r.clone()),
+                None => exec,
+            };
+            Arc::new(exec)
+        };
 
         // Build workflow executor with the tool registry. When a direct LLM
         // provider is set, attach it so prompt-based DAG steps run real
@@ -1471,17 +1492,26 @@ impl AppBuilder {
         // The provider_pool-config auto-build path resolves later (below), so
         // pool-only configs still get a provider at the App level — but DAG
         // prompt-steps there fall back to no-inference until a later pass.
-        let workflow_executor = if let Some(provider) = &self.provider {
-            Arc::new(WorkflowExecutor::with_provider(
-                Arc::new(std::collections::HashMap::new()),
-                interaction_gate.clone(),
-                provider.clone(),
-            ))
-        } else {
-            Arc::new(WorkflowExecutor::new(
-                Arc::new(std::collections::HashMap::new()),
-                interaction_gate.clone(),
-            ))
+        let workflow_executor = {
+            let exec = if let Some(provider) = &self.provider {
+                WorkflowExecutor::with_provider(
+                    Arc::new(std::collections::HashMap::new()),
+                    interaction_gate.clone(),
+                    provider.clone(),
+                )
+            } else {
+                WorkflowExecutor::new(
+                    Arc::new(std::collections::HashMap::new()),
+                    interaction_gate.clone(),
+                )
+            };
+            // Wire the domain permission resolver so tool steps honour
+            // deny_by_default on the workflow path too.
+            let exec = match &permission_resolver {
+                Some(r) => exec.with_permission_resolver(r.clone()),
+                None => exec,
+            };
+            Arc::new(exec)
         };
 
         // Eagerly register domain pack tools at build time

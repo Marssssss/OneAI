@@ -95,23 +95,12 @@ impl DenyPattern {
 
 // ─── PermissionAction ──────────────────────────────────────────────────────────
 
-/// The action determined by PermissionProfile for a tool call.
-///
-/// This is the result of resolving the 5-step permission decision chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PermissionAction {
-    /// Always deny this tool call — matches a deny pattern.
-    Deny { reason: String },
-
-    /// Auto-approve this tool call — skip the approval gate entirely.
-    AutoApprove,
-
-    /// Require human confirmation — route through the approval gate.
-    RequireConfirmation,
-
-    /// No domain-specific rule — fall back to the tool's own risk_level().
-    UseDefaultPermission { level: PermissionLevel },
-}
+// `PermissionAction` now lives in `oneai-core` (see `oneai_core::PermissionAction`)
+// so that `oneai-tool` / `oneai-workflow` can honour domain permission policy via
+// the `PermissionResolver` trait without depending on `oneai-domain` (the
+// dependency direction is `oneai-domain → oneai-tool`). Re-exported here for
+// backward-compatible `oneai_domain::PermissionAction` access.
+pub use oneai_core::PermissionAction;
 
 // ─── PermissionProfile ─────────────────────────────────────────────────────────
 
@@ -272,6 +261,16 @@ impl PermissionProfile {
 impl Default for PermissionProfile {
     fn default() -> Self {
         Self::new("default")
+    }
+}
+
+impl oneai_core::PermissionResolver for PermissionProfile {
+    /// Delegate to the inherent `resolve` — makes a `PermissionProfile`
+    /// injectable into `ToolExecutor` / `WorkflowExecutor` (which live below
+    /// `oneai-domain` in the dependency graph and so can only see the
+    /// `PermissionResolver` trait, not this concrete type).
+    fn resolve(&self, tool_name: &str, args: &serde_json::Value) -> PermissionAction {
+        PermissionProfile::resolve(self, tool_name, args)
     }
 }
 
