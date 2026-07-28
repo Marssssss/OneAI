@@ -140,6 +140,7 @@ impl AndroidInteractionBridge {
     }
 
     /// Send a response for a pending interaction item.
+    #[allow(clippy::result_unit_err)] // FFI bridge: callers only need ok/err, () = "channel closed"
     pub fn send_response(
         item: InteractionPendingItem,
         response: InteractionResponse,

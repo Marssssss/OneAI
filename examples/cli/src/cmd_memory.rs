@@ -29,7 +29,7 @@ pub fn cmd_memory_search(query: &str, user: &str, top_k: usize) {
                 })
                 .collect();
             // Most-recently-updated first.
-            hits.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            hits.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
             hits.truncate(top_k);
 
             if hits.is_empty() {

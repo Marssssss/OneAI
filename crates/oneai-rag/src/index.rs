@@ -381,6 +381,7 @@ mod tests {
     use oneai_core::traits::EmbeddingService;
 
     /// A simple in-memory vector store for testing.
+    #[allow(clippy::type_complexity)] // test helper; the field type is inherently complex
     struct TestVectorStore {
         vectors: tokio::sync::RwLock<HashMap<String, (Vec<f32>, HashMap<String, String>)>>,
     }

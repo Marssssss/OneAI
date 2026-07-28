@@ -291,11 +291,11 @@ impl TraceContext {
     }
 }
 
-// ─── SpanKind as_ref() ──────────────────────────────────────────────
+// ─── SpanKind as AsRef<str> ─────────────────────────────────────────
 
-impl SpanKind {
+impl AsRef<str> for SpanKind {
     /// Get a string representation of the span kind.
-    pub fn as_ref(&self) -> &'static str {
+    fn as_ref(&self) -> &str {
         match self {
             SpanKind::SESSION => "SESSION",
             SpanKind::AGENT => "AGENT",
@@ -310,9 +310,9 @@ impl SpanKind {
     }
 }
 
-impl SpanStatus {
+impl AsRef<str> for SpanStatus {
     /// Get a string representation of the span status.
-    pub fn as_ref(&self) -> &'static str {
+    fn as_ref(&self) -> &str {
         match self {
             SpanStatus::Ok => "Ok",
             SpanStatus::Error => "Error",
@@ -321,9 +321,9 @@ impl SpanStatus {
     }
 }
 
-impl EventKind {
+impl AsRef<str> for EventKind {
     /// Get a string representation of the event kind.
-    pub fn as_ref(&self) -> &'static str {
+    fn as_ref(&self) -> &str {
         match self {
             EventKind::Thought => "Thought",
             EventKind::Action => "Action",

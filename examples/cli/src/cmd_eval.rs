@@ -131,7 +131,7 @@ pub async fn cmd_eval_run(
     match output_format {
         "json" => println!("{}", report.to_json().unwrap()),
         "compact" => println!("{}", oneai_eval::render_compact(&report)),
-        "markdown" | _ => println!("{}", report.to_markdown()),
+        _ => println!("{}", report.to_markdown()),
     }
 
     if profile {
@@ -475,7 +475,7 @@ pub async fn cmd_eval_swebench(
     match format {
         "json" => println!("{}", report.to_json().unwrap()),
         "compact" => println!("{}", oneai_eval::render_compact(&report)),
-        "markdown" | _ => println!("{}", report.to_markdown()),
+        _ => println!("{}", report.to_markdown()),
     }
 }
 
@@ -565,6 +565,6 @@ pub async fn cmd_eval_memory(
     match format {
         "json" => println!("{}", report.to_json().unwrap()),
         "compact" => println!("{}", oneai_eval::render_compact(&report)),
-        "markdown" | _ => println!("{}", report.to_markdown()),
+        _ => println!("{}", report.to_markdown()),
     }
 }

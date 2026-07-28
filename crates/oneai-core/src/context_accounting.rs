@@ -83,9 +83,11 @@ impl ContextAccounting {
         let counter = HeuristicTokenCounter::new();
         let profile = counter.profile_for_model(model_name);
 
-        let mut accounting = Self::default();
-        accounting.context_window_size = counter.context_window_size(model_name);
-        accounting.is_estimated = true;
+        let mut accounting = Self {
+            context_window_size: counter.context_window_size(model_name),
+            is_estimated: true,
+            ..Default::default()
+        };
 
         let mut system_overhead_added = false;
 

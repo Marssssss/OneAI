@@ -255,7 +255,7 @@ impl ContentStore {
             .filter(|entry| oneai_core::keyword_matches(&entry.content, keyword))
             .collect();
         // Sort by timestamp descending (most recent first)
-        results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        results.sort_by_key(|x| std::cmp::Reverse(x.timestamp));
         results
     }
 
@@ -285,7 +285,7 @@ impl ContentStore {
                 true
             })
             .collect();
-        results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        results.sort_by_key(|x| std::cmp::Reverse(x.timestamp));
         results
     }
 
@@ -325,6 +325,12 @@ impl Default for ContentStore {
 pub struct ThreadSafeEmbeddedVectorStore {
     inner: Arc<tokio::sync::RwLock<EmbeddedVectorStore>>,
     scorer: HybridScorer,
+}
+
+impl Default for ThreadSafeEmbeddedVectorStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ThreadSafeEmbeddedVectorStore {
@@ -391,6 +397,11 @@ impl ThreadSafeEmbeddedVectorStore {
     /// Get the number of stored vectors.
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
+    }
+
+    /// Returns `true` if no vectors are stored.
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.len() == 0
     }
 }
 

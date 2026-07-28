@@ -359,9 +359,9 @@ impl WasmActionTemplate {
         // Sort values
         let mut sorted: Vec<serde_json::Value> = data.clone();
 
-        if key.is_some() {
+        if let Some(k) = key.as_ref() {
             // Sort objects by key
-            let key = key.unwrap().to_string();
+            let key = k.to_string();
             sorted.sort_by(|a, b| {
                 let a_val = a.get(&key).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let b_val = b.get(&key).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -785,8 +785,8 @@ fn matches_condition(
                 .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num > threshold_val;
         }
-        if condition.starts_with(">=") {
-            let threshold_val = condition[2..]
+        if let Some(rest) = condition.strip_prefix(">=") {
+            let threshold_val = rest
                 .parse::<f64>()
                 .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num >= threshold_val;
@@ -800,14 +800,14 @@ fn matches_condition(
                 .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num < threshold_val;
         }
-        if condition.starts_with("<=") {
-            let threshold_val = condition[2..]
+        if let Some(rest) = condition.strip_prefix("<=") {
+            let threshold_val = rest
                 .parse::<f64>()
                 .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num <= threshold_val;
         }
-        if condition.starts_with("==") {
-            let threshold_val = condition[2..]
+        if let Some(rest) = condition.strip_prefix("==") {
+            let threshold_val = rest
                 .parse::<f64>()
                 .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num == threshold_val;

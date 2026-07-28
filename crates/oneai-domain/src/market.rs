@@ -24,7 +24,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::DomainPack;
 
@@ -235,7 +235,7 @@ impl PackRegistry {
         }
     }
 
-    fn read_pack_description(&self, pack_dir: &PathBuf) -> String {
+    fn read_pack_description(&self, pack_dir: &Path) -> String {
         // Try to read description from config file
         for file in &["ONEAI.domain.yaml", "ONEAI.domain.yml", "ONEAI.domain.toml"] {
             let config_path = pack_dir.join(file);

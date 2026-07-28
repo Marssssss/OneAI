@@ -101,8 +101,10 @@ impl TraceTree {
 
             let trace_id = session_id.clone().unwrap_or_else(|| root.span_id.clone());
 
-            let mut metadata = TraceMetadata::default();
-            metadata.session_id = session_id;
+            let mut metadata = TraceMetadata {
+                session_id,
+                ..Default::default()
+            };
 
             // Extract platform and model from root attributes
             if let Some(platform) = root.attributes.get("session.platform") {

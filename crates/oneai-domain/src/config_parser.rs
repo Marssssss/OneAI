@@ -247,7 +247,7 @@ pub fn resolve_config(config: &DomainPackConfig, project_dir: &str) -> DomainPac
     let paradigm_strategies = config
         .paradigm_strategies
         .iter()
-        .map(|s| resolve_paradigm_strategy(s))
+        .map(resolve_paradigm_strategy)
         .collect();
 
     // Resolve compression template

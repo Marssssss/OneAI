@@ -30,6 +30,12 @@ pub struct OneAIAppBuilder {
     extra_tools: std::sync::Mutex<Vec<Arc<dyn Tool>>>,
 }
 
+impl Default for OneAIAppBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl OneAIAppBuilder {
     /// Create a new AppBuilder.

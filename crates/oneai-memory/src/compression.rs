@@ -389,9 +389,9 @@ impl ContextCompressorTrait for ContextCompressor {
     fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
         msg.content
             .iter()
-            .filter_map(|block| match block {
-                oneai_core::ContentBlock::Text { text } => Some(text.len()),
-                _ => Some(50),
+            .map(|block| match block {
+                oneai_core::ContentBlock::Text { text } => text.len(),
+                _ => 50,
             })
             .sum::<usize>()
             / 4

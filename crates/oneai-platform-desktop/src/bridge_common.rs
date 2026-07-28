@@ -42,6 +42,7 @@ impl DesktopInteractionBridge {
     /// This sends the response back through the oneshot channel
     /// embedded in the pending item, unblocking the agent's
     /// interaction request. Takes ownership of the item.
+    #[allow(clippy::result_unit_err)] // FFI bridge: callers only need ok/err, () = "channel closed"
     pub fn send_response(
         item: InteractionPendingItem,
         response: InteractionResponse,

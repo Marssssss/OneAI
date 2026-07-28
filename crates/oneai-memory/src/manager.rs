@@ -549,7 +549,7 @@ impl MemoryManager {
             .into_iter()
             .filter(|f| f.fact_type.as_str() == "episodic" && !f.superseded)
             .collect();
-        prior.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        prior.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
         let prior_summary = if prior.is_empty() {
             None
         } else {

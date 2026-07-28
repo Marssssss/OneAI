@@ -85,15 +85,16 @@ impl Default for TraceMetrics {
 impl TraceMetrics {
     /// Compute metrics from a root span tree by walking all spans and events.
     pub fn compute_from_tree(root: &Span) -> Self {
-        let mut metrics = Self::default();
-
         // Session success: root span status
-        metrics.success_rate = if root.status == SpanStatus::Ok {
-            1.0
-        } else {
-            0.0
+        let mut metrics = Self {
+            success_rate: if root.status == SpanStatus::Ok {
+                1.0
+            } else {
+                0.0
+            },
+            total_session_duration_ms: root.duration_ms.unwrap_or(0),
+            ..Default::default()
         };
-        metrics.total_session_duration_ms = root.duration_ms.unwrap_or(0);
 
         // Walk the tree and aggregate
         Self::walk_span(root, &mut metrics);

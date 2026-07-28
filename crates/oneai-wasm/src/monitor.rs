@@ -407,14 +407,13 @@ mod tests {
     #[test]
     fn test_monitor_new() {
         let _monitor = WasmResourceMonitor::new();
-        // Monitor is created successfully
-        assert!(true);
+        // Smoke test: construction must not panic.
     }
 
     #[test]
     fn test_monitor_default() {
         let _monitor = WasmResourceMonitor::default();
-        assert!(true);
+        // Smoke test: default construction must not panic.
     }
 
     #[test]

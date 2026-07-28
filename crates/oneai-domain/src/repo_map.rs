@@ -662,12 +662,12 @@ fn format_map(entries: &[(String, Vec<Symbol>)]) -> String {
 
 fn collect_source_files(dir: &Path, skip: &[String]) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    walk_dir(dir, dir, skip, &mut files);
+    walk_dir(dir, skip, &mut files);
     files.sort_by_key(|f| f.to_string_lossy().to_string());
     files
 }
 
-fn walk_dir(base: &Path, cur: &Path, skip: &[String], out: &mut Vec<PathBuf>) {
+fn walk_dir(cur: &Path, skip: &[String], out: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(cur) {
         for e in entries.flatten() {
             let p = e.path();
@@ -679,7 +679,7 @@ fn walk_dir(base: &Path, cur: &Path, skip: &[String], out: &mut Vec<PathBuf>) {
                 if skip.contains(&name) {
                     continue;
                 }
-                walk_dir(base, &p, skip, out);
+                walk_dir(&p, skip, out);
             } else if p.is_file() {
                 let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if Language::from_ext(ext) != Language::Unknown {

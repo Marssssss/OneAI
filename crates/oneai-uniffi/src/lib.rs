@@ -78,6 +78,12 @@ pub struct ProviderFactory;
 // MemoryManager) that are NOT UniFFI-exportable, so the impls are not
 // `#[uniffi::export]`-ed. Foreign code sets providers via
 // `OneAIAppBuilder::provider_config(ProviderConfigView)` instead.
+impl Default for ProviderFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProviderFactory {
     /// Create an OpenAI-compatible provider.
     #[uniffi::constructor]

@@ -416,7 +416,7 @@ impl MemoryFactStore {
             .cloned()
             .collect();
         // Most-recently-updated first.
-        results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        results.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
         results.truncate(top_k);
         results
     }

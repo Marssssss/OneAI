@@ -220,7 +220,7 @@ impl MemoryStore for ShortTermMemorySync {
         // future; bind it explicitly to document that the trait impl is a
         // no-op (it only logs), matching prior behavior. Actual clearing is
         // done via the inherent `ShortTermMemory::clear(&mut self)`.
-        let _ = self.inner.write().await.clear();
+        let _ = self.inner.write().await.clear().await;
         Ok(())
     }
 }

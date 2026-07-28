@@ -18,6 +18,7 @@ pub type PlanStateSnapshot = oneai_agent::PlanState;
 /// Not `Clone` — `PlanSubmitted` carries a oneshot reply sender that must be
 /// moved (not duplicated) into the TUI.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // TUI event enum moved through a channel; size is not perf-critical
 pub enum ObserverEvent {
     IterationStart(usize, ParadigmKind),
     DirectAnswer(String),
@@ -131,7 +132,6 @@ impl AgentLoopObserver for TuiObserver {
             completion: completion_tokens,
             total: prompt_tokens + completion_tokens,
             is_estimated: false,
-            ..Default::default()
         };
         // Accumulate into session total
         let _ = self.tx.send(ObserverEvent::TokenUsageUpdate(usage));

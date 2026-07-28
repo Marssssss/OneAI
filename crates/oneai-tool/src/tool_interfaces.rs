@@ -2342,7 +2342,7 @@ impl Tool for WebSearchTool {
             "google" => self.search_google(query, max_results).await,
             "bing" => self.search_bing(query, max_results).await,
             "serpapi" => self.search_serpapi(query, max_results).await,
-            "duckduckgo" | _ => self.search_duckduckgo(query, max_results).await,
+            _ => self.search_duckduckgo(query, max_results).await,
         };
 
         match results {

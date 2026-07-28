@@ -571,68 +571,67 @@ impl SmartRouter {
         factors: &mut Vec<SmartRouteFactor>,
     ) -> bool {
         // ── Check circuit breaker ──────────────────────────────────────
-        if self.config.health_aware && self.circuit_breaker.is_some() {
-            let state = self.circuit_breaker.as_ref().unwrap().check(provider);
-            let was_open = state.is_failing();
-            factors.push(SmartRouteFactor::CircuitOpen {
-                provider: provider.to_string(),
-                was_open,
-            });
-            if was_open {
-                return false;
+        if self.config.health_aware {
+            if let Some(cb) = self.circuit_breaker.as_ref() {
+                let state = cb.check(provider);
+                let was_open = state.is_failing();
+                factors.push(SmartRouteFactor::CircuitOpen {
+                    provider: provider.to_string(),
+                    was_open,
+                });
+                if was_open {
+                    return false;
+                }
             }
         }
 
         // ── Check rate limiter ────────────────────────────────────────
-        if self.config.rate_aware && self.rate_limiter.is_some() {
-            match self
-                .rate_limiter
-                .as_ref()
-                .unwrap()
-                .check_rate(provider)
-                .await
-            {
-                Ok(status) => {
-                    let was_exceeded = !status.is_allowed();
-                    factors.push(SmartRouteFactor::RateLimited {
-                        provider: provider.to_string(),
-                        was_exceeded,
-                    });
-                    if was_exceeded {
-                        return false;
+        if self.config.rate_aware {
+            if let Some(rl) = self.rate_limiter.as_ref() {
+                match rl.check_rate(provider).await {
+                    Ok(status) => {
+                        let was_exceeded = !status.is_allowed();
+                        factors.push(SmartRouteFactor::RateLimited {
+                            provider: provider.to_string(),
+                            was_exceeded,
+                        });
+                        if was_exceeded {
+                            return false;
+                        }
                     }
-                }
-                Err(_) => {
-                    // Rate check failed — assume OK (don't block routing)
-                    factors.push(SmartRouteFactor::RateLimited {
-                        provider: provider.to_string(),
-                        was_exceeded: false,
-                    });
+                    Err(_) => {
+                        // Rate check failed — assume OK (don't block routing)
+                        factors.push(SmartRouteFactor::RateLimited {
+                            provider: provider.to_string(),
+                            was_exceeded: false,
+                        });
+                    }
                 }
             }
         }
 
         // ── Check context window ────────────────────────────────────
-        if self.config.context_aware && conversation_tokens.is_some() {
-            let tokens = conversation_tokens.unwrap();
-            let context_window = if let Some(tc) = &self.token_counter {
-                // Use TokenCounter for accurate context window lookup
-                tc.context_window_size(model) as u64
-            } else {
-                // Fallback to heuristic from ModelQualityProfile
-                let profile = self.find_profile_for_model(model);
-                profile.map_or(128_000, |p| p.context_window_tokens)
-            };
+        if self.config.context_aware {
+            if let Some(tokens) = conversation_tokens {
+                let context_window = if let Some(tc) = &self.token_counter {
+                    // Use TokenCounter for accurate context window lookup
+                    tc.context_window_size(model) as u64
+                } else {
+                    // Fallback to heuristic from ModelQualityProfile
+                    let profile = self.find_profile_for_model(model);
+                    profile.map_or(128_000, |p| p.context_window_tokens)
+                };
 
-            let would_overflow =
-                (tokens as f64 / context_window as f64) > self.config.context_overflow_threshold;
-            factors.push(SmartRouteFactor::ContextOverflow {
-                conversation_tokens: tokens,
-                model_context_window: context_window,
-                would_overflow,
-            });
-            if would_overflow {
-                return false;
+                let would_overflow = (tokens as f64 / context_window as f64)
+                    > self.config.context_overflow_threshold;
+                factors.push(SmartRouteFactor::ContextOverflow {
+                    conversation_tokens: tokens,
+                    model_context_window: context_window,
+                    would_overflow,
+                });
+                if would_overflow {
+                    return false;
+                }
             }
         }
 
@@ -648,27 +647,23 @@ impl SmartRouter {
         factors: &mut Vec<SmartRouteFactor>,
     ) -> bool {
         // Circuit breaker
-        if self.config.health_aware && self.circuit_breaker.is_some() {
-            let state = self.circuit_breaker.as_ref().unwrap().check(provider);
-            if state.is_failing() {
-                factors.push(SmartRouteFactor::CircuitOpen {
-                    provider: provider.to_string(),
-                    was_open: true,
-                });
-                return false;
+        if self.config.health_aware {
+            if let Some(cb) = self.circuit_breaker.as_ref() {
+                let state = cb.check(provider);
+                if state.is_failing() {
+                    factors.push(SmartRouteFactor::CircuitOpen {
+                        provider: provider.to_string(),
+                        was_open: true,
+                    });
+                    return false;
+                }
             }
         }
 
         // Rate limiter
-        if self.config.rate_aware && self.rate_limiter.is_some() {
-            match self
-                .rate_limiter
-                .as_ref()
-                .unwrap()
-                .check_rate(provider)
-                .await
-            {
-                Ok(status) => {
+        if self.config.rate_aware {
+            if let Some(rl) = self.rate_limiter.as_ref() {
+                if let Ok(status) = rl.check_rate(provider).await {
                     if !status.is_allowed() {
                         factors.push(SmartRouteFactor::RateLimited {
                             provider: provider.to_string(),
@@ -677,23 +672,24 @@ impl SmartRouter {
                         return false;
                     }
                 }
-                Err(_) => {} // Assume OK
             }
         }
 
         // Context window overflow
-        if self.config.context_aware && conversation_tokens.is_some() {
-            let tokens = conversation_tokens.unwrap();
-            let profile = self.find_profile_for_model(model);
-            let context_window = profile.map_or(128_000, |p| p.context_window_tokens);
+        if self.config.context_aware {
+            if let Some(tokens) = conversation_tokens {
+                let profile = self.find_profile_for_model(model);
+                let context_window = profile.map_or(128_000, |p| p.context_window_tokens);
 
-            if (tokens as f64 / context_window as f64) > self.config.context_overflow_threshold {
-                factors.push(SmartRouteFactor::ContextOverflow {
-                    conversation_tokens: tokens,
-                    model_context_window: context_window,
-                    would_overflow: true,
-                });
-                return false;
+                if (tokens as f64 / context_window as f64) > self.config.context_overflow_threshold
+                {
+                    factors.push(SmartRouteFactor::ContextOverflow {
+                        conversation_tokens: tokens,
+                        model_context_window: context_window,
+                        would_overflow: true,
+                    });
+                    return false;
+                }
             }
         }
 

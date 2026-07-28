@@ -897,6 +897,7 @@ impl AgentLoop {
     }
 
     /// Create a new AgentLoop with all dependencies.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
@@ -938,6 +939,7 @@ impl AgentLoop {
     }
 
     /// Create a new AgentLoop with a domain pack and recovery manager.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_domain_pack(
         provider: Arc<dyn LlmProvider>,
         tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
@@ -1750,10 +1752,10 @@ impl AgentLoop {
                     .await?;
                 match resp {
                     InteractionResponse::Proceed => {}
-                    InteractionResponse::ProceedWith { modification } => {
-                        if let InteractionModification::ReplaceResponse(r) = modification {
-                            response = r;
-                        }
+                    InteractionResponse::ProceedWith {
+                        modification: InteractionModification::ReplaceResponse(r),
+                    } => {
+                        response = r;
                     }
                     InteractionResponse::Revise { feedback } => {
                         state.conversation.add_message(response.message.clone());

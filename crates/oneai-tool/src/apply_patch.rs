@@ -152,14 +152,14 @@ pub fn parse_unified_diff(diff_text: &str) -> Result<Vec<DiffHunk>> {
 
         // Diff lines within a hunk
         if in_hunk {
-            if line.starts_with('+') {
-                current_lines.push(DiffLine::Add(line[1..].to_string()));
-            } else if line.starts_with('-') {
-                current_lines.push(DiffLine::Remove(line[1..].to_string()));
+            if let Some(content) = line.strip_prefix('+') {
+                current_lines.push(DiffLine::Add(content.to_string()));
+            } else if let Some(content) = line.strip_prefix('-') {
+                current_lines.push(DiffLine::Remove(content.to_string()));
             } else if line.starts_with(' ') || line.is_empty() {
                 // Context line (or empty line which is a context line with empty content)
-                let content = if line.starts_with(' ') {
-                    line[1..].to_string()
+                let content = if let Some(rest) = line.strip_prefix(' ') {
+                    rest.to_string()
                 } else {
                     String::new()
                 };
@@ -318,9 +318,8 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
         if !context_match {
             // Try fuzzy matching — search for the context pattern anywhere in the file
             let search_start = find_fuzzy_match(&lines, hunk);
-            if search_start.is_some() {
+            if let Some(idx) = search_start {
                 // Re-apply with fuzzy match position
-                let idx = search_start.unwrap();
                 let remove_count = hunk
                     .lines
                     .iter()

@@ -162,8 +162,8 @@ impl WasmRuntime {
 
         let host_state = WasmHostState::new();
 
-        let store_state = if wasi_p1_ctx.is_some() {
-            WasmStoreState::with_wasi(host_state, wasi_p1_ctx.unwrap())
+        let store_state = if let Some(ctx) = wasi_p1_ctx {
+            WasmStoreState::with_wasi(host_state, ctx)
         } else {
             WasmStoreState::new(host_state)
         };

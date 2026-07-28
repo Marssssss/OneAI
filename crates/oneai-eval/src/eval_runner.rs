@@ -196,7 +196,7 @@ impl EvalRunner {
     /// Usage isolation: the session id is new per case, and we clear any prior
     /// records for it before running so concurrent/sequential cases don't bleed
     /// usage into each other. A single `session_usage` call yields api_calls
-    /// + token breakdown (the UsageSummary aggregates the UsageRecords the
+    /// and token breakdown (the UsageSummary aggregates the UsageRecords the
     /// AgentLoop already records after each inference).
     async fn run_agent_for_case(
         &self,

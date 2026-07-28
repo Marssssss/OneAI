@@ -369,6 +369,7 @@ pub struct ModelTokenizerProfile {
 
 impl ModelTokenizerProfile {
     /// Create a new profile.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_name: impl Into<String>,
         tokenizer_type: ProviderTokenizerType,
@@ -747,10 +748,8 @@ fn infer_max_output_for_tokenizer(model: &str) -> u32 {
         4_096
     } else if lower.contains("deepseek-r1") {
         8_192
-    } else if lower.contains("qwen") || lower.contains("llama") {
-        4_096
     } else {
-        4_096 // Default
+        4_096 // Default (qwen/llama and unknown models)
     }
 }
 

@@ -187,10 +187,7 @@ impl ReActAgent {
                 .message
                 .content
                 .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolCall { .. } => Some(block),
-                    _ => None,
-                })
+                .filter(|block| matches!(block, ContentBlock::ToolCall { .. }))
                 .collect();
 
             if tool_calls.is_empty() {
@@ -440,10 +437,7 @@ impl ReActAgent {
             let tool_calls: Vec<&ContentBlock> = assistant_message
                 .content
                 .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolCall { .. } => Some(block),
-                    _ => None,
-                })
+                .filter(|block| matches!(block, ContentBlock::ToolCall { .. }))
                 .collect();
 
             if tool_calls.is_empty() {

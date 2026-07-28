@@ -23,25 +23,14 @@ pub fn cmd_config_show() {
     // Provider config
     println!("🔧 Provider:");
     println!("   model: {}", config.provider.model);
-    if config.provider.api_key.is_some() {
-        println!(
-            "   api_key: {}***{}",
-            &config.provider.api_key.as_ref().unwrap()
-                [..3.min(config.provider.api_key.as_ref().unwrap().len())],
-            if config.provider.api_key.as_ref().unwrap().len() > 3 {
-                ""
-            } else {
-                ""
-            }
-        );
+    if let Some(key) = config.provider.api_key.as_ref() {
+        let prefix_end = 3.min(key.len());
+        println!("   api_key: {}***", &key[..prefix_end]);
     } else {
         println!("   api_key: (not set)");
     }
-    if config.provider.base_url.is_some() {
-        println!(
-            "   base_url: {}",
-            config.provider.base_url.as_ref().unwrap()
-        );
+    if let Some(base_url) = config.provider.base_url.as_ref() {
+        println!("   base_url: {}", base_url);
     } else {
         println!("   base_url: (default — OpenAI)");
     }
@@ -57,11 +46,11 @@ pub fn cmd_config_show() {
         if env_api_key.is_some() {
             println!("   ONEAI_API_KEY: set");
         }
-        if env_base_url.is_some() {
-            println!("   ONEAI_BASE_URL: {}", env_base_url.unwrap());
+        if let Some(base_url) = &env_base_url {
+            println!("   ONEAI_BASE_URL: {}", base_url);
         }
-        if env_model.is_some() {
-            println!("   ONEAI_MODEL: {}", env_model.unwrap());
+        if let Some(model) = &env_model {
+            println!("   ONEAI_MODEL: {}", model);
         }
     }
 

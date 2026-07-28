@@ -1332,6 +1332,8 @@ pub enum InteractionRequest {
 /// The application layer's reply to an [`InteractionRequest`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(clippy::large_enum_variant)] // ProceedWith holds InteractionModification (~264 B);
+                                     // boxing would break the public construction API (v0.2.0 stability).
 pub enum InteractionResponse {
     /// Proceed without changes.
     Proceed,

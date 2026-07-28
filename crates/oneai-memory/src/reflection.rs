@@ -394,24 +394,24 @@ fn parse_reflection_response(text: &str) -> (String, Vec<String>, Vec<String>, S
 
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with("REFLECTION:") {
-            reflection = line["REFLECTION:".len()..].trim().to_string();
-        } else if line.starts_with("INSIGHTS:") {
-            let insights_str = line["INSIGHTS:".len()..].trim();
+        if let Some(rest) = line.strip_prefix("REFLECTION:") {
+            reflection = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("INSIGHTS:") {
+            let insights_str = rest.trim();
             key_insights = insights_str
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-        } else if line.starts_with("DECISIONS:") {
-            let decisions_str = line["DECISIONS:".len()..].trim();
+        } else if let Some(rest) = line.strip_prefix("DECISIONS:") {
+            let decisions_str = rest.trim();
             decisions = decisions_str
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-        } else if line.starts_with("OUTCOME:") {
-            outcome = line["OUTCOME:".len()..].trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("OUTCOME:") {
+            outcome = rest.trim().to_string();
         }
     }
 

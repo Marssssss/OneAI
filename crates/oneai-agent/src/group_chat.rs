@@ -216,12 +216,10 @@ impl GroupChatSession {
                     }
                 }
             }
-            TurnPolicy::Moderator { moderator_id, .. } => {
-                if !ids.contains(moderator_id.as_str()) {
-                    return Err(OneAIError::Config(format!(
-                        "moderator '{moderator_id}' is not a member"
-                    )));
-                }
+            TurnPolicy::Moderator { moderator_id, .. } if !ids.contains(moderator_id.as_str()) => {
+                return Err(OneAIError::Config(format!(
+                    "moderator '{moderator_id}' is not a member"
+                )));
             }
             _ => {}
         }

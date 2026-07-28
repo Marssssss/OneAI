@@ -20,13 +20,13 @@ use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
 use oneai_core::{Conversation, InferenceRequest, Message, Role};
 
-/// A single step in a plan.
-///
-/// # Deprecated location
-///
-/// This definition has moved to [`oneai_core::PlanStep`]. The alias above
-/// re-exports it from this module for compatibility. New code should import
-/// from `oneai_core` directly.
+// A single step in a plan.
+//
+// # Deprecated location
+//
+// This definition has moved to `oneai_core::PlanStep`. The alias above
+// re-exports it from this module for compatibility. New code should import
+// from `oneai_core` directly.
 
 /// Result of a PlanAgent execution.
 #[derive(Debug, Clone)]

@@ -441,20 +441,20 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
         }
 
         // ── Left button drag (scrollbar only) ────────────────────────────────
-        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-            if is_in_scrollbar {
-                // Scrollbar drag — map Y position to scroll offset
-                let y_offset = (mouse_event.row - chat_rect.y) as usize;
-                let track_height = chat_rect.height as usize;
-                let content_height = app.content_height;
-                let viewport_height = chat_rect.height as usize;
-                if track_height > 0 && content_height > viewport_height {
-                    let ratio = y_offset as f64 / track_height as f64;
-                    app.chat_scroll_y = ((ratio * content_height as f64) as usize)
-                        .min(content_height.saturating_sub(viewport_height));
-                    app.user_scrolled = true;
-                    app.dirty = true;
-                }
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+            if is_in_scrollbar =>
+        {
+            // Scrollbar drag — map Y position to scroll offset
+            let y_offset = (mouse_event.row - chat_rect.y) as usize;
+            let track_height = chat_rect.height as usize;
+            let content_height = app.content_height;
+            let viewport_height = chat_rect.height as usize;
+            if track_height > 0 && content_height > viewport_height {
+                let ratio = y_offset as f64 / track_height as f64;
+                app.chat_scroll_y = ((ratio * content_height as f64) as usize)
+                    .min(content_height.saturating_sub(viewport_height));
+                app.user_scrolled = true;
+                app.dirty = true;
             }
         }
 
@@ -468,6 +468,7 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
 /// are processed asynchronously in the TUI loop. This enables
 /// the typewriter effect — stream chunks arrive in real-time
 /// while the TUI continues rendering.
+#[allow(clippy::too_many_arguments)]
 fn run_main_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut app: App,

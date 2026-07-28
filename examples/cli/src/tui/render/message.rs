@@ -400,16 +400,17 @@ fn render_result_lines(
 /// and ignore clicks.
 pub fn message_is_collapsible(msg: &ChatMessage, width: usize) -> bool {
     match &msg.role {
-        ChatRole::ToolInvocation { result, .. } => match result {
-            None => false,
-            Some((_, content)) => {
-                if content.is_empty() || content == "(completed successfully)" {
-                    return false;
-                }
-                let inner = width.saturating_sub(6);
-                wrap_content(content, inner).len() > COLLAPSE_THRESHOLD
+        ChatRole::ToolInvocation { result: None, .. } => false,
+        ChatRole::ToolInvocation {
+            result: Some((_, content)),
+            ..
+        } => {
+            if content.is_empty() || content == "(completed successfully)" {
+                return false;
             }
-        },
+            let inner = width.saturating_sub(6);
+            wrap_content(content, inner).len() > COLLAPSE_THRESHOLD
+        }
         ChatRole::Thinking => {
             if msg.content.trim().is_empty() || msg.content == "Processing your request..." {
                 return false;

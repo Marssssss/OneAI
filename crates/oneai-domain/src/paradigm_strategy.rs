@@ -45,6 +45,7 @@ impl DomainParadigmKind {
     }
 
     /// Parse from string.
+    #[allow(clippy::should_implement_trait)] // infallible (defaults on unknown), not a true FromStr
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "plan" => Self::Plan,
@@ -307,6 +308,7 @@ pub enum SubAgentMergeStrategy {
 /// 1. Plans the approach (Plan paradigm)
 /// 2. Executes the plan (ReAct paradigm)
 /// 3. Reflects on the results (Reflect paradigm)
+///
 /// And can delegate to specialized sub-agents defined in sub_agent_types.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ParadigmStrategy {

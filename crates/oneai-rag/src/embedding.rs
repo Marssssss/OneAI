@@ -623,7 +623,7 @@ impl FastEmbedService {
             "bge-base-en-v1.5" => M::BGEBaseENV15,
             "bge-large-en-v1.5" => M::BGELargeENV15,
             "mixedbread-embed-large-v1" | "mxbai-embed-large-v1" => M::MxbaiEmbedLargeV1,
-            "all-MiniLM-L6-v2" | _ => M::AllMiniLML6V2,
+            _ => M::AllMiniLML6V2,
         }
     }
 
@@ -636,7 +636,7 @@ impl FastEmbedService {
             "mixedbread-embed-large-v1" | "mxbai-embed-large-v1" => {
                 "mixedbread-ai/mxbai-embed-large-v1"
             }
-            "all-MiniLM-L6-v2" | _ => "Qdrant/all-MiniLM-L6-v2-onnx",
+            _ => "Qdrant/all-MiniLM-L6-v2-onnx",
         }
     }
 

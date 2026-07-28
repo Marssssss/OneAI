@@ -455,6 +455,12 @@ pub struct LlmJudgeMetric {
     provider: Option<Arc<dyn oneai_core::traits::LlmProvider>>,
 }
 
+impl Default for LlmJudgeMetric {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LlmJudgeMetric {
     /// Create an LlmJudgeMetric without a provider (will return error scores).
     pub fn new() -> Self {

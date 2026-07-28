@@ -807,11 +807,12 @@ impl AppBuilder {
 
     /// Use the zero-config embedding service (auto-detect from environment).
     ///
-    /// Probes, in order: an explicit embedding relay (`ONEAI_EMBEDDING_API_KEY`
-    /// + `ONEAI_EMBEDDING_BASE_URL`), Voyage (`VOYAGE_API_KEY`), OpenAI
-    /// (`OPENAI_API_KEY`), a reachable local Ollama, then FastEmbed when
-    /// implemented. If nothing is available, resolves to `None` and memory
-    /// recall falls back to keyword matching — never hard-fails on a missing key.
+    /// Probes, in order: an explicit embedding relay
+    /// (`ONEAI_EMBEDDING_API_KEY` and `ONEAI_EMBEDDING_BASE_URL`), Voyage
+    /// (`VOYAGE_API_KEY`), OpenAI (`OPENAI_API_KEY`), a reachable local
+    /// Ollama, then FastEmbed when implemented. If nothing is available,
+    /// resolves to `None` and memory recall falls back to keyword matching
+    /// — never hard-fails on a missing key.
     pub fn default_embedding_service(self) -> Self {
         self.embedding_config(EmbeddingConfig::auto())
     }

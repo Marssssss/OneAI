@@ -171,22 +171,19 @@ impl ProviderPoolConfig {
         let mut entries = Vec::new();
 
         // Primary: Anthropic Sonnet
-        if anthropic_key.is_some() {
+        if let Some(anthropic_key) = anthropic_key {
             entries.push(ProviderEntryConfig::new(
                 "anthropic",
-                ModelConfig::anthropic(
-                    anthropic_key.unwrap(),
-                    "claude-sonnet-4-6-20250514".to_string(),
-                ),
+                ModelConfig::anthropic(anthropic_key, "claude-sonnet-4-6-20250514".to_string()),
                 0,
             ));
         }
 
         // Secondary: OpenAI gpt-4o
-        if openai_key.is_some() {
+        if let Some(openai_key) = openai_key {
             entries.push(ProviderEntryConfig::new(
                 "openai",
-                ModelConfig::openai(openai_key.unwrap(), "gpt-4o".to_string()),
+                ModelConfig::openai(openai_key, "gpt-4o".to_string()),
                 1,
             ));
         }
@@ -204,21 +201,18 @@ impl ProviderPoolConfig {
     pub fn openai_primary(openai_key: Option<String>, anthropic_key: Option<String>) -> Self {
         let mut entries = Vec::new();
 
-        if openai_key.is_some() {
+        if let Some(openai_key) = openai_key {
             entries.push(ProviderEntryConfig::new(
                 "openai",
-                ModelConfig::openai(openai_key.unwrap(), "gpt-4o".to_string()),
+                ModelConfig::openai(openai_key, "gpt-4o".to_string()),
                 0,
             ));
         }
 
-        if anthropic_key.is_some() {
+        if let Some(anthropic_key) = anthropic_key {
             entries.push(ProviderEntryConfig::new(
                 "anthropic",
-                ModelConfig::anthropic(
-                    anthropic_key.unwrap(),
-                    "claude-sonnet-4-6-20250514".to_string(),
-                ),
+                ModelConfig::anthropic(anthropic_key, "claude-sonnet-4-6-20250514".to_string()),
                 1,
             ));
         }
@@ -240,21 +234,18 @@ impl ProviderPoolConfig {
                 .with_cooldown(5),
         );
 
-        if openai_key.is_some() {
+        if let Some(openai_key) = openai_key {
             entries.push(ProviderEntryConfig::new(
                 "openai",
-                ModelConfig::openai(openai_key.unwrap(), "gpt-4o-mini".to_string()),
+                ModelConfig::openai(openai_key, "gpt-4o-mini".to_string()),
                 1,
             ));
         }
 
-        if anthropic_key.is_some() {
+        if let Some(anthropic_key) = anthropic_key {
             entries.push(ProviderEntryConfig::new(
                 "anthropic",
-                ModelConfig::anthropic(
-                    anthropic_key.unwrap(),
-                    "claude-haiku-4-5-20251001".to_string(),
-                ),
+                ModelConfig::anthropic(anthropic_key, "claude-haiku-4-5-20251001".to_string()),
                 2,
             ));
         }

@@ -631,6 +631,7 @@ impl EmbeddingResolver {
     }
 
     /// Walk the auto chain; return (primary, next-available fallback).
+    #[allow(clippy::type_complexity)]
     fn resolve_auto(
         config: &EmbeddingConfig,
         probe: &EnvProbe,
@@ -670,6 +671,7 @@ impl EmbeddingResolver {
     }
 
     /// Explicit provider (+ optional explicit fallback).
+    #[allow(clippy::type_complexity)]
     fn resolve_explicit(
         config: &EmbeddingConfig,
         probe: &EnvProbe,

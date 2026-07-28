@@ -642,7 +642,6 @@ impl AnthropicProvider {
                     .get("cache_creation_input_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32,
-                ..Default::default()
             })
             .unwrap_or(TokenUsage {
                 prompt_tokens: 0,
@@ -923,7 +922,6 @@ impl AnthropicProvider {
                                             .and_then(|v| v.as_u64())
                                             .unwrap_or(0)
                                             as u32,
-                                        ..Default::default()
                                     };
 
                                     let _ = tx
@@ -1104,7 +1102,6 @@ impl AnthropicProvider {
                     .get("cache_creation_input_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32,
-                ..Default::default()
             })
             .unwrap_or(TokenUsage {
                 prompt_tokens: 0,
@@ -1332,7 +1329,6 @@ impl AnthropicProvider {
                                             .and_then(|v| v.as_u64())
                                             .unwrap_or(0)
                                             as u32,
-                                        ..Default::default()
                                     };
                                     let _ = tx
                                         .send(InferenceStreamChunk {

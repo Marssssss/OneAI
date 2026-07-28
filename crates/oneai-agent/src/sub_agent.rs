@@ -72,6 +72,7 @@ impl SubAgentKind {
 
     /// Parse a string into a SubAgentKind.
     /// Unknown strings are mapped to Custom.
+    #[allow(clippy::should_implement_trait)] // infallible (defaults on unknown), not a true FromStr
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "plan" => Self::Plan,
@@ -859,6 +860,7 @@ mod scoped_tools_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    #[allow(clippy::type_complexity)]
     fn build_factory(
         tool_names: &[&str],
     ) -> (

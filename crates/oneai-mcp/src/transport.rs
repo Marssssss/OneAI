@@ -292,7 +292,6 @@ mod tests {
         ));
         let router = Arc::new(crate::router::McpRouter::new(handler));
         let _transport = McpStdioTransport::new(router);
-        // Just verify creation — actual run requires stdin/stdout
-        assert!(true);
+        // Creation succeeded; actual run requires stdin/stdout, exercised elsewhere.
     }
 }

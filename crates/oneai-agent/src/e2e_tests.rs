@@ -103,7 +103,7 @@ struct TestObserver {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // variants record agent-loop events for inspection in ad-hoc debugging
+#[allow(dead_code, clippy::large_enum_variant)] // debug-inspection event log; variant size is irrelevant
 enum TestEvent {
     IterationStart(usize, ParadigmKind),
     DirectAnswer(String),
