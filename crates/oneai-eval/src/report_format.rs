@@ -49,26 +49,49 @@ pub fn render_markdown(report: &EvalReport) -> String {
 
     // Header
     md.push_str(&format!("# Eval Report: {}\n\n", report.suite_name));
-    md.push_str(&format!("**Timestamp**: {}\n\n", report.timestamp.to_rfc3339()));
+    md.push_str(&format!(
+        "**Timestamp**: {}\n\n",
+        report.timestamp.to_rfc3339()
+    ));
 
     // Summary table
     md.push_str("## Summary\n\n");
     md.push_str("| Metric | Value |\n");
     md.push_str("|--------|-------|\n");
-    md.push_str(&format!("| Total cases | {} |\n", report.summary.total_cases));
-    md.push_str(&format!("| Passed | {} ({:.1}%) |\n",
+    md.push_str(&format!(
+        "| Total cases | {} |\n",
+        report.summary.total_cases
+    ));
+    md.push_str(&format!(
+        "| Passed | {} ({:.1}%) |\n",
         report.summary.passed_cases,
-        report.summary.pass_rate * 100.0));
-    md.push_str(&format!("| Avg score | {:.2} |\n", report.summary.avg_score));
-    md.push_str(&format!("| Avg duration | {}ms |\n", report.summary.avg_duration_ms));
-    md.push_str(&format!("| Total tokens | {} |\n", report.summary.total_tokens));
-    md.push_str(&format!("| Total API calls | {} |\n\n", report.summary.total_api_calls));
+        report.summary.pass_rate * 100.0
+    ));
+    md.push_str(&format!(
+        "| Avg score | {:.2} |\n",
+        report.summary.avg_score
+    ));
+    md.push_str(&format!(
+        "| Avg duration | {}ms |\n",
+        report.summary.avg_duration_ms
+    ));
+    md.push_str(&format!(
+        "| Total tokens | {} |\n",
+        report.summary.total_tokens
+    ));
+    md.push_str(&format!(
+        "| Total API calls | {} |\n\n",
+        report.summary.total_api_calls
+    ));
 
     // Overall status
     if report.all_passed() {
         md.push_str("**Status**: ✓ ALL PASSED\n\n");
     } else {
-        md.push_str(&format!("**Status**: ✗ {} FAILED\n\n", report.failed_count()));
+        md.push_str(&format!(
+            "**Status**: ✗ {} FAILED\n\n",
+            report.failed_count()
+        ));
     }
 
     // Per-metric summary
@@ -77,7 +100,7 @@ pub fn render_markdown(report: &EvalReport) -> String {
         md.push_str("| Metric | Cases | Pass Rate | Avg Score | Min | Max |\n");
         md.push_str("|--------|-------|-----------|-----------|-----|-----|\n");
 
-        for (_, summary) in &report.summary.metric_summaries {
+        for summary in report.summary.metric_summaries.values() {
             md.push_str(&format!(
                 "| {} | {} | {:.1}% | {:.2} | {:.2} | {:.2} |\n",
                 summary.name,
@@ -88,7 +111,7 @@ pub fn render_markdown(report: &EvalReport) -> String {
                 summary.max_score,
             ));
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     // Case results
@@ -98,14 +121,19 @@ pub fn render_markdown(report: &EvalReport) -> String {
         md.push_str(&format!("- **Input**: {}\n", result.input));
 
         if result.has_error() {
-            md.push_str(&format!("- **Error**: {}\n", result.error.as_ref().unwrap()));
+            md.push_str(&format!(
+                "- **Error**: {}\n",
+                result.error.as_ref().unwrap()
+            ));
             md.push_str("- **Status**: ✗ ERROR\n\n");
             continue;
         }
 
         // Truncate long outputs for readability (char-boundary-safe for CJK)
         let output_preview = if result.actual_output.len() > 200 {
-            let end = result.actual_output.char_indices()
+            let end = result
+                .actual_output
+                .char_indices()
                 .take_while(|(i, _)| *i < 200)
                 .last()
                 .map(|(i, c)| i + c.len_utf8())
@@ -124,8 +152,7 @@ pub fn render_markdown(report: &EvalReport) -> String {
             };
             md.push_str(&format!(
                 "- API calls: {}{} | tokens: {}+{}\n",
-                result.api_calls, est_note,
-                result.prompt_tokens, result.completion_tokens,
+                result.api_calls, est_note, result.prompt_tokens, result.completion_tokens,
             ));
         }
         // Timing breakdown — present when the runner stamped a `timing` JSON
@@ -135,7 +162,11 @@ pub fn render_markdown(report: &EvalReport) -> String {
             md.push_str(&timing);
         }
 
-        let status_icon = if result.passed() { "✓ PASSED" } else { "✗ FAILED" };
+        let status_icon = if result.passed() {
+            "✓ PASSED"
+        } else {
+            "✗ FAILED"
+        };
         md.push_str(&format!("- **Status**: {}\n", status_icon));
 
         // Individual metric scores
@@ -145,15 +176,11 @@ pub fn render_markdown(report: &EvalReport) -> String {
                 let icon = if ms.score.passed { "✓" } else { "✗" };
                 md.push_str(&format!(
                     "  - {}: {:.2}/{:.02} ({}) — {}\n",
-                    ms.metric_name,
-                    ms.score.value,
-                    ms.score.max_value,
-                    icon,
-                    ms.score.reason,
+                    ms.metric_name, ms.score.value, ms.score.max_value, icon, ms.score.reason,
                 ));
             }
         }
-        md.push_str("\n");
+        md.push('\n');
     }
 
     md
@@ -166,9 +193,14 @@ pub fn render_markdown(report: &EvalReport) -> String {
 /// SwebenchRunner stamps. Returns `None` when no timing metadata exists (e.g.
 /// non-SWE-bench suites), so the report stays unchanged for those.
 fn render_timing_breakdown(result: &crate::eval_result::EvalResult) -> Option<String> {
-    let has_phases = ["dur_clone_ms", "dur_agent_ms", "dur_diff_ms", "dur_judge_ms"]
-        .iter()
-        .any(|k| result.metadata.contains_key(*k));
+    let has_phases = [
+        "dur_clone_ms",
+        "dur_agent_ms",
+        "dur_diff_ms",
+        "dur_judge_ms",
+    ]
+    .iter()
+    .any(|k| result.metadata.contains_key(*k));
     if !has_phases {
         return None;
     }
@@ -238,7 +270,10 @@ mod tests {
 
         let mut r2 = crate::eval_result::EvalResult::new("math_mult", "What is 3*5?", "15");
         r2.add_score("exact_match", EvalScore::perfect("Exact match"));
-        r2.add_score("contains_match", EvalScore::new(0.5, 1.0, "Partial match", true));
+        r2.add_score(
+            "contains_match",
+            EvalScore::new(0.5, 1.0, "Partial match", true),
+        );
         r2.duration_ms = 200;
 
         let report = EvalReport::new("math_test", vec![r1, r2]);

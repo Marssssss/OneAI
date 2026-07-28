@@ -61,10 +61,7 @@ pub struct DocumentIndex {
 
 impl DocumentIndex {
     /// Create a new document index with a (legacy) vector store.
-    pub fn new(
-        vector_store: Arc<dyn VectorStore>,
-        chunking_strategy: ChunkingStrategy,
-    ) -> Self {
+    pub fn new(vector_store: Arc<dyn VectorStore>, chunking_strategy: ChunkingStrategy) -> Self {
         Self {
             chunks: HashMap::new(),
             document_chunks: HashMap::new(),
@@ -116,7 +113,9 @@ impl DocumentIndex {
             None => 0,
         };
         let dim = if dim > 0 { Some(dim) } else { None };
-        let backend = oneai_vector::StandardRetrievalPipeline::in_memory_default_with_dim(dim, reranker).await?;
+        let backend =
+            oneai_vector::StandardRetrievalPipeline::in_memory_default_with_dim(dim, reranker)
+                .await?;
         Ok(Self::with_defaults_and_backend(backend))
     }
 
@@ -132,8 +131,14 @@ impl DocumentIndex {
         let mut metadata = indexed.chunk.metadata.clone();
         metadata.insert("document_id".to_string(), indexed.chunk.document_id.clone());
         metadata.insert("content".to_string(), indexed.chunk.content.clone());
-        metadata.insert("start_offset".to_string(), indexed.chunk.start_offset.to_string());
-        metadata.insert("end_offset".to_string(), indexed.chunk.end_offset.to_string());
+        metadata.insert(
+            "start_offset".to_string(),
+            indexed.chunk.start_offset.to_string(),
+        );
+        metadata.insert(
+            "end_offset".to_string(),
+            indexed.chunk.end_offset.to_string(),
+        );
         metadata
     }
 
@@ -150,7 +155,9 @@ impl DocumentIndex {
         // Chunk the document
         document.chunk(&self.chunking_strategy);
 
-        let chunk_ids: Vec<String> = document.chunks.iter()
+        let chunk_ids: Vec<String> = document
+            .chunks
+            .iter()
             .map(|chunk| chunk.id.clone())
             .collect();
 
@@ -168,12 +175,14 @@ impl DocumentIndex {
                 // No embedding here → the pipeline indexes the lexical leg +
                 // content cache only (no pipeline embedder is wired, so no
                 // auto-embedding; dense leg is populated by add_embedding).
-                b.upsert_chunk(&chunk.id, &chunk.content, metadata, None).await?;
+                b.upsert_chunk(&chunk.id, &chunk.content, metadata, None)
+                    .await?;
             }
         }
 
         // Track document → chunk mapping
-        self.document_chunks.insert(document.id.clone(), chunk_ids.clone());
+        self.document_chunks
+            .insert(document.id.clone(), chunk_ids.clone());
 
         Ok(chunk_ids)
     }
@@ -189,7 +198,8 @@ impl DocumentIndex {
             Some(i) => i,
             None => {
                 return Err(oneai_core::error::OneAIError::Rag(format!(
-                    "Chunk '{}' not found in index", chunk_id
+                    "Chunk '{}' not found in index",
+                    chunk_id
                 )));
             }
         };
@@ -197,12 +207,8 @@ impl DocumentIndex {
         let content = indexed.chunk.content.clone();
 
         if let Some(b) = &self.retrieval_backend {
-            b.upsert_chunk(
-                chunk_id,
-                &content,
-                metadata,
-                Some(&embedding),
-            ).await?;
+            b.upsert_chunk(chunk_id, &content, metadata, Some(&embedding))
+                .await?;
         } else if let Some(vs) = &self.vector_store {
             vs.upsert(chunk_id, embedding.clone(), metadata).await?;
         }
@@ -259,7 +265,11 @@ impl DocumentIndex {
     /// only). When a `RetrievalBackend` is configured, delegates to it (the
     /// pipeline runs the dense leg and returns fused hits); otherwise the
     /// legacy brute-force `vector_store` is used.
-    pub async fn search(&self, query_embedding: Vec<f32>, top_k: usize) -> Result<Vec<RetrievalResult>> {
+    pub async fn search(
+        &self,
+        query_embedding: Vec<f32>,
+        top_k: usize,
+    ) -> Result<Vec<RetrievalResult>> {
         if let Some(b) = &self.retrieval_backend {
             let req = RetrievalRequest::vector(String::new(), query_embedding, top_k);
             let hits = b.search_hybrid(&req).await?;
@@ -269,14 +279,13 @@ impl DocumentIndex {
             return Ok(Vec::new());
         };
         let search_results = vs.search(query_embedding, top_k).await?;
-        let results: Vec<RetrievalResult> = search_results.iter()
+        let results: Vec<RetrievalResult> = search_results
+            .iter()
             .filter_map(|result| {
-                self.chunks.get(&result.id).map(|indexed| {
-                    RetrievalResult {
-                        chunk: indexed.chunk.clone(),
-                        score: result.score,
-                        embedding: indexed.embedding.clone(),
-                    }
+                self.chunks.get(&result.id).map(|indexed| RetrievalResult {
+                    chunk: indexed.chunk.clone(),
+                    score: result.score,
+                    embedding: indexed.embedding.clone(),
                 })
             })
             .collect();
@@ -322,7 +331,9 @@ impl DocumentIndex {
     fn search_by_keyword_substring(&self, keyword: &str, top_k: usize) -> Vec<RetrievalResult> {
         let keyword_lower = keyword.to_lowercase();
 
-        let mut results: Vec<RetrievalResult> = self.chunks.values()
+        let mut results: Vec<RetrievalResult> = self
+            .chunks
+            .values()
             .filter(|indexed| oneai_core::keyword_matches(&indexed.chunk.content, keyword))
             .map(|indexed| {
                 // Keyword search score is based on term frequency / length ratio
@@ -338,7 +349,11 @@ impl DocumentIndex {
             .collect();
 
         // Sort by score descending
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
         results
     }
@@ -380,20 +395,41 @@ mod tests {
 
     #[async_trait::async_trait]
     impl VectorStore for TestVectorStore {
-        async fn upsert(&self, id: &str, embedding: Vec<f32>, metadata: HashMap<String, String>) -> Result<()> {
-            self.vectors.write().await.insert(id.to_string(), (embedding, metadata));
+        async fn upsert(
+            &self,
+            id: &str,
+            embedding: Vec<f32>,
+            metadata: HashMap<String, String>,
+        ) -> Result<()> {
+            self.vectors
+                .write()
+                .await
+                .insert(id.to_string(), (embedding, metadata));
             Ok(())
         }
 
-        async fn search(&self, query_embedding: Vec<f32>, top_k: usize) -> Result<Vec<oneai_core::VectorSearchResult>> {
+        async fn search(
+            &self,
+            query_embedding: Vec<f32>,
+            top_k: usize,
+        ) -> Result<Vec<oneai_core::VectorSearchResult>> {
             let vectors = self.vectors.read().await;
-            let mut results: Vec<oneai_core::VectorSearchResult> = vectors.iter()
+            let mut results: Vec<oneai_core::VectorSearchResult> = vectors
+                .iter()
                 .map(|(id, (embedding, metadata))| {
                     // Simple cosine similarity
-                    let dot: f32 = query_embedding.iter().zip(embedding.iter()).map(|(a, b)| a * b).sum();
+                    let dot: f32 = query_embedding
+                        .iter()
+                        .zip(embedding.iter())
+                        .map(|(a, b)| a * b)
+                        .sum();
                     let norm_q: f32 = query_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
                     let norm_e: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    let score = if norm_q > 0.0 && norm_e > 0.0 { dot / (norm_q * norm_e) } else { 0.0 };
+                    let score = if norm_q > 0.0 && norm_e > 0.0 {
+                        dot / (norm_q * norm_e)
+                    } else {
+                        0.0
+                    };
 
                     oneai_core::VectorSearchResult {
                         id: id.clone(),
@@ -403,7 +439,11 @@ mod tests {
                 })
                 .collect();
 
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             results.truncate(top_k);
             Ok(results)
         }
@@ -420,18 +460,24 @@ mod tests {
         let mut index = DocumentIndex::with_defaults(vector_store);
 
         // Add a document
-        let doc = Document::with_id("doc1", "Rust is a programming language. It is fast and safe.");
+        let doc = Document::with_id(
+            "doc1",
+            "Rust is a programming language. It is fast and safe.",
+        );
         let chunk_ids = index.add_document(doc).await.unwrap();
-        assert!(chunk_ids.len() > 0);
+        assert!(!chunk_ids.is_empty());
 
         // Add embeddings for each chunk
         for chunk_id in &chunk_ids {
-            index.add_embedding(chunk_id, vec![0.1, 0.2, 0.3]).await.unwrap();
+            index
+                .add_embedding(chunk_id, vec![0.1, 0.2, 0.3])
+                .await
+                .unwrap();
         }
 
         // Search by embedding
         let results = index.search(vec![0.1, 0.2, 0.3], 5).await.unwrap();
-        assert!(results.len() > 0);
+        assert!(!results.is_empty());
         assert_eq!(results[0].chunk.document_id, "doc1");
     }
 
@@ -441,12 +487,15 @@ mod tests {
         let mut index = DocumentIndex::with_defaults(vector_store);
 
         // Add a document
-        let doc = Document::with_id("doc1", "Rust programming language is great for system programming");
+        let doc = Document::with_id(
+            "doc1",
+            "Rust programming language is great for system programming",
+        );
         index.add_document(doc).await.unwrap();
 
         // Search by keyword (legacy substring path — no backend configured)
         let results = index.search_by_keyword("programming", 5).await;
-        assert!(results.len() > 0);
+        assert!(!results.is_empty());
     }
 
     #[tokio::test]
@@ -490,7 +539,7 @@ mod tests {
 
         let chunk_ids = index.document_chunk_ids("doc1");
         assert!(chunk_ids.is_some());
-        assert!(chunk_ids.unwrap().len() > 0);
+        assert!(!chunk_ids.unwrap().is_empty());
     }
 
     // ─── Default retrieval stack (oneai-vector) path ────────────────────────
@@ -518,7 +567,9 @@ mod tests {
         fn model(&self) -> oneai_core::EmbeddingModel {
             oneai_core::EmbeddingModel::new("stub-4d")
         }
-        fn dimension(&self) -> usize { 4 }
+        fn dimension(&self) -> usize {
+            4
+        }
     }
 
     #[tokio::test]
@@ -526,8 +577,14 @@ mod tests {
         // with_default_stack builds the BM25 lexical leg; keyword search hits
         // CJK tokens (real BM25, not substring).
         let mut index = DocumentIndex::with_default_stack(None, None).await.unwrap();
-        index.add_document(Document::with_id("d1", "机器学习是人工智能的一个分支")).await.unwrap();
-        index.add_document(Document::with_id("d2", "今天天气不错适合出门散步")).await.unwrap();
+        index
+            .add_document(Document::with_id("d1", "机器学习是人工智能的一个分支"))
+            .await
+            .unwrap();
+        index
+            .add_document(Document::with_id("d2", "今天天气不错适合出门散步"))
+            .await
+            .unwrap();
 
         let hits = index.search_by_keyword("人工智能", 5).await;
         assert!(hits.iter().any(|r| r.chunk.document_id == "d1"));
@@ -536,9 +593,17 @@ mod tests {
     #[tokio::test]
     async fn test_document_index_default_stack_hybrid_search() {
         let embedder = Arc::new(StubEmbedder);
-        let mut index = DocumentIndex::with_default_stack(Some(embedder), None).await.unwrap();
-        index.add_document(Document::with_id("d1", "alpha beta gamma")).await.unwrap();
-        index.add_document(Document::with_id("d2", "delta epsilon zeta")).await.unwrap();
+        let mut index = DocumentIndex::with_default_stack(Some(embedder), None)
+            .await
+            .unwrap();
+        index
+            .add_document(Document::with_id("d1", "alpha beta gamma"))
+            .await
+            .unwrap();
+        index
+            .add_document(Document::with_id("d2", "delta epsilon zeta"))
+            .await
+            .unwrap();
         // Populate the dense leg with explicit embeddings (the pipeline carries
         // no embedder, so embeddings are supplied here).
         let chunk_ids: Vec<String> = index.chunks.values().map(|c| c.chunk.id.clone()).collect();
@@ -558,7 +623,10 @@ mod tests {
     #[tokio::test]
     async fn test_document_index_default_stack_remove() {
         let mut index = DocumentIndex::with_default_stack(None, None).await.unwrap();
-        index.add_document(Document::with_id("d1", "content to delete")).await.unwrap();
+        index
+            .add_document(Document::with_id("d1", "content to delete"))
+            .await
+            .unwrap();
         assert_eq!(index.document_count(), 1);
         index.remove_document("d1").await.unwrap();
         assert_eq!(index.document_count(), 0);

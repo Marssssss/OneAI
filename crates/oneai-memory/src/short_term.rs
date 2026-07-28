@@ -8,9 +8,9 @@
 
 use std::collections::VecDeque;
 
-use oneai_core::{MemoryEntry, MemoryQuery};
 use oneai_core::error::Result;
 use oneai_core::traits::MemoryStore;
+use oneai_core::{MemoryEntry, MemoryQuery};
 
 /// Short-term memory with sliding window.
 ///
@@ -71,10 +71,13 @@ impl ShortTermMemory {
     /// plus overhead for metadata. This is a rough estimate; actual
     /// tokenization depends on the model's tokenizer.
     pub fn estimated_tokens(&self) -> usize {
-        self.entries.iter().map(|entry| {
-            // Rough token estimate: 1 token per ~4 chars
-            entry.content.len() / 4 + 50 // +50 for metadata overhead
-        }).sum()
+        self.entries
+            .iter()
+            .map(|entry| {
+                // Rough token estimate: 1 token per ~4 chars
+                entry.content.len() / 4 + 50 // +50 for metadata overhead
+            })
+            .sum()
     }
 
     /// Get the window size.
@@ -86,7 +89,8 @@ impl ShortTermMemory {
     ///
     /// Simple keyword matching for fast retrieval without embedding computation.
     pub fn find_by_keyword(&self, keyword: &str) -> Vec<&MemoryEntry> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|entry| oneai_core::keyword_matches(&entry.content, keyword))
             .collect()
     }
@@ -96,9 +100,14 @@ impl ShortTermMemory {
     /// Formats entries as a sequence of turns suitable for injection into
     /// an LLM context window.
     pub fn assemble_context(&self) -> String {
-        self.entries.iter()
+        self.entries
+            .iter()
             .map(|entry| {
-                let role = entry.metadata.get("role").map(|s| s.as_str()).unwrap_or("unknown");
+                let role = entry
+                    .metadata
+                    .get("role")
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
                 format!("[{}] {}", role, entry.content)
             })
             .collect::<Vec<_>>()
@@ -114,13 +123,17 @@ impl MemoryStore for ShortTermMemory {
         // ShortTermMemory should be used via direct push() calls,
         // and MemoryStore is primarily for long-term memory.
         // For compatibility, we use interior mutability via RwLock in practice.
-        tracing::warn!("ShortTermMemory::store via MemoryStore trait — use push() for direct access");
+        tracing::warn!(
+            "ShortTermMemory::store via MemoryStore trait — use push() for direct access"
+        );
         Ok(())
     }
 
     async fn retrieve(&self, query: &MemoryQuery, top_k: usize) -> Result<Vec<MemoryEntry>> {
         // Simple keyword matching for short-term memory retrieval
-        let results: Vec<MemoryEntry> = self.entries.iter()
+        let results: Vec<MemoryEntry> = self
+            .entries
+            .iter()
             .filter(|entry| oneai_core::keyword_matches(&entry.content, &query.text))
             .take(top_k)
             .cloned()
@@ -137,7 +150,9 @@ impl MemoryStore for ShortTermMemory {
 
     async fn clear(&self) -> Result<()> {
         // Same interior mutability limitation as store()
-        tracing::warn!("ShortTermMemory::clear via MemoryStore trait — use clear() for direct access");
+        tracing::warn!(
+            "ShortTermMemory::clear via MemoryStore trait — use clear() for direct access"
+        );
         Ok(())
     }
 }

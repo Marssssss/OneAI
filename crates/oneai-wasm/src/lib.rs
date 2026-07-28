@@ -85,27 +85,33 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
-pub mod error;
+pub mod action_template;
 pub mod config;
-pub mod runtime;
-pub mod wasi;
+pub mod error;
 pub mod guest_api;
 pub mod module;
-pub mod registry;
 pub mod monitor;
+pub mod registry;
+pub mod runtime;
 pub mod tool;
-pub mod action_template;
+pub mod wasi;
 
 // ─── Public exports ──────────────────────────────────────────────────────────────
 
-pub use error::{WasmError, Result};
+pub use action_template::{
+    WasmActionExecutionMode, WasmActionKind, WasmActionTemplate, WasmActionTool,
+};
 pub use config::WasmRuntimeConfig;
-pub use runtime::{WasmRuntime, WasmHostState, WasmStoreState};
-pub use wasi::{WasiConfig, WasiDirConfig, WasiAccessMode};
+pub use error::{Result, WasmError};
 pub use guest_api::{WasmGuestApi, WasmHostFunction};
 pub use module::WasmModuleManager;
-pub use registry::{WasmModuleRegistry, WasmModuleEntry, WasmModuleSource, WasmModuleVersion, WasmModuleHealth};
-pub use monitor::{WasmResourceMonitor, WasmExecutionMetrics, WasmResourceEvent, WasmResourceEventSubscriber, WasmLogSubscriber};
+pub use monitor::{
+    WasmExecutionMetrics, WasmLogSubscriber, WasmResourceEvent, WasmResourceEventSubscriber,
+    WasmResourceMonitor,
+};
+pub use registry::{
+    WasmModuleEntry, WasmModuleHealth, WasmModuleRegistry, WasmModuleSource, WasmModuleVersion,
+};
+pub use runtime::{WasmHostState, WasmRuntime, WasmStoreState};
 pub use tool::{WasmTool, WasmToolMetadata};
-pub use action_template::{WasmActionTemplate, WasmActionTool, WasmActionKind, WasmActionExecutionMode};
+pub use wasi::{WasiAccessMode, WasiConfig, WasiDirConfig};

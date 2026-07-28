@@ -39,12 +39,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oneai_core::{
-    ModelConfig,
-    CircuitBreaker, RateLimiter,
-    SmartRouteConfig, SmartRouteDecision, SmartRouteFactor, RoutingTier, ModelQualityProfile,
-    ProviderScore, SmartRoutingLog, InMemorySmartRoutingLog,
-    ProviderPoolConfig, DegradationRule,
-    TokenCounter,
+    CircuitBreaker, DegradationRule, InMemorySmartRoutingLog, ModelConfig, ModelQualityProfile,
+    ProviderPoolConfig, ProviderScore, RateLimiter, RoutingTier, SmartRouteConfig,
+    SmartRouteDecision, SmartRouteFactor, SmartRoutingLog, TokenCounter,
 };
 
 use crate::ModelRouter;
@@ -90,10 +87,7 @@ impl SmartRouter {
     ///
     /// The `model_router` provides regex-based first-pass routing.
     /// The `config` defines the routing strategy and constraints.
-    pub fn new(
-        model_router: ModelRouter,
-        config: SmartRouteConfig,
-    ) -> Self {
+    pub fn new(model_router: ModelRouter, config: SmartRouteConfig) -> Self {
         // Build quality profiles from default profiles
         let mut quality_profiles = HashMap::new();
         for profile in ModelQualityProfile::default_profiles() {
@@ -149,7 +143,8 @@ impl SmartRouter {
 
     /// Add a custom quality profile for a model.
     pub fn add_quality_profile(mut self, profile: ModelQualityProfile) -> Self {
-        self.quality_profiles.insert(profile.model_name.clone(), profile);
+        self.quality_profiles
+            .insert(profile.model_name.clone(), profile);
         self
     }
 
@@ -203,13 +198,17 @@ impl SmartRouter {
 
             // ── Step 2: Validate regex result against constraints ────────
             // Only use regex result if it was a real rule match (not fallback)
-            if regex_decision.matched_rule != "fallback" && self.validate_route(
-                &regex_decision.provider.to_string(),
-                &regex_decision.model,
-                session_id,
-                conversation_tokens,
-                &mut factors,
-            ).await {
+            if regex_decision.matched_rule != "fallback"
+                && self
+                    .validate_route(
+                        &regex_decision.provider.to_string(),
+                        &regex_decision.model,
+                        session_id,
+                        conversation_tokens,
+                        &mut factors,
+                    )
+                    .await
+            {
                 // Regex result passes validation — use it
                 let profile = self.quality_profiles.get(&regex_decision.model);
                 let mut decision = SmartRouteDecision::from_regex_match(
@@ -218,8 +217,8 @@ impl SmartRouter {
                     tier,
                     regex_decision.matched_rule,
                 )
-                    .with_estimated_latency(profile.map_or(0, |p| p.estimated_latency_ms))
-                    .with_max_tokens(regex_decision.max_tokens.unwrap_or(0));
+                .with_estimated_latency(profile.map_or(0, |p| p.estimated_latency_ms))
+                .with_max_tokens(regex_decision.max_tokens.unwrap_or(0));
 
                 // Add factors from validation
                 for factor in factors {
@@ -233,18 +232,21 @@ impl SmartRouter {
             // Regex result failed validation — fall through to multi-factor scoring
             tracing::debug!(
                 "SmartRouter: regex result ({}/{}) failed validation, falling through to scoring",
-                regex_decision.provider.to_string(), regex_decision.model,
+                regex_decision.provider.to_string(),
+                regex_decision.model,
             );
         }
 
         // ── Step 3: Multi-factor scoring ─────────────────────────────────
-        let decision = self.route_by_scoring(
-            task_description,
-            paradigm,
-            session_id,
-            conversation_tokens,
-            &mut factors,
-        ).await;
+        let decision = self
+            .route_by_scoring(
+                task_description,
+                paradigm,
+                session_id,
+                conversation_tokens,
+                &mut factors,
+            )
+            .await;
 
         self.routing_log.log_decision(decision.clone());
         decision
@@ -274,12 +276,14 @@ impl SmartRouter {
         let mut scores: Vec<ProviderScore> = Vec::new();
         for candidate in &candidates {
             // Check if this provider is available (health, rate, context)
-            let is_available = self.check_provider_available(
-                &candidate.provider_family,
-                &candidate.model_name,
-                conversation_tokens,
-                factors,
-            ).await;
+            let is_available = self
+                .check_provider_available(
+                    &candidate.provider_family,
+                    &candidate.model_name,
+                    conversation_tokens,
+                    factors,
+                )
+                .await;
 
             if !is_available {
                 scores.push(ProviderScore::skipped(
@@ -323,21 +327,26 @@ impl SmartRouter {
 
         if !fallback_already_scored {
             let tier = RoutingTier::from_model_name(fallback_model);
-            let profile = self.quality_profiles.get(fallback_model)
-                .or_else(|| {
-                    // Try partial match
-                    self.quality_profiles.iter()
-                        .find(|(k, _)| fallback_model.starts_with(k.as_str()) || k.as_str().starts_with(fallback_model))
-                        .map(|(_, v)| v)
-                });
+            let profile = self.quality_profiles.get(fallback_model).or_else(|| {
+                // Try partial match
+                self.quality_profiles
+                    .iter()
+                    .find(|(k, _)| {
+                        fallback_model.starts_with(k.as_str())
+                            || k.as_str().starts_with(fallback_model)
+                    })
+                    .map(|(_, v)| v)
+            });
 
             if let Some(profile) = profile {
-                let is_available = self.check_provider_available(
-                    &fallback_provider,
-                    fallback_model,
-                    conversation_tokens,
-                    factors,
-                ).await;
+                let is_available = self
+                    .check_provider_available(
+                        &fallback_provider,
+                        fallback_model,
+                        conversation_tokens,
+                        factors,
+                    )
+                    .await;
 
                 if is_available {
                     let latency_score = self.compute_latency_score(profile);
@@ -358,23 +367,22 @@ impl SmartRouter {
         }
 
         // Find the best available score
-        let best = scores.iter()
+        let best = scores
+            .iter()
             .filter(|s| s.is_available)
-            .max_by(|a, b| a.total_score.partial_cmp(&b.total_score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.total_score
+                    .partial_cmp(&b.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned(); // Clone the best score to release the borrow
 
         match best {
             Some(best_score) => {
                 let profile = self.find_profile_for_model(&best_score.model_name);
-                SmartRouteDecision::from_scoring(
-                    &best_score,
-                    *strategy,
-                    factors.clone(),
-                    scores,
-                ).with_estimated_latency(
-                    profile.map_or(0, |p| p.estimated_latency_ms)
-                )
-            },
+                SmartRouteDecision::from_scoring(&best_score, *strategy, factors.clone(), scores)
+                    .with_estimated_latency(profile.map_or(0, |p| p.estimated_latency_ms))
+            }
             None => {
                 // No available provider — return fallback decision
                 tracing::error!("SmartRouter: no available providers found, using fallback");
@@ -385,7 +393,7 @@ impl SmartRouter {
                     *strategy,
                     "No available providers — using fallback",
                 )
-            },
+            }
         }
     }
 
@@ -420,12 +428,14 @@ impl SmartRouter {
             let tier = profile.map_or(RoutingTier::from_model_name(model_name), |p| p.tier);
 
             // Check availability
-            let is_available = self.check_provider_available(
-                provider_name,
-                model_name,
-                conversation_tokens,
-                &mut factors,
-            ).await;
+            let is_available = self
+                .check_provider_available(
+                    provider_name,
+                    model_name,
+                    conversation_tokens,
+                    &mut factors,
+                )
+                .await;
 
             if !is_available {
                 scores.push(ProviderScore::skipped(
@@ -452,28 +462,28 @@ impl SmartRouter {
         }
 
         // Find the best available score
-        let best = scores.iter()
+        let best = scores
+            .iter()
             .filter(|s| s.is_available)
-            .max_by(|a, b| a.total_score.partial_cmp(&b.total_score).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.total_score
+                    .partial_cmp(&b.total_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned();
 
         match best {
             Some(best_score) => {
                 let profile = self.find_profile_for_model(&best_score.model_name);
-                SmartRouteDecision::from_scoring(
-                    &best_score,
-                    *strategy,
-                    factors,
-                    scores,
-                ).with_estimated_latency(
-                    profile.map_or(0, |p| p.estimated_latency_ms)
-                )
-            },
+                SmartRouteDecision::from_scoring(&best_score, *strategy, factors, scores)
+                    .with_estimated_latency(profile.map_or(0, |p| p.estimated_latency_ms))
+            }
             None => {
                 // All providers unavailable — try primary anyway
                 let sorted = pool_config.sorted_entries();
                 let primary = sorted.first();
-                let model_name = primary.map_or("unknown".to_string(), |e| e.model_name().to_string());
+                let model_name =
+                    primary.map_or("unknown".to_string(), |e| e.model_name().to_string());
                 let provider_name = primary.map_or("unknown".to_string(), |e| e.name.clone());
                 SmartRouteDecision::new(
                     model_name,
@@ -482,7 +492,7 @@ impl SmartRouter {
                     *strategy,
                     "No available providers — trying primary anyway",
                 )
-            },
+            }
         }
     }
 
@@ -508,21 +518,22 @@ impl SmartRouter {
         let mut current = current_model.to_string();
         loop {
             let next = rule.next_degraded_model(&current);
-            if next.is_none() {
-                return None; // Already at cheapest model
-            }
+            next.as_ref()?;
 
             let next_model = next.unwrap();
 
             // Validate the degraded model against constraints
             let mut factors = Vec::new();
-            if self.validate_route(
-                provider_family,
-                &next_model,
-                session_id,
-                conversation_tokens,
-                &mut factors,
-            ).await {
+            if self
+                .validate_route(
+                    provider_family,
+                    &next_model,
+                    session_id,
+                    conversation_tokens,
+                    &mut factors,
+                )
+                .await
+            {
                 return Some(next_model);
             }
 
@@ -574,7 +585,13 @@ impl SmartRouter {
 
         // ── Check rate limiter ────────────────────────────────────────
         if self.config.rate_aware && self.rate_limiter.is_some() {
-            match self.rate_limiter.as_ref().unwrap().check_rate(provider).await {
+            match self
+                .rate_limiter
+                .as_ref()
+                .unwrap()
+                .check_rate(provider)
+                .await
+            {
                 Ok(status) => {
                     let was_exceeded = !status.is_allowed();
                     factors.push(SmartRouteFactor::RateLimited {
@@ -584,14 +601,14 @@ impl SmartRouter {
                     if was_exceeded {
                         return false;
                     }
-                },
+                }
                 Err(_) => {
                     // Rate check failed — assume OK (don't block routing)
                     factors.push(SmartRouteFactor::RateLimited {
                         provider: provider.to_string(),
                         was_exceeded: false,
                     });
-                },
+                }
             }
         }
 
@@ -607,7 +624,8 @@ impl SmartRouter {
                 profile.map_or(128_000, |p| p.context_window_tokens)
             };
 
-            let would_overflow = (tokens as f64 / context_window as f64) > self.config.context_overflow_threshold;
+            let would_overflow =
+                (tokens as f64 / context_window as f64) > self.config.context_overflow_threshold;
             factors.push(SmartRouteFactor::ContextOverflow {
                 conversation_tokens: tokens,
                 model_context_window: context_window,
@@ -643,7 +661,13 @@ impl SmartRouter {
 
         // Rate limiter
         if self.config.rate_aware && self.rate_limiter.is_some() {
-            match self.rate_limiter.as_ref().unwrap().check_rate(provider).await {
+            match self
+                .rate_limiter
+                .as_ref()
+                .unwrap()
+                .check_rate(provider)
+                .await
+            {
                 Ok(status) => {
                     if !status.is_allowed() {
                         factors.push(SmartRouteFactor::RateLimited {
@@ -652,8 +676,8 @@ impl SmartRouter {
                         });
                         return false;
                     }
-                },
-                Err(_) => {}, // Assume OK
+                }
+                Err(_) => {} // Assume OK
             }
         }
 
@@ -681,11 +705,17 @@ impl SmartRouter {
     /// Infer provider from model name (same logic as ModelRouter).
     fn infer_provider_from_model(&self, model: &str) -> String {
         let lower = model.to_lowercase();
-        if lower.starts_with("claude") { "anthropic".to_string() }
-        else if lower.starts_with("gpt") || lower.contains("openai") || lower.starts_with("o3") { "openai".to_string() }
-        else if lower.starts_with("gemini") { "google".to_string() }
-        else if lower.contains("ollama") || lower.contains("local") { "ollama".to_string() }
-        else { "openai".to_string() } // Default: most services use OpenAI protocol
+        if lower.starts_with("claude") {
+            "anthropic".to_string()
+        } else if lower.starts_with("gpt") || lower.contains("openai") || lower.starts_with("o3") {
+            "openai".to_string()
+        } else if lower.starts_with("gemini") {
+            "google".to_string()
+        } else if lower.contains("ollama") || lower.contains("local") {
+            "ollama".to_string()
+        } else {
+            "openai".to_string()
+        } // Default: most services use OpenAI protocol
     }
 
     /// Find the quality profile for a model name (with partial matching).
@@ -717,9 +747,9 @@ impl SmartRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oneai_core::circuit_breaker::{CircuitBreakerConfig, ThresholdCircuitBreaker};
     use oneai_core::CloudProviderKind;
     use oneai_core::ProviderType;
-    use oneai_core::circuit_breaker::{ThresholdCircuitBreaker, CircuitBreakerConfig};
 
     fn anthropic_fallback_config() -> ModelConfig {
         ModelConfig {
@@ -770,7 +800,9 @@ mod tests {
     #[tokio::test]
     async fn test_balanced_route_simple_task() {
         let router = create_balanced_router();
-        let decision = router.route("What is the capital of France?", "react", None, None).await;
+        let decision = router
+            .route("What is the capital of France?", "react", None, None)
+            .await;
 
         // Should match regex rule for simple task → cheap model (Haiku)
         assert!(decision.from_regex);
@@ -780,7 +812,9 @@ mod tests {
     #[tokio::test]
     async fn test_balanced_route_implementation_task() {
         let router = create_balanced_router();
-        let decision = router.route("Implement a new authentication module", "react", None, None).await;
+        let decision = router
+            .route("Implement a new authentication module", "react", None, None)
+            .await;
 
         // Should match regex rule → balanced model (Sonnet)
         assert!(decision.from_regex);
@@ -790,7 +824,14 @@ mod tests {
     #[tokio::test]
     async fn test_balanced_route_architecture_task() {
         let router = create_balanced_router();
-        let decision = router.route("Design the architecture for a distributed system", "plan", None, None).await;
+        let decision = router
+            .route(
+                "Design the architecture for a distributed system",
+                "plan",
+                None,
+                None,
+            )
+            .await;
 
         // Should match regex rule → powerful model (Opus)
         assert!(decision.from_regex);
@@ -803,14 +844,17 @@ mod tests {
     async fn test_scoring_all_providers() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()), // No regex rules → scoring
-            SmartRouteConfig::balanced().without_health_awareness().without_rate_awareness().without_context_awareness(),
+            SmartRouteConfig::balanced()
+                .without_health_awareness()
+                .without_rate_awareness()
+                .without_context_awareness(),
         );
 
         let decision = router.route("any task", "react", None, None).await;
 
         // Should have scored multiple providers
         assert!(!decision.from_regex);
-        assert!(decision.all_scores.len() > 0);
+        assert!(!decision.all_scores.is_empty());
         assert!(!decision.model.is_empty());
     }
 
@@ -818,7 +862,10 @@ mod tests {
     async fn test_scoring_quality_optimized() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()),
-            SmartRouteConfig::quality_optimized().without_health_awareness().without_rate_awareness().without_context_awareness(),
+            SmartRouteConfig::quality_optimized()
+                .without_health_awareness()
+                .without_rate_awareness()
+                .without_context_awareness(),
         );
 
         let decision = router.route("any task", "react", None, None).await;
@@ -826,7 +873,9 @@ mod tests {
         // Quality-optimized should pick the most powerful model
         assert!(!decision.from_regex);
         // Opus should have the highest quality score (1.0)
-        let opus_scores = decision.all_scores.iter()
+        let opus_scores = decision
+            .all_scores
+            .iter()
             .filter(|s| s.model_name.contains("opus") || s.model_name.contains("o3-pro"))
             .collect::<Vec<_>>();
         assert!(!opus_scores.is_empty());
@@ -836,7 +885,10 @@ mod tests {
     async fn test_scoring_latency_optimized_no_regex() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()),
-            SmartRouteConfig::latency_optimized().without_health_awareness().without_rate_awareness().without_context_awareness(),
+            SmartRouteConfig::latency_optimized()
+                .without_health_awareness()
+                .without_rate_awareness()
+                .without_context_awareness(),
         );
 
         let decision = router.route("any task", "react", None, None).await;
@@ -860,10 +912,15 @@ mod tests {
 
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            SmartRouteConfig::balanced().without_rate_awareness().without_context_awareness(),
-        ).with_circuit_breaker(cb);
+            SmartRouteConfig::balanced()
+                .without_rate_awareness()
+                .without_context_awareness(),
+        )
+        .with_circuit_breaker(cb);
 
-        let decision = router.route("What is the capital?", "react", None, None).await;
+        let decision = router
+            .route("What is the capital?", "react", None, None)
+            .await;
 
         // Should not use anthropic (circuit is open)
         // Decision should have CircuitOpen factor for anthropic
@@ -879,7 +936,9 @@ mod tests {
     async fn test_context_overflow_skips_small_window_models() {
         let router = SmartRouter::new(
             ModelRouter::new(vec![], anthropic_fallback_config()),
-            SmartRouteConfig::balanced().without_health_awareness().without_rate_awareness(),
+            SmartRouteConfig::balanced()
+                .without_health_awareness()
+                .without_rate_awareness(),
         );
 
         // 150K tokens — should overflow models with 128K context at 0.8 threshold
@@ -887,8 +946,18 @@ mod tests {
         let decision = router.route("any task", "react", None, Some(150_000)).await;
 
         // Should not pick models with small context windows
-        let overflow_factors = decision.factors.iter()
-            .filter(|f| matches!(f, SmartRouteFactor::ContextOverflow { would_overflow: true, .. }))
+        let overflow_factors = decision
+            .factors
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f,
+                    SmartRouteFactor::ContextOverflow {
+                        would_overflow: true,
+                        ..
+                    }
+                )
+            })
             .collect::<Vec<_>>();
         assert!(!overflow_factors.is_empty());
     }
@@ -897,15 +966,29 @@ mod tests {
     async fn test_context_within_window_allows_model() {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
-            SmartRouteConfig::balanced().without_health_awareness().without_rate_awareness(),
+            SmartRouteConfig::balanced()
+                .without_health_awareness()
+                .without_rate_awareness(),
         );
 
         // 50K tokens — should be fine for all models (50K < 128K * 0.8)
-        let decision = router.route("What is the capital?", "react", None, Some(50_000)).await;
+        let decision = router
+            .route("What is the capital?", "react", None, Some(50_000))
+            .await;
 
         // Should allow models with 128K+ context windows
-        let overflow_factors = decision.factors.iter()
-            .filter(|f| matches!(f, SmartRouteFactor::ContextOverflow { would_overflow: true, .. }))
+        let overflow_factors = decision
+            .factors
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f,
+                    SmartRouteFactor::ContextOverflow {
+                        would_overflow: true,
+                        ..
+                    }
+                )
+            })
             .collect::<Vec<_>>();
         assert!(overflow_factors.is_empty());
     }
@@ -920,16 +1003,12 @@ mod tests {
             Some("sk-test".to_string()),
         );
 
-        let decision = router.route_for_pool(
-            "Implement auth module",
-            "react",
-            &pool_config,
-            None,
-            None,
-        ).await;
+        let decision = router
+            .route_for_pool("Implement auth module", "react", &pool_config, None, None)
+            .await;
 
         assert!(!decision.model.is_empty());
-        assert!(decision.all_scores.len() > 0);
+        assert!(!decision.all_scores.is_empty());
     }
 
     // ─── Degradation routing tests ─────────────────────────────────────
@@ -940,13 +1019,9 @@ mod tests {
         let rules = DegradationRule::default_presets();
 
         // Start at Opus → should degrade to Sonnet (passes validation)
-        let degraded = router.route_for_degradation(
-            "claude-opus-4-8",
-            "anthropic",
-            &rules,
-            None,
-            None,
-        ).await;
+        let degraded = router
+            .route_for_degradation("claude-opus-4-8", "anthropic", &rules, None, None)
+            .await;
 
         assert_eq!(degraded, Some("claude-sonnet-4-6-20250514".to_string()));
     }
@@ -957,13 +1032,9 @@ mod tests {
         let rules = DegradationRule::default_presets();
 
         // Start at Haiku (cheapest) → should return None (no further degradation)
-        let degraded = router.route_for_degradation(
-            "claude-haiku-4-5-20251001",
-            "anthropic",
-            &rules,
-            None,
-            None,
-        ).await;
+        let degraded = router
+            .route_for_degradation("claude-haiku-4-5-20251001", "anthropic", &rules, None, None)
+            .await;
 
         assert_eq!(degraded, None);
     }
@@ -977,12 +1048,16 @@ mod tests {
             SmartRouteConfig::regex_only(), // Disable all smart factors
         );
 
-        let decision = router.route("What is the capital?", "react", None, None).await;
+        let decision = router
+            .route("What is the capital?", "react", None, None)
+            .await;
 
         // Should use regex rule without any validation
         assert!(decision.from_regex);
         // No health/rate factors should be present
-        let smart_factors = decision.factors.iter()
+        let smart_factors = decision
+            .factors
+            .iter()
             .filter(|f| !matches!(f, SmartRouteFactor::RegexMatch { .. }))
             .collect::<Vec<_>>();
         assert!(smart_factors.is_empty());
@@ -994,8 +1069,12 @@ mod tests {
     async fn test_routing_log_records_decisions() {
         let router = create_balanced_router();
 
-        router.route("What is the capital?", "react", None, None).await;
-        router.route("Implement auth module", "react", None, None).await;
+        router
+            .route("What is the capital?", "react", None, None)
+            .await;
+        router
+            .route("Implement auth module", "react", None, None)
+            .await;
 
         assert_eq!(router.routing_log_count(), 2);
         let recent = router.routing_log_recent(1);
@@ -1010,12 +1089,11 @@ mod tests {
             ModelRouter::with_defaults(anthropic_fallback_config()),
             SmartRouteConfig::balanced().with_max_latency(10000),
         );
-        let profile = ModelQualityProfile::new(
-            "claude-haiku-4-5-20251001", "anthropic", RoutingTier::Cheap,
-        );
+        let profile =
+            ModelQualityProfile::new("claude-haiku-4-5-20251001", "anthropic", RoutingTier::Cheap);
         // Haiku has estimated_latency 1500ms, max_tolerance 10000ms
         let score = router.compute_latency_score(&profile);
-        assert!((score - (1.0 - 1500.0/10000.0)).abs() < 0.01);
+        assert!((score - (1.0 - 1500.0 / 10000.0)).abs() < 0.01);
     }
 
     #[test]
@@ -1024,9 +1102,8 @@ mod tests {
             ModelRouter::with_defaults(anthropic_fallback_config()),
             SmartRouteConfig::latency_optimized(), // max_latency = 10000ms
         );
-        let profile = ModelQualityProfile::new(
-            "claude-opus-4-8", "anthropic", RoutingTier::Powerful,
-        );
+        let profile =
+            ModelQualityProfile::new("claude-opus-4-8", "anthropic", RoutingTier::Powerful);
         // Opus has estimated_latency 15000ms > max_latency 10000ms
         let score = router.compute_latency_score(&profile);
         assert_eq!(score, 0.0);
@@ -1042,7 +1119,8 @@ mod tests {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
             SmartRouteConfig::balanced(),
-        ).with_token_counter(tc);
+        )
+        .with_token_counter(tc);
 
         // TokenCounter should be set
         assert!(router.token_counter.is_some());
@@ -1071,21 +1149,32 @@ mod tests {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
             SmartRouteConfig::balanced(),
-        ).with_token_counter(tc.clone());
+        )
+        .with_token_counter(tc.clone());
 
         // Validate route with conversation tokens — should use TokenCounter for context window
         let mut factors = Vec::new();
-        let valid = router.validate_route(
-            "anthropic", "claude-opus-4-8",
-            None, Some(50_000), // 50K tokens, well under 200K context
-            &mut factors,
-        ).await;
+        let valid = router
+            .validate_route(
+                "anthropic",
+                "claude-opus-4-8",
+                None,
+                Some(50_000), // 50K tokens, well under 200K context
+                &mut factors,
+            )
+            .await;
         assert!(valid);
 
         // Should have ContextOverflow factor
-        let ctx_factor = factors.iter().find(|f| matches!(f, SmartRouteFactor::ContextOverflow { .. }));
+        let ctx_factor = factors
+            .iter()
+            .find(|f| matches!(f, SmartRouteFactor::ContextOverflow { .. }));
         assert!(ctx_factor.is_some());
-        if let SmartRouteFactor::ContextOverflow { model_context_window, .. } = ctx_factor.unwrap() {
+        if let SmartRouteFactor::ContextOverflow {
+            model_context_window,
+            ..
+        } = ctx_factor.unwrap()
+        {
             // TokenCounter should return 200K for claude-opus-4-8
             assert_eq!(*model_context_window, 200_000);
         }
@@ -1099,21 +1188,39 @@ mod tests {
         let router = SmartRouter::new(
             ModelRouter::with_defaults(anthropic_fallback_config()),
             SmartRouteConfig::balanced(),
-        ).with_token_counter(tc.clone());
+        )
+        .with_token_counter(tc.clone());
 
         // Validate route with too many tokens for qwen2.5:7b (32K context)
         let mut factors = Vec::new();
-        let valid = router.validate_route(
-            "ollama", "qwen2.5:7b",
-            None, Some(30_000), // 30K tokens, over 80% of 32K = 25.6K threshold
-            &mut factors,
-        ).await;
+        let valid = router
+            .validate_route(
+                "ollama",
+                "qwen2.5:7b",
+                None,
+                Some(30_000), // 30K tokens, over 80% of 32K = 25.6K threshold
+                &mut factors,
+            )
+            .await;
         assert!(!valid); // Should overflow
 
         // Should have ContextOverflow factor with overflow
-        let ctx_factor = factors.iter().find(|f| matches!(f, SmartRouteFactor::ContextOverflow { would_overflow: true, .. }));
+        let ctx_factor = factors.iter().find(|f| {
+            matches!(
+                f,
+                SmartRouteFactor::ContextOverflow {
+                    would_overflow: true,
+                    ..
+                }
+            )
+        });
         assert!(ctx_factor.is_some());
-        if let SmartRouteFactor::ContextOverflow { model_context_window, would_overflow, .. } = ctx_factor.unwrap() {
+        if let SmartRouteFactor::ContextOverflow {
+            model_context_window,
+            would_overflow,
+            ..
+        } = ctx_factor.unwrap()
+        {
             // TokenCounter should return 32K for qwen2.5:7b
             assert_eq!(*model_context_window, 32_000);
             assert!(*would_overflow);

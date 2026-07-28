@@ -57,25 +57,24 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-use oneai_core::PermissionLevel;
 use oneai_core::traits::Tool;
+use oneai_core::PermissionLevel;
 use oneai_tool::{
-    FileReadTool, FileEditTool, GrepTool, GlobTool, FileListTool,
-    ShellTool, WebSearchTool, WebFetchTool, EnvironmentTool,
-    CalculatorTool, NotebookEditTool, ApplyPatchTool,
+    ApplyPatchTool, CalculatorTool, EnvironmentTool, FileEditTool, FileListTool, FileReadTool,
+    GlobTool, GrepTool, NotebookEditTool, ShellTool, WebFetchTool, WebSearchTool,
 };
+use serde::{Deserialize, Serialize};
 
-use crate::domain_pack::DomainPack;
-use crate::tool_decorator::ToolDecorator;
-use crate::permission_profile::{PermissionProfile, DenyPattern};
-use crate::paradigm_strategy::{ParadigmStrategy, SubAgentTypeDefinition, DomainParadigmKind};
-use crate::compression_template::CompressionTemplate;
 use crate::builtin_sources::{
-    GitStatusSource, FileTreeSource, ProjectConfigSource,
-    DateSource, EnvironmentInfoSource, ProjectInstructionsSource,
+    DateSource, EnvironmentInfoSource, FileTreeSource, GitStatusSource, ProjectConfigSource,
+    ProjectInstructionsSource,
 };
+use crate::compression_template::CompressionTemplate;
 use crate::context_source::ContextSource;
+use crate::domain_pack::DomainPack;
+use crate::paradigm_strategy::{DomainParadigmKind, ParadigmStrategy, SubAgentTypeDefinition};
+use crate::permission_profile::{DenyPattern, PermissionProfile};
+use crate::tool_decorator::ToolDecorator;
 
 // ─── DomainPackConfig (serde-deserializable) ────────────────────────────────────
 
@@ -232,9 +231,11 @@ pub fn resolve_config(config: &DomainPackConfig, project_dir: &str) -> DomainPac
     let tools = resolve_tools(&config.tools);
 
     // Resolve tool decorators
-    let tool_decorators = config.tool_decorators.iter().map(|(name, desc)| {
-        ToolDecorator::with_description(name, desc)
-    }).collect();
+    let tool_decorators = config
+        .tool_decorators
+        .iter()
+        .map(|(name, desc)| ToolDecorator::with_description(name, desc))
+        .collect();
 
     // Resolve context sources from string names
     let context_sources = resolve_context_sources(&config.context_sources, project_dir);
@@ -243,9 +244,11 @@ pub fn resolve_config(config: &DomainPackConfig, project_dir: &str) -> DomainPac
     let permission_profile = resolve_permission_profile(&config.permission_profile);
 
     // Resolve paradigm strategies
-    let paradigm_strategies = config.paradigm_strategies.iter().map(|s| {
-        resolve_paradigm_strategy(s)
-    }).collect();
+    let paradigm_strategies = config
+        .paradigm_strategies
+        .iter()
+        .map(|s| resolve_paradigm_strategy(s))
+        .collect();
 
     // Resolve compression template
     let compression_template = resolve_compression_template(&config.compression_template);
@@ -277,20 +280,44 @@ fn tool_factories() -> HashMap<String, fn() -> Arc<dyn Tool>> {
     let mut map: HashMap<String, fn() -> Arc<dyn Tool>> = HashMap::new();
 
     // Standard tools (available in most domains)
-    map.insert("read_file".to_string(), || Arc::new(FileReadTool::new()) as Arc<dyn Tool>);
-    map.insert("edit_file".to_string(), || Arc::new(FileEditTool::new()) as Arc<dyn Tool>);
-    map.insert("grep".to_string(), || Arc::new(GrepTool::new()) as Arc<dyn Tool>);
-    map.insert("glob".to_string(), || Arc::new(GlobTool::new()) as Arc<dyn Tool>);
-    map.insert("list_directory".to_string(), || Arc::new(FileListTool::new()) as Arc<dyn Tool>);
-    map.insert("shell".to_string(), || Arc::new(ShellTool::new()) as Arc<dyn Tool>);
-    map.insert("environment".to_string(), || Arc::new(EnvironmentTool::new()) as Arc<dyn Tool>);
-    map.insert("calculator".to_string(), || Arc::new(CalculatorTool::new()) as Arc<dyn Tool>);
-    map.insert("notebook_edit".to_string(), || Arc::new(NotebookEditTool::new()) as Arc<dyn Tool>);
-    map.insert("apply_patch".to_string(), || Arc::new(ApplyPatchTool::new()) as Arc<dyn Tool>);
+    map.insert("read_file".to_string(), || {
+        Arc::new(FileReadTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("edit_file".to_string(), || {
+        Arc::new(FileEditTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("grep".to_string(), || {
+        Arc::new(GrepTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("glob".to_string(), || {
+        Arc::new(GlobTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("list_directory".to_string(), || {
+        Arc::new(FileListTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("shell".to_string(), || {
+        Arc::new(ShellTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("environment".to_string(), || {
+        Arc::new(EnvironmentTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("calculator".to_string(), || {
+        Arc::new(CalculatorTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("notebook_edit".to_string(), || {
+        Arc::new(NotebookEditTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("apply_patch".to_string(), || {
+        Arc::new(ApplyPatchTool::new()) as Arc<dyn Tool>
+    });
 
     // Web tools (available in research/web-centric domains)
-    map.insert("web_search".to_string(), || Arc::new(WebSearchTool::new()) as Arc<dyn Tool>);
-    map.insert("web_fetch".to_string(), || Arc::new(WebFetchTool::new()) as Arc<dyn Tool>);
+    map.insert("web_search".to_string(), || {
+        Arc::new(WebSearchTool::new()) as Arc<dyn Tool>
+    });
+    map.insert("web_fetch".to_string(), || {
+        Arc::new(WebFetchTool::new()) as Arc<dyn Tool>
+    });
 
     map
 }
@@ -323,13 +350,18 @@ fn resolve_context_sources(names: &[String], project_dir: &str) -> Vec<Arc<dyn C
 
     for name in names {
         match name.as_str() {
-            "project_instructions" => sources.push(Arc::new(ProjectInstructionsSource::new(project_dir))),
+            "project_instructions" => {
+                sources.push(Arc::new(ProjectInstructionsSource::new(project_dir)))
+            }
             "git_status" => sources.push(Arc::new(GitStatusSource::new(project_dir))),
             "file_tree" => sources.push(Arc::new(FileTreeSource::new(project_dir))),
             "project_config" => sources.push(Arc::new(ProjectConfigSource::new(project_dir))),
             "date" => sources.push(Arc::new(DateSource::new())),
             "environment" => sources.push(Arc::new(EnvironmentInfoSource::new())),
-            other => tracing::warn!("DomainPack config: unknown context source '{}' — skipped", other),
+            other => tracing::warn!(
+                "DomainPack config: unknown context source '{}' — skipped",
+                other
+            ),
         }
     }
 
@@ -341,15 +373,25 @@ fn resolve_context_sources(names: &[String], project_dir: &str) -> Vec<Arc<dyn C
 fn resolve_permission_profile(config: &PermissionProfileConfig) -> PermissionProfile {
     PermissionProfile {
         name: "config".to_string(),
-        auto_approve: config.auto_approve.iter().cloned().collect::<HashSet<String>>(),
-        require_confirmation: config.require_confirmation.iter().cloned().collect::<HashSet<String>>(),
-        deny_by_default: config.deny_by_default.iter().map(|d| {
-            DenyPattern {
+        auto_approve: config
+            .auto_approve
+            .iter()
+            .cloned()
+            .collect::<HashSet<String>>(),
+        require_confirmation: config
+            .require_confirmation
+            .iter()
+            .cloned()
+            .collect::<HashSet<String>>(),
+        deny_by_default: config
+            .deny_by_default
+            .iter()
+            .map(|d| DenyPattern {
                 tool_pattern: d.tool.clone(),
                 arg_pattern: d.args_pattern.clone(),
                 reason: d.reason.clone(),
-            }
-        }).collect(),
+            })
+            .collect(),
         permission_overrides: HashMap::new(),
         default_threshold: PermissionLevel::Standard,
     }
@@ -360,30 +402,36 @@ fn resolve_permission_profile(config: &PermissionProfileConfig) -> PermissionPro
 fn resolve_paradigm_strategy(config: &ParadigmStrategyConfig) -> ParadigmStrategy {
     ParadigmStrategy {
         trigger_pattern: config.trigger.clone(),
-        paradigm_sequence: config.sequence.iter().map(|s| {
-            DomainParadigmKind::from_str(s)
-        }).collect(),
-        sub_agent_types: config.sub_agents.iter().map(|sa| {
-            SubAgentTypeDefinition {
-                name: sa.name.clone(),
-                description: sa.description.clone(),
-                system_prompt: sa.system_prompt.clone(),
-                available_tools: sa.available_tools.clone(),
-                permission_threshold: match sa.permission_threshold.as_str() {
-                    "read" => PermissionLevel::Read,
-                    "admin" => PermissionLevel::Full,
-                    _ => PermissionLevel::Standard,
-                },
-                budget: 0, // Default: uses SubAgentKind's default budget
-                modifies_files: sa.modifies_files,
-                merge_strategy: if sa.modifies_files {
-                    crate::paradigm_strategy::SubAgentMergeStrategy::Merge
-                } else {
-                    crate::paradigm_strategy::SubAgentMergeStrategy::PreserveOnly
-                },
-                structured_output: None, // Not configurable via YAML yet
-            }
-        }).collect(),
+        paradigm_sequence: config
+            .sequence
+            .iter()
+            .map(|s| DomainParadigmKind::from_str(s))
+            .collect(),
+        sub_agent_types: config
+            .sub_agents
+            .iter()
+            .map(|sa| {
+                SubAgentTypeDefinition {
+                    name: sa.name.clone(),
+                    description: sa.description.clone(),
+                    system_prompt: sa.system_prompt.clone(),
+                    available_tools: sa.available_tools.clone(),
+                    permission_threshold: match sa.permission_threshold.as_str() {
+                        "read" => PermissionLevel::Read,
+                        "admin" => PermissionLevel::Full,
+                        _ => PermissionLevel::Standard,
+                    },
+                    budget: 0, // Default: uses SubAgentKind's default budget
+                    modifies_files: sa.modifies_files,
+                    merge_strategy: if sa.modifies_files {
+                        crate::paradigm_strategy::SubAgentMergeStrategy::Merge
+                    } else {
+                        crate::paradigm_strategy::SubAgentMergeStrategy::PreserveOnly
+                    },
+                    structured_output: None, // Not configurable via YAML yet
+                }
+            })
+            .collect(),
         description: config.description.clone(),
     }
 }
@@ -420,18 +468,22 @@ pub fn parse_toml(path: &Path) -> Result<DomainPackConfig, Box<dyn std::error::E
 ///
 /// Supports `.yaml`, `.yml`, and `.toml` extensions.
 /// After parsing, resolves string references to actual objects.
-pub fn domain_pack_from_file(path: &Path, project_dir: &str) -> Result<DomainPack, Box<dyn std::error::Error>> {
-    let extension = path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+pub fn domain_pack_from_file(
+    path: &Path,
+    project_dir: &str,
+) -> Result<DomainPack, Box<dyn std::error::Error>> {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let config = match extension {
         "yaml" | "yml" => parse_yaml(path)?,
         "toml" => parse_toml(path)?,
-        other => return Err(format!(
-            "Unknown domain config file extension '{}' — expected .yaml, .yml, or .toml",
-            other
-        ).into()),
+        other => {
+            return Err(format!(
+                "Unknown domain config file extension '{}' — expected .yaml, .yml, or .toml",
+                other
+            )
+            .into())
+        }
     };
 
     Ok(resolve_config(&config, project_dir))
@@ -470,7 +522,10 @@ pub fn domain_pack_from_dir(project_dir: &str) -> Result<DomainPack, Box<dyn std
     }
 
     // No config file found → fallback to coding_pack
-    tracing::info!("No domain config file found in {}, using default coding pack", project_dir);
+    tracing::info!(
+        "No domain config file found in {}, using default coding pack",
+        project_dir
+    );
     Ok(crate::coding_pack(project_dir))
 }
 
@@ -513,7 +568,10 @@ system_prompt: "You are a research agent"
         assert_eq!(config.name, "research");
         assert_eq!(config.tools.len(), 6);
         assert_eq!(config.context_sources.len(), 3);
-        assert!(config.permission_profile.auto_approve.contains(&"web_search".to_string()));
+        assert!(config
+            .permission_profile
+            .auto_approve
+            .contains(&"web_search".to_string()));
         assert_eq!(config.paradigm_strategies.len(), 1);
         assert_eq!(config.paradigm_strategies[0].sequence.len(), 3);
     }
@@ -547,7 +605,10 @@ preserve_fields = ["critical_files", "progress_status"]
         assert_eq!(config.name, "coding");
         assert_eq!(config.tools.len(), 5);
         assert_eq!(config.context_sources.len(), 3);
-        assert!(config.permission_profile.auto_approve.contains(&"read_file".to_string()));
+        assert!(config
+            .permission_profile
+            .auto_approve
+            .contains(&"read_file".to_string()));
         assert_eq!(config.paradigm_strategies.len(), 1);
     }
 
@@ -556,11 +617,20 @@ preserve_fields = ["critical_files", "progress_status"]
         let config = DomainPackConfig {
             name: "test_domain".to_string(),
             description: "Test domain".to_string(),
-            tools: vec!["read_file".to_string(), "calculator".to_string(), "unknown_tool".to_string()],
-            tool_decorators: HashMap::from([
-                ("read_file".to_string(), "Read files for test purposes".to_string()),
-            ]),
-            context_sources: vec!["date".to_string(), "environment".to_string(), "unknown_source".to_string()],
+            tools: vec![
+                "read_file".to_string(),
+                "calculator".to_string(),
+                "unknown_tool".to_string(),
+            ],
+            tool_decorators: HashMap::from([(
+                "read_file".to_string(),
+                "Read files for test purposes".to_string(),
+            )]),
+            context_sources: vec![
+                "date".to_string(),
+                "environment".to_string(),
+                "unknown_source".to_string(),
+            ],
             permission_profile: PermissionProfileConfig {
                 auto_approve: vec!["read_file".to_string(), "calculator".to_string()],
                 require_confirmation: vec![],
@@ -612,15 +682,22 @@ preserve_fields = ["critical_files", "progress_status"]
         let pack = resolve_config(&config, "/tmp/test");
         assert_eq!(pack.tools.len(), 0); // Unknown tool skipped
         assert_eq!(pack.context_sources.len(), 0); // Unknown source skipped
-        // Permission profile still contains the name even if tool doesn't exist
-        assert!(pack.permission_profile.auto_approve.contains("nonexistent_tool"));
+                                                   // Permission profile still contains the name even if tool doesn't exist
+        assert!(pack
+            .permission_profile
+            .auto_approve
+            .contains("nonexistent_tool"));
     }
 
     #[test]
     fn test_resolve_paradigm_strategy() {
         let strategy_config = ParadigmStrategyConfig {
             trigger: "research|investigate".to_string(),
-            sequence: vec!["Explore".to_string(), "Reflect".to_string(), "Plan".to_string()],
+            sequence: vec![
+                "Explore".to_string(),
+                "Reflect".to_string(),
+                "Plan".to_string(),
+            ],
             sub_agents: vec![SubAgentConfig {
                 name: "searcher".to_string(),
                 description: "Search agent".to_string(),
@@ -642,9 +719,27 @@ preserve_fields = ["critical_files", "progress_status"]
 
     #[test]
     fn test_permission_threshold_resolution() {
-        assert_eq!(match "read" { "read" => PermissionLevel::Read, _ => PermissionLevel::Standard }, PermissionLevel::Read);
-        assert_eq!(match "admin" { "admin" => PermissionLevel::Full, _ => PermissionLevel::Standard }, PermissionLevel::Full);
-        assert_eq!(match "standard" { "standard" => PermissionLevel::Standard, _ => PermissionLevel::Standard }, PermissionLevel::Standard);
+        assert_eq!(
+            match "read" {
+                "read" => PermissionLevel::Read,
+                _ => PermissionLevel::Standard,
+            },
+            PermissionLevel::Read
+        );
+        assert_eq!(
+            match "admin" {
+                "admin" => PermissionLevel::Full,
+                _ => PermissionLevel::Standard,
+            },
+            PermissionLevel::Full
+        );
+        assert_eq!(
+            match "standard" {
+                "standard" => PermissionLevel::Standard,
+                _ => PermissionLevel::Standard,
+            },
+            PermissionLevel::Standard
+        );
     }
 
     #[test]

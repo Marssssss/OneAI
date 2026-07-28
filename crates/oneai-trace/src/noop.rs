@@ -27,21 +27,34 @@ impl TraceContext {
 
     pub fn log_event(&self, _kind: EventKind, _name: &str, _attrs: HashMap<String, Value>) {}
 
-    pub fn log_event_in_span(&self, _span_id: &str, _kind: EventKind, _name: &str, _attrs: HashMap<String, Value>) {}
+    pub fn log_event_in_span(
+        &self,
+        _span_id: &str,
+        _kind: EventKind,
+        _name: &str,
+        _attrs: HashMap<String, Value>,
+    ) {
+    }
 
     pub fn set_attribute(&self, _key: &str, _value: Value) {}
 
     pub fn set_attribute_on_span(&self, _span_id: &str, _key: &str, _value: Value) {}
 
-    pub fn current_span_id(&self) -> Option<String> { None }
+    pub fn current_span_id(&self) -> Option<String> {
+        None
+    }
 
-    pub fn is_enabled(&self) -> bool { false }
+    pub fn is_enabled(&self) -> bool {
+        false
+    }
 
     pub fn set_enabled(&self, _enabled: bool) {}
 
     pub fn set_session_id(&self, _session_id: &str) {}
 
-    pub fn session_id(&self) -> Option<String> { None }
+    pub fn session_id(&self) -> Option<String> {
+        None
+    }
 
     pub fn build_tree(&self) -> TraceTree {
         TraceTree::default()
@@ -86,7 +99,9 @@ pub struct TraceTree;
 
 #[cfg(not(feature = "trace"))]
 impl Default for TraceTree {
-    fn default() -> Self { Self }
+    fn default() -> Self {
+        Self
+    }
 }
 
 /// Stub TraceMetrics — no fields when trace is disabled.
@@ -96,7 +111,9 @@ pub struct TraceMetrics;
 
 #[cfg(not(feature = "trace"))]
 impl Default for TraceMetrics {
-    fn default() -> Self { Self }
+    fn default() -> Self {
+        Self
+    }
 }
 
 /// Stub TraceMetadata — no fields when trace is disabled.
@@ -106,7 +123,9 @@ pub struct TraceMetadata;
 
 #[cfg(not(feature = "trace"))]
 impl Default for TraceMetadata {
-    fn default() -> Self { Self }
+    fn default() -> Self {
+        Self
+    }
 }
 
 /// Stub TraceCollector trait — empty interface.
@@ -124,8 +143,12 @@ impl TraceEmitter {
         &EMITTER
     }
 
-    pub fn create_context(&self) -> TraceContext { TraceContext }
-    pub fn create_disabled_context(&self) -> TraceContext { TraceContext }
+    pub fn create_context(&self) -> TraceContext {
+        TraceContext
+    }
+    pub fn create_disabled_context(&self) -> TraceContext {
+        TraceContext
+    }
 }
 
 /// Stub InMemoryCollector — no-op.

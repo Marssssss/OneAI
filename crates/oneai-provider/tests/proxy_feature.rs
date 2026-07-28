@@ -25,8 +25,8 @@ mod tests {
     /// Without it, `build()` returns an error mentioning the `socks` feature.
     #[test]
     fn socks5_proxy_client_builds() {
-        let proxy = reqwest::Proxy::all("socks5://127.0.0.1:1080")
-            .expect("socks5 proxy URL should parse");
+        let proxy =
+            reqwest::Proxy::all("socks5://127.0.0.1:1080").expect("socks5 proxy URL should parse");
         let client = reqwest::Client::builder()
             .proxy(proxy)
             .build()

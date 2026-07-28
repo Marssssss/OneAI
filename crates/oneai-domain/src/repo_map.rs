@@ -21,8 +21,20 @@ use crate::context_source::{ContextSource, RefreshPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Language {
-    Rust, Python, JavaScript, TypeScript, Go, Java,
-    C, Cpp, Kotlin, Swift, Ruby, Php, Shell, Unknown,
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
+    Go,
+    Java,
+    C,
+    Cpp,
+    Kotlin,
+    Swift,
+    Ruby,
+    Php,
+    Shell,
+    Unknown,
 }
 
 impl Language {
@@ -59,8 +71,18 @@ struct Symbol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum SymKind {
-    Fn, Struct, Enum, Class, Interface, Trait,
-    Module, Import, Const, Type, Method, Field,
+    Fn,
+    Struct,
+    Enum,
+    Class,
+    Interface,
+    Trait,
+    Module,
+    Import,
+    Const,
+    Type,
+    Method,
+    Field,
 }
 
 impl SymKind {
@@ -100,9 +122,20 @@ impl Default for RepoMapConfig {
             max_files: 200,
             max_syms_per_file: 30,
             skip_dirs: vec![
-                "target".into(), "node_modules".into(), ".git".into(), "dist".into(), "build".into(),
-                "__pycache__".into(), ".venv".into(), "vendor".into(), "out".into(), ".next".into(),
-                ".cache".into(), ".cargo".into(), "debug".into(), "release".into(),
+                "target".into(),
+                "node_modules".into(),
+                ".git".into(),
+                "dist".into(),
+                "build".into(),
+                "__pycache__".into(),
+                ".venv".into(),
+                "vendor".into(),
+                "out".into(),
+                ".next".into(),
+                ".cache".into(),
+                ".cargo".into(),
+                "debug".into(),
+                "release".into(),
             ],
             include_imports: true,
         }
@@ -140,28 +173,58 @@ fn rust_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("fn", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("fn", n),
+            });
         } else if let Some(c) = st_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Struct, name: n.into(), sig: fmt_sig("struct", n) });
+            out.push(Symbol {
+                kind: SymKind::Struct,
+                name: n.into(),
+                sig: fmt_sig("struct", n),
+            });
         } else if let Some(c) = en_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Enum, name: n.into(), sig: fmt_sig("enum", n) });
+            out.push(Symbol {
+                kind: SymKind::Enum,
+                name: n.into(),
+                sig: fmt_sig("enum", n),
+            });
         } else if let Some(c) = tr_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Trait, name: n.into(), sig: fmt_sig("trait", n) });
+            out.push(Symbol {
+                kind: SymKind::Trait,
+                name: n.into(),
+                sig: fmt_sig("trait", n),
+            });
         } else if let Some(c) = mo_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Module, name: n.into(), sig: fmt_sig("mod", n) });
+            out.push(Symbol {
+                kind: SymKind::Module,
+                name: n.into(),
+                sig: fmt_sig("mod", n),
+            });
         } else if let Some(c) = cn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Const, name: n.into(), sig: fmt_sig("const", n) });
+            out.push(Symbol {
+                kind: SymKind::Const,
+                name: n.into(),
+                sig: fmt_sig("const", n),
+            });
         } else if let Some(c) = ty_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Type, name: n.into(), sig: fmt_sig("type", n) });
+            out.push(Symbol {
+                kind: SymKind::Type,
+                name: n.into(),
+                sig: fmt_sig("type", n),
+            });
         }
     }
     out
@@ -174,13 +237,23 @@ fn python_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with('#') || t.is_empty() { continue; }
+        if t.starts_with('#') || t.is_empty() {
+            continue;
+        }
         if let Some(c) = cl_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Class, name: n.into(), sig: fmt_sig("class", n) });
+            out.push(Symbol {
+                kind: SymKind::Class,
+                name: n.into(),
+                sig: fmt_sig("class", n),
+            });
         } else if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("def", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("def", n),
+            });
         }
     }
     out
@@ -196,22 +269,44 @@ fn js_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("function", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("function", n),
+            });
         } else if let Some(c) = cl_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Class, name: n.into(), sig: fmt_sig("class", n) });
+            out.push(Symbol {
+                kind: SymKind::Class,
+                name: n.into(),
+                sig: fmt_sig("class", n),
+            });
         } else if let Some(c) = if_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Interface, name: n.into(), sig: fmt_sig("interface", n) });
+            out.push(Symbol {
+                kind: SymKind::Interface,
+                name: n.into(),
+                sig: fmt_sig("interface", n),
+            });
         } else if let Some(c) = en_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Enum, name: n.into(), sig: fmt_sig("enum", n) });
+            out.push(Symbol {
+                kind: SymKind::Enum,
+                name: n.into(),
+                sig: fmt_sig("enum", n),
+            });
         } else if let Some(c) = ar_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("const", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("const", n),
+            });
         }
     }
     out
@@ -226,19 +321,37 @@ fn go_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("func", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("func", n),
+            });
         } else if let Some(c) = st_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Struct, name: n.into(), sig: fmt_sig("type struct", n) });
+            out.push(Symbol {
+                kind: SymKind::Struct,
+                name: n.into(),
+                sig: fmt_sig("type struct", n),
+            });
         } else if let Some(c) = if_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Interface, name: n.into(), sig: fmt_sig("type interface", n) });
+            out.push(Symbol {
+                kind: SymKind::Interface,
+                name: n.into(),
+                sig: fmt_sig("type interface", n),
+            });
         } else if let Some(c) = pk_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Module, name: n.into(), sig: fmt_sig("package", n) });
+            out.push(Symbol {
+                kind: SymKind::Module,
+                name: n.into(),
+                sig: fmt_sig("package", n),
+            });
         }
     }
     out
@@ -252,16 +365,30 @@ fn java_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = cl_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Class, name: n.into(), sig: fmt_sig("class", n) });
+            out.push(Symbol {
+                kind: SymKind::Class,
+                name: n.into(),
+                sig: fmt_sig("class", n),
+            });
         } else if let Some(c) = if_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Interface, name: n.into(), sig: fmt_sig("interface", n) });
+            out.push(Symbol {
+                kind: SymKind::Interface,
+                name: n.into(),
+                sig: fmt_sig("interface", n),
+            });
         } else if let Some(c) = en_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Enum, name: n.into(), sig: fmt_sig("enum", n) });
+            out.push(Symbol {
+                kind: SymKind::Enum,
+                name: n.into(),
+                sig: fmt_sig("enum", n),
+            });
         }
     }
     out
@@ -275,16 +402,30 @@ fn c_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = st_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Struct, name: n.into(), sig: fmt_sig("struct", n) });
+            out.push(Symbol {
+                kind: SymKind::Struct,
+                name: n.into(),
+                sig: fmt_sig("struct", n),
+            });
         } else if let Some(c) = en_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Enum, name: n.into(), sig: fmt_sig("enum", n) });
+            out.push(Symbol {
+                kind: SymKind::Enum,
+                name: n.into(),
+                sig: fmt_sig("enum", n),
+            });
         } else if let Some(c) = ma_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Const, name: n.into(), sig: fmt_sig("#define", n) });
+            out.push(Symbol {
+                kind: SymKind::Const,
+                name: n.into(),
+                sig: fmt_sig("#define", n),
+            });
         }
     }
     out
@@ -298,16 +439,30 @@ fn kotlin_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("fun", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("fun", n),
+            });
         } else if let Some(c) = cl_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Class, name: n.into(), sig: fmt_sig("class", n) });
+            out.push(Symbol {
+                kind: SymKind::Class,
+                name: n.into(),
+                sig: fmt_sig("class", n),
+            });
         } else if let Some(c) = ob_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Struct, name: n.into(), sig: fmt_sig("object", n) });
+            out.push(Symbol {
+                kind: SymKind::Struct,
+                name: n.into(),
+                sig: fmt_sig("object", n),
+            });
         }
     }
     out
@@ -322,19 +477,37 @@ fn swift_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("func", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("func", n),
+            });
         } else if let Some(c) = cl_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Class, name: n.into(), sig: fmt_sig("class", n) });
+            out.push(Symbol {
+                kind: SymKind::Class,
+                name: n.into(),
+                sig: fmt_sig("class", n),
+            });
         } else if let Some(c) = st_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Struct, name: n.into(), sig: fmt_sig("struct", n) });
+            out.push(Symbol {
+                kind: SymKind::Struct,
+                name: n.into(),
+                sig: fmt_sig("struct", n),
+            });
         } else if let Some(c) = pr_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Trait, name: n.into(), sig: fmt_sig("protocol", n) });
+            out.push(Symbol {
+                kind: SymKind::Trait,
+                name: n.into(),
+                sig: fmt_sig("protocol", n),
+            });
         }
     }
     out
@@ -348,16 +521,30 @@ fn ruby_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with('#') || t.is_empty() { continue; }
+        if t.starts_with('#') || t.is_empty() {
+            continue;
+        }
         if let Some(c) = cl_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Class, name: n.into(), sig: fmt_sig("class", n) });
+            out.push(Symbol {
+                kind: SymKind::Class,
+                name: n.into(),
+                sig: fmt_sig("class", n),
+            });
         } else if let Some(c) = mo_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Module, name: n.into(), sig: fmt_sig("module", n) });
+            out.push(Symbol {
+                kind: SymKind::Module,
+                name: n.into(),
+                sig: fmt_sig("module", n),
+            });
         } else if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Method, name: n.into(), sig: fmt_sig("def", n) });
+            out.push(Symbol {
+                kind: SymKind::Method,
+                name: n.into(),
+                sig: fmt_sig("def", n),
+            });
         }
     }
     out
@@ -370,13 +557,23 @@ fn php_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with("//") || t.is_empty() { continue; }
+        if t.starts_with("//") || t.is_empty() {
+            continue;
+        }
         if let Some(c) = cl_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Class, name: n.into(), sig: fmt_sig("class", n) });
+            out.push(Symbol {
+                kind: SymKind::Class,
+                name: n.into(),
+                sig: fmt_sig("class", n),
+            });
         } else if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("function", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("function", n),
+            });
         }
     }
     out
@@ -388,10 +585,16 @@ fn shell_syms(code: &str) -> Vec<Symbol> {
 
     for line in code.lines() {
         let t = line.trim();
-        if t.starts_with('#') || t.is_empty() { continue; }
+        if t.starts_with('#') || t.is_empty() {
+            continue;
+        }
         if let Some(c) = fn_r.captures(t) {
             let n = c.get(1).unwrap().as_str();
-            out.push(Symbol { kind: SymKind::Fn, name: n.into(), sig: fmt_sig("function", n) });
+            out.push(Symbol {
+                kind: SymKind::Fn,
+                name: n.into(),
+                sig: fmt_sig("function", n),
+            });
         }
     }
     out
@@ -410,10 +613,14 @@ async fn build_repo_map(project_dir: &Path, config: &RepoMapConfig) -> String {
     let files = collect_source_files(project_dir, &config.skip_dirs);
 
     for path in &files {
-        if entries.len() >= config.max_files { break; }
+        if entries.len() >= config.max_files {
+            break;
+        }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let lang = Language::from_ext(ext);
-        if lang == Language::Unknown { continue; }
+        if lang == Language::Unknown {
+            continue;
+        }
 
         if let Ok(content) = tokio::fs::read_to_string(path).await {
             let syms: Vec<Symbol> = extract_syms(&content, lang)
@@ -421,12 +628,19 @@ async fn build_repo_map(project_dir: &Path, config: &RepoMapConfig) -> String {
                 .filter(|s| config.include_imports || s.kind != SymKind::Import)
                 .take(config.max_syms_per_file)
                 .collect();
-            if syms.is_empty() { continue; }
+            if syms.is_empty() {
+                continue;
+            }
 
-            let rel = path.strip_prefix(project_dir)
-                .unwrap_or(path).to_string_lossy().to_string();
+            let rel = path
+                .strip_prefix(project_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
             let est = rel.len() + syms.len() * 30 + 20;
-            if total + est > config.max_chars { break; }
+            if total + est > config.max_chars {
+                break;
+            }
             total += est;
             entries.push((rel, syms));
         }
@@ -441,7 +655,7 @@ fn format_map(entries: &[(String, Vec<Symbol>)]) -> String {
         for s in syms {
             out.push_str(&format!("  {} {}\n", s.kind.tag(), s.sig));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
     out
 }
@@ -458,9 +672,13 @@ fn walk_dir(base: &Path, cur: &Path, skip: &[String], out: &mut Vec<PathBuf>) {
         for e in entries.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') { continue; }
+            if name.starts_with('.') {
+                continue;
+            }
             if p.is_dir() {
-                if skip.iter().any(|s| name == *s) { continue; }
+                if skip.contains(&name) {
+                    continue;
+                }
                 walk_dir(base, &p, skip, out);
             } else if p.is_file() {
                 let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -500,14 +718,20 @@ impl RepoMapSource {
 
 #[async_trait]
 impl ContextSource for RepoMapSource {
-    fn key(&self) -> &str { "repo_map" }
+    fn key(&self) -> &str {
+        "repo_map"
+    }
     async fn load(&self) -> Result<String> {
         let content = build_repo_map(&self.project_dir, &self.config).await;
         *self.last_content.write().await = Some(content.clone());
         Ok(content)
     }
-    fn refresh_policy(&self) -> RefreshPolicy { RefreshPolicy::OnChange }
-    fn priority(&self) -> u32 { 8 }
+    fn refresh_policy(&self) -> RefreshPolicy {
+        RefreshPolicy::OnChange
+    }
+    fn priority(&self) -> u32 {
+        8
+    }
 }
 
 #[cfg(test)]
@@ -527,53 +751,88 @@ mod tests {
     fn test_rust_syms() {
         let code = "pub struct AppConfig { }\npub enum DecisionKind { }\nfn run_agent() { }\nmod cli;\nconst MAX: usize = 50;";
         let syms = rust_syms(code);
-        assert!(syms.iter().any(|s| s.name == "AppConfig" && s.kind == SymKind::Struct));
-        assert!(syms.iter().any(|s| s.name == "DecisionKind" && s.kind == SymKind::Enum));
-        assert!(syms.iter().any(|s| s.name == "run_agent" && s.kind == SymKind::Fn));
-        assert!(syms.iter().any(|s| s.name == "cli" && s.kind == SymKind::Module));
-        assert!(syms.iter().any(|s| s.name == "MAX" && s.kind == SymKind::Const));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "AppConfig" && s.kind == SymKind::Struct));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "DecisionKind" && s.kind == SymKind::Enum));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "run_agent" && s.kind == SymKind::Fn));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "cli" && s.kind == SymKind::Module));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "MAX" && s.kind == SymKind::Const));
     }
 
     #[test]
     fn test_python_syms() {
         let code = "class AgentConfig:\n    def __init__(self):\n        pass";
         let syms = python_syms(code);
-        assert!(syms.iter().any(|s| s.name == "AgentConfig" && s.kind == SymKind::Class));
-        assert!(syms.iter().any(|s| s.name == "__init__" && s.kind == SymKind::Fn));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "AgentConfig" && s.kind == SymKind::Class));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "__init__" && s.kind == SymKind::Fn));
     }
 
     #[test]
     fn test_js_syms() {
         let code = "class AgentLoop { }\nfunction createAgent() { }\nconst runTask = ...";
         let syms = js_syms(code);
-        assert!(syms.iter().any(|s| s.name == "AgentLoop" && s.kind == SymKind::Class));
-        assert!(syms.iter().any(|s| s.name == "createAgent" && s.kind == SymKind::Fn));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "AgentLoop" && s.kind == SymKind::Class));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "createAgent" && s.kind == SymKind::Fn));
     }
 
     #[test]
     fn test_go_syms() {
         let code = "package agent\nfunc RunLoop() { }\ntype Config struct { }";
         let syms = go_syms(code);
-        assert!(syms.iter().any(|s| s.name == "RunLoop" && s.kind == SymKind::Fn));
-        assert!(syms.iter().any(|s| s.name == "Config" && s.kind == SymKind::Struct));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "RunLoop" && s.kind == SymKind::Fn));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Config" && s.kind == SymKind::Struct));
     }
 
     #[test]
     fn test_java_syms() {
         let code = "class AgentLoop { }\ninterface Provider { }";
         let syms = java_syms(code);
-        assert!(syms.iter().any(|s| s.name == "AgentLoop" && s.kind == SymKind::Class));
-        assert!(syms.iter().any(|s| s.name == "Provider" && s.kind == SymKind::Interface));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "AgentLoop" && s.kind == SymKind::Class));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Provider" && s.kind == SymKind::Interface));
     }
 
     #[test]
     fn test_format_map() {
-        let entries = vec![
-            ("src/main.rs".into(), vec![
-                Symbol { kind: SymKind::Fn, name: "main".into(), sig: "fn main".into() },
-                Symbol { kind: SymKind::Struct, name: "Config".into(), sig: "struct Config".into() },
-            ]),
-        ];
+        let entries = vec![(
+            "src/main.rs".into(),
+            vec![
+                Symbol {
+                    kind: SymKind::Fn,
+                    name: "main".into(),
+                    sig: "fn main".into(),
+                },
+                Symbol {
+                    kind: SymKind::Struct,
+                    name: "Config".into(),
+                    sig: "struct Config".into(),
+                },
+            ],
+        )];
         let out = format_map(&entries);
         assert!(out.contains("src/main.rs"));
         assert!(out.contains("fn main"));

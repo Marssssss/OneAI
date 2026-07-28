@@ -18,15 +18,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use oneai_core::error::{OneAIError, Result};
+use oneai_core::traits::{InteractionGate, Tool};
 use oneai_core::{
     ApprovalRequest, InteractionModification, InteractionPoint, InteractionRequest,
     InteractionResponse, PermissionLevel, RiskLevel, ToolOutput,
 };
-use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::{InteractionGate, Tool};
 
-use crate::registry::ToolRegistry;
 use crate::interaction_gate::DenyAllInteractionGate;
+use crate::registry::ToolRegistry;
 
 /// Configuration for the ToolExecutor.
 #[derive(Debug, Clone)]
@@ -118,14 +118,20 @@ impl ToolExecutor {
     /// - The tool execution times out
     pub async fn execute(&self, tool_name: &str, args: serde_json::Value) -> Result<ToolOutput> {
         // Look up the tool
-        let tool = self.registry.get(tool_name).await.ok_or_else(|| {
-            OneAIError::Tool(format!("Tool '{}' not found", tool_name))
-        })?;
+        let tool = self
+            .registry
+            .get(tool_name)
+            .await
+            .ok_or_else(|| OneAIError::Tool(format!("Tool '{}' not found", tool_name)))?;
 
         // Check if the tool requires approval
         let needs_approval = self.needs_approval(&tool);
 
-        if needs_approval && self.interaction_gate.enabled(InteractionPoint::ToolApproval) {
+        if needs_approval
+            && self
+                .interaction_gate
+                .enabled(InteractionPoint::ToolApproval)
+        {
             // Ask the interaction gate's ToolApproval point whether to proceed.
             let approval_request = ApprovalRequest {
                 tool_name: tool_name.to_string(),
@@ -134,20 +140,24 @@ impl ToolExecutor {
                 permission_level: Some(PermissionLevel::from_risk_level(tool.risk_level())),
                 justification: format!(
                     "Tool '{}' with risk level {:?} requires human approval",
-                    tool_name, tool.risk_level()
+                    tool_name,
+                    tool.risk_level()
                 ),
             };
 
             let response = self
                 .interaction_gate
-                .request(InteractionRequest::ToolApproval { approval: approval_request })
+                .request(InteractionRequest::ToolApproval {
+                    approval: approval_request,
+                })
                 .await?;
 
             match response {
                 InteractionResponse::Proceed => {
                     tracing::info!(
                         "Tool '{}' approved for execution with args: {}",
-                        tool_name, args
+                        tool_name,
+                        args
                     );
                     self.execute_with_timeout(tool, args).await
                 }
@@ -160,7 +170,8 @@ impl ToolExecutor {
                     };
                     tracing::info!(
                         "Tool '{}' approved with modified args: {}",
-                        tool_name, final_args
+                        tool_name,
+                        final_args
                     );
                     self.execute_with_timeout(tool, final_args).await
                 }
@@ -196,7 +207,8 @@ impl ToolExecutor {
             // which mirrors the agent-loop's behaviour under NoopInteractionGate.
             tracing::info!(
                 "Tool '{}' executing directly (risk level: {:?})",
-                tool_name, tool.risk_level()
+                tool_name,
+                tool.risk_level()
             );
             self.execute_with_timeout(tool, args).await
         }
@@ -223,16 +235,15 @@ impl ToolExecutor {
 
         match result {
             Ok(output) => output, // output is already Result<ToolOutput, OneAIError>
-            Err(_) => {
-                Ok(ToolOutput {
-                    success: false,
-                    content: String::new(),
-                    error: Some(format!(
-                        "Tool '{}' timed out after {} seconds",
-                        tool.name(), self.config.default_timeout_secs
-                    )),
-                })
-            }
+            Err(_) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!(
+                    "Tool '{}' timed out after {} seconds",
+                    tool.name(),
+                    self.config.default_timeout_secs
+                )),
+            }),
         }
     }
 
@@ -271,20 +282,26 @@ impl ToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_tools::CalculatorTool;
-    use crate::tool_interfaces::{ShellTool, FileReadTool, FileEditTool};
     use crate::interaction_gate::{ChannelInteractionGate, NoopInteractionGate};
+    use crate::local_tools::CalculatorTool;
+    use crate::tool_interfaces::{FileEditTool, FileReadTool, ShellTool};
     use oneai_core::InteractionResponse;
 
     #[tokio::test]
     async fn test_tool_executor_auto_approve_low_risk() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         let executor = ToolExecutor::new(registry);
 
         // Calculator is low-risk — should execute without approval
-        let result = executor.execute("calculator", serde_json::json!({"expression": "2+3"})).await.unwrap();
+        let result = executor
+            .execute("calculator", serde_json::json!({"expression": "2+3"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5");
     }
@@ -295,19 +312,24 @@ mod tests {
         registry.register(Arc::new(ShellTool::new())).await.unwrap();
 
         // NoopInteractionGate disables the ToolApproval point → auto-proceed.
-        let executor = ToolExecutor::with_interaction_gate(
-            registry,
-            Arc::new(NoopInteractionGate),
-        );
+        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(NoopInteractionGate));
 
         // Shell is high-risk — should be auto-approved
-        let result = executor.execute("shell", serde_json::json!({"command": "echo hello"})).await;
+        let result = executor
+            .execute("shell", serde_json::json!({"command": "echo hello"}))
+            .await;
         // ShellTool requires a real system, so the result depends on the environment
         // But it should NOT be denied
         assert!(result.is_ok());
         let output = result.unwrap();
         // It should either succeed (real shell) or be denied with a different reason
-        if !output.success && output.error.as_ref().map(|e| e.contains("denied")).unwrap_or(false) {
+        if !output.success
+            && output
+                .error
+                .as_ref()
+                .map(|e| e.contains("denied"))
+                .unwrap_or(false)
+        {
             panic!("Should not be denied by approval gate");
         }
     }
@@ -321,7 +343,10 @@ mod tests {
         let executor = ToolExecutor::new(registry);
 
         // Shell is high-risk — should be denied by the deny-all gate
-        let result = executor.execute("shell", serde_json::json!({"command": "echo hello"})).await.unwrap();
+        let result = executor
+            .execute("shell", serde_json::json!({"command": "echo hello"}))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("denied"));
     }
@@ -340,16 +365,19 @@ mod tests {
             }
         });
 
-        let executor = ToolExecutor::with_interaction_gate(
-            registry,
-            Arc::new(gate),
-        );
+        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(gate));
 
-        let result = executor.execute("shell", serde_json::json!({"command": "echo hello"})).await;
+        let result = executor
+            .execute("shell", serde_json::json!({"command": "echo hello"}))
+            .await;
         assert!(result.is_ok());
         // Should not be denied
         let output = result.unwrap();
-        assert!(!output.error.as_ref().map(|e| e.contains("denied")).unwrap_or(false));
+        assert!(!output
+            .error
+            .as_ref()
+            .map(|e| e.contains("denied"))
+            .unwrap_or(false));
     }
 
     #[tokio::test]
@@ -363,17 +391,19 @@ mod tests {
         tokio::spawn(async move {
             while let Some(item) = receiver.recv().await {
                 item.response_tx
-                    .send(InteractionResponse::Abort { reason: "Forbidden".to_string() })
+                    .send(InteractionResponse::Abort {
+                        reason: "Forbidden".to_string(),
+                    })
                     .unwrap();
             }
         });
 
-        let executor = ToolExecutor::with_interaction_gate(
-            registry,
-            Arc::new(gate),
-        );
+        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(gate));
 
-        let result = executor.execute("shell", serde_json::json!({"command": "echo hello"})).await.unwrap();
+        let result = executor
+            .execute("shell", serde_json::json!({"command": "echo hello"}))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("Forbidden"));
     }
@@ -381,7 +411,10 @@ mod tests {
     #[tokio::test]
     async fn test_tool_executor_channel_modify() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         let (gate, mut receiver) = ChannelInteractionGate::new(16);
 
@@ -398,14 +431,14 @@ mod tests {
             }
         });
 
-        let executor = ToolExecutor::with_interaction_gate(
-            registry,
-            Arc::new(gate),
-        );
+        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(gate));
 
         // Calculator is low-risk — bypasses the ToolApproval point, so the
         // spawn task is never reached and the original expression runs.
-        let result = executor.execute("calculator", serde_json::json!({"expression": "2+3"})).await.unwrap();
+        let result = executor
+            .execute("calculator", serde_json::json!({"expression": "2+3"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5"); // Original expression, not modified
     }
@@ -423,21 +456,27 @@ mod tests {
     async fn test_tool_executor_require_medium_approval() {
         let registry = Arc::new(ToolRegistry::new());
         // Use FileEditTool which has Standard/Medium permission level
-        registry.register(Arc::new(FileEditTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(FileEditTool::new()))
+            .await
+            .unwrap();
 
         let config = ToolExecutorConfig {
             require_approval_for_medium: true,
             default_timeout_secs: 60,
         };
 
-        let executor = ToolExecutor::with_config(
-            registry,
-            Arc::new(DenyAllInteractionGate),
-            config,
-        );
+        let executor =
+            ToolExecutor::with_config(registry, Arc::new(DenyAllInteractionGate), config);
 
         // FileEditTool is Standard-permission (Medium risk) — should be denied with blocking gate
-        let result = executor.execute("edit_file", serde_json::json!({"file_path": "/tmp/test", "old_string": "a", "new_string": "b"})).await.unwrap();
+        let result = executor
+            .execute(
+                "edit_file",
+                serde_json::json!({"file_path": "/tmp/test", "old_string": "a", "new_string": "b"}),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("denied"));
     }
@@ -447,8 +486,14 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         let executor = ToolExecutor::new(registry.clone());
 
-        executor.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
-        executor.register_tool(Arc::new(FileReadTool::new())).await.unwrap();
+        executor
+            .register_tool(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
+        executor
+            .register_tool(Arc::new(FileReadTool::new()))
+            .await
+            .unwrap();
 
         let tools = executor.list_tools().await;
         assert_eq!(tools.len(), 2);

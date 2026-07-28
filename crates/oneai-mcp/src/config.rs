@@ -30,7 +30,7 @@ use crate::plugin::McpPluginEntry;
 ///
 /// Contains a list of MCP server entries that are loaded from
 /// `~/.oneai/mcp_servers.toml`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct McpServerConfigFile {
     /// MCP server entries.
     #[serde(default)]
@@ -118,7 +118,10 @@ impl McpServerConfigFile {
                     description: "MCP filesystem server — read and write files".to_string(),
                     source: crate::plugin::McpPluginSource::Stdio {
                         command: "npx".to_string(),
-                        args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+                        args: vec![
+                            "-y".to_string(),
+                            "@modelcontextprotocol/server-filesystem".to_string(),
+                        ],
                         env: std::collections::HashMap::new(),
                     },
                     enabled: false,
@@ -144,12 +147,6 @@ impl McpServerConfigFile {
     }
 }
 
-impl Default for McpServerConfigFile {
-    fn default() -> Self {
-        Self { servers: Vec::new() }
-    }
-}
-
 // ─── Error types ────────────────────────────────────────────────────────────
 
 /// Error during config file loading.
@@ -166,7 +163,9 @@ impl std::fmt::Display for ConfigLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReadFailed(path, msg) => write!(f, "Failed to read {}: {}", path.display(), msg),
-            Self::ParseFailed(path, msg) => write!(f, "Failed to parse {}: {}", path.display(), msg),
+            Self::ParseFailed(path, msg) => {
+                write!(f, "Failed to parse {}: {}", path.display(), msg)
+            }
         }
     }
 }
@@ -187,7 +186,9 @@ impl std::fmt::Display for ConfigSaveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SerializeFailed(msg) => write!(f, "Failed to serialize config: {}", msg),
-            Self::WriteFailed(path, msg) => write!(f, "Failed to write {}: {}", path.display(), msg),
+            Self::WriteFailed(path, msg) => {
+                write!(f, "Failed to write {}: {}", path.display(), msg)
+            }
         }
     }
 }
@@ -220,28 +221,29 @@ mod tests {
         let path = tmp_dir.path().join("mcp_servers.toml");
 
         let config = McpServerConfigFile {
-            servers: vec![
-                McpPluginEntry {
-                    name: "filesystem".to_string(),
-                    description: "FS server".to_string(),
-                    source: McpPluginSource::Stdio {
-                        command: "npx".to_string(),
-                        args: vec!["-y".to_string(), "@mcp/fs".to_string()],
-                        env: HashMap::new(),
-                    },
-                    enabled: true,
-                    requires_api_key: false,
-                    api_key_env: None,
-                    tags: vec!["filesystem".to_string()],
+            servers: vec![McpPluginEntry {
+                name: "filesystem".to_string(),
+                description: "FS server".to_string(),
+                source: McpPluginSource::Stdio {
+                    command: "npx".to_string(),
+                    args: vec!["-y".to_string(), "@mcp/fs".to_string()],
+                    env: HashMap::new(),
                 },
-            ],
+                enabled: true,
+                requires_api_key: false,
+                api_key_env: None,
+                tags: vec!["filesystem".to_string()],
+            }],
         };
 
         config.save_to(&path).unwrap();
         let loaded = McpServerConfigFile::load_from(&path).unwrap();
         assert_eq!(loaded.servers.len(), 1);
         assert_eq!(loaded.servers[0].name, "filesystem");
-        assert!(matches!(loaded.servers[0].source, McpPluginSource::Stdio { .. }));
+        assert!(matches!(
+            loaded.servers[0].source,
+            McpPluginSource::Stdio { .. }
+        ));
     }
 
     #[test]
@@ -250,27 +252,28 @@ mod tests {
         let path = tmp_dir.path().join("mcp_servers.json");
 
         let config = McpServerConfigFile {
-            servers: vec![
-                McpPluginEntry {
-                    name: "web_search".to_string(),
-                    description: "Web search".to_string(),
-                    source: McpPluginSource::Sse {
-                        url: "http://localhost:8080/sse".to_string(),
-                        headers: HashMap::new(),
-                    },
-                    enabled: false,
-                    requires_api_key: true,
-                    api_key_env: Some("API_KEY".to_string()),
-                    tags: vec!["search".to_string()],
+            servers: vec![McpPluginEntry {
+                name: "web_search".to_string(),
+                description: "Web search".to_string(),
+                source: McpPluginSource::Sse {
+                    url: "http://localhost:8080/sse".to_string(),
+                    headers: HashMap::new(),
                 },
-            ],
+                enabled: false,
+                requires_api_key: true,
+                api_key_env: Some("API_KEY".to_string()),
+                tags: vec!["search".to_string()],
+            }],
         };
 
         config.save_to(&path).unwrap();
         let loaded = McpServerConfigFile::load_from(&path).unwrap();
         assert_eq!(loaded.servers.len(), 1);
         assert_eq!(loaded.servers[0].name, "web_search");
-        assert!(matches!(loaded.servers[0].source, McpPluginSource::Sse { .. }));
+        assert!(matches!(
+            loaded.servers[0].source,
+            McpPluginSource::Sse { .. }
+        ));
     }
 
     #[test]

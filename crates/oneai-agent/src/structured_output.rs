@@ -58,8 +58,14 @@ impl ValidationResult {
         if self.errors.is_empty() {
             "No validation errors".to_string()
         } else {
-            self.errors.iter()
-                .map(|e| format!("At {}: expected {}, got {} — {}", e.path, e.expected, e.actual, e.message))
+            self.errors
+                .iter()
+                .map(|e| {
+                    format!(
+                        "At {}: expected {}, got {} — {}",
+                        e.path, e.expected, e.actual, e.message
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("; ")
         }
@@ -226,7 +232,10 @@ fn validate_schema_subset(
                     path: path.to_string(),
                     expected: format!("minLength {}", min_length),
                     actual: format!("length {}", len),
-                    message: format!("String length {} is less than minLength {}", len, min_length),
+                    message: format!(
+                        "String length {} is less than minLength {}",
+                        len, min_length
+                    ),
                 });
             }
         }
@@ -248,10 +257,14 @@ fn validate_schema_subset(
             if !matches {
                 errors.push(ValidationError {
                     path: path.to_string(),
-                    expected: format!("one of {}", enum_values.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")),
+                    expected: format!(
+                        "one of {}",
+                        enum_values
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
                     actual: s.to_string(),
                     message: format!("Value '{}' is not in the allowed enum list", s),
                 });
@@ -286,15 +299,15 @@ fn validate_schema_subset(
         }
 
         // Check integer constraint
-        if schema.get("type").and_then(|t| t.as_str()) == Some("integer") {
-            if value.as_i64().is_none() {
-                errors.push(ValidationError {
-                    path: path.to_string(),
-                    expected: "integer".to_string(),
-                    actual: "float".to_string(),
-                    message: "Value is not an integer".to_string(),
-                });
-            }
+        if schema.get("type").and_then(|t| t.as_str()) == Some("integer")
+            && value.as_i64().is_none()
+        {
+            errors.push(ValidationError {
+                path: path.to_string(),
+                expected: "integer".to_string(),
+                actual: "float".to_string(),
+                message: "Value is not an integer".to_string(),
+            });
         }
     }
 
@@ -319,7 +332,7 @@ fn validate_schema_subset(
                     path: path.to_string(),
                     expected: "one of enum values".to_string(),
                     actual: value.to_string(),
-                    message: format!("Value is not in the allowed enum list"),
+                    message: "Value is not in the allowed enum list".to_string(),
                 });
             }
         }
@@ -334,8 +347,12 @@ fn json_type_of(value: &serde_json::Value) -> &'static str {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "boolean",
         serde_json::Value::Number(n) => {
-            if n.is_i64() { "integer" } else { "number" }
-        },
+            if n.is_i64() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
         serde_json::Value::String(_) => "string",
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
@@ -361,34 +378,42 @@ fn type_matches(actual: &str, expected: &str) -> bool {
 /// - States what went wrong (validation errors)
 /// - Shows the expected schema requirements
 /// - Instructs the model to re-generate conforming output
-pub fn build_retry_prompt(config: &StructuredOutputConfig, retry: &oneai_core::ModelRetry) -> String {
+pub fn build_retry_prompt(
+    config: &StructuredOutputConfig,
+    retry: &oneai_core::ModelRetry,
+) -> String {
     let template = config.error_prompt_template.as_deref().unwrap_or(
         "Your previous output did not conform to the required JSON Schema.\n\
          Validation errors: {errors}\n\
          Expected schema: {schema_description}\n\
          Please re-generate your output as valid JSON that conforms to the schema.\n\
-         Output ONLY the JSON, with no additional text or explanation."
+         Output ONLY the JSON, with no additional text or explanation.",
     );
 
     // Replace template placeholders
-    let prompt = template
-        .replace("{errors}", &retry.error_message)
-        .replace("{schema_description}", &schema_description(&retry.expected_schema))
-        .replace("{retry_count}", &retry.retry_count.to_string());
 
-    prompt
+    template
+        .replace("{errors}", &retry.error_message)
+        .replace(
+            "{schema_description}",
+            &schema_description(&retry.expected_schema),
+        )
+        .replace("{retry_count}", &retry.retry_count.to_string())
 }
 
 /// Generate a human-readable description of a JSON Schema.
 fn schema_description(schema: &serde_json::Value) -> String {
     let type_str = schema.get("type").and_then(|t| t.as_str()).unwrap_or("any");
 
-    let required = schema.get("required")
+    let required = schema
+        .get("required")
         .and_then(|r| r.as_array())
-        .map(|arr| arr.iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(", "))
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
         .unwrap_or_default();
 
     if required.is_empty() {
@@ -451,7 +476,10 @@ mod tests {
         let output = serde_json::json!({"name": "Alice", "age": "not a number"}).to_string();
         let result = validate_json_schema(&output, &schema);
         assert!(!result.passed);
-        assert!(result.errors.iter().any(|e| e.message.contains("Expected type")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Expected type")));
     }
 
     #[test]

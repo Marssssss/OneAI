@@ -5,9 +5,10 @@
 //! - MultiLineVim: vim-style multi-line editor (future phase)
 
 /// The current input mode of the TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
     /// Single-line input mode — Enter sends, Ctrl+Enter inserts newline.
+    #[default]
     SingleLine,
     /// Multi-line vim-style editor mode (future implementation).
     MultiLineVim {
@@ -16,21 +17,10 @@ pub enum InputMode {
     },
 }
 
-impl Default for InputMode {
-    fn default() -> Self {
-        InputMode::SingleLine
-    }
-}
-
 /// Vim mode for multi-line editing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VimMode {
     Normal,
+    #[default]
     Insert,
-}
-
-impl Default for VimMode {
-    fn default() -> Self {
-        VimMode::Insert
-    }
 }

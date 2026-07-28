@@ -13,13 +13,13 @@
 
 use std::sync::Arc;
 
+use crate::error::Result;
+use crate::traits::DiscardedSink;
+use crate::ContentBlock;
 use crate::Conversation;
 use crate::InferenceResponse;
-use crate::error::Result;
-use crate::ContentBlock;
 use crate::Message;
 use crate::Role;
-use crate::traits::DiscardedSink;
 
 // ─── ContextCompressor trait (defined in core for dependency inversion) ────
 
@@ -69,23 +69,31 @@ pub struct NoopCompressor;
 impl ContextCompressorTrait for NoopCompressor {
     fn estimate_tokens(&self, conversation: &Conversation) -> usize {
         // Rough estimate: ~4 chars per token
-        conversation.messages.iter()
-            .map(|m| m.content.iter()
-                .map(|b| match b {
-                    ContentBlock::Text { text } => text.len(),
-                    _ => 50, // rough estimate for non-text blocks
-                })
-                .sum::<usize>())
-            .sum::<usize>() / 4
+        conversation
+            .messages
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => text.len(),
+                        _ => 50, // rough estimate for non-text blocks
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>()
+            / 4
     }
 
     fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
-        msg.content.iter()
+        msg.content
+            .iter()
             .map(|b| match b {
                 ContentBlock::Text { text } => text.len(),
                 _ => 50,
             })
-            .sum::<usize>() / 4
+            .sum::<usize>()
+            / 4
     }
 
     async fn compress(&self, conversation: &Conversation) -> Result<CompressedResult> {
@@ -166,30 +174,39 @@ impl Default for TruncationCompressor {
 impl ContextCompressorTrait for TruncationCompressor {
     fn estimate_tokens(&self, conversation: &Conversation) -> usize {
         // Same heuristic as NoopCompressor: ~4 chars per token
-        conversation.messages.iter()
-            .map(|m| m.content.iter()
-                .map(|b| match b {
-                    ContentBlock::Text { text } => text.len(),
-                    _ => 50,
-                })
-                .sum::<usize>())
-            .sum::<usize>() / 4
+        conversation
+            .messages
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => text.len(),
+                        _ => 50,
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>()
+            / 4
     }
 
     fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
-        msg.content.iter()
+        msg.content
+            .iter()
             .map(|b| match b {
                 ContentBlock::Text { text } => text.len(),
                 _ => 50,
             })
-            .sum::<usize>() / 4
+            .sum::<usize>()
+            / 4
     }
 
     async fn compress(&self, conversation: &Conversation) -> Result<CompressedResult> {
         let total_messages = conversation.messages.len();
 
         // If conversation is short enough, no compression needed
-        if total_messages <= self.keep_recent_turns + 1 { // +1 for system message
+        if total_messages <= self.keep_recent_turns + 1 {
+            // +1 for system message
             return Ok(CompressedResult {
                 compressed_conversation: conversation.clone(),
                 summary: None,
@@ -209,7 +226,9 @@ impl ContextCompressorTrait for TruncationCompressor {
         // The first user message is the original task — pin it verbatim (Q2)
         // rather than truncating it to a 200-char stub. Identified once, then
         // treated like system/recent for keep-intact purposes.
-        let first_user_idx = conversation.messages.iter()
+        let first_user_idx = conversation
+            .messages
+            .iter()
             .position(|m| m.role == Role::User);
 
         // Process messages in order
@@ -222,37 +241,44 @@ impl ContextCompressorTrait for TruncationCompressor {
             if is_system || is_recent || is_pinned_first_user {
                 // Keep system messages and recent turns intact
                 // But truncate long tool results even in recent turns
-                let processed_content = msg.content.iter().map(|block| {
-                    match block {
-                        ContentBlock::ToolResult { call_id, content } => {
-                            if content.len() > self.max_tool_result_chars {
-                                ContentBlock::ToolResult {
-                                    call_id: call_id.clone(),
-                                    content: format!("{}{}",
-                                        &content[..self.max_tool_result_chars.min(content.len())],
-                                        "\n[...output truncated]"
-                                    ),
+                let processed_content = msg
+                    .content
+                    .iter()
+                    .map(|block| {
+                        match block {
+                            ContentBlock::ToolResult { call_id, content } => {
+                                if content.len() > self.max_tool_result_chars {
+                                    ContentBlock::ToolResult {
+                                        call_id: call_id.clone(),
+                                        content: format!(
+                                            "{}{}",
+                                            &content
+                                                [..self.max_tool_result_chars.min(content.len())],
+                                            "\n[...output truncated]"
+                                        ),
+                                    }
+                                } else {
+                                    block.clone()
                                 }
-                            } else {
-                                block.clone()
                             }
-                        }
-                        ContentBlock::Text { text } => {
-                            // Truncate very long text in recent turns (e.g., large file reads)
-                            if !is_system && text.len() > self.max_tool_result_chars {
-                                ContentBlock::Text {
-                                    text: format!("{}{}",
-                                        &text[..self.max_tool_result_chars.min(text.len())],
-                                        "\n[...content truncated]"
-                                    ),
+                            ContentBlock::Text { text } => {
+                                // Truncate very long text in recent turns (e.g., large file reads)
+                                if !is_system && text.len() > self.max_tool_result_chars {
+                                    ContentBlock::Text {
+                                        text: format!(
+                                            "{}{}",
+                                            &text[..self.max_tool_result_chars.min(text.len())],
+                                            "\n[...content truncated]"
+                                        ),
+                                    }
+                                } else {
+                                    block.clone()
                                 }
-                            } else {
-                                block.clone()
                             }
+                            _ => block.clone(),
                         }
-                        _ => block.clone(),
-                    }
-                }).collect::<Vec<_>>();
+                    })
+                    .collect::<Vec<_>>();
 
                 compressed.add_message(Message {
                     role: msg.role,
@@ -297,8 +323,10 @@ impl ContextCompressorTrait for TruncationCompressor {
             Some(format!(
                 "Compressed: {} older messages truncated to {}-char summaries. \
                 {} recent turns preserved intact. Tool outputs capped at {} chars.",
-                truncated_count, self.max_summary_chars,
-                self.keep_recent_turns, self.max_tool_result_chars
+                truncated_count,
+                self.max_summary_chars,
+                self.keep_recent_turns,
+                self.max_tool_result_chars
             ))
         } else {
             None
@@ -339,7 +367,10 @@ impl TokenBudget {
 
     /// Create an unlimited budget (for testing or when no budget constraint is needed).
     pub fn unlimited() -> Self {
-        Self { total: u32::MAX, consumed: 0 }
+        Self {
+            total: u32::MAX,
+            consumed: 0,
+        }
     }
 
     /// Create a budget based on a model's context window size.
@@ -368,7 +399,9 @@ impl TokenBudget {
 
     /// Get the estimated maximum number of remaining iterations.
     pub fn estimated_remaining_iterations(&self, per_iteration_cost: u32) -> u32 {
-        if per_iteration_cost == 0 { return u32::MAX; }
+        if per_iteration_cost == 0 {
+            return u32::MAX;
+        }
         self.remaining() / per_iteration_cost
     }
 }
@@ -417,8 +450,12 @@ impl Default for BudgetAllocation {
 impl BudgetAllocation {
     /// Validate that all fractions sum to approximately 1.0.
     pub fn validate(&self) -> bool {
-        let sum = self.system_prompt + self.recent_turns + self.tool_results
-            + self.skills + self.retrieved + self.overhead;
+        let sum = self.system_prompt
+            + self.recent_turns
+            + self.tool_results
+            + self.skills
+            + self.retrieved
+            + self.overhead;
         (sum - 1.0).abs() < 0.01
     }
 
@@ -525,8 +562,19 @@ impl ContextBudgetManager {
         allocation: BudgetAllocation,
         compressor: Arc<dyn ContextCompressorTrait>,
     ) -> Self {
-        assert!(allocation.validate(), "BudgetAllocation fractions must sum to ~1.0");
-        Self { budget, allocation, compressor, token_counter: None, model_name: None, discarded_sink: None, session_id: None }
+        assert!(
+            allocation.validate(),
+            "BudgetAllocation fractions must sum to ~1.0"
+        );
+        Self {
+            budget,
+            allocation,
+            compressor,
+            token_counter: None,
+            model_name: None,
+            discarded_sink: None,
+            session_id: None,
+        }
     }
 
     /// Create with default allocation based on a model's context window.
@@ -574,13 +622,14 @@ impl ContextBudgetManager {
 
     /// Check if a conversation needs compression (total tokens exceed budget).
     pub fn needs_compression(&self, conversation: &Conversation) -> bool {
-        let estimated_tokens = if let (Some(tc), Some(model)) = (&self.token_counter, &self.model_name) {
-            // Use TokenCounter for accurate estimation
-            tc.count_conversation_tokens(conversation, model) as usize
-        } else {
-            // Fallback to compressor heuristic
-            self.compressor.estimate_tokens(conversation)
-        };
+        let estimated_tokens =
+            if let (Some(tc), Some(model)) = (&self.token_counter, &self.model_name) {
+                // Use TokenCounter for accurate estimation
+                tc.count_conversation_tokens(conversation, model) as usize
+            } else {
+                // Fallback to compressor heuristic
+                self.compressor.estimate_tokens(conversation)
+            };
         estimated_tokens > self.budget.total as usize
     }
 
@@ -616,8 +665,14 @@ impl ContextBudgetManager {
         if let Some(sink) = &self.discarded_sink {
             if !result.discarded_messages.is_empty() {
                 let session_id = self.session_id.as_deref().unwrap_or("");
-                if let Err(e) = sink.archive_discarded(session_id, result.discarded_messages.clone()).await {
-                    tracing::warn!("discarded-sink archive failed (compression proceeds): {}", e);
+                if let Err(e) = sink
+                    .archive_discarded(session_id, result.discarded_messages.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        "discarded-sink archive failed (compression proceeds): {}",
+                        e
+                    );
                 }
             }
         }
@@ -685,32 +740,42 @@ pub struct BudgetSourceEstimate {
 /// `memory_search` rather than carrying it in context. Other blocks are left
 /// untouched. This is the "无损截断" tier that runs *before* summarization, so
 /// long shell/file outputs stop being summarized away wholesale.
-pub(crate) fn truncate_tool_results(conversation: Conversation, tool_results_token_budget: u32) -> Conversation {
+pub(crate) fn truncate_tool_results(
+    conversation: Conversation,
+    tool_results_token_budget: u32,
+) -> Conversation {
     // Roughly 4 chars per token; cap each block at the full budget in chars
     // (a single runaway output shouldn't eat the whole window silently, but
     // per-block proportional capping is overkill here — the summary step still
     // bounds older turns).
-    let max_chars = (tool_results_token_budget as usize).saturating_mul(4).max(1);
+    let max_chars = (tool_results_token_budget as usize)
+        .saturating_mul(4)
+        .max(1);
 
     let mut out = Conversation::with_id(conversation.id.clone());
     out.metadata = conversation.metadata.clone();
     for msg in conversation.messages {
-        let truncated_content: Vec<ContentBlock> = msg.content.into_iter().map(|block| {
-            match block {
+        let truncated_content: Vec<ContentBlock> = msg
+            .content
+            .into_iter()
+            .map(|block| match block {
                 ContentBlock::ToolResult { call_id, content } => {
                     if content.chars().count() > max_chars {
                         let cut: String = content.chars().take(max_chars).collect();
                         ContentBlock::ToolResult {
                             call_id,
-                            content: format!("{}\n[...output truncated — use memory_search for the full output]", cut),
+                            content: format!(
+                                "{}\n[...output truncated — use memory_search for the full output]",
+                                cut
+                            ),
                         }
                     } else {
                         ContentBlock::ToolResult { call_id, content }
                     }
                 }
                 other => other,
-            }
-        }).collect();
+            })
+            .collect();
         out.add_message(Message {
             role: msg.role,
             content: truncated_content,
@@ -743,7 +808,7 @@ mod tests {
         // 100-token tool_results budget → ~400 chars cap.
         let out = truncate_tool_results(conv, 100);
         let tool_msg = out.messages.iter().find(|m| m.role == Role::Tool).unwrap();
-        let block = tool_msg.content.iter().next().unwrap();
+        let block = tool_msg.content.first().unwrap();
         match block {
             ContentBlock::ToolResult { content, .. } => {
                 assert!(content.contains("memory_search"));
@@ -766,7 +831,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
         });
         let out = truncate_tool_results(conv, 100);
-        let block = out.messages[0].content.iter().next().unwrap();
+        let block = out.messages[0].content.first().unwrap();
         match block {
             ContentBlock::ToolResult { content, .. } => assert_eq!(content, "small output"),
             _ => panic!("expected ToolResult"),
@@ -788,9 +853,16 @@ mod tests {
             conv.add_message(Message::user(format!("continue {}", i)));
         }
         let result = compressor.compress(&conv).await.unwrap();
-        let text: String = result.compressed_conversation.messages.iter()
-            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
-        assert!(text.contains(long_task),
-            "first user message must be pinned verbatim by TruncationCompressor");
+        let text: String = result
+            .compressed_conversation
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(long_task),
+            "first user message must be pinned verbatim by TruncationCompressor"
+        );
     }
 }

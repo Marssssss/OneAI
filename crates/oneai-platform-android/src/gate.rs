@@ -9,11 +9,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
 use oneai_core::error::Result;
 use oneai_core::platform::PlatformInteractionGate;
 use oneai_core::traits::InteractionGate;
-use oneai_tool::{ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate};
+use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
+use oneai_tool::{
+    ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate,
+};
 
 // ─── AndroidInteractionGate ───────────────────────────────────────
 

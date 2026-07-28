@@ -7,11 +7,16 @@
 //!   oneai embed health            — Check embedding service health
 //!   oneai embed dimension         — Show embedding dimension for configured model
 
-use oneai_core::{EmbeddingModel, EmbeddingConfig};
+use oneai_core::{EmbeddingConfig, EmbeddingModel};
 use oneai_rag::EmbeddingConfigExt;
 
 /// Generate an embedding for a single text string.
-pub fn cmd_embed_generate(text: &str, model: Option<&str>, service_type: Option<&str>, api_key: Option<&str>) {
+pub fn cmd_embed_generate(
+    text: &str,
+    model: Option<&str>,
+    service_type: Option<&str>,
+    api_key: Option<&str>,
+) {
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
     rt.block_on(async {
         let embedding_service = create_embedding_service(model, service_type, api_key);
@@ -23,7 +28,10 @@ pub fn cmd_embed_generate(text: &str, model: Option<&str>, service_type: Option<
                         println!("Embedding generated successfully.");
                         println!("Model: {}", service.model().as_str());
                         println!("Dimension: {}", vec.len());
-                        println!("First 10 values: {:?}", &vec[..std::cmp::min(10, vec.len())]);
+                        println!(
+                            "First 10 values: {:?}",
+                            &vec[..std::cmp::min(10, vec.len())]
+                        );
                         // Compute L2 norm
                         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
                         println!("L2 norm: {:.6}", norm);
@@ -41,7 +49,12 @@ pub fn cmd_embed_generate(text: &str, model: Option<&str>, service_type: Option<
 }
 
 /// Generate embeddings for a batch of texts.
-pub fn cmd_embed_batch(texts: &str, model: Option<&str>, service_type: Option<&str>, api_key: Option<&str>) {
+pub fn cmd_embed_batch(
+    texts: &str,
+    model: Option<&str>,
+    service_type: Option<&str>,
+    api_key: Option<&str>,
+) {
     let text_list: Vec<String> = texts.split(',').map(|s| s.trim().to_string()).collect();
     if text_list.is_empty() {
         eprintln!("No texts provided. Use comma-separated text values.");
@@ -60,8 +73,10 @@ pub fn cmd_embed_batch(texts: &str, model: Option<&str>, service_type: Option<&s
                         println!("Model: {}", service.model().as_str());
                         println!("Count: {} embeddings", vecs.len());
                         for (i, vec) in vecs.iter().enumerate() {
-                            println!("  [{}] dim={} first5={:?} norm={:.4}",
-                                i, vec.len(),
+                            println!(
+                                "  [{}] dim={} first5={:?} norm={:.4}",
+                                i,
+                                vec.len(),
                                 &vec[..std::cmp::min(5, vec.len())],
                                 vec.iter().map(|x| x * x).sum::<f32>().sqrt()
                             );
@@ -84,7 +99,9 @@ pub fn cmd_embed_list() {
     println!("Available embedding providers (--provider):");
     println!();
     println!("  auto          — zero-config auto-detect (the default; see chain below)");
-    println!("  openai        — text-embedding-3-small (1536-dim) / 3-large (3072-dim); OPENAI_API_KEY");
+    println!(
+        "  openai        — text-embedding-3-small (1536-dim) / 3-large (3072-dim); OPENAI_API_KEY"
+    );
     println!("  voyage        — voyage-3 (1024-dim) / voyage-3-lite (512-dim); VOYAGE_API_KEY");
     println!("  ollama        — nomic-embed-text default; local, no key; probes localhost:11434");
     println!("  fastembed     — local ONNX, no key; auto-chain last resort (one-time ~22MB download, then offline)");

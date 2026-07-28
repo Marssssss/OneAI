@@ -6,25 +6,25 @@
 //! - Right panel: scrollable chat area with bubble-style messages
 //! - Input box: single-line with Enter=send, Esc=quit, Tab=sidebar
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 
+use oneai_agent::ParadigmKind;
 use oneai_app::AppBuilder;
 use oneai_core::ModelConfig;
+use oneai_domain::coding_pack;
 use oneai_provider::ProviderFactory;
 use oneai_tool::CalculatorTool;
-use oneai_agent::ParadigmKind;
-use oneai_domain::coding_pack;
 
 use app::{App, ApprovalPendingState, ChatRole, TokenUsage};
 use observer::{ObserverEvent, TuiObserver};
@@ -34,11 +34,11 @@ use session::SessionState;
 // ─── Public Modules ────────────────────────────────────────────────────────
 
 pub mod app;
+pub mod history;
+pub mod input_mode;
 pub mod observer;
 pub mod render;
 pub mod session;
-pub mod history;
-pub mod input_mode;
 pub mod theme;
 
 // ─── Run TUI ────────────────────────────────────────────────────────────────
@@ -87,18 +87,29 @@ pub fn run_tui(
         Some(config) => {
             let url = config.base_url.as_deref().unwrap_or("default");
             let model = config.model_name.as_deref().unwrap_or("unknown");
-            let detected = if url.contains("dashscope") { "阿里百炼" }
-                else if url.contains("deepseek") { "DeepSeek" }
-                else if url.contains("anthropic") { "Anthropic" }
-                else if url.contains("localhost") || url.contains("127.0.0.1") { "Ollama" }
-                else if url.contains("openai") || url == "default" { "OpenAI" }
-                else { "OpenAI-compatible" };
+            let detected = if url.contains("dashscope") {
+                "阿里百炼"
+            } else if url.contains("deepseek") {
+                "DeepSeek"
+            } else if url.contains("anthropic") {
+                "Anthropic"
+            } else if url.contains("localhost") || url.contains("127.0.0.1") {
+                "Ollama"
+            } else if url.contains("openai") || url == "default" {
+                "OpenAI"
+            } else {
+                "OpenAI-compatible"
+            };
             format!("{detected} · {model}")
         }
         None => "No Provider".to_string(),
     };
     let model_name = match &provider_config {
-        Some(config) => config.model_name.as_deref().unwrap_or("unknown").to_string(),
+        Some(config) => config
+            .model_name
+            .as_deref()
+            .unwrap_or("unknown")
+            .to_string(),
         None => "unknown".to_string(),
     };
 
@@ -141,8 +152,8 @@ pub fn run_tui(
         app.skill_registry.register_builtin(skills).await.unwrap();
 
         // Register domain-specific tools from the selected domain pack
-        let domain = crate::cmd_pack::get_builtin_pack(domain_pack_name, ".")
-            .unwrap_or_else(|| {
+        let domain =
+            crate::cmd_pack::get_builtin_pack(domain_pack_name, ".").unwrap_or_else(|| {
                 // Try loading from installed packs or project directory
                 oneai_domain::domain_pack_from_dir(".").unwrap_or_else(|_| coding_pack("."))
             });
@@ -150,19 +161,26 @@ pub fn run_tui(
             app.register_tool(tool.clone()).await.unwrap();
         }
         // Also register CalculatorTool as a general-purpose tool
-        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
-        // Register the `skill` tool — gives the model a call path to load a
-        // skill's full prompt (progressive disclosure Tier2/Tier3).
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(app.skill_registry.clone())))
+        app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
+        // Register the `skill` tool — gives the model a call path to load a
+        // skill's full prompt (progressive disclosure Tier2/Tier3).
+        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
+            app.skill_registry.clone(),
+        )))
+        .await
+        .unwrap();
 
         let tool_names = app.tool_executor().list_tools().await;
         let session = app.create_session();
         let session_id = session.session_id().to_string();
 
         let app_arc = Arc::new(app);
-        let session_state = SessionState { app: app_arc.clone(), session };
+        let session_state = SessionState {
+            app: app_arc.clone(),
+            session,
+        };
         let session_state = Arc::new(tokio::sync::Mutex::new(session_state));
 
         let mut tui_app = App::new(
@@ -189,7 +207,16 @@ pub fn run_tui(
         Arc::new(tokio::sync::Mutex::new(None));
 
     // Run the main loop
-    let result = run_main_loop(&mut terminal, app, session_state, observer_tx, observer_rx, &rt, interaction_rx, interrupt_slot);
+    let result = run_main_loop(
+        &mut terminal,
+        app,
+        session_state,
+        observer_tx,
+        observer_rx,
+        &rt,
+        interaction_rx,
+        interrupt_slot,
+    );
 
     // Restore terminal
     disable_raw_mode()?;
@@ -210,7 +237,9 @@ fn dispatch_event(
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
 ) {
     match event {
-        Event::Key(key) => handle_key_event(app, key, session_state, observer_tx, rt, interrupt_slot),
+        Event::Key(key) => {
+            handle_key_event(app, key, session_state, observer_tx, rt, interrupt_slot)
+        }
         Event::Mouse(mouse) => handle_mouse_event(app, mouse),
         // Bracketed paste: insert the whole pasted string at the cursor without
         // submitting. Without this arm, paste falls into the `_` catch-all and is
@@ -303,7 +332,14 @@ fn handle_key_event(
     let msg = app.handle_key_event(key);
     if let Some(user_input) = msg {
         if !app.is_thinking {
-            handle_user_input_async(app, session_state.clone(), user_input, observer_tx, rt, interrupt_slot);
+            handle_user_input_async(
+                app,
+                session_state.clone(),
+                user_input,
+                observer_tx,
+                rt,
+                interrupt_slot,
+            );
         }
     }
 }
@@ -361,15 +397,24 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                 let mut line_cursor = 0usize;
                 let mut target: Option<String> = None;
                 for msg in app.messages.iter() {
-                    let msg_height = app.render_cache.entries.get(&msg.id)
+                    let msg_height = app
+                        .render_cache
+                        .entries
+                        .get(&msg.id)
                         .map(|c| c.lines.len())
                         .unwrap_or_else(|| {
                             // Cache miss — render transiently just to count lines.
                             let width = (chat_rect.width as usize).saturating_sub(1);
                             let is_collapsed = app.collapsed_ids.contains(&msg.id);
                             render::message::render_message_lines(
-                                msg, is_collapsed, width, app.spinner_frame, app.approval_selected_index,
-                            ).len().max(1)
+                                msg,
+                                is_collapsed,
+                                width,
+                                app.spinner_frame,
+                                app.approval_selected_index,
+                            )
+                            .len()
+                            .max(1)
                         });
 
                     if clicked_line < line_cursor + msg_height {
@@ -443,7 +488,8 @@ fn run_main_loop(
         // Stream throttle: flush buffered chunks at ~10fps (100ms interval)
         // This prevents 100+ redraws/second during fast streaming
         if !app.stream_buffer.is_empty() {
-            const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+            const STREAM_FLUSH_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(100);
             if app.last_stream_flush.elapsed() >= STREAM_FLUSH_INTERVAL {
                 app.flush_stream_buffer();
             }
@@ -460,12 +506,26 @@ fn run_main_loop(
 
         if event::poll(poll_interval)? {
             let first_event = event::read()?;
-            dispatch_event(&mut app, first_event, session_state.clone(), &observer_tx, rt, interrupt_slot.clone());
+            dispatch_event(
+                &mut app,
+                first_event,
+                session_state.clone(),
+                &observer_tx,
+                rt,
+                interrupt_slot.clone(),
+            );
 
             // Drain all pending events (especially scroll events) in one frame
             while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
                 if let Ok(ev) = event::read() {
-                    dispatch_event(&mut app, ev, session_state.clone(), &observer_tx, rt, interrupt_slot.clone());
+                    dispatch_event(
+                        &mut app,
+                        ev,
+                        session_state.clone(),
+                        &observer_tx,
+                        rt,
+                        interrupt_slot.clone(),
+                    );
                 } else {
                     break;
                 }
@@ -491,12 +551,17 @@ fn run_main_loop(
                 oneai_core::InteractionRequest::ToolApproval { approval } => {
                     let tool_name = approval.tool_name.clone();
                     let justification = approval.justification.clone();
-                    let perm_label = approval.permission_level.map(|p| format!("{:?}", p))
+                    let perm_label = approval
+                        .permission_level
+                        .map(|p| format!("{:?}", p))
                         .unwrap_or_else(|| format!("{:?}", approval.risk_level));
 
                     if app.session_allowlist.contains(&tool_name) {
                         let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);
-                        app.add_message(ChatRole::System, format!("Auto-approved {} (session allowlist)", tool_name));
+                        app.add_message(
+                            ChatRole::System,
+                            format!("Auto-approved {} (session allowlist)", tool_name),
+                        );
                     } else {
                         // Show approval card in the TUI
                         app.approval_pending = Some(ApprovalPendingState {
@@ -505,12 +570,15 @@ fn run_main_loop(
                             tool_name,
                             justification,
                         });
-                        app.add_message(ChatRole::Approval, format!(
-                            "Tool: {} ({})\n{}",
-                            app.approval_pending.as_ref().unwrap().tool_name,
-                            perm_label,
-                            app.approval_pending.as_ref().unwrap().justification,
-                        ));
+                        app.add_message(
+                            ChatRole::Approval,
+                            format!(
+                                "Tool: {} ({})\n{}",
+                                app.approval_pending.as_ref().unwrap().tool_name,
+                                perm_label,
+                                app.approval_pending.as_ref().unwrap().justification,
+                            ),
+                        );
                     }
                 }
                 oneai_core::InteractionRequest::PlanDecision {
@@ -527,7 +595,10 @@ fn run_main_loop(
                         reply_tx: response_tx,
                     });
                     app.is_thinking = false; // pause spinner while awaiting decision
-                    app.add_message(ChatRole::System, "Decision needed — choose an option.".to_string());
+                    app.add_message(
+                        ChatRole::System,
+                        "Decision needed — choose an option.".to_string(),
+                    );
                 }
                 oneai_core::InteractionRequest::PlanReview { plan, steps } => {
                     app.pending_plan = Some((plan, steps, Some(response_tx)));
@@ -588,7 +659,9 @@ fn handle_user_input_async(
                 return;
             }
             "/tools" | "/t" => {
-                let tools = app.tool_names.iter()
+                let tools = app
+                    .tool_names
+                    .iter()
                     .map(|n| format!("  • {}", n))
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -615,8 +688,16 @@ fn handle_user_input_async(
                 return;
             }
             "/usage" => {
-                let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
-                let tok_est = if app.token_usage.is_estimated { "~" } else { "" };
+                let ctx_est = if app.context_tokens_is_estimated {
+                    "~"
+                } else {
+                    ""
+                };
+                let tok_est = if app.token_usage.is_estimated {
+                    "~"
+                } else {
+                    ""
+                };
                 app.add_message(ChatRole::System, format!(
                     "Session usage: {}{} tokens ({}prompt {}+ completion {})\nContext: {}{} / {}k tokens",
                     tok_est, app.token_usage.total, tok_est,
@@ -631,7 +712,10 @@ fn handle_user_input_async(
                 // domain pack, etc.), not the bare session conversation.
                 // Only fall back to session conversation if no agent run has occurred.
                 if let Some(accounting) = &app.last_context_accounting {
-                    app.add_message(ChatRole::System, accounting.format_display(&app.provider_info));
+                    app.add_message(
+                        ChatRole::System,
+                        accounting.format_display(&app.provider_info),
+                    );
                 } else {
                     // No agent run yet — compute from session conversation (best available)
                     let accounting = rt.block_on(async {
@@ -647,14 +731,25 @@ fn handle_user_input_async(
                     app.context_tokens_is_estimated = accounting.is_estimated;
                     app.context_window_size = accounting.context_window_size;
                     app.last_context_accounting = Some(accounting.clone());
-                    app.add_message(ChatRole::System, accounting.format_display(&app.provider_info));
+                    app.add_message(
+                        ChatRole::System,
+                        accounting.format_display(&app.provider_info),
+                    );
                 }
                 app.dirty = true;
                 return;
             }
             "/session" => {
-                let ctx_est = if app.context_tokens_is_estimated { "~" } else { "" };
-                let tok_est = if app.token_usage.is_estimated { "~" } else { "" };
+                let ctx_est = if app.context_tokens_is_estimated {
+                    "~"
+                } else {
+                    ""
+                };
+                let tok_est = if app.token_usage.is_estimated {
+                    "~"
+                } else {
+                    ""
+                };
                 app.add_message(ChatRole::System, format!(
                     "Session ID: {}\nProvider: {}\nParadigm: {}#{}\nContext: {}{} / {}k\nUsage: {}{} tokens ({}+{} prompt/completion)",
                     app.session_id,
@@ -690,10 +785,17 @@ fn handle_user_input_async(
                                 state.app.register_tool(tool.clone()).await.unwrap();
                             }
                             // Also keep CalculatorTool as general-purpose
-                            state.app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+                            state
+                                .app
+                                .register_tool(Arc::new(CalculatorTool::new()))
+                                .await
+                                .unwrap();
                             app.tool_names = state.app.tool_executor().list_tools().await;
                             // Switch skills to domain
-                            app.skill_registry.replace_all(oneai_skill::builtin::skills_for_domain(name)).await.unwrap();
+                            app.skill_registry
+                                .replace_all(oneai_skill::builtin::skills_for_domain(name))
+                                .await
+                                .unwrap();
                             // Re-discover user skills from convention dirs (replace_all
                             // clears them); discovered skills are user-owned and survive
                             // domain switches.
@@ -704,7 +806,8 @@ fn handle_user_input_async(
                         });
                         app.current_domain = name.to_string();
                         app.active_skill = None;
-                        let tool_names_str: Vec<String> = pack.tools.iter().map(|t| t.name().to_string()).collect();
+                        let tool_names_str: Vec<String> =
+                            pack.tools.iter().map(|t| t.name().to_string()).collect();
                         app.add_message(ChatRole::System, format!(
                             "Switched to {} domain. Tools: {}\nSkills: {} domain skills + general skills",
                             name,
@@ -713,9 +816,13 @@ fn handle_user_input_async(
                         ));
                     }
                     None => {
-                        app.add_message(ChatRole::Error, format!(
-                            "Unknown domain: {}. Available: coding, research, general", name
-                        ));
+                        app.add_message(
+                            ChatRole::Error,
+                            format!(
+                                "Unknown domain: {}. Available: coding, research, general",
+                                name
+                            ),
+                        );
                     }
                 }
                 return;
@@ -736,7 +843,10 @@ fn handle_user_input_async(
                 app.current_iteration = 0;
                 app.last_context_accounting = None;
                 app.add_new_session(new_session_id);
-                app.add_message(ChatRole::System, "New session created. Previous sessions preserved in sidebar.");
+                app.add_message(
+                    ChatRole::System,
+                    "New session created. Previous sessions preserved in sidebar.",
+                );
                 return;
             }
             "/init" => {
@@ -778,11 +888,19 @@ fn handle_user_input_async(
                 // Immediate feedback: clear input is already done by handle_singleline_key;
                 // show a progress line + start the spinner so the user knows work started.
                 app.start_thinking();
-                let mode_hint = if no_llm { " (heuristic)" } else { " + LLM synthesis" };
-                app.add_message(ChatRole::System, format!(
-                    "⏳ Generating {} (probing project{})…",
-                    opts.format.filename(), mode_hint
-                ));
+                let mode_hint = if no_llm {
+                    " (heuristic)"
+                } else {
+                    " + LLM synthesis"
+                };
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "⏳ Generating {} (probing project{})…",
+                        opts.format.filename(),
+                        mode_hint
+                    ),
+                );
                 app.dirty = true;
 
                 let session_state_cl = session_state.clone();
@@ -840,23 +958,24 @@ fn handle_user_input_async(
                 // the *backend* Conversation (AppSession::compact) so the model
                 // sees it on the next run, and work continues in the same
                 // session (same session_id, no new sidebar entry).
-                let has_provider = rt.block_on(async {
-                    session_state.lock().await.app.has_provider()
-                });
+                let has_provider =
+                    rt.block_on(async { session_state.lock().await.app.has_provider() });
                 if !has_provider {
                     app.add_message(ChatRole::Error, "No LLM provider configured. Cannot /compact — set ONEAI_API_KEY and ONEAI_BASE_URL.");
                     return;
                 }
 
                 app.start_thinking();
-                app.add_message(ChatRole::System, "⏳ Compacting conversation (LLM summary)…");
+                app.add_message(
+                    ChatRole::System,
+                    "⏳ Compacting conversation (LLM summary)…",
+                );
                 app.dirty = true;
 
                 let session_state_cl = session_state.clone();
                 let tx = observer_tx.clone();
                 rt.spawn(async move {
-                    let outcome = session_state_cl.lock().await
-                        .session.compact(2).await;
+                    let outcome = session_state_cl.lock().await.session.compact(2).await;
                     let msg = match &outcome {
                         // Empty summary ⇒ conversation was too short; send an
                         // empty payload so the handler shows the "too short"
@@ -920,9 +1039,17 @@ fn handle_user_input_async(
                         if let Some(name) = app.active_skill.take() {
                             // Sync to the shared session state read by run_agent.
                             rt.block_on(async {
-                                session_state.lock().await.session.set_active_skill(None).await;
+                                session_state
+                                    .lock()
+                                    .await
+                                    .session
+                                    .set_active_skill(None)
+                                    .await;
                             });
-                            app.add_message(ChatRole::System, format!("✅ Skill deactivated: {}", name));
+                            app.add_message(
+                                ChatRole::System,
+                                format!("✅ Skill deactivated: {}", name),
+                            );
                         } else {
                             app.add_message(ChatRole::System, "No active skill to deactivate.");
                         }
@@ -933,20 +1060,27 @@ fn handle_user_input_async(
                         // /skill add <name> <description>
                         // parts[0]="/skill", parts[1]="add", parts[2]="name description"
                         if parts.len() < 3 {
-                            app.add_message(ChatRole::Error, "Usage: /skill add <name> <description>");
+                            app.add_message(
+                                ChatRole::Error,
+                                "Usage: /skill add <name> <description>",
+                            );
                             return;
                         }
                         // Split the third part into name + description
                         // The name is the first word, the rest is description
                         let add_args: Vec<&str> = parts[2].splitn(2, ' ').collect();
                         if add_args.len() < 2 {
-                            app.add_message(ChatRole::Error, "Usage: /skill add <name> <description> (description required)");
+                            app.add_message(
+                                ChatRole::Error,
+                                "Usage: /skill add <name> <description> (description required)",
+                            );
                             return;
                         }
                         let skill_name = add_args[0];
                         let skill_desc = add_args[1];
 
-                        let prompt_template = format!("Act as a {} expert. {}", skill_name, skill_desc);
+                        let prompt_template =
+                            format!("Act as a {} expert. {}", skill_name, skill_desc);
                         let trigger_keywords = vec![skill_name.to_string()];
 
                         let skill = oneai_core::SkillDescriptor {
@@ -1031,12 +1165,19 @@ fn handle_user_input_async(
                             let selector = oneai_skill::SkillSelector::new();
                             let matches = selector.select_skills(query, &skills).await.unwrap();
                             if matches.is_empty() {
-                                app.add_message(ChatRole::System, format!("No skills matching '{}'.", query));
+                                app.add_message(
+                                    ChatRole::System,
+                                    format!("No skills matching '{}'.", query),
+                                );
                             } else {
-                                let mut lines = vec![format!("🎯 Skill search results for '{}':\n", query)];
+                                let mut lines =
+                                    vec![format!("🎯 Skill search results for '{}':\n", query)];
                                 for skill in &matches {
                                     let icon = oneai_skill::builtin::skill_icon(&skill.name);
-                                    lines.push(format!("  {} {} — {}", icon, skill.name, skill.description));
+                                    lines.push(format!(
+                                        "  {} {} — {}",
+                                        icon, skill.name, skill.description
+                                    ));
                                 }
                                 lines.push(format!("\nTop match: {}", matches[0].name));
                                 lines.push(format!("Type /skill {} to activate", matches[0].name));
@@ -1067,7 +1208,12 @@ fn handle_user_input_async(
                         if found {
                             let name_to_set = app.active_skill.clone();
                             rt.block_on(async {
-                                session_state.lock().await.session.set_active_skill(name_to_set).await;
+                                session_state
+                                    .lock()
+                                    .await
+                                    .session
+                                    .set_active_skill(name_to_set)
+                                    .await;
                             });
                         }
                         app.dirty = true;
@@ -1082,30 +1228,48 @@ fn handle_user_input_async(
                 }
                 let tool_name = parts[1];
                 let args_str = parts[2];
-                let args: serde_json::Value = serde_json::from_str(args_str)
-                    .unwrap_or(serde_json::json!({}));
+                let args: serde_json::Value =
+                    serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
 
                 let result = rt.block_on(async {
-                    session_state.lock().await.session.execute_tool(tool_name, args).await
+                    session_state
+                        .lock()
+                        .await
+                        .session
+                        .execute_tool(tool_name, args)
+                        .await
                 });
 
                 match result {
                     Ok(output) => {
                         if output.success {
-                            app.add_message(ChatRole::ToolInvocation {
-                                call_id: String::new(),
-                                tool_name: tool_name.to_string(),
-                                args: String::new(),
-                                result: Some((true, format!("{}: {}", tool_name, output.content))),
-                            }, format!("{}: {}", tool_name, output.content));
+                            app.add_message(
+                                ChatRole::ToolInvocation {
+                                    call_id: String::new(),
+                                    tool_name: tool_name.to_string(),
+                                    args: String::new(),
+                                    result: Some((
+                                        true,
+                                        format!("{}: {}", tool_name, output.content),
+                                    )),
+                                },
+                                format!("{}: {}", tool_name, output.content),
+                            );
                         } else {
-                            let error_msg = output.error.as_deref().unwrap_or("unknown error").to_string();
-                            app.add_message(ChatRole::ToolInvocation {
-                                call_id: String::new(),
-                                tool_name: tool_name.to_string(),
-                                args: String::new(),
-                                result: Some((false, format!("{}: {}", tool_name, error_msg))),
-                            }, format!("{}: {}", tool_name, error_msg));
+                            let error_msg = output
+                                .error
+                                .as_deref()
+                                .unwrap_or("unknown error")
+                                .to_string();
+                            app.add_message(
+                                ChatRole::ToolInvocation {
+                                    call_id: String::new(),
+                                    tool_name: tool_name.to_string(),
+                                    args: String::new(),
+                                    result: Some((false, format!("{}: {}", tool_name, error_msg))),
+                                },
+                                format!("{}: {}", tool_name, error_msg),
+                            );
                         }
                     }
                     Err(e) => app.add_message(ChatRole::Error, format!("Error: {e}")),
@@ -1124,11 +1288,12 @@ fn handle_user_input_async(
     }
 
     // Check if provider is available
-    let has_provider = rt.block_on(async {
-        session_state.lock().await.app.has_provider()
-    });
+    let has_provider = rt.block_on(async { session_state.lock().await.app.has_provider() });
     if !has_provider {
-        app.add_message(ChatRole::Error, "No LLM provider configured. Set ONEAI_API_KEY and ONEAI_BASE_URL.");
+        app.add_message(
+            ChatRole::Error,
+            "No LLM provider configured. Set ONEAI_API_KEY and ONEAI_BASE_URL.",
+        );
         return;
     }
 
@@ -1157,14 +1322,18 @@ fn handle_user_input_async(
         let mut state = session_state.lock().await;
         let observer = TuiObserver::new(tx1);
 
-        let result = state.session.run_agent(&task, &observer, interrupt_slot.clone()).await;
+        let result = state
+            .session
+            .run_agent(&task, &observer, interrupt_slot.clone())
+            .await;
 
         match result {
             Ok(agent_result) => {
                 if !agent_result.completed {
-                    let _ = tx2.send(ObserverEvent::Error(
-                        format!("Agent did not reach a final answer after {} iterations.", agent_result.iterations)
-                    ));
+                    let _ = tx2.send(ObserverEvent::Error(format!(
+                        "Agent did not reach a final answer after {} iterations.",
+                        agent_result.iterations
+                    )));
                 }
                 let _ = tx2.send(ObserverEvent::Complete(agent_result));
             }
@@ -1172,7 +1341,9 @@ fn handle_user_input_async(
                 let err_str = e.to_string();
                 let _ = tx2.send(ObserverEvent::Error(format!("Error: {}", err_str)));
                 if err_str.contains("API error") {
-                    let _ = tx2.send(ObserverEvent::Error("Hint: check your ONEAI_API_KEY and ONEAI_BASE_URL.".to_string()));
+                    let _ = tx2.send(ObserverEvent::Error(
+                        "Hint: check your ONEAI_API_KEY and ONEAI_BASE_URL.".to_string(),
+                    ));
                 }
             }
         }
@@ -1187,7 +1358,8 @@ fn handle_workflow_command(
     rt: &tokio::runtime::Runtime,
 ) {
     if parts.len() < 2 {
-        app.add_message(ChatRole::System,
+        app.add_message(
+            ChatRole::System,
             "Workflow commands:\n\
              /wf list              — Show available workflows\n\
              /wf run <name>        — Execute a workflow\n\
@@ -1198,18 +1370,17 @@ fn handle_workflow_command(
              /wf graph <name>      — Show StateGraph visualization\n\
              /wf status            — Show recent workflow results\n\
              /wf cancel            — Cancel running workflow (not yet supported)\n\
-             /wf history           — Show workflow execution history");
+             /wf history           — Show workflow execution history",
+        );
         return;
     }
 
     match parts[1] {
         "list" => {
-            let workflows = rt.block_on(async {
-                session_state.lock().await.session.get_available_workflows()
-            });
-            let graph_names = rt.block_on(async {
-                session_state.lock().await.session.get_state_graph_names()
-            });
+            let workflows =
+                rt.block_on(async { session_state.lock().await.session.get_available_workflows() });
+            let graph_names =
+                rt.block_on(async { session_state.lock().await.session.get_state_graph_names() });
 
             if workflows.is_empty() && graph_names.is_empty() {
                 app.add_message(ChatRole::System,
@@ -1220,7 +1391,10 @@ fn handle_workflow_command(
                     lines.push(format!("  • {} — {}", wf.name, wf.description));
                 }
                 if !graph_names.is_empty() {
-                    lines.push(format!("\n📋 Available StateGraphs ({})\n", graph_names.len()));
+                    lines.push(format!(
+                        "\n📋 Available StateGraphs ({})\n",
+                        graph_names.len()
+                    ));
                     for name in &graph_names {
                         lines.push(format!("  • {}", name));
                     }
@@ -1232,7 +1406,10 @@ fn handle_workflow_command(
 
         "run" => {
             if parts.len() < 3 {
-                app.add_message(ChatRole::Error, "Usage: /wf run <name> [--vars key=value ...]");
+                app.add_message(
+                    ChatRole::Error,
+                    "Usage: /wf run <name> [--vars key=value ...]",
+                );
                 return;
             }
             let wf_name = parts[2];
@@ -1256,7 +1433,11 @@ fn handle_workflow_command(
 
             // Try as workflow first, then as StateGraph
             let wf_config = rt.block_on(async {
-                session_state.lock().await.session.get_workflow_config(wf_name)
+                session_state
+                    .lock()
+                    .await
+                    .session
+                    .get_workflow_config(wf_name)
             });
 
             if let Some(mut config) = wf_config {
@@ -1265,20 +1446,33 @@ fn handle_workflow_command(
                     config.variables.insert(k, v);
                 }
 
-                app.add_message(ChatRole::System,
-                    format!("▶ Starting workflow '{}' with {} steps...", config.name, config.steps.len()));
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "▶ Starting workflow '{}' with {} steps...",
+                        config.name,
+                        config.steps.len()
+                    ),
+                );
 
                 let result = rt.block_on(async {
-                    session_state.lock().await.session.execute_workflow(&config).await
+                    session_state
+                        .lock()
+                        .await
+                        .session
+                        .execute_workflow(&config)
+                        .await
                 });
 
                 match result {
                     Ok(result) => {
                         let mut lines = vec![format!("✅ Workflow '{}' completed", result.name)];
-                        lines.push(format!("   Steps: {} total, {} completed, {} failed",
+                        lines.push(format!(
+                            "   Steps: {} total, {} completed, {} failed",
                             result.step_results.len(),
                             result.completed_steps().len(),
-                            result.failed_steps().len()));
+                            result.failed_steps().len()
+                        ));
                         lines.push(format!("   Time: {}ms", result.total_time_ms));
 
                         for (step_id, step) in &result.step_results {
@@ -1288,7 +1482,9 @@ fn handle_workflow_command(
                                 oneai_workflow::StepStatus::Skipped => "⏭️",
                                 _ => "⏳",
                             };
-                            let output_preview = step.output.as_ref()
+                            let output_preview = step
+                                .output
+                                .as_ref()
                                 .map(|o| {
                                     let truncated = if o.len() > 200 {
                                         format!("{}...", &o[..200])
@@ -1298,7 +1494,10 @@ fn handle_workflow_command(
                                     truncated
                                 })
                                 .unwrap_or_else(|| "no output".to_string());
-                            lines.push(format!("   {} {}: {}", status_icon, step_id, output_preview));
+                            lines.push(format!(
+                                "   {} {}: {}",
+                                status_icon, step_id, output_preview
+                            ));
                         }
 
                         app.add_message(ChatRole::System, lines.join("\n"));
@@ -1314,16 +1513,24 @@ fn handle_workflow_command(
                 });
 
                 if let Some(graph) = graph {
-                    app.add_message(ChatRole::System,
-                        format!("▶ Starting StateGraph '{}' execution...", graph.name));
+                    app.add_message(
+                        ChatRole::System,
+                        format!("▶ Starting StateGraph '{}' execution...", graph.name),
+                    );
 
                     let result = rt.block_on(async {
-                        session_state.lock().await.session.execute_state_graph(&graph).await
+                        session_state
+                            .lock()
+                            .await
+                            .session
+                            .execute_state_graph(&graph)
+                            .await
                     });
 
                     match result {
                         Ok(result) => {
-                            let mut lines = vec![format!("✅ StateGraph '{}' completed", result.name)];
+                            let mut lines =
+                                vec![format!("✅ StateGraph '{}' completed", result.name)];
                             lines.push(format!("   Iterations: {}", result.iterations));
                             lines.push(format!("   Completed: {}", result.completed));
                             if let Some(terminal) = &result.terminal_node {
@@ -1340,20 +1547,30 @@ fn handle_workflow_command(
                             app.add_message(ChatRole::System, lines.join("\n"));
                         }
                         Err(e) => {
-                            app.add_message(ChatRole::Error, format!("❌ StateGraph failed: {}", e));
+                            app.add_message(
+                                ChatRole::Error,
+                                format!("❌ StateGraph failed: {}", e),
+                            );
                         }
                     }
                 } else {
-                    app.add_message(ChatRole::Error,
-                        format!("Workflow '{}' not found. Use /wf list to see available workflows.", wf_name));
+                    app.add_message(
+                        ChatRole::Error,
+                        format!(
+                            "Workflow '{}' not found. Use /wf list to see available workflows.",
+                            wf_name
+                        ),
+                    );
                 }
             }
         }
 
         "define" => {
             if parts.len() < 3 {
-                app.add_message(ChatRole::Error,
-                    "Usage: /wf define <json_string> OR /wf define --file <path>");
+                app.add_message(
+                    ChatRole::Error,
+                    "Usage: /wf define <json_string> OR /wf define --file <path>",
+                );
                 return;
             }
 
@@ -1365,9 +1582,7 @@ fn handle_workflow_command(
                 let path = parts[3];
                 let content = std::fs::read_to_string(path);
                 match content {
-                    Ok(content) => {
-                        oneai_workflow::WorkflowConfig::from_json(&content)
-                    }
+                    Ok(content) => oneai_workflow::WorkflowConfig::from_json(&content),
                     Err(e) => {
                         app.add_message(ChatRole::Error, format!("Cannot read file: {}", e));
                         return;
@@ -1380,19 +1595,35 @@ fn handle_workflow_command(
 
             match config {
                 Ok(config) => {
-                    app.add_message(ChatRole::System,
-                        format!("▶ Executing custom workflow '{}' with {} steps...",
-                            config.name, config.steps.len()));
+                    app.add_message(
+                        ChatRole::System,
+                        format!(
+                            "▶ Executing custom workflow '{}' with {} steps...",
+                            config.name,
+                            config.steps.len()
+                        ),
+                    );
 
                     let result = rt.block_on(async {
-                        session_state.lock().await.session.execute_workflow(&config).await
+                        session_state
+                            .lock()
+                            .await
+                            .session
+                            .execute_workflow(&config)
+                            .await
                     });
 
                     match result {
                         Ok(result) => {
-                            app.add_message(ChatRole::System,
-                                format!("✅ Workflow '{}' completed. Steps: {}, Time: {}ms",
-                                    result.name, result.step_results.len(), result.total_time_ms));
+                            app.add_message(
+                                ChatRole::System,
+                                format!(
+                                    "✅ Workflow '{}' completed. Steps: {}, Time: {}ms",
+                                    result.name,
+                                    result.step_results.len(),
+                                    result.total_time_ms
+                                ),
+                            );
                         }
                         Err(e) => {
                             app.add_message(ChatRole::Error, format!("❌ Workflow failed: {}", e));
@@ -1400,7 +1631,10 @@ fn handle_workflow_command(
                     }
                 }
                 Err(e) => {
-                    app.add_message(ChatRole::Error, format!("Invalid workflow definition: {}", e));
+                    app.add_message(
+                        ChatRole::Error,
+                        format!("Invalid workflow definition: {}", e),
+                    );
                 }
             }
         }
@@ -1412,18 +1646,32 @@ fn handle_workflow_command(
             }
             let wf_name = parts[2];
             let config = rt.block_on(async {
-                session_state.lock().await.session.get_workflow_config(wf_name)
+                session_state
+                    .lock()
+                    .await
+                    .session
+                    .get_workflow_config(wf_name)
             });
 
             match config {
                 Some(config) => {
                     let viz = rt.block_on(async {
-                        session_state.lock().await.session.render_workflow_dag(&config)
+                        session_state
+                            .lock()
+                            .await
+                            .session
+                            .render_workflow_dag(&config)
                     });
-                    app.add_message(ChatRole::System, format!("Workflow: {}\n{}", config.name, viz));
+                    app.add_message(
+                        ChatRole::System,
+                        format!("Workflow: {}\n{}", config.name, viz),
+                    );
                 }
                 None => {
-                    app.add_message(ChatRole::Error, format!("Workflow '{}' not found.", wf_name));
+                    app.add_message(
+                        ChatRole::Error,
+                        format!("Workflow '{}' not found.", wf_name),
+                    );
                 }
             }
         }
@@ -1435,18 +1683,29 @@ fn handle_workflow_command(
             }
             let graph_name = parts[2];
             let graph = rt.block_on(async {
-                session_state.lock().await.session.get_state_graph(graph_name)
+                session_state
+                    .lock()
+                    .await
+                    .session
+                    .get_state_graph(graph_name)
             });
 
             match graph {
                 Some(graph) => {
                     let viz = rt.block_on(async {
-                        session_state.lock().await.session.render_state_graph(&graph)
+                        session_state
+                            .lock()
+                            .await
+                            .session
+                            .render_state_graph(&graph)
                     });
                     app.add_message(ChatRole::System, viz);
                 }
                 None => {
-                    app.add_message(ChatRole::Error, format!("StateGraph '{}' not found.", graph_name));
+                    app.add_message(
+                        ChatRole::Error,
+                        format!("StateGraph '{}' not found.", graph_name),
+                    );
                 }
             }
         }
@@ -1454,12 +1713,19 @@ fn handle_workflow_command(
         "status" => {
             // Show the latest workflow execution result from history
             let history = rt.block_on(async {
-                session_state.lock().await.session.workflow_history().to_vec()
+                session_state
+                    .lock()
+                    .await
+                    .session
+                    .workflow_history()
+                    .to_vec()
             });
 
             if history.is_empty() {
-                app.add_message(ChatRole::System,
-                    "No workflow executions in this session. Use /wf run <name> to start one.");
+                app.add_message(
+                    ChatRole::System,
+                    "No workflow executions in this session. Use /wf run <name> to start one.",
+                );
             } else {
                 let last = history.last().unwrap();
                 let kind_str = match last.kind {
@@ -1479,14 +1745,24 @@ fn handle_workflow_command(
         "history" => {
             // Show all workflow execution history
             let history = rt.block_on(async {
-                session_state.lock().await.session.workflow_history().to_vec()
+                session_state
+                    .lock()
+                    .await
+                    .session
+                    .workflow_history()
+                    .to_vec()
             });
 
             if history.is_empty() {
-                app.add_message(ChatRole::System,
-                    "No workflow executions in this session. Use /wf run <name> to start one.");
+                app.add_message(
+                    ChatRole::System,
+                    "No workflow executions in this session. Use /wf run <name> to start one.",
+                );
             } else {
-                let mut lines = vec![format!("📋 Workflow Execution History ({})\n", history.len())];
+                let mut lines = vec![format!(
+                    "📋 Workflow Execution History ({})\n",
+                    history.len()
+                )];
                 for (idx, entry) in history.iter().enumerate() {
                     let kind_str = match entry.kind {
                         oneai_app::session::WorkflowKind::Dag => "DAG",
@@ -1495,8 +1771,12 @@ fn handle_workflow_command(
                     let status_icon = if entry.success { "✅" } else { "❌" };
                     lines.push(format!(
                         "  {} {} [{}] {} — {} ({})",
-                        status_icon, idx + 1, kind_str, entry.name,
-                        entry.summary, entry.timestamp
+                        status_icon,
+                        idx + 1,
+                        kind_str,
+                        entry.name,
+                        entry.summary,
+                        entry.timestamp
                     ));
                 }
                 app.add_message(ChatRole::System, lines.join("\n"));
@@ -1510,15 +1790,20 @@ fn handle_workflow_command(
             // TUI event loop, so there's no way to cancel mid-execution.
             // Future implementation: use tokio::sync::CancellationToken in
             // StateGraphExecutor and WorkflowExecutor to support graceful cancellation.
-            app.add_message(ChatRole::System,
+            app.add_message(
+                ChatRole::System,
                 "⚠️ /wf cancel is not yet supported. Workflows execute synchronously \
                  within the TUI event loop and cannot be cancelled mid-execution.\n\n\
                  Future implementation will use CancellationToken for graceful \
-                 cancellation of StateGraph and DAG workflows.");
+                 cancellation of StateGraph and DAG workflows.",
+            );
         }
 
         _ => {
-            app.add_message(ChatRole::Error, format!("Unknown workflow command: {}. Type /wf for help.", parts[1]));
+            app.add_message(
+                ChatRole::Error,
+                format!("Unknown workflow command: {}. Type /wf for help.", parts[1]),
+            );
         }
     }
 }
@@ -1545,7 +1830,10 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // If streaming already created an assistant message, don't add a duplicate.
             // Search backwards through all messages in the current turn (until we hit
             // a User message, which marks the start of a new turn).
-            let already_has_assistant = app.messages.iter().rev()
+            let already_has_assistant = app
+                .messages
+                .iter()
+                .rev()
                 .take_while(|m| m.role != ChatRole::User)
                 .any(|m| m.role == ChatRole::Assistant);
             if already_has_assistant {
@@ -1572,7 +1860,11 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 let tool_name = call.name.clone();
                 let already_pending = app.messages.iter().any(|m| {
                     if let ChatRole::ToolInvocation {
-                        call_id: cid, tool_name: tn, args, result, ..
+                        call_id: cid,
+                        tool_name: tn,
+                        args,
+                        result,
+                        ..
                     } = &m.role
                     {
                         if result.is_some() {
@@ -1612,7 +1904,10 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // with the result. This merges ToolCall + ToolResult into one message.
             let call_id_to_find = call_id.clone();
             let found_msg = app.messages.iter_mut().rev().find(|m| {
-                if let ChatRole::ToolInvocation { call_id, result, .. } = &m.role {
+                if let ChatRole::ToolInvocation {
+                    call_id, result, ..
+                } = &m.role
+                {
                     call_id == &call_id_to_find && result.is_none()
                 } else {
                     false
@@ -1629,11 +1924,20 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                         output.content.clone()
                     }
                 } else {
-                    format!("Error: {}", output.error.as_deref().unwrap_or("unknown error"))
+                    format!(
+                        "Error: {}",
+                        output.error.as_deref().unwrap_or("unknown error")
+                    )
                 };
 
                 // Update the role to include the result
-                if let ChatRole::ToolInvocation { call_id, tool_name, args, result: _ } = &msg.role {
+                if let ChatRole::ToolInvocation {
+                    call_id,
+                    tool_name,
+                    args,
+                    result: _,
+                } = &msg.role
+                {
                     msg.role = ChatRole::ToolInvocation {
                         call_id: call_id.clone(),
                         tool_name: tool_name.clone(),
@@ -1681,27 +1985,49 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                             call_id: call_id.clone(),
                             tool_name: tool_name.clone(),
                             args: String::new(),
-                            result: Some((false, format!("Error: {}", output.error.as_deref().unwrap_or("unknown error")))),
+                            result: Some((
+                                false,
+                                format!(
+                                    "Error: {}",
+                                    output.error.as_deref().unwrap_or("unknown error")
+                                ),
+                            )),
                         },
-                        format!("{}: {}", tool_name, output.error.as_deref().unwrap_or("unknown error")),
+                        format!(
+                            "{}: {}",
+                            tool_name,
+                            output.error.as_deref().unwrap_or("unknown error")
+                        ),
                     );
                 }
             }
         }
         ObserverEvent::Delegate(task, agent_type) => {
-            app.add_message(ChatRole::System, format!("delegating to {} sub-agent: {}", agent_type.name(), task));
+            app.add_message(
+                ChatRole::System,
+                format!("delegating to {} sub-agent: {}", agent_type.name(), task),
+            );
         }
         ObserverEvent::DelegateComplete(summary) => {
             // Pairs with the Delegate message above to close the lifecycle.
             // Show status, a trimmed summary, and budget signal so the user
             // can tell the sub-agent actually finished (not hung).
-            let status = if summary.completed { "✓" } else { "⚠ (incomplete)" };
+            let status = if summary.completed {
+                "✓"
+            } else {
+                "⚠ (incomplete)"
+            };
             let kind = summary.agent_kind.name();
-            let budget_tag = if summary.budget_exceeded { " · budget exceeded" } else { "" };
+            let budget_tag = if summary.budget_exceeded {
+                " · budget exceeded"
+            } else {
+                ""
+            };
             let body = summary.summary.trim();
             let preview: String = if body.len() > 280 {
                 // char-boundary-safe truncation for CJK
-                let end = body.char_indices()
+                let end = body
+                    .char_indices()
                     .take_while(|(i, _)| *i < 280)
                     .last()
                     .map(|(i, c)| i + c.len_utf8())
@@ -1717,7 +2043,10 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             };
             app.add_message(
                 ChatRole::System,
-                format!("{} {} sub-agent finished{}: {}{}", status, kind, budget_tag, preview, key_findings),
+                format!(
+                    "{} {} sub-agent finished{}: {}{}",
+                    status, kind, budget_tag, preview, key_findings
+                ),
             );
         }
         ObserverEvent::ParadigmSwitch(paradigm) => {
@@ -1738,10 +2067,10 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // Flush any remaining buffered stream text before marking as done
             app.flush_stream_buffer();
             app.stop_thinking(); // stop timer; last run duration retained for dim display
-            // Remove useless thinking bubbles: the "Processing your request..."
-            // placeholder (model never produced thinking) AND any empty thinking
-            // bubble (model emitted an empty Thinking block). Both leave blank
-            // cards that add clutter, so drop them on completion.
+                                 // Remove useless thinking bubbles: the "Processing your request..."
+                                 // placeholder (model never produced thinking) AND any empty thinking
+                                 // bubble (model emitted an empty Thinking block). Both leave blank
+                                 // cards that add clutter, so drop them on completion.
             app.messages.retain(|m| {
                 if m.role == ChatRole::Thinking
                     && (m.content == "Processing your request..." || m.content.trim().is_empty())
@@ -1809,7 +2138,9 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // round of thinking stays attached to the answer it precedes,
             // instead of all thinking accumulating into the first round's
             // block at the top (which then scrolls off-screen).
-            let is_trailing_thinking = app.messages.last()
+            let is_trailing_thinking = app
+                .messages
+                .last()
                 .map(|m| m.role == ChatRole::Thinking)
                 .unwrap_or(false);
             if is_trailing_thinking {
@@ -1841,17 +2172,20 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.plan_state = plan;
             if was_none && app.plan_state.is_some() {
                 if let Some(ps) = &app.plan_state {
-                    app.add_message(ChatRole::System, format!(
-                        "📋 Plan created — {} steps tracked in the panel above.",
-                        ps.steps.len()
-                    ));
+                    app.add_message(
+                        ChatRole::System,
+                        format!(
+                            "📋 Plan created — {} steps tracked in the panel above.",
+                            ps.steps.len()
+                        ),
+                    );
                 }
             }
             app.dirty = true;
         }
         ObserverEvent::Error(msg) => {
             app.stop_thinking(); // run ended via error; retain duration for dim display
-            // Run ended (via error) — dismiss the plan panel too.
+                                 // Run ended (via error) — dismiss the plan panel too.
             app.plan_state = None;
             app.add_message(ChatRole::Error, msg);
         }
@@ -1861,7 +2195,11 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.stop_thinking();
             app.add_message(ChatRole::System, msg);
         }
-        ObserverEvent::CompactResult { summary, removed_count, retained } => {
+        ObserverEvent::CompactResult {
+            summary,
+            removed_count,
+            retained,
+        } => {
             // `/compact` background summarization finished. The backend
             // Conversation was already replaced in place by AppSession::compact
             // (summary system message + retained recent turns) — the model sees
@@ -1873,14 +2211,20 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.render_cache.invalidate_all();
             app.messages.clear();
             if summary.is_empty() {
-                app.add_message(ChatRole::System,
-                    "Conversation too short to compact — nothing to summarize.");
+                app.add_message(
+                    ChatRole::System,
+                    "Conversation too short to compact — nothing to summarize.",
+                );
             } else {
-                app.add_message(ChatRole::System, format!(
-                    "📋 Conversation compacted: {} older messages summarized into the \
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "📋 Conversation compacted: {} older messages summarized into the \
                      session context. Work continues in this session — the summary is \
                      visible to the model.\n\n--- Summary ---\n{}",
-                    removed_count, summary));
+                        removed_count, summary
+                    ),
+                );
                 // Re-append retained recent turns (user/assistant only) in order.
                 for (role, text) in &retained {
                     match role.as_str() {
@@ -1900,12 +2244,20 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
         }
         ObserverEvent::TokenUsageUpdate(usage) => {
             // Accumulate raw usage (some providers report real data, others 0)
-            let iter_prompt = if usage.prompt > 0 { usage.prompt }
-                else if !app.messages.is_empty() { app.estimate_tokens_from_messages() * 3 / 4 }
-                else { 0 };
-            let iter_completion = if usage.completion > 0 { usage.completion }
-                else if !app.messages.is_empty() { app.estimate_tokens_from_messages() / 4 }
-                else { 0 };
+            let iter_prompt = if usage.prompt > 0 {
+                usage.prompt
+            } else if !app.messages.is_empty() {
+                app.estimate_tokens_from_messages() * 3 / 4
+            } else {
+                0
+            };
+            let iter_completion = if usage.completion > 0 {
+                usage.completion
+            } else if !app.messages.is_empty() {
+                app.estimate_tokens_from_messages() / 4
+            } else {
+                0
+            };
             let iter_total = iter_prompt + iter_completion;
 
             app.token_usage.prompt += iter_prompt;
@@ -1970,9 +2322,13 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
             }
             app.dirty = true;
             // Invalidate approval message cache to re-render with new selection
-            if let Some(last_approval_id) = app.messages.iter().rev()
+            if let Some(last_approval_id) = app
+                .messages
+                .iter()
+                .rev()
                 .find(|m| m.role == ChatRole::Approval)
-                .map(|m| m.id.clone()) {
+                .map(|m| m.id.clone())
+            {
                 app.render_cache.invalidate(&last_approval_id);
             }
             return;
@@ -1985,9 +2341,13 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
                 app.approval_selected_index += 1;
             }
             app.dirty = true;
-            if let Some(last_approval_id) = app.messages.iter().rev()
+            if let Some(last_approval_id) = app
+                .messages
+                .iter()
+                .rev()
                 .find(|m| m.role == ChatRole::Approval)
-                .map(|m| m.id.clone()) {
+                .map(|m| m.id.clone())
+            {
                 app.render_cache.invalidate(&last_approval_id);
             }
             return;
@@ -2002,25 +2362,54 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
             // Enter: confirm currently selected option
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 match app.approval_selected_index {
-                    0 => { // Y: Approve
-                        app.add_message(ChatRole::System, format!("✅ Approved: {}", state.tool_name));
+                    0 => {
+                        // Y: Approve
+                        app.add_message(
+                            ChatRole::System,
+                            format!("✅ Approved: {}", state.tool_name),
+                        );
                         oneai_core::InteractionResponse::Proceed
                     }
-                    1 => { // N: Deny
-                        app.add_message(ChatRole::System, format!("❌ Denied: {}", state.tool_name));
-                        oneai_core::InteractionResponse::Abort { reason: "User denied via TUI".to_string() }
+                    1 => {
+                        // N: Deny
+                        app.add_message(
+                            ChatRole::System,
+                            format!("❌ Denied: {}", state.tool_name),
+                        );
+                        oneai_core::InteractionResponse::Abort {
+                            reason: "User denied via TUI".to_string(),
+                        }
                     }
-                    2 => { // M: Modify → Revise with feedback
-                        app.add_message(ChatRole::System, format!("📝 Modify requested for: {} (rejected with feedback)", state.tool_name));
-                        oneai_core::InteractionResponse::Revise { feedback: "User wants to modify the tool arguments".to_string() }
+                    2 => {
+                        // M: Modify → Revise with feedback
+                        app.add_message(
+                            ChatRole::System,
+                            format!(
+                                "📝 Modify requested for: {} (rejected with feedback)",
+                                state.tool_name
+                            ),
+                        );
+                        oneai_core::InteractionResponse::Revise {
+                            feedback: "User wants to modify the tool arguments".to_string(),
+                        }
                     }
-                    3 => { // A: Always
+                    3 => {
+                        // A: Always
                         app.session_allowlist.insert(state.tool_name.clone());
-                        app.add_message(ChatRole::System, format!("✅ Always approved: {} (added to session allowlist)", state.tool_name));
+                        app.add_message(
+                            ChatRole::System,
+                            format!(
+                                "✅ Always approved: {} (added to session allowlist)",
+                                state.tool_name
+                            ),
+                        );
                         oneai_core::InteractionResponse::Proceed
                     }
                     _ => {
-                        app.add_message(ChatRole::System, format!("✅ Approved: {}", state.tool_name));
+                        app.add_message(
+                            ChatRole::System,
+                            format!("✅ Approved: {}", state.tool_name),
+                        );
                         oneai_core::InteractionResponse::Proceed
                     }
                 }
@@ -2028,33 +2417,57 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
 
             // Y: Approve (shortcut)
             (KeyModifiers::NONE, KeyCode::Char('y')) | (KeyModifiers::NONE, KeyCode::Char('Y')) => {
-                app.add_message(ChatRole::System, format!("✅ Approved: {}", state.tool_name));
+                app.add_message(
+                    ChatRole::System,
+                    format!("✅ Approved: {}", state.tool_name),
+                );
                 oneai_core::InteractionResponse::Proceed
             }
 
             // N: Deny (shortcut)
             (KeyModifiers::NONE, KeyCode::Char('n')) | (KeyModifiers::NONE, KeyCode::Char('N')) => {
                 app.add_message(ChatRole::System, format!("❌ Denied: {}", state.tool_name));
-                oneai_core::InteractionResponse::Abort { reason: "User denied via TUI".to_string() }
+                oneai_core::InteractionResponse::Abort {
+                    reason: "User denied via TUI".to_string(),
+                }
             }
 
             // A: Always (shortcut)
             (KeyModifiers::NONE, KeyCode::Char('a')) | (KeyModifiers::NONE, KeyCode::Char('A')) => {
                 app.session_allowlist.insert(state.tool_name.clone());
-                app.add_message(ChatRole::System, format!("✅ Always approved: {} (added to session allowlist)", state.tool_name));
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "✅ Always approved: {} (added to session allowlist)",
+                        state.tool_name
+                    ),
+                );
                 oneai_core::InteractionResponse::Proceed
             }
 
             // M: Modify (shortcut) → Revise with feedback
             (KeyModifiers::NONE, KeyCode::Char('m')) | (KeyModifiers::NONE, KeyCode::Char('M')) => {
-                app.add_message(ChatRole::System, format!("📝 Modify requested for: {} (rejected with feedback)", state.tool_name));
-                oneai_core::InteractionResponse::Revise { feedback: "User wants to modify the tool arguments".to_string() }
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "📝 Modify requested for: {} (rejected with feedback)",
+                        state.tool_name
+                    ),
+                );
+                oneai_core::InteractionResponse::Revise {
+                    feedback: "User wants to modify the tool arguments".to_string(),
+                }
             }
 
             // Esc: deny and cancel
             (_, KeyCode::Esc) => {
-                app.add_message(ChatRole::System, format!("❌ Cancelled: {}", state.tool_name));
-                oneai_core::InteractionResponse::Abort { reason: "User cancelled via TUI".to_string() }
+                app.add_message(
+                    ChatRole::System,
+                    format!("❌ Cancelled: {}", state.tool_name),
+                );
+                oneai_core::InteractionResponse::Abort {
+                    reason: "User cancelled via TUI".to_string(),
+                }
             }
 
             // Unknown key: put the state back and ignore
@@ -2102,7 +2515,10 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                     if let Some(tx) = reply_tx {
                         let _ = tx.send(oneai_core::InteractionResponse::Revise { feedback });
                     }
-                    app.add_message(ChatRole::System, "↩️ Plan revise feedback sent — model will re-plan.");
+                    app.add_message(
+                        ChatRole::System,
+                        "↩️ Plan revise feedback sent — model will re-plan.",
+                    );
                 }
                 app.is_thinking = true;
                 app.dirty = true;
@@ -2127,7 +2543,7 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             Some(p) => p,
             None => return 0,
         };
-        let steps_len = steps.len() as usize;
+        let steps_len = steps.len();
         // Mirror draw_plan_approval's height cap (steps + 8, capped at 20) and
         // subtract border + buttons row (3) for the visible body. The renderer
         // clamps again, so this only needs to be a reasonable bound.
@@ -2145,19 +2561,16 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             };
             app.dirty = true;
         }
-        (KeyModifiers::NONE, KeyCode::Tab)
-        | (KeyModifiers::NONE, KeyCode::Right) => {
+        (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Right) => {
             // Tab/→ cycle forwards (wraps to first).
             app.plan_approval_selected_index = (app.plan_approval_selected_index + 1) % count;
             app.dirty = true;
         }
-        (KeyModifiers::NONE, KeyCode::Up)
-        | (KeyModifiers::NONE, KeyCode::Char('j')) => {
+        (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('j')) => {
             app.plan_approval_scroll = app.plan_approval_scroll.saturating_sub(1);
             app.dirty = true;
         }
-        (KeyModifiers::NONE, KeyCode::Down)
-        | (KeyModifiers::NONE, KeyCode::Char('k')) => {
+        (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
             let max = scroll_max(app);
             app.plan_approval_scroll = (app.plan_approval_scroll + 1).min(max);
             app.dirty = true;
@@ -2194,7 +2607,10 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                 1 => {
                     // Revise — open inline input box, plan stays pending.
                     app.plan_revise_input = Some(String::new());
-                    app.add_message(ChatRole::System, "✏️ Enter revise feedback, then Enter (Esc to cancel).");
+                    app.add_message(
+                        ChatRole::System,
+                        "✏️ Enter revise feedback, then Enter (Esc to cancel).",
+                    );
                 }
                 _ => {
                     // Reject (index 2)
@@ -2204,7 +2620,10 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                                 reason: "User rejected plan".to_string(),
                             });
                         }
-                        app.add_message(ChatRole::System, "↩️ Plan rejected — revise and re-submit (exit_plan_mode).");
+                        app.add_message(
+                            ChatRole::System,
+                            "↩️ Plan rejected — revise and re-submit (exit_plan_mode).",
+                        );
                     }
                     app.is_thinking = true;
                 }
@@ -2218,7 +2637,10 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                         reason: "User rejected plan".to_string(),
                     });
                 }
-                app.add_message(ChatRole::System, "↩️ Plan rejected (Esc) — revise and re-submit.");
+                app.add_message(
+                    ChatRole::System,
+                    "↩️ Plan rejected (Esc) — revise and re-submit.",
+                );
             }
             app.is_thinking = true;
             app.dirty = true;
@@ -2247,8 +2669,13 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                 let feedback = std::mem::take(buf);
                 app.plan_revise_input = None;
                 if let Some(state) = app.plan_decision_pending.take() {
-                    let _ = state.reply_tx.send(oneai_core::InteractionResponse::Revise { feedback });
-                    app.add_message(ChatRole::System, "↩️ Custom decision sent — planner will use it.");
+                    let _ = state
+                        .reply_tx
+                        .send(oneai_core::InteractionResponse::Revise { feedback });
+                    app.add_message(
+                        ChatRole::System,
+                        "↩️ Custom decision sent — planner will use it.",
+                    );
                 }
                 app.is_thinking = true;
                 app.dirty = true;
@@ -2301,7 +2728,10 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                 let opt = state.options.get(state.selected).cloned();
                 let resp = match opt {
                     Some(o) => {
-                        app.add_message(ChatRole::System, format!("✅ Chose: {} ({})", o.id, o.label));
+                        app.add_message(
+                            ChatRole::System,
+                            format!("✅ Chose: {} ({})", o.id, o.label),
+                        );
                         oneai_core::InteractionResponse::Choose { option_id: o.id }
                     }
                     None => oneai_core::InteractionResponse::Proceed,
@@ -2313,7 +2743,10 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
         }
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             app.plan_revise_input = Some(String::new());
-            app.add_message(ChatRole::System, "✏️ Enter custom decision, then Enter (Esc to cancel).");
+            app.add_message(
+                ChatRole::System,
+                "✏️ Enter custom decision, then Enter (Esc to cancel).",
+            );
             app.dirty = true;
         }
         (_, KeyCode::Esc) => {

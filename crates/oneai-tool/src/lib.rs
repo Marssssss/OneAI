@@ -15,32 +15,34 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
-pub mod registry;
-pub mod local_tools;
-pub mod mcp_tools;
-pub mod mcp_real;
-pub mod interaction_gate;
-pub mod executor;
-pub mod tool_interfaces;
 pub mod apply_patch;
+pub mod executor;
+pub mod interaction_gate;
+pub mod local_tools;
+pub mod mcp_real;
+pub mod mcp_tools;
+pub mod registry;
 pub mod sandbox;
+pub mod tool_interfaces;
 
 // Explicit imports to avoid ambiguity between local_tools and tool_interfaces
 // (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
-pub use registry::*;
-pub use local_tools::{FileWriteTool, CalculatorTool};
-pub use mcp_tools::*;
-pub use mcp_real::{McpConnection, McpFramingParser, McpServerConfig, McpTransport, McpToolInfo};
-pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
-pub use mcp_real::McpServerManager as RealMcpServerManager;
-pub use mcp_real::{default_mcp_configs, optional_mcp_configs};
-pub use interaction_gate::*;
+pub use apply_patch::{parse_unified_diff, ApplyPatchTool, DiffHunk, DiffLine};
 pub use executor::*;
+pub use interaction_gate::*;
+pub use local_tools::{CalculatorTool, FileWriteTool};
+pub use mcp_real::McpServerManager as RealMcpServerManager;
+pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
+pub use mcp_real::{default_mcp_configs, optional_mcp_configs};
+pub use mcp_real::{McpConnection, McpFramingParser, McpServerConfig, McpToolInfo, McpTransport};
+pub use mcp_tools::*;
+pub use registry::*;
+pub use sandbox::{
+    default_sandbox_backend, DockerBackend, RegexBackend, SandboxBackend, SeatbeltBackend,
+    WrappedCommand,
+};
 pub use tool_interfaces::*;
-pub use apply_patch::{ApplyPatchTool, DiffHunk, DiffLine, parse_unified_diff};
-pub use sandbox::{SandboxBackend, SeatbeltBackend, DockerBackend, RegexBackend, WrappedCommand, default_sandbox_backend};
-pub use tool_interfaces::{WebSearchTool, SearchResult};
+pub use tool_interfaces::{SearchResult, WebSearchTool};
 
 #[cfg(test)]
 mod tests {
@@ -79,7 +81,9 @@ mod tests {
         let calc_tool = std::sync::Arc::new(CalculatorTool::new());
         registry.register(calc_tool).await.unwrap();
 
-        let result = registry.execute("calculator", serde_json::json!({"expression": "2 + 3"})).await;
+        let result = registry
+            .execute("calculator", serde_json::json!({"expression": "2 + 3"}))
+            .await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.success);
@@ -100,33 +104,51 @@ mod tests {
         assert_eq!(tool.risk_level(), RiskLevel::Low);
 
         // Test basic arithmetic
-        let result = tool.execute(serde_json::json!({"expression": "2 + 3"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "2 + 3"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5");
 
         // Test multiplication
-        let result = tool.execute(serde_json::json!({"expression": "3 * 4"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "3 * 4"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "12");
 
         // Test parentheses
-        let result = tool.execute(serde_json::json!({"expression": "(2 + 3) * 4"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "(2 + 3) * 4"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "20");
 
         // Test division
-        let result = tool.execute(serde_json::json!({"expression": "10 / 2"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "10 / 2"}))
+            .await
+            .unwrap();
         assert!(result.success);
 
         // Test negative number
-        let result = tool.execute(serde_json::json!({"expression": "-5 + 10"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "-5 + 10"}))
+            .await
+            .unwrap();
         assert!(result.success);
     }
 
     #[tokio::test]
     async fn test_calculator_division_by_zero() {
         let tool = CalculatorTool::new();
-        let result = tool.execute(serde_json::json!({"expression": "10 / 0"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "10 / 0"}))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.is_some());
     }
@@ -134,14 +156,20 @@ mod tests {
     #[tokio::test]
     async fn test_calculator_invalid_expression() {
         let tool = CalculatorTool::new();
-        let result = tool.execute(serde_json::json!({"expression": "abc"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "abc"}))
+            .await
+            .unwrap();
         assert!(!result.success);
     }
 
     #[tokio::test]
     async fn test_calculator_empty_expression() {
         let tool = CalculatorTool::new();
-        let result = tool.execute(serde_json::json!({"expression": ""})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": ""}))
+            .await
+            .unwrap();
         assert!(!result.success);
     }
 
@@ -179,15 +207,26 @@ mod tests {
         let tmp = std::env::temp_dir();
         // Use a unique nested path that definitely doesn't exist yet.
         let unique = format!("oneai_write_test_{}", std::process::id());
-        let nested = tmp.join(&unique).join("nested").join("dir").join("file.txt");
+        let nested = tmp
+            .join(&unique)
+            .join("nested")
+            .join("dir")
+            .join("file.txt");
         // Sanity: parent really doesn't exist before the call.
         assert!(!nested.parent().unwrap().exists());
 
-        let result = tool.execute(serde_json::json!({
-            "path": nested.to_str().unwrap(),
-            "content": "hello",
-        })).await.unwrap();
-        assert!(result.success, "write_file should succeed: {:?}", result.error);
+        let result = tool
+            .execute(serde_json::json!({
+                "path": nested.to_str().unwrap(),
+                "content": "hello",
+            }))
+            .await
+            .unwrap();
+        assert!(
+            result.success,
+            "write_file should succeed: {:?}",
+            result.error
+        );
         assert_eq!(std::fs::read_to_string(&nested).unwrap(), "hello");
 
         // Cleanup
@@ -215,7 +254,10 @@ mod tests {
             "cat <<EOF > /tmp/oneai_shell_test.txt\nhello\nEOF",
         ];
         for cmd in cases {
-            let result = tool.execute(serde_json::json!({"command": cmd})).await.unwrap();
+            let result = tool
+                .execute(serde_json::json!({"command": cmd}))
+                .await
+                .unwrap();
             assert!(!result.success, "expected rejection for: {cmd}");
             let err = result.error.unwrap_or_default();
             assert!(
@@ -348,14 +390,12 @@ mod tests {
     #[test]
     fn test_mcp_server_manager() {
         let mut manager = McpServerManager::new();
-        let tools = vec![
-            McpToolWrapper::new(
-                "search".to_string(),
-                "Search tool".to_string(),
-                serde_json::json!({}),
-                "server1".to_string(),
-            ),
-        ];
+        let tools = vec![McpToolWrapper::new(
+            "search".to_string(),
+            "Search tool".to_string(),
+            serde_json::json!({}),
+            "server1".to_string(),
+        )];
         manager.register_server_tools("server1".to_string(), tools);
 
         assert_eq!(manager.server_names().len(), 1);
@@ -365,7 +405,9 @@ mod tests {
     #[tokio::test]
     async fn test_deny_all_interaction_gate() {
         use oneai_core::traits::InteractionGate;
-        use oneai_core::{ApprovalRequest, InteractionRequest, InteractionResponse, PermissionLevel};
+        use oneai_core::{
+            ApprovalRequest, InteractionRequest, InteractionResponse, PermissionLevel,
+        };
 
         let gate = DenyAllInteractionGate;
         assert!(gate.enabled(oneai_core::InteractionPoint::ToolApproval));

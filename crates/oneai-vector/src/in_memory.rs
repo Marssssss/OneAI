@@ -33,7 +33,12 @@ impl InMemoryVectorBackend {
 
 #[async_trait]
 impl VectorBackend for InMemoryVectorBackend {
-    async fn upsert(&self, id: &str, embedding: &[f32], metadata: Metadata) -> oneai_core::Result<()> {
+    async fn upsert(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        metadata: Metadata,
+    ) -> oneai_core::Result<()> {
         if embedding.len() != self.dim {
             return Err(oneai_core::OneAIError::Rag(format!(
                 "InMemoryVectorBackend: dim mismatch (got {}, expected {})",
@@ -77,7 +82,11 @@ impl VectorBackend for InMemoryVectorBackend {
             })
             .collect();
         // Descending by score.
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(top_k);
         Ok(scored)
     }
@@ -110,15 +119,27 @@ mod tests {
     #[tokio::test]
     async fn upsert_search_filter_delete() {
         let be = InMemoryVectorBackend::new(4);
-        be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::from([("k".into(), "x".into())]))
-            .await
-            .unwrap();
-        be.upsert("b", &[0.11, 0.21, 0.31, 0.41], Metadata::from([("k".into(), "y".into())]))
-            .await
-            .unwrap();
-        be.upsert("c", &[0.9, 0.8, 0.7, 0.6], Metadata::from([("k".into(), "x".into())]))
-            .await
-            .unwrap();
+        be.upsert(
+            "a",
+            &[0.1, 0.2, 0.3, 0.4],
+            Metadata::from([("k".into(), "x".into())]),
+        )
+        .await
+        .unwrap();
+        be.upsert(
+            "b",
+            &[0.11, 0.21, 0.31, 0.41],
+            Metadata::from([("k".into(), "y".into())]),
+        )
+        .await
+        .unwrap();
+        be.upsert(
+            "c",
+            &[0.9, 0.8, 0.7, 0.6],
+            Metadata::from([("k".into(), "x".into())]),
+        )
+        .await
+        .unwrap();
 
         // Nearest to a is b, then c.
         let hits = be.search(&[0.1, 0.2, 0.3, 0.4], 3, None).await.unwrap();
@@ -133,12 +154,17 @@ mod tests {
         assert!(hits.iter().all(|h| h.metadata["k"] == "x"));
 
         // Upsert replaces.
-        be.upsert("a", &[0.9, 0.8, 0.7, 0.6], Metadata::new()).await.unwrap();
+        be.upsert("a", &[0.9, 0.8, 0.7, 0.6], Metadata::new())
+            .await
+            .unwrap();
         let hits = be.search(&[0.9, 0.8, 0.7, 0.6], 2, None).await.unwrap();
         assert!(hits.iter().any(|h| h.id == "a"));
 
         be.delete("b").await.unwrap();
-        let hits = be.search(&[0.11, 0.21, 0.31, 0.41], 10, None).await.unwrap();
+        let hits = be
+            .search(&[0.11, 0.21, 0.31, 0.41], 10, None)
+            .await
+            .unwrap();
         assert!(!hits.iter().any(|h| h.id == "b"));
     }
 

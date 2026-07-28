@@ -76,7 +76,10 @@ impl EmbeddingService for BgeM3Embedder {
         let tt_arr = Array2::<i64>::from_shape_vec((1, seq), tt)
             .map_err(|e| OneAIError::Embedding(format!("ndarray tt: {e}")))?;
 
-        let mut session = self.session.lock().map_err(|e| OneAIError::Embedding(format!("session lock: {e}")))?;
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|e| OneAIError::Embedding(format!("session lock: {e}")))?;
         let outputs = session
             .run(ort::inputs![
                 "input_ids" => TensorRef::from_array_view(&ids_arr).map_err(|e| OneAIError::Embedding(format!("input_ids: {e}")))?,
@@ -156,9 +159,24 @@ impl BgeM3Embedder {
             Ok(e) => e,
             Err(_) => return (Vec::new(), Vec::new(), Vec::new()),
         };
-        let ids: Vec<i64> = enc.get_ids().iter().take(MAX_LEN).map(|v| *v as i64).collect();
-        let mask: Vec<i64> = enc.get_attention_mask().iter().take(MAX_LEN).map(|v| *v as i64).collect();
-        let tt: Vec<i64> = enc.get_type_ids().iter().take(MAX_LEN).map(|v| *v as i64).collect();
+        let ids: Vec<i64> = enc
+            .get_ids()
+            .iter()
+            .take(MAX_LEN)
+            .map(|v| *v as i64)
+            .collect();
+        let mask: Vec<i64> = enc
+            .get_attention_mask()
+            .iter()
+            .take(MAX_LEN)
+            .map(|v| *v as i64)
+            .collect();
+        let tt: Vec<i64> = enc
+            .get_type_ids()
+            .iter()
+            .take(MAX_LEN)
+            .map(|v| *v as i64)
+            .collect();
         (ids, mask, tt)
     }
 }

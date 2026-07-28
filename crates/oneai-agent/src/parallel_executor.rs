@@ -12,12 +12,12 @@
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
-use oneai_core::{ContentBlock, GlobalState, Reduction};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::StateReducer;
+use oneai_core::{ContentBlock, GlobalState, Reduction};
 
-use crate::scope_state::ScopeState;
 use crate::plan_agent::PlanStep;
+use crate::scope_state::ScopeState;
 
 /// Result of a parallel execution step.
 #[derive(Debug, Clone)]
@@ -102,9 +102,7 @@ impl ParallelExecutor {
             let executor = step_executor.clone();
             let step = step.clone();
 
-            join_set.spawn(async move {
-                executor(step, scope_state).await
-            });
+            join_set.spawn(async move { executor(step, scope_state).await });
         }
 
         // Collect all results
@@ -129,7 +127,8 @@ impl ParallelExecutor {
 
         // Merge reductions into global state
         let mut global_state = global_state.clone();
-        let all_reductions: Vec<Reduction> = step_results.iter()
+        let all_reductions: Vec<Reduction> = step_results
+            .iter()
             .flat_map(|r| r.reductions.clone())
             .collect();
 
@@ -168,7 +167,9 @@ impl ParallelExecutor {
                 // Create a reduction for this step's result
                 let reduction = Reduction::SetResult {
                     step_id: step_id.clone(),
-                    result: ContentBlock::Text { text: result_text.clone() },
+                    result: ContentBlock::Text {
+                        text: result_text.clone(),
+                    },
                 };
 
                 Ok(ParallelStepResult {
@@ -178,6 +179,7 @@ impl ParallelExecutor {
                     reductions: vec![reduction],
                 })
             }
-        }).await
+        })
+        .await
     }
 }

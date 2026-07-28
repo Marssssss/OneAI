@@ -11,10 +11,10 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use crate::{InteractionRequest, InteractionResponse};
 use crate::error::Result;
 use crate::traits::InteractionGate;
+use crate::{InteractionRequest, InteractionResponse};
+use async_trait::async_trait;
 
 // ─── PlatformInteractionGate ───────────────────────────────────────────
 
@@ -174,7 +174,7 @@ impl PlatformAdapter {
         Self {
             platform: Platform::current(),
             interaction_gate: Arc::new(StubPlatformInteractionGate::new(
-                Platform::current().name().to_lowercase()
+                Platform::current().name().to_lowercase(),
             )),
         }
     }
@@ -220,7 +220,10 @@ mod tests {
     fn test_platform_detection() {
         let platform = Platform::current();
         // On macOS, should detect macOS
-        assert!(matches!(platform, Platform::Macos | Platform::Linux | Platform::Windows));
+        assert!(matches!(
+            platform,
+            Platform::Macos | Platform::Linux | Platform::Windows
+        ));
     }
 
     #[test]

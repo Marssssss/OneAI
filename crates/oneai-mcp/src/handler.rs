@@ -27,7 +27,10 @@ pub struct McpHandler {
 impl McpHandler {
     /// Create a new handler with a tool registry and server info.
     pub fn new(tool_registry: Arc<ToolRegistry>, server_info: McpServerInfo) -> Self {
-        Self { tool_registry, server_info }
+        Self {
+            tool_registry,
+            server_info,
+        }
     }
 
     /// Handle an `initialize` request.
@@ -82,10 +85,7 @@ impl McpHandler {
     ///
     /// Returns all registered OneAI tools as MCP tool definitions.
     /// Each tool is converted using `McpServerHost::tool_to_mcp_definition()`.
-    pub async fn handle_tools_list(
-        &self,
-        id: Option<serde_json::Value>,
-    ) -> serde_json::Value {
+    pub async fn handle_tools_list(&self, id: Option<serde_json::Value>) -> serde_json::Value {
         let tool_names = self.tool_registry.list_names().await;
         let mut tool_definitions = Vec::new();
 
@@ -139,11 +139,10 @@ impl McpHandler {
         id: Option<serde_json::Value>,
         params: &serde_json::Value,
     ) -> serde_json::Value {
-        let tool_name = params.get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("");
+        let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
-        let args = params.get("arguments")
+        let args = params
+            .get("arguments")
             .cloned()
             .unwrap_or(serde_json::json!({}));
 
@@ -219,10 +218,7 @@ impl McpHandler {
     ///
     /// Returns a placeholder list of resources. In a full implementation,
     /// this would list available data resources that the MCP server exposes.
-    pub async fn handle_resources_list(
-        &self,
-        id: Option<serde_json::Value>,
-    ) -> serde_json::Value {
+    pub async fn handle_resources_list(&self, id: Option<serde_json::Value>) -> serde_json::Value {
         // Placeholder — OneAI doesn't currently expose resources via MCP
         serde_json::json!({
             "jsonrpc": "2.0",
@@ -236,10 +232,7 @@ impl McpHandler {
     /// Handle a `ping` request.
     ///
     /// Simple heartbeat — returns an empty result.
-    pub fn handle_ping(
-        &self,
-        id: Option<serde_json::Value>,
-    ) -> serde_json::Value {
+    pub fn handle_ping(&self, id: Option<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -258,12 +251,20 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         let handler = McpHandler::new(registry, McpServerInfo::default());
 
-        let response = handler.handle_initialize(Some(serde_json::json!(1)), None).await;
-        assert_eq!(response.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
+        let response = handler
+            .handle_initialize(Some(serde_json::json!(1)), None)
+            .await;
+        assert_eq!(
+            response.get("jsonrpc").and_then(|v| v.as_str()),
+            Some("2.0")
+        );
         assert_eq!(response.get("id").and_then(|v| v.as_u64()), Some(1));
 
         let result = response.get("result").unwrap();
-        assert_eq!(result.get("protocolVersion").and_then(|v| v.as_str()), Some("2024-11-05"));
+        assert_eq!(
+            result.get("protocolVersion").and_then(|v| v.as_str()),
+            Some("2024-11-05")
+        );
         assert!(result.get("capabilities").is_some());
         assert!(result.get("serverInfo").is_some());
     }
@@ -292,7 +293,10 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_list_with_tools() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         let handler = McpHandler::new(registry, McpServerInfo::default());
 
@@ -300,13 +304,19 @@ mod tests {
         let result = response.get("result").unwrap();
         let tools = result.get("tools").unwrap().as_array().unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].get("name").and_then(|n| n.as_str()), Some("calculator"));
+        assert_eq!(
+            tools[0].get("name").and_then(|n| n.as_str()),
+            Some("calculator")
+        );
     }
 
     #[tokio::test]
     async fn test_handle_tools_call_success() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         let handler = McpHandler::new(registry, McpServerInfo::default());
 
@@ -315,13 +325,18 @@ mod tests {
             "arguments": { "expression": "2+3" }
         });
 
-        let response = handler.handle_tools_call(Some(serde_json::json!(4)), &params).await;
+        let response = handler
+            .handle_tools_call(Some(serde_json::json!(4)), &params)
+            .await;
         assert_eq!(response.get("id").and_then(|v| v.as_u64()), Some(4));
 
         let result = response.get("result").unwrap();
         let content = result.get("content").unwrap().as_array().unwrap();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0].get("type").and_then(|t| t.as_str()), Some("text"));
+        assert_eq!(
+            content[0].get("type").and_then(|t| t.as_str()),
+            Some("text")
+        );
         assert_eq!(content[0].get("text").and_then(|t| t.as_str()), Some("5"));
     }
 
@@ -335,10 +350,17 @@ mod tests {
             "arguments": {}
         });
 
-        let response = handler.handle_tools_call(Some(serde_json::json!(5)), &params).await;
+        let response = handler
+            .handle_tools_call(Some(serde_json::json!(5)), &params)
+            .await;
         let error = response.get("error").unwrap();
         assert_eq!(error.get("code").and_then(|c| c.as_i64()), Some(-32601));
-        assert!(error.get("message").unwrap().as_str().unwrap().contains("not found"));
+        assert!(error
+            .get("message")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("not found"));
     }
 
     #[tokio::test]
@@ -348,7 +370,9 @@ mod tests {
 
         let params = serde_json::json!({});
 
-        let response = handler.handle_tools_call(Some(serde_json::json!(6)), &params).await;
+        let response = handler
+            .handle_tools_call(Some(serde_json::json!(6)), &params)
+            .await;
         let error = response.get("error").unwrap();
         assert_eq!(error.get("code").and_then(|c| c.as_i64()), Some(-32602));
     }
@@ -368,7 +392,9 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         let handler = McpHandler::new(registry, McpServerInfo::default());
 
-        let response = handler.handle_resources_list(Some(serde_json::json!(8))).await;
+        let response = handler
+            .handle_resources_list(Some(serde_json::json!(8)))
+            .await;
         let result = response.get("result").unwrap();
         let resources = result.get("resources").unwrap().as_array().unwrap();
         assert!(resources.is_empty());

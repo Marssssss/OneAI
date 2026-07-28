@@ -10,11 +10,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
 use oneai_core::error::Result;
 use oneai_core::platform::PlatformInteractionGate;
 use oneai_core::traits::InteractionGate;
-use oneai_tool::{ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate};
+use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
+use oneai_tool::{
+    ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate,
+};
 
 use crate::bridge_common::DesktopInteractionBridge;
 
@@ -130,18 +132,18 @@ fn show_messagebox_for_request(request: &InteractionRequest) -> InteractionRespo
         _ => return InteractionResponse::Proceed,
     };
 
-    use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::*;
 
     let title = HSTRING::from(format!("OneAI: Approve '{}'", approval.tool_name));
     let message = HSTRING::from(DesktopInteractionBridge::format_request(approval));
 
     // MB_YESNOCANCEL: Yes=Proceed, No=Abort, Cancel=ProceedWith (unchanged args)
     let result = MessageBoxW(
-        None,  // No parent window
+        None, // No parent window
         &message,
         &title,
-        MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2,  // Default to "No" (deny)
+        MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2, // Default to "No" (deny)
     );
 
     match result {

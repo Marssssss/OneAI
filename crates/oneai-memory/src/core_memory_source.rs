@@ -37,7 +37,10 @@ pub struct CoreMemorySource {
 impl CoreMemorySource {
     /// Create a source backed by the given core memory.
     pub fn new(core: Arc<CoreMemory>) -> Self {
-        Self { core, recall: RwLock::new(String::new()) }
+        Self {
+            core,
+            recall: RwLock::new(String::new()),
+        }
     }
 
     /// Set the per-turn recalled context (from archival `retrieve`).

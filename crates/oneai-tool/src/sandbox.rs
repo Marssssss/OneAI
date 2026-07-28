@@ -105,7 +105,10 @@ pub struct SeatbeltBackend {
 impl SeatbeltBackend {
     /// Create a new SeatbeltBackend with the given allowed directories.
     pub fn new(allowed_write_dirs: Vec<PathBuf>, allow_network: bool) -> Self {
-        Self { allowed_write_dirs, allow_network }
+        Self {
+            allowed_write_dirs,
+            allow_network,
+        }
     }
 
     /// Create a basic SeatbeltBackend for coding tasks.
@@ -140,10 +143,7 @@ impl SeatbeltBackend {
         // Allow file writes only in specified directories
         for dir in &self.allowed_write_dirs {
             let dir_str = dir.to_string_lossy();
-            rules.push(format!(
-                "(allow file-write* (subpath \"{}\"))",
-                dir_str
-            ));
+            rules.push(format!("(allow file-write* (subpath \"{}\"))", dir_str));
         }
 
         // Allow file writes to temp directories (needed for compilers)
@@ -267,17 +267,13 @@ impl SandboxBackend for DockerBackend {
         // Mount directories
         for dir in &self.mount_dirs {
             let dir_str = dir.to_string_lossy();
-            docker_args.push(format!(
-                "-v {}:{}", dir_str, dir_str
-            ));
+            docker_args.push(format!("-v {}:{}", dir_str, dir_str));
         }
 
         // Mount working directory specifically
         let wd_str = working_dir.to_string_lossy();
         if !self.mount_dirs.iter().any(|d| d == working_dir) {
-            docker_args.push(format!(
-                "-v {}:{}", wd_str, wd_str
-            ));
+            docker_args.push(format!("-v {}:{}", wd_str, wd_str));
         }
 
         // Set working directory in container
@@ -345,7 +341,10 @@ pub struct RegexBackend {
 impl RegexBackend {
     /// Create a new RegexBackend with the given allowed directories.
     pub fn new(allowed_dirs: Vec<PathBuf>, allow_network: bool) -> Self {
-        Self { allowed_dirs, allow_network }
+        Self {
+            allowed_dirs,
+            allow_network,
+        }
     }
 
     /// Create a basic RegexBackend for coding tasks.
@@ -397,7 +396,10 @@ impl SandboxBackend for RegexBackend {
 ///
 /// This is used by ShellTool to automatically select the appropriate
 /// sandbox backend based on the platform.
-pub fn default_sandbox_backend(project_dir: &Path, _allow_network: bool) -> Arc<dyn SandboxBackend> {
+pub fn default_sandbox_backend(
+    project_dir: &Path,
+    _allow_network: bool,
+) -> Arc<dyn SandboxBackend> {
     if cfg!(target_os = "macos") {
         let seatbelt = SeatbeltBackend::coding_defaults(project_dir);
         if seatbelt.is_available() {
@@ -425,7 +427,9 @@ mod tests {
     #[test]
     fn test_regex_backend_wrapping() {
         let backend = RegexBackend::coding_defaults(Path::new("/project"));
-        let result = backend.wrap_command("cargo build", Path::new("/project")).unwrap();
+        let result = backend
+            .wrap_command("cargo build", Path::new("/project"))
+            .unwrap();
         assert_eq!(result.shell_command, "cargo build");
         assert_eq!(result.working_dir, Path::new("/project"));
         assert!(result.allow_network);
@@ -460,7 +464,9 @@ mod tests {
     #[test]
     fn test_seatbelt_wrapping() {
         let backend = SeatbeltBackend::coding_defaults(Path::new("/project"));
-        let result = backend.wrap_command("cargo test", Path::new("/project")).unwrap();
+        let result = backend
+            .wrap_command("cargo test", Path::new("/project"))
+            .unwrap();
         assert!(result.shell_command.starts_with("sandbox-exec"));
         assert!(result.shell_command.contains("cargo test"));
     }
@@ -468,7 +474,9 @@ mod tests {
     #[test]
     fn test_docker_backend_wrapping() {
         let backend = DockerBackend::coding_defaults(Path::new("/project"));
-        let result = backend.wrap_command("cargo test", Path::new("/project")).unwrap();
+        let result = backend
+            .wrap_command("cargo test", Path::new("/project"))
+            .unwrap();
         assert!(result.shell_command.starts_with("docker run --rm"));
         assert!(result.shell_command.contains("-v /project:/project"));
         assert!(result.shell_command.contains("-w /project"));
@@ -477,8 +485,14 @@ mod tests {
 
     #[test]
     fn test_docker_no_network() {
-        let backend = DockerBackend::new("oneai-sandbox:latest", vec![PathBuf::from("/project")], false);
-        let result = backend.wrap_command("npm install", Path::new("/project")).unwrap();
+        let backend = DockerBackend::new(
+            "oneai-sandbox:latest",
+            vec![PathBuf::from("/project")],
+            false,
+        );
+        let result = backend
+            .wrap_command("npm install", Path::new("/project"))
+            .unwrap();
         assert!(result.shell_command.contains("--network none"));
     }
 

@@ -13,11 +13,11 @@
 //!
 //! Inspired by Codex CLI's `apply_patch` tool and Aider's similar capability.
 
+use crate::tool_interfaces::PermissionAwareTool;
 use async_trait::async_trait;
-use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
-use crate::tool_interfaces::PermissionAwareTool;
+use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
 
 // ─── DiffLine ────────────────────────────────────────────────────────────────
 
@@ -132,9 +132,10 @@ pub fn parse_unified_diff(diff_text: &str) -> Result<Vec<DiffHunk>> {
             // Extract the -X,Y +A,B part
             let parts: Vec<&str> = header.split_whitespace().collect();
             if parts.len() < 3 {
-                return Err(oneai_core::error::OneAIError::Agent(
-                    format!("Invalid hunk header: {}", line)
-                ));
+                return Err(oneai_core::error::OneAIError::Agent(format!(
+                    "Invalid hunk header: {}",
+                    line
+                )));
             }
 
             let old_part = parts[1]; // -X,Y
@@ -157,7 +158,11 @@ pub fn parse_unified_diff(diff_text: &str) -> Result<Vec<DiffHunk>> {
                 current_lines.push(DiffLine::Remove(line[1..].to_string()));
             } else if line.starts_with(' ') || line.is_empty() {
                 // Context line (or empty line which is a context line with empty content)
-                let content = if line.starts_with(' ') { line[1..].to_string() } else { String::new() };
+                let content = if line.starts_with(' ') {
+                    line[1..].to_string()
+                } else {
+                    String::new()
+                };
                 current_lines.push(DiffLine::Context(content));
             } else if line.starts_with("\\ ") {
                 // "No newline at end of file" marker — skip
@@ -215,7 +220,7 @@ fn parse_range_start(part: &str, prefix: char) -> usize {
 fn parse_range_count(part: &str, prefix: char) -> usize {
     let without_prefix = part.trim_start_matches(prefix);
     if let Some(idx) = without_prefix.find(',') {
-        without_prefix[idx+1..].parse::<usize>().unwrap_or(1)
+        without_prefix[idx + 1..].parse::<usize>().unwrap_or(1)
     } else {
         1
     }
@@ -238,7 +243,9 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
         // Handle new file creation (old_file is empty)
         if hunk.old_file.is_empty() {
             // Create new file from add lines
-            let new_lines: Vec<String> = hunk.lines.iter()
+            let new_lines: Vec<String> = hunk
+                .lines
+                .iter()
                 .filter_map(|l| match l {
                     DiffLine::Add(s) => Some(s.clone()),
                     _ => None,
@@ -266,7 +273,11 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
 
         // Find the position to apply the hunk
         // The hunk specifies old_start (1-based line number)
-        let start_idx = if hunk.old_start == 0 { 0 } else { hunk.old_start - 1 };
+        let start_idx = if hunk.old_start == 0 {
+            0
+        } else {
+            hunk.old_start - 1
+        };
 
         // Verify context lines match
         let mut context_match = true;
@@ -310,10 +321,14 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
             if search_start.is_some() {
                 // Re-apply with fuzzy match position
                 let idx = search_start.unwrap();
-                let remove_count = hunk.lines.iter()
+                let remove_count = hunk
+                    .lines
+                    .iter()
                     .filter(|l| matches!(l, DiffLine::Remove(_)))
                     .count();
-                let add_lines: Vec<String> = hunk.lines.iter()
+                let add_lines: Vec<String> = hunk
+                    .lines
+                    .iter()
                     .filter_map(|l| match l {
                         DiffLine::Add(s) => Some(s.clone()),
                         DiffLine::Context(s) => Some(s.clone()),
@@ -346,24 +361,33 @@ fn apply_hunks_to_content(content: &str, hunks: &[DiffHunk]) -> (String, Vec<Hun
                 message: format!(
                     "Context mismatch at line {} — expected '{}' but found '{}'",
                     hunk.old_start,
-                    hunk.lines.iter()
+                    hunk.lines
+                        .iter()
                         .filter_map(|l| match l {
                             DiffLine::Context(s) | DiffLine::Remove(s) => Some(s.clone()),
                             _ => None,
                         })
                         .next()
                         .unwrap_or_default(),
-                    if start_idx < lines.len() { &lines[start_idx] } else { "[EOF]" }
+                    if start_idx < lines.len() {
+                        &lines[start_idx]
+                    } else {
+                        "[EOF]"
+                    }
                 ),
             });
             continue;
         }
 
         // Apply the hunk: remove Remove lines, keep Context lines, add Add lines
-        let remove_count = hunk.lines.iter()
+        let remove_count = hunk
+            .lines
+            .iter()
             .filter(|l| matches!(l, DiffLine::Remove(_)))
             .count();
-        let add_lines: Vec<String> = hunk.lines.iter()
+        let add_lines: Vec<String> = hunk
+            .lines
+            .iter()
             .filter_map(|l| match l {
                 DiffLine::Add(s) => Some(s.clone()),
                 DiffLine::Context(s) => Some(s.clone()),
@@ -413,11 +437,10 @@ struct HunkApplyResult {
 /// then checks if subsequent context/remove lines match from that position.
 fn find_fuzzy_match(lines: &[String], hunk: &DiffHunk) -> Option<usize> {
     // Get the first non-Add line as anchor
-    let anchor = hunk.lines.iter()
-        .find_map(|l| match l {
-            DiffLine::Context(s) | DiffLine::Remove(s) => Some(s.clone()),
-            _ => None,
-        })?;
+    let anchor = hunk.lines.iter().find_map(|l| match l {
+        DiffLine::Context(s) | DiffLine::Remove(s) => Some(s.clone()),
+        _ => None,
+    })?;
 
     // Search for anchor line
     for (idx, line) in lines.iter().enumerate() {
@@ -462,11 +485,15 @@ fn find_fuzzy_match(lines: &[String], hunk: &DiffHunk) -> Option<usize> {
 pub struct ApplyPatchTool;
 
 impl ApplyPatchTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for ApplyPatchTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for ApplyPatchTool {
@@ -508,9 +535,7 @@ impl Tool for ApplyPatchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let patch = args.get("patch")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
 
         if patch.is_empty() {
             return Ok(ToolOutput {
@@ -541,7 +566,10 @@ impl Tool for ApplyPatchTool {
                     } else {
                         hunk.new_file.clone()
                     };
-                    file_hunks.entry(target_file).or_default().push(hunk.clone());
+                    file_hunks
+                        .entry(target_file)
+                        .or_default()
+                        .push(hunk.clone());
                 }
 
                 // Apply hunks per file
@@ -589,7 +617,8 @@ impl Tool for ApplyPatchTool {
                     };
 
                     // Apply hunks to content
-                    let (new_content, hunk_results) = apply_hunks_to_content(&content, &file_hunk_list);
+                    let (new_content, hunk_results) =
+                        apply_hunks_to_content(&content, file_hunk_list);
 
                     // Check if all hunks were applied successfully
                     let failed_hunks = hunk_results.iter().filter(|r| !r.applied).count();
@@ -617,10 +646,8 @@ impl Tool for ApplyPatchTool {
                     match write_result {
                         Ok(_) => {
                             let hunk_count = file_hunk_list.len();
-                            results.push(format!(
-                                "Applied {} hunk(s) to {}",
-                                hunk_count, file_path
-                            ));
+                            results
+                                .push(format!("Applied {} hunk(s) to {}", hunk_count, file_path));
                             files_changed += 1;
                         }
                         Err(e) => {
@@ -646,7 +673,9 @@ impl Tool for ApplyPatchTool {
                 Ok(ToolOutput {
                     success,
                     content: output_parts.join("\n"),
-                    error: if errors.is_empty() { None } else {
+                    error: if errors.is_empty() {
+                        None
+                    } else {
                         Some(format!("{} errors during patch application", errors.len()))
                     },
                 })

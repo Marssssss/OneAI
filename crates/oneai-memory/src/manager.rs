@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use oneai_core::{Conversation, MemoryEntry, MemoryFact, Message};
 use oneai_core::error::Result;
-use oneai_core::traits::{LlmProvider, MemoryPersistence, EmbeddingService, DiscardedSink};
+use oneai_core::traits::{DiscardedSink, EmbeddingService, LlmProvider, MemoryPersistence};
+use oneai_core::{Conversation, MemoryEntry, MemoryFact, Message};
 
-use crate::reflection::{MemoryReflection, EpisodicMemory};
+use crate::reflection::{EpisodicMemory, MemoryReflection};
 
 // `RecallStrategy` is defined canonically in `oneai-core` so that the
 // domain-level `MemoryProfile` and this runtime manager share one type.
@@ -277,7 +277,10 @@ impl MemoryManager {
     /// Existing embedded facts are re-indexed into the new backend (see
     /// [`MemoryFactStore::set_vector_backend`]), so this is safe to call after
     /// `load_persisted_facts` has populated the archive from SQLite.
-    pub async fn set_vector_backend(&self, backend: Option<Arc<dyn oneai_core::traits::VectorBackend>>) {
+    pub async fn set_vector_backend(
+        &self,
+        backend: Option<Arc<dyn oneai_core::traits::VectorBackend>>,
+    ) {
         self.fact_archive.set_vector_backend(backend).await;
     }
 
@@ -312,7 +315,10 @@ impl MemoryManager {
     /// persistence is configured, the invalidated state is also persisted so
     /// resume keeps it suppressed. Returns true if a live fact was invalidated.
     pub async fn invalidate_fact(&self, user_id: &str, subject: &str, predicate: &str) -> bool {
-        let hit = self.fact_archive.invalidate(user_id, subject, predicate).await;
+        let hit = self
+            .fact_archive
+            .invalidate(user_id, subject, predicate)
+            .await;
         if hit {
             if let Some(p) = &self.persistence {
                 // Persist the invalidated state: re-store the fact (its
@@ -385,7 +391,13 @@ impl MemoryManager {
         };
         match svc.embed(&text).await {
             Ok(emb) => fact.embedding = Some(emb),
-            Err(e) => tracing::warn!("fact embedding failed (key={}/{}/{}): {}", fact.user_id, fact.subject, fact.predicate, e),
+            Err(e) => tracing::warn!(
+                "fact embedding failed (key={}/{}/{}): {}",
+                fact.user_id,
+                fact.subject,
+                fact.predicate,
+                e
+            ),
         }
     }
 
@@ -449,7 +461,10 @@ impl MemoryManager {
             match svc.embed(query).await {
                 Ok(emb) => Some(emb),
                 Err(e) => {
-                    tracing::warn!("query embedding failed, falling back to keyword recall: {}", e);
+                    tracing::warn!(
+                        "query embedding failed, falling back to keyword recall: {}",
+                        e
+                    );
                     None
                 }
             }
@@ -527,7 +542,11 @@ impl MemoryManager {
         }
         // Gather up to 3 most-recent prior episodic facts to seed recursive
         // reflection. Sorted by updated_at descending.
-        let mut prior: Vec<_> = self.fact_archive.all().await.into_iter()
+        let mut prior: Vec<_> = self
+            .fact_archive
+            .all()
+            .await
+            .into_iter()
             .filter(|f| f.fact_type.as_str() == "episodic" && !f.superseded)
             .collect();
         prior.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -535,15 +554,25 @@ impl MemoryManager {
             None
         } else {
             Some(
-                prior.iter().take(3)
-                    .map(|f| format!("- ({}): {}", f.updated_at.to_rfc3339(), f.content.chars().take(280).collect::<String>()))
+                prior
+                    .iter()
+                    .take(3)
+                    .map(|f| {
+                        format!(
+                            "- ({}): {}",
+                            f.updated_at.to_rfc3339(),
+                            f.content.chars().take(280).collect::<String>()
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"),
             )
         };
 
         // Build the entry view the reflector expects from the live conversation.
-        let entries: Vec<MemoryEntry> = conversation.messages.iter()
+        let entries: Vec<MemoryEntry> = conversation
+            .messages
+            .iter()
             .filter(|m| !matches!(m.role, oneai_core::Role::System))
             .map(|m| {
                 let role = match m.role {
@@ -557,14 +586,17 @@ impl MemoryManager {
                     content: m.text_content(),
                     timestamp: chrono::Utc::now(),
                     embedding: None,
-                    metadata: std::collections::HashMap::from([
-                        ("role".to_string(), role.to_string()),
-                    ]),
+                    metadata: std::collections::HashMap::from([(
+                        "role".to_string(),
+                        role.to_string(),
+                    )]),
                 }
             })
             .collect();
 
-        let episodic = reflection.reflect_with_prior(session_id, &entries, prior_summary.as_deref()).await?;
+        let episodic = reflection
+            .reflect_with_prior(session_id, &entries, prior_summary.as_deref())
+            .await?;
         // Route through archive_facts so the episodic fact is embedded (§12.1)
         // and persisted in one place.
         self.archive_facts(vec![episodic.to_fact()]).await;
@@ -596,7 +628,9 @@ impl MemoryManager {
         };
 
         // Build the entry view the reflector expects from the live conversation.
-        let entries: Vec<MemoryEntry> = conversation.messages.iter()
+        let entries: Vec<MemoryEntry> = conversation
+            .messages
+            .iter()
             .filter(|m| !matches!(m.role, oneai_core::Role::System))
             .map(|m| {
                 let role = match m.role {
@@ -610,9 +644,10 @@ impl MemoryManager {
                     content: m.text_content(),
                     timestamp: chrono::Utc::now(),
                     embedding: None,
-                    metadata: std::collections::HashMap::from([
-                        ("role".to_string(), role.to_string()),
-                    ]),
+                    metadata: std::collections::HashMap::from([(
+                        "role".to_string(),
+                        role.to_string(),
+                    )]),
                 }
             })
             .collect();
@@ -666,7 +701,8 @@ impl MemoryManager {
             p.save_conversation(session_id, conversation).await?;
             tracing::info!(
                 "Saved session '{}': {} conversation messages",
-                session_id, conversation.messages.len()
+                session_id,
+                conversation.messages.len()
             );
             Ok(())
         } else {
@@ -733,15 +769,17 @@ impl ArchivalDiscardedSink {
 #[async_trait::async_trait]
 impl DiscardedSink for ArchivalDiscardedSink {
     async fn archive_discarded(&self, session_id: &str, discarded: Vec<Message>) -> Result<()> {
-        self.mm.archive_discarded_snapshot(session_id, discarded).await
+        self.mm
+            .archive_discarded_snapshot(session_id, discarded)
+            .await
     }
 }
 
 #[cfg(test)]
 mod manager_tests {
     use super::*;
-    use std::collections::HashMap;
     use oneai_core::MemoryEntry;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_recall_facts_from_archive() {
@@ -805,7 +843,11 @@ mod manager_tests {
         manager.archive_facts(vec![mk("npm")]).await;
         manager.archive_facts(vec![mk("pnpm")]).await;
         assert_eq!(manager.fact_archive().len().await, 1);
-        let f = manager.fact_archive().get("alice", "user.pm", "prefers").await.unwrap();
+        let f = manager
+            .fact_archive()
+            .get("alice", "user.pm", "prefers")
+            .await
+            .unwrap();
         assert_eq!(f.content, "pnpm");
     }
 
@@ -835,14 +877,21 @@ mod manager_tests {
             pinned: false,
         };
         manager.archive_facts(vec![mk("JWT")]).await;
-        assert!(manager.invalidate_fact("alice", "auth.scheme", "decided_to").await);
+        assert!(
+            manager
+                .invalidate_fact("alice", "auth.scheme", "decided_to")
+                .await
+        );
 
         // Recall for "auth"/"jwt" no longer returns the invalidated fact.
         let recalled = manager.recall_facts("jwt", 5).await.unwrap();
         assert!(recalled.is_empty());
 
         // The supersede history was recorded on the (still-present) fact.
-        let f = manager.get_fact("alice", "auth.scheme", "decided_to").await.unwrap();
+        let f = manager
+            .get_fact("alice", "auth.scheme", "decided_to")
+            .await
+            .unwrap();
         assert!(f.superseded);
         assert!(f.metadata.contains_key("_superseded_history"));
     }
@@ -853,7 +902,10 @@ mod manager_tests {
         // no-op (facts were already extracted inside the compressor).
         let manager = MemoryManager::new();
         let discarded = vec![oneai_core::Message::user("old turn")];
-        manager.archive_discarded_snapshot("sess", discarded).await.unwrap();
+        manager
+            .archive_discarded_snapshot("sess", discarded)
+            .await
+            .unwrap();
         // No panic, no error — that's the contract.
     }
 
@@ -869,11 +921,20 @@ mod manager_tests {
     // ─── §12.3: threshold-triggered mid-session reflection ──────────────────
 
     /// Mock LLM provider for the reflection prompt.
-    struct MockReflectProvider { resp: String }
-    impl MockReflectProvider { fn new(r: impl Into<String>) -> Self { Self { resp: r.into() } } }
+    struct MockReflectProvider {
+        resp: String,
+    }
+    impl MockReflectProvider {
+        fn new(r: impl Into<String>) -> Self {
+            Self { resp: r.into() }
+        }
+    }
     #[async_trait::async_trait]
     impl oneai_core::traits::LlmProvider for MockReflectProvider {
-        async fn infer(&self, _req: oneai_core::InferenceRequest) -> Result<oneai_core::InferenceResponse> {
+        async fn infer(
+            &self,
+            _req: oneai_core::InferenceRequest,
+        ) -> Result<oneai_core::InferenceResponse> {
             Ok(oneai_core::InferenceResponse {
                 message: oneai_core::Message::assistant(self.resp.clone()),
                 usage: oneai_core::TokenUsage::default(),
@@ -881,14 +942,26 @@ mod manager_tests {
                 metadata: HashMap::new(),
             })
         }
-        async fn infer_stream(&self, _req: oneai_core::InferenceRequest) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>> {
+        async fn infer_stream(
+            &self,
+            _req: oneai_core::InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
+        > {
             Err(oneai_core::error::OneAIError::Provider("no stream".into()))
         }
         fn capabilities(&self) -> oneai_core::ModelCapability {
-            oneai_core::ModelCapability { supports_multimodal: false, supports_streaming: false, supports_tools: false, context_window_size: 4096, max_output_tokens: 512 }
+            oneai_core::ModelCapability {
+                supports_multimodal: false,
+                supports_streaming: false,
+                supports_tools: false,
+                context_window_size: 4096,
+                max_output_tokens: 512,
+            }
         }
         fn config(&self) -> &oneai_core::ModelConfig {
-            static CONFIG: std::sync::OnceLock<oneai_core::ModelConfig> = std::sync::OnceLock::new();
+            static CONFIG: std::sync::OnceLock<oneai_core::ModelConfig> =
+                std::sync::OnceLock::new();
             CONFIG.get_or_init(oneai_core::ModelConfig::default)
         }
     }
@@ -901,7 +974,10 @@ mod manager_tests {
         );
         let conv = oneai_core::Conversation::new();
         // Below the 150.0 default threshold.
-        let r = manager.reflect_if_threshold("s", &conv, 10.0, 20).await.unwrap();
+        let r = manager
+            .reflect_if_threshold("s", &conv, 10.0, 20)
+            .await
+            .unwrap();
         assert!(r.is_none(), "should not reflect below threshold");
     }
 
@@ -914,7 +990,10 @@ mod manager_tests {
         let mut conv = oneai_core::Conversation::new();
         conv.add_message(oneai_core::Message::user("did important work"));
         // Above threshold + enough turns → fires.
-        let r = manager.reflect_if_threshold("s", &conv, 200.0, 10).await.unwrap();
+        let r = manager
+            .reflect_if_threshold("s", &conv, 200.0, 10)
+            .await
+            .unwrap();
         assert!(r.is_some(), "should reflect above threshold");
         // The resulting episodic fact is archived (and embedded if a service were set).
         let facts = manager.fact_archive().all().await;
@@ -947,12 +1026,16 @@ mod manager_tests {
             }
             // L2-normalize.
             let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-            for x in v.iter_mut() { *x /= norm; }
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
             Ok(v)
         }
         async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             let mut out = Vec::with_capacity(texts.len());
-            for t in texts { out.push(self.embed(t).await?); }
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
             Ok(out)
         }
         fn model(&self) -> oneai_core::traits::EmbeddingModel {
@@ -990,17 +1073,40 @@ mod manager_tests {
             MemoryManagerConfig::default(),
             Arc::new(HashEmbeddingService),
         );
-        mm.archive_facts(vec![make_fact_embed("alice", "user.package_manager", "prefers", "pnpm")]).await;
-        let f = mm.fact_archive().get("alice", "user.package_manager", "prefers").await.unwrap();
-        assert!(f.embedding.is_some(), "fact must be embedded at archive time");
+        mm.archive_facts(vec![make_fact_embed(
+            "alice",
+            "user.package_manager",
+            "prefers",
+            "pnpm",
+        )])
+        .await;
+        let f = mm
+            .fact_archive()
+            .get("alice", "user.package_manager", "prefers")
+            .await
+            .unwrap();
+        assert!(
+            f.embedding.is_some(),
+            "fact must be embedded at archive time"
+        );
     }
 
     #[tokio::test]
     async fn archive_facts_no_embedding_without_service() {
         // Without an embedding service, facts stay un-embedded (keyword recall).
         let mm = MemoryManager::new();
-        mm.archive_facts(vec![make_fact_embed("alice", "user.package_manager", "prefers", "pnpm")]).await;
-        let f = mm.fact_archive().get("alice", "user.package_manager", "prefers").await.unwrap();
+        mm.archive_facts(vec![make_fact_embed(
+            "alice",
+            "user.package_manager",
+            "prefers",
+            "pnpm",
+        )])
+        .await;
+        let f = mm
+            .fact_archive()
+            .get("alice", "user.package_manager", "prefers")
+            .await
+            .unwrap();
         assert!(f.embedding.is_none());
     }
 
@@ -1015,7 +1121,13 @@ mod manager_tests {
             Arc::new(HashEmbeddingService),
         );
         // Content with no byte overlap with the English query.
-        mm.archive_facts(vec![make_fact_embed("alice", "用户.包管理器", "偏好", "使用 pnpm 管理依赖")]).await;
+        mm.archive_facts(vec![make_fact_embed(
+            "alice",
+            "用户.包管理器",
+            "偏好",
+            "使用 pnpm 管理依赖",
+        )])
+        .await;
 
         // Keyword path: query "package manager" shares no bytes with the
         // Chinese subject/predicate/content → 0 hits.
@@ -1023,9 +1135,15 @@ mod manager_tests {
         assert!(kw.is_empty(), "keyword recall should miss the synonym fact");
 
         // Semantic path: embed the query, search_hybrid uses cosine.
-        let qemb = HashEmbeddingService.embed("package manager dependency").await.unwrap();
+        let qemb = HashEmbeddingService
+            .embed("package manager dependency")
+            .await
+            .unwrap();
         let sem = mm.fact_archive().search_semantic(&qemb, 5).await;
-        assert!(!sem.is_empty(), "semantic recall must surface the synonym fact");
+        assert!(
+            !sem.is_empty(),
+            "semantic recall must surface the synonym fact"
+        );
         assert_eq!(sem[0].subject, "用户.包管理器");
     }
 

@@ -217,13 +217,17 @@ impl WorktreeIsolation {
 
     /// Get the worktree directory path (where worktrees are stored).
     fn worktree_base_dir(&self) -> PathBuf {
-        self.config.worktree_dir.clone()
+        self.config
+            .worktree_dir
+            .clone()
             .unwrap_or_else(|| self.project_path.join(".oneai-worktrees"))
     }
 
     /// Generate a unique branch name for a worktree.
     fn generate_branch_name(&self, agent_kind: &str) -> String {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Include a timestamp-like component for uniqueness
         format!("{}{}-{}", self.config.branch_prefix, agent_kind, id)
     }
@@ -272,7 +276,10 @@ impl WorktreeIsolation {
     pub fn create(&self, agent_kind: &str) -> Result<WorktreeHandle> {
         if !self.config.enabled {
             // Read-only agents don't need isolation
-            tracing::info!("Worktree isolation disabled for '{}' agent — using project directory directly", agent_kind);
+            tracing::info!(
+                "Worktree isolation disabled for '{}' agent — using project directory directly",
+                agent_kind
+            );
             return Ok(WorktreeHandle {
                 worktree_path: self.project_path.clone(),
                 branch_name: String::new(),
@@ -298,24 +305,27 @@ impl WorktreeIsolation {
 
         // Create the worktree directory if it doesn't exist
         std::fs::create_dir_all(&base_dir).map_err(|e| {
-            oneai_core::error::OneAIError::Agent(
-                format!("Failed to create worktree directory '{}': {}", base_dir.display(), e)
-            )
+            oneai_core::error::OneAIError::Agent(format!(
+                "Failed to create worktree directory '{}': {}",
+                base_dir.display(),
+                e
+            ))
         })?;
 
         // The worktree path is <base_dir>/<branch_name>
         let worktree_path = base_dir.join(&branch_name);
 
         // Get current branch to branch from
-        let source_branch = self.current_branch()
-            .unwrap_or_else(|| "HEAD".to_string());
+        let source_branch = self.current_branch().unwrap_or_else(|| "HEAD".to_string());
 
         // Run: git worktree add <path> -b <branch> <source_branch>
         let output = std::process::Command::new("git")
             .args([
-                "worktree", "add",
+                "worktree",
+                "add",
                 worktree_path.to_str().unwrap_or("."),
-                "-b", &branch_name,
+                "-b",
+                &branch_name,
                 &source_branch,
             ])
             .current_dir(&self.project_path)
@@ -325,7 +335,9 @@ impl WorktreeIsolation {
             Ok(o) if o.status.success() => {
                 tracing::info!(
                     "Created git worktree for '{}' agent: branch='{}', path='{}'",
-                    agent_kind, branch_name, worktree_path.display()
+                    agent_kind,
+                    branch_name,
+                    worktree_path.display()
                 );
                 Ok(WorktreeHandle {
                     worktree_path,
@@ -403,7 +415,9 @@ impl WorktreeIsolation {
     pub fn merge_back(&self, handle: &WorktreeHandle) -> Result<MergeResult> {
         if !handle.is_isolated {
             // No isolation — nothing to merge
-            return Ok(MergeResult::Skipped { reason: "No worktree isolation was used".to_string() });
+            return Ok(MergeResult::Skipped {
+                reason: "No worktree isolation was used".to_string(),
+            });
         }
 
         // Check for changes
@@ -411,7 +425,9 @@ impl WorktreeIsolation {
         if !has_changes {
             tracing::info!("No changes in worktree — cleaning up without merge");
             self.cleanup(handle)?;
-            return Ok(MergeResult::Skipped { reason: "No changes made in worktree".to_string() });
+            return Ok(MergeResult::Skipped {
+                reason: "No changes made in worktree".to_string(),
+            });
         }
 
         // Commit any uncommitted changes in the worktree first
@@ -447,7 +463,10 @@ impl WorktreeIsolation {
 
         if let Ok(o) = add_output {
             if !o.status.success() {
-                tracing::warn!("git add -A failed in worktree: {}", String::from_utf8_lossy(&o.stderr).trim());
+                tracing::warn!(
+                    "git add -A failed in worktree: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
             }
         }
 
@@ -460,7 +479,7 @@ impl WorktreeIsolation {
         // git diff --cached --quiet exits with 1 if there are staged changes
         let has_staged = match status_output {
             Ok(o) => !o.status.success(), // Exit code 1 = has staged changes
-            Err(_) => true, // Assume there are changes if we can't check
+            Err(_) => true,               // Assume there are changes if we can't check
         };
 
         if has_staged {
@@ -472,7 +491,10 @@ impl WorktreeIsolation {
 
             match commit_output {
                 Ok(o) if o.status.success() => {
-                    tracing::info!("Committed worktree changes for branch '{}'", handle.branch_name);
+                    tracing::info!(
+                        "Committed worktree changes for branch '{}'",
+                        handle.branch_name
+                    );
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
@@ -532,18 +554,19 @@ impl WorktreeIsolation {
                     })
                 }
             }
-            Err(e) => {
-                Ok(MergeResult::Failed {
-                    branch_name: handle.branch_name.clone(),
-                    reason: format!("git merge command failed: {}", e),
-                })
-            }
+            Err(e) => Ok(MergeResult::Failed {
+                branch_name: handle.branch_name.clone(),
+                reason: format!("git merge command failed: {}", e),
+            }),
         }
     }
 
     /// Rebase the worktree branch onto the main branch, then fast-forward.
     fn rebase_branch(&self, handle: &WorktreeHandle) -> Result<MergeResult> {
-        tracing::info!("Rebasing worktree branch '{}' onto main", handle.branch_name);
+        tracing::info!(
+            "Rebasing worktree branch '{}' onto main",
+            handle.branch_name
+        );
 
         // First, rebase in the worktree
         let rebase_output = std::process::Command::new("git")
@@ -561,7 +584,10 @@ impl WorktreeIsolation {
 
                 match ff_output {
                     Ok(o2) if o2.status.success() => {
-                        tracing::info!("Successfully rebased and fast-forwarded branch '{}'", handle.branch_name);
+                        tracing::info!(
+                            "Successfully rebased and fast-forwarded branch '{}'",
+                            handle.branch_name
+                        );
                         if self.config.auto_cleanup {
                             self.cleanup(handle)?;
                         }
@@ -577,12 +603,10 @@ impl WorktreeIsolation {
                             reason: format!("Fast-forward failed: {}", stderr.trim()),
                         })
                     }
-                    Err(e) => {
-                        Ok(MergeResult::Failed {
-                            branch_name: handle.branch_name.clone(),
-                            reason: format!("git merge --ff-only command failed: {}", e),
-                        })
-                    }
+                    Err(e) => Ok(MergeResult::Failed {
+                        branch_name: handle.branch_name.clone(),
+                        reason: format!("git merge --ff-only command failed: {}", e),
+                    }),
                 }
             }
             Ok(o) => {
@@ -606,12 +630,10 @@ impl WorktreeIsolation {
                     })
                 }
             }
-            Err(e) => {
-                Ok(MergeResult::Failed {
-                    branch_name: handle.branch_name.clone(),
-                    reason: format!("git rebase command failed: {}", e),
-                })
-            }
+            Err(e) => Ok(MergeResult::Failed {
+                branch_name: handle.branch_name.clone(),
+                reason: format!("git rebase command failed: {}", e),
+            }),
         }
     }
 
@@ -624,14 +646,12 @@ impl WorktreeIsolation {
             .output();
 
         let commits: Vec<String> = match log_output {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
-                    .filter(|c| !c.is_empty())
-                    .collect()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+                .filter(|c| !c.is_empty())
+                .collect(),
             _ => {
                 tracing::warn!("Failed to get commit list for cherry-pick — falling back to merge");
                 return self.merge_branch(handle);
@@ -639,14 +659,23 @@ impl WorktreeIsolation {
         };
 
         if commits.is_empty() {
-            tracing::info!("No commits to cherry-pick from branch '{}'", handle.branch_name);
+            tracing::info!(
+                "No commits to cherry-pick from branch '{}'",
+                handle.branch_name
+            );
             if self.config.auto_cleanup {
                 self.cleanup(handle)?;
             }
-            return Ok(MergeResult::Skipped { reason: "No commits to cherry-pick".to_string() });
+            return Ok(MergeResult::Skipped {
+                reason: "No commits to cherry-pick".to_string(),
+            });
         }
 
-        tracing::info!("Cherry-picking {} commits from branch '{}'", commits.len(), handle.branch_name);
+        tracing::info!(
+            "Cherry-picking {} commits from branch '{}'",
+            commits.len(),
+            handle.branch_name
+        );
 
         // Cherry-pick each commit
         for commit_hash in &commits {
@@ -680,7 +709,10 @@ impl WorktreeIsolation {
             }
         }
 
-        tracing::info!("Successfully cherry-picked all commits from branch '{}'", handle.branch_name);
+        tracing::info!(
+            "Successfully cherry-picked all commits from branch '{}'",
+            handle.branch_name
+        );
         if self.config.auto_cleanup {
             self.cleanup(handle)?;
         }
@@ -702,7 +734,11 @@ impl WorktreeIsolation {
 
         // Remove the worktree directory
         let remove_output = std::process::Command::new("git")
-            .args(["worktree", "remove", handle.worktree_path.to_str().unwrap_or(".")])
+            .args([
+                "worktree",
+                "remove",
+                handle.worktree_path.to_str().unwrap_or("."),
+            ])
             .current_dir(&self.project_path)
             .output();
 
@@ -714,7 +750,12 @@ impl WorktreeIsolation {
                     String::from_utf8_lossy(&o.stderr).trim()
                 );
                 std::process::Command::new("git")
-                    .args(["worktree", "remove", "--force", handle.worktree_path.to_str().unwrap_or(".")])
+                    .args([
+                        "worktree",
+                        "remove",
+                        "--force",
+                        handle.worktree_path.to_str().unwrap_or("."),
+                    ])
                     .current_dir(&self.project_path)
                     .output()
                     .ok();
@@ -744,15 +785,12 @@ impl WorktreeIsolation {
 
     /// Extract conflict file paths from git merge/rebase error output.
     fn extract_conflict_files(&self, output: &str) -> Vec<String> {
-        output.lines()
+        output
+            .lines()
             .filter(|l| l.contains("CONFLICT") || l.contains("Merge conflict in"))
             .filter_map(|l| {
                 // Extract file path from "Merge conflict in <path>" or similar
-                if let Some(idx) = l.find(" in ") {
-                    Some(l[idx + 4..].trim().to_string())
-                } else {
-                    None
-                }
+                l.find(" in ").map(|idx| l[idx + 4..].trim().to_string())
             })
             .collect()
     }
@@ -768,20 +806,18 @@ impl WorktreeIsolation {
             .output();
 
         match output {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter(|l| l.starts_with("branch "))
-                    .filter_map(|l| {
-                        let branch = l.strip_prefix("branch ").unwrap_or("").trim();
-                        if branch.starts_with(&self.config.branch_prefix) {
-                            Some(branch.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| l.starts_with("branch "))
+                .filter_map(|l| {
+                    let branch = l.strip_prefix("branch ").unwrap_or("").trim();
+                    if branch.starts_with(&self.config.branch_prefix) {
+                        Some(branch.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -858,9 +894,7 @@ impl WorktreeIsolation {
 pub enum MergeResult {
     /// Merge succeeded — changes are now in the main branch.
     /// The worktree has been cleaned up (if auto_cleanup is enabled).
-    Success {
-        branch_name: String,
-    },
+    Success { branch_name: String },
 
     /// Merge had conflicts — the worktree is preserved for manual resolution.
     /// The main branch is unchanged (merge was aborted).
@@ -872,15 +906,10 @@ pub enum MergeResult {
 
     /// Merge failed for a non-conflict reason (e.g., branch not found).
     /// The worktree is preserved.
-    Failed {
-        branch_name: String,
-        reason: String,
-    },
+    Failed { branch_name: String, reason: String },
 
     /// Merge was skipped (no changes, no isolation, or preserve-only mode).
-    Skipped {
-        reason: String,
-    },
+    Skipped { reason: String },
 
     /// Changes are preserved in a separate branch for manual review.
     /// No merge was attempted.
@@ -899,16 +928,27 @@ impl MergeResult {
     /// Get a human-readable description of the merge result.
     pub fn description(&self) -> String {
         match self {
-            MergeResult::Success { branch_name } =>
-                format!("Successfully merged branch '{}'", branch_name),
-            MergeResult::Conflict { branch_name, conflict_files, .. } =>
-                format!("Merge conflict in branch '{}' (files: {})", branch_name, conflict_files.join(", ")),
-            MergeResult::Failed { branch_name, reason } =>
-                format!("Merge failed for branch '{}': {}", branch_name, reason),
-            MergeResult::Skipped { reason } =>
-                format!("Merge skipped: {}", reason),
-            MergeResult::Preserved { branch_name, .. } =>
-                format!("Changes preserved in branch '{}' for manual review", branch_name),
+            MergeResult::Success { branch_name } => {
+                format!("Successfully merged branch '{}'", branch_name)
+            }
+            MergeResult::Conflict {
+                branch_name,
+                conflict_files,
+                ..
+            } => format!(
+                "Merge conflict in branch '{}' (files: {})",
+                branch_name,
+                conflict_files.join(", ")
+            ),
+            MergeResult::Failed {
+                branch_name,
+                reason,
+            } => format!("Merge failed for branch '{}': {}", branch_name, reason),
+            MergeResult::Skipped { reason } => format!("Merge skipped: {}", reason),
+            MergeResult::Preserved { branch_name, .. } => format!(
+                "Changes preserved in branch '{}' for manual review",
+                branch_name
+            ),
         }
     }
 }
@@ -953,7 +993,9 @@ mod tests {
 
     #[test]
     fn test_merge_result_is_success() {
-        let result = MergeResult::Success { branch_name: "oneai-sub-code-1".to_string() };
+        let result = MergeResult::Success {
+            branch_name: "oneai-sub-code-1".to_string(),
+        };
         assert!(result.is_success());
         assert!(result.description().contains("Successfully merged"));
     }
@@ -972,7 +1014,9 @@ mod tests {
 
     #[test]
     fn test_merge_result_skipped() {
-        let result = MergeResult::Skipped { reason: "No changes".to_string() };
+        let result = MergeResult::Skipped {
+            reason: "No changes".to_string(),
+        };
         assert!(!result.is_success());
         assert!(result.description().contains("No changes"));
     }
@@ -1006,7 +1050,10 @@ mod tests {
             is_isolated: true,
             has_changes: false,
         };
-        assert_eq!(handle.working_dir(), Path::new("/project/.oneai-worktrees/oneai-sub-code-1"));
+        assert_eq!(
+            handle.working_dir(),
+            Path::new("/project/.oneai-worktrees/oneai-sub-code-1")
+        );
     }
 
     #[test]

@@ -21,7 +21,11 @@ use std::collections::HashMap;
 /// `k` is the RRF constant (use 60 for the Cormack 2009 default). `weights`
 /// optionally biases legs (aligned with `legs` order; defaults to 1.0 each).
 /// Returns `(id, fused_score)` tuples sorted by fused score descending.
-pub fn rrf_fuse(legs: &[Vec<(String, f32)>], k: u32, weights: Option<&[f32]>) -> Vec<(String, f32)> {
+pub fn rrf_fuse(
+    legs: &[Vec<(String, f32)>],
+    k: u32,
+    weights: Option<&[f32]>,
+) -> Vec<(String, f32)> {
     let k = k.max(1) as f32;
     let w: Vec<f32> = match weights {
         Some(ws) if ws.len() == legs.len() => ws.to_vec(),
@@ -89,10 +93,16 @@ mod tests {
         let fused = rrf_fuse(&[a, b], 60, None);
         assert_eq!(fused[0].0, "a");
         assert_eq!(fused[1].0, "b");
-        assert!(fused[0].1 > fused[1].1, "rank-1-in-both must beat rank-2-in-both");
+        assert!(
+            fused[0].1 > fused[1].1,
+            "rank-1-in-both must beat rank-2-in-both"
+        );
         // c and d each appear in exactly one leg, at rank 3 → tied at the bottom.
         assert_eq!(fused.len(), 4);
-        assert!((fused[2].1 - fused[3].1).abs() < 1e-9, "single-leg rank-3 ties");
+        assert!(
+            (fused[2].1 - fused[3].1).abs() < 1e-9,
+            "single-leg rank-3 ties"
+        );
         let last_two: Vec<&str> = fused[2..].iter().map(|(id, _)| id.as_str()).collect();
         assert!(last_two.contains(&"c") && last_two.contains(&"d"));
     }

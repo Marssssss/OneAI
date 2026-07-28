@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 /// - `HalfOpen`: Testing if the provider has recovered, limited calls allowed
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum CircuitState {
     /// Provider is healthy — calls proceed normally.
+    #[default]
     Closed,
 
     /// Provider is failing — calls are rejected.
@@ -69,12 +71,6 @@ impl CircuitState {
     /// Whether the provider is definitely failing (no calls allowed).
     pub fn is_failing(&self) -> bool {
         matches!(self, Self::Open { .. })
-    }
-}
-
-impl Default for CircuitState {
-    fn default() -> Self {
-        Self::Closed
     }
 }
 
@@ -206,7 +202,11 @@ impl CircuitBreakerConfig {
     }
 
     /// Add a per-provider config override.
-    pub fn with_provider_config(mut self, provider: impl Into<String>, config: CircuitBreakerConfig) -> Self {
+    pub fn with_provider_config(
+        mut self,
+        provider: impl Into<String>,
+        config: CircuitBreakerConfig,
+    ) -> Self {
         self.per_provider_config.insert(provider.into(), config);
         self
     }
@@ -276,7 +276,10 @@ impl ThresholdCircuitBreaker {
     }
 
     /// Check if an Open circuit should transition to HalfOpen.
-    fn check_half_open_transition(state: &ProviderCircuitState, config: &CircuitBreakerConfig) -> bool {
+    fn check_half_open_transition(
+        state: &ProviderCircuitState,
+        config: &CircuitBreakerConfig,
+    ) -> bool {
         if let CircuitState::Open { since, .. } = &state.state {
             let now = Utc::now();
             let elapsed = now.signed_duration_since(*since);
@@ -390,7 +393,10 @@ impl CircuitBreaker for ThresholdCircuitBreaker {
 
     fn all_states(&self) -> HashMap<String, CircuitState> {
         let states = self.states.read().unwrap();
-        states.iter().map(|(k, v)| (k.clone(), v.state.clone())).collect()
+        states
+            .iter()
+            .map(|(k, v)| (k.clone(), v.state.clone()))
+            .collect()
     }
 }
 

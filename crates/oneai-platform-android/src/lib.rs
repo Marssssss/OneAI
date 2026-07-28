@@ -18,10 +18,9 @@
 mod gate;
 mod jni_bridge;
 
-
 use oneai_core::RiskLevel;
 
-pub use gate::{AndroidInteractionGate, AndroidInteractionBridge};
+pub use gate::{AndroidInteractionBridge, AndroidInteractionGate};
 pub use jni_bridge::JniInteractionBridge;
 
 /// Factory for creating Android interaction gates.
@@ -29,12 +28,17 @@ pub struct AndroidInteractionGateFactory;
 
 impl AndroidInteractionGateFactory {
     /// Create an Android interaction gate with an auto-proceed threshold.
-    pub fn create(buffer_size: usize, threshold: RiskLevel) -> (AndroidInteractionGate, AndroidInteractionBridge) {
+    pub fn create(
+        buffer_size: usize,
+        threshold: RiskLevel,
+    ) -> (AndroidInteractionGate, AndroidInteractionBridge) {
         AndroidInteractionGate::new(buffer_size, threshold)
     }
 
     /// Create a gate where tool-approval requests go through the channel.
-    pub fn create_manual_only(buffer_size: usize) -> (AndroidInteractionGate, AndroidInteractionBridge) {
+    pub fn create_manual_only(
+        buffer_size: usize,
+    ) -> (AndroidInteractionGate, AndroidInteractionBridge) {
         AndroidInteractionGate::new_manual_only(buffer_size)
     }
 }

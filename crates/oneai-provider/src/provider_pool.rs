@@ -31,8 +31,8 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use std::pin::Pin;
 
@@ -40,17 +40,16 @@ use async_trait::async_trait;
 use futures::Stream;
 use tokio::sync::RwLock;
 
-use oneai_core::{
-    InferenceRequest, InferenceResponse, InferenceStreamChunk, ModelCapability, ModelConfig,
-    CircuitBreaker, RateLimiter, UsageTracker,
-    DegradationRule, FallbackEvent, FallbackReason, FallbackLog, InMemoryFallbackLog,
-    ProviderPoolConfig,
-    ProviderPoolStatus, ProviderHealthStatus,
-};
-use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::LlmProvider;
 use crate::ProviderFactory;
 use crate::SmartRouter;
+use oneai_core::error::{OneAIError, Result};
+use oneai_core::traits::LlmProvider;
+use oneai_core::{
+    CircuitBreaker, DegradationRule, FallbackEvent, FallbackLog, FallbackReason,
+    InMemoryFallbackLog, InferenceRequest, InferenceResponse, InferenceStreamChunk,
+    ModelCapability, ModelConfig, ProviderHealthStatus, ProviderPoolConfig, ProviderPoolStatus,
+    RateLimiter, UsageTracker,
+};
 
 /// Injectable factory closure that builds a fresh `LlmProvider` from a
 /// `ModelConfig` (used by within-family model degradation).
@@ -81,11 +80,7 @@ pub struct ProviderEntry {
 
 impl ProviderEntry {
     /// Create a new provider entry.
-    pub fn new(
-        name: impl Into<String>,
-        provider: Arc<dyn LlmProvider>,
-        priority: u32,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, provider: Arc<dyn LlmProvider>, priority: u32) -> Self {
         Self {
             name: name.into(),
             provider,
@@ -108,7 +103,11 @@ impl ProviderEntry {
 
     /// Get the model name from the provider config.
     pub fn model_name(&self) -> &str {
-        self.provider.config().model_name.as_deref().unwrap_or("unknown")
+        self.provider
+            .config()
+            .model_name
+            .as_deref()
+            .unwrap_or("unknown")
     }
 
     /// Get the priority.
@@ -215,14 +214,19 @@ impl ProviderPool {
 
     /// Create a pool with just the configuration (entries built from entry configs).
     pub fn from_config(config: ProviderPoolConfig) -> Self {
-        let entries: Vec<ProviderEntry> = config.entries.iter().map(|entry_config| {
-            let provider = ProviderFactory::create(entry_config.model_config.clone());
-            ProviderEntry::new(
-                entry_config.name.clone(),
-                Arc::from(provider),
-                entry_config.priority,
-            ).with_cooldown(entry_config.cooldown_secs)
-        }).collect();
+        let entries: Vec<ProviderEntry> = config
+            .entries
+            .iter()
+            .map(|entry_config| {
+                let provider = ProviderFactory::create(entry_config.model_config.clone());
+                ProviderEntry::new(
+                    entry_config.name.clone(),
+                    Arc::from(provider),
+                    entry_config.priority,
+                )
+                .with_cooldown(entry_config.cooldown_secs)
+            })
+            .collect();
 
         Self::new(entries, config)
     }
@@ -352,11 +356,10 @@ impl ProviderPool {
                 None
             };
 
-            let failure_count = if let Some(cb) = &self.circuit_breaker {
-                Some(cb.failure_count(&entry.name))
-            } else {
-                None
-            };
+            let failure_count = self
+                .circuit_breaker
+                .as_ref()
+                .map(|cb| cb.failure_count(&entry.name));
 
             let actually_available = if let Some(cb) = &self.circuit_breaker {
                 is_available && cb.check(&entry.name).allows_calls()
@@ -364,14 +367,17 @@ impl ProviderPool {
                 is_available
             };
 
-            provider_health.insert(entry.name.clone(), ProviderHealthStatus::new(
+            provider_health.insert(
                 entry.name.clone(),
-                entry.model_name(),
-                entry.priority,
-                actually_available,
-                circuit_state,
-                failure_count,
-            ));
+                ProviderHealthStatus::new(
+                    entry.name.clone(),
+                    entry.model_name(),
+                    entry.priority,
+                    actually_available,
+                    circuit_state,
+                    failure_count,
+                ),
+            );
         }
 
         let recent_fallback_count = self.fallback_log.total_count();
@@ -578,13 +584,15 @@ impl ProviderPool {
         // Otherwise, use the default priority order
         let ordered_indices: Vec<usize> = if let Some(router) = &self.smart_router {
             // Use smart router to pick the best provider first
-            let decision = router.route_for_pool(
-                "", // No task description available at pool level
-                "react", // Default paradigm
-                &self.config,
-                None, // No session context at pool level
-                None, // No conversation token count at pool level
-            ).await;
+            let decision = router
+                .route_for_pool(
+                    "",      // No task description available at pool level
+                    "react", // Default paradigm
+                    &self.config,
+                    None, // No session context at pool level
+                    None, // No conversation token count at pool level
+                )
+                .await;
 
             // Reorder: start with the smart router's recommendation,
             // then continue with remaining providers in priority order
@@ -605,7 +613,8 @@ impl ProviderPool {
 
             tracing::info!(
                 "SmartRouter recommends provider '{}' (model '{}'), reordered provider chain",
-                recommended_name, decision.model,
+                recommended_name,
+                decision.model,
             );
 
             indices
@@ -667,7 +676,11 @@ impl ProviderPool {
             attempts += 1;
 
             // ── Attempt inference ───────────────────────────────────────────
-            tracing::info!("Attempting inference with provider {} (attempt {})", entry.name, attempts);
+            tracing::info!(
+                "Attempting inference with provider {} (attempt {})",
+                entry.name,
+                attempts
+            );
 
             let result = entry.provider.infer(request.clone()).await;
 
@@ -678,7 +691,9 @@ impl ProviderPool {
 
                     // Update active index
                     self.active_index.store(
-                        self.entries.iter().position(|e| e.name == entry.name)
+                        self.entries
+                            .iter()
+                            .position(|e| e.name == entry.name)
                             .unwrap_or(0) as u32,
                         Ordering::Relaxed,
                     );
@@ -723,9 +738,15 @@ impl ProviderPool {
                     }
 
                     // ── Cross-provider fallback — log and continue to next entry
-                    let next_idx = self.entries.iter().position(|e| e.priority > entry.priority);
+                    let next_idx = self
+                        .entries
+                        .iter()
+                        .position(|e| e.priority > entry.priority);
                     let (next_name, next_model) = if let Some(idx) = next_idx {
-                        (self.entries[idx].name.clone(), self.entries[idx].model_name().to_string())
+                        (
+                            self.entries[idx].name.clone(),
+                            self.entries[idx].model_name().to_string(),
+                        )
                     } else {
                         ("none".to_string(), "none".to_string())
                     };
@@ -743,10 +764,11 @@ impl ProviderPool {
 
         // All providers exhausted
         tracing::error!("All providers exhausted after {} attempts", attempts);
-        Err(OneAIError::Fallback(
-            format!("All providers exhausted after {} attempts (pool has {} providers)",
-                attempts, self.entries.len())
-        ))
+        Err(OneAIError::Fallback(format!(
+            "All providers exhausted after {} attempts (pool has {} providers)",
+            attempts,
+            self.entries.len()
+        )))
     }
 
     /// Try streaming inference with fallback chain.
@@ -764,9 +786,9 @@ impl ProviderPool {
 
         // If a smart router is attached, use it to determine provider order
         let ordered_indices: Vec<usize> = if let Some(router) = &self.smart_router {
-            let decision = router.route_for_pool(
-                "", "react", &self.config, None, None,
-            ).await;
+            let decision = router
+                .route_for_pool("", "react", &self.config, None, None)
+                .await;
 
             let recommended_name = decision.provider;
             let mut indices: Vec<usize> = Vec::new();
@@ -840,7 +862,11 @@ impl ProviderPool {
             attempts += 1;
 
             // ── Attempt streaming inference ─────────────────────────────────
-            tracing::info!("Attempting streaming inference with provider {} (attempt {})", entry.name, attempts);
+            tracing::info!(
+                "Attempting streaming inference with provider {} (attempt {})",
+                entry.name,
+                attempts
+            );
 
             let result = entry.provider.infer_stream(request.clone()).await;
 
@@ -848,7 +874,9 @@ impl ProviderPool {
                 Ok(stream) => {
                     // Success — update active index and record success
                     self.active_index.store(
-                        self.entries.iter().position(|e| e.name == entry.name)
+                        self.entries
+                            .iter()
+                            .position(|e| e.name == entry.name)
                             .unwrap_or(0) as u32,
                         Ordering::Relaxed,
                     );
@@ -862,7 +890,11 @@ impl ProviderPool {
                 }
                 Err(error) => {
                     // Failure — record and try degradation, then cross-provider fallback
-                    tracing::warn!("Streaming inference failed with provider {}: {}", entry.name, error);
+                    tracing::warn!(
+                        "Streaming inference failed with provider {}: {}",
+                        entry.name,
+                        error
+                    );
 
                     if let Some(cb) = &self.circuit_breaker {
                         cb.record_failure(&entry.name, &error.to_string());
@@ -875,9 +907,15 @@ impl ProviderPool {
                     }
 
                     // ── Cross-provider fallback — log and continue to next entry
-                    let next_idx = self.entries.iter().position(|e| e.priority > entry.priority);
+                    let next_idx = self
+                        .entries
+                        .iter()
+                        .position(|e| e.priority > entry.priority);
                     let (next_name, next_model) = if let Some(idx) = next_idx {
-                        (self.entries[idx].name.clone(), self.entries[idx].model_name().to_string())
+                        (
+                            self.entries[idx].name.clone(),
+                            self.entries[idx].model_name().to_string(),
+                        )
                     } else {
                         ("none".to_string(), "none".to_string())
                     };
@@ -893,9 +931,10 @@ impl ProviderPool {
             }
         }
 
-        Err(OneAIError::Fallback(
-            format!("All providers exhausted for streaming after {} attempts", attempts)
-        ))
+        Err(OneAIError::Fallback(format!(
+            "All providers exhausted for streaming after {} attempts",
+            attempts
+        )))
     }
 
     /// Get the number of providers in the pool.
@@ -1006,11 +1045,11 @@ impl LlmProvider for ProviderPool {
 mod tests {
     use super::*;
     use futures::StreamExt; // test-only (boxed-stream .collect in tests)
-    // These core types are referenced only by the tests below; kept here (not at
-    // module scope) to avoid unused-import warnings in the non-test build.
+                            // These core types are referenced only by the tests below; kept here (not at
+                            // module scope) to avoid unused-import warnings in the non-test build.
+    use oneai_core::circuit_breaker::{CircuitBreakerConfig, ThresholdCircuitBreaker};
+    use oneai_core::rate_limiter::{RateLimitConfig, TokenWindowRateLimiter};
     use oneai_core::{ContentBlock, Message, Role, TokenUsage};
-    use oneai_core::circuit_breaker::{ThresholdCircuitBreaker, CircuitBreakerConfig};
-    use oneai_core::rate_limiter::{TokenWindowRateLimiter, RateLimitConfig};
 
     /// Simple mock provider for pool testing.
     /// Can be configured to succeed or fail deterministically.
@@ -1024,9 +1063,15 @@ mod tests {
     impl TestProvider {
         fn new(name: &str, model: &str) -> Self {
             let (provider_type, cloud_kind) = if name == "anthropic" {
-                (oneai_core::ProviderType::Cloud, Some(oneai_core::CloudProviderKind::Anthropic))
+                (
+                    oneai_core::ProviderType::Cloud,
+                    Some(oneai_core::CloudProviderKind::Anthropic),
+                )
             } else if name == "openai" {
-                (oneai_core::ProviderType::Cloud, Some(oneai_core::CloudProviderKind::OpenAI))
+                (
+                    oneai_core::ProviderType::Cloud,
+                    Some(oneai_core::CloudProviderKind::OpenAI),
+                )
             } else {
                 (oneai_core::ProviderType::Local, None)
             };
@@ -1097,7 +1142,10 @@ mod tests {
                 message: Message {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Text {
-                        text: format!("Response from {}", self.config.model_name.as_deref().unwrap_or("unknown")),
+                        text: format!(
+                            "Response from {}",
+                            self.config.model_name.as_deref().unwrap_or("unknown")
+                        ),
                     }],
                     metadata: HashMap::new(),
                 },
@@ -1105,7 +1153,8 @@ mod tests {
                     prompt_tokens: 100,
                     completion_tokens: 50,
                     total_tokens: 150,
-            ..Default::default()},
+                    ..Default::default()
+                },
                 model: self.config.model_name.clone().unwrap_or_default(),
                 metadata: HashMap::new(),
             })
@@ -1126,14 +1175,18 @@ mod tests {
                         is_final: false,
                         usage: None,
                         model: Some(response.model.clone()),
-                    }).await.ok();
+                    })
+                    .await
+                    .ok();
                 }
                 tx.send(InferenceStreamChunk {
                     content: vec![],
                     is_final: true,
                     usage: Some(response.usage.clone()),
                     model: Some(response.model.clone()),
-                }).await.ok();
+                })
+                .await
+                .ok();
             });
 
             Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
@@ -1191,10 +1244,7 @@ mod tests {
         );
 
         let response = pool.infer(test_request()).await.unwrap();
-        assert_eq!(
-            pool.active_provider_name(),
-            "anthropic"
-        );
+        assert_eq!(pool.active_provider_name(), "anthropic");
         // Response should come from anthropic
         let text = match &response.message.content[0] {
             ContentBlock::Text { text } => text.clone(),
@@ -1277,7 +1327,7 @@ mod tests {
     #[tokio::test]
     async fn test_pool_circuit_breaker_skips_open_provider() {
         let cb = Arc::new(ThresholdCircuitBreaker::with_config(
-            CircuitBreakerConfig::new(1, 1, 60) // Open after 1 failure
+            CircuitBreakerConfig::new(1, 1, 60), // Open after 1 failure
         ));
 
         let primary = failing_test_provider("API error");
@@ -1289,7 +1339,8 @@ mod tests {
                 ProviderEntry::new("openai", secondary, 1),
             ],
             ProviderPoolConfig::default(),
-        ).with_circuit_breaker(cb.clone());
+        )
+        .with_circuit_breaker(cb.clone());
 
         // First call — anthropic fails, circuit opens, fallback to openai
         let _response = pool.infer(test_request()).await.unwrap();
@@ -1304,8 +1355,10 @@ mod tests {
     async fn test_pool_rate_limiter_skips_rate_limited_provider() {
         // Create a rate limiter with very low limit for anthropic
         let rl = Arc::new(TokenWindowRateLimiter::with_config(
-            RateLimitConfig::new()
-                .with_provider_limit("anthropic", oneai_core::rate_limiter::ProviderRateLimit::new(1, 100))
+            RateLimitConfig::new().with_provider_limit(
+                "anthropic",
+                oneai_core::rate_limiter::ProviderRateLimit::new(1, 100),
+            ),
         ));
 
         let primary = anthropic_test_provider();
@@ -1317,7 +1370,8 @@ mod tests {
                 ProviderEntry::new("openai", secondary, 1),
             ],
             ProviderPoolConfig::default(),
-        ).with_rate_limiter(rl.clone());
+        )
+        .with_rate_limiter(rl.clone());
 
         // First call — anthropic succeeds (rate limit allows 1 call)
         let _response1 = pool.infer(test_request()).await.unwrap();
@@ -1456,7 +1510,8 @@ mod tests {
                 ProviderEntry::new("openai", openai_test_provider(), 1),
             ],
             ProviderPoolConfig::default(),
-        ).with_circuit_breaker(cb.clone());
+        )
+        .with_circuit_breaker(cb.clone());
 
         let status = pool.status().await;
         // Anthropic should show as open circuit
@@ -1472,7 +1527,7 @@ mod tests {
         assert_eq!(pool.active_provider_name(), "anthropic");
 
         let response = pool.infer(test_request()).await.unwrap();
-        assert!(response.message.content.len() > 0);
+        assert!(!response.message.content.is_empty());
     }
 
     #[tokio::test]
@@ -1561,7 +1616,10 @@ mod tests {
         );
 
         let config = pool.config();
-        assert_eq!(config.cloud_kind, Some(oneai_core::CloudProviderKind::Anthropic));
+        assert_eq!(
+            config.cloud_kind,
+            Some(oneai_core::CloudProviderKind::Anthropic)
+        );
     }
 
     #[test]
@@ -1600,7 +1658,10 @@ mod tests {
             Box::new(TestProvider::from_config(cfg.clone()))
         });
 
-        let response = pool.infer(test_request()).await.expect("degradation should recover");
+        let response = pool
+            .infer(test_request())
+            .await
+            .expect("degradation should recover");
         assert_eq!(response.model, "claude-sonnet-4-6-20250514");
         assert_eq!(pool.active_provider_name(), "anthropic");
 
@@ -1637,10 +1698,16 @@ mod tests {
         )
         // Every degraded tier also fails → degradation exhausts the chain.
         .with_provider_builder(|cfg: &ModelConfig| {
-            Box::new(TestProvider::from_config_failing(cfg.clone(), "degraded tier failed"))
+            Box::new(TestProvider::from_config_failing(
+                cfg.clone(),
+                "degraded tier failed",
+            ))
         });
 
-        let response = pool.infer(test_request()).await.expect("cross-provider fallback should recover");
+        let response = pool
+            .infer(test_request())
+            .await
+            .expect("cross-provider fallback should recover");
         assert_eq!(response.model, "gpt-4o");
         assert_eq!(pool.active_provider_name(), "openai");
 
@@ -1668,7 +1735,10 @@ mod tests {
         });
 
         use futures::StreamExt;
-        let mut stream = pool.infer_stream(test_request()).await.expect("degraded stream should open");
+        let mut stream = pool
+            .infer_stream(test_request())
+            .await
+            .expect("degraded stream should open");
         // Drain to completion to ensure the degraded stream is live.
         while stream.next().await.is_some() {}
 

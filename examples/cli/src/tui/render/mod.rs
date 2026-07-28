@@ -22,17 +22,17 @@ use ratatui::{
 use super::app::App;
 use super::theme::*;
 
+pub mod approval;
 pub mod brand;
 pub mod chat;
 pub mod context_bar;
+pub mod diff;
 pub mod input;
 pub mod markdown;
 pub mod message;
 pub mod plan;
 pub mod sidebar;
 pub mod spinner;
-pub mod approval;
-pub mod diff;
 
 /// Draw the full TUI layout.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -47,22 +47,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let total_size = f.area();
 
     // Determine brand line height: 5 lines for block art (large terminal), 1 line for text
-    let brand_lines = if total_size.width >= 80 && total_size.height >= 30 { 5 } else { 1 };
+    let brand_lines = if total_size.width >= 80 && total_size.height >= 30 {
+        5
+    } else {
+        1
+    };
     let context_bar_lines = if !app.show_sidebar { 1 } else { 0 };
 
     let outer_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if context_bar_lines > 0 {
             vec![
-                Constraint::Length(brand_lines),         // brand line (1 or 3)
-                Constraint::Length(context_bar_lines),    // context bar
-                Constraint::Min(0),                       // main content
+                Constraint::Length(brand_lines),       // brand line (1 or 3)
+                Constraint::Length(context_bar_lines), // context bar
+                Constraint::Min(0),                    // main content
             ]
         } else {
-            vec![
-                Constraint::Length(brand_lines),
-                Constraint::Min(0),
-            ]
+            vec![Constraint::Length(brand_lines), Constraint::Min(0)]
         })
         .split(total_size);
 
@@ -115,13 +116,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             vec![
                 Constraint::Length(plan_lines), // plan bar
                 Constraint::Min(0),             // chat area
-                Constraint::Length(3),           // input box (2 lines + border)
+                Constraint::Length(3),          // input box (2 lines + border)
             ]
         } else {
             vec![
-                Constraint::Length(0),           // no plan bar
-                Constraint::Min(0),             // chat area
-                Constraint::Length(3),           // input box (2 lines + border)
+                Constraint::Length(0), // no plan bar
+                Constraint::Min(0),    // chat area
+                Constraint::Length(3), // input box (2 lines + border)
             ]
         })
         .split(right_rect);
@@ -171,7 +172,8 @@ pub fn format_work_duration(d: std::time::Duration) -> String {
 
 /// Draw the sidebar (delegates to sidebar module).
 fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
-    sidebar::draw_sidebar(f, rect, app);}
+    sidebar::draw_sidebar(f, rect, app);
+}
 
 /// Draw command autocomplete popup.
 ///
@@ -212,7 +214,9 @@ fn draw_command_popup(f: &mut Frame, chat_rect: Rect, _input_rect: Rect, app: &A
     f.render_widget(Clear, popup_rect);
 
     // Build list items with prominent selection indicator
-    let items: Vec<ListItem> = suggestions.iter().enumerate()
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .enumerate()
         .skip(scroll_offset)
         .take(visible_count)
         .map(|(i, (cmd, desc))| {
@@ -222,17 +226,23 @@ fn draw_command_popup(f: &mut Frame, chat_rect: Rect, _input_rect: Rect, app: &A
             // Non-selected item: blank prefix + normal cmd + dim desc
             let indicator = if is_selected { "▸ " } else { "  " };
             let indicator_style = if is_selected {
-                Style::default().fg(ratatui::style::Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(ratatui::style::Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(ratatui::style::Color::DarkGray)
             };
             let cmd_style = if is_selected {
-                Style::default().fg(INPUT_PROMPT_COLOR).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(INPUT_PROMPT_COLOR)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(INPUT_TEXT_COLOR)
             };
             let desc_style = if is_selected {
-                Style::default().fg(INPUT_HINT_COLOR).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(INPUT_HINT_COLOR)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(ratatui::style::Color::DarkGray)
             };
@@ -252,15 +262,18 @@ fn draw_command_popup(f: &mut Frame, chat_rect: Rect, _input_rect: Rect, app: &A
         String::new()
     };
 
-    let list = List::new(items)
-        .block(Block::default()
+    let list = List::new(items).block(
+        Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(INPUT_BORDER))
             .title(Span::styled(
                 format!(" Commands{} ", title_suffix),
-                Style::default().fg(INPUT_PROMPT_COLOR).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(INPUT_PROMPT_COLOR)
+                    .add_modifier(Modifier::BOLD),
             ))
-            .style(Style::default().bg(BRAND_BG)));
+            .style(Style::default().bg(BRAND_BG)),
+    );
 
     f.render_widget(list, popup_rect);
 }

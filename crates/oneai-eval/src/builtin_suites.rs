@@ -7,9 +7,11 @@
 
 use std::sync::Arc;
 
+use crate::builtin_metrics::{
+    ContainsMatchMetric, ExactMatchMetric, RegexMatchMetric, TrajectoryMetric,
+};
 use crate::eval_case::{EvalCase, ExpectedOutput};
 use crate::eval_suite::{EvalSuite, EvalSuiteBuilder};
-use crate::builtin_metrics::{ExactMatchMetric, ContainsMatchMetric, RegexMatchMetric, TrajectoryMetric};
 
 // ─── Coding Suite ────────────────────────────────────────────────────────
 
@@ -27,29 +29,65 @@ pub fn coding_suite() -> EvalSuite {
         .description("Basic coding/math reasoning evaluation")
         .domain("coding")
         // Simple math — exact answers expected
-        .case(EvalCase::with_id("math_add", "What is 2+2?", ExpectedOutput::exact("4"))
-            .difficulty(1).domain("math"))
-        .case(EvalCase::with_id("math_multiply", "What is 3*5?", ExpectedOutput::exact("15"))
-            .difficulty(1).domain("math"))
-        .case(EvalCase::with_id("math_subtract", "What is 10-3?", ExpectedOutput::exact("7"))
-            .difficulty(1).domain("math"))
-        .case(EvalCase::with_id("math_divide", "What is 100/4?", ExpectedOutput::exact("25"))
-            .difficulty(1).domain("math"))
+        .case(
+            EvalCase::with_id("math_add", "What is 2+2?", ExpectedOutput::exact("4"))
+                .difficulty(1)
+                .domain("math"),
+        )
+        .case(
+            EvalCase::with_id("math_multiply", "What is 3*5?", ExpectedOutput::exact("15"))
+                .difficulty(1)
+                .domain("math"),
+        )
+        .case(
+            EvalCase::with_id("math_subtract", "What is 10-3?", ExpectedOutput::exact("7"))
+                .difficulty(1)
+                .domain("math"),
+        )
+        .case(
+            EvalCase::with_id("math_divide", "What is 100/4?", ExpectedOutput::exact("25"))
+                .difficulty(1)
+                .domain("math"),
+        )
         // Math explanations — contains key concepts
-        .case(EvalCase::with_id("math_explain", "Explain why 0! = 1",
-            ExpectedOutput::contains(["empty product", "1"]))
-            .difficulty(3).domain("math"))
+        .case(
+            EvalCase::with_id(
+                "math_explain",
+                "Explain why 0! = 1",
+                ExpectedOutput::contains(["empty product", "1"]),
+            )
+            .difficulty(3)
+            .domain("math"),
+        )
         // String operations — regex for flexible format
-        .case(EvalCase::with_id("str_reverse", "Reverse the string 'hello'",
-            ExpectedOutput::regex("olleh"))
-            .difficulty(2).domain("string"))
-        .case(EvalCase::with_id("str_length", "What is the length of 'hello world'?",
-            ExpectedOutput::contains(["11"]))
-            .difficulty(1).domain("string"))
+        .case(
+            EvalCase::with_id(
+                "str_reverse",
+                "Reverse the string 'hello'",
+                ExpectedOutput::regex("olleh"),
+            )
+            .difficulty(2)
+            .domain("string"),
+        )
+        .case(
+            EvalCase::with_id(
+                "str_length",
+                "What is the length of 'hello world'?",
+                ExpectedOutput::contains(["11"]),
+            )
+            .difficulty(1)
+            .domain("string"),
+        )
         // Logic
-        .case(EvalCase::with_id("logic_fizzbuzz", "What does FizzBuzz return for 15?",
-            ExpectedOutput::contains_case_sensitive(["FizzBuzz"]))
-            .difficulty(2).domain("logic"))
+        .case(
+            EvalCase::with_id(
+                "logic_fizzbuzz",
+                "What does FizzBuzz return for 15?",
+                ExpectedOutput::contains_case_sensitive(["FizzBuzz"]),
+            )
+            .difficulty(2)
+            .domain("logic"),
+        )
         // Metrics
         .metric(Arc::new(ExactMatchMetric))
         .metric(Arc::new(ContainsMatchMetric))
@@ -73,19 +111,43 @@ pub fn tool_use_suite() -> EvalSuite {
         .description("Tool selection and execution evaluation")
         .domain("coding")
         // Tool selection — trajectory checks
-        .case(EvalCase::with_id("calc_tool", "Calculate 2+2 using the calculator",
-            ExpectedOutput::trajectory(["calculator"], 3))
-            .difficulty(1).domain("tool"))
-        .case(EvalCase::with_id("calc_result", "Use calculator to compute 7*8",
-            ExpectedOutput::exact("56"))
-            .difficulty(1).domain("tool"))
-        .case(EvalCase::with_id("multi_tool", "Calculate 2+2 and then multiply the result by 3",
-            ExpectedOutput::trajectory(["calculator"], 5))
-            .difficulty(2).domain("tool"))
+        .case(
+            EvalCase::with_id(
+                "calc_tool",
+                "Calculate 2+2 using the calculator",
+                ExpectedOutput::trajectory(["calculator"], 3),
+            )
+            .difficulty(1)
+            .domain("tool"),
+        )
+        .case(
+            EvalCase::with_id(
+                "calc_result",
+                "Use calculator to compute 7*8",
+                ExpectedOutput::exact("56"),
+            )
+            .difficulty(1)
+            .domain("tool"),
+        )
+        .case(
+            EvalCase::with_id(
+                "multi_tool",
+                "Calculate 2+2 and then multiply the result by 3",
+                ExpectedOutput::trajectory(["calculator"], 5),
+            )
+            .difficulty(2)
+            .domain("tool"),
+        )
         // Tool result verification
-        .case(EvalCase::with_id("calc_large", "What is 123 * 456?",
-            ExpectedOutput::contains(["56088"]))
-            .difficulty(2).domain("tool"))
+        .case(
+            EvalCase::with_id(
+                "calc_large",
+                "What is 123 * 456?",
+                ExpectedOutput::contains(["56088"]),
+            )
+            .difficulty(2)
+            .domain("tool"),
+        )
         // Metrics
         .metric(Arc::new(ExactMatchMetric))
         .metric(Arc::new(ContainsMatchMetric))
@@ -108,23 +170,53 @@ pub fn general_suite() -> EvalSuite {
     EvalSuiteBuilder::new("general")
         .description("General QA and reasoning evaluation")
         // Factual questions — must contain key facts
-        .case(EvalCase::with_id("rust_safe", "What makes Rust unique?",
-            ExpectedOutput::contains(["memory", "safe"]))
-            .difficulty(2).domain("knowledge"))
-        .case(EvalCase::with_id("rust_zero_cost", "What is zero-cost abstraction in Rust?",
-            ExpectedOutput::contains(["abstraction", "runtime"]))
-            .difficulty(3).domain("knowledge"))
+        .case(
+            EvalCase::with_id(
+                "rust_safe",
+                "What makes Rust unique?",
+                ExpectedOutput::contains(["memory", "safe"]),
+            )
+            .difficulty(2)
+            .domain("knowledge"),
+        )
+        .case(
+            EvalCase::with_id(
+                "rust_zero_cost",
+                "What is zero-cost abstraction in Rust?",
+                ExpectedOutput::contains(["abstraction", "runtime"]),
+            )
+            .difficulty(3)
+            .domain("knowledge"),
+        )
         // Structured output — regex for format
-        .case(EvalCase::with_id("date_format", "What is today's date in ISO format?",
-            ExpectedOutput::regex("\\d{4}-\\d{2}-\\d{2}"))
-            .difficulty(1).domain("knowledge"))
-        .case(EvalCase::with_id("email_format", "Format this as an email: John Doe, example.com",
-            ExpectedOutput::regex("john\\.?doe@example\\.com"))
-            .difficulty(2).domain("formatting"))
+        .case(
+            EvalCase::with_id(
+                "date_format",
+                "What is today's date in ISO format?",
+                ExpectedOutput::regex("\\d{4}-\\d{2}-\\d{2}"),
+            )
+            .difficulty(1)
+            .domain("knowledge"),
+        )
+        .case(
+            EvalCase::with_id(
+                "email_format",
+                "Format this as an email: John Doe, example.com",
+                ExpectedOutput::regex("john\\.?doe@example\\.com"),
+            )
+            .difficulty(2)
+            .domain("formatting"),
+        )
         // Logic puzzles
-        .case(EvalCase::with_id("binary_convert", "Convert 10 to binary",
-            ExpectedOutput::contains(["1010"]))
-            .difficulty(2).domain("logic"))
+        .case(
+            EvalCase::with_id(
+                "binary_convert",
+                "Convert 10 to binary",
+                ExpectedOutput::contains(["1010"]),
+            )
+            .difficulty(2)
+            .domain("logic"),
+        )
         // Metrics
         .metric(Arc::new(ContainsMatchMetric))
         .metric(Arc::new(RegexMatchMetric))
@@ -169,7 +261,10 @@ mod tests {
         assert_eq!(suite.name, "tool_use");
         assert_eq!(suite.case_count(), 4);
         assert_eq!(suite.metric_count(), 3); // exact + contains + trajectory
-        assert_eq!(suite.metric_names(), vec!["exact_match", "contains_match", "trajectory"]);
+        assert_eq!(
+            suite.metric_names(),
+            vec!["exact_match", "contains_match", "trajectory"]
+        );
     }
 
     #[test]

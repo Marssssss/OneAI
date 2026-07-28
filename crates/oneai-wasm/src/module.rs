@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::WasmRuntimeConfig;
-use crate::error::{WasmError, Result};
+use crate::error::{Result, WasmError};
 use crate::runtime::WasmRuntime;
 use crate::runtime::WasmStoreState;
 use crate::tool::{WasmTool, WasmToolMetadata};
@@ -80,8 +80,9 @@ impl WasmModuleManager {
     /// - `WasmError::InvalidMetadata` — metadata values are invalid
     pub async fn load_from_file(&self, name: &str, path: &Path) -> Result<Arc<WasmTool>> {
         // Read the file bytes
-        let wasm_bytes = std::fs::read(path)
-            .map_err(|e| WasmError::FileReadError(format!("Failed to read {}: {}", path.display(), e)))?;
+        let wasm_bytes = std::fs::read(path).map_err(|e| {
+            WasmError::FileReadError(format!("Failed to read {}: {}", path.display(), e))
+        })?;
 
         self.load_from_bytes(name, &wasm_bytes).await
     }
@@ -130,18 +131,28 @@ impl WasmModuleManager {
         let linker = self.runtime.create_linker()?;
 
         // Instantiate the module
-        let instance = linker.instantiate(&mut store, module)
-            .map_err(|e| WasmError::InstantiationFailed(format!("Failed to instantiate for metadata extraction: {}", e)))?;
+        let instance = linker.instantiate(&mut store, module).map_err(|e| {
+            WasmError::InstantiationFailed(format!(
+                "Failed to instantiate for metadata extraction: {}",
+                e
+            ))
+        })?;
 
         // Extract each metadata field
         let name = self.read_string_export(&mut store, &instance, "tool_name")?;
         let description = self.read_string_export(&mut store, &instance, "tool_description")?;
-        let schema_str = self.read_string_export(&mut store, &instance, "tool_parameters_schema")?;
+        let schema_str =
+            self.read_string_export(&mut store, &instance, "tool_parameters_schema")?;
         let risk_str = self.read_string_export(&mut store, &instance, "tool_risk_level")?;
 
         // Parse the JSON Schema
-        let parameters_schema: serde_json::Value = serde_json::from_str(&schema_str)
-            .map_err(|e| WasmError::InvalidMetadata(format!("Invalid JSON Schema from tool_parameters_schema: {}", e)))?;
+        let parameters_schema: serde_json::Value =
+            serde_json::from_str(&schema_str).map_err(|e| {
+                WasmError::InvalidMetadata(format!(
+                    "Invalid JSON Schema from tool_parameters_schema: {}",
+                    e
+                ))
+            })?;
 
         // Parse the risk level
         let risk_level = match risk_str.to_lowercase().as_str() {
@@ -170,15 +181,20 @@ impl WasmModuleManager {
         export_name: &str,
     ) -> Result<String> {
         // Get the exported function
-        let func = instance.get_typed_func::<(), (u32, u32)>(&mut *store, export_name)
-            .map_err(|e| WasmError::ExportNotFound(format!("Export '{}' not found: {}", export_name, e)))?;
+        let func = instance
+            .get_typed_func::<(), (u32, u32)>(&mut *store, export_name)
+            .map_err(|e| {
+                WasmError::ExportNotFound(format!("Export '{}' not found: {}", export_name, e))
+            })?;
 
         // Call the function
-        let (ptr, len) = func.call(&mut *store, ())
-            .map_err(|e| WasmError::CallFailed(format!("Failed to call '{}': {}", export_name, e)))?;
+        let (ptr, len) = func.call(&mut *store, ()).map_err(|e| {
+            WasmError::CallFailed(format!("Failed to call '{}': {}", export_name, e))
+        })?;
 
         // Read the string from guest memory (need AsContextMut for get_memory in v45)
-        let memory = instance.get_memory(&mut *store, "memory")
+        let memory = instance
+            .get_memory(&mut *store, "memory")
             .ok_or_else(|| WasmError::ExportNotFound("memory export not found".to_string()))?;
 
         let data = memory.data(&*store);

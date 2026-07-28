@@ -1,10 +1,10 @@
 //! Tool registry — registration, lookup, and execution of tools.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::Tool;
 use oneai_core::ToolOutput;
-use oneai_core::error::{OneAIError, Result};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Registry for managing tools.
@@ -51,9 +51,9 @@ impl ToolRegistry {
     /// Execute a tool by name with the given arguments.
     pub async fn execute(&self, name: &str, args: serde_json::Value) -> Result<ToolOutput> {
         let tools = self.tools.read().await;
-        let tool = tools.get(name).ok_or_else(|| {
-            OneAIError::Tool(format!("Tool '{}' not found", name))
-        })?;
+        let tool = tools
+            .get(name)
+            .ok_or_else(|| OneAIError::Tool(format!("Tool '{}' not found", name)))?;
         tool.execute(args).await
     }
 

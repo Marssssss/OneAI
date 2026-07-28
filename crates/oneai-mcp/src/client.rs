@@ -28,10 +28,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use oneai_tool::mcp_real::{McpServerConfig, McpTransport, McpToolInfo};
-use oneai_tool::RealMcpServerManager;
 use oneai_core::traits::Tool;
 use oneai_core::ToolOutput;
+use oneai_tool::mcp_real::{McpServerConfig, McpToolInfo, McpTransport};
+use oneai_tool::RealMcpServerManager;
 
 use crate::error::McpError;
 
@@ -149,7 +149,9 @@ impl McpClient {
     /// Returns the list of discovered tool names.
     pub async fn connect(&self) -> crate::error::Result<Vec<String>> {
         let mut manager = self.manager.lock().await;
-        let tool_names = manager.connect_server(self.config.clone()).await
+        let tool_names = manager
+            .connect_server(self.config.clone())
+            .await
             .map_err(|e| McpError::Connection(e.to_string()))?;
 
         let mut connected = self.connected.lock().await;
@@ -166,15 +168,18 @@ impl McpClient {
         let manager = self.manager.lock().await;
         let wrappers = manager.all_tool_wrappers();
 
-        let tool_infos: Vec<McpToolInfo> = wrappers.iter().map(|w| {
-            let tool: &dyn Tool = w.as_ref();
-            McpToolInfo {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters_schema: tool.parameters_schema(),
-                server_name: "mcp-client".to_string(),
-            }
-        }).collect();
+        let tool_infos: Vec<McpToolInfo> = wrappers
+            .iter()
+            .map(|w| {
+                let tool: &dyn Tool = w.as_ref();
+                McpToolInfo {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters_schema: tool.parameters_schema(),
+                    server_name: "mcp-client".to_string(),
+                }
+            })
+            .collect();
         Ok(tool_infos)
     }
 
@@ -182,16 +187,23 @@ impl McpClient {
     ///
     /// Invokes the MCP `tools/call` method with the given tool name
     /// and arguments. Returns the tool's output.
-    pub async fn call_tool(&self, tool_name: &str, arguments: serde_json::Value) -> crate::error::Result<ToolOutput> {
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::error::Result<ToolOutput> {
         let manager = self.manager.lock().await;
 
         // Find the tool wrapper
-        let wrapper = manager.get_tool_wrapper(tool_name)
+        let wrapper = manager
+            .get_tool_wrapper(tool_name)
             .ok_or_else(|| McpError::ToolNotFound(tool_name.to_string()))?;
 
         // Execute the tool (McpToolWrapper implements Tool trait)
         let tool: &dyn Tool = wrapper.as_ref();
-        let result = tool.execute(arguments).await
+        let result = tool
+            .execute(arguments)
+            .await
             .map_err(|e| McpError::Execution(e.to_string()))?;
 
         Ok(result)
@@ -229,21 +241,30 @@ mod tests {
     fn test_mcp_client_stdio_creation() {
         let client = McpClient::stdio("npx", &["-y", "@anthropic/mcp-server-filesystem"]);
         assert_eq!(client.config().name, "mcp-client");
-        assert!(matches!(client.config().transport, McpTransport::Stdio { .. }));
+        assert!(matches!(
+            client.config().transport,
+            McpTransport::Stdio { .. }
+        ));
     }
 
     #[test]
     fn test_mcp_client_sse_creation() {
         let client = McpClient::sse("http://localhost:3001/sse");
         assert_eq!(client.config().name, "mcp-client-sse");
-        assert!(matches!(client.config().transport, McpTransport::Sse { .. }));
+        assert!(matches!(
+            client.config().transport,
+            McpTransport::Sse { .. }
+        ));
     }
 
     #[test]
     fn test_mcp_client_streamable_http_creation() {
         let client = McpClient::streamable_http("http://localhost:3001/mcp");
         assert_eq!(client.config().name, "mcp-client-http");
-        assert!(matches!(client.config().transport, McpTransport::StreamableHttp { .. }));
+        assert!(matches!(
+            client.config().transport,
+            McpTransport::StreamableHttp { .. }
+        ));
     }
 
     #[test]

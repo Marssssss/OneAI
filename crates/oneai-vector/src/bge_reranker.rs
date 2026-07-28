@@ -103,16 +103,36 @@ impl BgeRerankerOnnx {
             Ok(e) => e,
             Err(_) => return (Vec::new(), Vec::new(), Vec::new()),
         };
-        let ids: Vec<i64> = enc.get_ids().iter().take(MAX_LEN).map(|v| *v as i64).collect();
-        let mask: Vec<i64> = enc.get_attention_mask().iter().take(MAX_LEN).map(|v| *v as i64).collect();
-        let tt: Vec<i64> = enc.get_type_ids().iter().take(MAX_LEN).map(|v| *v as i64).collect();
+        let ids: Vec<i64> = enc
+            .get_ids()
+            .iter()
+            .take(MAX_LEN)
+            .map(|v| *v as i64)
+            .collect();
+        let mask: Vec<i64> = enc
+            .get_attention_mask()
+            .iter()
+            .take(MAX_LEN)
+            .map(|v| *v as i64)
+            .collect();
+        let tt: Vec<i64> = enc
+            .get_type_ids()
+            .iter()
+            .take(MAX_LEN)
+            .map(|v| *v as i64)
+            .collect();
         (ids, mask, tt)
     }
 }
 
 #[async_trait]
 impl RerankerProvider for BgeRerankerOnnx {
-    async fn rerank(&self, query: &str, docs: &[RerankDoc], top_n: usize) -> Result<Vec<RankedDoc>> {
+    async fn rerank(
+        &self,
+        query: &str,
+        docs: &[RerankDoc],
+        top_n: usize,
+    ) -> Result<Vec<RankedDoc>> {
         let mut scored: Vec<(usize, f32)> = Vec::with_capacity(docs.len());
         for (i, d) in docs.iter().enumerate() {
             let s = self.score(query, &d.content)?;
@@ -141,7 +161,9 @@ mod tests {
     use super::*;
 
     fn dir() -> Option<String> {
-        std::env::var("BGE_RERANKER_DIR").ok().filter(|s| !s.is_empty())
+        std::env::var("BGE_RERANKER_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 
     #[tokio::test]

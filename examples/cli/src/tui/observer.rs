@@ -1,9 +1,12 @@
 //! TUI Observer — receives AgentLoop events and forwards them
 //! to the TUI via a channel for real-time rendering.
 
-use oneai_agent::{AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest, SubAgentKind, SubAgentSummary};
-use oneai_core::ToolOutput;
+use oneai_agent::{
+    AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind, SubAgentSummary,
+    ToolCallRequest,
+};
 use oneai_core::ContextAccounting;
+use oneai_core::ToolOutput;
 
 use super::app::TokenUsage;
 
@@ -72,7 +75,9 @@ impl TuiObserver {
 
 impl AgentLoopObserver for TuiObserver {
     fn on_iteration_start(&self, iteration: usize, paradigm: ParadigmKind) {
-        let _ = self.tx.send(ObserverEvent::IterationStart(iteration, paradigm));
+        let _ = self
+            .tx
+            .send(ObserverEvent::IterationStart(iteration, paradigm));
     }
 
     fn on_direct_answer(&self, text: &str) {
@@ -92,11 +97,16 @@ impl AgentLoopObserver for TuiObserver {
     }
 
     fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
-        let _ = self.tx.send(ObserverEvent::Delegate(task.to_string(), agent_type.clone()));
+        let _ = self.tx.send(ObserverEvent::Delegate(
+            task.to_string(),
+            agent_type.clone(),
+        ));
     }
 
     fn on_delegate_complete(&self, summary: &SubAgentSummary) {
-        let _ = self.tx.send(ObserverEvent::DelegateComplete(summary.clone()));
+        let _ = self
+            .tx
+            .send(ObserverEvent::DelegateComplete(summary.clone()));
     }
 
     fn on_paradigm_switch(&self, paradigm: ParadigmKind) {
@@ -121,13 +131,16 @@ impl AgentLoopObserver for TuiObserver {
             completion: completion_tokens,
             total: prompt_tokens + completion_tokens,
             is_estimated: false,
-            ..Default::default()};
+            ..Default::default()
+        };
         // Accumulate into session total
         let _ = self.tx.send(ObserverEvent::TokenUsageUpdate(usage));
     }
 
     fn on_context_accounting(&self, accounting: &oneai_core::ContextAccounting) {
-        let _ = self.tx.send(ObserverEvent::ContextAccountingUpdate(accounting.clone()));
+        let _ = self
+            .tx
+            .send(ObserverEvent::ContextAccountingUpdate(accounting.clone()));
     }
 
     fn on_thinking(&self, text: &str) {

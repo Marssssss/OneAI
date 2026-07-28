@@ -11,9 +11,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oneai_core::traits::Tool;
 use oneai_core::error::Result;
-use oneai_tool::{ToolRegistry, RealMcpServerManager, McpServerConfig, McpTransport, RealMcpToolWrapper};
+use oneai_core::traits::Tool;
+use oneai_tool::{
+    McpServerConfig, McpTransport, RealMcpServerManager, RealMcpToolWrapper, ToolRegistry,
+};
 
 use crate::config::McpServerConfigFile;
 
@@ -88,10 +90,9 @@ impl McpPluginEntry {
         let transport = match &self.source {
             McpPluginSource::Stdio { command, args, env } => {
                 // Interpolate environment variables in args
-                let interpolated_args = args.iter()
-                    .map(|a| interpolate_env_vars(a))
-                    .collect();
-                let interpolated_env = env.iter()
+                let interpolated_args = args.iter().map(|a| interpolate_env_vars(a)).collect();
+                let interpolated_env = env
+                    .iter()
                     .map(|(k, v)| (k.clone(), interpolate_env_vars(v)))
                     .collect();
                 McpTransport::Stdio {
@@ -101,7 +102,8 @@ impl McpPluginEntry {
                 }
             }
             McpPluginSource::Sse { url, headers } => {
-                let interpolated_headers = headers.iter()
+                let interpolated_headers = headers
+                    .iter()
                     .map(|(k, v)| (k.clone(), interpolate_env_vars(v)))
                     .collect();
                 McpTransport::Sse {
@@ -110,7 +112,8 @@ impl McpPluginEntry {
                 }
             }
             McpPluginSource::StreamableHttp { url, headers } => {
-                let interpolated_headers = headers.iter()
+                let interpolated_headers = headers
+                    .iter()
                     .map(|(k, v)| (k.clone(), interpolate_env_vars(v)))
                     .collect();
                 McpTransport::StreamableHttp {
@@ -222,15 +225,18 @@ impl McpPluginRegistry {
     /// Uses the oneai-tool McpServerManager to establish a connection
     /// and discover available tools. Stores discovered tool names.
     pub async fn connect_server(&mut self, name: &str) -> Result<Vec<String>> {
-        let entry = self.entries.get(name)
-            .ok_or_else(|| oneai_core::error::OneAIError::Provider(
-                format!("MCP plugin '{}' not found in registry", name)
-            ))?;
+        let entry = self.entries.get(name).ok_or_else(|| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' not found in registry",
+                name
+            ))
+        })?;
 
         if !entry.enabled {
-            return Err(oneai_core::error::OneAIError::Provider(
-                format!("MCP plugin '{}' is disabled", name)
-            ));
+            return Err(oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' is disabled",
+                name
+            )));
         }
 
         let config = entry.to_server_config();
@@ -239,8 +245,12 @@ impl McpPluginRegistry {
 
         self.connected.insert(name.to_string(), tool_names.clone());
 
-        tracing::info!("MCP plugin '{}' connected — discovered {} tools: {:?}",
-            name, tool_names.len(), tool_names);
+        tracing::info!(
+            "MCP plugin '{}' connected — discovered {} tools: {:?}",
+            name,
+            tool_names.len(),
+            tool_names
+        );
 
         Ok(tool_names)
     }
@@ -249,7 +259,9 @@ impl McpPluginRegistry {
     ///
     /// Returns a map of server_name → discovered_tool_names.
     pub async fn connect_all_enabled(&mut self) -> Result<HashMap<String, Vec<String>>> {
-        let enabled_names: Vec<String> = self.entries.values()
+        let enabled_names: Vec<String> = self
+            .entries
+            .values()
             .filter(|e| e.enabled)
             .map(|e| e.name.clone())
             .collect();
@@ -333,17 +345,19 @@ impl McpPluginRegistry {
     pub fn save_config_to(&self, path: &PathBuf) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("Failed to create config directory: {}", e)
-                ))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!(
+                    "Failed to create config directory: {}",
+                    e
+                ))
+            })?;
         }
 
         let servers: Vec<McpPluginEntry> = self.entries.values().cloned().collect();
         let config = McpServerConfigFile { servers };
-        config.save_to(path).map_err(|e| oneai_core::error::OneAIError::Provider(
-            format!("Failed to save MCP config: {}", e)
-        ))?;
+        config.save_to(path).map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!("Failed to save MCP config: {}", e))
+        })?;
 
         Ok(())
     }
@@ -390,7 +404,8 @@ pub fn interpolate_env_vars(s: &str) -> String {
     while i < result.len() {
         if result.as_bytes()[i] == b'$' && i + 1 < result.len() {
             let rest = &result[i + 1..];
-            let var_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')
+            let var_end = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
                 .unwrap_or(rest.len());
             if var_end > 0 {
                 let var_name = &rest[..var_end];
@@ -416,7 +431,10 @@ fn builtin_mcp_entries() -> Vec<McpPluginEntry> {
             description: "MCP filesystem server — read and write files".to_string(),
             source: McpPluginSource::Stdio {
                 command: "npx".to_string(),
-                args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                ],
                 env: HashMap::new(),
             },
             enabled: false, // Disabled by default — requires npx
@@ -594,7 +612,10 @@ mod tests {
             description: "Filesystem server".to_string(),
             source: McpPluginSource::Sse {
                 url: "http://localhost:8080/sse".to_string(),
-                headers: HashMap::from([("Authorization".to_string(), "Bearer $API_KEY".to_string())]),
+                headers: HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer $API_KEY".to_string(),
+                )]),
             },
             enabled: true,
             requires_api_key: true,

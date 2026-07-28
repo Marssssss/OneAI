@@ -265,7 +265,10 @@ pub fn apply_control_tool(
             state.set_steps(steps.clone());
             let summary = summarize(&state);
             *plan = Some(state);
-            ok(format!("Created task list ({} steps).\n{}", summary.len_count, summary.text))
+            ok(format!(
+                "Created task list ({} steps).\n{}",
+                summary.len_count, summary.text
+            ))
         }
         TOOL_TASK_UPDATE => {
             let id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -288,7 +291,10 @@ pub fn apply_control_tool(
                         state.set_active_form(id, Some(af));
                     }
                     let summary = summarize(state);
-                    ok(format!("Updated step {} → {:?}.\n{}", id, status, summary.text))
+                    ok(format!(
+                        "Updated step {} → {:?}.\n{}",
+                        id, status, summary.text
+                    ))
                 }
                 None => fail(&format!("Step '{}' not found in the task list.", id)),
             }
@@ -303,11 +309,11 @@ pub fn apply_control_tool(
         TOOL_EXIT_PLAN_MODE => {
             // Phase 3 wires the actual exit; here we just acknowledge so the
             // loop's interceptor can detect the call.
-            let plan_text = args
-                .get("plan")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            ok(format!("Plan submitted (awaiting approval):\n{}", plan_text))
+            let plan_text = args.get("plan").and_then(|v| v.as_str()).unwrap_or("");
+            ok(format!(
+                "Plan submitted (awaiting approval):\n{}",
+                plan_text
+            ))
         }
         TOOL_REQUEST_PLAN_DECISION => {
             // The loop intercepts this tool name and routes it through the
@@ -336,7 +342,10 @@ fn parse_steps(steps: Option<&serde_json::Value>) -> Vec<PlanStep> {
         .filter_map(|item| {
             let id = item.get("id")?.as_str()?.to_string();
             let description = item.get("description")?.as_str()?.to_string();
-            let active_form = item.get("active_form").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let active_form = item
+                .get("active_form")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             Some(PlanStep {
                 id,
                 description,
@@ -366,7 +375,12 @@ pub fn parse_decisions(raw: &str) -> Vec<PlanDecisionRequest> {
     // Direct object parse: {"decisions": [...]}
     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(raw) {
         let parsed = decode_decisions(&obj);
-        if !parsed.is_empty() || obj.get("decisions").map(|d| d.as_array().map(|a| a.is_empty()).unwrap_or(false)).unwrap_or(false) {
+        if !parsed.is_empty()
+            || obj
+                .get("decisions")
+                .map(|d| d.as_array().map(|a| a.is_empty()).unwrap_or(false))
+                .unwrap_or(false)
+        {
             return parsed;
         }
     }
@@ -423,8 +437,16 @@ fn parse_decision_value(item: &serde_json::Value) -> Option<PlanDecisionRequest>
                     Some(oneai_core::DecisionOption {
                         id: o.get("id")?.as_str()?.to_string(),
                         label: o.get("label")?.as_str()?.to_string(),
-                        description: o.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        tradeoffs: o.get("tradeoffs").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        description: o
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        tradeoffs: o
+                            .get("tradeoffs")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -464,7 +486,13 @@ fn summarize(state: &PlanState) -> PlanSummary {
             .as_deref()
             .map(|f| format!(" ({})", f))
             .unwrap_or_default();
-        lines.push(format!("{} [{}] {}{}", step.status.icon(), step.id, step.description, af));
+        lines.push(format!(
+            "{} [{}] {}{}",
+            step.status.icon(),
+            step.id,
+            step.description,
+            af
+        ));
     }
     let len_count = format!(
         "{} steps (✓{} / ◐{} / ✗{})",
@@ -480,11 +508,19 @@ fn summarize(state: &PlanState) -> PlanSummary {
 }
 
 fn ok(content: String) -> ToolOutput {
-    ToolOutput { success: true, content, error: None }
+    ToolOutput {
+        success: true,
+        content,
+        error: None,
+    }
 }
 
 fn fail(msg: &str) -> ToolOutput {
-    ToolOutput { success: false, content: String::new(), error: Some(msg.to_string()) }
+    ToolOutput {
+        success: false,
+        content: String::new(),
+        error: Some(msg.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -516,7 +552,10 @@ mod tests {
             &serde_json::json!({"task_id": "1", "status": "in_progress"}),
         );
         assert!(out.success);
-        assert_eq!(plan.as_ref().unwrap().steps[0].status, PlanStepStatus::InProgress);
+        assert_eq!(
+            plan.as_ref().unwrap().steps[0].status,
+            PlanStepStatus::InProgress
+        );
         assert!(plan.as_ref().unwrap().revision >= 2);
 
         let out = apply_control_tool(

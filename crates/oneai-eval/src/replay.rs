@@ -18,8 +18,8 @@
 //! (frozen responses carry the original cache stats), so it lives in the
 //! real-LLM validation step rather than here.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,8 +31,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::LlmProvider;
 use oneai_core::{
-    InferenceRequest, InferenceResponse, InferenceStreamChunk, ModelCapability,
-    ModelConfig,
+    InferenceRequest, InferenceResponse, InferenceStreamChunk, ModelCapability, ModelConfig,
 };
 use oneai_trace::SpanKind;
 
@@ -55,8 +54,9 @@ pub struct Trajectory {
 impl Trajectory {
     /// Load a trajectory from a JSON file.
     pub fn load(path: &std::path::Path) -> Result<Self> {
-        let data = std::fs::read(path)
-            .map_err(|e| OneAIError::Config(format!("read trajectory {}: {}", path.display(), e)))?;
+        let data = std::fs::read(path).map_err(|e| {
+            OneAIError::Config(format!("read trajectory {}: {}", path.display(), e))
+        })?;
         serde_json::from_slice::<Trajectory>(&data)
             .map_err(|e| OneAIError::Config(format!("parse trajectory: {}", e)))
     }
@@ -85,7 +85,11 @@ impl ReplayProvider {
     /// `ModelConfig` is returned by `config()`; pass the original model's
     /// config if available, else `ModelConfig::default()`.
     pub fn new(responses: Vec<InferenceResponse>, config: ModelConfig) -> Self {
-        Self { responses, config, index: AtomicUsize::new(0) }
+        Self {
+            responses,
+            config,
+            index: AtomicUsize::new(0),
+        }
     }
 
     /// Build a replay provider from a loaded trajectory.
@@ -98,18 +102,21 @@ impl ReplayProvider {
 impl LlmProvider for ReplayProvider {
     async fn infer(&self, _req: InferenceRequest) -> Result<InferenceResponse> {
         let i = self.index.fetch_add(1, Ordering::SeqCst);
-        self.responses.get(i).cloned().ok_or_else(|| OneAIError::Provider(format!(
-            "ReplayProvider exhausted: recording had {} responses, call #{} requested. \
+        self.responses.get(i).cloned().ok_or_else(|| {
+            OneAIError::Provider(format!(
+                "ReplayProvider exhausted: recording had {} responses, call #{} requested. \
              The loop made more inference calls than the recorded trajectory — behavior drift.",
-            self.responses.len(),
-            i + 1,
-        )))
+                self.responses.len(),
+                i + 1,
+            ))
+        })
     }
 
     async fn infer_stream(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         // Reuse infer() and emit the whole response as one final chunk.
         let resp = self.infer(req).await?;
         let chunk = InferenceStreamChunk {
@@ -145,13 +152,21 @@ pub struct RecordingProvider {
 
 impl RecordingProvider {
     pub fn new(inner: Arc<dyn LlmProvider>) -> Self {
-        Self { inner, recorded: Mutex::new(Vec::new()) }
+        Self {
+            inner,
+            recorded: Mutex::new(Vec::new()),
+        }
     }
 
     /// Snapshot the recorded responses so far into a [`Trajectory`] (used by
     /// the CLI `--record` flag, which shares the recorder as the App's
     /// `Arc<dyn LlmProvider>` and so can't consume it).
-    pub async fn trajectory(&self, input: &str, tool_calls: Vec<String>, iterations: usize) -> Trajectory {
+    pub async fn trajectory(
+        &self,
+        input: &str,
+        tool_calls: Vec<String>,
+        iterations: usize,
+    ) -> Trajectory {
         let responses = self.recorded.lock().await.clone();
         Trajectory {
             input: input.to_string(),
@@ -173,7 +188,8 @@ impl LlmProvider for RecordingProvider {
     async fn infer_stream(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         // The agent loop uses streaming (session.rs sets use_streaming=true),
         // so infer() above wouldn't be hit. Route streaming through infer()
         // so the response is recorded, then emit it as a single final chunk.
@@ -258,14 +274,16 @@ pub async fn replay_trajectory_with(trajectory: Trajectory) -> Result<ReplayResu
     // Extract the replayed tool-call sequence + iteration count from the trace.
     let (replayed_tool_calls, replayed_iterations) = if let Some(ctx) = session.trace_context() {
         let tree = ctx.build_tree();
-        let calls: Vec<String> = tree.root_span
+        let calls: Vec<String> = tree
+            .root_span
             .spans_by_kind(SpanKind::TOOL)
             .iter()
             .filter_map(|s| s.attributes.get("tool.name"))
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
         let iters = oneai_trace::TraceMetrics::compute_from_tree(&tree.root_span)
-            .avg_iterations.round() as usize;
+            .avg_iterations
+            .round() as usize;
         (calls, iters)
     } else {
         (Vec::new(), 0)
@@ -276,7 +294,9 @@ pub async fn replay_trajectory_with(trajectory: Trajectory) -> Result<ReplayResu
         crate::efficiency::EfficiencyProfile::from_tree(
             &tree.root_span,
             0, // wall-clock not meaningful for a frozen replay (instant responses)
-            0, 0, 0,
+            0,
+            0,
+            0,
             replayed_iterations,
         )
     });
@@ -319,7 +339,10 @@ mod tests {
         };
 
         let result = replay_trajectory_with(trajectory).await.expect("replay ok");
-        assert!(result.deterministic, "direct-answer replay must be deterministic");
+        assert!(
+            result.deterministic,
+            "direct-answer replay must be deterministic"
+        );
         assert!(result.tool_calls_match());
         assert!(result.replayed_tool_calls.is_empty());
     }
@@ -344,34 +367,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_replay_provider_exhausts_past_recording() {
-        let provider = ReplayProvider::new(
-            vec![direct_answer_response("only")],
-            ModelConfig::default(),
-        );
+        let provider =
+            ReplayProvider::new(vec![direct_answer_response("only")], ModelConfig::default());
         // First call OK.
-        let _ = provider.infer(InferenceRequest {
-            conversation: Conversation::new(),
-            tools: vec![],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            stop_sequences: vec![],
-            constrained_output: None,
-            thinking_budget: None,
-            metadata: std::collections::HashMap::new(),
-        }).await.expect("first replay call");
+        let _ = provider
+            .infer(InferenceRequest {
+                conversation: Conversation::new(),
+                tools: vec![],
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                stop_sequences: vec![],
+                constrained_output: None,
+                thinking_budget: None,
+                metadata: std::collections::HashMap::new(),
+            })
+            .await
+            .expect("first replay call");
         // Second call must error — recording exhausted.
-        let second = provider.infer(InferenceRequest {
-            conversation: Conversation::new(),
-            tools: vec![],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            stop_sequences: vec![],
-            constrained_output: None,
-            thinking_budget: None,
-            metadata: std::collections::HashMap::new(),
-        }).await;
+        let second = provider
+            .infer(InferenceRequest {
+                conversation: Conversation::new(),
+                tools: vec![],
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                stop_sequences: vec![],
+                constrained_output: None,
+                thinking_budget: None,
+                metadata: std::collections::HashMap::new(),
+            })
+            .await;
         assert!(second.is_err(), "ReplayProvider must error when exhausted");
     }
 }

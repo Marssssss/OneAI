@@ -38,8 +38,8 @@ async fn main() {
     println!();
 
     // AppBuilder::threshold_interaction_gate() returns (builder, Receiver<InteractionPendingItem>)
-    let (builder, mut receiver) = AppBuilder::new()
-        .threshold_interaction_gate(16, RiskLevel::Medium);
+    let (builder, mut receiver) =
+        AppBuilder::new().threshold_interaction_gate(16, RiskLevel::Medium);
 
     // ─── Build App ───────────────────────────────────────────────────
     println!("🔧 Building OneAI App with channel approval gate...");
@@ -53,7 +53,9 @@ async fn main() {
     println!();
 
     // ─── Register Tools ──────────────────────────────────────────────
-    app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+    app.register_tool(Arc::new(CalculatorTool::new()))
+        .await
+        .unwrap();
     app.register_tool(Arc::new(ShellTool::new())).await.unwrap();
     let tools = app.tool_executor().list_tools().await;
     println!("🛠  Registered {} tools: {}", tools.len(), tools.join(", "));
@@ -65,14 +67,29 @@ async fn main() {
     println!("   Calculator is Low-risk → auto-approved without manual review");
 
     let session = app.create_session();
-    let result = session.execute_tool("calculator", serde_json::json!({"expression": "2+2"})).await.unwrap();
-    println!("   calculator(2+2) → {} (success: {})", result.content, result.success);
+    let result = session
+        .execute_tool("calculator", serde_json::json!({"expression": "2+2"}))
+        .await
+        .unwrap();
+    println!(
+        "   calculator(2+2) → {} (success: {})",
+        result.content, result.success
+    );
 
-    let result = session.execute_tool("calculator", serde_json::json!({"expression": "15*3"})).await.unwrap();
-    println!("   calculator(15*3) → {} (success: {})", result.content, result.success);
+    let result = session
+        .execute_tool("calculator", serde_json::json!({"expression": "15*3"}))
+        .await
+        .unwrap();
+    println!(
+        "   calculator(15*3) → {} (success: {})",
+        result.content, result.success
+    );
 
     // Check: no pending requests in the channel (all auto-approved)
-    assert!(receiver.try_recv().is_err(), "No pending items after auto-approved calls");
+    assert!(
+        receiver.try_recv().is_err(),
+        "No pending items after auto-approved calls"
+    );
     println!("   ✓ No pending approval items (all auto-approved)");
     println!();
 
@@ -105,8 +122,18 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Execute a high-risk tool (shell) — will wait for approval
-    let result = session.execute_tool("shell", serde_json::json!({"command": "echo 'Hello OneAI!'"})).await.unwrap();
-    println!("   ✓ Shell result: success={}, content={}", result.success, result.content.trim());
+    let result = session
+        .execute_tool(
+            "shell",
+            serde_json::json!({"command": "echo 'Hello OneAI!'"}),
+        )
+        .await
+        .unwrap();
+    println!(
+        "   ✓ Shell result: success={}, content={}",
+        result.success,
+        result.content.trim()
+    );
     println!();
 
     handler_task.abort();
@@ -116,8 +143,8 @@ async fn main() {
     println!("──────────────────────────");
 
     // Build a new app with Low threshold (only Low risk auto-approved)
-    let (builder2, mut receiver2) = AppBuilder::new()
-        .threshold_interaction_gate(16, RiskLevel::Low);
+    let (builder2, mut receiver2) =
+        AppBuilder::new().threshold_interaction_gate(16, RiskLevel::Low);
 
     let app2 = builder2
         .default_parser()
@@ -126,7 +153,9 @@ async fn main() {
         .await
         .expect("App build should succeed");
 
-    app2.register_tool(Arc::new(ShellTool::new())).await.unwrap();
+    app2.register_tool(Arc::new(ShellTool::new()))
+        .await
+        .unwrap();
     let session2 = app2.create_session();
 
     // Handler that denies all requests
@@ -151,8 +180,15 @@ async fn main() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    let result = session2.execute_tool("shell", serde_json::json!({"command": "rm -rf /"})).await.unwrap();
-    println!("   ✓ Shell denied: success={}, error={}", result.success, result.error.unwrap_or_default());
+    let result = session2
+        .execute_tool("shell", serde_json::json!({"command": "rm -rf /"}))
+        .await
+        .unwrap();
+    println!(
+        "   ✓ Shell denied: success={}, error={}",
+        result.success,
+        result.error.unwrap_or_default()
+    );
     println!();
 
     deny_handler.abort();
@@ -171,7 +207,9 @@ async fn main() {
         .await
         .expect("Manual app build should succeed");
 
-    app3.register_tool(Arc::new(ShellTool::new())).await.unwrap();
+    app3.register_tool(Arc::new(ShellTool::new()))
+        .await
+        .unwrap();
     let session3 = app3.create_session();
 
     // Handler that modifies args
@@ -196,8 +234,15 @@ async fn main() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    let result = session3.execute_tool("shell", serde_json::json!({"command": "cat /etc/passwd"})).await.unwrap();
-    println!("   ✓ Modified result: success={}, content={}", result.success, result.content.trim());
+    let result = session3
+        .execute_tool("shell", serde_json::json!({"command": "cat /etc/passwd"}))
+        .await
+        .unwrap();
+    println!(
+        "   ✓ Modified result: success={}, content={}",
+        result.success,
+        result.content.trim()
+    );
     println!();
 
     modify_handler.abort();
@@ -214,7 +259,9 @@ async fn main() {
         .await
         .expect("Manual app build should succeed");
 
-    app4.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+    app4.register_tool(Arc::new(CalculatorTool::new()))
+        .await
+        .unwrap();
     let session4 = app4.create_session();
 
     println!("   → Even calculator needs approval with manual-only gate");
@@ -225,7 +272,10 @@ async fn main() {
                 InteractionRequest::ToolApproval { approval } => approval,
                 _ => continue,
             };
-            println!("      • Tool: {}, Risk: {:?}", approval.tool_name, approval.risk_level);
+            println!(
+                "      • Tool: {}, Risk: {:?}",
+                approval.tool_name, approval.risk_level
+            );
             println!("   → Approving calculator request");
 
             item.response_tx.send(InteractionResponse::Proceed).unwrap();
@@ -234,8 +284,14 @@ async fn main() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-    let result = session4.execute_tool("calculator", serde_json::json!({"expression": "7*8"})).await.unwrap();
-    println!("   ✓ Result: success={}, content={}", result.success, result.content);
+    let result = session4
+        .execute_tool("calculator", serde_json::json!({"expression": "7*8"}))
+        .await
+        .unwrap();
+    println!(
+        "   ✓ Result: success={}, content={}",
+        result.success, result.content
+    );
     println!();
 
     approve_handler.abort();

@@ -4,9 +4,9 @@
 //! a common interface for receiving pending interaction items and
 //! sending responses back.
 
-use tokio::sync::mpsc;
 use oneai_core::InteractionResponse;
 use oneai_tool::InteractionPendingItem;
+use tokio::sync::mpsc;
 
 /// A shared bridge that holds the channel receiver for desktop interaction items.
 ///
@@ -42,7 +42,10 @@ impl DesktopInteractionBridge {
     /// This sends the response back through the oneshot channel
     /// embedded in the pending item, unblocking the agent's
     /// interaction request. Takes ownership of the item.
-    pub fn send_response(item: InteractionPendingItem, response: InteractionResponse) -> Result<(), ()> {
+    pub fn send_response(
+        item: InteractionPendingItem,
+        response: InteractionResponse,
+    ) -> Result<(), ()> {
         item.response_tx.send(response).map_err(|_| ())
     }
 
@@ -61,7 +64,8 @@ impl DesktopInteractionBridge {
             "Tool: {}\nRisk Level: {}\nArguments: {}\n\nJustification: {}",
             request.tool_name,
             risk_label,
-            serde_json::to_string_pretty(&request.args).unwrap_or_else(|_| request.args.to_string()),
+            serde_json::to_string_pretty(&request.args)
+                .unwrap_or_else(|_| request.args.to_string()),
             request.justification
         )
     }
@@ -96,7 +100,9 @@ impl DesktopInteractionDecision {
 
     /// Abort the request with a reason (deny).
     pub fn deny(reason: impl Into<String>) -> InteractionResponse {
-        InteractionResponse::Abort { reason: reason.into() }
+        InteractionResponse::Abort {
+            reason: reason.into(),
+        }
     }
 
     /// Proceed with replaced tool arguments (approve with modification).

@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use crate::span::{Span, SpanKind, SpanStatus};
-use crate::event::{TraceEvent, EventKind};
 use crate::collector::TraceCollector;
+use crate::event::{EventKind, TraceEvent};
+use crate::span::{Span, SpanKind, SpanStatus};
 use crate::tree::TraceTree;
 
 // ─── SharedTraceContext ──────────────────────────────────────────────
@@ -62,7 +62,10 @@ pub struct TraceContext {
 impl std::fmt::Debug for SharedTraceContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedTraceContext")
-            .field("enabled", &self.enabled.load(std::sync::atomic::Ordering::Relaxed))
+            .field(
+                "enabled",
+                &self.enabled.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .field("session_id", &self.session_id.lock().unwrap())
             .field("span_stack_len", &self.span_stack.lock().unwrap().len())
             .field("spans_count", &self.spans.lock().unwrap().len())
@@ -99,12 +102,16 @@ impl TraceContext {
 
     /// Check if tracing is enabled.
     pub fn is_enabled(&self) -> bool {
-        self.inner.enabled.load(std::sync::atomic::Ordering::Relaxed)
+        self.inner
+            .enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Set runtime enabled/disabled.
     pub fn set_enabled(&self, enabled: bool) {
-        self.inner.enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set the session ID for this trace context.
@@ -131,20 +138,29 @@ impl TraceContext {
         }
 
         // Determine parent: use explicit parent_id, or current stack top
-        let resolved_parent = parent_id.map(|s| s.to_string()).or_else(|| {
-            self.inner.span_stack.lock().unwrap().last().cloned()
-        });
+        let resolved_parent = parent_id
+            .map(|s| s.to_string())
+            .or_else(|| self.inner.span_stack.lock().unwrap().last().cloned());
 
         let span = Span::new(kind, name, resolved_parent.as_deref());
         let span_id = span.span_id.clone();
 
         // Store the span
-        self.inner.spans.lock().unwrap().insert(span_id.clone(), span);
+        self.inner
+            .spans
+            .lock()
+            .unwrap()
+            .insert(span_id.clone(), span);
 
         // Push onto the stack
         self.inner.span_stack.lock().unwrap().push(span_id.clone());
 
-        tracing::debug!("Trace: enter span {} kind={} name={}", span_id, kind.as_ref(), name);
+        tracing::debug!(
+            "Trace: enter span {} kind={} name={}",
+            span_id,
+            kind.as_ref(),
+            name
+        );
 
         span_id
     }
@@ -182,7 +198,12 @@ impl TraceContext {
     // ─── Event Logging ──────────────────────────────────────────────
 
     /// Log an event within the current span (top of stack).
-    pub fn log_event(&self, kind: EventKind, name: &str, attrs: HashMap<String, serde_json::Value>) {
+    pub fn log_event(
+        &self,
+        kind: EventKind,
+        name: &str,
+        attrs: HashMap<String, serde_json::Value>,
+    ) {
         if !self.is_enabled() {
             return;
         }
@@ -195,7 +216,12 @@ impl TraceContext {
             let mut spans = self.inner.spans.lock().unwrap();
             if let Some(span) = spans.get_mut(&span_id) {
                 span.add_event(event);
-                tracing::debug!("Trace: log event {} kind={} in span {}", name, kind.as_ref(), span_id);
+                tracing::debug!(
+                    "Trace: log event {} kind={} in span {}",
+                    name,
+                    kind.as_ref(),
+                    span_id
+                );
             }
         } else {
             tracing::warn!("Trace: log event {} with no active span", name);
@@ -203,7 +229,13 @@ impl TraceContext {
     }
 
     /// Log an event within a specific span (by ID).
-    pub fn log_event_in_span(&self, span_id: &str, kind: EventKind, name: &str, attrs: HashMap<String, serde_json::Value>) {
+    pub fn log_event_in_span(
+        &self,
+        span_id: &str,
+        kind: EventKind,
+        name: &str,
+        attrs: HashMap<String, serde_json::Value>,
+    ) {
         if !self.is_enabled() || span_id.is_empty() {
             return;
         }

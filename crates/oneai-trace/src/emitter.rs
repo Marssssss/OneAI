@@ -7,8 +7,8 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use crate::context::TraceContext;
 use crate::collector::TraceCollector;
+use crate::context::TraceContext;
 
 // ─── TraceEmitter ────────────────────────────────────────────────────
 
@@ -55,14 +55,19 @@ impl TraceEmitter {
     ///
     /// Uses the default collector if initialized, otherwise uses a NoopCollector.
     pub fn create_context(&self) -> TraceContext {
-        let collector = self.default_collector.get()
+        let collector = self
+            .default_collector
+            .get()
             .cloned()
             .unwrap_or_else(|| Arc::new(crate::collector::NoopCollector));
         TraceContext::new(collector)
     }
 
     /// Create a trace context with a specific collector (overrides default).
-    pub fn create_context_with_collector(&self, collector: Arc<dyn TraceCollector>) -> TraceContext {
+    pub fn create_context_with_collector(
+        &self,
+        collector: Arc<dyn TraceCollector>,
+    ) -> TraceContext {
         TraceContext::new(collector)
     }
 

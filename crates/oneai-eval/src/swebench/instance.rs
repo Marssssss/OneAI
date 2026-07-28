@@ -98,20 +98,26 @@ pub fn load_instances(path: &Path) -> Vec<SwebenchInstance> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("swebench: cannot read instances file {}: {}", path.display(), e);
+            tracing::warn!(
+                "swebench: cannot read instances file {}: {}",
+                path.display(),
+                e
+            );
             return Vec::new();
         }
     };
 
     text.lines()
         .filter(|l| !l.trim().is_empty())
-        .filter_map(|line| match serde_json::from_str::<SwebenchInstance>(line) {
-            Ok(inst) => Some(inst),
-            Err(e) => {
-                tracing::warn!("swebench: skipping malformed instance line: {}", e);
-                None
-            }
-        })
+        .filter_map(
+            |line| match serde_json::from_str::<SwebenchInstance>(line) {
+                Ok(inst) => Some(inst),
+                Err(e) => {
+                    tracing::warn!("swebench: skipping malformed instance line: {}", e);
+                    None
+                }
+            },
+        )
         .collect()
 }
 
@@ -123,7 +129,10 @@ pub fn load_instances_filtered(path: &Path, ids: &[String]) -> Vec<SwebenchInsta
         return instances;
     }
     let want: std::collections::HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
-    instances.into_iter().filter(|i| want.contains(i.instance_id.as_str())).collect()
+    instances
+        .into_iter()
+        .filter(|i| want.contains(i.instance_id.as_str()))
+        .collect()
 }
 
 #[cfg(test)]

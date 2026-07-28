@@ -20,8 +20,16 @@ use super::super::theme::*;
 /// `阿里百炼·qwen-plus | a3f2 | ReAct#3 | ctx 0.6k/128k 🪙1.2k`
 #[allow(dead_code)]
 pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
-    let tok_prefix = if app.token_usage.is_estimated { "~" } else { "" };
-    let ctx_prefix = if app.context_tokens_is_estimated { "~" } else { "" };
+    let tok_prefix = if app.token_usage.is_estimated {
+        "~"
+    } else {
+        ""
+    };
+    let ctx_prefix = if app.context_tokens_is_estimated {
+        "~"
+    } else {
+        ""
+    };
     let ctx_display = if app.context_tokens >= 1000 {
         format!("{:.1}k", app.context_tokens as f64 / 1000.0)
     } else if app.context_tokens > 0 {
@@ -33,24 +41,54 @@ pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
 
     let mut spans = vec![
         Span::styled(" ", Style::default().fg(CONTEXT_PROVIDER_COLOR)),
-        Span::styled(app.provider_info.clone(), Style::default().fg(CONTEXT_PROVIDER_COLOR).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            app.provider_info.clone(),
+            Style::default()
+                .fg(CONTEXT_PROVIDER_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled(&app.session_id[..8.min(app.session_id.len())], Style::default().fg(CONTEXT_SESSION_COLOR)),
+        Span::styled(
+            &app.session_id[..8.min(app.session_id.len())],
+            Style::default().fg(CONTEXT_SESSION_COLOR),
+        ),
         Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled(format!("{}#{}", paradigm_display_name(&app.active_paradigm), app.current_iteration),
-            Style::default().fg(CONTEXT_PARADIGM_COLOR)),
+        Span::styled(
+            format!(
+                "{}#{}",
+                paradigm_display_name(&app.active_paradigm),
+                app.current_iteration
+            ),
+            Style::default().fg(CONTEXT_PARADIGM_COLOR),
+        ),
         Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)),
     ];
 
     // Interaction mode indicator (only when not Normal, to avoid clutter).
     match app.interaction_mode {
         InteractionMode::AutoAccept => {
-            spans.push(Span::styled("⚡Auto", Style::default().fg(ACTIVE_PARADIGM_COLOR).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)));
+            spans.push(Span::styled(
+                "⚡Auto",
+                Style::default()
+                    .fg(ACTIVE_PARADIGM_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                " | ",
+                Style::default().fg(ratatui::style::Color::DarkGray),
+            ));
         }
         InteractionMode::Plan => {
-            spans.push(Span::styled("📋Plan", Style::default().fg(ACTIVE_PARADIGM_COLOR).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)));
+            spans.push(Span::styled(
+                "📋Plan",
+                Style::default()
+                    .fg(ACTIVE_PARADIGM_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                " | ",
+                Style::default().fg(ratatui::style::Color::DarkGray),
+            ));
         }
         InteractionMode::Normal => {}
     }
@@ -66,16 +104,23 @@ pub fn draw_context_bar(f: &mut Frame, rect: Rect, app: &App) {
             format!("⏱{}", super::format_work_duration(dur)),
             Style::default().fg(color),
         ));
-        spans.push(Span::styled(" | ", Style::default().fg(ratatui::style::Color::DarkGray)));
+        spans.push(Span::styled(
+            " | ",
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        ));
     }
 
-    spans.push(Span::styled(format!("{}ctx{}/{}k 🪙{}{}tok", ctx_prefix, ctx_display, ctx_max_display, tok_prefix, app.token_usage.total),
-        Style::default().fg(CONTEXT_COST_COLOR)));
+    spans.push(Span::styled(
+        format!(
+            "{}ctx{}/{}k 🪙{}{}tok",
+            ctx_prefix, ctx_display, ctx_max_display, tok_prefix, app.token_usage.total
+        ),
+        Style::default().fg(CONTEXT_COST_COLOR),
+    ));
 
     let line = Line::from(spans);
 
-    let paragraph = ratatui::widgets::Paragraph::new(line)
-        .style(Style::default().bg(BRAND_BG));
+    let paragraph = ratatui::widgets::Paragraph::new(line).style(Style::default().bg(BRAND_BG));
 
     f.render_widget(paragraph, rect);
 }

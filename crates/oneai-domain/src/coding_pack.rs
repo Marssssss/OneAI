@@ -16,26 +16,29 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use oneai_core::PermissionLevel;
 use oneai_core::traits::Tool;
+use oneai_core::PermissionLevel;
 use oneai_tool::{
-    ShellTool, FileReadTool, FileEditTool, FileWriteTool, GrepTool, GlobTool,
-    FileListTool, NotebookEditTool, EnvironmentTool, WebFetchTool, WebSearchTool,
-    ApplyPatchTool,
+    ApplyPatchTool, EnvironmentTool, FileEditTool, FileListTool, FileReadTool, FileWriteTool,
+    GlobTool, GrepTool, NotebookEditTool, ShellTool, WebFetchTool, WebSearchTool,
 };
 
-use oneai_workflow::{WorkflowConfig, StepConfig, StateGraph, GraphNode, GraphEdge, NodeAction, EdgeCondition};
+use oneai_workflow::{
+    EdgeCondition, GraphEdge, GraphNode, NodeAction, StateGraph, StepConfig, WorkflowConfig,
+};
 
-use crate::domain_pack::DomainPack;
-use crate::tool_decorator::ToolDecorator;
-use crate::permission_profile::{PermissionProfile, DenyPattern};
-use crate::paradigm_strategy::{ParadigmStrategy, SubAgentTypeDefinition, SubAgentMergeStrategy, DomainParadigmKind};
-use crate::compression_template::CompressionTemplate;
 use crate::builtin_sources::{
-    GitStatusSource, FileTreeSource, ProjectConfigSource, DateSource, EnvironmentInfoSource,
+    DateSource, EnvironmentInfoSource, FileTreeSource, GitStatusSource, ProjectConfigSource,
     ProjectInstructionsSource,
 };
+use crate::compression_template::CompressionTemplate;
+use crate::domain_pack::DomainPack;
+use crate::paradigm_strategy::{
+    DomainParadigmKind, ParadigmStrategy, SubAgentMergeStrategy, SubAgentTypeDefinition,
+};
+use crate::permission_profile::{DenyPattern, PermissionProfile};
 use crate::repo_map::RepoMapSource;
+use crate::tool_decorator::ToolDecorator;
 
 // ─── Coding System Prompt ──────────────────────────────────────────────────────
 
@@ -775,7 +778,7 @@ fn react_state_graph() -> StateGraph {
         action: NodeAction::LlmInfer {
             system_prompt_override: None,
             use_streaming: true,
-            include_tool_definitions: true,  // P2-2: Send tools so model can decide to call them
+            include_tool_definitions: true, // P2-2: Send tools so model can decide to call them
             tool_filter_override: None,
             thinking_budget: None,
             temperature: None,
@@ -810,9 +813,11 @@ fn react_state_graph() -> StateGraph {
     graph.add_node(GraphNode {
         id: "end".to_string(),
         action: NodeAction::LlmInfer {
-            system_prompt_override: Some("Provide a final answer to the user's question.".to_string()),
+            system_prompt_override: Some(
+                "Provide a final answer to the user's question.".to_string(),
+            ),
             use_streaming: true,
-            include_tool_definitions: false,  // P2-2: No tools for final answer node
+            include_tool_definitions: false, // P2-2: No tools for final answer node
             tool_filter_override: None,
             thinking_budget: None,
             temperature: None,
@@ -877,7 +882,8 @@ fn plan_workflow_state_graph() -> StateGraph {
                 "You are a planning agent. Decompose the task into ordered, \
                 dependency-ordered steps. Use `task_create` to commit the step \
                 list, then `exit_plan_mode` to submit, or give the plan as \
-                your final answer text.".to_string(),
+                your final answer text."
+                    .to_string(),
             ),
             use_streaming: true,
             include_tool_definitions: true,
@@ -910,7 +916,8 @@ fn plan_workflow_state_graph() -> StateGraph {
         action: NodeAction::LlmInfer {
             system_prompt_override: Some(
                 "Present the finalized plan to the user as a clear, ordered \
-                list of steps.".to_string(),
+                list of steps."
+                    .to_string(),
             ),
             use_streaming: true,
             include_tool_definitions: false,
@@ -972,7 +979,8 @@ fn reflect_workflow_state_graph() -> StateGraph {
                 "You are a reflection agent. Critically review the last result: \
                 check for correctness, gaps, and regressions. If a verification \
                 or fix is needed, call the right tool; otherwise give your \
-                final assessment as text.".to_string(),
+                final assessment as text."
+                    .to_string(),
             ),
             use_streaming: true,
             include_tool_definitions: true,
@@ -998,9 +1006,7 @@ fn reflect_workflow_state_graph() -> StateGraph {
     graph.add_node(GraphNode {
         id: "end".to_string(),
         action: NodeAction::LlmInfer {
-            system_prompt_override: Some(
-                "Provide the final reflection assessment.".to_string(),
-            ),
+            system_prompt_override: Some("Provide the final reflection assessment.".to_string()),
             use_streaming: true,
             include_tool_definitions: false,
             tool_filter_override: None,
@@ -1054,7 +1060,8 @@ fn explore_workflow_state_graph() -> StateGraph {
                 "You are an exploration agent. Search and understand the \
                 codebase/environment. Call tools to inspect, or delegate \
                 focused sub-searches to an Explore sub-agent. When you have \
-                enough, give your findings as your final answer.".to_string(),
+                enough, give your findings as your final answer."
+                    .to_string(),
             ),
             use_streaming: true,
             include_tool_definitions: true,
@@ -1092,7 +1099,8 @@ fn explore_workflow_state_graph() -> StateGraph {
         action: NodeAction::LlmInfer {
             system_prompt_override: Some(
                 "Synthesize the exploration findings into a comprehensive \
-                final summary: file paths, key signatures, and patterns.".to_string(),
+                final summary: file paths, key signatures, and patterns."
+                    .to_string(),
             ),
             use_streaming: true,
             include_tool_definitions: false,
@@ -1163,33 +1171,52 @@ mod tests {
 
         // All four paradigm graphs must be registered.
         assert_eq!(pack.state_graphs.len(), 4);
-        let names: Vec<&str> = pack.state_graphs.iter()
-            .map(|g| g.name.as_str()).collect();
-        for expected in ["react-loop", "plan-workflow", "reflect-workflow", "explore-workflow"] {
+        let names: Vec<&str> = pack.state_graphs.iter().map(|g| g.name.as_str()).collect();
+        for expected in [
+            "react-loop",
+            "plan-workflow",
+            "reflect-workflow",
+            "explore-workflow",
+        ] {
             assert!(
                 names.contains(&expected),
-                "missing state graph '{}'; got: {:?}", expected, names
+                "missing state graph '{}'; got: {:?}",
+                expected,
+                names
             );
         }
 
         // Each graph must have an entry point and at least one terminal node
         // (guaranteed termination path for the StateGraphExecutor).
         for g in &pack.state_graphs {
-            assert!(!g.entry_point.is_empty(), "graph '{}' has no entry point", g.name);
-            assert!(!g.terminal_nodes.is_empty(), "graph '{}' has no terminal nodes", g.name);
+            assert!(
+                !g.entry_point.is_empty(),
+                "graph '{}' has no entry point",
+                g.name
+            );
+            assert!(
+                !g.terminal_nodes.is_empty(),
+                "graph '{}' has no terminal nodes",
+                g.name
+            );
             assert!(g.node_count() > 0, "graph '{}' has no nodes", g.name);
         }
 
         // Spot-check the new graphs' terminals.
         let terminal_of = |name: &str| -> &Vec<String> {
-            pack.state_graphs.iter()
+            pack.state_graphs
+                .iter()
                 .find(|g| g.name == name)
                 .expect("graph must exist")
-                .terminal_nodes.as_ref()
+                .terminal_nodes
+                .as_ref()
         };
         assert_eq!(terminal_of("plan-workflow"), &vec!["end".to_string()]);
         assert_eq!(terminal_of("reflect-workflow"), &vec!["end".to_string()]);
-        assert_eq!(terminal_of("explore-workflow"), &vec!["synthesize".to_string()]);
+        assert_eq!(
+            terminal_of("explore-workflow"),
+            &vec!["synthesize".to_string()]
+        );
     }
 
     #[test]
@@ -1202,8 +1229,14 @@ mod tests {
         assert!(pack.permission_profile.auto_approve.contains("glob"));
 
         // Require confirmation: state-modifying operations
-        assert!(pack.permission_profile.require_confirmation.contains("edit_file"));
-        assert!(pack.permission_profile.require_confirmation.contains("shell"));
+        assert!(pack
+            .permission_profile
+            .require_confirmation
+            .contains("edit_file"));
+        assert!(pack
+            .permission_profile
+            .require_confirmation
+            .contains("shell"));
 
         // Deny by default: dangerous commands
         assert!(!pack.permission_profile.deny_by_default.is_empty());
@@ -1216,13 +1249,17 @@ mod tests {
         assert!(pack.paradigm_strategies.len() >= 4);
 
         // Refactoring strategy
-        let refactor = pack.paradigm_strategies.iter()
+        let refactor = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.trigger_pattern.contains("refactor"))
             .unwrap();
         assert_eq!(refactor.paradigm_sequence.len(), 3);
 
         // Search strategy
-        let search = pack.paradigm_strategies.iter()
+        let search = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.trigger_pattern.contains("find"))
             .unwrap();
         assert_eq!(search.paradigm_sequence.len(), 1);
@@ -1233,10 +1270,22 @@ mod tests {
         let pack = coding_pack("/tmp/test");
 
         assert_eq!(pack.compression_template.name, "coding");
-        assert!(pack.compression_template.preserve_fields.contains(&"critical_files".to_string()));
-        assert!(pack.compression_template.preserve_fields.contains(&"progress_status".to_string()));
-        assert!(pack.compression_template.truncate_rules.contains_key("tool_output"));
-        assert!(pack.compression_template.truncate_rules.contains_key("file_content"));
+        assert!(pack
+            .compression_template
+            .preserve_fields
+            .contains(&"critical_files".to_string()));
+        assert!(pack
+            .compression_template
+            .preserve_fields
+            .contains(&"progress_status".to_string()));
+        assert!(pack
+            .compression_template
+            .truncate_rules
+            .contains_key("tool_output"));
+        assert!(pack
+            .compression_template
+            .truncate_rules
+            .contains_key("file_content"));
     }
 
     #[test]
@@ -1244,17 +1293,23 @@ mod tests {
         let pack = coding_pack("/tmp/test");
 
         // Should match refactoring tasks
-        let refactor_match = pack.paradigm_strategies.iter()
+        let refactor_match = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.matches("Please refactor the auth module"));
         assert!(refactor_match.is_some());
 
         // Should match search tasks
-        let search_match = pack.paradigm_strategies.iter()
+        let search_match = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.matches("Find all uses of authenticate"));
         assert!(search_match.is_some());
 
         // Should match bug tasks
-        let bug_match = pack.paradigm_strategies.iter()
+        let bug_match = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.matches("Fix the crash in login handler"));
         assert!(bug_match.is_some());
     }

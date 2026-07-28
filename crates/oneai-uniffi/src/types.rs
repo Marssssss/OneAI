@@ -110,8 +110,7 @@ impl From<ApprovalRequestView> for oneai_core::ApprovalRequest {
     fn from(view: ApprovalRequestView) -> Self {
         Self {
             tool_name: view.tool_name,
-            args: serde_json::from_str(&view.args_json)
-                .unwrap_or(serde_json::json!({})),
+            args: serde_json::from_str(&view.args_json).unwrap_or(serde_json::json!({})),
             risk_level: oneai_core::RiskLevel::from(view.risk_level),
             permission_level: view.permission_level.map(oneai_core::PermissionLevel::from),
             justification: view.justification,
@@ -161,19 +160,11 @@ impl From<ToolOutputView> for oneai_core::ToolOutput {
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ContentBlockView {
     /// Plain text content.
-    Text {
-        text: String,
-    },
+    Text { text: String },
     /// Image content with raw bytes.
-    Image {
-        mime_type: String,
-        data: Vec<u8>,
-    },
+    Image { mime_type: String, data: Vec<u8> },
     /// File reference by URI.
-    File {
-        mime_type: String,
-        uri: String,
-    },
+    File { mime_type: String, uri: String },
     /// A tool call request from the model.
     ToolCall {
         id: String,
@@ -182,32 +173,33 @@ pub enum ContentBlockView {
         args_json: String,
     },
     /// The result of a tool call.
-    ToolResult {
-        call_id: String,
-        content: String,
-    },
+    ToolResult { call_id: String, content: String },
     /// Thinking/reasoning content from extended thinking models.
-    Thinking {
-        text: String,
-    },
+    Thinking { text: String },
 }
 
 impl From<oneai_core::ContentBlock> for ContentBlockView {
     fn from(block: oneai_core::ContentBlock) -> Self {
         match block {
             oneai_core::ContentBlock::Text { text } => ContentBlockView::Text { text },
-            oneai_core::ContentBlock::Image { mime_type, data } => ContentBlockView::Image { mime_type, data },
-            oneai_core::ContentBlock::File { mime_type, uri } => ContentBlockView::File { mime_type, uri },
-            oneai_core::ContentBlock::ToolCall { id, name, args } => {
-                ContentBlockView::ToolCall { id, name, args_json: args }
+            oneai_core::ContentBlock::Image { mime_type, data } => {
+                ContentBlockView::Image { mime_type, data }
+            }
+            oneai_core::ContentBlock::File { mime_type, uri } => {
+                ContentBlockView::File { mime_type, uri }
+            }
+            oneai_core::ContentBlock::ToolCall { id, name, args } => ContentBlockView::ToolCall {
+                id,
+                name,
+                args_json: args,
             },
             oneai_core::ContentBlock::ToolResult { call_id, content } => {
                 ContentBlockView::ToolResult { call_id, content }
+            }
+            oneai_core::ContentBlock::Thinking { text } => ContentBlockView::Thinking { text },
+            _ => ContentBlockView::Text {
+                text: "[unsupported content block]".to_string(),
             },
-            oneai_core::ContentBlock::Thinking { text } => {
-                ContentBlockView::Thinking { text }
-            },
-            _ => ContentBlockView::Text { text: "[unsupported content block]".to_string() },
         }
     }
 }
@@ -216,17 +208,25 @@ impl From<ContentBlockView> for oneai_core::ContentBlock {
     fn from(view: ContentBlockView) -> Self {
         match view {
             ContentBlockView::Text { text } => oneai_core::ContentBlock::Text { text },
-            ContentBlockView::Image { mime_type, data } => oneai_core::ContentBlock::Image { mime_type, data },
-            ContentBlockView::File { mime_type, uri } => oneai_core::ContentBlock::File { mime_type, uri },
-            ContentBlockView::ToolCall { id, name, args_json } => {
-                oneai_core::ContentBlock::ToolCall { id, name, args: args_json }
+            ContentBlockView::Image { mime_type, data } => {
+                oneai_core::ContentBlock::Image { mime_type, data }
+            }
+            ContentBlockView::File { mime_type, uri } => {
+                oneai_core::ContentBlock::File { mime_type, uri }
+            }
+            ContentBlockView::ToolCall {
+                id,
+                name,
+                args_json,
+            } => oneai_core::ContentBlock::ToolCall {
+                id,
+                name,
+                args: args_json,
             },
             ContentBlockView::ToolResult { call_id, content } => {
                 oneai_core::ContentBlock::ToolResult { call_id, content }
-            },
-            ContentBlockView::Thinking { text } => {
-                oneai_core::ContentBlock::Thinking { text }
-            },
+            }
+            ContentBlockView::Thinking { text } => oneai_core::ContentBlock::Thinking { text },
         }
     }
 }
@@ -247,19 +247,45 @@ impl From<ContentBlockView> for oneai_core::ContentBlock {
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum ChatEventView {
     /// A streamed text fragment from the model (typewriter effect).
-    StreamChunk { text: String, speaker: Option<String> },
+    StreamChunk {
+        text: String,
+        speaker: Option<String>,
+    },
     /// A streamed thinking/reasoning fragment (extended-thinking models).
-    Thinking { text: String, speaker: Option<String> },
+    Thinking {
+        text: String,
+        speaker: Option<String>,
+    },
     /// The model decided to call one or more tools (one event per call).
-    ToolCall { id: String, name: String, args_json: String, speaker: Option<String> },
+    ToolCall {
+        id: String,
+        name: String,
+        args_json: String,
+        speaker: Option<String>,
+    },
     /// A tool call finished with its result.
-    ToolResult { call_id: String, tool_name: String, content: String, success: bool, speaker: Option<String> },
+    ToolResult {
+        call_id: String,
+        tool_name: String,
+        content: String,
+        success: bool,
+        speaker: Option<String>,
+    },
     /// The model produced a final direct answer (loop will end).
-    DirectAnswer { text: String, speaker: Option<String> },
+    DirectAnswer {
+        text: String,
+        speaker: Option<String>,
+    },
     /// The agent loop completed with the final answer.
-    Complete { final_text: String, speaker: Option<String> },
+    Complete {
+        final_text: String,
+        speaker: Option<String>,
+    },
     /// The agent loop errored out.
-    Error { message: String, speaker: Option<String> },
+    Error {
+        message: String,
+        speaker: Option<String>,
+    },
 }
 
 // ─── ProviderConfigView ─────────────────────────────────────────────
@@ -419,7 +445,8 @@ impl From<&oneai_core::Message> for MessageView {
             oneai_core::Role::Assistant => "assistant",
             oneai_core::Role::Tool => "tool",
             _ => "system", // #[non_exhaustive] catch-all
-        }.to_string();
+        }
+        .to_string();
         Self {
             role,
             text: m.text_content(),
@@ -489,16 +516,22 @@ impl From<oneai_core::OneAIError> for OneAIErrorView {
             oneai_core::OneAIError::Agent(msg) => OneAIErrorView::Agent { message: msg },
             oneai_core::OneAIError::Skill(msg) => OneAIErrorView::Skill { message: msg },
             oneai_core::OneAIError::Scheduler(msg) => OneAIErrorView::Scheduler { message: msg },
-            oneai_core::OneAIError::Persistence(msg) => OneAIErrorView::Persistence { message: msg },
+            oneai_core::OneAIError::Persistence(msg) => {
+                OneAIErrorView::Persistence { message: msg }
+            }
             oneai_core::OneAIError::Rag(msg) => OneAIErrorView::Rag { message: msg },
             oneai_core::OneAIError::Config(msg) => OneAIErrorView::Config { message: msg },
-            oneai_core::OneAIError::Serialization(msg) => OneAIErrorView::Serialization { message: msg },
+            oneai_core::OneAIError::Serialization(msg) => {
+                OneAIErrorView::Serialization { message: msg }
+            }
             oneai_core::OneAIError::Network(msg) => OneAIErrorView::Network { message: msg },
             oneai_core::OneAIError::Timeout(msg) => OneAIErrorView::Timeout { message: msg },
             oneai_core::OneAIError::Platform(msg) => OneAIErrorView::Platform { message: msg },
             oneai_core::OneAIError::Wasm(msg) => OneAIErrorView::Wasm { message: msg },
             oneai_core::OneAIError::Other(msg) => OneAIErrorView::Other { message: msg },
-            _ => OneAIErrorView::Other { message: "unknown error".to_string() }, // #[non_exhaustive] catch-all
+            _ => OneAIErrorView::Other {
+                message: "unknown error".to_string(),
+            }, // #[non_exhaustive] catch-all
         }
     }
 }
@@ -625,7 +658,9 @@ mod tests {
 
     #[test]
     fn test_content_block_conversion() {
-        let text = oneai_core::ContentBlock::Text { text: "hello".to_string() };
+        let text = oneai_core::ContentBlock::Text {
+            text: "hello".to_string(),
+        };
         let view: ContentBlockView = text.into();
         assert!(matches!(view, ContentBlockView::Text { text: _ }));
     }

@@ -43,7 +43,9 @@ impl CoreMemory {
     /// with the fact through serialization and SQLite round-trips — not in a
     /// process-local set that's lost on restart.
     pub async fn pin(&self, user_id: &str, subject: &str, predicate: &str) {
-        self.store.set_pinned(user_id, subject, predicate, true).await;
+        self.store
+            .set_pinned(user_id, subject, predicate, true)
+            .await;
     }
 
     /// Remove a fact by conflict key.
@@ -58,7 +60,11 @@ impl CoreMemory {
 
     /// Estimated token usage of the current core block (rough: ~1 token / 4 chars).
     pub async fn estimated_tokens(&self) -> usize {
-        self.facts().await.iter().map(|f| f.content.len() / 4 + 40).sum()
+        self.facts()
+            .await
+            .iter()
+            .map(|f| f.content.len() / 4 + 40)
+            .sum()
     }
 
     /// Enforce the token budget, evicting oldest-updated non-pinned facts.
@@ -77,7 +83,9 @@ impl CoreMemory {
             }
             facts.sort_by_key(|f| f.updated_at);
             let victim = facts.into_iter().next().unwrap();
-            self.store.remove(&victim.user_id, &victim.subject, &victim.predicate).await;
+            self.store
+                .remove(&victim.user_id, &victim.subject, &victim.predicate)
+                .await;
             evicted.push(victim);
         }
         evicted
@@ -169,7 +177,8 @@ mod tests {
         let old = chrono::Utc::now() - chrono::Duration::seconds(60);
         cm.upsert(fact("user.pm", "pnpm", old)).await;
         cm.pin("alice", "user.pm", "prefers").await;
-        cm.upsert(fact("user.runner", "vitest", chrono::Utc::now())).await;
+        cm.upsert(fact("user.runner", "vitest", chrono::Utc::now()))
+            .await;
 
         let evicted = cm.enforce_budget().await;
         // Pinned user.pm must not be evicted even though it's oldest.
@@ -183,7 +192,12 @@ mod tests {
         let cm = CoreMemory::new(2048);
         cm.upsert(fact("user.pm", "npm", chrono::Utc::now())).await;
         let out = cm.upsert(fact("user.pm", "pnpm", chrono::Utc::now())).await;
-        assert_eq!(out, UpsertOutcome::Updated { previous_version: 1 });
+        assert_eq!(
+            out,
+            UpsertOutcome::Updated {
+                previous_version: 1
+            }
+        );
         assert_eq!(cm.facts().await.len(), 1);
         assert_eq!(cm.facts().await[0].content, "pnpm");
     }

@@ -9,9 +9,9 @@
 //! 4. Executes MCP tool calls through the standard Tool interface
 
 use async_trait::async_trait;
-use oneai_core::{RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
+use oneai_core::{RiskLevel, ToolOutput};
 
 /// An MCP tool wrapper that implements the OneAI Tool trait.
 ///
@@ -78,7 +78,9 @@ impl Tool for McpToolWrapper {
 
         tracing::info!(
             "MCP tool call: {} on server {} with args: {}",
-            self.name, self.server_name, args
+            self.name,
+            self.server_name,
+            args
         );
 
         Ok(ToolOutput {
@@ -129,20 +131,20 @@ impl McpServerManager {
     /// 2. Call the ListTools method
     /// 3. Create McpToolWrapper instances for each tool
     /// 4. Store the server info and tools
-    pub fn register_server_tools(
-        &mut self,
-        server_name: String,
-        tools: Vec<McpToolWrapper>,
-    ) {
-        self.servers.insert(server_name.clone(), McpServerInfo {
-            name: server_name,
-            tools,
-        });
+    pub fn register_server_tools(&mut self, server_name: String, tools: Vec<McpToolWrapper>) {
+        self.servers.insert(
+            server_name.clone(),
+            McpServerInfo {
+                name: server_name,
+                tools,
+            },
+        );
     }
 
     /// Get all tools from all connected servers.
     pub fn all_tools(&self) -> Vec<&McpToolWrapper> {
-        self.servers.values()
+        self.servers
+            .values()
             .flat_map(|server| server.tools.iter())
             .collect()
     }

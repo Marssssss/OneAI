@@ -20,9 +20,7 @@ use uuid::Uuid;
 pub enum ContentBlock {
     /// Plain text content.
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
 
     /// Image content with raw bytes.
     #[serde(rename = "image")]
@@ -34,10 +32,7 @@ pub enum ContentBlock {
 
     /// File reference by URI.
     #[serde(rename = "file")]
-    File {
-        mime_type: String,
-        uri: String,
-    },
+    File { mime_type: String, uri: String },
 
     /// A tool call request from the model.
     #[serde(rename = "tool_call")]
@@ -49,16 +44,11 @@ pub enum ContentBlock {
 
     /// The result of a tool call, returned to the model.
     #[serde(rename = "tool_result")]
-    ToolResult {
-        call_id: String,
-        content: String,
-    },
+    ToolResult { call_id: String, content: String },
 
     /// Thinking/reasoning content from extended thinking models (Anthropic, DeepSeek).
     #[serde(rename = "thinking")]
-    Thinking {
-        text: String,
-    },
+    Thinking { text: String },
 }
 
 /// Base64 serialization helpers for byte arrays in ContentBlock::Image.
@@ -392,8 +382,14 @@ impl ModelConfig {
         match (&self.base_url, &self.port) {
             (Some(url), Some(port)) => {
                 // Avoid double-port if base_url already includes a port number
-                let already_has_port = url.rsplit_once(':')
-                    .map(|(_, rest)| rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+                let already_has_port = url
+                    .rsplit_once(':')
+                    .map(|(_, rest)| {
+                        rest.chars()
+                            .next()
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                    })
                     .unwrap_or(false);
                 if already_has_port {
                     url.clone()
@@ -630,7 +626,7 @@ pub struct InferenceResponse {
 // ─── TokenUsage ───────────────────────────────────────────────────────────────
 
 /// Token usage statistics for an inference request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -642,18 +638,6 @@ pub struct TokenUsage {
     /// Input tokens written into the cache (`cache_creation_input_tokens`).
     #[serde(default)]
     pub cache_creation_tokens: u32,
-}
-
-impl Default for TokenUsage {
-    fn default() -> Self {
-        Self {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-        }
-    }
 }
 
 impl TokenUsage {
@@ -1329,9 +1313,7 @@ pub enum InteractionRequest {
     },
     /// A high-risk tool is about to execute — replaces `ApprovalRequest`'s
     /// interactive role.
-    ToolApproval {
-        approval: ApprovalRequest,
-    },
+    ToolApproval { approval: ApprovalRequest },
     /// The planner hit a tradeoff with no clearly superior option and asks the
     /// user to choose (or supply a custom decision) before producing the final
     /// plan. Surfaces before [`InteractionRequest::PlanReview`].
@@ -1344,10 +1326,7 @@ pub enum InteractionRequest {
         options: Vec<DecisionOption>,
     },
     /// Final confirmation of a single produced plan.
-    PlanReview {
-        plan: String,
-        steps: Vec<PlanStep>,
-    },
+    PlanReview { plan: String, steps: Vec<PlanStep> },
 }
 
 /// The application layer's reply to an [`InteractionRequest`].
@@ -1364,17 +1343,11 @@ pub enum InteractionResponse {
     },
     /// Reject and feed back free-text corrective guidance. The loop injects the
     /// feedback into the conversation and retries / re-plans.
-    Revise {
-        feedback: String,
-    },
+    Revise { feedback: String },
     /// `PlanDecision`-only: select an option by its `id`.
-    Choose {
-        option_id: String,
-    },
+    Choose { option_id: String },
     /// Abort this iteration or the whole loop.
-    Abort {
-        reason: String,
-    },
+    Abort { reason: String },
 }
 
 /// A modification attached to [`InteractionResponse::ProceedWith`].
@@ -1390,10 +1363,7 @@ pub enum InteractionModification {
     /// ToolApproval: replace the tool arguments.
     ReplaceToolArgs(serde_json::Value),
     /// PlanReview: the user edited the plan directly in the UI.
-    ReplacePlan {
-        plan: String,
-        steps: Vec<PlanStep>,
-    },
+    ReplacePlan { plan: String, steps: Vec<PlanStep> },
 }
 
 // ─── ConstrainedOutputConfig ──────────────────────────────────────────────────
@@ -1568,19 +1538,15 @@ pub struct TimeRange {
 /// domain-level `MemoryProfile` and the runtime `MemoryManager` share one type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RecallStrategy {
     /// Keyword search first, then semantic if available.
     KeywordFirst,
     /// Semantic (embedding) search first, then keyword as fallback.
     SemanticFirst,
     /// Both keyword and semantic search, merge and deduplicate.
+    #[default]
     Hybrid,
-}
-
-impl Default for RecallStrategy {
-    fn default() -> Self {
-        Self::Hybrid
-    }
 }
 
 // ─── Memory facts & domain memory profile types ──────────────────────────────
@@ -1680,11 +1646,21 @@ pub struct RecallConfig {
     pub normalize_factors: bool,
 }
 
-fn default_relevance_weight() -> f32 { 0.5 }
-fn default_recency_weight() -> f32 { 0.3 }
-fn default_importance_weight() -> f32 { 0.2 }
-fn default_recency_half_life_secs() -> u64 { 3600 }
-fn default_normalize_factors() -> bool { true }
+fn default_relevance_weight() -> f32 {
+    0.5
+}
+fn default_recency_weight() -> f32 {
+    0.3
+}
+fn default_importance_weight() -> f32 {
+    0.2
+}
+fn default_recency_half_life_secs() -> u64 {
+    3600
+}
+fn default_normalize_factors() -> bool {
+    true
+}
 
 impl Default for RecallConfig {
     fn default() -> Self {
@@ -1913,14 +1889,12 @@ pub fn tokenize_keywords(text: &str) -> Vec<String> {
 /// "which is the auth scheme" doesn't inflate recall by matching every fact
 /// containing "the" / "is" / "which".
 const STOPWORDS: &[&str] = &[
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "of", "to", "in", "on", "at", "for", "and", "or", "but", "not", "no",
-    "do", "does", "did", "what", "which", "who", "whom", "when", "where",
-    "why", "how", "this", "that", "these", "those", "it", "its", "as", "by",
-    "with", "from", "into", "your", "my", "our", "their", "his", "her",
-    "them", "they", "we", "you", "i", "me", "us", "please", "can", "could",
-    "would", "should", "will", "shall", "may", "might", "has", "have", "had",
-    "if", "then", "so", "about",
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "of", "to", "in", "on",
+    "at", "for", "and", "or", "but", "not", "no", "do", "does", "did", "what", "which", "who",
+    "whom", "when", "where", "why", "how", "this", "that", "these", "those", "it", "its", "as",
+    "by", "with", "from", "into", "your", "my", "our", "their", "his", "her", "them", "they", "we",
+    "you", "i", "me", "us", "please", "can", "could", "would", "should", "will", "shall", "may",
+    "might", "has", "have", "had", "if", "then", "so", "about",
 ];
 
 /// Token-level keyword match for natural-language recall queries.
@@ -2101,20 +2075,13 @@ pub enum InterruptReason {
     },
 
     /// Human feedback requested — the agent wants guidance before proceeding.
-    HumanFeedbackRequested {
-        question: String,
-    },
+    HumanFeedbackRequested { question: String },
 
     /// Paradigm boundary — pause at paradigm switch for human review.
-    ParadigmBoundary {
-        from: String,
-        to: String,
-    },
+    ParadigmBoundary { from: String, to: String },
 
     /// Custom interrupt reason (user-defined).
-    Custom {
-        reason: String,
-    },
+    Custom { reason: String },
 }
 
 /// Resume signal — injected when the loop resumes from an interrupt.
@@ -2289,12 +2256,21 @@ mod tests {
     fn keyword_matches_any_token_matches_natural_language_query() {
         // The §12.1 headline: a multi-word question matches short fact text
         // via its meaningful tokens — the whole-sentence substring never did.
-        assert!(keyword_matches_any_token("user.package_manager", "which package manager does the user prefer"));
+        assert!(keyword_matches_any_token(
+            "user.package_manager",
+            "which package manager does the user prefer"
+        ));
         // "pnpm" content alone has no overlapping token with that query (it's
         // matched via the subject "user.package_manager" instead).
-        assert!(!keyword_matches_any_token("pnpm", "which package manager does the user prefer"));
+        assert!(!keyword_matches_any_token(
+            "pnpm",
+            "which package manager does the user prefer"
+        ));
         // But the fact as a whole (subject + content) is recalled via subject.
-        assert!(keyword_matches_any_token("use pnpm as the package manager", "which package manager"));
+        assert!(keyword_matches_any_token(
+            "use pnpm as the package manager",
+            "which package manager"
+        ));
         // Stop-words don't inflate: "the"/"which" alone shouldn't match clean text.
         assert!(!keyword_matches_any_token("pnpm", "the which"));
     }
@@ -2305,7 +2281,10 @@ mod tests {
         assert!(keyword_matches_any_token("用户偏好包管理器", "包管理器"));
         assert!(keyword_matches_any_token("用户偏好 pnpm", "用户"));
         // Mixed: English token + CJK both work.
-        assert!(keyword_matches_any_token("使用 pnpm 管理依赖", "package manager pnpm"));
+        assert!(keyword_matches_any_token(
+            "使用 pnpm 管理依赖",
+            "package manager pnpm"
+        ));
     }
 
     #[test]

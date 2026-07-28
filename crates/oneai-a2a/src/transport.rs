@@ -92,7 +92,9 @@ impl JsonRpcResponse {
                 message: error.message.clone(),
             });
         }
-        self.result.clone().ok_or_else(|| A2AError::Protocol("No result in response".to_string()))
+        self.result
+            .clone()
+            .ok_or_else(|| A2AError::Protocol("No result in response".to_string()))
     }
 }
 
@@ -159,7 +161,10 @@ pub fn parse_sse_event(data: &str) -> Result<TaskStreamEvent> {
             "task" => Ok(TaskStreamEvent::Task { task: value }),
             "status" => Ok(TaskStreamEvent::Status { status: value }),
             "artifact" => Ok(TaskStreamEvent::Artifact { artifact: value }),
-            _ => Err(A2AError::Protocol(format!("Unknown SSE event type: {}", event_type))),
+            _ => Err(A2AError::Protocol(format!(
+                "Unknown SSE event type: {}",
+                event_type
+            ))),
         }
     } else {
         // If no "type" field, assume it's a full Task update
@@ -176,7 +181,11 @@ mod tests {
 
     #[test]
     fn test_json_rpc_request_creation() {
-        let request = JsonRpcRequest::new(1, METHOD_TASKS_SEND, json!({"id": "task-1", "message": {"role": "user", "parts": []}}));
+        let request = JsonRpcRequest::new(
+            1,
+            METHOD_TASKS_SEND,
+            json!({"id": "task-1", "message": {"role": "user", "parts": []}}),
+        );
         assert_eq!(request.jsonrpc, "2.0");
         assert_eq!(request.id, 1);
         assert_eq!(request.method, "tasks/send");
@@ -266,7 +275,10 @@ mod tests {
         let event = parse_sse_event(data).unwrap();
         match event {
             TaskStreamEvent::Status { status } => {
-                assert_eq!(status.get("state").and_then(|v| v.as_str()), Some("completed"));
+                assert_eq!(
+                    status.get("state").and_then(|v| v.as_str()),
+                    Some("completed")
+                );
             }
             _ => panic!("Expected Status event"),
         }
@@ -278,7 +290,10 @@ mod tests {
         let event = parse_sse_event(data).unwrap();
         match event {
             TaskStreamEvent::Artifact { artifact } => {
-                assert_eq!(artifact.get("name").and_then(|v| v.as_str()), Some("result"));
+                assert_eq!(
+                    artifact.get("name").and_then(|v| v.as_str()),
+                    Some("result")
+                );
             }
             _ => panic!("Expected Artifact event"),
         }

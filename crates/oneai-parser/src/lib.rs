@@ -16,15 +16,14 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
 pub mod constrained;
-pub mod fuzzy;
 pub mod fallback;
+pub mod fuzzy;
 pub mod three_layer;
 
 pub use constrained::*;
-pub use fuzzy::*;
 pub use fallback::*;
+pub use fuzzy::*;
 pub use three_layer::*;
 
 #[cfg(test)]
@@ -64,7 +63,8 @@ mod tests {
     #[test]
     fn test_fuzzy_repair_embedded_json() {
         let repair = FuzzyJsonRepair::new();
-        let embedded = "Here is some text before the JSON: {\"key\": \"value\"} and some text after.";
+        let embedded =
+            "Here is some text before the JSON: {\"key\": \"value\"} and some text after.";
         let result = repair.repair_and_parse(embedded);
         assert!(result.is_ok());
         let val = result.unwrap();
@@ -78,7 +78,10 @@ mod tests {
         let result = repair.repair_and_parse(tool_call).unwrap();
         let tool_calls = result.get("tool_calls").unwrap().as_array().unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].get("name").unwrap().as_str().unwrap(), "shell");
+        assert_eq!(
+            tool_calls[0].get("name").unwrap().as_str().unwrap(),
+            "shell"
+        );
     }
 
     #[test]

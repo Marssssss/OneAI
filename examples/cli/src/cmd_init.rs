@@ -47,7 +47,11 @@ pub fn cmd_init(
     let abs_dir = match std::fs::canonicalize(&project_dir) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("✗ Cannot resolve project directory '{}': {}", project_dir.display(), e);
+            eprintln!(
+                "✗ Cannot resolve project directory '{}': {}",
+                project_dir.display(),
+                e
+            );
             return;
         }
     };
@@ -64,16 +68,29 @@ pub fn cmd_init(
     let use_llm = !no_llm && config.to_model_config().is_some();
 
     let result = if use_llm {
-        println!("🔍 Probing project and synthesizing {} with the LLM…", format.filename());
-        let model_config = config.to_model_config().expect("provider config checked above");
+        println!(
+            "🔍 Probing project and synthesizing {} with the LLM…",
+            format.filename()
+        );
+        let model_config = config
+            .to_model_config()
+            .expect("provider config checked above");
         let provider = oneai_provider::ProviderFactory::create(model_config);
         rt.block_on(generate_project_info_with_llm(&abs_dir, &opts, &*provider))
     } else {
         if no_llm {
-            println!("⚙  Generating {} heuristically (--no-llm)…", format.filename());
+            println!(
+                "⚙  Generating {} heuristically (--no-llm)…",
+                format.filename()
+            );
         } else {
-            println!("⚙  No LLM provider configured — generating {} heuristically.", format.filename());
-            println!("   Configure ONEAI_API_KEY / ~/.oneai/config.toml for an LLM-synthesized doc.");
+            println!(
+                "⚙  No LLM provider configured — generating {} heuristically.",
+                format.filename()
+            );
+            println!(
+                "   Configure ONEAI_API_KEY / ~/.oneai/config.toml for an LLM-synthesized doc."
+            );
         }
         rt.block_on(generate_project_info(&abs_dir, &opts))
     };
@@ -98,9 +115,18 @@ pub fn cmd_init(
     } else {
         println!("✅ Created {}", res.path.display());
     }
-    let mode = if res.llm_generated { "LLM-synthesized" } else { "heuristic" };
+    let mode = if res.llm_generated {
+        "LLM-synthesized"
+    } else {
+        "heuristic"
+    };
     println!();
-    println!("Format: {} ({}) — {}", opts.format.label(), res.filename, mode);
+    println!(
+        "Format: {} ({}) — {}",
+        opts.format.label(),
+        res.filename,
+        mode
+    );
     if use_llm && !res.llm_generated {
         println!("⚠  LLM synthesis failed (provider error) — wrote a heuristic doc instead.");
         println!("   Check ONEAI_API_KEY / base_url, or pass --no-llm to silence this.");

@@ -12,9 +12,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oneai_core::{PermissionLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
+use oneai_core::{PermissionLevel, ToolOutput};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -70,8 +70,7 @@ impl McpFramingParser {
 
         // Extract and parse the JSON body
         let body_bytes = &self.buffer[body_start..body_end];
-        let json: serde_json::Value = serde_json::from_slice(body_bytes)
-            .ok()?; // If JSON parsing fails, skip this frame
+        let json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?; // If JSON parsing fails, skip this frame
 
         // Remove consumed bytes from buffer
         self.buffer = self.buffer[body_end..].to_vec();
@@ -90,14 +89,19 @@ impl McpFramingParser {
 }
 
 impl Default for McpFramingParser {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Find the end of the HTTP-like header section (\r\n\r\n).
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     for i in 0..buffer.len().saturating_sub(3) {
-        if buffer[i] == b'\r' && buffer[i+1] == b'\n'
-            && buffer[i+2] == b'\r' && buffer[i+3] == b'\n' {
+        if buffer[i] == b'\r'
+            && buffer[i + 1] == b'\n'
+            && buffer[i + 2] == b'\r'
+            && buffer[i + 3] == b'\n'
+        {
             return Some(i + 4); // Include the final \r\n\r\n
         }
     }
@@ -108,7 +112,8 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 fn parse_content_length(header: &str) -> Option<usize> {
     for line in header.lines() {
         if line.starts_with("Content-Length:") || line.starts_with("Content-Length: ") {
-            let value = line.trim_start_matches("Content-Length:")
+            let value = line
+                .trim_start_matches("Content-Length:")
                 .trim()
                 .parse::<usize>()
                 .ok()?;
@@ -237,15 +242,19 @@ impl McpConnection {
                     .stdin(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
 
-                let mut child = cmd.spawn()
-                    .map_err(|e| oneai_core::error::OneAIError::Provider(
-                        format!("Failed to launch MCP server '{}': {}", command, e)
-                    ))?;
+                let mut child = cmd.spawn().map_err(|e| {
+                    oneai_core::error::OneAIError::Provider(format!(
+                        "Failed to launch MCP server '{}': {}",
+                        command, e
+                    ))
+                })?;
 
-                let stdin = child.stdin.take()
-                    .ok_or_else(|| oneai_core::error::OneAIError::Provider("No stdin pipe".to_string()))?;
-                let stdout = child.stdout.take()
-                    .ok_or_else(|| oneai_core::error::OneAIError::Provider("No stdout pipe".to_string()))?;
+                let stdin = child.stdin.take().ok_or_else(|| {
+                    oneai_core::error::OneAIError::Provider("No stdin pipe".to_string())
+                })?;
+                let stdout = child.stdout.take().ok_or_else(|| {
+                    oneai_core::error::OneAIError::Provider("No stdout pipe".to_string())
+                })?;
 
                 let stdin_writer = tokio::io::BufWriter::new(stdin);
                 let stdout_reader = BufReader::new(stdout);
@@ -274,14 +283,17 @@ impl McpConnection {
                 // Verify initialize response
                 if init_response.get("error").is_some() {
                     let error = init_response.get("error").unwrap();
-                    return Err(oneai_core::error::OneAIError::Provider(
-                        format!("MCP initialize error: {}", error)
-                    ));
+                    return Err(oneai_core::error::OneAIError::Provider(format!(
+                        "MCP initialize error: {}",
+                        error
+                    )));
                 }
 
-                tracing::info!("MCP initialized with server '{}' — capabilities: {}",
+                tracing::info!(
+                    "MCP initialized with server '{}' — capabilities: {}",
                     self.config.name,
-                    init_response.get("result")
+                    init_response
+                        .get("result")
                         .and_then(|r| r.get("capabilities"))
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "unknown".to_string())
@@ -310,30 +322,39 @@ impl McpConnection {
                 if let Some(result) = tools_response.get("result") {
                     if let Some(tool_list) = result.get("tools").and_then(|t| t.as_array()) {
                         for tool_def in tool_list {
-                            let name = tool_def.get("name")
+                            let name = tool_def
+                                .get("name")
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("unknown")
                                 .to_string();
-                            let description = tool_def.get("description")
+                            let description = tool_def
+                                .get("description")
                                 .and_then(|d| d.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let schema = tool_def.get("inputSchema")
+                            let schema = tool_def
+                                .get("inputSchema")
                                 .cloned()
                                 .unwrap_or(serde_json::json!({"type": "object"}));
 
-                            self.tools.insert(name.clone(), McpToolInfo {
-                                name,
-                                description,
-                                parameters_schema: schema,
-                                server_name: self.config.name.clone(),
-                            });
+                            self.tools.insert(
+                                name.clone(),
+                                McpToolInfo {
+                                    name,
+                                    description,
+                                    parameters_schema: schema,
+                                    server_name: self.config.name.clone(),
+                                },
+                            );
                         }
                     }
                 }
 
-                tracing::info!("MCP connection established with server '{}' via Stdio — discovered {} tools",
-                    self.config.name, self.tools.len());
+                tracing::info!(
+                    "MCP connection established with server '{}' via Stdio — discovered {} tools",
+                    self.config.name,
+                    self.tools.len()
+                );
 
                 Ok(())
             }
@@ -345,7 +366,7 @@ impl McpConnection {
                 // 4. Send initialized notification via POST
                 // 5. Send tools/list request via POST
                 // 6. Parse tools from SSE stream
-                let client = Self::build_http_client(&headers)?;
+                let client = Self::build_http_client(headers)?;
 
                 // Step 1: Send initialize request via POST to the SSE endpoint
                 // The MCP SSE protocol requires sending JSON-RPC via POST
@@ -363,19 +384,23 @@ impl McpConnection {
                 self.next_id += 1;
 
                 // POST the initialize request
-                let init_response = Self::http_post_json(&client, url, &headers, &init_request).await?;
+                let init_response =
+                    Self::http_post_json(&client, url, headers, &init_request).await?;
 
                 // Verify initialize response
                 if init_response.get("error").is_some() {
                     let error = init_response.get("error").unwrap();
-                    return Err(oneai_core::error::OneAIError::Provider(
-                        format!("MCP SSE initialize error: {}", error)
-                    ));
+                    return Err(oneai_core::error::OneAIError::Provider(format!(
+                        "MCP SSE initialize error: {}",
+                        error
+                    )));
                 }
 
-                tracing::info!("MCP initialized with SSE server '{}' — capabilities: {}",
+                tracing::info!(
+                    "MCP initialized with SSE server '{}' — capabilities: {}",
                     self.config.name,
-                    init_response.get("result")
+                    init_response
+                        .get("result")
                         .and_then(|r| r.get("capabilities"))
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "unknown".to_string())
@@ -386,7 +411,7 @@ impl McpConnection {
                     "jsonrpc": "2.0",
                     "method": "notifications/initialized"
                 });
-                Self::http_post_json(&client, url, &headers, &initialized_notification).await?;
+                Self::http_post_json(&client, url, headers, &initialized_notification).await?;
 
                 // Step 3: Send tools/list request
                 let list_tools_request = serde_json::json!({
@@ -397,30 +422,37 @@ impl McpConnection {
                 });
                 self.next_id += 1;
 
-                let tools_response = Self::http_post_json(&client, url, &headers, &list_tools_request).await?;
+                let tools_response =
+                    Self::http_post_json(&client, url, headers, &list_tools_request).await?;
 
                 // Parse tool definitions
                 if let Some(result) = tools_response.get("result") {
                     if let Some(tool_list) = result.get("tools").and_then(|t| t.as_array()) {
                         for tool_def in tool_list {
-                            let name = tool_def.get("name")
+                            let name = tool_def
+                                .get("name")
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("unknown")
                                 .to_string();
-                            let description = tool_def.get("description")
+                            let description = tool_def
+                                .get("description")
                                 .and_then(|d| d.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let schema = tool_def.get("inputSchema")
+                            let schema = tool_def
+                                .get("inputSchema")
                                 .cloned()
                                 .unwrap_or(serde_json::json!({"type": "object"}));
 
-                            self.tools.insert(name.clone(), McpToolInfo {
-                                name,
-                                description,
-                                parameters_schema: schema,
-                                server_name: self.config.name.clone(),
-                            });
+                            self.tools.insert(
+                                name.clone(),
+                                McpToolInfo {
+                                    name,
+                                    description,
+                                    parameters_schema: schema,
+                                    server_name: self.config.name.clone(),
+                                },
+                            );
                         }
                     }
                 }
@@ -430,8 +462,11 @@ impl McpConnection {
                 self.sse_url = Some(url.clone());
                 self.post_url = Some(url.clone());
 
-                tracing::info!("MCP SSE connection established with server '{}' — discovered {} tools",
-                    self.config.name, self.tools.len());
+                tracing::info!(
+                    "MCP SSE connection established with server '{}' — discovered {} tools",
+                    self.config.name,
+                    self.tools.len()
+                );
 
                 Ok(())
             }
@@ -440,7 +475,7 @@ impl McpConnection {
                 // Similar to SSE but with session management.
                 // The server returns a session ID in the initial response
                 // that must be included in subsequent requests.
-                let client = Self::build_http_client(&headers)?;
+                let client = Self::build_http_client(headers)?;
 
                 // Step 1: Send initialize request via POST
                 let init_request = serde_json::json!({
@@ -455,30 +490,43 @@ impl McpConnection {
                 });
                 self.next_id += 1;
 
-                let (init_response, resp_headers) = Self::http_post_with_headers(&client, url, &headers, &init_request).await?;
+                let (init_response, resp_headers) =
+                    Self::http_post_with_headers(&client, url, headers, &init_request).await?;
 
                 // Extract session ID from response headers (if provided)
                 // MCP StreamableHttp uses Mcp-Session-Id header
-                let session_id = resp_headers.get("mcp-session-id")
+                let session_id = resp_headers
+                    .get("mcp-session-id")
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
 
                 if init_response.get("error").is_some() {
                     let error = init_response.get("error").unwrap();
-                    return Err(oneai_core::error::OneAIError::Provider(
-                        format!("MCP StreamableHttp initialize error: {}", error)
-                    ));
+                    return Err(oneai_core::error::OneAIError::Provider(format!(
+                        "MCP StreamableHttp initialize error: {}",
+                        error
+                    )));
                 }
 
-                tracing::info!("MCP initialized with StreamableHttp server '{}' — session_id: {:?}",
-                    self.config.name, session_id);
+                tracing::info!(
+                    "MCP initialized with StreamableHttp server '{}' — session_id: {:?}",
+                    self.config.name,
+                    session_id
+                );
 
                 // Step 2: Send initialized notification
                 let initialized_notification = serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "notifications/initialized"
                 });
-                Self::http_post_with_session(&client, url, &headers, session_id.as_deref(), &initialized_notification).await?;
+                Self::http_post_with_session(
+                    &client,
+                    url,
+                    headers,
+                    session_id.as_deref(),
+                    &initialized_notification,
+                )
+                .await?;
 
                 // Step 3: Send tools/list request
                 let list_tools_request = serde_json::json!({
@@ -489,30 +537,43 @@ impl McpConnection {
                 });
                 self.next_id += 1;
 
-                let (tools_response, _) = Self::http_post_with_session(&client, url, &headers, session_id.as_deref(), &list_tools_request).await?;
+                let (tools_response, _) = Self::http_post_with_session(
+                    &client,
+                    url,
+                    headers,
+                    session_id.as_deref(),
+                    &list_tools_request,
+                )
+                .await?;
 
                 // Parse tool definitions
                 if let Some(result) = tools_response.get("result") {
                     if let Some(tool_list) = result.get("tools").and_then(|t| t.as_array()) {
                         for tool_def in tool_list {
-                            let name = tool_def.get("name")
+                            let name = tool_def
+                                .get("name")
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("unknown")
                                 .to_string();
-                            let description = tool_def.get("description")
+                            let description = tool_def
+                                .get("description")
                                 .and_then(|d| d.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let schema = tool_def.get("inputSchema")
+                            let schema = tool_def
+                                .get("inputSchema")
                                 .cloned()
                                 .unwrap_or(serde_json::json!({"type": "object"}));
 
-                            self.tools.insert(name.clone(), McpToolInfo {
-                                name,
-                                description,
-                                parameters_schema: schema,
-                                server_name: self.config.name.clone(),
-                            });
+                            self.tools.insert(
+                                name.clone(),
+                                McpToolInfo {
+                                    name,
+                                    description,
+                                    parameters_schema: schema,
+                                    server_name: self.config.name.clone(),
+                                },
+                            );
                         }
                     }
                 }
@@ -547,7 +608,10 @@ impl McpConnection {
                     return Ok(ToolOutput {
                         success: false,
                         content: String::new(),
-                        error: Some("MCP connection not established — call connect_and_discover() first".to_string()),
+                        error: Some(
+                            "MCP connection not established — call connect_and_discover() first"
+                                .to_string(),
+                        ),
                     });
                 }
 
@@ -570,10 +634,11 @@ impl McpConnection {
             }
             McpTransport::Sse { url, headers } => {
                 // Use HTTP POST for SSE transport
-                let client = self.http_client.as_ref()
-                    .ok_or_else(|| oneai_core::error::OneAIError::Provider(
-                        "SSE HTTP client not initialized".to_string()
-                    ))?;
+                let client = self.http_client.as_ref().ok_or_else(|| {
+                    oneai_core::error::OneAIError::Provider(
+                        "SSE HTTP client not initialized".to_string(),
+                    )
+                })?;
 
                 let call_request = serde_json::json!({
                     "jsonrpc": "2.0",
@@ -591,10 +656,11 @@ impl McpConnection {
             }
             McpTransport::StreamableHttp { url, headers } => {
                 // Use HTTP POST with session ID for StreamableHttp transport
-                let client = self.http_client.as_ref()
-                    .ok_or_else(|| oneai_core::error::OneAIError::Provider(
-                        "StreamableHttp HTTP client not initialized".to_string()
-                    ))?;
+                let client = self.http_client.as_ref().ok_or_else(|| {
+                    oneai_core::error::OneAIError::Provider(
+                        "StreamableHttp HTTP client not initialized".to_string(),
+                    )
+                })?;
 
                 let call_request = serde_json::json!({
                     "jsonrpc": "2.0",
@@ -608,10 +674,13 @@ impl McpConnection {
                 self.next_id += 1;
 
                 let (response, _) = Self::http_post_with_session(
-                    client, url, headers,
+                    client,
+                    url,
+                    headers,
                     self.session_id.as_deref(),
                     &call_request,
-                ).await?;
+                )
+                .await?;
                 Self::parse_tool_call_response(&response)
             }
         }
@@ -620,23 +689,22 @@ impl McpConnection {
     /// Send a JSON-RPC message via the persistent stdin connection.
     async fn send_jsonrpc(&mut self, message: &serde_json::Value) -> Result<()> {
         if let Some(writer) = &mut self.stdin_writer {
-            let json_str = serde_json::to_string(message)
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("JSON serialization error: {}", e)
-                ))?;
+            let json_str = serde_json::to_string(message).map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!("JSON serialization error: {}", e))
+            })?;
 
             let frame = format!("Content-Length: {}\r\n\r\n{}", json_str.len(), json_str);
-            writer.write_all(frame.as_bytes()).await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("MCP write error: {}", e)
-                ))?;
-            writer.flush().await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("MCP flush error: {}", e)
-                ))?;
+            writer.write_all(frame.as_bytes()).await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!("MCP write error: {}", e))
+            })?;
+            writer.flush().await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!("MCP flush error: {}", e))
+            })?;
             Ok(())
         } else {
-            Err(oneai_core::error::OneAIError::Provider("No MCP stdin connection".to_string()))
+            Err(oneai_core::error::OneAIError::Provider(
+                "No MCP stdin connection".to_string(),
+            ))
         }
     }
 
@@ -650,15 +718,14 @@ impl McpConnection {
 
             // Read until we get a complete frame
             loop {
-                let n = reader.read(&mut buffer).await
-                    .map_err(|e| oneai_core::error::OneAIError::Provider(
-                        format!("MCP read error: {}", e)
-                    ))?;
+                let n = reader.read(&mut buffer).await.map_err(|e| {
+                    oneai_core::error::OneAIError::Provider(format!("MCP read error: {}", e))
+                })?;
 
                 if n == 0 {
                     // EOF — subprocess has closed stdout
                     return Err(oneai_core::error::OneAIError::Provider(
-                        "MCP server closed stdout (process may have exited)".to_string()
+                        "MCP server closed stdout (process may have exited)".to_string(),
                     ));
                 }
 
@@ -682,7 +749,9 @@ impl McpConnection {
                 // If no response frame yet, continue reading
             }
         } else {
-            Err(oneai_core::error::OneAIError::Provider("No MCP stdout connection".to_string()))
+            Err(oneai_core::error::OneAIError::Provider(
+                "No MCP stdout connection".to_string(),
+            ))
         }
     }
 
@@ -690,11 +759,16 @@ impl McpConnection {
     pub async fn shutdown(&mut self) -> Result<()> {
         if let Some(child) = &mut self.child {
             // Try graceful shutdown first (SIGTERM on Unix)
-            child.kill().await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("Failed to kill MCP subprocess: {}", e)
-                ))?;
-            tracing::info!("MCP connection to server '{}' shut down (Stdio)", self.config.name);
+            child.kill().await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!(
+                    "Failed to kill MCP subprocess: {}",
+                    e
+                ))
+            })?;
+            tracing::info!(
+                "MCP connection to server '{}' shut down (Stdio)",
+                self.config.name
+            );
         }
         self.stdin_writer = None;
         self.stdout_reader = None;
@@ -720,27 +794,22 @@ impl McpConnection {
 
     /// Build an HTTP client with optional custom headers.
     fn build_http_client(headers: &HashMap<String, String>) -> Result<reqwest::Client> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30));
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
 
         // Add custom headers as default request headers
         for (key, value) in headers {
-            builder = builder.default_headers(
-                reqwest::header::HeaderMap::from_iter(
-                    std::iter::once((
-                        reqwest::header::HeaderName::from_bytes(key.as_bytes())
-                            .unwrap_or_else(|_| reqwest::header::AUTHORIZATION),
-                        reqwest::header::HeaderValue::from_str(value)
-                            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(""))
-                    ))
-                )
-            );
+            builder =
+                builder.default_headers(reqwest::header::HeaderMap::from_iter(std::iter::once((
+                    reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                        .unwrap_or(reqwest::header::AUTHORIZATION),
+                    reqwest::header::HeaderValue::from_str(value)
+                        .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
+                ))));
         }
 
-        builder.build()
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("Failed to build HTTP client: {}", e)
-            ))
+        builder.build().map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!("Failed to build HTTP client: {}", e))
+        })
     }
 
     /// Send a JSON-RPC message via HTTP POST and receive the JSON response.
@@ -761,8 +830,7 @@ impl McpConnection {
         headers: &HashMap<String, String>,
         message: &serde_json::Value,
     ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
-        let mut request = client.post(url)
-            .json(message);
+        let mut request = client.post(url).json(message);
 
         // Add any custom headers to this specific request
         for (key, value) in headers {
@@ -773,10 +841,12 @@ impl McpConnection {
             }
         }
 
-        let response = request.send().await
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("MCP HTTP POST error to {}: {}", url, e)
-            ))?;
+        let response = request.send().await.map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "MCP HTTP POST error to {}: {}",
+                url, e
+            ))
+        })?;
 
         let resp_headers = response.headers().clone();
 
@@ -784,16 +854,18 @@ impl McpConnection {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(oneai_core::error::OneAIError::Provider(
-                format!("MCP HTTP POST returned status {} from {}: {}", status.as_u16(), url, body)
-            ));
+            return Err(oneai_core::error::OneAIError::Provider(format!(
+                "MCP HTTP POST returned status {} from {}: {}",
+                status.as_u16(),
+                url,
+                body
+            )));
         }
 
         // Parse response body as JSON
-        let body = response.text().await
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("MCP HTTP POST read error: {}", e)
-            ))?;
+        let body = response.text().await.map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!("MCP HTTP POST read error: {}", e))
+        })?;
 
         // The response might be SSE format (multiple events) or plain JSON
         // Try parsing as plain JSON first
@@ -813,9 +885,10 @@ impl McpConnection {
         }
 
         // If neither works, return an error
-        Err(oneai_core::error::OneAIError::Provider(
-            format!("MCP HTTP POST response could not be parsed as JSON from {}: {}", url, body)
-        ))
+        Err(oneai_core::error::OneAIError::Provider(format!(
+            "MCP HTTP POST response could not be parsed as JSON from {}: {}",
+            url, body
+        )))
     }
 
     /// Send a JSON-RPC message via HTTP POST with session ID header.
@@ -826,8 +899,7 @@ impl McpConnection {
         session_id: Option<&str>,
         message: &serde_json::Value,
     ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
-        let mut request = client.post(url)
-            .json(message);
+        let mut request = client.post(url).json(message);
 
         // Add session ID header if present
         if let Some(sid) = session_id {
@@ -843,25 +915,29 @@ impl McpConnection {
             }
         }
 
-        let response = request.send().await
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("MCP HTTP POST error to {}: {}", url, e)
-            ))?;
+        let response = request.send().await.map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "MCP HTTP POST error to {}: {}",
+                url, e
+            ))
+        })?;
 
         let resp_headers = response.headers().clone();
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(oneai_core::error::OneAIError::Provider(
-                format!("MCP HTTP POST returned status {} from {}: {}", status.as_u16(), url, body)
-            ));
+            return Err(oneai_core::error::OneAIError::Provider(format!(
+                "MCP HTTP POST returned status {} from {}: {}",
+                status.as_u16(),
+                url,
+                body
+            )));
         }
 
-        let body = response.text().await
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("MCP HTTP POST read error: {}", e)
-            ))?;
+        let body = response.text().await.map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!("MCP HTTP POST read error: {}", e))
+        })?;
 
         // Parse response (plain JSON or SSE format)
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -877,16 +953,19 @@ impl McpConnection {
             }
         }
 
-        Err(oneai_core::error::OneAIError::Provider(
-            format!("MCP HTTP POST response could not be parsed from {}: {}", url, &body[..body.len().min(200)])
-        ))
+        Err(oneai_core::error::OneAIError::Provider(format!(
+            "MCP HTTP POST response could not be parsed from {}: {}",
+            url,
+            &body[..body.len().min(200)]
+        )))
     }
 
     /// Parse a tool call response from any transport into a ToolOutput.
     fn parse_tool_call_response(response: &serde_json::Value) -> Result<ToolOutput> {
         // Check for errors
         if let Some(error) = response.get("error") {
-            let error_msg = error.get("message")
+            let error_msg = error
+                .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("Unknown MCP error");
             return Ok(ToolOutput {
@@ -900,10 +979,14 @@ impl McpConnection {
         let content = if let Some(result) = response.get("result") {
             if let Some(content_arr) = result.get("content").and_then(|c| c.as_array()) {
                 // MCP returns content as an array of content blocks
-                content_arr.iter()
+                content_arr
+                    .iter()
                     .filter_map(|block| {
                         if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                            block
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
                         } else {
                             None
                         }
@@ -950,15 +1033,27 @@ impl McpToolWrapper {
         server_name: String,
         connection: Arc<tokio::sync::Mutex<McpConnection>>,
     ) -> Self {
-        Self { name, description, parameters_schema, server_name, connection }
+        Self {
+            name,
+            description,
+            parameters_schema,
+            server_name,
+            connection,
+        }
     }
 }
 
 #[async_trait]
 impl Tool for McpToolWrapper {
-    fn name(&self) -> &str { &self.name }
-    fn description(&self) -> &str { &self.description }
-    fn parameters_schema(&self) -> serde_json::Value { self.parameters_schema.clone() }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.parameters_schema.clone()
+    }
 
     fn risk_level(&self) -> oneai_core::RiskLevel {
         self.permission_level().to_risk_level()
@@ -1000,7 +1095,8 @@ impl McpServerManager {
         connection.connect_and_discover().await?;
 
         let connection_arc = Arc::new(tokio::sync::Mutex::new(connection));
-        self.connections.insert(config.name.clone(), connection_arc.clone());
+        self.connections
+            .insert(config.name.clone(), connection_arc.clone());
 
         let mut tool_names = Vec::new();
         // We need to read tools from the connection (it's locked in the Arc<Mutex>)
@@ -1014,7 +1110,8 @@ impl McpServerManager {
                 connection_arc.clone(),
             );
             tool_names.push(tool_name.clone());
-            self.tool_wrappers.insert(tool_name.clone(), Arc::new(wrapper));
+            self.tool_wrappers
+                .insert(tool_name.clone(), Arc::new(wrapper));
         }
 
         Ok(tool_names)
@@ -1032,7 +1129,7 @@ impl McpServerManager {
 
     /// Shutdown all MCP connections.
     pub async fn shutdown_all(&mut self) -> Result<()> {
-        for (_name, conn_arc) in &self.connections {
+        for conn_arc in self.connections.values() {
             let mut conn = conn_arc.lock().await;
             conn.shutdown().await?;
         }
@@ -1043,45 +1140,40 @@ impl McpServerManager {
 }
 
 impl Default for McpServerManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── Pre-registered default MCP servers ──────────────────────────────────────
 
 pub fn default_mcp_configs() -> Vec<McpServerConfig> {
-    vec![
-        McpServerConfig {
-            name: "filesystem".to_string(),
-            transport: McpTransport::Stdio {
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@modelcontextprotocol/server-filesystem".to_string(),
-                ],
-                env: HashMap::new(),
-            },
-            requires_api_key: false,
-            api_key_field: None,
+    vec![McpServerConfig {
+        name: "filesystem".to_string(),
+        transport: McpTransport::Stdio {
+            command: "npx".to_string(),
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
+            env: HashMap::new(),
         },
-    ]
+        requires_api_key: false,
+        api_key_field: None,
+    }]
 }
 
 pub fn optional_mcp_configs() -> Vec<McpServerConfig> {
-    vec![
-        McpServerConfig {
-            name: "web_search".to_string(),
-            transport: McpTransport::Stdio {
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@anthropic-ai/mcp-web-search".to_string(),
-                ],
-                env: HashMap::new(),
-            },
-            requires_api_key: true,
-            api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+    vec![McpServerConfig {
+        name: "web_search".to_string(),
+        transport: McpTransport::Stdio {
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@anthropic-ai/mcp-web-search".to_string()],
+            env: HashMap::new(),
         },
-    ]
+        requires_api_key: true,
+        api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+    }]
 }
 
 #[cfg(test)]
@@ -1111,7 +1203,10 @@ mod tests {
         let str2 = serde_json::to_string(&json2).unwrap();
         let frame = format!(
             "Content-Length: {}\r\n\r\n{}Content-Length: {}\r\n\r\n{}",
-            str1.len(), str1, str2.len(), str2
+            str1.len(),
+            str1,
+            str2.len(),
+            str2
         );
 
         let mut parser = McpFramingParser::new();

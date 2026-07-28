@@ -24,9 +24,7 @@ use std::path::{Path, PathBuf};
 
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::LlmProvider;
-use oneai_core::types::{
-    Conversation, InferenceRequest, Message,
-};
+use oneai_core::types::{Conversation, InferenceRequest, Message};
 
 /// Over-collect dependencies during probing; the composer / LLM trims for display.
 const PROBE_MAX_DEPS: usize = 60;
@@ -235,9 +233,7 @@ impl ProjectProbe {
             p.build_system = Some(BuildSystem::GoModule);
             p.language = "Go".to_string();
             probe_go(project_dir, &mut p).await;
-        } else if project_dir.join("Makefile").exists()
-            || project_dir.join("makefile").exists()
-        {
+        } else if project_dir.join("Makefile").exists() || project_dir.join("makefile").exists() {
             p.build_system = Some(BuildSystem::Make);
             probe_make(project_dir, &mut p).await;
         } else if project_dir.join("CMakeLists.txt").exists() {
@@ -279,20 +275,31 @@ impl ProjectProbe {
             s.push_str(&format!("## {}\n{}\n\n", label, body));
         };
 
-        push("Project", format!(
-            "name: {}\nversion: {}\nlanguage: {}\nbuild_system: {}\ndescription: {}\nroot: {}",
-            self.name,
-            self.version,
-            self.language,
-            self.build_system.as_ref().map(|b| b.label()).unwrap_or("unrecognized"),
-            self.description,
-            self.project_dir.display()
-        ));
+        push(
+            "Project",
+            format!(
+                "name: {}\nversion: {}\nlanguage: {}\nbuild_system: {}\ndescription: {}\nroot: {}",
+                self.name,
+                self.version,
+                self.language,
+                self.build_system
+                    .as_ref()
+                    .map(|b| b.label())
+                    .unwrap_or("unrecognized"),
+                self.description,
+                self.project_dir.display()
+            ),
+        );
 
         if !self.commands.is_empty() {
-            push("Commands", self.commands.iter()
-                .map(|(l, c)| format!("- {}: {}", l, c))
-                .collect::<Vec<_>>().join("\n"));
+            push(
+                "Commands",
+                self.commands
+                    .iter()
+                    .map(|(l, c)| format!("- {}: {}", l, c))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
         }
 
         if !self.module_map.is_empty() {
@@ -316,21 +323,42 @@ impl ProjectProbe {
         }
 
         if !self.entry_points.is_empty() {
-            push("Entry-point file excerpts", self.entry_points.iter()
-                .map(|(f, body)| format!("// {} \n{}", f, body))
-                .collect::<Vec<_>>().join("\n\n"));
+            push(
+                "Entry-point file excerpts",
+                self.entry_points
+                    .iter()
+                    .map(|(f, body)| format!("// {} \n{}", f, body))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            );
         }
 
         if !self.key_dependencies.is_empty() {
-            push("Key dependencies", self.key_dependencies.iter()
-                .map(|(n, v)| if v.is_empty() { format!("- {}", n) } else { format!("- {}: {}", n, v) })
-                .collect::<Vec<_>>().join("\n"));
+            push(
+                "Key dependencies",
+                self.key_dependencies
+                    .iter()
+                    .map(|(n, v)| {
+                        if v.is_empty() {
+                            format!("- {}", n)
+                        } else {
+                            format!("- {}: {}", n, v)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
         }
 
         if !self.conventions.is_empty() {
-            push("Conventions", self.conventions.iter()
-                .map(|c| format!("- {}", c))
-                .collect::<Vec<_>>().join("\n"));
+            push(
+                "Conventions",
+                self.conventions
+                    .iter()
+                    .map(|c| format!("- {}", c))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
         }
 
         if !self.readme.is_empty() {
@@ -338,23 +366,37 @@ impl ProjectProbe {
         }
 
         if let Some((fname, content)) = &self.existing_instructions {
-            push(&format!("Existing instruction file ({})", fname),
-                 truncate_chars(content, 4000));
+            push(
+                &format!("Existing instruction file ({})", fname),
+                truncate_chars(content, 4000),
+            );
         }
 
         if !self.doc_links.is_empty() {
-            push("Supplementary docs (link, don't embed)",
-                 self.doc_links.iter().map(|d| format!("- {}", d)).collect::<Vec<_>>().join("\n"));
+            push(
+                "Supplementary docs (link, don't embed)",
+                self.doc_links
+                    .iter()
+                    .map(|d| format!("- {}", d))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
         }
 
         if !self.file_tree.is_empty() {
-            push("File tree (top levels)", truncate_chars(&self.file_tree, 3000));
+            push(
+                "File tree (top levels)",
+                truncate_chars(&self.file_tree, 3000),
+            );
         }
 
-        push("Git", format!(
-            "branch: {}\nrecent commits:\n{}",
-            self.git_branch, self.git_commits
-        ));
+        push(
+            "Git",
+            format!(
+                "branch: {}\nrecent commits:\n{}",
+                self.git_branch, self.git_commits
+            ),
+        );
 
         truncate_chars(&s, CONTEXT_BLOCK_CAP)
     }
@@ -377,7 +419,8 @@ do/don't rules, gotchas).\n\
 it rather than guess.\n\n\
 Output ONLY the raw markdown file content. Do not wrap it in a code fence, do not add \
 preamble or commentary, do not mention that you were asked to generate a file.",
-            format.label(), format.filename()
+            format.label(),
+            format.filename()
         );
 
         let user = format!(
@@ -413,26 +456,49 @@ async fn probe_cargo(dir: &Path, p: &mut ProjectProbe) {
     let Ok(parsed) = text.parse::<toml::Value>() else {
         p.commands.push(("build".into(), "cargo build".into()));
         p.commands.push(("test".into(), "cargo test".into()));
-        p.commands.push(("lint".into(), "cargo clippy --workspace --all-targets".into()));
+        p.commands.push((
+            "lint".into(),
+            "cargo clippy --workspace --all-targets".into(),
+        ));
         return;
     };
 
     if let Some(pkg) = parsed.get("package").and_then(|v| v.as_table()) {
-        p.name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        p.version = pkg.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        p.description = pkg.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        p.name = pkg
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        p.version = pkg
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        p.description = pkg
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
     } else if parsed.get("workspace").is_some() {
-        p.name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "workspace".into());
+        p.name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "workspace".into());
     }
 
     let is_workspace = parsed.get("workspace").is_some();
-    let test = if is_workspace { "cargo test --workspace" } else { "cargo test" };
+    let test = if is_workspace {
+        "cargo test --workspace"
+    } else {
+        "cargo test"
+    };
     let lint = "cargo clippy --workspace --all-targets";
     p.commands.push(("build".into(), "cargo build".into()));
     p.commands.push(("test".into(), test.into()));
     p.commands.push(("lint".into(), lint.into()));
     p.commands.push(("format".into(), "cargo fmt".into()));
-    p.commands.push(("run".into(), "cargo run --bin <bin>".into()));
+    p.commands
+        .push(("run".into(), "cargo run --bin <bin>".into()));
 
     let deps_table = parsed
         .get(if is_workspace { "workspace" } else { "package" })
@@ -458,7 +524,10 @@ fn dep_version(val: &toml::Value) -> String {
             if let Some(s) = t.get("version").and_then(|v| v.as_str()) {
                 return s.to_string();
             }
-            if t.get("workspace").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if t.get("workspace")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 return "{workspace}".to_string();
             }
             String::new()
@@ -474,9 +543,21 @@ async fn probe_node(dir: &Path, p: &mut ProjectProbe) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
         return;
     };
-    p.name = json.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    p.version = json.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    p.description = json.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    p.name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    p.version = json
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    p.description = json
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let pm = if dir.join("pnpm-lock.yaml").exists() {
         "pnpm"
@@ -496,7 +577,8 @@ async fn probe_node(dir: &Path, p: &mut ProjectProbe) {
             if p.key_dependencies.len() >= PROBE_MAX_DEPS {
                 break;
             }
-            p.key_dependencies.push((name.clone(), val.as_str().unwrap_or("").to_string()));
+            p.key_dependencies
+                .push((name.clone(), val.as_str().unwrap_or("").to_string()));
         }
     }
 }
@@ -505,9 +587,21 @@ async fn probe_python(dir: &Path, p: &mut ProjectProbe) {
     if let Ok(text) = tokio::fs::read_to_string(dir.join("pyproject.toml")).await {
         if let Ok(parsed) = text.parse::<toml::Value>() {
             if let Some(proj) = parsed.get("project").and_then(|v| v.as_table()) {
-                p.name = proj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                p.version = proj.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                p.description = proj.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                p.name = proj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                p.version = proj
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                p.description = proj
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if let Some(deps) = proj.get("dependencies").and_then(|v| v.as_array()) {
                     for d in deps {
                         if p.key_dependencies.len() >= PROBE_MAX_DEPS {
@@ -519,10 +613,26 @@ async fn probe_python(dir: &Path, p: &mut ProjectProbe) {
                         }
                     }
                 }
-            } else if let Some(poetry) = parsed.get("tool").and_then(|t| t.get("poetry")).and_then(|v| v.as_table()) {
-                p.name = poetry.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                p.version = poetry.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                p.description = poetry.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            } else if let Some(poetry) = parsed
+                .get("tool")
+                .and_then(|t| t.get("poetry"))
+                .and_then(|v| v.as_table())
+            {
+                p.name = poetry
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                p.version = poetry
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                p.description = poetry
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if let Some(deps) = poetry.get("dependencies").and_then(|v| v.as_table()) {
                     for (name, val) in deps.iter() {
                         if p.key_dependencies.len() >= PROBE_MAX_DEPS {
@@ -537,7 +647,8 @@ async fn probe_python(dir: &Path, p: &mut ProjectProbe) {
             }
         }
     }
-    p.commands.push(("install".into(), "pip install -e .".into()));
+    p.commands
+        .push(("install".into(), "pip install -e .".into()));
     p.commands.push(("test".into(), "pytest".into()));
     p.commands.push(("build".into(), "python -m build".into()));
     p.commands.push(("lint".into(), "ruff check".into()));
@@ -588,7 +699,8 @@ async fn probe_make(dir: &Path, p: &mut ProjectProbe) {
     if let Ok(re) = regex::Regex::new(r"(?m)^([a-zA-Z][a-zA-Z0-9_.-]*):") {
         for cap in re.captures_iter(&text) {
             if let Some(target) = cap.get(1).map(|m| m.as_str()) {
-                p.commands.push((target.to_string(), format!("make {target}")));
+                p.commands
+                    .push((target.to_string(), format!("make {target}")));
             }
         }
     }
@@ -604,39 +716,54 @@ async fn probe_cmake(dir: &Path, p: &mut ProjectProbe) {
             }
         }
     }
-    p.commands.push(("configure".into(), "cmake -B build".into()));
-    p.commands.push(("build".into(), "cmake --build build".into()));
-    p.commands.push(("test".into(), "ctest --test-dir build".into()));
+    p.commands
+        .push(("configure".into(), "cmake -B build".into()));
+    p.commands
+        .push(("build".into(), "cmake --build build".into()));
+    p.commands
+        .push(("test".into(), "ctest --test-dir build".into()));
 }
 
 // ─── Conventions detection ───────────────────────────────────────────────────
 
 async fn detect_conventions(dir: &Path, p: &mut ProjectProbe) {
     let checks: &[(&str, &str)] = &[
-        ("rustfmt.toml",         "uses rustfmt with a custom config"),
-        (".rustfmt.toml",        "uses rustfmt with a custom config"),
-        ("clippy.toml",          "uses clippy with project-specific lints"),
-        (".cargo/config.toml",   "has a .cargo/config.toml (custom build flags)"),
-        (".eslintrc",            "uses ESLint"),
-        (".eslintrc.json",       "uses ESLint"),
-        (".eslintrc.js",         "uses ESLint"),
-        (".eslintrc.cjs",        "uses ESLint"),
-        (".eslintrc.yml",        "uses ESLint"),
-        (".prettierrc",          "uses Prettier"),
-        (".prettierrc.json",     "uses Prettier"),
-        ("prettier.config.js",   "uses Prettier"),
-        ("tsconfig.json",        "uses TypeScript (tsconfig.json present)"),
-        (".ruff.toml",           "uses Ruff (lint/format)"),
-        ("ruff.toml",            "uses Ruff (lint/format)"),
-        (".flake8",              "uses flake8"),
-        ("mypy.ini",             "uses mypy for type checking"),
+        ("rustfmt.toml", "uses rustfmt with a custom config"),
+        (".rustfmt.toml", "uses rustfmt with a custom config"),
+        ("clippy.toml", "uses clippy with project-specific lints"),
+        (
+            ".cargo/config.toml",
+            "has a .cargo/config.toml (custom build flags)",
+        ),
+        (".eslintrc", "uses ESLint"),
+        (".eslintrc.json", "uses ESLint"),
+        (".eslintrc.js", "uses ESLint"),
+        (".eslintrc.cjs", "uses ESLint"),
+        (".eslintrc.yml", "uses ESLint"),
+        (".prettierrc", "uses Prettier"),
+        (".prettierrc.json", "uses Prettier"),
+        ("prettier.config.js", "uses Prettier"),
+        ("tsconfig.json", "uses TypeScript (tsconfig.json present)"),
+        (".ruff.toml", "uses Ruff (lint/format)"),
+        ("ruff.toml", "uses Ruff (lint/format)"),
+        (".flake8", "uses flake8"),
+        ("mypy.ini", "uses mypy for type checking"),
         (".pre-commit-config.yaml", "uses pre-commit hooks"),
-        ("pytest.ini",           "uses pytest (pytest.ini present)"),
-        ("tox.ini",              "uses tox"),
-        (".editorconfig",        "ships an .editorconfig (editor consistency)"),
-        (".gitattributes",       "ships .gitattributes (line-ending / diff normalization)"),
-        (".gitignore",           "ships a .gitignore"),
-        ("CONTRIBUTING.md",      "has CONTRIBUTING.md (commit/PR conventions)"),
+        ("pytest.ini", "uses pytest (pytest.ini present)"),
+        ("tox.ini", "uses tox"),
+        (
+            ".editorconfig",
+            "ships an .editorconfig (editor consistency)",
+        ),
+        (
+            ".gitattributes",
+            "ships .gitattributes (line-ending / diff normalization)",
+        ),
+        (".gitignore", "ships a .gitignore"),
+        (
+            "CONTRIBUTING.md",
+            "has CONTRIBUTING.md (commit/PR conventions)",
+        ),
     ];
     for (file, note) in checks {
         if dir.join(file).exists() {
@@ -646,22 +773,27 @@ async fn detect_conventions(dir: &Path, p: &mut ProjectProbe) {
     if dir.join("pyproject.toml").exists() {
         if let Ok(text) = tokio::fs::read_to_string(dir.join("pyproject.toml")).await {
             if text.contains("[tool.ruff") {
-                p.conventions.push("uses Ruff (config in pyproject.toml)".into());
+                p.conventions
+                    .push("uses Ruff (config in pyproject.toml)".into());
             }
             if text.contains("[tool.mypy") {
-                p.conventions.push("uses mypy (config in pyproject.toml)".into());
+                p.conventions
+                    .push("uses mypy (config in pyproject.toml)".into());
             }
             if text.contains("[tool.pytest") || text.contains("[tool.pytest]") {
-                p.conventions.push("uses pytest (config in pyproject.toml)".into());
+                p.conventions
+                    .push("uses pytest (config in pyproject.toml)".into());
             }
         }
     }
     if p.build_system == Some(BuildSystem::RustCargo) {
         if !p.conventions.iter().any(|c| c.contains("rustfmt")) {
-            p.conventions.push("cargo fmt is the canonical formatter".into());
+            p.conventions
+                .push("cargo fmt is the canonical formatter".into());
         }
         if !p.conventions.iter().any(|c| c.contains("clippy")) {
-            p.conventions.push("cargo clippy is the canonical linter".into());
+            p.conventions
+                .push("cargo clippy is the canonical linter".into());
         }
     }
 }
@@ -702,7 +834,11 @@ async fn workspace_members(dir: &Path) -> Vec<PathBuf> {
     let Ok(parsed) = text.parse::<toml::Value>() else {
         return Vec::new();
     };
-    let Some(members) = parsed.get("workspace").and_then(|w| w.get("members")).and_then(|v| v.as_array()) else {
+    let Some(members) = parsed
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|v| v.as_array())
+    else {
         return Vec::new();
     };
 
@@ -734,7 +870,9 @@ fn glob_expand(root: &Path, pat: &str) -> Vec<PathBuf> {
     let star_seg = parts[idx];
     let segs_after = &parts[idx + 1..];
 
-    let Ok(rd) = std::fs::read_dir(&prefix) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(&prefix) else {
+        return vec![];
+    };
     let mut out = Vec::new();
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -760,7 +898,9 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     if let Some(star) = pattern.find('*') {
         let prefix = &pattern[..star];
         let suffix = &pattern[star + 1..];
-        return name.starts_with(prefix) && name.ends_with(suffix) && name.len() >= prefix.len() + suffix.len();
+        return name.starts_with(prefix)
+            && name.ends_with(suffix)
+            && name.len() >= prefix.len() + suffix.len();
     }
     name == pattern
 }
@@ -772,11 +912,24 @@ async fn rust_module_entry(root: &Path, crate_dir: &Path) -> Option<ModuleEntry>
     let (name, description) = if cargo_path.exists() {
         let text = tokio::fs::read_to_string(&cargo_path).await.ok()?;
         let parsed = text.parse::<toml::Value>().ok()?;
-        let name = parsed.get("package").and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let desc = parsed.get("package").and_then(|p| p.get("description")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = parsed
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let desc = parsed
+            .get("package")
+            .and_then(|p| p.get("description"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         (name, desc)
     } else {
-        (crate_dir.file_name()?.to_string_lossy().to_string(), String::new())
+        (
+            crate_dir.file_name()?.to_string_lossy().to_string(),
+            String::new(),
+        )
     };
 
     let lib_path = crate_dir.join("src").join("lib.rs");
@@ -786,7 +939,8 @@ async fn rust_module_entry(root: &Path, crate_dir: &Path) -> Option<ModuleEntry>
         (String::new(), Vec::new())
     };
 
-    let rel_path = crate_dir.strip_prefix(root)
+    let rel_path = crate_dir
+        .strip_prefix(root)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| crate_dir.to_string_lossy().to_string());
 
@@ -825,7 +979,8 @@ async fn parse_rust_entry(path: &Path) -> Option<(String, Vec<String>)> {
 /// Extract the module name from a `pub mod x;` / `pub(crate) mod x;` line.
 fn parse_pub_mod(line: &str) -> Option<String> {
     let re = regex::Regex::new(r"^pub(?:\([^)]*\))?\s+mod\s+([a-zA-Z_][a-zA-Z0-9_]*)").ok()?;
-    re.captures(line).and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+    re.captures(line)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
 }
 
 /// Read entry-point file doc excerpts (lib.rs / main.rs / index.ts).
@@ -852,7 +1007,8 @@ async fn read_entry_points(dir: &Path, build_system: Option<BuildSystem>) -> Vec
         }
         if let Ok(text) = tokio::fs::read_to_string(&path).await {
             // First ~40 non-empty lines, trimmed.
-            let body: String = text.lines()
+            let body: String = text
+                .lines()
                 .filter(|l| !l.trim().is_empty())
                 .take(40)
                 .collect::<Vec<_>>()
@@ -864,7 +1020,13 @@ async fn read_entry_points(dir: &Path, build_system: Option<BuildSystem>) -> Vec
 }
 
 async fn read_readme(dir: &Path) -> String {
-    for name in &["README.md", "README", "README.rst", "README.txt", "readme.md"] {
+    for name in &[
+        "README.md",
+        "README",
+        "README.rst",
+        "README.txt",
+        "readme.md",
+    ] {
         let path = dir.join(name);
         if !path.exists() {
             continue;
@@ -897,7 +1059,12 @@ async fn read_existing_instructions(dir: &Path) -> Option<(String, String)> {
 /// CONTRIBUTING.md, docs/*.md.
 async fn inventory_docs(dir: &Path) -> Vec<String> {
     let mut links = Vec::new();
-    for name in &["ARCHITECTURE.md", "CONTRIBUTING.md", "CHANGELOG.md", "DESIGN.md"] {
+    for name in &[
+        "ARCHITECTURE.md",
+        "CONTRIBUTING.md",
+        "CHANGELOG.md",
+        "DESIGN.md",
+    ] {
         if dir.join(name).exists() {
             links.push(name.to_string());
         }
@@ -937,7 +1104,10 @@ async fn scan_file_tree(dir: &Path) -> String {
     );
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::process::Command::new(shell).arg(shell_arg).arg(cmd).output(),
+        tokio::process::Command::new(shell)
+            .arg(shell_arg)
+            .arg(cmd)
+            .output(),
     )
     .await;
     match out {
@@ -960,8 +1130,20 @@ async fn scan_git(dir: &Path) -> (String, String) {
     } else {
         ("sh", "-c")
     };
-    let branch = git_run(&dir_str, shell, shell_arg, "git branch --show-current 2>/dev/null").await;
-    let commits = git_run(&dir_str, shell, shell_arg, "git log --oneline -10 2>/dev/null").await;
+    let branch = git_run(
+        &dir_str,
+        shell,
+        shell_arg,
+        "git branch --show-current 2>/dev/null",
+    )
+    .await;
+    let commits = git_run(
+        &dir_str,
+        shell,
+        shell_arg,
+        "git log --oneline -10 2>/dev/null",
+    )
+    .await;
     let branch = if branch.is_empty() {
         "(not a git repo or no branch)".to_string()
     } else {
@@ -996,7 +1178,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let end = s.char_indices()
+    let end = s
+        .char_indices()
         .take_while(|(i, _)| *i < max)
         .last()
         .map(|(i, c)| i + c.len_utf8())
@@ -1028,10 +1211,21 @@ fn compose_heuristic(probe: &ProjectProbe, opts: &ProjectInfoOptions) -> String 
     if !probe.version.is_empty() {
         md.push_str(&format!("- **Version**: {}\n", probe.version));
     }
-    md.push_str(&format!("- **Language**: {}\n", if probe.language.is_empty() { "unknown".into() } else { probe.language.clone() }));
+    md.push_str(&format!(
+        "- **Language**: {}\n",
+        if probe.language.is_empty() {
+            "unknown".into()
+        } else {
+            probe.language.clone()
+        }
+    ));
     md.push_str(&format!(
         "- **Build system**: {}\n",
-        probe.build_system.as_ref().map(|b| b.label()).unwrap_or("unrecognized")
+        probe
+            .build_system
+            .as_ref()
+            .map(|b| b.label())
+            .unwrap_or("unrecognized")
     ));
     if !probe.description.is_empty() {
         md.push_str(&format!("- **Description**: {}\n", probe.description));
@@ -1048,7 +1242,9 @@ fn compose_heuristic(probe: &ProjectProbe, opts: &ProjectInfoOptions) -> String 
 
     if !probe.module_map.is_empty() {
         md.push_str("## Architecture — module map\n\n");
-        md.push_str("Grounded in each crate's `src/lib.rs` doc comment and `pub mod` declarations.\n\n");
+        md.push_str(
+            "Grounded in each crate's `src/lib.rs` doc comment and `pub mod` declarations.\n\n",
+        );
         for m in &probe.module_map {
             md.push_str(&format!("### {} (`{}`)\n", m.name, m.path));
             if !m.description.is_empty() {
@@ -1067,7 +1263,11 @@ fn compose_heuristic(probe: &ProjectProbe, opts: &ProjectInfoOptions) -> String 
         }
     } else if opts.include_file_tree && !probe.file_tree.is_empty() {
         md.push_str("## Project structure\n\n```\n");
-        let lines: Vec<&str> = probe.file_tree.lines().take(opts.max_structure_lines).collect();
+        let lines: Vec<&str> = probe
+            .file_tree
+            .lines()
+            .take(opts.max_structure_lines)
+            .collect();
         md.push_str(&lines.join("\n"));
         if probe.file_tree.lines().count() > opts.max_structure_lines {
             md.push_str("\n... [truncated]");
@@ -1078,7 +1278,10 @@ fn compose_heuristic(probe: &ProjectProbe, opts: &ProjectInfoOptions) -> String 
     if !probe.entry_points.is_empty() {
         md.push_str("## Entry-point excerpts\n\n");
         for (label, body) in &probe.entry_points {
-            md.push_str(&format!("`{}` (first lines):\n\n```\n{}\n```\n\n", label, body));
+            md.push_str(&format!(
+                "`{}` (first lines):\n\n```\n{}\n```\n\n",
+                label, body
+            ));
         }
     }
 
@@ -1188,23 +1391,23 @@ pub async fn generate_project_info_with_llm(
         metadata: std::collections::HashMap::new(),
     };
 
-    let llm_text = match tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        provider.infer(req),
-    ).await {
-        Ok(Ok(resp)) => {
-            let text = resp.message.text_content();
-            strip_code_fence(&text).trim().to_string()
-        }
-        Ok(Err(e)) => {
-            tracing::warn!("project_info LLM synthesis failed, falling back to heuristic: {e}");
-            String::new()
-        }
-        Err(_) => {
-            tracing::warn!("project_info LLM synthesis timed out after 60s, falling back to heuristic");
-            String::new()
-        }
-    };
+    let llm_text =
+        match tokio::time::timeout(std::time::Duration::from_secs(60), provider.infer(req)).await {
+            Ok(Ok(resp)) => {
+                let text = resp.message.text_content();
+                strip_code_fence(&text).trim().to_string()
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("project_info LLM synthesis failed, falling back to heuristic: {e}");
+                String::new()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "project_info LLM synthesis timed out after 60s, falling back to heuristic"
+                );
+                String::new()
+            }
+        };
 
     if llm_text.is_empty() {
         let content = compose_heuristic(&probe, opts);
@@ -1228,15 +1431,15 @@ async fn write_content(
         if !opts.force {
             (false, true)
         } else {
-            tokio::fs::write(&target, &content)
-                .await
-                .map_err(|e| OneAIError::Config(format!("failed to write {}: {}", target.display(), e)))?;
+            tokio::fs::write(&target, &content).await.map_err(|e| {
+                OneAIError::Config(format!("failed to write {}: {}", target.display(), e))
+            })?;
             (true, false)
         }
     } else {
-        tokio::fs::write(&target, &content)
-            .await
-            .map_err(|e| OneAIError::Config(format!("failed to write {}: {}", target.display(), e)))?;
+        tokio::fs::write(&target, &content).await.map_err(|e| {
+            OneAIError::Config(format!("failed to write {}: {}", target.display(), e))
+        })?;
         (false, false)
     };
 
@@ -1282,17 +1485,32 @@ mod tests {
 
     #[test]
     fn format_from_name_roundtrip() {
-        assert_eq!(ProjectInfoFormat::from_name("oneai").unwrap(), ProjectInfoFormat::Oneai);
-        assert_eq!(ProjectInfoFormat::from_name("AGENTS").unwrap(), ProjectInfoFormat::Agents);
-        assert_eq!(ProjectInfoFormat::from_name("Claude").unwrap(), ProjectInfoFormat::Claude);
+        assert_eq!(
+            ProjectInfoFormat::from_name("oneai").unwrap(),
+            ProjectInfoFormat::Oneai
+        );
+        assert_eq!(
+            ProjectInfoFormat::from_name("AGENTS").unwrap(),
+            ProjectInfoFormat::Agents
+        );
+        assert_eq!(
+            ProjectInfoFormat::from_name("Claude").unwrap(),
+            ProjectInfoFormat::Claude
+        );
         assert!(ProjectInfoFormat::from_name("nope").is_err());
     }
 
     #[test]
     fn pep508_split() {
-        assert_eq!(split_pep508("requests>=2.0"), ("requests".into(), ">=2.0".into()));
+        assert_eq!(
+            split_pep508("requests>=2.0"),
+            ("requests".into(), ">=2.0".into())
+        );
         assert_eq!(split_pep508("numpy"), ("numpy".into(), "".into()));
-        assert_eq!(split_pep508("foo-bar>=1; extra == \"x\""), ("foo-bar".into(), ">=1; extra == \"x\"".into()));
+        assert_eq!(
+            split_pep508("foo-bar>=1; extra == \"x\""),
+            ("foo-bar".into(), ">=1; extra == \"x\"".into())
+        );
     }
 
     #[test]
@@ -1306,7 +1524,10 @@ mod tests {
 
     #[test]
     fn strip_fence_removes_wrapping() {
-        assert_eq!(strip_code_fence("```markdown\n# hi\nbody\n```"), "# hi\nbody");
+        assert_eq!(
+            strip_code_fence("```markdown\n# hi\nbody\n```"),
+            "# hi\nbody"
+        );
         assert_eq!(strip_code_fence("# plain"), "# plain");
         assert_eq!(strip_code_fence("```\nbody\n```"), "body");
     }
@@ -1340,8 +1561,12 @@ resolver = "2"
 [workspace.dependencies]
 serde = "1.0"
 "#;
-        tokio::fs::write(dir.path().join("Cargo.toml"), root_cargo).await.unwrap();
-        tokio::fs::create_dir_all(dir.path().join("crates/foo/src")).await.unwrap();
+        tokio::fs::write(dir.path().join("Cargo.toml"), root_cargo)
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.path().join("crates/foo/src"))
+            .await
+            .unwrap();
         tokio::fs::write(
             dir.path().join("crates/foo/Cargo.toml"),
             r#"[package]
@@ -1349,15 +1574,22 @@ name = "foo"
 version = "0.1.0"
 description = "The foo crate"
 "#,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         tokio::fs::write(
             dir.path().join("crates/foo/src/lib.rs"),
             "//! Foo does the thing.\n//! It is important.\npub mod bar;\npub mod baz;\n",
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let probe = ProjectProbe::probe(dir.path()).await;
         assert_eq!(probe.build_system, Some(BuildSystem::RustCargo));
-        assert!(probe.commands.iter().any(|(_, c)| c.contains("cargo test --workspace")));
+        assert!(probe
+            .commands
+            .iter()
+            .any(|(_, c)| c.contains("cargo test --workspace")));
         assert_eq!(probe.module_map.len(), 1);
         let m = &probe.module_map[0];
         assert_eq!(m.name, "foo");
@@ -1369,9 +1601,18 @@ description = "The foo crate"
     #[tokio::test]
     async fn probe_reads_readme_and_existing_instructions() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\n").await.unwrap();
-        tokio::fs::write(dir.path().join("README.md"), "# X\n\nA project.\n").await.unwrap();
-        tokio::fs::write(dir.path().join("CLAUDE.md"), "manual rules").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(dir.path().join("README.md"), "# X\n\nA project.\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("CLAUDE.md"), "manual rules")
+            .await
+            .unwrap();
 
         let probe = ProjectProbe::probe(dir.path()).await;
         assert!(probe.readme.contains("A project."));
@@ -1383,10 +1624,21 @@ description = "The foo crate"
     #[tokio::test]
     async fn probe_inventories_docs() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\n").await.unwrap();
-        tokio::fs::write(dir.path().join("ARCHITECTURE.md"), "design").await.unwrap();
-        tokio::fs::create_dir_all(dir.path().join("docs")).await.unwrap();
-        tokio::fs::write(dir.path().join("docs/guide.md"), "guide").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(dir.path().join("ARCHITECTURE.md"), "design")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.path().join("docs"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("docs/guide.md"), "guide")
+            .await
+            .unwrap();
         let probe = ProjectProbe::probe(dir.path()).await;
         assert!(probe.doc_links.contains(&"ARCHITECTURE.md".to_string()));
         assert!(probe.doc_links.contains(&"docs/guide.md".to_string()));
@@ -1395,7 +1647,12 @@ description = "The foo crate"
     #[tokio::test]
     async fn context_block_is_bounded_and_labelled() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\ndescription=\"d\"\n").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\ndescription=\"d\"\n",
+        )
+        .await
+        .unwrap();
         let probe = ProjectProbe::probe(dir.path()).await;
         let block = probe.context_block();
         assert!(block.contains("## Project"));
@@ -1406,7 +1663,12 @@ description = "The foo crate"
     #[tokio::test]
     async fn build_init_prompt_mentions_principles() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\n").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .await
+        .unwrap();
         let probe = ProjectProbe::probe(dir.path()).await;
         let (system, user) = probe.build_init_prompt(ProjectInfoFormat::Oneai);
         assert!(system.contains("Link, don't embed"));
@@ -1427,7 +1689,9 @@ description = "A demo project"
 serde = "1.0"
 tokio = { version = "1", features = ["full"] }
 "#;
-        tokio::fs::write(dir.path().join("Cargo.toml"), cargo).await.unwrap();
+        tokio::fs::write(dir.path().join("Cargo.toml"), cargo)
+            .await
+            .unwrap();
 
         let opts = ProjectInfoOptions::default();
         let res = generate_project_info(dir.path(), &opts).await.unwrap();
@@ -1440,41 +1704,70 @@ tokio = { version = "1", features = ["full"] }
         assert!(res.content.contains("cargo build"));
         assert!(res.content.contains("serde"));
         assert!(res.content.contains("Build, test, run"));
-        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md")).await.unwrap();
+        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md"))
+            .await
+            .unwrap();
         assert_eq!(on_disk, res.content);
     }
 
     #[tokio::test]
     async fn skip_when_exists_unless_force() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\n").await.unwrap();
-        tokio::fs::write(dir.path().join("ONEAI.md"), "manual content").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(dir.path().join("ONEAI.md"), "manual content")
+            .await
+            .unwrap();
 
-        let res = generate_project_info(dir.path(), &ProjectInfoOptions::default()).await.unwrap();
+        let res = generate_project_info(dir.path(), &ProjectInfoOptions::default())
+            .await
+            .unwrap();
         assert!(res.skipped);
-        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md")).await.unwrap();
+        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md"))
+            .await
+            .unwrap();
         assert_eq!(on_disk, "manual content");
 
-        let opts = ProjectInfoOptions { force: true, ..Default::default() };
+        let opts = ProjectInfoOptions {
+            force: true,
+            ..Default::default()
+        };
         let res = generate_project_info(dir.path(), &opts).await.unwrap();
         assert!(!res.skipped);
         assert!(res.overwritten);
-        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md")).await.unwrap();
+        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md"))
+            .await
+            .unwrap();
         assert!(on_disk.contains("cargo build"));
     }
 
     #[tokio::test]
     async fn agents_and_claude_filenames() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("package.json"), r#"{"name":"jsproj","version":"1.0.0","dependencies":{"react":"^18"}}"#).await.unwrap();
+        tokio::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"jsproj","version":"1.0.0","dependencies":{"react":"^18"}}"#,
+        )
+        .await
+        .unwrap();
 
-        let opts = ProjectInfoOptions { format: ProjectInfoFormat::Agents, ..Default::default() };
+        let opts = ProjectInfoOptions {
+            format: ProjectInfoFormat::Agents,
+            ..Default::default()
+        };
         let res = generate_project_info(dir.path(), &opts).await.unwrap();
         assert_eq!(res.filename, "AGENTS.md");
         assert!(res.content.contains("jsproj"));
         assert!(res.content.contains("react"));
 
-        let opts = ProjectInfoOptions { format: ProjectInfoFormat::Claude, ..Default::default() };
+        let opts = ProjectInfoOptions {
+            format: ProjectInfoFormat::Claude,
+            ..Default::default()
+        };
         let res = generate_project_info(dir.path(), &opts).await.unwrap();
         assert_eq!(res.filename, "CLAUDE.md");
     }
@@ -1482,7 +1775,9 @@ tokio = { version = "1", features = ["full"] }
     #[tokio::test]
     async fn unknown_project_still_emits() {
         let dir = tempfile::tempdir().unwrap();
-        let res = generate_project_info(dir.path(), &ProjectInfoOptions::default()).await.unwrap();
+        let res = generate_project_info(dir.path(), &ProjectInfoOptions::default())
+            .await
+            .unwrap();
         assert!(res.content.contains("Overview"));
         assert!(res.content.contains("unrecognized"));
     }
@@ -1492,9 +1787,11 @@ tokio = { version = "1", features = ["full"] }
     use async_trait::async_trait;
     use futures::stream;
     use futures::Stream;
-    use std::pin::Pin;
     use oneai_core::error::OneAIError;
-    use oneai_core::types::{InferenceResponse, InferenceStreamChunk, ModelCapability, ModelConfig, TokenUsage};
+    use oneai_core::types::{
+        InferenceResponse, InferenceStreamChunk, ModelCapability, ModelConfig, TokenUsage,
+    };
+    use std::pin::Pin;
 
     /// A minimal LlmProvider that returns a fixed markdown string for every infer().
     struct StubProvider {
@@ -1504,10 +1801,18 @@ tokio = { version = "1", features = ["full"] }
 
     #[async_trait]
     impl LlmProvider for StubProvider {
-        async fn infer(&self, _req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> std::result::Result<InferenceResponse, OneAIError> {
             Ok(InferenceResponse {
                 message: Message::assistant(self.reply.clone()),
-                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
+                usage: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    ..Default::default()
+                },
                 model: "stub".to_string(),
                 metadata: std::collections::HashMap::new(),
             })
@@ -1515,16 +1820,25 @@ tokio = { version = "1", features = ["full"] }
         async fn infer_stream(
             &self,
             _req: InferenceRequest,
-        ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+        ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+        {
             Ok(Box::pin(stream::empty()))
         }
-        fn capabilities(&self) -> ModelCapability { ModelCapability::gpt4_class() }
-        fn config(&self) -> &ModelConfig { &self.model_config }
+        fn capabilities(&self) -> ModelCapability {
+            ModelCapability::gpt4_class()
+        }
+        fn config(&self) -> &ModelConfig {
+            &self.model_config
+        }
     }
 
     fn stub(reply: &str) -> StubProvider {
         StubProvider {
-            model_config: ModelConfig::openai_compatible("k".into(), "http://x".into(), "stub-model".into()),
+            model_config: ModelConfig::openai_compatible(
+                "k".into(),
+                "http://x".into(),
+                "stub-model".into(),
+            ),
             reply: reply.to_string(),
         }
     }
@@ -1532,25 +1846,42 @@ tokio = { version = "1", features = ["full"] }
     #[tokio::test]
     async fn llm_path_uses_model_output() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\n").await.unwrap();
-        let provider = stub("# X\n\nSynthesized by the model.\n\n## Build\n\n```bash\ncargo build\n```\n");
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .await
+        .unwrap();
+        let provider =
+            stub("# X\n\nSynthesized by the model.\n\n## Build\n\n```bash\ncargo build\n```\n");
         let opts = ProjectInfoOptions::default();
-        let res = generate_project_info_with_llm(dir.path(), &opts, &provider).await.unwrap();
+        let res = generate_project_info_with_llm(dir.path(), &opts, &provider)
+            .await
+            .unwrap();
         assert!(res.llm_generated);
         assert!(!res.skipped);
         assert!(res.content.contains("Synthesized by the model"));
         // Code fence stripped (no leading ```markdown).
         assert!(!res.content.starts_with("```"));
-        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md")).await.unwrap();
+        let on_disk = tokio::fs::read_to_string(dir.path().join("ONEAI.md"))
+            .await
+            .unwrap();
         assert_eq!(on_disk, res.content);
     }
 
     #[tokio::test]
     async fn llm_path_strips_wrapping_fence() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\n").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .await
+        .unwrap();
         let provider = stub("```markdown\n# X\nbody line\n```");
-        let res = generate_project_info_with_llm(dir.path(), &opts_default(), &provider).await.unwrap();
+        let res = generate_project_info_with_llm(dir.path(), &opts_default(), &provider)
+            .await
+            .unwrap();
         assert!(res.llm_generated);
         assert!(res.content.contains("body line"));
         assert!(!res.content.contains("```markdown"));
@@ -1559,12 +1890,21 @@ tokio = { version = "1", features = ["full"] }
     #[tokio::test]
     async fn llm_path_falls_back_when_empty() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0\"\n").await.unwrap();
+        tokio::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .await
+        .unwrap();
         let provider = stub("   "); // whitespace-only → falls back to heuristic
-        let res = generate_project_info_with_llm(dir.path(), &opts_default(), &provider).await.unwrap();
+        let res = generate_project_info_with_llm(dir.path(), &opts_default(), &provider)
+            .await
+            .unwrap();
         assert!(!res.llm_generated);
         assert!(res.content.contains("cargo build")); // heuristic output
     }
 
-    fn opts_default() -> ProjectInfoOptions { ProjectInfoOptions::default() }
+    fn opts_default() -> ProjectInfoOptions {
+        ProjectInfoOptions::default()
+    }
 }

@@ -16,9 +16,9 @@
 //! - `RerankerProvider`: second-stage cross-encoder rerank
 
 use crate::error::Result;
-use crate::types::*;
 use crate::platform::Platform;
-use crate::types::{HookPoint, HookResult, HookContext};
+use crate::types::*;
+use crate::types::{HookContext, HookPoint, HookResult};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
@@ -211,7 +211,11 @@ pub trait OutputParser: Send + Sync {
     /// 1. If constrained decoding is active, the output is already correct (Layer 1).
     /// 2. If not, attempt fuzzy repair (Layer 2).
     /// 3. If repair fails, trigger fallback self-correction (Layer 3).
-    async fn parse<'a>(&self, raw_output: &str, schema: Option<&'a serde_json::Value>) -> Result<ParsedOutput>;
+    async fn parse<'a>(
+        &self,
+        raw_output: &str,
+        schema: Option<&'a serde_json::Value>,
+    ) -> Result<ParsedOutput>;
 
     /// Repair a raw tool-args JSON string (Layer 2 fuzzy repair).
     ///
@@ -310,7 +314,10 @@ pub enum Reduction {
     UpdateContext { key: String, value: String },
 
     /// Set the result for a specific plan step.
-    SetResult { step_id: String, result: ContentBlock },
+    SetResult {
+        step_id: String,
+        result: ContentBlock,
+    },
 }
 
 // ─── TaskScheduler ────────────────────────────────────────────────────────────
@@ -325,10 +332,18 @@ pub enum Reduction {
 #[async_trait]
 pub trait TaskScheduler: Send + Sync {
     /// Schedule a one-shot task with a delay.
-    async fn schedule_one_shot(&self, task: ScheduledTask, delay: std::time::Duration) -> Result<TaskHandle>;
+    async fn schedule_one_shot(
+        &self,
+        task: ScheduledTask,
+        delay: std::time::Duration,
+    ) -> Result<TaskHandle>;
 
     /// Schedule a periodic task with an interval.
-    async fn schedule_periodic(&self, task: ScheduledTask, interval: std::time::Duration) -> Result<TaskHandle>;
+    async fn schedule_periodic(
+        &self,
+        task: ScheduledTask,
+        interval: std::time::Duration,
+    ) -> Result<TaskHandle>;
 
     /// Cancel a scheduled task.
     async fn cancel(&self, handle: &TaskHandle) -> Result<()>;
@@ -420,11 +435,7 @@ pub trait WorkingStateStore: Send + Sync {
 
     /// List open (Active / Paused) tasks for a (user, project) — reads the
     /// lightweight index, does not derive each task. Cross-session discovery.
-    async fn list_open_tasks(
-        &self,
-        user_id: &str,
-        project: &str,
-    ) -> Result<Vec<TaskBrief>>;
+    async fn list_open_tasks(&self, user_id: &str, project: &str) -> Result<Vec<TaskBrief>>;
 
     /// Append one event to the task's log. The only write path. Also updates
     /// the index. Returns the event id.
@@ -528,10 +539,19 @@ pub trait LifecycleHook: Send + Sync {
 #[async_trait]
 pub trait VectorStore: Send + Sync {
     /// Store a vector with associated metadata.
-    async fn upsert(&self, id: &str, embedding: Vec<f32>, metadata: HashMap<String, String>) -> Result<()>;
+    async fn upsert(
+        &self,
+        id: &str,
+        embedding: Vec<f32>,
+        metadata: HashMap<String, String>,
+    ) -> Result<()>;
 
     /// Search for vectors similar to the query embedding.
-    async fn search(&self, query_embedding: Vec<f32>, top_k: usize) -> Result<Vec<VectorSearchResult>>;
+    async fn search(
+        &self,
+        query_embedding: Vec<f32>,
+        top_k: usize,
+    ) -> Result<Vec<VectorSearchResult>>;
 
     /// Delete a vector by ID.
     async fn delete(&self, id: &str) -> Result<()>;
@@ -664,7 +684,10 @@ pub enum FusionMode {
 
 impl Default for FusionMode {
     fn default() -> Self {
-        FusionMode::Rrf { k: 60, weights: None }
+        FusionMode::Rrf {
+            k: 60,
+            weights: None,
+        }
     }
 }
 
@@ -789,7 +812,10 @@ pub struct RerankDoc {
 impl RerankDoc {
     /// Create a rerank candidate.
     pub fn new(id: impl Into<String>, content: impl Into<String>) -> Self {
-        Self { id: id.into(), content: content.into() }
+        Self {
+            id: id.into(),
+            content: content.into(),
+        }
     }
 }
 
@@ -898,12 +924,8 @@ pub trait RetrievalBackend: Send + Sync {
 pub trait RerankerProvider: Send + Sync {
     /// Rerank `docs` against `query`, returning the top `top_n` by
     /// cross-encoder score.
-    async fn rerank(
-        &self,
-        query: &str,
-        docs: &[RerankDoc],
-        top_n: usize,
-    ) -> Result<Vec<RankedDoc>>;
+    async fn rerank(&self, query: &str, docs: &[RerankDoc], top_n: usize)
+        -> Result<Vec<RankedDoc>>;
 
     /// The reranker model name (for logging/identification).
     fn model(&self) -> &str;
@@ -945,7 +967,11 @@ pub trait MemoryPersistence: Send + Sync {
     /// Loads entries with embeddings from storage, computes brute-force cosine
     /// similarity in Rust (acceptable for <10K entries), and returns the top_k
     /// most similar entries with their scores.
-    async fn search_ltm_embedding(&self, query: &[f32], top_k: usize) -> Result<Vec<(MemoryEntry, f32)>>;
+    async fn search_ltm_embedding(
+        &self,
+        query: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>>;
 
     /// Delete a LTM entry by ID.
     async fn delete_ltm(&self, id: &str) -> Result<()>;
@@ -1041,7 +1067,13 @@ impl SessionInfo {
         updated_at: chrono::DateTime<chrono::Utc>,
         message_count: usize,
     ) -> Self {
-        Self { id, created_at, updated_at, message_count, title: None }
+        Self {
+            id,
+            created_at,
+            updated_at,
+            message_count,
+            title: None,
+        }
     }
 
     /// Create a new SessionInfo with an explicit title (first-user-message
@@ -1053,7 +1085,13 @@ impl SessionInfo {
         message_count: usize,
         title: Option<String>,
     ) -> Self {
-        Self { id, created_at, updated_at, message_count, title }
+        Self {
+            id,
+            created_at,
+            updated_at,
+            message_count,
+            title,
+        }
     }
 }
 
@@ -1137,11 +1175,15 @@ pub trait EmbeddingService: Send + Sync {
     async fn health_check(&self) -> Result<()> {
         let embedding = self.embed("health check").await?;
         if embedding.is_empty() {
-            return Err(crate::error::OneAIError::Embedding("Embedding service returned empty vector".to_string()));
+            return Err(crate::error::OneAIError::Embedding(
+                "Embedding service returned empty vector".to_string(),
+            ));
         }
         for val in &embedding {
             if !val.is_finite() {
-                return Err(crate::error::OneAIError::Embedding("Embedding service returned non-finite values".to_string()));
+                return Err(crate::error::OneAIError::Embedding(
+                    "Embedding service returned non-finite values".to_string(),
+                ));
             }
         }
         Ok(())
@@ -1263,8 +1305,10 @@ pub static KNOWN_EMBEDDING_DIMENSIONS: &[(&str, usize)] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum EmbeddingProvider {
     /// Zero-config auto-detection (the default).
+    #[default]
     Auto,
     /// OpenAI `text-embedding-3-*` (official API, `OPENAI_API_KEY`).
     OpenAi,
@@ -1295,12 +1339,6 @@ impl EmbeddingProvider {
             "openai-compat" | "openai_compat" | "openai-compatible" => Some(Self::OpenAiCompat),
             _ => None,
         }
-    }
-}
-
-impl Default for EmbeddingProvider {
-    fn default() -> Self {
-        Self::Auto
     }
 }
 

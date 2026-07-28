@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::span::{Span, SpanKind, SpanStatus};
 use crate::metrics::TraceMetrics;
+use crate::span::{Span, SpanKind, SpanStatus};
 
 // ─── TraceMetadata ──────────────────────────────────────────────────
 
@@ -85,14 +85,16 @@ impl TraceTree {
     /// 3. Computing metrics from the assembled tree
     pub fn from_spans(spans: HashMap<String, Span>, session_id: Option<String>) -> Self {
         // Find root span (no parent)
-        let root_id = spans.values()
+        let root_id = spans
+            .values()
             .find(|s| s.parent_span_id.is_none())
             .map(|s| s.span_id.clone());
 
         if let Some(root_id) = root_id {
-            let mut root = spans.get(&root_id).cloned().unwrap_or_else(|| {
-                Span::new(SpanKind::SESSION, "session", None)
-            });
+            let mut root = spans
+                .get(&root_id)
+                .cloned()
+                .unwrap_or_else(|| Span::new(SpanKind::SESSION, "session", None));
 
             // Assemble children into the root
             root = assemble_children(root, &spans);
@@ -142,7 +144,7 @@ impl TraceTree {
 
     /// Export to a JSON file.
     pub fn to_file(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        let json = self.to_json().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = self.to_json().map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -163,7 +165,8 @@ fn assemble_children(parent: Span, all_spans: &HashMap<String, Span>) -> Span {
     let mut assembled = parent;
 
     // Find all spans whose parent_span_id matches this span's ID
-    let child_ids: Vec<String> = all_spans.values()
+    let child_ids: Vec<String> = all_spans
+        .values()
         .filter(|s| s.parent_span_id.as_deref() == Some(&assembled.span_id))
         .map(|s| s.span_id.clone())
         .collect();

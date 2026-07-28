@@ -11,12 +11,12 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use oneai_core::error::{InteractionError, OneAIError, Result};
+use oneai_core::traits::InteractionGate;
 use oneai_core::{
     ApprovalRequest, InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel,
 };
-use oneai_core::error::{InteractionError, OneAIError, Result};
-use oneai_core::traits::InteractionGate;
+use tokio::sync::{mpsc, oneshot};
 
 // ─── NoopInteractionGate ────────────────────────────────────────────────────
 
@@ -273,10 +273,7 @@ impl ThresholdInteractionGate {
     }
 
     /// Forward to the channel and await the reply.
-    async fn forward(
-        &self,
-        req: InteractionRequest,
-    ) -> Result<InteractionResponse> {
+    async fn forward(&self, req: InteractionRequest) -> Result<InteractionResponse> {
         let (response_tx, response_rx) = oneshot::channel();
         self.pending_tx
             .send(InteractionPendingItem {
@@ -444,15 +441,15 @@ mod tests {
         let (gate, mut rx) =
             ChannelInteractionGate::with_config(4, InteractionGateConfig::default());
         let g = into_shared(gate);
-        let handle = tokio::spawn(async move {
-            g.request(sample_plan_review()).await.unwrap()
-        });
+        let handle = tokio::spawn(async move { g.request(sample_plan_review()).await.unwrap() });
         let item = rx.recv().await.unwrap();
         let _ = item.response_tx.send(InteractionResponse::Revise {
             feedback: "make it cheaper".to_string(),
         });
         let resp = handle.await.unwrap();
-        assert!(matches!(resp, InteractionResponse::Revise { feedback } if feedback == "make it cheaper"));
+        assert!(
+            matches!(resp, InteractionResponse::Revise { feedback } if feedback == "make it cheaper")
+        );
     }
 
     #[tokio::test]
@@ -488,27 +485,26 @@ mod tests {
 
     #[tokio::test]
     async fn threshold_auto_proceeds_low_risk() {
-        let (gate, _rx) = ThresholdInteractionGate::new(
-            4,
-            RiskLevel::High,
-            InteractionGateConfig::default(),
-        );
+        let (gate, _rx) =
+            ThresholdInteractionGate::new(4, RiskLevel::High, InteractionGateConfig::default());
         let g = into_shared(gate);
         // Low-risk tool → auto Proceed, no channel interaction.
-        let resp = g.request(sample_tool_approval(RiskLevel::Low)).await.unwrap();
+        let resp = g
+            .request(sample_tool_approval(RiskLevel::Low))
+            .await
+            .unwrap();
         assert!(matches!(resp, InteractionResponse::Proceed));
     }
 
     #[tokio::test]
     async fn threshold_forwards_high_risk_to_channel() {
-        let (gate, mut rx) = ThresholdInteractionGate::new(
-            4,
-            RiskLevel::Medium,
-            InteractionGateConfig::default(),
-        );
+        let (gate, mut rx) =
+            ThresholdInteractionGate::new(4, RiskLevel::Medium, InteractionGateConfig::default());
         let g = into_shared(gate);
         let handle = tokio::spawn(async move {
-            g.request(sample_tool_approval(RiskLevel::High)).await.unwrap()
+            g.request(sample_tool_approval(RiskLevel::High))
+                .await
+                .unwrap()
         });
         let item = rx.recv().await.unwrap();
         let _ = item.response_tx.send(InteractionResponse::Abort {
@@ -521,15 +517,10 @@ mod tests {
     #[tokio::test]
     async fn threshold_non_tool_request_ignores_threshold() {
         // PlanDecision isn't a tool approval — threshold must not auto-proceed it.
-        let (gate, mut rx) = ThresholdInteractionGate::new(
-            4,
-            RiskLevel::Low,
-            InteractionGateConfig::default(),
-        );
+        let (gate, mut rx) =
+            ThresholdInteractionGate::new(4, RiskLevel::Low, InteractionGateConfig::default());
         let g = into_shared(gate);
-        let handle = tokio::spawn(async move {
-            g.request(sample_plan_decision()).await.unwrap()
-        });
+        let handle = tokio::spawn(async move { g.request(sample_plan_decision()).await.unwrap() });
         let item = rx.recv().await.unwrap();
         let _ = item.response_tx.send(InteractionResponse::Choose {
             option_id: "opt_a".to_string(),

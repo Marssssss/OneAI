@@ -34,18 +34,20 @@
 //! This crate follows the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/).
 //! All public enums are annotated `#[non_exhaustive]` where appropriate.
 
-pub mod graph_dto;
-pub mod trace_dto;
 pub mod checkpoint_dto;
-pub mod state;
-pub mod server;
-pub mod routes;
-pub mod ws;
+pub mod graph_dto;
 pub mod handlers;
+pub mod routes;
+pub mod server;
+pub mod state;
+pub mod trace_dto;
+pub mod ws;
 
-pub use state::{StudioState, StudioEvent, SessionView, SessionUpdate, StudioRunner, RunnerStatus, RunOutcome};
-pub use server::{StudioConfig, serve, serve_with_state};
-pub use graph_dto::{GraphVisualization, NodeView, EdgeView};
-pub use trace_dto::{TraceTreeView, SpanView, EventView, MetricsView};
-pub use checkpoint_dto::{CheckpointListView, CheckpointDetailView, CheckpointEntryView};
-pub use handlers::{RunRequest};
+pub use checkpoint_dto::{CheckpointDetailView, CheckpointEntryView, CheckpointListView};
+pub use graph_dto::{EdgeView, GraphVisualization, NodeView};
+pub use handlers::RunRequest;
+pub use server::{serve, serve_with_state, StudioConfig};
+pub use state::{
+    RunOutcome, RunnerStatus, SessionUpdate, SessionView, StudioEvent, StudioRunner, StudioState,
+};
+pub use trace_dto::{EventView, MetricsView, SpanView, TraceTreeView};

@@ -27,8 +27,8 @@ use async_trait::async_trait;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::WorkingStateStore;
 use oneai_core::{
-    TaskBrief, TaskEvent, TaskEventPayload, TaskEventType, TaskStatus, TASK_EVENT_SCHEMA_VERSION,
-    WorkingState,
+    TaskBrief, TaskEvent, TaskEventPayload, TaskEventType, TaskStatus, WorkingState,
+    TASK_EVENT_SCHEMA_VERSION,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -76,13 +76,15 @@ impl FileWorkingStateStore {
     }
 
     async fn ensure_dirs(&self) -> Result<()> {
-        tokio::fs::create_dir_all(self.tasks_dir()).await.map_err(|e| {
-            OneAIError::Persistence(format!(
-                "Failed to create working-state dir '{}': {}",
-                self.tasks_dir().display(),
-                e
-            ))
-        })
+        tokio::fs::create_dir_all(self.tasks_dir())
+            .await
+            .map_err(|e| {
+                OneAIError::Persistence(format!(
+                    "Failed to create working-state dir '{}': {}",
+                    self.tasks_dir().display(),
+                    e
+                ))
+            })
     }
 
     /// Read every event line from a task log, skipping malformed/partial
@@ -207,10 +209,18 @@ impl FileWorkingStateStore {
         // Atomic-ish: write to temp then rename.
         let tmp = path.with_extension("json.tmp");
         tokio::fs::write(&tmp, &json).await.map_err(|e| {
-            OneAIError::Persistence(format!("Failed to write index tmp '{}': {}", tmp.display(), e))
+            OneAIError::Persistence(format!(
+                "Failed to write index tmp '{}': {}",
+                tmp.display(),
+                e
+            ))
         })?;
         tokio::fs::rename(&tmp, &path).await.map_err(|e| {
-            OneAIError::Persistence(format!("Failed to rename index '{}': {}", path.display(), e))
+            OneAIError::Persistence(format!(
+                "Failed to rename index '{}': {}",
+                path.display(),
+                e
+            ))
         })?;
         Ok(())
     }
@@ -284,9 +294,14 @@ fn apply_event(state: &mut Option<WorkingState>, ev: &TaskEvent) {
                 s.updated_at = ev.ts.clone();
             }
         }
-        (TaskEventType::StepStatusChanged, TaskEventPayload::StepStatusChanged {
-            step_id, status, active_form,
-        }) => {
+        (
+            TaskEventType::StepStatusChanged,
+            TaskEventPayload::StepStatusChanged {
+                step_id,
+                status,
+                active_form,
+            },
+        ) => {
             if let Some(s) = state.as_mut() {
                 if let Some(step) = s.steps.iter_mut().find(|x| x.id == *step_id) {
                     step.status = *status;
@@ -318,9 +333,13 @@ fn apply_event(state: &mut Option<WorkingState>, ev: &TaskEvent) {
                 s.updated_at = ev.ts.clone();
             }
         }
-        (TaskEventType::BlockerResolved, TaskEventPayload::BlockerResolved {
-            blocker_id, resolution,
-        }) => {
+        (
+            TaskEventType::BlockerResolved,
+            TaskEventPayload::BlockerResolved {
+                blocker_id,
+                resolution,
+            },
+        ) => {
             if let Some(s) = state.as_mut() {
                 if let Some(b) = s.blockers.iter_mut().find(|x| x.id == *blocker_id) {
                     b.status = oneai_core::BlockerStatus::Resolved;
@@ -458,11 +477,7 @@ impl WorkingStateStore for FileWorkingStateStore {
         Ok(Some(state))
     }
 
-    async fn list_open_tasks(
-        &self,
-        user_id: &str,
-        project: &str,
-    ) -> Result<Vec<TaskBrief>> {
+    async fn list_open_tasks(&self, user_id: &str, project: &str) -> Result<Vec<TaskBrief>> {
         let index = self.read_index().await?;
         let mut briefs: Vec<TaskBrief> = index
             .into_values()
@@ -499,17 +514,19 @@ impl WorkingStateStore for FileWorkingStateStore {
 
         // Update the index entry's status / counts / ts.
         let mut index = self.read_index().await?;
-        let brief = index.entry(task_id.to_string()).or_insert_with(|| TaskBrief {
-            task_id: task_id.to_string(),
-            goal: String::new(),
-            status: TaskStatus::Active,
-            open_step_count: 0,
-            open_blocker_count: 0,
-            user_id: String::new(),
-            project: String::new(),
-            last_event_ts: ev.ts.clone(),
-            file: format!("tasks/{}.jsonl", task_id),
-        });
+        let brief = index
+            .entry(task_id.to_string())
+            .or_insert_with(|| TaskBrief {
+                task_id: task_id.to_string(),
+                goal: String::new(),
+                status: TaskStatus::Active,
+                open_step_count: 0,
+                open_blocker_count: 0,
+                user_id: String::new(),
+                project: String::new(),
+                last_event_ts: ev.ts.clone(),
+                file: format!("tasks/{}.jsonl", task_id),
+            });
         brief.last_event_ts = ev.ts.clone();
 
         // Derive counts/status cheaply from current state (re-derive on demand
@@ -553,7 +570,9 @@ impl WorkingStateStore for FileWorkingStateStore {
             id: uuid::Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
             session_id: snapshot_state.owner_session.clone(),
-            parent_event_id: events.get(tail_start.saturating_sub(1)).map(|e| e.id.clone()),
+            parent_event_id: events
+                .get(tail_start.saturating_sub(1))
+                .map(|e| e.id.clone()),
             event_type: TaskEventType::Snapshot,
             payload: TaskEventPayload::Snapshot {
                 state: snapshot_state,
@@ -601,12 +620,12 @@ impl WorkingStateStore for FileWorkingStateStore {
             encoder.write_all(&bytes).map_err(|e| {
                 OneAIError::Persistence(format!("Failed to write gzip stream: {}", e))
             })?;
-            let compressed = encoder
-                .finish()
-                .map_err(|e| OneAIError::Persistence(format!("Failed to finish gzip stream: {}", e)))?;
-            tokio::fs::write(&archive_path, &compressed).await.map_err(|e| {
-                OneAIError::Persistence(format!("Failed to write archive: {}", e))
+            let compressed = encoder.finish().map_err(|e| {
+                OneAIError::Persistence(format!("Failed to finish gzip stream: {}", e))
             })?;
+            tokio::fs::write(&archive_path, &compressed)
+                .await
+                .map_err(|e| OneAIError::Persistence(format!("Failed to write archive: {}", e)))?;
             let _ = tokio::fs::remove_file(&log_path).await;
         }
         // Update index file pointer + status.
@@ -640,7 +659,13 @@ mod tests {
     async fn create_and_get_task() {
         let (_d, s) = store();
         let id = s
-            .create_task("alice", "proj", "refactor auth", "split into services", "sess1")
+            .create_task(
+                "alice",
+                "proj",
+                "refactor auth",
+                "split into services",
+                "sess1",
+            )
             .await
             .unwrap();
         let state = s.get_task(&id).await.unwrap().unwrap();
@@ -697,7 +722,9 @@ mod tests {
         let (_d, s) = store();
         let id = s.create_task("u", "p", "g", "", "sess").await.unwrap();
         s.append_event(
-            &id, "sess", None,
+            &id,
+            "sess",
+            None,
             TaskEventType::DecisionMade,
             TaskEventPayload::DecisionMade {
                 decision: Decision {
@@ -710,9 +737,13 @@ mod tests {
                     ts: String::new(),
                 },
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         s.append_event(
-            &id, "sess", None,
+            &id,
+            "sess",
+            None,
             TaskEventType::BlockerRaised,
             TaskEventPayload::BlockerRaised {
                 blocker: Blocker {
@@ -724,15 +755,21 @@ mod tests {
                     ts: String::new(),
                 },
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         s.append_event(
-            &id, "sess", None,
+            &id,
+            "sess",
+            None,
             TaskEventType::BlockerResolved,
             TaskEventPayload::BlockerResolved {
                 blocker_id: "b1".into(),
                 resolution: "retried".into(),
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let state = s.get_task(&id).await.unwrap().unwrap();
         assert_eq!(state.decisions.len(), 1);
         assert_eq!(state.decisions[0].chosen, "sqlx");
@@ -743,13 +780,28 @@ mod tests {
     #[tokio::test]
     async fn list_open_tasks_cross_session() {
         let (_d, s) = store();
-        let a = s.create_task("alice", "proj", "task A", "", "s1").await.unwrap();
-        let _b = s.create_task("bob", "proj", "task B", "", "s2").await.unwrap();
-        let c = s.create_task("alice", "proj", "task C", "", "s3").await.unwrap();
-        // Complete C — should drop out of open list.
-        s.append_event(&c, "s3", None, TaskEventType::TaskCompleted, TaskEventPayload::TaskStatus {})
+        let a = s
+            .create_task("alice", "proj", "task A", "", "s1")
             .await
             .unwrap();
+        let _b = s
+            .create_task("bob", "proj", "task B", "", "s2")
+            .await
+            .unwrap();
+        let c = s
+            .create_task("alice", "proj", "task C", "", "s3")
+            .await
+            .unwrap();
+        // Complete C — should drop out of open list.
+        s.append_event(
+            &c,
+            "s3",
+            None,
+            TaskEventType::TaskCompleted,
+            TaskEventPayload::TaskStatus {},
+        )
+        .await
+        .unwrap();
         let open = s.list_open_tasks("alice", "proj").await.unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].goal, "task A");
@@ -762,12 +814,20 @@ mod tests {
         let id = s.create_task("u", "p", "g", "", "sess").await.unwrap();
         for i in 0..6 {
             s.append_event(
-                &id, "sess", None,
+                &id,
+                "sess",
+                None,
                 TaskEventType::NoteAdded,
                 TaskEventPayload::NoteAdded {
-                    note: Note { id: format!("n{i}"), content: format!("note {i}"), ts: String::new() },
+                    note: Note {
+                        id: format!("n{i}"),
+                        content: format!("note {i}"),
+                        ts: String::new(),
+                    },
                 },
-            ).await.unwrap();
+            )
+            .await
+            .unwrap();
         }
         s.compact_if_needed(&id).await.unwrap();
         // After compaction: 1 snapshot + 2 tail = 3 events; derived state must

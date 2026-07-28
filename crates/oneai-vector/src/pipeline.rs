@@ -323,7 +323,10 @@ impl RetrievalBackend for StandardRetrievalPipeline {
         for (id, score) in fused.into_iter().take(pool) {
             let (c, m) = match content.get(&id) {
                 Some((c, m)) => (c.clone(), m.clone()),
-                None => (String::new(), leg_metas.get(&id).cloned().unwrap_or_default()),
+                None => (
+                    String::new(),
+                    leg_metas.get(&id).cloned().unwrap_or_default(),
+                ),
             };
             hits.push(RetrievalHit {
                 id,
@@ -419,8 +422,8 @@ impl RetrievalBackend for StandardRetrievalPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_core::traits::Filter;
     use crate::InMemoryVectorBackend;
+    use oneai_core::traits::Filter;
 
     /// A deterministic stub embedder: maps text → a 4-d vector by hashing.
     /// Lets us exercise the dense leg without ort / a model file.
@@ -494,7 +497,10 @@ mod tests {
 
         // Delete removes from both legs + content cache.
         pipe.delete("d1").await.unwrap();
-        let hits = pipe.search_hybrid(&RetrievalRequest::keyword("天气", 5)).await.unwrap();
+        let hits = pipe
+            .search_hybrid(&RetrievalRequest::keyword("天气", 5))
+            .await
+            .unwrap();
         assert!(!hits.iter().any(|h| h.id == "d1"));
     }
 
@@ -504,8 +510,12 @@ mod tests {
         // closest to a query whose text also lexically matches d1 — RRF should
         // rank d1 first.
         let pipe = make_pipeline();
-        pipe.upsert_chunk("d1", "alpha beta gamma", Metadata::new(), None).await.unwrap();
-        pipe.upsert_chunk("d2", "delta epsilon zeta", Metadata::new(), None).await.unwrap();
+        pipe.upsert_chunk("d1", "alpha beta gamma", Metadata::new(), None)
+            .await
+            .unwrap();
+        pipe.upsert_chunk("d2", "delta epsilon zeta", Metadata::new(), None)
+            .await
+            .unwrap();
         let emb = StubEmbedder.embed("alpha beta gamma").await.unwrap();
         let req = RetrievalRequest::hybrid("alpha beta", emb, 5);
         let hits = pipe.search_hybrid(&req).await.unwrap();
@@ -517,12 +527,10 @@ mod tests {
         // The default-stack constructor wires both legs + the embedder, so
         // upsert_chunk(text, None) auto-embeds and a dense-only query returns
         // the right doc.
-        let backend = StandardRetrievalPipeline::in_memory_default(
-            Some(Arc::new(StubEmbedder)),
-            None,
-        )
-        .await
-        .unwrap();
+        let backend =
+            StandardRetrievalPipeline::in_memory_default(Some(Arc::new(StubEmbedder)), None)
+                .await
+                .unwrap();
         backend
             .upsert_chunk("d1", "rust programming language", Metadata::new(), None)
             .await
@@ -530,7 +538,9 @@ mod tests {
         let emb = StubEmbedder.embed("rust language").await.unwrap();
         let req = RetrievalRequest::vector("rust", emb, 5);
         let hits = backend.search_hybrid(&req).await.unwrap();
-        assert!(hits.iter().any(|h| h.id == "d1" && h.content.contains("rust")));
+        assert!(hits
+            .iter()
+            .any(|h| h.id == "d1" && h.content.contains("rust")));
     }
 
     #[tokio::test]

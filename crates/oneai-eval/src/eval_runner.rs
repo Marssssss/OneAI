@@ -30,10 +30,10 @@ use std::time::Instant;
 use oneai_core::error::Result;
 use oneai_trace::{TraceMetrics, TraceTree};
 
-use crate::eval_case::{EvalCase, ExpectedOutput};
 use crate::efficiency::EfficiencyProfile;
+use crate::eval_case::{EvalCase, ExpectedOutput};
 use crate::eval_metric::EvalMetric;
-use crate::eval_result::{EvalResult, EvalReport};
+use crate::eval_result::{EvalReport, EvalResult};
 use crate::eval_suite::EvalSuite;
 // ─── EvalRunnerConfig ────────────────────────────────────────────────────
 
@@ -152,11 +152,7 @@ impl EvalRunner {
     /// 3. Collect output + trace metrics + cost
     /// 4. Apply each metric
     /// 5. Return the result
-    async fn run_case(
-        &self,
-        case: &EvalCase,
-        metrics: &[Arc<dyn EvalMetric>],
-    ) -> EvalResult {
+    async fn run_case(&self, case: &EvalCase, metrics: &[Arc<dyn EvalMetric>]) -> EvalResult {
         let start = Instant::now();
         let mut result = EvalResult::new(&case.id, &case.input, "");
 
@@ -177,7 +173,12 @@ impl EvalRunner {
         // the span tree; text-only metrics ignore it via the default impl.
         for metric in metrics {
             let score = metric
-                .score_with_trace(&case.input, &result.actual_output, &case.expected, tree.as_ref())
+                .score_with_trace(
+                    &case.input,
+                    &result.actual_output,
+                    &case.expected,
+                    tree.as_ref(),
+                )
                 .await;
             result.add_score(metric.name(), score);
         }
@@ -197,7 +198,11 @@ impl EvalRunner {
     /// usage into each other. A single `session_usage` call yields api_calls
     /// + token breakdown (the UsageSummary aggregates the UsageRecords the
     /// AgentLoop already records after each inference).
-    async fn run_agent_for_case(&self, case: &EvalCase, result: &mut EvalResult) -> Option<TraceTree> {
+    async fn run_agent_for_case(
+        &self,
+        case: &EvalCase,
+        result: &mut EvalResult,
+    ) -> Option<TraceTree> {
         let mut session = self.app.create_session();
         let session_id = session.session_id().to_string();
         let mut tree_out: Option<TraceTree> = None;
@@ -285,7 +290,9 @@ impl EvalRunner {
             let mut result = EvalResult::new(&case.id, &case.input, actual_output);
 
             for metric in metrics {
-                let score = metric.score(&case.input, actual_output, &case.expected).await;
+                let score = metric
+                    .score(&case.input, actual_output, &case.expected)
+                    .await;
                 result.add_score(metric.name(), score);
             }
 
@@ -314,11 +321,7 @@ impl ScoreOnlyRunner {
         let mut results = Vec::new();
 
         for (idx, (input, actual, expected)) in cases.iter().enumerate() {
-            let mut result = EvalResult::new(
-                format!("case_{}", idx),
-                input,
-                actual,
-            );
+            let mut result = EvalResult::new(format!("case_{}", idx), input, actual);
 
             for metric in metrics {
                 let score = metric.score(input, actual, expected).await;
@@ -335,20 +338,30 @@ impl ScoreOnlyRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtin_metrics::{ContainsMatchMetric, ExactMatchMetric};
     use crate::eval_case::ExpectedOutput;
-    use crate::builtin_metrics::{ExactMatchMetric, ContainsMatchMetric};
 
     #[tokio::test]
     async fn test_score_only_runner() {
         // Use metrics that match their ExpectedOutput types
-        let metrics: Vec<Arc<dyn EvalMetric>> = vec![
-            Arc::new(ExactMatchMetric),
-        ];
+        let metrics: Vec<Arc<dyn EvalMetric>> = vec![Arc::new(ExactMatchMetric)];
 
         let cases = vec![
-            ("What is 2+2?".to_string(), "4".to_string(), ExpectedOutput::exact("4")),
-            ("What is 3*5?".to_string(), "15".to_string(), ExpectedOutput::exact("15")),
-            ("Hello world".to_string(), "wrong".to_string(), ExpectedOutput::exact("correct")),
+            (
+                "What is 2+2?".to_string(),
+                "4".to_string(),
+                ExpectedOutput::exact("4"),
+            ),
+            (
+                "What is 3*5?".to_string(),
+                "15".to_string(),
+                ExpectedOutput::exact("15"),
+            ),
+            (
+                "Hello world".to_string(),
+                "wrong".to_string(),
+                ExpectedOutput::exact("correct"),
+            ),
         ];
 
         let report = ScoreOnlyRunner::score(&cases, &metrics, "test_suite").await;
@@ -362,8 +375,16 @@ mod tests {
     async fn test_score_only_all_pass() {
         let metrics: Vec<Arc<dyn EvalMetric>> = vec![Arc::new(ExactMatchMetric)];
         let cases = vec![
-            ("2+2?".to_string(), "4".to_string(), ExpectedOutput::exact("4")),
-            ("3+3?".to_string(), "6".to_string(), ExpectedOutput::exact("6")),
+            (
+                "2+2?".to_string(),
+                "4".to_string(),
+                ExpectedOutput::exact("4"),
+            ),
+            (
+                "3+3?".to_string(),
+                "6".to_string(),
+                ExpectedOutput::exact("6"),
+            ),
         ];
 
         let report = ScoreOnlyRunner::score(&cases, &metrics, "exact_test").await;
@@ -374,10 +395,11 @@ mod tests {
     #[tokio::test]
     async fn test_score_only_with_contains() {
         let metrics: Vec<Arc<dyn EvalMetric>> = vec![Arc::new(ContainsMatchMetric)];
-        let cases = vec![
-            ("Explain Rust".to_string(), "Rust is a memory-safe language".to_string(),
-             ExpectedOutput::contains(["memory", "safe"])),
-        ];
+        let cases = vec![(
+            "Explain Rust".to_string(),
+            "Rust is a memory-safe language".to_string(),
+            ExpectedOutput::contains(["memory", "safe"]),
+        )];
 
         let report = ScoreOnlyRunner::score(&cases, &metrics, "contains_test").await;
         assert!(report.all_passed());

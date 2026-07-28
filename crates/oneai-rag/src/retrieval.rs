@@ -104,9 +104,10 @@ impl RetrievalResult {
 /// - `CrossEncoder`: Use a cross-encoder model for reranking (requires LLM)
 /// - `RecencyWeighted`: Weight results by recency (timestamp-based)
 /// - `Diversity`: Ensure diverse results (different documents/sources)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum RerankingStrategy {
     /// No reranking — use initial scores.
+    #[default]
     ScoreOnly,
 
     /// Weight results by recency (timestamp metadata).
@@ -122,12 +123,6 @@ pub enum RerankingStrategy {
     },
 }
 
-impl Default for RerankingStrategy {
-    fn default() -> Self {
-        Self::ScoreOnly
-    }
-}
-
 /// Rerank retrieval results according to a strategy.
 pub fn rerank(results: &mut Vec<RetrievalResult>, strategy: &RerankingStrategy) {
     match strategy {
@@ -139,7 +134,10 @@ pub fn rerank(results: &mut Vec<RetrievalResult>, strategy: &RerankingStrategy) 
             let now = chrono::Utc::now();
             for result in results.iter_mut() {
                 // Use timestamp metadata for recency scoring
-                let recency_score = result.chunk.metadata.get("timestamp")
+                let recency_score = result
+                    .chunk
+                    .metadata
+                    .get("timestamp")
                     .and_then(|ts| ts.parse::<i64>().ok())
                     .map(|ts| {
                         let age_seconds = now.timestamp() - ts;
@@ -152,13 +150,19 @@ pub fn rerank(results: &mut Vec<RetrievalResult>, strategy: &RerankingStrategy) 
                 result.score = score_weight * result.score + *recency_weight * recency_score;
             }
             // Re-sort by adjusted score
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         RerankingStrategy::Diversity { max_per_document } => {
             // Limit chunks per document
             let mut doc_counts: HashMap<String, usize> = HashMap::new();
             results.retain(|result| {
-                let count = doc_counts.entry(result.chunk.document_id.clone()).or_insert(0);
+                let count = doc_counts
+                    .entry(result.chunk.document_id.clone())
+                    .or_insert(0);
                 if *count < *max_per_document {
                     *count += 1;
                     true
@@ -224,9 +228,11 @@ mod tests {
 
     #[test]
     fn test_retrieval_query_with_filter() {
-        let query = RetrievalQuery::keyword("test", 5)
-            .with_filter("source", "wikipedia");
-        assert_eq!(query.metadata_filters.get("source"), Some(&"wikipedia".to_string()));
+        let query = RetrievalQuery::keyword("test", 5).with_filter("source", "wikipedia");
+        assert_eq!(
+            query.metadata_filters.get("source"),
+            Some(&"wikipedia".to_string())
+        );
     }
 
     #[test]
@@ -249,10 +255,21 @@ mod tests {
             RetrievalResult::new(make_chunk("doc1", "Third from doc1"), 0.7),
             RetrievalResult::new(make_chunk("doc2", "First from doc2"), 0.6),
         ];
-        rerank(&mut results, &RerankingStrategy::Diversity { max_per_document: 2 });
+        rerank(
+            &mut results,
+            &RerankingStrategy::Diversity {
+                max_per_document: 2,
+            },
+        );
         // Only 2 chunks per document should remain
-        let doc1_count = results.iter().filter(|r| r.chunk.document_id == "doc1").count();
-        let doc2_count = results.iter().filter(|r| r.chunk.document_id == "doc2").count();
+        let doc1_count = results
+            .iter()
+            .filter(|r| r.chunk.document_id == "doc1")
+            .count();
+        let doc2_count = results
+            .iter()
+            .filter(|r| r.chunk.document_id == "doc2")
+            .count();
         assert_eq!(doc1_count, 2);
         assert_eq!(doc2_count, 1);
     }
@@ -272,7 +289,10 @@ mod tests {
     #[test]
     fn test_assemble_context_token_limit() {
         let results = vec![
-            RetrievalResult::new(make_chunk("doc1", "A very long piece of text that takes many tokens"), 0.9),
+            RetrievalResult::new(
+                make_chunk("doc1", "A very long piece of text that takes many tokens"),
+                0.9,
+            ),
             RetrievalResult::new(make_chunk("doc2", "Another long text"), 0.7),
         ];
         // Very low token limit — should truncate

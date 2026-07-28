@@ -24,13 +24,15 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Conversation;
+use crate::error::Result;
+use crate::model_context::ModelContextResolver;
+use crate::token_counter::{
+    ContextFitResult, HeuristicTokenCounter, ModelTokenizerProfile, TokenCounter,
+};
 use crate::ContentBlock;
+use crate::Conversation;
 use crate::Message;
 use crate::Role;
-use crate::model_context::ModelContextResolver;
-use crate::token_counter::{TokenCounter, ContextFitResult, HeuristicTokenCounter, ModelTokenizerProfile};
-use crate::error::Result;
 
 // ─── ContextTrimmingStrategy ────────────────────────────────────────────
 
@@ -120,15 +122,27 @@ pub enum ContextTrimmingStrategy {
     },
 }
 
-fn default_keep_recent_turns() -> usize { 6 }
-fn default_max_tool_result_chars() -> usize { 2000 }
-fn default_max_summary_chars() -> usize { 500 }
-fn default_keep_first_turns() -> usize { 2 }
-fn default_summary_tokens() -> u32 { 256 }
+fn default_keep_recent_turns() -> usize {
+    6
+}
+fn default_max_tool_result_chars() -> usize {
+    2000
+}
+fn default_max_summary_chars() -> usize {
+    500
+}
+fn default_keep_first_turns() -> usize {
+    2
+}
+fn default_summary_tokens() -> u32 {
+    256
+}
 
 impl Default for ContextTrimmingStrategy {
     fn default() -> Self {
-        Self::TruncateOldest { keep_recent_turns: 6 }
+        Self::TruncateOldest {
+            keep_recent_turns: 6,
+        }
     }
 }
 
@@ -300,7 +314,9 @@ impl ContextManagerConfig {
     /// Create with TruncateOldest strategy.
     pub fn truncate_oldest() -> Self {
         Self {
-            default_strategy: ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 6 },
+            default_strategy: ContextTrimmingStrategy::TruncateOldest {
+                keep_recent_turns: 6,
+            },
             profiles: ContextWindowProfile::default_profiles(),
             auto_trim: true,
         }
@@ -395,7 +411,8 @@ impl ContextManager {
         token_counter: Arc<dyn TokenCounter>,
         default_strategy: ContextTrimmingStrategy,
     ) -> Self {
-        let profiles = ContextWindowProfile::default_profiles().into_iter()
+        let profiles = ContextWindowProfile::default_profiles()
+            .into_iter()
             .map(|p| (p.model_name.clone(), p))
             .collect();
 
@@ -411,7 +428,9 @@ impl ContextManager {
 
     /// Create from a ContextManagerConfig.
     pub fn from_config(config: ContextManagerConfig, token_counter: Arc<dyn TokenCounter>) -> Self {
-        let profiles = config.profiles.into_iter()
+        let profiles = config
+            .profiles
+            .into_iter()
             .map(|p| (p.model_name.clone(), p))
             .collect();
 
@@ -465,7 +484,10 @@ impl ContextManager {
     /// max-output numbers are sourced from it (3-layer resolution), overriding
     /// the static profile's stored values.
     pub fn profile_for_model(&self, model: &str) -> ContextWindowProfile {
-        let mut profile = self.profiles.get(model).cloned()
+        let mut profile = self
+            .profiles
+            .get(model)
+            .cloned()
             .unwrap_or_else(|| ContextWindowProfile::from_model_name(model));
         if let Some(resolver) = &self.resolver {
             let resolved = resolver.resolve_cached(model);
@@ -484,11 +506,8 @@ impl ContextManager {
         model: &str,
     ) -> ContextFitResult {
         let profile = self.profile_for_model(model);
-        self.token_counter.fits_context_window(
-            conversation,
-            model,
-            profile.recommended_utilization,
-        )
+        self.token_counter
+            .fits_context_window(conversation, model, profile.recommended_utilization)
     }
 
     /// Trim a conversation to fit within a model's context window.
@@ -511,7 +530,8 @@ impl ContextManager {
         }
 
         let strategy = &profile.trimming_strategy;
-        self.trim_with_strategy(conversation, model, strategy, &fit).await
+        self.trim_with_strategy(conversation, model, strategy, &fit)
+            .await
     }
 
     /// Trim a conversation using a specific strategy.
@@ -526,13 +546,29 @@ impl ContextManager {
             ContextTrimmingStrategy::TruncateOldest { keep_recent_turns } => {
                 Ok(self.trim_truncate_oldest(conversation, *keep_recent_turns))
             }
-            ContextTrimmingStrategy::ImportanceRanked { max_tool_result_chars, max_summary_chars } => {
-                Ok(self.trim_importance_ranked(conversation, model, *max_tool_result_chars, *max_summary_chars, fit))
-            }
-            ContextTrimmingStrategy::CompressMiddle { max_summary_chars, keep_first_turns, keep_last_turns } => {
-                Ok(self.trim_compress_middle(conversation, *max_summary_chars, *keep_first_turns, *keep_last_turns))
-            }
-            ContextTrimmingStrategy::SmartSummary { keep_recent_turns, .. } => {
+            ContextTrimmingStrategy::ImportanceRanked {
+                max_tool_result_chars,
+                max_summary_chars,
+            } => Ok(self.trim_importance_ranked(
+                conversation,
+                model,
+                *max_tool_result_chars,
+                *max_summary_chars,
+                fit,
+            )),
+            ContextTrimmingStrategy::CompressMiddle {
+                max_summary_chars,
+                keep_first_turns,
+                keep_last_turns,
+            } => Ok(self.trim_compress_middle(
+                conversation,
+                *max_summary_chars,
+                *keep_first_turns,
+                *keep_last_turns,
+            )),
+            ContextTrimmingStrategy::SmartSummary {
+                keep_recent_turns, ..
+            } => {
                 // SmartSummary: produce a real structured handoff via one LLM
                 // call when a summarizer is attached (the doc-flagged bug was
                 // that this branch *always* silently fell back to
@@ -540,7 +576,8 @@ impl ContextManager {
                 // summarizer we still fall back — but to first-user-pinned
                 // TruncateOldest, and we log so it's not silent.
                 if let Some(summarizer) = &self.summarizer {
-                    self.trim_smart_summary(conversation, *keep_recent_turns, summarizer.clone()).await
+                    self.trim_smart_summary(conversation, *keep_recent_turns, summarizer.clone())
+                        .await
                 } else {
                     tracing::warn!(
                         "SmartSummary strategy requested but no summarizer attached; \
@@ -596,7 +633,9 @@ impl ContextManager {
         // The first user message is the original task — pin it verbatim (Q2)
         // instead of letting it fall into the "older" segment and be squashed
         // to a 200-char stub. Identified once; treated like system/recent.
-        let first_user_idx = conversation.messages.iter()
+        let first_user_idx = conversation
+            .messages
+            .iter()
             .position(|m| m.role == Role::User);
 
         for (idx, msg) in conversation.messages.iter().enumerate() {
@@ -606,13 +645,16 @@ impl ContextManager {
 
             if is_system || is_recent || is_pinned_first_user {
                 // Keep intact, but truncate long tool results
-                let processed_content = msg.content.iter().map(|block| {
-                    match block {
+                let processed_content = msg
+                    .content
+                    .iter()
+                    .map(|block| match block {
                         ContentBlock::ToolResult { call_id, content } => {
                             if content.len() > max_tool_result_chars {
                                 ContentBlock::ToolResult {
                                     call_id: call_id.clone(),
-                                    content: format!("{}{}",
+                                    content: format!(
+                                        "{}{}",
                                         &content[..max_tool_result_chars.min(content.len())],
                                         "\n[...output truncated]"
                                     ),
@@ -624,7 +666,8 @@ impl ContextManager {
                         ContentBlock::Text { text } => {
                             if !is_system && text.len() > max_tool_result_chars {
                                 ContentBlock::Text {
-                                    text: format!("{}{}",
+                                    text: format!(
+                                        "{}{}",
                                         &text[..max_tool_result_chars.min(text.len())],
                                         "\n[...content truncated]"
                                     ),
@@ -634,8 +677,8 @@ impl ContextManager {
                             }
                         }
                         _ => block.clone(),
-                    }
-                }).collect::<Vec<_>>();
+                    })
+                    .collect::<Vec<_>>();
 
                 trimmed.add_message(Message {
                     role: msg.role,
@@ -718,9 +761,11 @@ impl ContextManager {
                 trimmed.add_message(msg.clone());
             } else if is_recent {
                 // Recent messages: keep intact, but truncate long content
-                let processed_content = msg.content.iter().map(|block| {
-                    truncate_content_block(block, max_tool_result_chars)
-                }).collect::<Vec<_>>();
+                let processed_content = msg
+                    .content
+                    .iter()
+                    .map(|block| truncate_content_block(block, max_tool_result_chars))
+                    .collect::<Vec<_>>();
                 trimmed.add_message(Message {
                     role: msg.role,
                     content: processed_content,
@@ -728,9 +773,11 @@ impl ContextManager {
                 });
             } else if is_tool_result {
                 // Tool results from older turns: truncate to max_tool_result_chars
-                let processed_content = msg.content.iter().map(|block| {
-                    truncate_content_block(block, max_tool_result_chars)
-                }).collect::<Vec<_>>();
+                let processed_content = msg
+                    .content
+                    .iter()
+                    .map(|block| truncate_content_block(block, max_tool_result_chars))
+                    .collect::<Vec<_>>();
 
                 // Check if this is worth keeping (short enough after truncation)
                 let est_tokens = estimate_content_tokens(&processed_content);
@@ -744,17 +791,21 @@ impl ContextManager {
                 } else {
                     // Too large even after truncation — summarize
                     let text = msg.text_content();
-                    let summary = format!("[Tool result (older): {}...]",
-                        &text[..max_summary_chars.min(text.len())]);
+                    let summary = format!(
+                        "[Tool result (older): {}...]",
+                        &text[..max_summary_chars.min(text.len())]
+                    );
                     trimmed.add_message(Message::system(summary));
                 }
             } else {
                 // Older user/assistant messages: summarize
                 let text = msg.text_content();
                 if text.len() > max_summary_chars {
-                    let summary = format!("[{} (older)]: {}...",
+                    let summary = format!(
+                        "[{} (older)]: {}...",
                         role_name(&msg.role),
-                        &text[..max_summary_chars.min(text.len())]);
+                        &text[..max_summary_chars.min(text.len())]
+                    );
                     trimmed.add_message(Message::system(summary));
                 } else if !text.is_empty() {
                     trimmed.add_message(Message::system(format!(
@@ -767,7 +818,7 @@ impl ContextManager {
         }
 
         trimmed.add_message(Message::system(
-            "[Context trimmed by importance ranking: system + recent preserved, older summarized]"
+            "[Context trimmed by importance ranking: system + recent preserved, older summarized]",
         ));
 
         trimmed
@@ -815,7 +866,8 @@ impl ContextManager {
                 let role = role_name(&msg.role);
                 if text.len() > 100 {
                     // Char-boundary-safe truncation for CJK strings
-                    let end = text.char_indices()
+                    let end = text
+                        .char_indices()
                         .take_while(|(i, _)| *i < 100)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())
@@ -829,12 +881,17 @@ impl ContextManager {
             // Combine into a single summary, truncating if too long
             let full_summary = middle_summary_parts.join("\n");
             let summary = if full_summary.len() > max_summary_chars {
-                format!("{}...\n[Middle context compressed: {} messages summarized]",
+                format!(
+                    "{}...\n[Middle context compressed: {} messages summarized]",
                     &full_summary[..max_summary_chars.min(full_summary.len())],
-                    middle_msgs.len())
+                    middle_msgs.len()
+                )
             } else {
-                format!("{}\n[Middle context compressed: {} messages summarized]",
-                    full_summary, middle_msgs.len())
+                format!(
+                    "{}\n[Middle context compressed: {} messages summarized]",
+                    full_summary,
+                    middle_msgs.len()
+                )
             };
 
             trimmed.add_message(Message::system(summary));
@@ -872,7 +929,9 @@ impl ContextManager {
         }
 
         let recent_start = total_messages - keep_recent_turns;
-        let first_user_idx = conversation.messages.iter()
+        let first_user_idx = conversation
+            .messages
+            .iter()
             .position(|m| m.role == Role::User);
         let pin_first_user = first_user_idx
             .map(|idx| idx < recent_start)
@@ -962,7 +1021,8 @@ fn truncate_content_block(block: &ContentBlock, max_chars: usize) -> ContentBloc
             if content.len() > max_chars {
                 ContentBlock::ToolResult {
                     call_id: call_id.clone(),
-                    content: format!("{}{}",
+                    content: format!(
+                        "{}{}",
                         &content[..max_chars.min(content.len())],
                         "\n[...truncated]"
                     ),
@@ -974,7 +1034,8 @@ fn truncate_content_block(block: &ContentBlock, max_chars: usize) -> ContentBloc
         ContentBlock::Text { text } => {
             if text.len() > max_chars {
                 ContentBlock::Text {
-                    text: format!("{}{}",
+                    text: format!(
+                        "{}{}",
                         &text[..max_chars.min(text.len())],
                         "\n[...truncated]"
                     ),
@@ -989,13 +1050,14 @@ fn truncate_content_block(block: &ContentBlock, max_chars: usize) -> ContentBloc
 
 /// Rough token estimate for content blocks.
 fn estimate_content_tokens(content: &[ContentBlock]) -> u32 {
-    content.iter().map(|block| {
-        match block {
+    content
+        .iter()
+        .map(|block| match block {
             ContentBlock::Text { text } => (text.len() as f64 / 4.0).ceil() as u32,
             ContentBlock::ToolResult { content, .. } => (content.len() as f64 / 4.0).ceil() as u32,
             _ => 10,
-        }
-    }).sum()
+        })
+        .sum()
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────
@@ -1008,10 +1070,22 @@ mod tests {
 
     #[test]
     fn test_context_trimming_strategy_variants() {
-        let truncate = ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 6 };
-        let importance = ContextTrimmingStrategy::ImportanceRanked { max_tool_result_chars: 2000, max_summary_chars: 500 };
-        let compress = ContextTrimmingStrategy::CompressMiddle { max_summary_chars: 500, keep_first_turns: 2, keep_last_turns: 6 };
-        let smart = ContextTrimmingStrategy::SmartSummary { keep_recent_turns: 6, summary_max_tokens: 256 };
+        let truncate = ContextTrimmingStrategy::TruncateOldest {
+            keep_recent_turns: 6,
+        };
+        let importance = ContextTrimmingStrategy::ImportanceRanked {
+            max_tool_result_chars: 2000,
+            max_summary_chars: 500,
+        };
+        let compress = ContextTrimmingStrategy::CompressMiddle {
+            max_summary_chars: 500,
+            keep_first_turns: 2,
+            keep_last_turns: 6,
+        };
+        let smart = ContextTrimmingStrategy::SmartSummary {
+            keep_recent_turns: 6,
+            summary_max_tokens: 256,
+        };
 
         assert_eq!(truncate.name(), "Truncate Oldest");
         assert_eq!(importance.name(), "Importance Ranked");
@@ -1022,29 +1096,59 @@ mod tests {
     #[test]
     fn test_context_trimming_strategy_default() {
         let default = ContextTrimmingStrategy::default();
-        assert!(matches!(default, ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 6 }));
+        assert!(matches!(
+            default,
+            ContextTrimmingStrategy::TruncateOldest {
+                keep_recent_turns: 6
+            }
+        ));
     }
 
     #[test]
     fn test_context_trimming_strategy_requires_llm() {
-        assert!(!ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 6 }.requires_llm());
-        assert!(!ContextTrimmingStrategy::ImportanceRanked { max_tool_result_chars: 2000, max_summary_chars: 500 }.requires_llm());
-        assert!(ContextTrimmingStrategy::SmartSummary { keep_recent_turns: 6, summary_max_tokens: 256 }.requires_llm());
+        assert!(!ContextTrimmingStrategy::TruncateOldest {
+            keep_recent_turns: 6
+        }
+        .requires_llm());
+        assert!(!ContextTrimmingStrategy::ImportanceRanked {
+            max_tool_result_chars: 2000,
+            max_summary_chars: 500
+        }
+        .requires_llm());
+        assert!(ContextTrimmingStrategy::SmartSummary {
+            keep_recent_turns: 6,
+            summary_max_tokens: 256
+        }
+        .requires_llm());
     }
 
     #[test]
     fn test_context_trimming_strategy_factory_methods() {
         let truncate = ContextTrimmingStrategy::truncate_oldest(4);
-        assert!(matches!(truncate, ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 4 }));
+        assert!(matches!(
+            truncate,
+            ContextTrimmingStrategy::TruncateOldest {
+                keep_recent_turns: 4
+            }
+        ));
 
         let importance = ContextTrimmingStrategy::importance_ranked();
-        assert!(matches!(importance, ContextTrimmingStrategy::ImportanceRanked { .. }));
+        assert!(matches!(
+            importance,
+            ContextTrimmingStrategy::ImportanceRanked { .. }
+        ));
 
         let compress = ContextTrimmingStrategy::compress_middle();
-        assert!(matches!(compress, ContextTrimmingStrategy::CompressMiddle { .. }));
+        assert!(matches!(
+            compress,
+            ContextTrimmingStrategy::CompressMiddle { .. }
+        ));
 
         let smart = ContextTrimmingStrategy::smart_summary();
-        assert!(matches!(smart, ContextTrimmingStrategy::SmartSummary { .. }));
+        assert!(matches!(
+            smart,
+            ContextTrimmingStrategy::SmartSummary { .. }
+        ));
     }
 
     // ─── ContextWindowProfile tests ──────────────────────────────────
@@ -1104,9 +1208,15 @@ mod tests {
         // Should have fewer original messages (some compressed into summaries)
         // but may have extra system messages for the truncation notice
         // The key assertion: system message should be preserved
-        assert!(trimmed.messages.iter().any(|m| m.role == Role::System && m.text_content().contains("You are helpful")));
+        assert!(trimmed
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System && m.text_content().contains("You are helpful")));
         // And there should be a truncation notice
-        assert!(trimmed.messages.iter().any(|m| m.role == Role::System && m.text_content().contains("Context trimmed")));
+        assert!(trimmed
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System && m.text_content().contains("Context trimmed")));
     }
 
     #[test]
@@ -1118,7 +1228,8 @@ mod tests {
         // Each message needs to be long enough to overflow
         let mut conv = Conversation::new();
         conv.add_message(Message::system("You are helpful".to_string()));
-        let long_text = "This is a very long message content that contains substantial detail ".repeat(20);
+        let long_text =
+            "This is a very long message content that contains substantial detail ".repeat(20);
         for i in 0..100 {
             conv.add_message(Message::user(format!("{} Question {}", long_text, i)));
             conv.add_message(Message::assistant(format!("{} Answer {}", long_text, i)));
@@ -1128,14 +1239,26 @@ mod tests {
         if !fit.fits {
             let trimmed = manager.trim_importance_ranked(&conv, "qwen2.5:7b", 2000, 500, &fit);
             // System message should be preserved
-            assert!(trimmed.messages.iter().any(|m| m.role == Role::System && m.text_content().contains("You are helpful")));
+            assert!(trimmed
+                .messages
+                .iter()
+                .any(|m| m.role == Role::System && m.text_content().contains("You are helpful")));
             // And there should be an importance-ranked trimming notice
-            assert!(trimmed.messages.iter().any(|m| m.role == Role::System && m.text_content().contains("importance ranking")));
+            assert!(
+                trimmed
+                    .messages
+                    .iter()
+                    .any(|m| m.role == Role::System
+                        && m.text_content().contains("importance ranking"))
+            );
         } else {
             // If conversation doesn't overflow, verify it's handled correctly
             // This can happen with different token counting heuristics
             // Just verify that trimming doesn't corrupt the conversation
-            assert!(conv.messages.iter().any(|m| m.role == Role::System && m.text_content().contains("You are helpful")));
+            assert!(conv
+                .messages
+                .iter()
+                .any(|m| m.role == Role::System && m.text_content().contains("You are helpful")));
         }
     }
 
@@ -1155,7 +1278,12 @@ mod tests {
         // Should have: first 2 + summary + last 6
         assert!(trimmed.len() < conv.len());
         // System message should be preserved
-        assert!(trimmed.messages.first().unwrap().text_content().contains("You are helpful"));
+        assert!(trimmed
+            .messages
+            .first()
+            .unwrap()
+            .text_content()
+            .contains("You are helpful"));
     }
 
     #[test]
@@ -1269,7 +1397,9 @@ mod tests {
         let manager = ContextManager::new(counter, ContextTrimmingStrategy::default());
 
         let mut conv = Conversation::new();
-        conv.add_message(Message::system("CRITICAL SYSTEM PROMPT - DO NOT LOSE".to_string()));
+        conv.add_message(Message::system(
+            "CRITICAL SYSTEM PROMPT - DO NOT LOSE".to_string(),
+        ));
         for i in 0..30 {
             conv.add_message(Message::user(format!("Question {}", i)));
             conv.add_message(Message::assistant(format!("Answer {}", i)));
@@ -1277,10 +1407,14 @@ mod tests {
 
         let trimmed = manager.trim_truncate_oldest(&conv, 6);
         // System message should be preserved exactly
-        let system_msgs = trimmed.messages.iter()
+        let system_msgs = trimmed
+            .messages
+            .iter()
             .filter(|m| m.role == Role::System)
             .collect::<Vec<_>>();
-        assert!(system_msgs.iter().any(|m| m.text_content().contains("CRITICAL SYSTEM PROMPT")));
+        assert!(system_msgs
+            .iter()
+            .any(|m| m.text_content().contains("CRITICAL SYSTEM PROMPT")));
     }
 
     #[test]
@@ -1302,42 +1436,73 @@ mod tests {
         }
 
         let trimmed = manager.trim_truncate_oldest(&conv, 6);
-        let text: String = trimmed.messages.iter()
-            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
-        assert!(text.contains(long_task),
-            "first user message must be pinned verbatim by trim_truncate_oldest");
+        let text: String = trimmed
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains(long_task),
+            "first user message must be pinned verbatim by trim_truncate_oldest"
+        );
     }
 
     #[tokio::test]
     async fn test_smart_summary_generates_handoff_with_summarizer() {
-        use crate::{InferenceRequest, InferenceResponse, ModelCapability, ModelConfig, ProviderType, TokenUsage};
+        use crate::{
+            InferenceRequest, InferenceResponse, ModelCapability, ModelConfig, ProviderType,
+            TokenUsage,
+        };
         use async_trait::async_trait;
         use std::collections::HashMap;
 
         struct HandoffMock;
         #[async_trait]
         impl crate::traits::LlmProvider for HandoffMock {
-            async fn infer(&self, _req: InferenceRequest) -> std::result::Result<InferenceResponse, crate::error::OneAIError> {
+            async fn infer(
+                &self,
+                _req: InferenceRequest,
+            ) -> std::result::Result<InferenceResponse, crate::error::OneAIError> {
                 Ok(InferenceResponse {
                     message: Message::assistant(
-                        "# Session Summary\n## Goal: refactor auth\n## Next Steps: add tests".to_string()
+                        "# Session Summary\n## Goal: refactor auth\n## Next Steps: add tests"
+                            .to_string(),
                     ),
-                    usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
+                    usage: TokenUsage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        ..Default::default()
+                    },
                     model: "mock".to_string(),
                     metadata: HashMap::new(),
                 })
             }
             async fn infer_stream(
-                &self, _req: InferenceRequest,
-            ) -> std::result::Result<std::pin::Pin<Box<dyn futures::Stream<Item = crate::InferenceStreamChunk> + Send>>, crate::error::OneAIError> {
+                &self,
+                _req: InferenceRequest,
+            ) -> std::result::Result<
+                std::pin::Pin<Box<dyn futures::Stream<Item = crate::InferenceStreamChunk> + Send>>,
+                crate::error::OneAIError,
+            > {
                 Err(crate::error::OneAIError::Provider("no stream".into()))
             }
             fn capabilities(&self) -> ModelCapability {
-                ModelCapability { supports_multimodal: false, supports_streaming: false, supports_tools: false, context_window_size: 4096, max_output_tokens: 512 }
+                ModelCapability {
+                    supports_multimodal: false,
+                    supports_streaming: false,
+                    supports_tools: false,
+                    context_window_size: 4096,
+                    max_output_tokens: 512,
+                }
             }
             fn config(&self) -> &ModelConfig {
                 static CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
-                CONFIG.get_or_init(|| ModelConfig { provider_type: ProviderType::Local, ..Default::default() })
+                CONFIG.get_or_init(|| ModelConfig {
+                    provider_type: ProviderType::Local,
+                    ..Default::default()
+                })
             }
         }
 
@@ -1353,25 +1518,47 @@ mod tests {
         }
 
         let fit = manager.fits_context_window(&conv, "qwen2.5:7b");
-        let trimmed = manager.trim_with_strategy(
-            &conv, "qwen2.5:7b",
-            &ContextTrimmingStrategy::smart_summary(), &fit).await.unwrap();
-        let text: String = trimmed.messages.iter()
-            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
+        let trimmed = manager
+            .trim_with_strategy(
+                &conv,
+                "qwen2.5:7b",
+                &ContextTrimmingStrategy::smart_summary(),
+                &fit,
+            )
+            .await
+            .unwrap();
+        let text: String = trimmed
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
         // The LLM-generated handoff is present (not a silent TruncateOldest stub).
-        assert!(text.contains("Session Summary"), "SmartSummary must produce a real handoff: {text}");
-        assert!(text.contains("refactor auth"), "handoff must carry the original goal: {text}");
+        assert!(
+            text.contains("Session Summary"),
+            "SmartSummary must produce a real handoff: {text}"
+        );
+        assert!(
+            text.contains("refactor auth"),
+            "handoff must carry the original goal: {text}"
+        );
     }
 
     #[test]
     fn test_context_manager_config() {
         let config = ContextManagerConfig::default();
-        assert!(matches!(config.default_strategy, ContextTrimmingStrategy::TruncateOldest { .. }));
+        assert!(matches!(
+            config.default_strategy,
+            ContextTrimmingStrategy::TruncateOldest { .. }
+        ));
         assert!(config.auto_trim);
         assert_eq!(config.profiles.len(), 12);
 
         let config_ranked = ContextManagerConfig::importance_ranked();
-        assert!(matches!(config_ranked.default_strategy, ContextTrimmingStrategy::ImportanceRanked { .. }));
+        assert!(matches!(
+            config_ranked.default_strategy,
+            ContextTrimmingStrategy::ImportanceRanked { .. }
+        ));
 
         let config_no_trim = ContextManagerConfig::default().without_auto_trim();
         assert!(!config_no_trim.auto_trim);
@@ -1381,6 +1568,9 @@ mod tests {
     fn test_context_manager_with_defaults() {
         let manager = ContextManager::with_defaults();
         assert!(manager.auto_trim());
-        assert!(matches!(manager.default_strategy(), ContextTrimmingStrategy::TruncateOldest { .. }));
+        assert!(matches!(
+            manager.default_strategy(),
+            ContextTrimmingStrategy::TruncateOldest { .. }
+        ));
     }
 }

@@ -3,9 +3,9 @@
 //! Tools remaining here: FileWriteTool, CalculatorTool.
 
 use async_trait::async_trait;
-use oneai_core::{RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
+use oneai_core::{RiskLevel, ToolOutput};
 
 // ─── FileWriteTool ──────────────────────────────────────────────────────────
 
@@ -73,13 +73,10 @@ impl Tool for FileWriteTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let path = args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let content = args.get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let append = args.get("append")
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let append = args
+            .get("append")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -121,7 +118,9 @@ impl Tool for FileWriteTool {
             // alone fails when the parent dir does not exist, which previously
             // pushed the model toward `mkdir -p` + `cat >` shell workarounds.
             if let Some(parent) = std::path::Path::new(path).parent() {
-                if !parent.as_os_str().is_empty() && !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+                if !parent.as_os_str().is_empty()
+                    && !tokio::fs::try_exists(parent).await.unwrap_or(false)
+                {
                     if let Err(e) = tokio::fs::create_dir_all(parent).await {
                         return Ok(ToolOutput {
                             success: false,
@@ -198,7 +197,8 @@ impl Tool for CalculatorTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let expression = args.get("expression")
+        let expression = args
+            .get("expression")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
@@ -239,7 +239,15 @@ fn evaluate_expression(expr: &str) -> std::result::Result<f64, String> {
 
     // Validate that the expression only contains safe characters
     for ch in expr.chars() {
-        if !ch.is_ascii_digit() && ch != '.' && ch != '+' && ch != '-' && ch != '*' && ch != '/' && ch != '(' && ch != ')' {
+        if !ch.is_ascii_digit()
+            && ch != '.'
+            && ch != '+'
+            && ch != '-'
+            && ch != '*'
+            && ch != '/'
+            && ch != '('
+            && ch != ')'
+        {
             return Err(format!("Invalid character in expression: '{}'", ch));
         }
     }
@@ -250,11 +258,13 @@ fn evaluate_expression(expr: &str) -> std::result::Result<f64, String> {
 
     fn parse_number(chars: &[u8], pos: &mut usize) -> std::result::Result<f64, String> {
         let start = *pos;
-        while *pos < chars.len() && (chars[*pos].is_ascii_digit() || chars[*pos] == '.' as u8) {
+        while *pos < chars.len() && (chars[*pos].is_ascii_digit() || chars[*pos] == b'.') {
             *pos += 1;
         }
         let num_str = std::str::from_utf8(&chars[start..*pos]).unwrap();
-        num_str.parse::<f64>().map_err(|e| format!("Invalid number: {}", e))
+        num_str
+            .parse::<f64>()
+            .map_err(|e| format!("Invalid number: {}", e))
     }
 
     fn parse_expr(chars: &[u8], pos: &mut usize) -> std::result::Result<f64, String> {
@@ -262,10 +272,10 @@ fn evaluate_expression(expr: &str) -> std::result::Result<f64, String> {
 
         while *pos < chars.len() {
             let op = chars[*pos];
-            if op == '+' as u8 || op == '-' as u8 {
+            if op == b'+' || op == b'-' {
                 *pos += 1;
                 let term = parse_term(chars, pos)?;
-                if op == '+' as u8 {
+                if op == b'+' {
                     result += term
                 } else {
                     result -= term
@@ -283,10 +293,10 @@ fn evaluate_expression(expr: &str) -> std::result::Result<f64, String> {
 
         while *pos < chars.len() {
             let op = chars[*pos];
-            if op == '*' as u8 || op == '/' as u8 {
+            if op == b'*' || op == b'/' {
                 *pos += 1;
                 let factor = parse_factor(chars, pos)?;
-                if op == '*' as u8 {
+                if op == b'*' {
                     result *= factor
                 } else {
                     if factor == 0.0 {
@@ -304,16 +314,16 @@ fn evaluate_expression(expr: &str) -> std::result::Result<f64, String> {
 
     fn parse_factor(chars: &[u8], pos: &mut usize) -> std::result::Result<f64, String> {
         // Handle negative numbers
-        if *pos < chars.len() && chars[*pos] == '-' as u8 {
+        if *pos < chars.len() && chars[*pos] == b'-' {
             *pos += 1;
             return Ok(-parse_factor(chars, pos)?);
         }
 
         // Handle parentheses
-        if *pos < chars.len() && chars[*pos] == '(' as u8 {
+        if *pos < chars.len() && chars[*pos] == b'(' {
             *pos += 1;
             let result = parse_expr(chars, pos)?;
-            if *pos >= chars.len() || chars[*pos] != ')' as u8 {
+            if *pos >= chars.len() || chars[*pos] != b')' {
                 return Err("Missing closing parenthesis".to_string());
             }
             *pos += 1;
@@ -324,7 +334,7 @@ fn evaluate_expression(expr: &str) -> std::result::Result<f64, String> {
         parse_number(chars, pos)
     }
 
-    let result = parse_expr(&chars, &mut pos)?;
+    let result = parse_expr(chars, &mut pos)?;
 
     if pos != chars.len() {
         return Err("Unexpected characters at end of expression".to_string());

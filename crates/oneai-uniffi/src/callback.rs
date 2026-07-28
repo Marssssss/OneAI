@@ -58,7 +58,10 @@ impl AgentLoopObserver for CallbackObserver {
     }
 
     fn on_direct_answer(&self, text: &str) {
-        self.emit(ChatEventView::DirectAnswer { text: text.to_string(), speaker: None });
+        self.emit(ChatEventView::DirectAnswer {
+            text: text.to_string(),
+            speaker: None,
+        });
     }
 
     fn on_tool_calls(&self, calls: &[ToolCallRequest]) {
@@ -102,11 +105,17 @@ impl AgentLoopObserver for CallbackObserver {
     }
 
     fn on_stream_chunk(&self, text: &str) {
-        self.emit(ChatEventView::StreamChunk { text: text.to_string(), speaker: None });
+        self.emit(ChatEventView::StreamChunk {
+            text: text.to_string(),
+            speaker: None,
+        });
     }
 
     fn on_thinking(&self, text: &str) {
-        self.emit(ChatEventView::Thinking { text: text.to_string(), speaker: None });
+        self.emit(ChatEventView::Thinking {
+            text: text.to_string(),
+            speaker: None,
+        });
     }
 
     fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {
@@ -126,7 +135,9 @@ mod tests {
 
     impl CollectingCallback {
         fn new() -> Self {
-            Self { events: Mutex::new(Vec::new()) }
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
         }
 
         fn take(&self) -> Vec<ChatEventView> {
@@ -158,8 +169,14 @@ mod tests {
         });
 
         let events = cb.take();
-        assert!(matches!(events[0], ChatEventView::StreamChunk { ref text, speaker: None } if text == "Hel"));
-        assert!(matches!(events[1], ChatEventView::StreamChunk { ref text, speaker: None } if text == "lo"));
-        assert!(matches!(events[2], ChatEventView::Complete { ref final_text, speaker: None } if final_text == "Hello"));
+        assert!(
+            matches!(events[0], ChatEventView::StreamChunk { ref text, speaker: None } if text == "Hel")
+        );
+        assert!(
+            matches!(events[1], ChatEventView::StreamChunk { ref text, speaker: None } if text == "lo")
+        );
+        assert!(
+            matches!(events[2], ChatEventView::Complete { ref final_text, speaker: None } if final_text == "Hello")
+        );
     }
 }

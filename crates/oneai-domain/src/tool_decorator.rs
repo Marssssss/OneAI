@@ -15,11 +15,11 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
+use async_trait::async_trait;
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
-use async_trait::async_trait;
+use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
+use serde::{Deserialize, Serialize};
 
 // ─── ToolDecorator ─────────────────────────────────────────────────────────────
 
@@ -126,9 +126,12 @@ pub struct DecoratedTool {
 impl DecoratedTool {
     /// Create a new DecoratedTool wrapping an inner tool with a decorator.
     pub fn new(inner: Arc<dyn Tool>, decorator: ToolDecorator) -> Self {
-        assert_eq!(inner.name(), decorator.tool_name,
+        assert_eq!(
+            inner.name(),
+            decorator.tool_name,
             "DecoratedTool: decorator tool_name '{}' must match inner tool name '{}'",
-            decorator.tool_name, inner.name()
+            decorator.tool_name,
+            inner.name()
         );
         Self { inner, decorator }
     }
@@ -152,7 +155,9 @@ impl Tool for DecoratedTool {
 
     fn description(&self) -> &str {
         // Use decorator override if present, otherwise fall back to inner
-        self.decorator.description_override.as_deref()
+        self.decorator
+            .description_override
+            .as_deref()
             .unwrap_or_else(|| self.inner.description())
     }
 
@@ -171,7 +176,8 @@ impl Tool for DecoratedTool {
 
     fn risk_level(&self) -> RiskLevel {
         // Use decorator override if present, otherwise fall back to inner
-        self.decorator.permission_override
+        self.decorator
+            .permission_override
             .map(|p| p.to_risk_level())
             .unwrap_or_else(|| self.inner.risk_level())
     }
@@ -188,17 +194,18 @@ impl Tool for DecoratedTool {
 /// - New properties from extra_params are added to the base "properties"
 /// - Existing properties in the base are NOT overwritten
 /// - The "required" list from extra_params is appended to the base "required"
-pub fn merge_tool_schemas(
-    base: serde_json::Value,
-    extra: serde_json::Value,
-) -> serde_json::Value {
+pub fn merge_tool_schemas(base: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
     let mut merged = base.clone();
 
-    if let (Some(base_obj), Some(extra_props)) =
-        (merged.as_object_mut(), extra.get("properties").and_then(|p| p.as_object()))
-    {
+    if let (Some(base_obj), Some(extra_props)) = (
+        merged.as_object_mut(),
+        extra.get("properties").and_then(|p| p.as_object()),
+    ) {
         // Merge "properties"
-        if let Some(base_props) = base_obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        if let Some(base_props) = base_obj
+            .get_mut("properties")
+            .and_then(|p| p.as_object_mut())
+        {
             for (key, value) in extra_props {
                 // Only add if not already in base (don't overwrite)
                 if !base_props.contains_key(key) {
@@ -209,7 +216,8 @@ pub fn merge_tool_schemas(
 
         // Merge "required"
         if let Some(extra_required) = extra.get("required").and_then(|r| r.as_array()) {
-            if let Some(base_required) = base_obj.get_mut("required").and_then(|r| r.as_array_mut()) {
+            if let Some(base_required) = base_obj.get_mut("required").and_then(|r| r.as_array_mut())
+            {
                 for item in extra_required {
                     // Only add if not already in base required
                     if !base_required.iter().any(|b| b == item) {
@@ -241,7 +249,10 @@ mod tests {
     fn test_tool_decorator_simple() {
         let decorator = ToolDecorator::with_description("calculator", "Domain-specific calculator");
         assert_eq!(decorator.tool_name, "calculator");
-        assert_eq!(decorator.description_override.as_deref(), Some("Domain-specific calculator"));
+        assert_eq!(
+            decorator.description_override.as_deref(),
+            Some("Domain-specific calculator")
+        );
         assert!(decorator.permission_override.is_none());
     }
 
@@ -250,12 +261,15 @@ mod tests {
         let inner: Arc<dyn Tool> = Arc::new(CalculatorTool::new());
         let decorator = ToolDecorator::with_description(
             "calculator",
-            "Scientific calculator for data analysis"
+            "Scientific calculator for data analysis",
         );
         let decorated = DecoratedTool::new(inner.clone(), decorator);
 
         // Description overridden
-        assert_eq!(decorated.description(), "Scientific calculator for data analysis");
+        assert_eq!(
+            decorated.description(),
+            "Scientific calculator for data analysis"
+        );
 
         // Name unchanged
         assert_eq!(decorated.name(), "calculator");
@@ -285,8 +299,8 @@ mod tests {
         let original_risk = inner.risk_level();
         let decorator = ToolDecorator {
             tool_name: "calculator".to_string(),
-            description_override: None,  // No override
-            permission_override: None,    // No override
+            description_override: None, // No override
+            permission_override: None,  // No override
             extra_params: serde_json::json!({}),
         };
         let decorated = DecoratedTool::new(inner.clone(), decorator);
@@ -303,7 +317,10 @@ mod tests {
         let decorated = DecoratedTool::new(inner, decorator);
 
         // Execute delegates to inner tool
-        let result = decorated.execute(serde_json::json!({"expression": "2+3"})).await.unwrap();
+        let result = decorated
+            .execute(serde_json::json!({"expression": "2+3"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5");
     }
@@ -331,10 +348,10 @@ mod tests {
 
         // Should have both base and extra properties
         let props = merged.get("properties").unwrap().as_object().unwrap();
-        assert!(props.contains_key("path"));      // base
-        assert!(props.contains_key("offset"));    // base
-        assert!(props.contains_key("encoding"));  // extra
-        assert!(props.contains_key("format"));    // extra
+        assert!(props.contains_key("path")); // base
+        assert!(props.contains_key("offset")); // base
+        assert!(props.contains_key("encoding")); // extra
+        assert!(props.contains_key("format")); // extra
 
         // Required should include both
         let required = merged.get("required").unwrap().as_array().unwrap();
@@ -364,7 +381,10 @@ mod tests {
         // Base property should not be overwritten
         let props = merged.get("properties").unwrap().as_object().unwrap();
         let path_prop = props.get("path").unwrap();
-        assert_eq!(path_prop.get("description").unwrap().as_str().unwrap(), "Original description");
+        assert_eq!(
+            path_prop.get("description").unwrap().as_str().unwrap(),
+            "Original description"
+        );
 
         // Required should not duplicate
         let required = merged.get("required").unwrap().as_array().unwrap();

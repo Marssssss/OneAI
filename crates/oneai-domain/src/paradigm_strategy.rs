@@ -11,9 +11,9 @@
 //! ParadigmKind stays unchanged (Plan/ReAct/Reflect/Explore). Domain packs
 //! configure *within* paradigms (system prompt, tool set), not new paradigm types.
 
-use serde::{Deserialize, Serialize};
 use oneai_core::PermissionLevel;
 use oneai_core::StructuredOutputConfig;
+use serde::{Deserialize, Serialize};
 
 // ─── ParadigmKind ──────────────────────────────────────────────────────────────
 
@@ -153,7 +153,8 @@ impl SubAgentTypeDefinition {
             name: "plan".to_string(),
             description: "Task decomposition agent — creates structured plans".to_string(),
             system_prompt: "You are a planning agent. Decompose the given task into ordered steps \
-                with dependencies. Return a structured plan as a numbered list.".to_string(),
+                with dependencies. Return a structured plan as a numbered list."
+                .to_string(),
             available_tools: vec!["read_file".into(), "grep".into(), "glob".into()],
             permission_threshold: PermissionLevel::Read,
             budget: 30_000,
@@ -169,9 +170,12 @@ impl SubAgentTypeDefinition {
             name: "explore".to_string(),
             description: "Exploration agent — searches and understands the codebase".to_string(),
             system_prompt: "You are an exploration agent. Search and understand the codebase \
-                using available tools. Return a comprehensive summary of your findings.".to_string(),
+                using available tools. Return a comprehensive summary of your findings."
+                .to_string(),
             available_tools: vec![
-                "read_file".into(), "grep".into(), "glob".into(),
+                "read_file".into(),
+                "grep".into(),
+                "glob".into(),
                 "list_directory".into(),
             ],
             permission_threshold: PermissionLevel::Read,
@@ -188,10 +192,14 @@ impl SubAgentTypeDefinition {
             name: "code".to_string(),
             description: "Code implementation agent — writes and modifies code".to_string(),
             system_prompt: "You are a code implementation agent. Write and modify code based \
-                on the given specification. Return a summary of all changes you made.".to_string(),
+                on the given specification. Return a summary of all changes you made."
+                .to_string(),
             available_tools: vec![
-                "read_file".into(), "edit_file".into(), "shell".into(),
-                "grep".into(), "glob".into(),
+                "read_file".into(),
+                "edit_file".into(),
+                "shell".into(),
+                "grep".into(),
+                "glob".into(),
             ],
             permission_threshold: PermissionLevel::Standard,
             budget: 80_000,
@@ -207,9 +215,12 @@ impl SubAgentTypeDefinition {
             name: "review".to_string(),
             description: "Review agent — reviews and audits existing work".to_string(),
             system_prompt: "You are a code review agent. Review code for correctness bugs, \
-                style issues, and potential improvements. Return a structured review.".to_string(),
+                style issues, and potential improvements. Return a structured review."
+                .to_string(),
             available_tools: vec![
-                "read_file".into(), "grep".into(), "glob".into(),
+                "read_file".into(),
+                "grep".into(),
+                "glob".into(),
                 "list_directory".into(),
             ],
             permission_threshold: PermissionLevel::Read,
@@ -221,13 +232,24 @@ impl SubAgentTypeDefinition {
     }
 
     /// Create a custom sub-agent definition.
-    pub fn custom(name: &str, description: &str, system_prompt: &str, tools: Vec<String>, budget: u32, modifies_files: bool) -> Self {
+    pub fn custom(
+        name: &str,
+        description: &str,
+        system_prompt: &str,
+        tools: Vec<String>,
+        budget: u32,
+        modifies_files: bool,
+    ) -> Self {
         Self {
             name: name.to_string(),
             description: description.to_string(),
             system_prompt: system_prompt.to_string(),
             available_tools: tools,
-            permission_threshold: if modifies_files { PermissionLevel::Standard } else { PermissionLevel::Read },
+            permission_threshold: if modifies_files {
+                PermissionLevel::Standard
+            } else {
+                PermissionLevel::Read
+            },
             budget,
             modifies_files,
             merge_strategy: if modifies_files {
@@ -332,7 +354,9 @@ pub struct ParadigmStrategyRegistry {
 impl ParadigmStrategyRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
-        Self { strategies: Vec::new() }
+        Self {
+            strategies: Vec::new(),
+        }
     }
 
     /// Create from a list of strategies.
@@ -365,7 +389,11 @@ mod tests {
     fn test_paradigm_strategy_match() {
         let strategy = ParadigmStrategy {
             trigger_pattern: "refactor|rewrite|restructure".to_string(),
-            paradigm_sequence: vec![DomainParadigmKind::Plan, DomainParadigmKind::ReAct, DomainParadigmKind::Reflect],
+            paradigm_sequence: vec![
+                DomainParadigmKind::Plan,
+                DomainParadigmKind::ReAct,
+                DomainParadigmKind::Reflect,
+            ],
             sub_agent_types: Vec::new(),
             description: "Refactoring tasks".to_string(),
         };
@@ -381,7 +409,11 @@ mod tests {
             name: "searcher".to_string(),
             description: "Explores codebase with read+grep+glob".to_string(),
             system_prompt: "You are a code exploration agent...".to_string(),
-            available_tools: vec!["read_file".to_string(), "grep".to_string(), "glob".to_string()],
+            available_tools: vec![
+                "read_file".to_string(),
+                "grep".to_string(),
+                "glob".to_string(),
+            ],
             permission_threshold: PermissionLevel::Read,
             budget: 40_000,
             modifies_files: false,

@@ -26,9 +26,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Conversation;
-use crate::ContentBlock;
 use crate::model_context::ModelContextResolver;
+use crate::ContentBlock;
+use crate::Conversation;
 
 // ─── TokenCounter trait ────────────────────────────────────────────────────
 
@@ -111,11 +111,7 @@ pub struct ContextFitResult {
 
 impl ContextFitResult {
     /// Create a new ContextFitResult.
-    pub fn new(
-        total_tokens: u32,
-        context_window: u32,
-        threshold: f64,
-    ) -> Self {
+    pub fn new(total_tokens: u32, context_window: u32, threshold: f64) -> Self {
         let effective_limit = (context_window as f64 * threshold) as u32;
         let fits = total_tokens <= effective_limit;
         let remaining_tokens = effective_limit.saturating_sub(total_tokens);
@@ -200,9 +196,13 @@ impl ProviderTokenizerType {
             Self::OpenAI
         } else if lower.contains("gemini") || lower.contains("google") {
             Self::Google
-        } else if lower.contains("ollama") || lower.contains("llama") || lower.contains("qwen")
-            || lower.contains("deepseek") || lower.contains("mistral")
-            || lower.contains("glm") // GLM uses similar tokenization to Chinese-focused models
+        } else if lower.contains("ollama")
+            || lower.contains("llama")
+            || lower.contains("qwen")
+            || lower.contains("deepseek")
+            || lower.contains("mistral")
+            || lower.contains("glm")
+        // GLM uses similar tokenization to Chinese-focused models
         {
             Self::Ollama
         } else {
@@ -283,24 +283,24 @@ impl LanguageType {
 
         for ch in text.chars() {
             // CJK Unified Ideographs
-            if (ch >= '\u{4E00}' && ch <= '\u{9FFF}')
+            if ('\u{4E00}'..='\u{9FFF}').contains(&ch)
                 // CJK Extension A
-                || (ch >= '\u{3400}' && ch <= '\u{4DBF}')
+                || ('\u{3400}'..='\u{4DBF}').contains(&ch)
                 // Hiragana
-                || (ch >= '\u{3040}' && ch <= '\u{309F}')
+                || ('\u{3040}'..='\u{309F}').contains(&ch)
                 // Katakana
-                || (ch >= '\u{30A0}' && ch <= '\u{30FF}')
+                || ('\u{30A0}'..='\u{30FF}').contains(&ch)
                 // Korean Hangul Syllables
-                || (ch >= '\u{AC00}' && ch <= '\u{D7AF}')
+                || ('\u{AC00}'..='\u{D7AF}').contains(&ch)
                 // Korean Hangul Jamo
-                || (ch >= '\u{1100}' && ch <= '\u{11FF}')
+                || ('\u{1100}'..='\u{11FF}').contains(&ch)
                 // Fullwidth forms
-                || (ch >= '\u{FF00}' && ch <= '\u{FFEF}')
+                || ('\u{FF00}'..='\u{FFEF}').contains(&ch)
             {
                 cjk_count += 1;
             } else if ch.is_ascii_alphanumeric() || ch.is_ascii_punctuation() || ch == ' '
                 // Extended Latin
-                || (ch >= '\u{00C0}' && ch <= '\u{024F}')
+                || ('\u{00C0}'..='\u{024F}').contains(&ch)
             {
                 latin_count += 1;
             }
@@ -495,7 +495,11 @@ impl HeuristicTokenCounter {
         let profiles = Self::default_profiles_map();
         let default_profile = ModelTokenizerProfile::from_model_name("default");
 
-        Self { profiles, default_profile, resolver: None }
+        Self {
+            profiles,
+            default_profile,
+            resolver: None,
+        }
     }
 
     /// Create with only default profile (no model-specific profiles).
@@ -510,11 +514,16 @@ impl HeuristicTokenCounter {
 
     /// Create with custom profiles (replaces default profiles).
     pub fn with_profiles(profiles: Vec<ModelTokenizerProfile>) -> Self {
-        let map = profiles.into_iter()
+        let map = profiles
+            .into_iter()
             .map(|p| (p.model_name.clone(), p))
             .collect();
         let default_profile = ModelTokenizerProfile::from_model_name("default");
-        Self { profiles: map, default_profile, resolver: None }
+        Self {
+            profiles: map,
+            default_profile,
+            resolver: None,
+        }
     }
 
     /// Attach a 3-layer `ModelContextResolver` as the source of truth for
@@ -524,7 +533,10 @@ impl HeuristicTokenCounter {
     /// The resolver's own L1 user-profile map is populated at construction
     /// time (by `AppBuilder`), so no seeding is done here.
     pub fn with_resolver(self, resolver: Arc<ModelContextResolver>) -> Self {
-        Self { resolver: Some(resolver), ..self }
+        Self {
+            resolver: Some(resolver),
+            ..self
+        }
     }
 
     /// The attached resolver, if any.
@@ -544,7 +556,8 @@ impl HeuristicTokenCounter {
 
     /// Build the default profiles map.
     fn default_profiles_map() -> HashMap<String, ModelTokenizerProfile> {
-        ModelTokenizerProfile::default_profiles().into_iter()
+        ModelTokenizerProfile::default_profiles()
+            .into_iter()
             .map(|p| (p.model_name.clone(), p))
             .collect()
     }
@@ -595,7 +608,8 @@ impl TokenCounter for HeuristicTokenCounter {
                         // Tool call: name + args + formatting overhead
                         let name_tokens = self.count_tokens(name, model);
                         let args_tokens = self.count_tokens(args, model);
-                        total_tokens += name_tokens + args_tokens + profile.tool_definition_overhead_tokens;
+                        total_tokens +=
+                            name_tokens + args_tokens + profile.tool_definition_overhead_tokens;
                     }
                     ContentBlock::ToolResult { content, .. } => {
                         let cpt = profile.chars_per_token_for_text(content);
@@ -662,7 +676,9 @@ impl TokenCounter for HeuristicTokenCounter {
 // ─── Helper functions ──────────────────────────────────────────────────
 
 /// Get default overhead values for a tokenizer type.
-fn tokenizer_type_default_overhead(tokenizer_type: &ProviderTokenizerType) -> (f64, f64, u32, u32, u32) {
+fn tokenizer_type_default_overhead(
+    tokenizer_type: &ProviderTokenizerType,
+) -> (f64, f64, u32, u32, u32) {
     let cpt_en = tokenizer_type.chars_per_token_english();
     let cpt_cjk = tokenizer_type.chars_per_token_cjk();
     let (msg_overhead, sys_overhead, tool_overhead) = match tokenizer_type {
@@ -706,7 +722,7 @@ pub fn infer_context_window_for_tokenizer(model: &str) -> u32 {
         return 128_000;
     }
     if lower.contains("glm-5") || lower.contains("glm5") || lower.contains("glm") {
-        return 203_000;  // GLM-5.x series: ~203K context window
+        return 203_000; // GLM-5.x series: ~203K context window
     }
     if lower.contains("deepseek-r1") {
         return 64_000;
@@ -768,7 +784,7 @@ mod tests {
 
         // "Hello world" — 11 chars, ~4 chars/token for OpenAI → ~3 tokens
         let tokens = counter.count_tokens("Hello world", "gpt-4o");
-        assert!(tokens >= 2 && tokens <= 4);
+        assert!((2..=4).contains(&tokens));
 
         // Longer English text
         let tokens_anthropic = counter.count_tokens(
@@ -776,7 +792,7 @@ mod tests {
             "claude-sonnet-4-6-20250514",
         );
         // 44 chars / 3.8 cpt ≈ 12 tokens
-        assert!(tokens_anthropic >= 10 && tokens_anthropic <= 15);
+        assert!((10..=15).contains(&tokens_anthropic));
     }
 
     #[test]
@@ -785,15 +801,13 @@ mod tests {
 
         // Chinese text: "你好世界" — 4 CJK chars, ~1.8 chars/token for Anthropic → ~3 tokens
         let tokens = counter.count_tokens("你好世界", "claude-sonnet-4-6-20250514");
-        assert!(tokens >= 2 && tokens <= 4);
+        assert!((2..=4).contains(&tokens));
 
         // Longer Chinese text
-        let tokens_openai = counter.count_tokens(
-            "这是一个很长的中文句子用来测试分词器的估算能力",
-            "gpt-4o",
-        );
+        let tokens_openai =
+            counter.count_tokens("这是一个很长的中文句子用来测试分词器的估算能力", "gpt-4o");
         // 22 CJK chars / 2.0 cpt ≈ 11 tokens
-        assert!(tokens_openai >= 9 && tokens_openai <= 14);
+        assert!((9..=14).contains(&tokens_openai));
     }
 
     #[test]
@@ -809,7 +823,7 @@ mod tests {
         // "You are helpful" ≈ 4 tokens
         // "What is Rust?" ≈ 4 tokens
         // Total ≈ 8 + 8 + 4 + 4 = ~24
-        assert!(tokens >= 16 && tokens <= 30);
+        assert!((16..=30).contains(&tokens));
     }
 
     #[test]
@@ -818,15 +832,26 @@ mod tests {
         let _g = crate::model_context::ENV_TEST_MUTEX.lock().unwrap();
         // Most basic test first
         let lower = "gemini-2.5-pro".to_lowercase();
-        assert!(lower.contains("gemini"), "lowercase must contain 'gemini': {}", lower);
+        assert!(
+            lower.contains("gemini"),
+            "lowercase must contain 'gemini': {}",
+            lower
+        );
 
         // Call infer_context_window directly
         let result = infer_context_window_for_tokenizer("gemini-2.5-pro");
-        assert_eq!(result, 1_000_000, "infer_context_window_for_tokenizer returned {} for gemini-2.5-pro", result);
+        assert_eq!(
+            result, 1_000_000,
+            "infer_context_window_for_tokenizer returned {} for gemini-2.5-pro",
+            result
+        );
 
         let counter = HeuristicTokenCounter::new();
         assert_eq!(counter.context_window_size("claude-opus-4-8"), 200_000);
-        assert_eq!(counter.context_window_size("claude-haiku-4-5-20251001"), 128_000);
+        assert_eq!(
+            counter.context_window_size("claude-haiku-4-5-20251001"),
+            128_000
+        );
         assert_eq!(counter.context_window_size("gpt-4o"), 200_000);
         assert_eq!(counter.context_window_size("gemini-2.5-pro"), 1_000_000);
         assert_eq!(counter.context_window_size("qwen2.5:7b"), 32_000);
@@ -1007,7 +1032,7 @@ mod tests {
         assert_eq!(counter.context_window_size("my-custom-model"), 50_000);
         let tokens = counter.count_tokens("Hello", "my-custom-model");
         // 5 chars / 3.0 cpt ≈ 2 tokens
-        assert!(tokens >= 1 && tokens <= 3);
+        assert!((1..=3).contains(&tokens));
     }
 
     #[test]
@@ -1043,16 +1068,28 @@ mod tests {
         assert_eq!(profiles.len(), 12); // 4 families × 3 tiers
 
         // Check each family has 3 models
-        let anthropic_count = profiles.iter().filter(|p| p.tokenizer_type == ProviderTokenizerType::Anthropic).count();
+        let anthropic_count = profiles
+            .iter()
+            .filter(|p| p.tokenizer_type == ProviderTokenizerType::Anthropic)
+            .count();
         assert_eq!(anthropic_count, 3);
 
-        let openai_count = profiles.iter().filter(|p| p.tokenizer_type == ProviderTokenizerType::OpenAI).count();
+        let openai_count = profiles
+            .iter()
+            .filter(|p| p.tokenizer_type == ProviderTokenizerType::OpenAI)
+            .count();
         assert_eq!(openai_count, 3);
 
-        let google_count = profiles.iter().filter(|p| p.tokenizer_type == ProviderTokenizerType::Google).count();
+        let google_count = profiles
+            .iter()
+            .filter(|p| p.tokenizer_type == ProviderTokenizerType::Google)
+            .count();
         assert_eq!(google_count, 3);
 
-        let ollama_count = profiles.iter().filter(|p| p.tokenizer_type == ProviderTokenizerType::Ollama).count();
+        let ollama_count = profiles
+            .iter()
+            .filter(|p| p.tokenizer_type == ProviderTokenizerType::Ollama)
+            .count();
         assert_eq!(ollama_count, 3);
     }
 }

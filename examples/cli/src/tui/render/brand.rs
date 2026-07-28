@@ -27,8 +27,8 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::super::app::App;
-use super::spinner::spinner_char;
 use super::super::theme::*;
+use super::spinner::spinner_char;
 
 /// Brand character definitions with their gradient colors.
 const BRAND_CHARS: [(char, Color); 5] = [
@@ -52,43 +52,43 @@ const BRAND_CHARS: [(char, Color); 5] = [
 const BLOCK_ART_PATTERNS: [[[bool; 7]; 5]; 5] = [
     // O
     [
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, true, true, true, true, true, true],   //  ██████
+        [false, true, true, false, false, true, true], //  ██  ██
+        [false, true, true, false, false, true, true], //  ██  ██
+        [false, true, true, false, false, true, true], //  ██  ██
+        [false, true, true, true, true, true, true],   //  ██████
     ],
     // n
     [
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, true, true, true, true, true, true],   //  ██████
+        [false, true, true, false, false, true, true], //  ██  ██
+        [false, true, true, false, false, true, true], //  ██  ██
+        [false, true, true, false, false, true, true], //  ██  ██
+        [false, true, true, false, false, true, true], //  ██  ██
     ],
     // e
     [
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
-        [false, true,  true,  false, false, false, false],  //  ██
-        [false, true,  true,  true,  true,  false, false],  //  ████
-        [false, true,  true,  false, false, false, false],  //  ██
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, true, true, true, true, true, true], //  ██████
+        [false, true, true, false, false, false, false], //  ██
+        [false, true, true, true, true, false, false], //  ████
+        [false, true, true, false, false, false, false], //  ██
+        [false, true, true, true, true, true, true], //  ██████
     ],
     // A
     [
-        [false, false, false, true,  true,  false, false],  //    ██
-        [false, false, true,  true,  true,  true,  false],  //   ████
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
-        [false, true,  true,  false, false, true,  true ],  //  ██  ██
+        [false, false, false, true, true, false, false], //    ██
+        [false, false, true, true, true, true, false],   //   ████
+        [false, true, true, true, true, true, true],     //  ██████
+        [false, true, true, false, false, true, true],   //  ██  ██
+        [false, true, true, false, false, true, true],   //  ██  ██
     ],
     // I
     [
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
-        [false, false, false, true,  true,  false, false],  //    ██
-        [false, false, false, true,  true,  false, false],  //    ██
-        [false, false, false, true,  true,  false, false],  //    ██
-        [false, true,  true,  true,  true,  true,  true ],  //  ██████
+        [false, true, true, true, true, true, true], //  ██████
+        [false, false, false, true, true, false, false], //    ██
+        [false, false, false, true, true, false, false], //    ██
+        [false, false, false, true, true, false, false], //    ██
+        [false, true, true, true, true, true, true], //  ██████
     ],
 ];
 
@@ -246,7 +246,11 @@ fn draw_text_brand(f: &mut Frame, rect: Rect, app: &App) {
         .collect();
 
     // Remove trailing space
-    if brand_spans.last().map(|s| s.content == " ").unwrap_or(false) {
+    if brand_spans
+        .last()
+        .map(|s| s.content == " ")
+        .unwrap_or(false)
+    {
         brand_spans.pop();
     }
 
@@ -292,8 +296,7 @@ fn draw_text_brand(f: &mut Frame, rect: Rect, app: &App) {
     }
 
     let line = Line::from(full_spans);
-    let paragraph = Paragraph::new(line)
-        .style(Style::default().bg(BRAND_BG));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(BRAND_BG));
 
     f.render_widget(paragraph, rect);
 }

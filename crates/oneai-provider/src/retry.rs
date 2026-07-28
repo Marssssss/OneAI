@@ -12,9 +12,9 @@
 //! - `compute_backoff_delay`: Exponential backoff delay computation
 //! - `send_with_retry`: Execute an async HTTP request with automatic retry on transient errors
 
+use reqwest::StatusCode;
 use std::future::Future;
 use std::time::Duration;
-use reqwest::StatusCode;
 
 // ─── ProviderRetryConfig ─────────────────────────────────────────────────────
 
@@ -74,7 +74,12 @@ impl ProviderRetryConfig {
     }
 
     /// Create a retry config with custom parameters.
-    pub fn new(max_retries: usize, initial_delay_ms: u64, max_delay_ms: u64, backoff_factor: f64) -> Self {
+    pub fn new(
+        max_retries: usize,
+        initial_delay_ms: u64,
+        max_delay_ms: u64,
+        backoff_factor: f64,
+    ) -> Self {
         Self {
             max_retries,
             initial_delay_ms,
@@ -164,7 +169,11 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 /// If a `retry_after_ms` value is provided (from the Retry-After header),
 /// it overrides the computed delay (the provider's recommended wait time
 /// is more accurate than our estimate), but is still capped at max_delay.
-pub fn compute_backoff_delay(attempt: usize, config: &ProviderRetryConfig, retry_after_ms: Option<u64>) -> u64 {
+pub fn compute_backoff_delay(
+    attempt: usize,
+    config: &ProviderRetryConfig,
+    retry_after_ms: Option<u64>,
+) -> u64 {
     // If the provider gave us a Retry-After value, use it (it's more accurate)
     if let Some(server_delay) = retry_after_ms {
         return server_delay.min(config.max_delay_ms);
@@ -272,7 +281,8 @@ where
                 if attempt >= config.max_retries {
                     tracing::error!(
                         "Provider request network error after {} retries: {}",
-                        attempt, e
+                        attempt,
+                        e
                     );
                     return Err(e); // Return the network error — caller handles it
                 }
@@ -391,7 +401,10 @@ mod tests {
     #[test]
     fn test_parse_retry_after_invalid() {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, "not-a-number".parse().unwrap());
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "not-a-number".parse().unwrap(),
+        );
 
         let result = parse_retry_after(&headers);
         // "not-a-number" is not a valid integer or RFC 2822 date

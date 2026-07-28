@@ -10,11 +10,13 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use oneai_core::{InteractionRequest, InteractionResponse, RiskLevel};
 use oneai_core::error::Result;
 use oneai_core::platform::PlatformInteractionGate;
 use oneai_core::traits::InteractionGate;
-use oneai_tool::{ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate};
+use oneai_core::{InteractionRequest, InteractionResponse, RiskLevel};
+use oneai_tool::{
+    ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate,
+};
 
 use crate::bridge_common::DesktopInteractionBridge;
 
@@ -180,7 +182,9 @@ fn show_nsalert_for_request(request: &InteractionRequest) -> InteractionResponse
 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str("OneAI: Approve tool execution?"));
-    alert.setInformativeText(&NSString::from_str(&DesktopInteractionBridge::format_request(approval)));
+    alert.setInformativeText(&NSString::from_str(
+        &DesktopInteractionBridge::format_request(approval),
+    ));
     alert.addButtonWithTitle(&NSString::from_str("Approve"));
     alert.addButtonWithTitle(&NSString::from_str("Deny"));
     alert.addButtonWithTitle(&NSString::from_str("Modify Args"));

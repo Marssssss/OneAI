@@ -8,10 +8,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
 use oneai_core::error::Result;
 use oneai_core::platform::PlatformInteractionGate;
 use oneai_core::traits::InteractionGate;
+use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
 use oneai_tool::{ChannelInteractionGate, InteractionGateConfig, ThresholdInteractionGate};
 
 use crate::callback_bridge::CallbackInteractionBridge;
@@ -41,7 +41,9 @@ impl IOSInteractionGate {
             ThresholdInteractionGate::new(buffer_size, threshold, mobile_config());
         let inner: Arc<dyn InteractionGate> = Arc::new(gate);
         let callback_bridge = CallbackInteractionBridge::new(receiver);
-        let bridge = IOSInteractionBridge { inner: callback_bridge };
+        let bridge = IOSInteractionBridge {
+            inner: callback_bridge,
+        };
         (Self { inner }, bridge)
     }
 
@@ -50,7 +52,9 @@ impl IOSInteractionGate {
         let (gate, receiver) = ChannelInteractionGate::with_config(buffer_size, mobile_config());
         let inner: Arc<dyn InteractionGate> = Arc::new(gate);
         let callback_bridge = CallbackInteractionBridge::new(receiver);
-        let bridge = IOSInteractionBridge { inner: callback_bridge };
+        let bridge = IOSInteractionBridge {
+            inner: callback_bridge,
+        };
         (Self { inner }, bridge)
     }
 }

@@ -27,12 +27,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
-use oneai_core::error::Result;
+use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 use oneai_core::budget::TokenBudget;
-use crate::sub_agent::{SubAgentSummary, SubAgentKind, SubAgentFactory};
+use oneai_core::error::Result;
 
 // ─── Task Status ────────────────────────────────────────────────────────────
 
@@ -153,7 +153,10 @@ impl AsyncTaskRunner {
         };
 
         // Create the sub-agent using the unified SubAgentFactory
-        let sub_agent = self.factory.create(kind.clone(), self.default_budget.clone()).await?;
+        let sub_agent = self
+            .factory
+            .create(kind.clone(), self.default_budget.clone())
+            .await?;
         let task_owned = task.to_string();
         let _kind_owned = kind.clone();
         let id_clone = id.clone();
@@ -162,14 +165,17 @@ impl AsyncTaskRunner {
         // Store initial task info
         {
             let mut info = self.info.write().await;
-            info.insert(id.clone(), TaskInfo {
-                id: id.clone(),
-                agent_kind: kind.clone(),
-                description: task.to_string(),
-                status: TaskStatus::Pending,
-                result: None,
-                allocated_tokens: 0,
-            });
+            info.insert(
+                id.clone(),
+                TaskInfo {
+                    id: id.clone(),
+                    agent_kind: kind.clone(),
+                    description: task.to_string(),
+                    status: TaskStatus::Pending,
+                    result: None,
+                    allocated_tokens: 0,
+                },
+            );
         }
 
         // Spawn the sub-agent as an independent tokio task
@@ -208,13 +214,20 @@ impl AsyncTaskRunner {
         // Store the task handle
         {
             let mut tasks = self.tasks.write().await;
-            tasks.insert(id.clone(), TaskHandle {
-                join_handle: handle,
-                cancelled: false,
-            });
+            tasks.insert(
+                id.clone(),
+                TaskHandle {
+                    join_handle: handle,
+                    cancelled: false,
+                },
+            );
         }
 
-        tracing::info!("AsyncTaskRunner: submitted background task '{}' (kind: {})", id, kind.name());
+        tracing::info!(
+            "AsyncTaskRunner: submitted background task '{}' (kind: {})",
+            id,
+            kind.name()
+        );
 
         Ok(id)
     }
@@ -223,7 +236,12 @@ impl AsyncTaskRunner {
     ///
     /// Useful when different tasks need different budget allocations
     /// (e.g., exploration tasks need less budget than code implementation tasks).
-    pub async fn submit_with_budget(&self, task: &str, kind: SubAgentKind, budget: TokenBudget) -> Result<String> {
+    pub async fn submit_with_budget(
+        &self,
+        task: &str,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+    ) -> Result<String> {
         // Generate a unique task ID
         let id = {
             let mut counter = self.next_id.lock().await;
@@ -243,14 +261,17 @@ impl AsyncTaskRunner {
         // Store initial task info
         {
             let mut info = self.info.write().await;
-            info.insert(id.clone(), TaskInfo {
-                id: id.clone(),
-                agent_kind: kind.clone(),
-                description: task.to_string(),
-                status: TaskStatus::Pending,
-                result: None,
-                allocated_tokens: budget_total,
-            });
+            info.insert(
+                id.clone(),
+                TaskInfo {
+                    id: id.clone(),
+                    agent_kind: kind.clone(),
+                    description: task.to_string(),
+                    status: TaskStatus::Pending,
+                    result: None,
+                    allocated_tokens: budget_total,
+                },
+            );
         }
 
         // Spawn the sub-agent as an independent tokio task
@@ -289,13 +310,21 @@ impl AsyncTaskRunner {
         // Store the task handle
         {
             let mut tasks = self.tasks.write().await;
-            tasks.insert(id.clone(), TaskHandle {
-                join_handle: handle,
-                cancelled: false,
-            });
+            tasks.insert(
+                id.clone(),
+                TaskHandle {
+                    join_handle: handle,
+                    cancelled: false,
+                },
+            );
         }
 
-        tracing::info!("AsyncTaskRunner: submitted background task '{}' (kind: {}, budget: {})", id, kind.name(), budget.total);
+        tracing::info!(
+            "AsyncTaskRunner: submitted background task '{}' (kind: {}, budget: {})",
+            id,
+            kind.name(),
+            budget.total
+        );
 
         Ok(id)
     }
@@ -314,8 +343,7 @@ impl AsyncTaskRunner {
     /// Returns the SubAgentSummary if the task completed successfully.
     pub async fn result(&self, task_id: &str) -> Option<SubAgentSummary> {
         let info = self.info.read().await;
-        info.get(task_id)
-            .and_then(|t| t.result.clone())
+        info.get(task_id).and_then(|t| t.result.clone())
     }
 
     /// Get full task info (status, description, result).
@@ -342,30 +370,36 @@ impl AsyncTaskRunner {
         };
 
         if let Some(TaskHandle { join_handle, .. }) = handle {
-            join_handle.await
-                .map_err(|e| oneai_core::error::OneAIError::Agent(
-                    format!("Background task '{}' panicked or was cancelled: {}", task_id, e)
-                ))?
+            join_handle.await.map_err(|e| {
+                oneai_core::error::OneAIError::Agent(format!(
+                    "Background task '{}' panicked or was cancelled: {}",
+                    task_id, e
+                ))
+            })?
         } else {
             // Task might have already completed — check the info
             let info = self.info.read().await;
             if let Some(task_info) = info.get(task_id) {
                 match &task_info.status {
-                    TaskStatus::Completed => {
-                        task_info.result.clone()
-                            .ok_or_else(|| oneai_core::error::OneAIError::Agent(
-                                format!("Task '{}' completed but has no result", task_id)
-                            ))
+                    TaskStatus::Completed => task_info.result.clone().ok_or_else(|| {
+                        oneai_core::error::OneAIError::Agent(format!(
+                            "Task '{}' completed but has no result",
+                            task_id
+                        ))
+                    }),
+                    TaskStatus::Failed(err) => {
+                        Err(oneai_core::error::OneAIError::Agent(err.clone()))
                     }
-                    TaskStatus::Failed(err) => Err(oneai_core::error::OneAIError::Agent(err.clone())),
-                    _ => Err(oneai_core::error::OneAIError::Agent(
-                        format!("Task '{}' is still pending/running", task_id)
-                    )),
+                    _ => Err(oneai_core::error::OneAIError::Agent(format!(
+                        "Task '{}' is still pending/running",
+                        task_id
+                    ))),
                 }
             } else {
-                Err(oneai_core::error::OneAIError::Agent(
-                    format!("Task '{}' not found", task_id)
-                ))
+                Err(oneai_core::error::OneAIError::Agent(format!(
+                    "Task '{}' not found",
+                    task_id
+                )))
             }
         }
     }
@@ -414,7 +448,12 @@ impl AsyncTaskRunner {
         let finished_ids: Vec<String> = {
             let info = self.info.read().await;
             info.iter()
-                .filter(|(_, t)| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed(_) | TaskStatus::Cancelled))
+                .filter(|(_, t)| {
+                    matches!(
+                        t.status,
+                        TaskStatus::Completed | TaskStatus::Failed(_) | TaskStatus::Cancelled
+                    )
+                })
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -427,7 +466,10 @@ impl AsyncTaskRunner {
             // Keep info for recently completed tasks (so results can be retrieved)
             // Only remove if the task was cancelled or failed
             if let Some(task_info) = info.get(&id) {
-                if matches!(task_info.status, TaskStatus::Cancelled | TaskStatus::Failed(_)) {
+                if matches!(
+                    task_info.status,
+                    TaskStatus::Cancelled | TaskStatus::Failed(_)
+                ) {
                     info.remove(&id);
                 }
             }
@@ -440,8 +482,8 @@ mod tests {
     use super::*;
     use oneai_core::budget::TokenBudget;
     // Test-only imports (kept out of the lib build to avoid unused-import warnings):
-    use async_trait::async_trait;
     use crate::sub_agent::{SubAgent, SubAgentSummary};
+    use async_trait::async_trait;
 
     // ─── Mock SubAgent ────────────────────────────────────────────────────────
 
@@ -462,9 +504,14 @@ mod tests {
                 tokens_used: 500,
             })
         }
-        fn kind(&self) -> &SubAgentKind { &self.kind }
+        fn kind(&self) -> &SubAgentKind {
+            &self.kind
+        }
         fn budget(&self) -> &TokenBudget {
-            static BUDGET: TokenBudget = TokenBudget { total: 10000, consumed: 0 };
+            static BUDGET: TokenBudget = TokenBudget {
+                total: 10000,
+                consumed: 0,
+            };
             &BUDGET
         }
     }
@@ -475,7 +522,11 @@ mod tests {
 
     #[async_trait]
     impl SubAgentFactory for MockFactory {
-        async fn create(&self, kind: SubAgentKind, _budget: TokenBudget) -> Result<Box<dyn SubAgent>> {
+        async fn create(
+            &self,
+            kind: SubAgentKind,
+            _budget: TokenBudget,
+        ) -> Result<Box<dyn SubAgent>> {
             Ok(Box::new(MockSubAgent {
                 kind: kind.clone(),
                 response: format!("Result for kind {}", kind.name()),
@@ -496,7 +547,10 @@ mod tests {
         let factory = Arc::new(MockFactory);
         let runner = AsyncTaskRunner::new(factory);
 
-        let task_id = runner.submit("Find all authentication functions", SubAgentKind::Explore).await.unwrap();
+        let task_id = runner
+            .submit("Find all authentication functions", SubAgentKind::Explore)
+            .await
+            .unwrap();
         assert!(!task_id.is_empty());
 
         // Wait for the task to complete
@@ -510,11 +564,17 @@ mod tests {
         let factory = Arc::new(MockFactory);
         let runner = AsyncTaskRunner::new(factory);
 
-        let task_id = runner.submit("Search for patterns", SubAgentKind::Explore).await.unwrap();
+        let task_id = runner
+            .submit("Search for patterns", SubAgentKind::Explore)
+            .await
+            .unwrap();
 
         // Check initial status (might be Pending or Running depending on timing)
         let status = runner.status(&task_id).await;
-        assert!(matches!(status, TaskStatus::Pending | TaskStatus::Running | TaskStatus::Completed));
+        assert!(matches!(
+            status,
+            TaskStatus::Pending | TaskStatus::Running | TaskStatus::Completed
+        ));
 
         // Wait for completion
         runner.wait_for(&task_id).await.unwrap();
@@ -529,9 +589,18 @@ mod tests {
         let factory = Arc::new(MockFactory);
         let runner = AsyncTaskRunner::new(factory);
 
-        let id1 = runner.submit("Explore module A", SubAgentKind::Explore).await.unwrap();
-        let id2 = runner.submit("Explore module B", SubAgentKind::Explore).await.unwrap();
-        let id3 = runner.submit("Review code changes", SubAgentKind::Code).await.unwrap();
+        let id1 = runner
+            .submit("Explore module A", SubAgentKind::Explore)
+            .await
+            .unwrap();
+        let id2 = runner
+            .submit("Explore module B", SubAgentKind::Explore)
+            .await
+            .unwrap();
+        let id3 = runner
+            .submit("Review code changes", SubAgentKind::Code)
+            .await
+            .unwrap();
 
         // Wait for all tasks
         let r1 = runner.wait_for(&id1).await.unwrap();
@@ -548,7 +617,10 @@ mod tests {
         let factory = Arc::new(MockFactory);
         let runner = AsyncTaskRunner::new(factory);
 
-        let id1 = runner.submit("Task 1", SubAgentKind::Explore).await.unwrap();
+        let id1 = runner
+            .submit("Task 1", SubAgentKind::Explore)
+            .await
+            .unwrap();
         let id2 = runner.submit("Task 2", SubAgentKind::Code).await.unwrap();
 
         // Wait for both
@@ -565,14 +637,20 @@ mod tests {
         let factory = Arc::new(MockFactory);
         let runner = AsyncTaskRunner::new(factory);
 
-        let task_id = runner.submit("Long task", SubAgentKind::Explore).await.unwrap();
+        let task_id = runner
+            .submit("Long task", SubAgentKind::Explore)
+            .await
+            .unwrap();
 
         // Cancel it (may complete before cancel, that's OK)
         runner.cancel(&task_id).await.unwrap();
 
         // Status should be Cancelled or Completed (if it finished before cancel)
         let status = runner.status(&task_id).await;
-        assert!(matches!(status, TaskStatus::Cancelled | TaskStatus::Completed));
+        assert!(matches!(
+            status,
+            TaskStatus::Cancelled | TaskStatus::Completed
+        ));
     }
 
     #[tokio::test]
@@ -580,7 +658,10 @@ mod tests {
         let factory = Arc::new(MockFactory);
         let runner = AsyncTaskRunner::new(factory);
 
-        let id1 = runner.submit("Task 1", SubAgentKind::Explore).await.unwrap();
+        let id1 = runner
+            .submit("Task 1", SubAgentKind::Explore)
+            .await
+            .unwrap();
         runner.wait_for(&id1).await.unwrap();
 
         let tasks = runner.all_tasks().await;
@@ -595,7 +676,10 @@ mod tests {
         let runner = AsyncTaskRunner::new(factory);
 
         let custom_budget = TokenBudget::new(30_000);
-        let task_id = runner.submit_with_budget("Small task", SubAgentKind::Explore, custom_budget).await.unwrap();
+        let task_id = runner
+            .submit_with_budget("Small task", SubAgentKind::Explore, custom_budget)
+            .await
+            .unwrap();
 
         let result = runner.wait_for(&task_id).await.unwrap();
         assert!(result.completed);

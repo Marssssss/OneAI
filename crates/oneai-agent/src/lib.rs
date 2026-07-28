@@ -25,49 +25,49 @@
 // fragment the public re-export surface.
 #![allow(ambiguous_glob_reexports)]
 
-pub mod scope_state;
-pub mod react_agent;
-pub mod plan_agent;
-pub mod reflection_agent;
-pub mod parallel_executor;
-pub mod agent_runner;
 pub mod agent_loop;
-pub mod sub_agent;
-pub mod streaming;
+pub mod agent_runner;
+pub mod async_task_runner;
 pub mod context_assembler;
 pub mod error_recovery;
-pub mod prompts;
-pub mod async_task_runner;
-pub mod worktree_isolation;
+pub mod group_chat;
+pub mod hooks;
+pub mod meta_tool;
 pub mod mock_provider;
 pub mod mock_tool;
-pub mod hooks;
-pub mod structured_output;
-pub mod skill_tool;
+pub mod parallel_executor;
+pub mod plan_agent;
 pub mod plan_state;
-pub mod meta_tool;
-pub mod group_chat;
+pub mod prompts;
+pub mod react_agent;
+pub mod reflection_agent;
+pub mod scope_state;
+pub mod skill_tool;
+pub mod streaming;
+pub mod structured_output;
+pub mod sub_agent;
+pub mod worktree_isolation;
 
-pub use scope_state::*;
-pub use react_agent::*;
-pub use plan_agent::*;
-pub use reflection_agent::*;
-pub use parallel_executor::*;
-pub use agent_runner::*;
 pub use agent_loop::*;
-pub use sub_agent::*;
-pub use streaming::*;
+pub use agent_runner::*;
+pub use async_task_runner::*;
 pub use context_assembler::*;
 pub use error_recovery::*;
-pub use prompts::*;
-pub use async_task_runner::*;
-pub use worktree_isolation::*;
+pub use hooks::*;
 pub use mock_provider::*;
 pub use mock_tool::*;
-pub use hooks::*;
-pub use structured_output::*;
-pub use skill_tool::*;
+pub use parallel_executor::*;
+pub use plan_agent::*;
 pub use plan_state::*;
+pub use prompts::*;
+pub use react_agent::*;
+pub use reflection_agent::*;
+pub use scope_state::*;
+pub use skill_tool::*;
+pub use streaming::*;
+pub use structured_output::*;
+pub use sub_agent::*;
+pub use worktree_isolation::*;
 
 #[cfg(test)]
 mod e2e_tests;
@@ -75,8 +75,8 @@ mod e2e_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_core::{GlobalState, Reduction, ContentBlock, MemoryEntry};
     use oneai_core::traits::StateReducer;
+    use oneai_core::{ContentBlock, GlobalState, MemoryEntry, Reduction};
 
     #[test]
     fn test_scope_state_creation() {
@@ -128,13 +128,18 @@ mod tests {
             },
             Reduction::SetResult {
                 step_id: "step_1".to_string(),
-                result: ContentBlock::Text { text: "result text".to_string() },
+                result: ContentBlock::Text {
+                    text: "result text".to_string(),
+                },
             },
         ];
 
         reducer.reduce(&mut global, reductions).unwrap();
 
-        assert_eq!(global.context.get("answer"), Some(&"hello world".to_string()));
+        assert_eq!(
+            global.context.get("answer"),
+            Some(&"hello world".to_string())
+        );
         assert!(global.step_results.contains_key("step_1"));
     }
 
@@ -173,7 +178,8 @@ mod tests {
 
     #[test]
     fn test_parse_plan_steps_valid_json() {
-        let raw = "[{\"id\":\"step_1\",\"description\":\"Search\",\"coupled\":false,\"depends_on\":[]}]";
+        let raw =
+            "[{\"id\":\"step_1\",\"description\":\"Search\",\"coupled\":false,\"depends_on\":[]}]";
         let steps = plan_agent::parse_plan_steps(raw).unwrap();
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].id, "step_1");
@@ -277,7 +283,10 @@ mod tests {
         // Temperature/top_p/max_tokens are None so the scenario default at the
         // call site (0.3 for the agentic loop) applies.
         let config = AgentLoopConfig::default();
-        assert_eq!(config.thinking_budget, None, "thinking must be off by default");
+        assert_eq!(
+            config.thinking_budget, None,
+            "thinking must be off by default"
+        );
         assert_eq!(config.temperature, None);
         assert_eq!(config.top_p, None);
         assert_eq!(config.max_tokens, None);
@@ -327,7 +336,9 @@ mod tests {
             success: true,
             reductions: vec![Reduction::SetResult {
                 step_id: "step_1".to_string(),
-                result: ContentBlock::Text { text: "search completed".to_string() },
+                result: ContentBlock::Text {
+                    text: "search completed".to_string(),
+                },
             }],
         };
         assert!(result.success);

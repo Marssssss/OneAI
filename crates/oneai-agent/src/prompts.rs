@@ -67,7 +67,11 @@ impl PromptTemplate {
     }
 
     /// Create with default variables.
-    pub fn with_defaults(name: impl Into<String>, template: impl Into<String>, variables: HashMap<String, String>) -> Self {
+    pub fn with_defaults(
+        name: impl Into<String>,
+        template: impl Into<String>,
+        variables: HashMap<String, String>,
+    ) -> Self {
         Self {
             name: name.into(),
             template: template.into(),

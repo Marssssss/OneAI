@@ -27,9 +27,9 @@
 
 use std::sync::Arc;
 
-use oneai_core::{Conversation, FactType, InferenceRequest, MemoryEntry, MemoryFact, Message};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{Conversation, FactType, InferenceRequest, MemoryEntry, MemoryFact, Message};
 
 // ─── MemoryReflectionConfig ──────────────────────────────────────────
 
@@ -187,9 +187,10 @@ impl EpisodicMemory {
             predicate: "reflection".to_string(),
             content,
             embedding: self.embedding.clone(),
-            metadata: std::collections::HashMap::from([
-                ("outcome".to_string(), self.outcome.clone()),
-            ]),
+            metadata: std::collections::HashMap::from([(
+                "outcome".to_string(),
+                self.outcome.clone(),
+            )]),
             importance: 0.8,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -230,14 +231,8 @@ impl MemoryReflection {
     }
 
     /// Create with custom configuration.
-    pub fn with_config(
-        summarizer: Arc<dyn LlmProvider>,
-        config: MemoryReflectionConfig,
-    ) -> Self {
-        Self {
-            summarizer,
-            config,
-        }
+    pub fn with_config(summarizer: Arc<dyn LlmProvider>, config: MemoryReflectionConfig) -> Self {
+        Self { summarizer, config }
     }
 
     /// Get the configuration.
@@ -302,16 +297,22 @@ impl MemoryReflection {
         }
 
         // Build the text to reflect on
-        let session_text = stm_entries.iter()
+        let session_text = stm_entries
+            .iter()
             .map(|entry| {
-                let role = entry.metadata.get("role").map(|s| s.as_str()).unwrap_or("memory");
+                let role = entry
+                    .metadata
+                    .get("role")
+                    .map(|s| s.as_str())
+                    .unwrap_or("memory");
                 format!("[{}]: {}", role, entry.content)
             })
             .collect::<Vec<_>>()
             .join("\n");
 
         // Build the reflection prompt
-        let mut reflection_prompt = "You are a memory reflection system. Analyze the conversation below \
+        let mut reflection_prompt =
+            "You are a memory reflection system. Analyze the conversation below \
             and extract: (1) Key Insights — the most important facts, patterns, and learnings, \
             (2) Decisions — the key choices made during the session, \
             (3) Outcome — a brief summary of whether the session succeeded, partially succeeded, \
@@ -320,13 +321,15 @@ impl MemoryReflection {
             REFLECTION: [your reflective summary]\n\
             INSIGHTS: [comma-separated list]\n\
             DECISIONS: [comma-separated list]\n\
-            OUTCOME: [success/partial/failure + brief description]".to_string();
+            OUTCOME: [success/partial/failure + brief description]"
+                .to_string();
         if let Some(prior) = prior_episodic_summary {
             if !prior.trim().is_empty() {
                 reflection_prompt.push_str(&format!(
                     "\n\nYou have accumulated these earlier episodic reflections for this user. \
                     Build on them — reference and extend prior insights rather than restating \
-                    them, and note how this session advances or revises them:\n{}", prior
+                    them, and note how this session advances or revises them:\n{}",
+                    prior
                 ));
             }
         }
@@ -335,7 +338,8 @@ impl MemoryReflection {
         let mut reflection_conv = Conversation::new();
         reflection_conv.add_message(Message::system(reflection_prompt));
         reflection_conv.add_message(Message::user(format!(
-            "Reflect on this session (session_id: {}):\n\n{}", session_id, session_text
+            "Reflect on this session (session_id: {}):\n\n{}",
+            session_id, session_text
         )));
 
         let request = InferenceRequest {
@@ -354,7 +358,8 @@ impl MemoryReflection {
         let reflection_text = response.message.text_content();
 
         // Parse the structured response
-        let (reflection, key_insights, decisions, outcome) = parse_reflection_response(&reflection_text);
+        let (reflection, key_insights, decisions, outcome) =
+            parse_reflection_response(&reflection_text);
 
         Ok(EpisodicMemory {
             id: format!("epi_{}", uuid::Uuid::new_v4()),
@@ -393,13 +398,15 @@ fn parse_reflection_response(text: &str) -> (String, Vec<String>, Vec<String>, S
             reflection = line["REFLECTION:".len()..].trim().to_string();
         } else if line.starts_with("INSIGHTS:") {
             let insights_str = line["INSIGHTS:".len()..].trim();
-            key_insights = insights_str.split(',')
+            key_insights = insights_str
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
         } else if line.starts_with("DECISIONS:") {
             let decisions_str = line["DECISIONS:".len()..].trim();
-            decisions = decisions_str.split(',')
+            decisions = decisions_str
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -409,7 +416,11 @@ fn parse_reflection_response(text: &str) -> (String, Vec<String>, Vec<String>, S
     }
 
     // Fallback: if no structured fields were found, treat entire text as reflection
-    if reflection.is_empty() && key_insights.is_empty() && decisions.is_empty() && outcome.is_empty() {
+    if reflection.is_empty()
+        && key_insights.is_empty()
+        && decisions.is_empty()
+        && outcome.is_empty()
+    {
         reflection = text.to_string();
         outcome = "unknown".to_string();
     }
@@ -422,11 +433,13 @@ fn parse_reflection_response(text: &str) -> (String, Vec<String>, Vec<String>, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use oneai_core::{InferenceRequest, InferenceResponse, TokenUsage, ModelCapability, ModelConfig};
-    use oneai_core::traits::LlmProvider;
     use oneai_core::error::Result;
+    use oneai_core::traits::LlmProvider;
     use oneai_core::ProviderType;
+    use oneai_core::{
+        InferenceRequest, InferenceResponse, ModelCapability, ModelConfig, TokenUsage,
+    };
+    use std::collections::HashMap;
 
     fn make_entry(id: &str, content: &str, role: &str) -> MemoryEntry {
         MemoryEntry {
@@ -434,9 +447,7 @@ mod tests {
             content: content.to_string(),
             timestamp: chrono::Utc::now(),
             embedding: None,
-            metadata: HashMap::from([
-                ("role".to_string(), role.to_string()),
-            ]),
+            metadata: HashMap::from([("role".to_string(), role.to_string())]),
         }
     }
 
@@ -447,7 +458,9 @@ mod tests {
 
     impl MockReflectionProvider {
         fn new(response_text: &str) -> Self {
-            Self { response_text: response_text.to_string() }
+            Self {
+                response_text: response_text.to_string(),
+            }
         }
     }
 
@@ -460,7 +473,8 @@ mod tests {
                     prompt_tokens: 100,
                     completion_tokens: 50,
                     total_tokens: 150,
-            ..Default::default()},
+                    ..Default::default()
+                },
                 model: "mock-reflection".to_string(),
                 metadata: HashMap::new(),
             })
@@ -469,8 +483,12 @@ mod tests {
         async fn infer_stream(
             &self,
             _req: InferenceRequest,
-        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>> {
-            Err(oneai_core::error::OneAIError::Provider("Streaming not supported in mock".to_string()))
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
+        > {
+            Err(oneai_core::error::OneAIError::Provider(
+                "Streaming not supported in mock".to_string(),
+            ))
         }
 
         fn capabilities(&self) -> ModelCapability {
@@ -506,7 +524,10 @@ mod tests {
             OUTCOME: success — completed all coding tasks";
 
         let (reflection, insights, decisions, outcome) = parse_reflection_response(text);
-        assert_eq!(reflection, "The session explored Rust programming concepts.");
+        assert_eq!(
+            reflection,
+            "The session explored Rust programming concepts."
+        );
         assert_eq!(insights.len(), 2);
         assert_eq!(decisions.len(), 2);
         assert!(outcome.starts_with("success"));
@@ -580,14 +601,18 @@ mod tests {
             "REFLECTION: Explored Rust concepts\n\
             INSIGHTS: Rust is memory-safe, Ownership prevents leaks\n\
             DECISIONS: Use Rust for backend\n\
-            OUTCOME: success — all tasks completed"
+            OUTCOME: success — all tasks completed",
         ));
 
         let reflection = MemoryReflection::new(mock);
 
         let entries = vec![
             make_entry("1", "What is Rust?", "user"),
-            make_entry("2", "Rust is a programming language with ownership model", "assistant"),
+            make_entry(
+                "2",
+                "Rust is a programming language with ownership model",
+                "assistant",
+            ),
         ];
 
         let result = reflection.reflect("sess_test", &entries).await.unwrap();
@@ -624,7 +649,9 @@ mod tests {
 
     #[test]
     fn should_reflect_threshold_and_interval_gating() {
-        let mock = Arc::new(MockReflectionProvider::new("REFLECTION: x\nOUTCOME: success"));
+        let mock = Arc::new(MockReflectionProvider::new(
+            "REFLECTION: x\nOUTCOME: success",
+        ));
         let r = MemoryReflection::new(mock);
 
         // Below threshold → no.
@@ -637,7 +664,9 @@ mod tests {
 
     #[test]
     fn should_reflect_disabled_when_threshold_zero() {
-        let mock = Arc::new(MockReflectionProvider::new("REFLECTION: x\nOUTCOME: success"));
+        let mock = Arc::new(MockReflectionProvider::new(
+            "REFLECTION: x\nOUTCOME: success",
+        ));
         let mut r = MemoryReflection::new(mock);
         r.config.reflectance_threshold = 0.0;
         // Even huge accumulated importance doesn't trigger when disabled.
@@ -652,8 +681,14 @@ mod tests {
             "REFLECTION: Built on prior insight\nINSIGHTS: extended insight\nDECISIONS: refine approach\nOUTCOME: success"
         ));
         let r = MemoryReflection::new(mock);
-        let entries = vec![make_entry("1", "work", "user"), make_entry("2", "done", "assistant")];
-        let result = r.reflect_with_prior("s", &entries, Some("- prior episodic: decided Rust")).await.unwrap();
+        let entries = vec![
+            make_entry("1", "work", "user"),
+            make_entry("2", "done", "assistant"),
+        ];
+        let result = r
+            .reflect_with_prior("s", &entries, Some("- prior episodic: decided Rust"))
+            .await
+            .unwrap();
         assert!(result.reflection.contains("Built on prior insight"));
         assert_eq!(result.key_insights.len(), 1);
     }

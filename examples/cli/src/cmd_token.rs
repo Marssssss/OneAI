@@ -1,8 +1,8 @@
 //! CLI token subcommand — token counting, context window profiles, and fit checking.
 
-use oneai_core::{HeuristicTokenCounter, TokenCounter, ProviderTokenizerType};
+use oneai_core::model_context::{builtin_lookup, ModelContextResolver, BUILTIN_MODEL_CONTEXT};
 use oneai_core::{ContextManager, ContextTrimmingStrategy};
-use oneai_core::model_context::{builtin_lookup, BUILTIN_MODEL_CONTEXT, ModelContextResolver};
+use oneai_core::{HeuristicTokenCounter, ProviderTokenizerType, TokenCounter};
 use std::sync::Arc;
 
 /// Count tokens in a text string for a specific model.
@@ -21,13 +21,23 @@ pub fn run_token_count(text: &str, model: Option<&str>) -> i32 {
 
     println!("  Input: {} chars", chars);
     println!("  Model: {}", model_name);
-    println!("  Language: {}", match language {
-        oneai_core::token_counter::LanguageType::Latin => "Latin/English",
-        oneai_core::token_counter::LanguageType::CJK => "CJK (Chinese/Japanese/Korean)",
-        oneai_core::token_counter::LanguageType::Mixed => "Mixed",
-    });
+    println!(
+        "  Language: {}",
+        match language {
+            oneai_core::token_counter::LanguageType::Latin => "Latin/English",
+            oneai_core::token_counter::LanguageType::CJK => "CJK (Chinese/Japanese/Korean)",
+            oneai_core::token_counter::LanguageType::Mixed => "Mixed",
+        }
+    );
     println!("  Estimated tokens: {}", tokens);
-    println!("  Chars per token: {:.1}", if tokens > 0 { chars as f64 / tokens as f64 } else { 0.0 });
+    println!(
+        "  Chars per token: {:.1}",
+        if tokens > 0 {
+            chars as f64 / tokens as f64
+        } else {
+            0.0
+        }
+    );
 
     if let Some(model) = model {
         let context_window = counter.context_window_size(model);
@@ -65,11 +75,23 @@ pub fn run_token_context(model: &str) -> i32 {
     println!("  Context window: {}K tokens", context_window / 1000);
     println!("  Max output: {} tokens", profile.max_output_tokens);
     println!("  Source: {}", source.label());
-    println!("  Chars/token (English): {:.1}", profile.chars_per_token_english);
+    println!(
+        "  Chars/token (English): {:.1}",
+        profile.chars_per_token_english
+    );
     println!("  Chars/token (CJK): {:.1}", profile.chars_per_token_cjk);
-    println!("  Message overhead: {} tokens", profile.message_overhead_tokens);
-    println!("  System prompt overhead: {} tokens", profile.system_prompt_overhead_tokens);
-    println!("  Tool definition overhead: {} tokens", profile.tool_definition_overhead_tokens);
+    println!(
+        "  Message overhead: {} tokens",
+        profile.message_overhead_tokens
+    );
+    println!(
+        "  System prompt overhead: {} tokens",
+        profile.system_prompt_overhead_tokens
+    );
+    println!(
+        "  Tool definition overhead: {} tokens",
+        profile.tool_definition_overhead_tokens
+    );
 
     println!();
     0
@@ -84,13 +106,21 @@ pub fn run_token_models() -> i32 {
     println!("  3-layer resolution: user config > provider probe > this library");
     println!();
 
-    println!("  {:<12} {:<22} {:>14} {:>12}",
-        "Provider", "Model pattern", "Context(K)", "MaxOut");
-    println!("  {}{}{}{}",
-        "─".repeat(12), "─".repeat(22), "─".repeat(14), "─".repeat(12));
+    println!(
+        "  {:<12} {:<22} {:>14} {:>12}",
+        "Provider", "Model pattern", "Context(K)", "MaxOut"
+    );
+    println!(
+        "  {}{}{}{}",
+        "─".repeat(12),
+        "─".repeat(22),
+        "─".repeat(14),
+        "─".repeat(12)
+    );
 
     for entry in BUILTIN_MODEL_CONTEXT.iter() {
-        println!("  {:<12} {:<22} {:>14} {:>12}",
+        println!(
+            "  {:<12} {:<22} {:>14} {:>12}",
             entry.provider,
             entry.model_id,
             entry.context_window / 1000,
@@ -151,10 +181,19 @@ pub fn run_token_estimate(model: Option<&str>) -> i32 {
 
     // Create a sample conversation
     let mut conv = oneai_core::Conversation::new();
-    conv.add_message(oneai_core::Message::system("You are a helpful assistant.".to_string()));
-    conv.add_message(oneai_core::Message::user("What is Rust programming language?".to_string()));
-    conv.add_message(oneai_core::Message::assistant("Rust is a modern programming language focused on safety, speed, and concurrency.".to_string()));
-    conv.add_message(oneai_core::Message::user("How does it compare to C++?".to_string()));
+    conv.add_message(oneai_core::Message::system(
+        "You are a helpful assistant.".to_string(),
+    ));
+    conv.add_message(oneai_core::Message::user(
+        "What is Rust programming language?".to_string(),
+    ));
+    conv.add_message(oneai_core::Message::assistant(
+        "Rust is a modern programming language focused on safety, speed, and concurrency."
+            .to_string(),
+    ));
+    conv.add_message(oneai_core::Message::user(
+        "How does it compare to C++?".to_string(),
+    ));
 
     let tokens = counter.count_conversation_tokens(&conv, model_name);
     let context_window = counter.context_window_size(model_name);
@@ -192,21 +231,41 @@ pub async fn run_token_probe(model: Option<&str>, config: &crate::config::OneaiC
 
     // Layer candidates (sync, no provider needed).
     let resolver = ModelContextResolver::empty();
-    let l1_env = std::env::var("ONEAI_CONTEXT_WINDOW").ok().and_then(|s| s.parse::<u32>().ok());
+    let l1_env = std::env::var("ONEAI_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok());
     let l3_builtin = builtin_lookup(&model_name).map(|e| e.context_window);
 
     println!();
     println!("  Layer candidates:");
-    println!("    L1 env override   : {}", l1_env.map(|v| format!("{}K", v / 1000)).unwrap_or_else(|| "—".to_string()));
-    println!("    L2 provider probe : {}", if model_config.is_some() { "pending (will query)" } else { "skipped (no provider configured)" });
-    println!("    L3 builtin library: {}", l3_builtin.map(|v| format!("{}K", v / 1000)).unwrap_or_else(|| "—".to_string()));
+    println!(
+        "    L1 env override   : {}",
+        l1_env
+            .map(|v| format!("{}K", v / 1000))
+            .unwrap_or_else(|| "—".to_string())
+    );
+    println!(
+        "    L2 provider probe : {}",
+        if model_config.is_some() {
+            "pending (will query)"
+        } else {
+            "skipped (no provider configured)"
+        }
+    );
+    println!(
+        "    L3 builtin library: {}",
+        l3_builtin
+            .map(|v| format!("{}K", v / 1000))
+            .unwrap_or_else(|| "—".to_string())
+    );
 
     // If a provider is configured, perform the live L2 probe.
     let (resolved, source) = if let Some(mc) = model_config {
         let provider = oneai_provider::ProviderFactory::create(mc);
         let provider = Arc::from(provider);
         let r = ModelContextResolver::empty();
-        r.resolve_with_source_with_provider(&model_name, &provider).await
+        r.resolve_with_source_with_provider(&model_name, &provider)
+            .await
     } else {
         // No provider — resolve via L1/L3 only.
         resolver.resolve_with_source(&model_name)

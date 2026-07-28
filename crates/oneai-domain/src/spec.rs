@@ -215,17 +215,30 @@ impl DomainPackSpec {
     /// of a DomainPack configuration.
     pub fn known_tool_names() -> Vec<String> {
         vec![
-            "read_file".to_string(), "edit_file".to_string(), "grep".to_string(), "glob".to_string(), "list_directory".to_string(),
-            "shell".to_string(), "environment".to_string(), "calculator".to_string(), "notebook_edit".to_string(), "apply_patch".to_string(),
-            "web_search".to_string(), "web_fetch".to_string(),
+            "read_file".to_string(),
+            "edit_file".to_string(),
+            "grep".to_string(),
+            "glob".to_string(),
+            "list_directory".to_string(),
+            "shell".to_string(),
+            "environment".to_string(),
+            "calculator".to_string(),
+            "notebook_edit".to_string(),
+            "apply_patch".to_string(),
+            "web_search".to_string(),
+            "web_fetch".to_string(),
         ]
     }
 
     /// Known context source names — the predefined context source factory keys.
     pub fn known_context_source_names() -> Vec<String> {
         vec![
-            "project_instructions".to_string(), "git_status".to_string(), "file_tree".to_string(),
-            "project_config".to_string(), "date".to_string(), "environment".to_string(),
+            "project_instructions".to_string(),
+            "git_status".to_string(),
+            "file_tree".to_string(),
+            "project_config".to_string(),
+            "date".to_string(),
+            "environment".to_string(),
         ]
     }
 }
@@ -272,9 +285,7 @@ mod tests {
         let required = schema.get("required").unwrap().as_array().unwrap();
 
         // name, tools, permission_profile are required
-        let required_names: Vec<&str> = required.iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
+        let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_names.contains(&"name"));
         assert!(required_names.contains(&"tools"));
         assert!(required_names.contains(&"permission_profile"));

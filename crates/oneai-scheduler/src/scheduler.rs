@@ -12,9 +12,9 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use oneai_core::{ScheduledTask, TaskHandle};
 use oneai_core::error::Result;
 use oneai_core::traits::TaskScheduler;
+use oneai_core::{ScheduledTask, TaskHandle};
 
 /// In-memory task scheduler using tokio timers.
 ///
@@ -66,17 +66,26 @@ impl TaskScheduler for InMemoryScheduler {
     /// The task payload is logged and the task is tracked, but
     /// actual execution of the payload requires a platform-specific
     /// callback. In the core layer, we just schedule the timer.
-    async fn schedule_one_shot(&self, task: ScheduledTask, delay: std::time::Duration) -> Result<TaskHandle> {
+    async fn schedule_one_shot(
+        &self,
+        task: ScheduledTask,
+        delay: std::time::Duration,
+    ) -> Result<TaskHandle> {
         let task_id = task.id.clone();
         let task_name = task.name.clone();
 
         tracing::info!(
             "Scheduling one-shot task '{}' (id: {}) with delay {:?}",
-            task_name, task_id, delay
+            task_name,
+            task_id,
+            delay
         );
 
         // Store task info
-        self.task_info.write().await.insert(task_id.clone(), task.clone());
+        self.task_info
+            .write()
+            .await
+            .insert(task_id.clone(), task.clone());
 
         let task_id_for_spawn = task_id.clone();
         let task_name_for_spawn = task_name.clone();
@@ -86,7 +95,8 @@ impl TaskScheduler for InMemoryScheduler {
             tokio::time::sleep(delay).await;
             tracing::info!(
                 "One-shot task '{}' (id: {}) executed",
-                task_name_for_spawn, task_id_for_spawn
+                task_name_for_spawn,
+                task_id_for_spawn
             );
         });
 
@@ -101,17 +111,26 @@ impl TaskScheduler for InMemoryScheduler {
     /// Schedule a periodic task with an interval.
     ///
     /// The task will be executed repeatedly at the given interval.
-    async fn schedule_periodic(&self, task: ScheduledTask, interval: std::time::Duration) -> Result<TaskHandle> {
+    async fn schedule_periodic(
+        &self,
+        task: ScheduledTask,
+        interval: std::time::Duration,
+    ) -> Result<TaskHandle> {
         let task_id = task.id.clone();
         let task_name = task.name.clone();
 
         tracing::info!(
             "Scheduling periodic task '{}' (id: {}) with interval {:?}",
-            task_name, task_id, interval
+            task_name,
+            task_id,
+            interval
         );
 
         // Store task info
-        self.task_info.write().await.insert(task_id.clone(), task.clone());
+        self.task_info
+            .write()
+            .await
+            .insert(task_id.clone(), task.clone());
 
         let task_id_for_spawn = task_id.clone();
         let task_name_for_spawn = task_name.clone();
@@ -126,7 +145,8 @@ impl TaskScheduler for InMemoryScheduler {
                 interval_timer.tick().await;
                 tracing::info!(
                     "Periodic task '{}' (id: {}) ticked",
-                    task_name_for_spawn, task_id_for_spawn
+                    task_name_for_spawn,
+                    task_id_for_spawn
                 );
             }
         });
@@ -179,7 +199,10 @@ mod tests {
         let scheduler = InMemoryScheduler::new();
 
         let task = make_task("task1", "Test One-Shot");
-        let handle = scheduler.schedule_one_shot(task, std::time::Duration::from_millis(100)).await.unwrap();
+        let handle = scheduler
+            .schedule_one_shot(task, std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
 
         assert_eq!(handle.task_id, "task1");
         assert_eq!(handle.platform_handle, "tokio_task1");
@@ -196,7 +219,10 @@ mod tests {
         let scheduler = InMemoryScheduler::new();
 
         let task = make_task("periodic1", "Test Periodic");
-        let handle = scheduler.schedule_periodic(task, std::time::Duration::from_millis(100)).await.unwrap();
+        let handle = scheduler
+            .schedule_periodic(task, std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
 
         assert_eq!(handle.task_id, "periodic1");
         assert_eq!(scheduler.active_task_count().await, 1);
@@ -210,7 +236,10 @@ mod tests {
         let scheduler = InMemoryScheduler::new();
 
         let task = make_task("cancel1", "Test Cancel");
-        let handle = scheduler.schedule_one_shot(task, std::time::Duration::from_secs(10)).await.unwrap();
+        let handle = scheduler
+            .schedule_one_shot(task, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
 
         assert_eq!(scheduler.active_task_count().await, 1);
 
@@ -228,7 +257,10 @@ mod tests {
         let scheduler = InMemoryScheduler::new();
 
         let task = make_task("cancel_periodic", "Test Cancel Periodic");
-        let handle = scheduler.schedule_periodic(task, std::time::Duration::from_millis(50)).await.unwrap();
+        let handle = scheduler
+            .schedule_periodic(task, std::time::Duration::from_millis(50))
+            .await
+            .unwrap();
 
         // Wait for a tick
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -260,9 +292,18 @@ mod tests {
         let task2 = make_task("task2", "Task 2");
         let task3 = make_task("task3", "Task 3");
 
-        scheduler.schedule_one_shot(task1, std::time::Duration::from_millis(100)).await.unwrap();
-        scheduler.schedule_periodic(task2, std::time::Duration::from_millis(100)).await.unwrap();
-        scheduler.schedule_one_shot(task3, std::time::Duration::from_millis(100)).await.unwrap();
+        scheduler
+            .schedule_one_shot(task1, std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
+        scheduler
+            .schedule_periodic(task2, std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
+        scheduler
+            .schedule_one_shot(task3, std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
 
         assert_eq!(scheduler.active_task_count().await, 3);
     }

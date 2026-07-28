@@ -21,10 +21,10 @@
 //!
 //! **Custom rules** can be added via YAML/TOML configuration or programmatically.
 
-use regex::Regex;
-use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
-use oneai_core::traits::LlmProvider;
 use crate::ProviderFactory;
+use oneai_core::traits::LlmProvider;
+use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
+use regex::Regex;
 
 // ─── RouteRule ────────────────────────────────────────────────────────────────
 
@@ -168,7 +168,10 @@ pub struct ModelRouter {
 impl ModelRouter {
     /// Create a new ModelRouter with custom rules and a fallback config.
     pub fn new(rules: Vec<RouteRule>, fallback_config: ModelConfig) -> Self {
-        Self { rules, fallback_config }
+        Self {
+            rules,
+            fallback_config,
+        }
     }
 
     /// Create a ModelRouter with built-in default rules.
@@ -212,7 +215,9 @@ impl ModelRouter {
 
                 return RouteDecision {
                     model: rule.model.clone(),
-                    provider: rule.provider_override.clone()
+                    provider: rule
+                        .provider_override
+                        .clone()
                         .unwrap_or_else(|| self.infer_provider_from_model(&rule.model)),
                     max_tokens: rule.max_tokens_override,
                     matched_rule: rule.description.clone(),
@@ -237,7 +242,10 @@ impl ModelRouter {
         );
 
         RouteDecision {
-            model: self.fallback_config.model_name.clone()
+            model: self
+                .fallback_config
+                .model_name
+                .clone()
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string()),
             provider: self.infer_provider_from_config(&self.fallback_config),
             max_tokens: None,
@@ -250,7 +258,11 @@ impl ModelRouter {
     ///
     /// This uses the ProviderFactory to create the appropriate provider
     /// based on the route decision's model and provider specifications.
-    pub fn create_provider(&self, decision: &RouteDecision, api_key: Option<String>) -> Box<dyn LlmProvider> {
+    pub fn create_provider(
+        &self,
+        decision: &RouteDecision,
+        api_key: Option<String>,
+    ) -> Box<dyn LlmProvider> {
         let config = ModelConfig {
             provider_type: decision.provider.to_provider_type(),
             cloud_kind: decision.provider.to_cloud_kind(),
@@ -274,11 +286,17 @@ impl ModelRouter {
     /// - "ollama:*" → Ollama
     fn infer_provider_from_model(&self, model: &str) -> RouteProviderKind {
         let lower = model.to_lowercase();
-        if lower.starts_with("claude") { RouteProviderKind::Anthropic }
-        else if lower.starts_with("gpt") || lower.contains("openai") { RouteProviderKind::OpenAI }
-        else if lower.starts_with("gemini") { RouteProviderKind::Gemini }
-        else if lower.contains("ollama") || lower.contains("local") { RouteProviderKind::Ollama }
-        else { RouteProviderKind::OpenAI } // Default: most services use OpenAI protocol
+        if lower.starts_with("claude") {
+            RouteProviderKind::Anthropic
+        } else if lower.starts_with("gpt") || lower.contains("openai") {
+            RouteProviderKind::OpenAI
+        } else if lower.starts_with("gemini") {
+            RouteProviderKind::Gemini
+        } else if lower.contains("ollama") || lower.contains("local") {
+            RouteProviderKind::Ollama
+        } else {
+            RouteProviderKind::OpenAI
+        } // Default: most services use OpenAI protocol
     }
 
     /// Infer the provider kind from an existing ModelConfig.
@@ -297,10 +315,16 @@ impl ModelRouter {
             Some(CloudProviderKind::OpenAI) | None => {
                 // Auto-detect from base_url if cloud_kind not set
                 let url = config.base_url.as_deref().unwrap_or("").to_lowercase();
-                if url.contains("anthropic.com") { RouteProviderKind::Anthropic }
-                else if url.contains("generativelanguage.googleapis.com") || url.contains("aiplatform.googleapis.com") { RouteProviderKind::Gemini }
-                else { RouteProviderKind::OpenAI }
-            },
+                if url.contains("anthropic.com") {
+                    RouteProviderKind::Anthropic
+                } else if url.contains("generativelanguage.googleapis.com")
+                    || url.contains("aiplatform.googleapis.com")
+                {
+                    RouteProviderKind::Gemini
+                } else {
+                    RouteProviderKind::OpenAI
+                }
+            }
         }
     }
 
@@ -601,12 +625,19 @@ mod tests {
 
         for rule in rules {
             // None of the default rules should mention claude
-            assert!(!rule.model.contains("claude"),
-                "Default rule for OpenAI provider references Anthropic model: {}", rule.model);
+            assert!(
+                !rule.model.contains("claude"),
+                "Default rule for OpenAI provider references Anthropic model: {}",
+                rule.model
+            );
             // Provider override should be OpenAI, not Anthropic
             if let Some(provider) = &rule.provider_override {
-                assert_eq!(*provider, RouteProviderKind::OpenAI,
-                    "Default rule for OpenAI provider overrides to {:?}", provider);
+                assert_eq!(
+                    *provider,
+                    RouteProviderKind::OpenAI,
+                    "Default rule for OpenAI provider overrides to {:?}",
+                    provider
+                );
             }
         }
     }
@@ -622,7 +653,7 @@ mod tests {
                 max_tokens_override: Some(8192),
                 description: "Code review → Anthropic Opus (cross-provider)".to_string(),
             }],
-            openai_fallback_config(),  // Fallback is OpenAI
+            openai_fallback_config(), // Fallback is OpenAI
         );
 
         let decision = router.route("Code review of authentication module", "reflect");
@@ -647,7 +678,7 @@ mod tests {
     fn test_auto_detect_anthropic_from_url() {
         let config = ModelConfig {
             provider_type: ProviderType::Cloud,
-            cloud_kind: None,  // Not explicitly set
+            cloud_kind: None, // Not explicitly set
             api_key: Some("sk-test".to_string()),
             base_url: Some("https://api.anthropic.com/v1".to_string()),
             port: None,
@@ -670,9 +701,18 @@ mod tests {
     fn test_default_rules_research_task() {
         let router = ModelRouter::with_defaults(anthropic_fallback_config());
 
-        let d1 = router.route("Conduct a comprehensive survey of agent frameworks", "reflect");
-        let d2 = router.route("Perform a meta-analysis of clinical trial results", "reflect");
-        let d3 = router.route("Research the latest advances in quantum computing", "explore");
+        let d1 = router.route(
+            "Conduct a comprehensive survey of agent frameworks",
+            "reflect",
+        );
+        let d2 = router.route(
+            "Perform a meta-analysis of clinical trial results",
+            "reflect",
+        );
+        let d3 = router.route(
+            "Research the latest advances in quantum computing",
+            "explore",
+        );
 
         // All should produce valid decisions with Opus-level model for Anthropic
         assert!(!d1.model.is_empty());
@@ -699,15 +739,13 @@ mod tests {
 
     #[test]
     fn test_custom_rule_with_priority() {
-        let custom_rules = vec![
-            RouteRule {
-                pattern: Regex::new("(?i)(code\\s*review|pr\\s*review)").unwrap(),
-                model: "gemini-2.0-flash".to_string(),
-                provider_override: Some(RouteProviderKind::Gemini),
-                max_tokens_override: Some(8192),
-                description: "Code review → Gemini flash".to_string(),
-            },
-        ];
+        let custom_rules = vec![RouteRule {
+            pattern: Regex::new("(?i)(code\\s*review|pr\\s*review)").unwrap(),
+            model: "gemini-2.0-flash".to_string(),
+            provider_override: Some(RouteProviderKind::Gemini),
+            max_tokens_override: Some(8192),
+            description: "Code review → Gemini flash".to_string(),
+        }];
 
         let router = ModelRouter::new(custom_rules, anthropic_fallback_config());
         let decision = router.route("Code review of authentication module", "reflect");
@@ -718,20 +756,47 @@ mod tests {
     #[test]
     fn test_infer_provider_from_model() {
         let router = ModelRouter::with_defaults(anthropic_fallback_config());
-        assert_eq!(router.infer_provider_from_model("claude-opus-4-8"), RouteProviderKind::Anthropic);
-        assert_eq!(router.infer_provider_from_model("gpt-4o"), RouteProviderKind::OpenAI);
-        assert_eq!(router.infer_provider_from_model("gemini-2.0-flash"), RouteProviderKind::Gemini);
-        assert_eq!(router.infer_provider_from_model("ollama:qwen2.5"), RouteProviderKind::Ollama);
+        assert_eq!(
+            router.infer_provider_from_model("claude-opus-4-8"),
+            RouteProviderKind::Anthropic
+        );
+        assert_eq!(
+            router.infer_provider_from_model("gpt-4o"),
+            RouteProviderKind::OpenAI
+        );
+        assert_eq!(
+            router.infer_provider_from_model("gemini-2.0-flash"),
+            RouteProviderKind::Gemini
+        );
+        assert_eq!(
+            router.infer_provider_from_model("ollama:qwen2.5"),
+            RouteProviderKind::Ollama
+        );
     }
 
     #[test]
     fn test_route_provider_kind_conversion() {
-        assert_eq!(RouteProviderKind::Anthropic.to_cloud_kind(), Some(CloudProviderKind::Anthropic));
-        assert_eq!(RouteProviderKind::OpenAI.to_cloud_kind(), Some(CloudProviderKind::OpenAI));
-        assert_eq!(RouteProviderKind::Gemini.to_cloud_kind(), Some(CloudProviderKind::Gemini));
+        assert_eq!(
+            RouteProviderKind::Anthropic.to_cloud_kind(),
+            Some(CloudProviderKind::Anthropic)
+        );
+        assert_eq!(
+            RouteProviderKind::OpenAI.to_cloud_kind(),
+            Some(CloudProviderKind::OpenAI)
+        );
+        assert_eq!(
+            RouteProviderKind::Gemini.to_cloud_kind(),
+            Some(CloudProviderKind::Gemini)
+        );
         assert_eq!(RouteProviderKind::Ollama.to_cloud_kind(), None);
-        assert_eq!(RouteProviderKind::Ollama.to_provider_type(), ProviderType::Local);
-        assert_eq!(RouteProviderKind::Anthropic.to_provider_type(), ProviderType::Cloud);
+        assert_eq!(
+            RouteProviderKind::Ollama.to_provider_type(),
+            ProviderType::Local
+        );
+        assert_eq!(
+            RouteProviderKind::Anthropic.to_provider_type(),
+            ProviderType::Cloud
+        );
     }
 
     #[test]

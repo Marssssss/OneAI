@@ -39,8 +39,10 @@ impl ConstrainedDecoder for StubConstrainedDecoder {
         _mode: ConstrainedMode,
         _grammar: &str,
     ) -> std::result::Result<(), OneAIError> {
-        Err(OneAIError::Parser(oneai_core::error::ParserError::ConstrainedNotSupported(
-            "No constrained decoder configured".to_string(),
-        )))
+        Err(OneAIError::Parser(
+            oneai_core::error::ParserError::ConstrainedNotSupported(
+                "No constrained decoder configured".to_string(),
+            ),
+        ))
     }
 }

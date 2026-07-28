@@ -42,9 +42,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::span::{Span, SpanKind, SpanStatus};
-use crate::event::{TraceEvent, EventKind};
 use crate::collector::TraceCollector;
+use crate::event::{EventKind, TraceEvent};
+use crate::span::{Span, SpanKind, SpanStatus};
 
 // ─── OtlpConfig ──────────────────────────────────────────────────────
 
@@ -96,7 +96,8 @@ impl OtlpConfig {
 
     /// Add a resource attribute.
     pub fn with_attribute(mut self, key: &str, value: &str) -> Self {
-        self.resource_attributes.insert(key.to_string(), value.to_string());
+        self.resource_attributes
+            .insert(key.to_string(), value.to_string());
         self
     }
 }
@@ -166,10 +167,7 @@ impl HttpOtlpExporter {
                 traces_url
             );
         }
-        Self {
-            client,
-            traces_url,
-        }
+        Self { client, traces_url }
     }
 }
 
@@ -219,7 +217,12 @@ impl InMemoryOtlpExporter {
 
     /// Total spans across all exported batches.
     pub fn total_spans(&self) -> usize {
-        self.batches.lock().unwrap().iter().map(|b| b.spans.len()).sum()
+        self.batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| b.spans.len())
+            .sum()
     }
 
     /// All exported spans, flattened (newest batch last).
@@ -402,7 +405,8 @@ fn events_to_otlp(span: &Span) -> Vec<serde_json::Value> {
 /// Build the OTLP/JSON `resourceSpans` payload for one batch.
 fn build_otlp_json_payload(batch: &ExportBatch) -> serde_json::Value {
     // Index spans by id for trace-id root resolution.
-    let by_id: HashMap<String, &Span> = batch.spans.iter().map(|s| (s.span_id.clone(), s)).collect();
+    let by_id: HashMap<String, &Span> =
+        batch.spans.iter().map(|s| (s.span_id.clone(), s)).collect();
 
     let mut resource_attrs: Vec<serde_json::Value> = vec![serde_json::json!({
         "key": "service.name",
@@ -415,39 +419,49 @@ fn build_otlp_json_payload(batch: &ExportBatch) -> serde_json::Value {
         }));
     }
 
-    let spans: Vec<serde_json::Value> = batch.spans.iter().map(|span| {
-        let trace_id = otel_trace_id(span, &by_id);
-        let span_id = otel_span_id(&span.span_id);
-        let parent_span_id = span.parent_span_id.as_ref().map(|p| otel_span_id(p));
-        let start_nanos = span.start_time.timestamp_nanos_opt().unwrap_or(0).max(0).to_string();
-        let end_nanos = span.end_time
-            .and_then(|t| t.timestamp_nanos_opt())
-            .unwrap_or(0)
-            .max(0)
-            .to_string();
-        let code = span_status_to_otel_code(&span.status);
-        let mut status = serde_json::json!({"code": code});
-        if code == 2 {
-            if let (_, Some(msg)) = span_status_to_otel(&span.status) {
-                status["message"] = serde_json::json!(msg);
+    let spans: Vec<serde_json::Value> = batch
+        .spans
+        .iter()
+        .map(|span| {
+            let trace_id = otel_trace_id(span, &by_id);
+            let span_id = otel_span_id(&span.span_id);
+            let parent_span_id = span.parent_span_id.as_ref().map(|p| otel_span_id(p));
+            let start_nanos = span
+                .start_time
+                .timestamp_nanos_opt()
+                .unwrap_or(0)
+                .max(0)
+                .to_string();
+            let end_nanos = span
+                .end_time
+                .and_then(|t| t.timestamp_nanos_opt())
+                .unwrap_or(0)
+                .max(0)
+                .to_string();
+            let code = span_status_to_otel_code(&span.status);
+            let mut status = serde_json::json!({"code": code});
+            if code == 2 {
+                if let (_, Some(msg)) = span_status_to_otel(&span.status) {
+                    status["message"] = serde_json::json!(msg);
+                }
             }
-        }
-        let mut span_obj = serde_json::json!({
-            "traceId": trace_id,
-            "spanId": span_id,
-            "name": span.name,
-            "kind": span_kind_to_otel_code(&span.kind),
-            "startTimeUnixNano": start_nanos,
-            "endTimeUnixNano": end_nanos,
-            "status": status,
-            "attributes": attributes_to_otlp(span),
-            "events": events_to_otlp(span),
-        });
-        if let Some(pid) = parent_span_id {
-            span_obj["parentSpanId"] = serde_json::json!(pid);
-        }
-        span_obj
-    }).collect();
+            let mut span_obj = serde_json::json!({
+                "traceId": trace_id,
+                "spanId": span_id,
+                "name": span.name,
+                "kind": span_kind_to_otel_code(&span.kind),
+                "startTimeUnixNano": start_nanos,
+                "endTimeUnixNano": end_nanos,
+                "status": status,
+                "attributes": attributes_to_otlp(span),
+                "events": events_to_otlp(span),
+            });
+            if let Some(pid) = parent_span_id {
+                span_obj["parentSpanId"] = serde_json::json!(pid);
+            }
+            span_obj
+        })
+        .collect();
 
     serde_json::json!({
         "resourceSpans": [{
@@ -641,25 +655,32 @@ impl OtlpCollector {
     pub fn span_to_otel_json(span: &Span) -> serde_json::Value {
         let (status_code, status_message) = span_status_to_otel(&span.status);
 
-        let otel_events: Vec<serde_json::Value> = span.events.iter().map(|event| {
-            let event_name = event_kind_to_otel_name(&event.kind);
-            let attrs: HashMap<String, serde_json::Value> = event.attributes.iter()
-                .map(|(k, v)| (format!("oneai.{}", k), v.clone()))
-                .collect();
-            serde_json::json!({
-                "name": event_name,
-                "timestamp": event.timestamp.to_rfc3339(),
-                "attributes": attrs,
+        let otel_events: Vec<serde_json::Value> = span
+            .events
+            .iter()
+            .map(|event| {
+                let event_name = event_kind_to_otel_name(&event.kind);
+                let attrs: HashMap<String, serde_json::Value> = event
+                    .attributes
+                    .iter()
+                    .map(|(k, v)| (format!("oneai.{}", k), v.clone()))
+                    .collect();
+                serde_json::json!({
+                    "name": event_name,
+                    "timestamp": event.timestamp.to_rfc3339(),
+                    "attributes": attrs,
+                })
             })
-        }).collect();
+            .collect();
 
-        let otel_attributes: HashMap<String, serde_json::Value> = span.attributes.iter()
+        let otel_attributes: HashMap<String, serde_json::Value> = span
+            .attributes
+            .iter()
             .map(|(k, v)| (format!("oneai.{}", k), v.clone()))
             .collect();
 
-        let children: Vec<serde_json::Value> = span.children.iter()
-            .map(Self::span_to_otel_json)
-            .collect();
+        let children: Vec<serde_json::Value> =
+            span.children.iter().map(Self::span_to_otel_json).collect();
 
         serde_json::json!({
             "traceId": span.parent_span_id.as_deref().or(Some("00000000000000000000000000000000")),
@@ -685,7 +706,10 @@ impl OtlpCollector {
 impl TraceCollector for OtlpCollector {
     async fn on_span_start(&self, span: &Span) {
         // Store the span as pending (started but not yet ended)
-        self.pending_spans.lock().unwrap().insert(span.span_id.clone(), span.clone());
+        self.pending_spans
+            .lock()
+            .unwrap()
+            .insert(span.span_id.clone(), span.clone());
     }
 
     async fn on_span_end(&self, span: &Span) {
@@ -736,9 +760,9 @@ impl TraceCollector for OtlpCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::span::Span;
-    use crate::event::TraceEvent;
     use crate::context::TraceContext;
+    use crate::event::TraceEvent;
+    use crate::span::Span;
     use std::sync::Arc;
 
     #[test]
@@ -760,8 +784,14 @@ mod tests {
         let config = OtlpConfig::grpc("http://localhost:4317", "oneai")
             .with_attribute("deployment.environment", "production")
             .with_attribute("service.version", "0.1.0");
-        assert_eq!(config.resource_attributes.get("deployment.environment"), Some(&"production".to_string()));
-        assert_eq!(config.resource_attributes.get("service.version"), Some(&"0.1.0".to_string()));
+        assert_eq!(
+            config.resource_attributes.get("deployment.environment"),
+            Some(&"production".to_string())
+        );
+        assert_eq!(
+            config.resource_attributes.get("service.version"),
+            Some(&"0.1.0".to_string())
+        );
     }
 
     #[test]
@@ -777,19 +807,40 @@ mod tests {
     #[test]
     fn test_span_status_to_otel() {
         assert_eq!(span_status_to_otel(&SpanStatus::Ok), ("Ok", None));
-        assert_eq!(span_status_to_otel(&SpanStatus::Error), ("Error", Some("operation failed")));
-        assert_eq!(span_status_to_otel(&SpanStatus::Cancelled), ("Error", Some("operation cancelled")));
+        assert_eq!(
+            span_status_to_otel(&SpanStatus::Error),
+            ("Error", Some("operation failed"))
+        );
+        assert_eq!(
+            span_status_to_otel(&SpanStatus::Cancelled),
+            ("Error", Some("operation cancelled"))
+        );
     }
 
     #[test]
     fn test_event_kind_to_otel_name() {
-        assert_eq!(event_kind_to_otel_name(&EventKind::Thought), "agent.thought");
+        assert_eq!(
+            event_kind_to_otel_name(&EventKind::Thought),
+            "agent.thought"
+        );
         assert_eq!(event_kind_to_otel_name(&EventKind::Action), "agent.action");
-        assert_eq!(event_kind_to_otel_name(&EventKind::Observation), "agent.observation");
-        assert_eq!(event_kind_to_otel_name(&EventKind::InferenceEnd), "llm.inference.end");
+        assert_eq!(
+            event_kind_to_otel_name(&EventKind::Observation),
+            "agent.observation"
+        );
+        assert_eq!(
+            event_kind_to_otel_name(&EventKind::InferenceEnd),
+            "llm.inference.end"
+        );
         assert_eq!(event_kind_to_otel_name(&EventKind::ToolCall), "tool.call");
-        assert_eq!(event_kind_to_otel_name(&EventKind::ApprovalRequest), "approval.request");
-        assert_eq!(event_kind_to_otel_name(&EventKind::MemoryRetrieve), "memory.retrieve");
+        assert_eq!(
+            event_kind_to_otel_name(&EventKind::ApprovalRequest),
+            "approval.request"
+        );
+        assert_eq!(
+            event_kind_to_otel_name(&EventKind::MemoryRetrieve),
+            "memory.retrieve"
+        );
     }
 
     #[test]
@@ -839,9 +890,14 @@ mod tests {
         ctx.set_attribute("session.id", serde_json::json!("test_otel_123"));
 
         let agent_span = ctx.enter_span(SpanKind::AGENT, "react_loop", None);
-        ctx.log_event(EventKind::Thought, "agent.thought", HashMap::from([
-            ("input.message".to_string(), serde_json::json!("What is OTEL?")),
-        ]));
+        ctx.log_event(
+            EventKind::Thought,
+            "agent.thought",
+            HashMap::from([(
+                "input.message".to_string(),
+                serde_json::json!("What is OTEL?"),
+            )]),
+        );
         ctx.exit_span(&agent_span, SpanStatus::Ok);
         ctx.exit_span(&session_span, SpanStatus::Ok);
 
@@ -887,7 +943,10 @@ mod tests {
         let mut root = Span::new(SpanKind::SESSION, "session", None);
         let mut agent = Span::new(SpanKind::AGENT, "react_loop", Some(&root.span_id));
         agent.set_attribute("agent.paradigm", serde_json::json!("react"));
-        agent.add_event(TraceEvent::action("calculator", &serde_json::json!({"expr": "2+2"})));
+        agent.add_event(TraceEvent::action(
+            "calculator",
+            &serde_json::json!({"expr": "2+2"}),
+        ));
         agent.end(SpanStatus::Ok);
 
         let mut tool = Span::new(SpanKind::TOOL, "tool.calculator", Some(&agent.span_id));
@@ -907,12 +966,22 @@ mod tests {
         assert_eq!(otel_root["children"][0]["children"][0]["kind"], "CLIENT");
 
         // Verify attributes are prefixed with oneai namespace
-        assert!(otel_root["children"][0]["attributes"].get("oneai.agent.paradigm").is_some());
-        assert!(otel_root["children"][0]["children"][0]["attributes"].get("oneai.tool.name").is_some());
+        assert!(otel_root["children"][0]["attributes"]
+            .get("oneai.agent.paradigm")
+            .is_some());
+        assert!(otel_root["children"][0]["children"][0]["attributes"]
+            .get("oneai.tool.name")
+            .is_some());
 
         // Verify events are mapped
-        assert_eq!(otel_root["children"][0]["events"][0]["name"], "agent.action");
-        assert_eq!(otel_root["children"][0]["children"][0]["events"][0]["name"], "agent.observation");
+        assert_eq!(
+            otel_root["children"][0]["events"][0]["name"],
+            "agent.action"
+        );
+        assert_eq!(
+            otel_root["children"][0]["children"][0]["events"][0]["name"],
+            "agent.observation"
+        );
     }
 
     // ─── Real-export regression tests (gap-analysis #4) ───────────────
@@ -946,7 +1015,8 @@ mod tests {
     async fn otlp_collector_exports_spans_via_exporter_on_flush() {
         let exporter = Arc::new(InMemoryOtlpExporter::new());
         let config = OtlpConfig::http("http://localhost:4318", "oneai-test");
-        let collector = OtlpCollector::with_exporter(config, exporter.clone() as Arc<dyn OtlpExporter>);
+        let collector =
+            OtlpCollector::with_exporter(config, exporter.clone() as Arc<dyn OtlpExporter>);
 
         // Empty flush → Ok, no batch captured.
         collector.flush().await.unwrap();
@@ -958,7 +1028,11 @@ mod tests {
         collector.on_span_end(&span).await;
 
         assert_eq!(collector.completed_count(), 1);
-        assert_eq!(exporter.total_spans(), 0, "span must not be exported before flush");
+        assert_eq!(
+            exporter.total_spans(),
+            0,
+            "span must not be exported before flush"
+        );
 
         collector.flush().await.unwrap();
 
@@ -974,8 +1048,9 @@ mod tests {
     async fn otlp_collector_eager_flush_at_batch_size() {
         let exporter = Arc::new(InMemoryOtlpExporter::new());
         let config = OtlpConfig::http("http://localhost:4318", "oneai-test");
-        let collector = OtlpCollector::with_exporter(config, exporter.clone() as Arc<dyn OtlpExporter>)
-            .with_batch_size(2);
+        let collector =
+            OtlpCollector::with_exporter(config, exporter.clone() as Arc<dyn OtlpExporter>)
+                .with_batch_size(2);
 
         for i in 0..2 {
             let mut s = Span::new(SpanKind::AGENT, &format!("agent_{i}"), None);
@@ -1032,9 +1107,10 @@ mod tests {
 
         let batch = ExportBatch {
             service_name: "oneai-test".to_string(),
-            resource_attributes: HashMap::from([
-                ("deployment.environment".to_string(), "ci".to_string()),
-            ]),
+            resource_attributes: HashMap::from([(
+                "deployment.environment".to_string(),
+                "ci".to_string(),
+            )]),
             spans: vec![root, child],
         };
         let payload = build_otlp_json_payload(&batch);

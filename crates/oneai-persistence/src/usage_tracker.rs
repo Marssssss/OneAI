@@ -70,10 +70,13 @@ impl SqliteUsageTracker {
 
     /// Open a connection to the SQLite database and ensure the schema exists.
     fn open_connection(&self) -> std::result::Result<rusqlite::Connection, OneAIError> {
-        let conn = rusqlite::Connection::open(&self.db_path)
-            .map_err(|e| OneAIError::Persistence(
-                format!("Failed to open SQLite database at {}: {}", self.db_path.display(), e)
-            ))?;
+        let conn = rusqlite::Connection::open(&self.db_path).map_err(|e| {
+            OneAIError::Persistence(format!(
+                "Failed to open SQLite database at {}: {}",
+                self.db_path.display(),
+                e
+            ))
+        })?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS usage_records (
@@ -88,20 +91,25 @@ impl SqliteUsageTracker {
             );
             CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id);
             CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_records(model);
-            CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_records(timestamp);"
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to create usage_records schema: {}", e)
-        ))?;
+            CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_records(timestamp);",
+        )
+        .map_err(|e| {
+            OneAIError::Persistence(format!("Failed to create usage_records schema: {}", e))
+        })?;
 
         Ok(conn)
     }
 
     /// Insert a usage record into the database.
-    fn insert_record(&self, conn: &rusqlite::Connection, record: &UsageRecord) -> std::result::Result<(), OneAIError> {
+    fn insert_record(
+        &self,
+        conn: &rusqlite::Connection,
+        record: &UsageRecord,
+    ) -> std::result::Result<(), OneAIError> {
         let id = uuid::Uuid::new_v4().to_string();
         let timestamp = record.timestamp.to_rfc3339();
-        let metadata_json = serde_json::to_string(&record.metadata)
-            .unwrap_or_else(|_| "{}".to_string());
+        let metadata_json =
+            serde_json::to_string(&record.metadata).unwrap_or_else(|_| "{}".to_string());
 
         conn.execute(
             "INSERT INTO usage_records (id, session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json)
@@ -117,7 +125,11 @@ impl SqliteUsageTracker {
     }
 
     /// Load usage records from the database for a specific session.
-    fn load_session_records(&self, conn: &rusqlite::Connection, session_id: &str) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
+    fn load_session_records(
+        &self,
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
         let mut stmt = conn.prepare(
             "SELECT session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json
              FROM usage_records WHERE session_id = ?1 ORDER BY timestamp ASC"
@@ -125,44 +137,47 @@ impl SqliteUsageTracker {
             format!("Failed to prepare query: {}", e)
         ))?;
 
-        let records = stmt.query_map(rusqlite::params![session_id], |row| {
-            let session_id: String = row.get(0)?;
-            let model: String = row.get(1)?;
-            let provider: String = row.get(2)?;
-            let prompt_tokens: u32 = row.get(3)?;
-            let completion_tokens: u32 = row.get(4)?;
-            let timestamp_str: String = row.get(5)?;
-            let metadata_json: String = row.get(6)?;
+        let records = stmt
+            .query_map(rusqlite::params![session_id], |row| {
+                let session_id: String = row.get(0)?;
+                let model: String = row.get(1)?;
+                let provider: String = row.get(2)?;
+                let prompt_tokens: u32 = row.get(3)?;
+                let completion_tokens: u32 = row.get(4)?;
+                let timestamp_str: String = row.get(5)?;
+                let metadata_json: String = row.get(6)?;
 
-            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
 
-            let metadata: HashMap<String, String> = serde_json::from_str(&metadata_json)
-                .unwrap_or_default();
+                let metadata: HashMap<String, String> =
+                    serde_json::from_str(&metadata_json).unwrap_or_default();
 
-            let record = UsageRecord::with_timestamp(
-                session_id,
-                model,
-                provider,
-                prompt_tokens,
-                completion_tokens,
-                timestamp,
-                metadata,
-            );
+                let record = UsageRecord::with_timestamp(
+                    session_id,
+                    model,
+                    provider,
+                    prompt_tokens,
+                    completion_tokens,
+                    timestamp,
+                    metadata,
+                );
 
-            Ok(record)
-        }).map_err(|e| OneAIError::Usage(
-            format!("Failed to query usage records: {}", e)
-        ))?
-        .filter_map(|r| r.ok())
-        .collect();
+                Ok(record)
+            })
+            .map_err(|e| OneAIError::Usage(format!("Failed to query usage records: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok(records)
     }
 
     /// Load all usage records from the database.
-    fn load_all_records(&self, conn: &rusqlite::Connection) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
+    fn load_all_records(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
         let mut stmt = conn.prepare(
             "SELECT session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json
              FROM usage_records ORDER BY timestamp ASC"
@@ -170,38 +185,38 @@ impl SqliteUsageTracker {
             format!("Failed to prepare query: {}", e)
         ))?;
 
-        let records = stmt.query_map([], |row| {
-            let session_id: String = row.get(0)?;
-            let model: String = row.get(1)?;
-            let provider: String = row.get(2)?;
-            let prompt_tokens: u32 = row.get(3)?;
-            let completion_tokens: u32 = row.get(4)?;
-            let timestamp_str: String = row.get(5)?;
-            let metadata_json: String = row.get(6)?;
+        let records = stmt
+            .query_map([], |row| {
+                let session_id: String = row.get(0)?;
+                let model: String = row.get(1)?;
+                let provider: String = row.get(2)?;
+                let prompt_tokens: u32 = row.get(3)?;
+                let completion_tokens: u32 = row.get(4)?;
+                let timestamp_str: String = row.get(5)?;
+                let metadata_json: String = row.get(6)?;
 
-            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
 
-            let metadata: HashMap<String, String> = serde_json::from_str(&metadata_json)
-                .unwrap_or_default();
+                let metadata: HashMap<String, String> =
+                    serde_json::from_str(&metadata_json).unwrap_or_default();
 
-            let record = UsageRecord::with_timestamp(
-                session_id,
-                model,
-                provider,
-                prompt_tokens,
-                completion_tokens,
-                timestamp,
-                metadata,
-            );
+                let record = UsageRecord::with_timestamp(
+                    session_id,
+                    model,
+                    provider,
+                    prompt_tokens,
+                    completion_tokens,
+                    timestamp,
+                    metadata,
+                );
 
-            Ok(record)
-        }).map_err(|e| OneAIError::Usage(
-            format!("Failed to query usage records: {}", e)
-        ))?
-        .filter_map(|r| r.ok())
-        .collect();
+                Ok(record)
+            })
+            .map_err(|e| OneAIError::Usage(format!("Failed to query usage records: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
 
         Ok(records)
     }
@@ -238,10 +253,14 @@ impl UsageTracker for SqliteUsageTracker {
 
         let mut by_model: HashMap<String, Vec<UsageRecord>> = HashMap::new();
         for record in records {
-            by_model.entry(record.model.clone()).or_default().push(record);
+            by_model
+                .entry(record.model.clone())
+                .or_default()
+                .push(record);
         }
 
-        Ok(by_model.into_iter()
+        Ok(by_model
+            .into_iter()
             .map(|(model, records)| (model, UsageSummary::from_records(&records)))
             .collect())
     }
@@ -252,10 +271,14 @@ impl UsageTracker for SqliteUsageTracker {
 
         let mut by_model: HashMap<String, Vec<UsageRecord>> = HashMap::new();
         for record in records {
-            by_model.entry(record.model.clone()).or_default().push(record);
+            by_model
+                .entry(record.model.clone())
+                .or_default()
+                .push(record);
         }
 
-        Ok(by_model.into_iter()
+        Ok(by_model
+            .into_iter()
             .map(|(model, records)| (model, UsageSummary::from_records(&records)))
             .collect())
     }
@@ -275,18 +298,15 @@ impl UsageTracker for SqliteUsageTracker {
         conn.execute(
             "DELETE FROM usage_records WHERE session_id = ?1",
             rusqlite::params![session_id],
-        ).map_err(|e| OneAIError::Usage(
-            format!("Failed to clear session usage data: {}", e)
-        ))?;
+        )
+        .map_err(|e| OneAIError::Usage(format!("Failed to clear session usage data: {}", e)))?;
         Ok(())
     }
 
     async fn clear_all(&self) -> Result<()> {
         let conn = self.open_connection()?;
         conn.execute("DELETE FROM usage_records", [])
-            .map_err(|e| OneAIError::Usage(
-                format!("Failed to clear all usage data: {}", e)
-            ))?;
+            .map_err(|e| OneAIError::Usage(format!("Failed to clear all usage data: {}", e)))?;
         Ok(())
     }
 }
@@ -307,8 +327,20 @@ mod tests {
     async fn test_sqlite_usage_tracker_record_and_session_usage() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new(
+                "sess1",
+                "claude-sonnet-4",
+                "anthropic",
+                200,
+                100,
+            ))
+            .await
+            .unwrap();
 
         let session_usage = tracker.session_usage("sess1").await.unwrap();
         assert_eq!(session_usage.call_count, 2);
@@ -319,8 +351,14 @@ mod tests {
     async fn test_sqlite_usage_tracker_global_usage() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
 
         let global = tracker.global_usage().await.unwrap();
         assert_eq!(global.call_count, 2);
@@ -331,8 +369,20 @@ mod tests {
     async fn test_sqlite_usage_tracker_per_model_breakdown() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new(
+                "sess1",
+                "claude-sonnet-4",
+                "anthropic",
+                200,
+                100,
+            ))
+            .await
+            .unwrap();
 
         let by_model = tracker.usage_by_model("sess1").await.unwrap();
         assert_eq!(by_model.len(), 2);
@@ -344,8 +394,14 @@ mod tests {
     async fn test_sqlite_usage_tracker_clear() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
 
         tracker.clear_session("sess1").await.unwrap();
         let sess1 = tracker.session_usage("sess1").await.unwrap();
@@ -360,8 +416,20 @@ mod tests {
     async fn test_sqlite_usage_tracker_session_records() {
         let (tracker, _tmp) = make_tracker();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new(
+                "sess1",
+                "claude-sonnet-4",
+                "anthropic",
+                200,
+                100,
+            ))
+            .await
+            .unwrap();
 
         let records = tracker.session_records("sess1").await.unwrap();
         assert_eq!(records.len(), 2);

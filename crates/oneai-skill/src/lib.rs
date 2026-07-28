@@ -14,7 +14,6 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
 pub mod builtin;
 pub mod discovery;
 pub mod registry;

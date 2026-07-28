@@ -12,12 +12,12 @@
 //! - `localhost` / `127.0.0.1` → Ollama (Local)
 //! - anything else → OpenAI-compatible (most services use OpenAI protocol)
 
-use crate::openai::OpenAIProvider;
 use crate::anthropic::AnthropicProvider;
 use crate::gemini::GeminiProvider;
 use crate::ollama::OllamaProvider;
-use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
+use crate::openai::OpenAIProvider;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
 
 /// Factory for creating LlmProvider instances from configuration.
 ///
@@ -48,9 +48,7 @@ impl ProviderFactory {
                     }
                 }
             }
-            ProviderType::Local => {
-                Box::new(OllamaProvider::new(resolved_config))
-            }
+            ProviderType::Local => Box::new(OllamaProvider::new(resolved_config)),
             ProviderType::Transformers => {
                 panic!("Transformers provider not yet implemented. Use Local (Ollama) instead.");
             }
@@ -81,7 +79,9 @@ impl ProviderFactory {
         }
 
         // Detect Gemini
-        if url.contains("generativelanguage.googleapis.com") || url.contains("aiplatform.googleapis.com") {
+        if url.contains("generativelanguage.googleapis.com")
+            || url.contains("aiplatform.googleapis.com")
+        {
             return ModelConfig {
                 cloud_kind: Some(CloudProviderKind::Gemini),
                 ..config
@@ -89,7 +89,11 @@ impl ProviderFactory {
         }
 
         // Detect local/Ollama
-        if url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0") || url.contains("[::1]") {
+        if url.contains("localhost")
+            || url.contains("127.0.0.1")
+            || url.contains("0.0.0.0")
+            || url.contains("[::1]")
+        {
             return ModelConfig {
                 provider_type: ProviderType::Local,
                 cloud_kind: None,

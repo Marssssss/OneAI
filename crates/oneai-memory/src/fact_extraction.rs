@@ -15,9 +15,9 @@
 
 use std::sync::Arc;
 
-use oneai_core::{Conversation, FactType, InferenceRequest, MemoryFact, Message, Role};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{Conversation, FactType, InferenceRequest, MemoryFact, Message, Role};
 
 /// LLM-backed extractor of atomic facts from a conversation segment.
 pub struct FactExtractor {
@@ -64,7 +64,8 @@ impl FactExtractor {
             return Ok(Vec::new());
         }
 
-        let segment = messages.iter()
+        let segment = messages
+            .iter()
             .map(|m| {
                 let role = match m.role {
                     Role::System => "System",
@@ -82,7 +83,9 @@ impl FactExtractor {
             return Ok(Vec::new());
         }
 
-        let schema_list = self.schema.iter()
+        let schema_list = self
+            .schema
+            .iter()
             .map(|f| format!("  - {}", f.as_str()))
             .collect::<Vec<_>>()
             .join("\n");
@@ -126,21 +129,28 @@ impl FactExtractor {
 ///
 /// Tolerant: strips ```json fences, finds the first `[...]` span, and ignores
 /// any unparseable elements. Returns an empty vec on any failure.
-fn parse_facts(text: &str, schema: &[FactType], user_id: &str, session_id: &str) -> Vec<MemoryFact> {
+fn parse_facts(
+    text: &str,
+    schema: &[FactType],
+    user_id: &str,
+    session_id: &str,
+) -> Vec<MemoryFact> {
     let json_text = extract_json_array(text);
     let parsed: Vec<RawFact> = match serde_json::from_str(&json_text) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
     let now = chrono::Utc::now();
-    parsed.into_iter()
+    parsed
+        .into_iter()
         .filter(|r| {
             // Keep only facts whose type is in the schema (defense against drift).
             schema.iter().any(|s| s.as_str() == r.fact_type.as_str())
         })
         .map(|r| {
             let fact_type = FactType::new(r.fact_type.clone());
-            let importance = r.importance
+            let importance = r
+                .importance
                 .filter(|v| (0.0..=1.0).contains(v))
                 .unwrap_or_else(|| default_importance_for_type(fact_type.as_str()));
             MemoryFact {
@@ -184,7 +194,11 @@ fn default_importance_for_type(fact_type: &str) -> f32 {
 fn extract_json_array(text: &str) -> String {
     let trimmed = text.trim();
     // Strip ```json ... ``` fences if present.
-    let stripped = trimmed.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    let stripped = trimmed
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
     if stripped.starts_with('[') {
         return stripped.to_string();
     }
@@ -200,36 +214,63 @@ fn extract_json_array(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_core::{
-        InferenceResponse, ModelCapability, ModelConfig, ProviderType, TokenUsage,
-    };
+    use oneai_core::{InferenceResponse, ModelCapability, ModelConfig, ProviderType, TokenUsage};
     use std::collections::HashMap;
 
     /// Mock provider that returns a canned response.
-    struct MockExtractorProvider { response: String }
-    impl MockExtractorProvider { fn new(r: impl Into<String>) -> Self { Self { response: r.into() } } }
+    struct MockExtractorProvider {
+        response: String,
+    }
+    impl MockExtractorProvider {
+        fn new(r: impl Into<String>) -> Self {
+            Self { response: r.into() }
+        }
+    }
 
     #[async_trait::async_trait]
     impl LlmProvider for MockExtractorProvider {
         async fn infer(&self, _req: InferenceRequest) -> Result<InferenceResponse> {
             Ok(InferenceResponse {
                 message: Message::assistant(self.response.clone()),
-                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
+                usage: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    ..Default::default()
+                },
                 model: "mock-extractor".to_string(),
                 metadata: HashMap::new(),
             })
         }
         async fn infer_stream(
-            &self, _req: InferenceRequest,
-        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>> {
+            &self,
+            _req: InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
+        > {
             Err(oneai_core::error::OneAIError::Provider("no stream".into()))
         }
         fn capabilities(&self) -> ModelCapability {
-            ModelCapability { supports_multimodal: false, supports_streaming: false, supports_tools: false, context_window_size: 4096, max_output_tokens: 512 }
+            ModelCapability {
+                supports_multimodal: false,
+                supports_streaming: false,
+                supports_tools: false,
+                context_window_size: 4096,
+                max_output_tokens: 512,
+            }
         }
         fn config(&self) -> &ModelConfig {
             static CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
-            CONFIG.get_or_init(|| ModelConfig { provider_type: ProviderType::Local, cloud_kind: None, api_key: None, base_url: None, port: None, model_name: Some("mock-extractor".into()), model_path: None, ..Default::default() })
+            CONFIG.get_or_init(|| ModelConfig {
+                provider_type: ProviderType::Local,
+                cloud_kind: None,
+                api_key: None,
+                base_url: None,
+                port: None,
+                model_name: Some("mock-extractor".into()),
+                model_path: None,
+                ..Default::default()
+            })
         }
     }
 
@@ -253,8 +294,12 @@ mod tests {
         let msgs = vec![Message::user("I use pnpm. Let's use JWT for auth.")];
         let facts = ext.extract(&msgs, "alice", "s1").await.unwrap();
         assert_eq!(facts.len(), 2);
-        assert!(facts.iter().any(|f| f.subject == "user.package_manager" && f.content == "pnpm"));
-        assert!(facts.iter().any(|f| f.subject == "auth.module" && f.content == "use JWT"));
+        assert!(facts
+            .iter()
+            .any(|f| f.subject == "user.package_manager" && f.content == "pnpm"));
+        assert!(facts
+            .iter()
+            .any(|f| f.subject == "auth.module" && f.content == "use JWT"));
         assert_eq!(facts[0].user_id, "alice");
     }
 
@@ -263,21 +308,33 @@ mod tests {
         // LLM emits a fact_type not in schema → dropped.
         let resp = r#"[{"fact_type":"bogus","subject":"x","predicate":"y","content":"z"}]"#;
         let ext = FactExtractor::new(Arc::new(MockExtractorProvider::new(resp)), coding_schema());
-        let facts = ext.extract(&[Message::user("hi")], "alice", "s1").await.unwrap();
+        let facts = ext
+            .extract(&[Message::user("hi")], "alice", "s1")
+            .await
+            .unwrap();
         assert!(facts.is_empty());
     }
 
     #[tokio::test]
     async fn extract_fails_safe_on_malformed_json() {
-        let ext = FactExtractor::new(Arc::new(MockExtractorProvider::new("not json at all")), coding_schema());
-        let facts = ext.extract(&[Message::user("hi")], "alice", "s1").await.unwrap();
+        let ext = FactExtractor::new(
+            Arc::new(MockExtractorProvider::new("not json at all")),
+            coding_schema(),
+        );
+        let facts = ext
+            .extract(&[Message::user("hi")], "alice", "s1")
+            .await
+            .unwrap();
         assert!(facts.is_empty()); // no crash, no facts
     }
 
     #[tokio::test]
     async fn extract_empty_when_no_schema() {
         let ext = FactExtractor::new(Arc::new(MockExtractorProvider::new("[]")), Vec::new());
-        let facts = ext.extract(&[Message::user("hi")], "alice", "s1").await.unwrap();
+        let facts = ext
+            .extract(&[Message::user("hi")], "alice", "s1")
+            .await
+            .unwrap();
         assert!(facts.is_empty());
     }
 
@@ -286,7 +343,8 @@ mod tests {
         let facts = parse_facts(
             r#"[{"fact_type":"decision","subject":"a","predicate":"b","content":"c"}]"#,
             &coding_schema(),
-            "u", "s",
+            "u",
+            "s",
         );
         assert_eq!(facts.len(), 1);
     }

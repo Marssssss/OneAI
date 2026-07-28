@@ -69,18 +69,20 @@ pub mod bge_reranker;
 
 pub use fusion::{dbsf_fuse, rrf_fuse};
 pub use in_memory::InMemoryVectorBackend;
-pub use pipeline::{StandardRetrievalPipeline, StandardRetrievalPipelineBuilder, StandardRetrievalPipelineConfig};
+pub use pipeline::{
+    StandardRetrievalPipeline, StandardRetrievalPipelineBuilder, StandardRetrievalPipelineConfig,
+};
 
-#[cfg(feature = "sqlite")]
-pub use sqlite_vec::SqliteVecBackend;
-#[cfg(feature = "usearch")]
-pub use usearch_backend::UsearchBackend;
-#[cfg(feature = "tantivy")]
-pub use tantivy_bm25::TantivyBm25Backend;
 #[cfg(feature = "ort")]
 pub use bge_m3::BgeM3Embedder;
 #[cfg(feature = "ort")]
 pub use bge_reranker::BgeRerankerOnnx;
+#[cfg(feature = "sqlite")]
+pub use sqlite_vec::SqliteVecBackend;
+#[cfg(feature = "tantivy")]
+pub use tantivy_bm25::TantivyBm25Backend;
+#[cfg(feature = "usearch")]
+pub use usearch_backend::UsearchBackend;
 
 // ─── shared helpers ─────────────────────────────────────────────────────────
 

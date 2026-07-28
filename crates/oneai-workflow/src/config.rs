@@ -184,32 +184,35 @@ mod tests {
 
     #[test]
     fn test_workflow_config_creation() {
-        let config = WorkflowConfig::new("test_workflow", vec![
-            StepConfig {
-                id: "step1".to_string(),
-                description: "First step".to_string(),
-                depends_on: vec![],
-                tool: None,
-                tool_args: None,
-                prompt: Some("Do something".to_string()),
-                requires_approval: false,
-                timeout_secs: None,
-                retry_policy: None,
-                metadata: HashMap::new(),
-            },
-            StepConfig {
-                id: "step2".to_string(),
-                description: "Second step".to_string(),
-                depends_on: vec!["step1".to_string()],
-                tool: Some("calculator".to_string()),
-                tool_args: Some(serde_json::json!({"expression": "2+2"})),
-                prompt: None,
-                requires_approval: false,
-                timeout_secs: None,
-                retry_policy: None,
-                metadata: HashMap::new(),
-            },
-        ]);
+        let config = WorkflowConfig::new(
+            "test_workflow",
+            vec![
+                StepConfig {
+                    id: "step1".to_string(),
+                    description: "First step".to_string(),
+                    depends_on: vec![],
+                    tool: None,
+                    tool_args: None,
+                    prompt: Some("Do something".to_string()),
+                    requires_approval: false,
+                    timeout_secs: None,
+                    retry_policy: None,
+                    metadata: HashMap::new(),
+                },
+                StepConfig {
+                    id: "step2".to_string(),
+                    description: "Second step".to_string(),
+                    depends_on: vec!["step1".to_string()],
+                    tool: Some("calculator".to_string()),
+                    tool_args: Some(serde_json::json!({"expression": "2+2"})),
+                    prompt: None,
+                    requires_approval: false,
+                    timeout_secs: None,
+                    retry_policy: None,
+                    metadata: HashMap::new(),
+                },
+            ],
+        );
 
         assert_eq!(config.name, "test_workflow");
         assert_eq!(config.steps.len(), 2);
@@ -218,8 +221,9 @@ mod tests {
 
     #[test]
     fn test_workflow_config_serialization() {
-        let config = WorkflowConfig::new("test_workflow", vec![
-            StepConfig {
+        let config = WorkflowConfig::new(
+            "test_workflow",
+            vec![StepConfig {
                 id: "step1".to_string(),
                 description: "First step".to_string(),
                 depends_on: vec![],
@@ -230,8 +234,8 @@ mod tests {
                 timeout_secs: Some(30),
                 retry_policy: None,
                 metadata: HashMap::new(),
-            },
-        ]);
+            }],
+        );
 
         let json = config.to_json().unwrap();
         let parsed: WorkflowConfig = WorkflowConfig::from_json(&json).unwrap();
@@ -240,32 +244,39 @@ mod tests {
 
     #[test]
     fn test_effective_retry_policy() {
-        let config = WorkflowConfig::new("test", vec![
-            StepConfig {
-                id: "step1".to_string(),
-                description: "Step 1".to_string(),
-                depends_on: vec![],
-                tool: None,
-                tool_args: None,
-                prompt: None,
-                requires_approval: false,
-                timeout_secs: None,
-                retry_policy: Some(RetryPolicy { max_retries: 5, retry_delay_secs: 10, retry_on_all_errors: true }),
-                metadata: HashMap::new(),
-            },
-            StepConfig {
-                id: "step2".to_string(),
-                description: "Step 2".to_string(),
-                depends_on: vec!["step1".to_string()],
-                tool: None,
-                tool_args: None,
-                prompt: None,
-                requires_approval: false,
-                timeout_secs: None,
-                retry_policy: None,
-                metadata: HashMap::new(),
-            },
-        ]);
+        let config = WorkflowConfig::new(
+            "test",
+            vec![
+                StepConfig {
+                    id: "step1".to_string(),
+                    description: "Step 1".to_string(),
+                    depends_on: vec![],
+                    tool: None,
+                    tool_args: None,
+                    prompt: None,
+                    requires_approval: false,
+                    timeout_secs: None,
+                    retry_policy: Some(RetryPolicy {
+                        max_retries: 5,
+                        retry_delay_secs: 10,
+                        retry_on_all_errors: true,
+                    }),
+                    metadata: HashMap::new(),
+                },
+                StepConfig {
+                    id: "step2".to_string(),
+                    description: "Step 2".to_string(),
+                    depends_on: vec!["step1".to_string()],
+                    tool: None,
+                    tool_args: None,
+                    prompt: None,
+                    requires_approval: false,
+                    timeout_secs: None,
+                    retry_policy: None,
+                    metadata: HashMap::new(),
+                },
+            ],
+        );
 
         let policy1 = config.effective_retry_policy("step1");
         assert_eq!(policy1.max_retries, 5);
@@ -276,8 +287,9 @@ mod tests {
 
     #[test]
     fn test_effective_timeout() {
-        let mut config = WorkflowConfig::new("test", vec![
-            StepConfig {
+        let mut config = WorkflowConfig::new(
+            "test",
+            vec![StepConfig {
                 id: "step1".to_string(),
                 description: "Step 1".to_string(),
                 depends_on: vec![],
@@ -288,8 +300,8 @@ mod tests {
                 timeout_secs: Some(60),
                 retry_policy: None,
                 metadata: HashMap::new(),
-            },
-        ]);
+            }],
+        );
         config.timeout_secs = Some(120);
 
         assert_eq!(config.effective_timeout("step1"), Some(60));

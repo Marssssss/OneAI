@@ -21,10 +21,7 @@ pub enum A2AError {
 
     /// Invalid task state transition
     #[error("A2A invalid state transition: from {from} to {to}")]
-    InvalidStateTransition {
-        from: TaskState,
-        to: TaskState,
-    },
+    InvalidStateTransition { from: TaskState, to: TaskState },
 
     /// Serialization/deserialization error
     #[error("A2A serialization error: {0}")]
@@ -32,10 +29,7 @@ pub enum A2AError {
 
     /// JSON-RPC error response from the remote agent
     #[error("A2A JSON-RPC error: code={code}, message={message}")]
-    JsonRpcError {
-        code: i64,
-        message: String,
-    },
+    JsonRpcError { code: i64, message: String },
 
     /// Agent discovery error (failed to fetch AgentCard)
     #[error("A2A agent discovery error: {0}")]

@@ -2,8 +2,8 @@
 //!
 //! Subcommands for listing, inspecting, and installing domain packs.
 
+use oneai_domain::{coding_pack, research_pack, DomainPack};
 use std::sync::Arc;
-use oneai_domain::{DomainPack, coding_pack, research_pack};
 
 /// Builtin domain pack names and their descriptions.
 pub const BUILTIN_PACKS: &[(&str, &str, &str)] = &[
@@ -27,11 +27,11 @@ pub fn get_builtin_pack(name: &str, project_dir: &str) -> Option<DomainPack> {
 
 /// General-purpose domain pack — minimal tool set (just calculator).
 fn general_pack(_project_dir: &str) -> DomainPack {
-    use std::collections::HashSet;
-    use oneai_tool::CalculatorTool;
-    use oneai_domain::permission_profile::PermissionProfile;
     use oneai_domain::compression_template::CompressionTemplate;
     use oneai_domain::paradigm_strategy::ParadigmStrategy;
+    use oneai_domain::permission_profile::PermissionProfile;
+    use oneai_tool::CalculatorTool;
+    use std::collections::HashSet;
 
     let mut profile = PermissionProfile::new("general");
     profile.auto_approve = HashSet::from(["calculator".to_string()]);
@@ -157,54 +157,92 @@ pub fn cmd_pack_show(name: &str) {
         }
     }
 
-    eprintln!("Pack '{}' not found. Use 'oneai pack list' to see available packs.", name);
+    eprintln!(
+        "Pack '{}' not found. Use 'oneai pack list' to see available packs.",
+        name
+    );
 }
 
 /// Print detailed information about a DomainPack.
 fn print_pack_details(pack: &DomainPack) {
     println!("📦 Domain Pack: {}\n", pack.name);
     println!("  Description: {}", pack.description);
-    println!("  System prompt: \"{}...\"", &pack.system_prompt_template[..pack.system_prompt_template.len().min(200)]);
+    println!(
+        "  System prompt: \"{}...\"",
+        &pack.system_prompt_template[..pack.system_prompt_template.len().min(200)]
+    );
     println!();
 
     // Tools
     println!("  Tools ({}):", pack.tools.len());
     for tool in &pack.tools {
-        println!("    • {} [risk: {:?}] — {}", tool.name(), tool.risk_level(), tool.description().chars().take(80).collect::<String>());
+        println!(
+            "    • {} [risk: {:?}] — {}",
+            tool.name(),
+            tool.risk_level(),
+            tool.description().chars().take(80).collect::<String>()
+        );
     }
     println!();
 
     // Permission profile
     println!("  Permission profile:");
-    println!("    Auto-approve: {} tools", pack.permission_profile.auto_approve.len());
-    println!("    Require confirmation: {} tools", pack.permission_profile.require_confirmation.len());
-    println!("    Deny by default: {} patterns", pack.permission_profile.deny_by_default.len());
+    println!(
+        "    Auto-approve: {} tools",
+        pack.permission_profile.auto_approve.len()
+    );
+    println!(
+        "    Require confirmation: {} tools",
+        pack.permission_profile.require_confirmation.len()
+    );
+    println!(
+        "    Deny by default: {} patterns",
+        pack.permission_profile.deny_by_default.len()
+    );
     println!();
 
     // Context sources
     println!("  Context sources ({}):", pack.context_sources.len());
     for source in &pack.context_sources {
-        println!("    • {} (refresh: {:?})", source.key(), source.refresh_policy());
+        println!(
+            "    • {} (refresh: {:?})",
+            source.key(),
+            source.refresh_policy()
+        );
     }
     println!();
 
     // Paradigm strategies
-    println!("  Paradigm strategies ({}):", pack.paradigm_strategies.len());
+    println!(
+        "  Paradigm strategies ({}):",
+        pack.paradigm_strategies.len()
+    );
     for strategy in &pack.paradigm_strategies {
-        println!("    • trigger: \"{}\" → {:?}", strategy.trigger_pattern, strategy.paradigm_sequence);
+        println!(
+            "    • trigger: \"{}\" → {:?}",
+            strategy.trigger_pattern, strategy.paradigm_sequence
+        );
     }
     println!();
 
     // Compression template
     println!("  Compression template: {}", pack.compression_template.name);
-    println!("    Preserve fields: {}", pack.compression_template.preserve_fields.join(", "));
+    println!(
+        "    Preserve fields: {}",
+        pack.compression_template.preserve_fields.join(", ")
+    );
     println!();
 
     // Workflows
     if !pack.workflows.is_empty() {
         println!("  Workflows ({}):", pack.workflows.len());
         for wf in &pack.workflows {
-            println!("    • {} — {} ({} steps)", wf.name, wf.description, wf.steps.len());
+            println!(
+                "    • {} — {} ({} steps)",
+                wf.name,
+                wf.description,
+                wf.steps.len()
+            );
         }
         println!();
     }
@@ -213,7 +251,12 @@ fn print_pack_details(pack: &DomainPack) {
     if !pack.state_graphs.is_empty() {
         println!("  StateGraphs ({}):", pack.state_graphs.len());
         for sg in &pack.state_graphs {
-            println!("    • {} — {} nodes, {} edges", sg.name, sg.nodes.len(), sg.edges.len());
+            println!(
+                "    • {} — {} nodes, {} edges",
+                sg.name,
+                sg.nodes.len(),
+                sg.edges.len()
+            );
         }
     }
 }
@@ -235,7 +278,11 @@ pub fn cmd_pack_install(source: &str) {
         let dest = packs_dir.join(&pack_name);
 
         if dest.exists() {
-            eprintln!("Pack '{}' already installed. Remove it first: rm -rf {}", pack_name, dest.display());
+            eprintln!(
+                "Pack '{}' already installed. Remove it first: rm -rf {}",
+                pack_name,
+                dest.display()
+            );
             return;
         }
 
@@ -251,7 +298,10 @@ pub fn cmd_pack_install(source: &str) {
                 println!("   Use: oneai chat --domain {}", pack_name);
             }
             Ok(output) => {
-                eprintln!("❌ Git clone failed: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "❌ Git clone failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             Err(e) => {
                 eprintln!("❌ Failed to run git clone: {}", e);
@@ -271,11 +321,17 @@ pub fn cmd_pack_install(source: &str) {
     let pack_name = if source_path.is_dir() {
         // Try loading config to get the pack name
         let config_result = oneai_domain::domain_pack_from_dir(&source_path.to_string_lossy());
-        config_result.map(|p| p.name.clone())
-            .unwrap_or_else(|_| source_path.file_name().unwrap().to_string_lossy().to_string())
+        config_result.map(|p| p.name.clone()).unwrap_or_else(|_| {
+            source_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        })
     } else {
         // Single config file — use parent dir name or filename
-        source_path.file_stem()
+        source_path
+            .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or("custom".to_string())
     };
@@ -318,7 +374,10 @@ fn extract_pack_name_from_git_url(url: &str) -> String {
 }
 
 /// Recursively copy a directory.
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn copy_dir_recursive(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -359,7 +418,10 @@ pub fn cmd_pack_validate(path: &str) {
     if result.is_valid() {
         println!("✅ Validation PASSED — config is valid");
     } else {
-        println!("❌ Validation FAILED — {} errors found", result.errors().len());
+        println!(
+            "❌ Validation FAILED — {} errors found",
+            result.errors().len()
+        );
     }
 
     // Print all issues
@@ -372,10 +434,15 @@ pub fn cmd_pack_validate(path: &str) {
                 oneai_domain::ValidationSeverity::Info => "ℹ️",
                 _ => "?",
             };
-            let location = issue.location.as_ref()
+            let location = issue
+                .location
+                .as_ref()
                 .map(|l| format!(" at {}", l))
                 .unwrap_or_default();
-            println!("  {} {} [{}{}]: {}", icon, issue.severity, issue.layer, location, issue.message);
+            println!(
+                "  {} {} [{}{}]: {}",
+                icon, issue.severity, issue.layer, location, issue.message
+            );
         }
     }
 
@@ -392,7 +459,10 @@ pub fn cmd_pack_spec() {
         "{}".to_string()
     });
 
-    println!("📋 DomainPack Specification (JSON Schema v{})\n", oneai_domain::DomainPackSpec::SPEC_VERSION);
+    println!(
+        "📋 DomainPack Specification (JSON Schema v{})\n",
+        oneai_domain::DomainPackSpec::SPEC_VERSION
+    );
     println!("{}", json);
 }
 
@@ -401,8 +471,15 @@ pub fn cmd_pack_check(name: &str) {
     // Try builtin first
     if let Some(pack) = get_builtin_pack(name, ".") {
         // Built-in packs are always valid (they're defined in Rust code)
-        println!("✅ Built-in pack '{}' is always valid (defined in Rust code).", name);
-        println!("   Tools: {}, Strategies: {}", pack.tools.len(), pack.paradigm_strategies.len());
+        println!(
+            "✅ Built-in pack '{}' is always valid (defined in Rust code).",
+            name
+        );
+        println!(
+            "   Tools: {}, Strategies: {}",
+            pack.tools.len(),
+            pack.paradigm_strategies.len()
+        );
         return;
     }
 
@@ -411,7 +488,10 @@ pub fn cmd_pack_check(name: &str) {
     let pack_dir = packs_dir.join(name);
 
     if !pack_dir.exists() {
-        eprintln!("❌ Pack '{}' not found. Use 'oneai pack list' to see available packs.", name);
+        eprintln!(
+            "❌ Pack '{}' not found. Use 'oneai pack list' to see available packs.",
+            name
+        );
         return;
     }
 
@@ -425,7 +505,11 @@ pub fn cmd_pack_check(name: &str) {
                     if result.is_valid() {
                         println!("✅ Pack '{}' validation PASSED", name);
                     } else {
-                        println!("❌ Pack '{}' validation FAILED — {} errors", name, result.errors().len());
+                        println!(
+                            "❌ Pack '{}' validation FAILED — {} errors",
+                            name,
+                            result.errors().len()
+                        );
                     }
                     for issue in result.issues() {
                         let icon = match issue.severity {
@@ -434,17 +518,27 @@ pub fn cmd_pack_check(name: &str) {
                             oneai_domain::ValidationSeverity::Info => "ℹ️",
                             _ => "?",
                         };
-                        println!("  {} {} [{}]: {}", icon, issue.severity, issue.layer, issue.message);
+                        println!(
+                            "  {} {} [{}]: {}",
+                            icon, issue.severity, issue.layer, issue.message
+                        );
                     }
                     return;
                 }
                 Err(e) => {
-                    eprintln!("❌ Failed to load pack config from {}: {}", config_path.display(), e);
+                    eprintln!(
+                        "❌ Failed to load pack config from {}: {}",
+                        config_path.display(),
+                        e
+                    );
                     return;
                 }
             }
         }
     }
 
-    eprintln!("❌ Pack '{}' directory exists but no config file found.", name);
+    eprintln!(
+        "❌ Pack '{}' directory exists but no config file found.",
+        name
+    );
 }

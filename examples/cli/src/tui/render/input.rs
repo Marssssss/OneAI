@@ -28,7 +28,10 @@ fn mode_badge_spans(app: &App) -> Vec<Span<'static>> {
     };
     vec![
         Span::styled("mode:", Style::default().fg(LABEL_DIM)),
-        Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" │ ", Style::default().fg(LABEL_DIM)),
     ]
 }
@@ -37,7 +40,10 @@ fn mode_badge_spans(app: &App) -> Vec<Span<'static>> {
 pub fn draw_input(f: &mut Frame, rect: Rect, app: &App) {
     match app.input_mode {
         InputMode::SingleLine => draw_singleline_input(f, rect, app),
-        InputMode::MultiLineVim { cursor_position, mode } => {
+        InputMode::MultiLineVim {
+            cursor_position,
+            mode,
+        } => {
             draw_vim_input(f, rect, app, cursor_position, mode);
         }
     }
@@ -45,9 +51,13 @@ pub fn draw_input(f: &mut Frame, rect: Rect, app: &App) {
 
 /// Draw single-line input mode with cursor indicator.
 fn draw_singleline_input(f: &mut Frame, rect: Rect, app: &App) {
-    let prompt_style = Style::default().fg(INPUT_PROMPT_COLOR).add_modifier(Modifier::BOLD);
+    let prompt_style = Style::default()
+        .fg(INPUT_PROMPT_COLOR)
+        .add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(INPUT_TEXT_COLOR);
-    let cursor_style = Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK);
+    let cursor_style = Style::default()
+        .fg(INPUT_CURSOR_COLOR)
+        .add_modifier(Modifier::RAPID_BLINK);
     let prompt = "oneai> ";
     // continuation lines indent to align under the prompt ("oneai> " = 7 cols)
     let cont_indent = "       ";
@@ -123,8 +133,7 @@ fn draw_singleline_input(f: &mut Frame, rect: Rect, app: &App) {
         .borders(Borders::TOP)
         .border_style(Style::default().fg(INPUT_BORDER));
 
-    let paragraph = Paragraph::new(Text::from(input_lines))
-        .block(input_block);
+    let paragraph = Paragraph::new(Text::from(input_lines)).block(input_block);
 
     f.render_widget(paragraph, rect);
 }
@@ -162,8 +171,7 @@ fn draw_vim_input(f: &mut Frame, rect: Rect, app: &App, cursor_position: usize, 
     vim_hint_spans.push(Span::styled(hints, Style::default().fg(INPUT_HINT_COLOR)));
     all_lines.push(Line::from(vim_hint_spans));
 
-    let paragraph = Paragraph::new(Text::from(all_lines))
-        .block(border_block);
+    let paragraph = Paragraph::new(Text::from(all_lines)).block(border_block);
 
     f.render_widget(paragraph, rect);
 }
@@ -172,11 +180,25 @@ fn draw_vim_input(f: &mut Frame, rect: Rect, app: &App, cursor_position: usize, 
 ///
 /// In Normal mode: cursor is shown as a reversed (highlight) character at the position
 /// In Insert mode: cursor is shown as a blinking block █ after the position
-fn build_vim_lines_with_cursor(input: &str, cursor_position: usize, mode: VimMode) -> Vec<Line<'static>> {
+fn build_vim_lines_with_cursor(
+    input: &str,
+    cursor_position: usize,
+    mode: VimMode,
+) -> Vec<Line<'static>> {
     if input.is_empty() {
         let cursor_char = match mode {
-            VimMode::Normal => Span::styled("~", Style::default().fg(INPUT_TEXT_COLOR).bg(ratatui::style::Color::Yellow)),
-            VimMode::Insert => Span::styled("█", Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK)),
+            VimMode::Normal => Span::styled(
+                "~",
+                Style::default()
+                    .fg(INPUT_TEXT_COLOR)
+                    .bg(ratatui::style::Color::Yellow),
+            ),
+            VimMode::Insert => Span::styled(
+                "█",
+                Style::default()
+                    .fg(INPUT_CURSOR_COLOR)
+                    .add_modifier(Modifier::RAPID_BLINK),
+            ),
         };
         return vec![Line::from(cursor_char)];
     }
@@ -215,7 +237,10 @@ fn build_vim_lines_with_cursor(input: &str, cursor_position: usize, mode: VimMod
 
             let mut spans = Vec::new();
             if !line_before_cursor.is_empty() {
-                spans.push(Span::styled(line_before_cursor.to_string(), Style::default().fg(INPUT_TEXT_COLOR)));
+                spans.push(Span::styled(
+                    line_before_cursor.to_string(),
+                    Style::default().fg(INPUT_TEXT_COLOR),
+                ));
             }
 
             // Insert cursor indicator
@@ -225,17 +250,21 @@ fn build_vim_lines_with_cursor(input: &str, cursor_position: usize, mode: VimMod
                     if let Some(ch) = cursor_char_opt {
                         spans.push(Span::styled(
                             ch.to_string(),
-                            Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Yellow),
+                            Style::default()
+                                .fg(ratatui::style::Color::Black)
+                                .bg(ratatui::style::Color::Yellow),
                         ));
                     } else {
                         // At end of line — show a space highlight
                         spans.push(Span::styled(
                             " ",
-                            Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Yellow),
+                            Style::default()
+                                .fg(ratatui::style::Color::Black)
+                                .bg(ratatui::style::Color::Yellow),
                         ));
                     }
                     // Remaining text after cursor character
-                    let remaining = if after.len() > 0 && cursor_char_opt.is_some() {
+                    let remaining = if !after.is_empty() && cursor_char_opt.is_some() {
                         let skip = cursor_char_opt.map(|c| c.len_utf8()).unwrap_or(0);
                         &after[skip..]
                     } else {
@@ -244,19 +273,27 @@ fn build_vim_lines_with_cursor(input: &str, cursor_position: usize, mode: VimMod
                     // Get remaining on this line
                     let remaining_this_line = remaining.lines().next().unwrap_or("");
                     if !remaining_this_line.is_empty() {
-                        spans.push(Span::styled(remaining_this_line.to_string(), Style::default().fg(INPUT_TEXT_COLOR)));
+                        spans.push(Span::styled(
+                            remaining_this_line.to_string(),
+                            Style::default().fg(INPUT_TEXT_COLOR),
+                        ));
                     }
                 }
                 VimMode::Insert => {
                     // In Insert mode, show blinking block cursor
                     spans.push(Span::styled(
                         "█",
-                        Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK),
+                        Style::default()
+                            .fg(INPUT_CURSOR_COLOR)
+                            .add_modifier(Modifier::RAPID_BLINK),
                     ));
                     // Remaining text after cursor
                     let remaining = after.lines().next().unwrap_or("");
                     if !remaining.is_empty() {
-                        spans.push(Span::styled(remaining.to_string(), Style::default().fg(INPUT_TEXT_COLOR)));
+                        spans.push(Span::styled(
+                            remaining.to_string(),
+                            Style::default().fg(INPUT_TEXT_COLOR),
+                        ));
                     }
                 }
             }
@@ -272,13 +309,17 @@ fn build_vim_lines_with_cursor(input: &str, cursor_position: usize, mode: VimMod
             VimMode::Normal => {
                 spans.push(Span::styled(
                     " ",
-                    Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Yellow),
+                    Style::default()
+                        .fg(ratatui::style::Color::Black)
+                        .bg(ratatui::style::Color::Yellow),
                 ));
             }
             VimMode::Insert => {
                 spans.push(Span::styled(
                     "█",
-                    Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK),
+                    Style::default()
+                        .fg(INPUT_CURSOR_COLOR)
+                        .add_modifier(Modifier::RAPID_BLINK),
                 ));
             }
         }
@@ -299,8 +340,18 @@ fn build_vim_lines_with_cursor(input: &str, cursor_position: usize, mode: VimMod
     // If display is still empty, add at least one cursor line
     if display_lines.is_empty() {
         let cursor = match mode {
-            VimMode::Normal => Span::styled(" ", Style::default().fg(ratatui::style::Color::Black).bg(ratatui::style::Color::Yellow)),
-            VimMode::Insert => Span::styled("█", Style::default().fg(INPUT_CURSOR_COLOR).add_modifier(Modifier::RAPID_BLINK)),
+            VimMode::Normal => Span::styled(
+                " ",
+                Style::default()
+                    .fg(ratatui::style::Color::Black)
+                    .bg(ratatui::style::Color::Yellow),
+            ),
+            VimMode::Insert => Span::styled(
+                "█",
+                Style::default()
+                    .fg(INPUT_CURSOR_COLOR)
+                    .add_modifier(Modifier::RAPID_BLINK),
+            ),
         };
         display_lines.push(Line::from(cursor));
     }

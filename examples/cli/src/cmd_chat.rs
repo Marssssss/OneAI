@@ -3,7 +3,6 @@
 //! This command starts the full Terminal User Interface (TUI) for interactive
 //! agent conversations. It's the primary way to use OneAI interactively.
 
-
 use crate::config::OneaiConfig;
 
 /// Launch the TUI chat interface.
@@ -13,7 +12,12 @@ use crate::config::OneaiConfig;
 /// 2. Build App with provider + DomainPack + approval gate
 /// 3. Register domain tools
 /// 4. Launch TUI (delegates to tui::run_tui)
-pub fn cmd_chat(config: &OneaiConfig, domain_override: Option<&str>, model_override: Option<&str>, user: Option<&str>) {
+pub fn cmd_chat(
+    config: &OneaiConfig,
+    domain_override: Option<&str>,
+    model_override: Option<&str>,
+    user: Option<&str>,
+) {
     // Initialize tracing to a log file — since the TUI takes over the terminal,
     // stderr/stdout logs can't be read from the TUI. Instead, all tracing output
     // goes to ~/.oneai/logs/oneai.log (with rolling file appender).
@@ -67,11 +71,16 @@ fn init_file_logging() {
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         // If we can't create the log directory, fall back to stderr
         // (still visible if the TUI crashes before taking over the terminal)
-        eprintln!("Warning: couldn't create log directory {:?}: {}. Using stderr fallback.", log_dir, e);
+        eprintln!(
+            "Warning: couldn't create log directory {:?}: {}. Using stderr fallback.",
+            log_dir, e
+        );
         tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env()
-                .add_directive("oneai_agent=info".parse().unwrap())
-                .add_directive("oneai_provider=info".parse().unwrap()))
+            .with_env_filter(
+                EnvFilter::from_default_env()
+                    .add_directive("oneai_agent=info".parse().unwrap())
+                    .add_directive("oneai_provider=info".parse().unwrap()),
+            )
             .init();
         return;
     }
@@ -88,14 +97,26 @@ fn init_file_logging() {
         Ok(file) => {
             // Write a session separator line so each run is easy to find
             use std::io::Write;
-            let _ = writeln!(&file, "\n═══════════════════════════════════════════════════════════════");
-            let _ = writeln!(&file, "OneAI session started at {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"));
-            let _ = writeln!(&file, "═══════════════════════════════════════════════════════════════\n");
+            let _ = writeln!(
+                &file,
+                "\n═══════════════════════════════════════════════════════════════"
+            );
+            let _ = writeln!(
+                &file,
+                "OneAI session started at {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            );
+            let _ = writeln!(
+                &file,
+                "═══════════════════════════════════════════════════════════════\n"
+            );
 
             tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::from_default_env()
-                    .add_directive("oneai_agent=info".parse().unwrap())
-                    .add_directive("oneai_provider=info".parse().unwrap()))
+                .with_env_filter(
+                    EnvFilter::from_default_env()
+                        .add_directive("oneai_agent=info".parse().unwrap())
+                        .add_directive("oneai_provider=info".parse().unwrap()),
+                )
                 .with_writer(file)
                 .with_ansi(false) // No ANSI colors in log file
                 .init();
@@ -104,11 +125,16 @@ fn init_file_logging() {
             eprintln!("   (Logs are written to this file since TUI occupies the terminal)");
         }
         Err(e) => {
-            eprintln!("Warning: couldn't open log file {:?}: {}. Using stderr fallback.", log_file_path, e);
+            eprintln!(
+                "Warning: couldn't open log file {:?}: {}. Using stderr fallback.",
+                log_file_path, e
+            );
             tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::from_default_env()
-                    .add_directive("oneai_agent=info".parse().unwrap())
-                .add_directive("oneai_provider=info".parse().unwrap()))
+                .with_env_filter(
+                    EnvFilter::from_default_env()
+                        .add_directive("oneai_agent=info".parse().unwrap())
+                        .add_directive("oneai_provider=info".parse().unwrap()),
+                )
                 .init();
         }
     }

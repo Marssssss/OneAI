@@ -24,15 +24,24 @@ pub fn cmd_config_show() {
     println!("🔧 Provider:");
     println!("   model: {}", config.provider.model);
     if config.provider.api_key.is_some() {
-        println!("   api_key: {}***{}",
-            &config.provider.api_key.as_ref().unwrap()[..3.min(config.provider.api_key.as_ref().unwrap().len())],
-            if config.provider.api_key.as_ref().unwrap().len() > 3 { "" } else { "" }
+        println!(
+            "   api_key: {}***{}",
+            &config.provider.api_key.as_ref().unwrap()
+                [..3.min(config.provider.api_key.as_ref().unwrap().len())],
+            if config.provider.api_key.as_ref().unwrap().len() > 3 {
+                ""
+            } else {
+                ""
+            }
         );
     } else {
         println!("   api_key: (not set)");
     }
     if config.provider.base_url.is_some() {
-        println!("   base_url: {}", config.provider.base_url.as_ref().unwrap());
+        println!(
+            "   base_url: {}",
+            config.provider.base_url.as_ref().unwrap()
+        );
     } else {
         println!("   base_url: (default — OpenAI)");
     }

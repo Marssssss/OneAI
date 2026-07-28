@@ -14,7 +14,9 @@ use oneai_agent::group_chat::{
     GroupChatConfig, GroupChatMemberSpec, GroupChatObserver, GroupChatPersistence,
     GroupChatResources, GroupChatSession, TurnPolicy,
 };
-use oneai_agent::{AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind, ToolCallRequest};
+use oneai_agent::{
+    AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind, ToolCallRequest,
+};
 use oneai_core::error::Result;
 use oneai_core::Conversation;
 
@@ -97,12 +99,16 @@ pub struct OneAiGroupChatSession {
 
 /// Build an `Arc<dyn LlmProvider>` from a foreign `AgentSpecView` — mirrors
 /// `OneAIAppBuilder::provider_config` so each member can use a different model.
-fn build_member_provider(spec: &AgentSpecView) -> std::result::Result<Arc<dyn oneai_core::traits::LlmProvider>, OneAIErrorView> {
+fn build_member_provider(
+    spec: &AgentSpecView,
+) -> std::result::Result<Arc<dyn oneai_core::traits::LlmProvider>, OneAIErrorView> {
     let provider: Arc<dyn oneai_core::traits::LlmProvider> = match spec.kind.as_str() {
         "openai" => {
             let config = oneai_core::ModelConfig::openai_compatible(
                 spec.api_key.clone().unwrap_or_default(),
-                spec.base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                spec.base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
                 spec.model.clone(),
             );
             Arc::new(oneai_provider::OpenAIProvider::new(config))
@@ -130,7 +136,10 @@ fn build_member_provider(spec: &AgentSpecView) -> std::result::Result<Arc<dyn on
         }
         other => {
             return Err(OneAIErrorView::Config {
-                message: format!("Unknown provider kind '{}' for member '{}'; expected openai/anthropic/ollama", other, spec.id),
+                message: format!(
+                    "Unknown provider kind '{}' for member '{}'; expected openai/anthropic/ollama",
+                    other, spec.id
+                ),
             });
         }
     };
@@ -191,15 +200,19 @@ impl OneAiGroupChatSession {
             opener_agent_id: scenario.opener_agent_id,
             opener_line: scenario.opener_line,
             title: scenario.title,
-            review_loop: scenario.review_loop.map(|r| oneai_agent::group_chat::ReviewLoopConfig {
-                reviewer_id: r.reviewer_id,
-                approve_marker: r.approve_marker,
-                max_rounds: r.max_rounds as usize,
-            }),
+            review_loop: scenario
+                .review_loop
+                .map(|r| oneai_agent::group_chat::ReviewLoopConfig {
+                    reviewer_id: r.reviewer_id,
+                    approve_marker: r.approve_marker,
+                    max_rounds: r.max_rounds as usize,
+                }),
         };
 
-        let session = GroupChatSession::new(config, resources)
-            .map_err(|e| OneAIErrorView::Config { message: format!("{:?}", e) })?;
+        let session =
+            GroupChatSession::new(config, resources).map_err(|e| OneAIErrorView::Config {
+                message: format!("{:?}", e),
+            })?;
 
         // Persistence via the app's memory manager (SQLite-backed when
         // sqlite_persistence_at was set; otherwise save is a no-op).
@@ -277,7 +290,9 @@ impl OneAiGroupChatSession {
     pub async fn save(&self) -> std::result::Result<(), OneAIErrorView> {
         if let Some(p) = &self.persistence {
             let conv = self.inner.conversation().await;
-            p.save_conversation(&conv).await.map_err(OneAIErrorView::from)?;
+            p.save_conversation(&conv)
+                .await
+                .map_err(OneAIErrorView::from)?;
         }
         Ok(())
     }
@@ -404,6 +419,10 @@ impl GroupChatCallbackObserver {
     /// thread, never contended).
     fn speaker_sync(&self) -> Option<String> {
         let g = self.current_speaker.lock().unwrap();
-        if g.is_empty() { None } else { Some(g.clone()) }
+        if g.is_empty() {
+            None
+        } else {
+            Some(g.clone())
+        }
     }
 }

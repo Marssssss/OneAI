@@ -198,7 +198,11 @@ impl IncrementalStreamParser {
                         let builder = ToolCallBuilder {
                             id: id.clone(),
                             name: name.clone(),
-                            args_buffer: if !args.is_empty() { args.clone() } else { String::new() },
+                            args_buffer: if !args.is_empty() {
+                                args.clone()
+                            } else {
+                                String::new()
+                            },
                             name_complete: true,
                         };
                         let is_new = !self.tool_call_builders.contains_key(id);
@@ -234,7 +238,8 @@ impl IncrementalStreamParser {
                                     tracing::warn!(
                                         "tool-call arg fragment with no matching builder \
                                          (id={:?}, current={:?}); fragment dropped",
-                                        id, self.current_tool_call_id
+                                        id,
+                                        self.current_tool_call_id
                                     );
                                 }
                             }
@@ -302,7 +307,7 @@ impl IncrementalStreamParser {
         }
 
         // Add all completed tool calls
-        for (_, builder) in &self.tool_call_builders {
+        for builder in self.tool_call_builders.values() {
             content_blocks.push(ContentBlock::ToolCall {
                 id: builder.id.clone(),
                 name: builder.name.clone(),
@@ -383,15 +388,22 @@ impl IncrementalStreamParser {
         // Emit StreamComplete with a preview of assembled content
         // (without calling finalize, which would clear buffers)
         let preview_blocks: Vec<ContentBlock> = if !self.thinking_buffer.is_empty() {
-            vec![ContentBlock::Thinking { text: self.thinking_buffer.clone() }]
+            vec![ContentBlock::Thinking {
+                text: self.thinking_buffer.clone(),
+            }]
         } else if !self.text_buffer.is_empty() {
-            vec![ContentBlock::Text { text: self.text_buffer.clone() }]
+            vec![ContentBlock::Text {
+                text: self.text_buffer.clone(),
+            }]
         } else {
-            self.tool_call_builders.values().map(|b| ContentBlock::ToolCall {
-                id: b.id.clone(),
-                name: b.name.clone(),
-                args: b.args_buffer.clone(),
-            }).collect()
+            self.tool_call_builders
+                .values()
+                .map(|b| ContentBlock::ToolCall {
+                    id: b.id.clone(),
+                    name: b.name.clone(),
+                    args: b.args_buffer.clone(),
+                })
+                .collect()
         };
         let event = StreamEvent::StreamComplete {
             assembled_content: preview_blocks,
@@ -424,11 +436,20 @@ mod tests {
     use oneai_core::{ContentBlock, InferenceStreamChunk};
 
     fn tc(id: &str, name: &str, args: &str) -> ContentBlock {
-        ContentBlock::ToolCall { id: id.to_string(), name: name.to_string(), args: args.to_string() }
+        ContentBlock::ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            args: args.to_string(),
+        }
     }
 
     fn chunk(blocks: Vec<ContentBlock>, is_final: bool) -> InferenceStreamChunk {
-        InferenceStreamChunk { content: blocks, is_final, usage: None, model: None }
+        InferenceStreamChunk {
+            content: blocks,
+            is_final,
+            usage: None,
+            model: None,
+        }
     }
 
     /// Collect the tool calls assembled by a sequence of chunks.
@@ -440,10 +461,13 @@ mod tests {
         }
         // finalize() returns the assembled content blocks
         let blocks = parser.finalize();
-        blocks.into_iter().filter_map(|b| match b {
-            ContentBlock::ToolCall { id, name, args } => Some((id, name, args)),
-            _ => None,
-        }).collect()
+        blocks
+            .into_iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolCall { id, name, args } => Some((id, name, args)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Collect ToolCallComplete events (id, name, args) in order.
@@ -452,7 +476,12 @@ mod tests {
         let mut out = Vec::new();
         for c in chunks {
             for e in parser.process_chunk(c) {
-                if let StreamEvent::ToolCallComplete { call_id, tool_name, args } = e {
+                if let StreamEvent::ToolCallComplete {
+                    call_id,
+                    tool_name,
+                    args,
+                } = e
+                {
                     out.push((call_id, tool_name, args));
                 }
             }
@@ -542,7 +571,10 @@ mod tests {
             // content_block_start: id+name, empty args
             chunk(vec![tc("call_1", "environment", "")], false),
             // content_block_stop: id+name+full args (name re-emitted)
-            chunk(vec![tc("call_1", "environment", "{\"info_type\":\"all\"}")], false),
+            chunk(
+                vec![tc("call_1", "environment", "{\"info_type\":\"all\"}")],
+                false,
+            ),
             chunk(vec![], true),
         ];
         let assembled = assemble(chunks);
@@ -559,7 +591,9 @@ mod tests {
             chunk(vec![], true),
         ] {
             for e in parser.process_chunk(c) {
-                if matches!(e, StreamEvent::ToolIntentDetected { .. }) { intent += 1; }
+                if matches!(e, StreamEvent::ToolIntentDetected { .. }) {
+                    intent += 1;
+                }
             }
         }
         assert_eq!(intent, 1, "intent should fire once per unique id");

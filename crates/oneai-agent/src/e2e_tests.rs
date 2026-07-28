@@ -18,18 +18,20 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use oneai_core::budget::{BudgetAllocation, ContextBudgetManager, TokenBudget};
 use oneai_core::{Role, ToolOutput};
-use oneai_core::budget::{TokenBudget, BudgetAllocation, ContextBudgetManager};
 
 use oneai_parser::ThreeLayerParser;
 use oneai_skill::SkillSelector;
 
-use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, AgentLoopObserver, ParadigmKind, ToolCallRequest};
+use crate::agent_loop::{
+    AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest,
+};
+use crate::context_assembler::ContextAssembler;
 use crate::mock_provider::{MockProvider, ScriptedResponse};
 use crate::mock_tool::MockTool;
-use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary, SubAgentFactoryNone};
-use crate::context_assembler::ContextAssembler;
 use crate::streaming::IncrementalStreamParser;
+use crate::sub_agent::{SubAgentFactory, SubAgentFactoryNone, SubAgentKind, SubAgentSummary};
 
 // ─── Test interaction gates ───────────────────────────────────────────────────
 
@@ -118,37 +120,71 @@ enum TestEvent {
 
 impl AgentLoopObserver for TestObserver {
     fn on_iteration_start(&self, iteration: usize, paradigm: ParadigmKind) {
-        self.events.lock().unwrap().push(TestEvent::IterationStart(iteration, paradigm));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::IterationStart(iteration, paradigm));
     }
     fn on_direct_answer(&self, text: &str) {
-        self.events.lock().unwrap().push(TestEvent::DirectAnswer(text.to_string()));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::DirectAnswer(text.to_string()));
     }
     fn on_tool_calls(&self, calls: &[ToolCallRequest]) {
-        self.events.lock().unwrap().push(TestEvent::ToolCalls(calls.to_vec()));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::ToolCalls(calls.to_vec()));
     }
     fn on_tool_result(&self, call_id: &str, tool_name: &str, output: &ToolOutput) {
-        self.events.lock().unwrap().push(TestEvent::ToolResult(call_id.to_string(), tool_name.to_string(), output.clone()));
+        self.events.lock().unwrap().push(TestEvent::ToolResult(
+            call_id.to_string(),
+            tool_name.to_string(),
+            output.clone(),
+        ));
     }
     fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
-        self.events.lock().unwrap().push(TestEvent::Delegate(task.to_string(), agent_type.clone()));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::Delegate(task.to_string(), agent_type.clone()));
     }
     fn on_delegate_complete(&self, summary: &SubAgentSummary) {
-        self.events.lock().unwrap().push(TestEvent::DelegateComplete(summary.clone()));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::DelegateComplete(summary.clone()));
     }
     fn on_paradigm_switch(&self, paradigm: ParadigmKind) {
-        self.events.lock().unwrap().push(TestEvent::ParadigmSwitch(paradigm));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::ParadigmSwitch(paradigm));
     }
     fn on_checkpoint(&self, iteration: usize) {
-        self.events.lock().unwrap().push(TestEvent::Checkpoint(iteration));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::Checkpoint(iteration));
     }
     fn on_complete(&self, result: &AgentLoopResult) {
-        self.events.lock().unwrap().push(TestEvent::Complete(result.clone()));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::Complete(result.clone()));
     }
     fn on_stream_chunk(&self, text: &str) {
-        self.events.lock().unwrap().push(TestEvent::StreamChunk(text.to_string()));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::StreamChunk(text.to_string()));
     }
     fn on_thinking(&self, text: &str) {
-        self.events.lock().unwrap().push(TestEvent::Thinking(text.to_string()));
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::Thinking(text.to_string()));
     }
 }
 
@@ -156,16 +192,19 @@ impl AgentLoopObserver for TestObserver {
 
 #[tokio::test]
 async fn e2e_scenario_1_direct_answer() {
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("The answer is 42"),
-    ]);
+    let provider =
+        MockProvider::from_script(vec![ScriptedResponse::direct_answer("The answer is 42")]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("What is the answer?").await.unwrap();
 
@@ -187,14 +226,21 @@ async fn e2e_scenario_2_single_tool_call() {
         ScriptedResponse::direct_answer("The file contains: hello world from /test.txt"),
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
-    let result = agent_loop.run("Read /test.txt and tell me what's in it").await.unwrap();
+    let result = agent_loop
+        .run("Read /test.txt and tell me what's in it")
+        .await
+        .unwrap();
 
     assert!(result.completed);
     assert!(result.final_answer.contains("hello world"));
@@ -225,23 +271,32 @@ async fn malformed_tool_args_fed_back_not_silently_dispatched() {
         ScriptedResponse::direct_answer("recovered"),
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("read /test.txt").await.unwrap();
     assert!(result.completed);
 
     // The malformed call was NOT dispatched to the tool.
     let log = read_file_log.lock().await;
-    assert!(log.is_empty(),
-        "malformed-args call must not be dispatched with empty args, got {log:?}");
+    assert!(
+        log.is_empty(),
+        "malformed-args call must not be dispatched with empty args, got {log:?}"
+    );
 
     // A feedback tool_result was injected into the conversation.
-    let feedback_injected = result.conversation.messages.iter()
+    let feedback_injected = result
+        .conversation
+        .messages
+        .iter()
         .flat_map(|m| m.content.iter())
         .any(|block| match block {
             oneai_core::ContentBlock::ToolResult { content, .. } => {
@@ -249,8 +304,10 @@ async fn malformed_tool_args_fed_back_not_silently_dispatched() {
             }
             _ => false,
         });
-    assert!(feedback_injected,
-        "expected a 'malformed arguments' tool_result feedback in the conversation");
+    assert!(
+        feedback_injected,
+        "expected a 'malformed arguments' tool_result feedback in the conversation"
+    );
 }
 
 #[tokio::test]
@@ -272,19 +329,27 @@ async fn malformed_args_fuzzy_repaired_then_dispatched() {
         ScriptedResponse::direct_answer("done"),
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("read /test.txt").await.unwrap();
     assert!(result.completed);
 
     // The repaired call WAS dispatched to the tool.
     let log = read_file_log.lock().await;
-    assert_eq!(log.len(), 1, "fuzzy-repaired call must be dispatched, got {log:?}");
+    assert_eq!(
+        log.len(),
+        1,
+        "fuzzy-repaired call must be dispatched, got {log:?}"
+    );
     assert_eq!(log[0].args["path"], "/test.txt");
 }
 
@@ -330,7 +395,9 @@ async fn context_manager_trims_oversized_request_before_inference() {
     };
     let cm = ContextManager::new(
         Arc::new(counter),
-        ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 2 },
+        ContextTrimmingStrategy::TruncateOldest {
+            keep_recent_turns: 2,
+        },
     );
     // Register the strategy on the ContextManager profile too (trim_for_model
     // reads trimming_strategy from here).
@@ -341,28 +408,45 @@ async fn context_manager_trims_oversized_request_before_inference() {
             400,
             100,
             0.8,
-            ContextTrimmingStrategy::TruncateOldest { keep_recent_turns: 2 },
+            ContextTrimmingStrategy::TruncateOldest {
+                keep_recent_turns: 2,
+            },
         ));
         Arc::new(cm)
     };
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        context_manager: Some(cm),
-        hard_max_iterations: Some(20),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            context_manager: Some(cm),
+            hard_max_iterations: Some(20),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("read several files").await.unwrap();
-    assert!(result.completed, "run must complete; got: {:?}", result.final_answer);
+    assert!(
+        result.completed,
+        "run must complete; got: {:?}",
+        result.final_answer
+    );
 
     // Inspect the inference requests the provider actually received.
     let calls = call_log.lock().await.clone();
-    assert!(calls.len() >= 2, "expected multiple inference calls, got {}", calls.len());
+    assert!(
+        calls.len() >= 2,
+        "expected multiple inference calls, got {}",
+        calls.len()
+    );
 
     // The durable log accumulated many messages (4 tool calls + results).
     let durable_len = result.conversation.messages.len();
-    assert!(durable_len > 6, "durable log should have accumulated many messages, got {durable_len}");
+    assert!(
+        durable_len > 6,
+        "durable log should have accumulated many messages, got {durable_len}"
+    );
 
     // The LAST inference request must have been trimmed to fit the window —
     // far fewer messages than the durable log. TruncateOldest keeps system +
@@ -376,12 +460,19 @@ async fn context_manager_trims_oversized_request_before_inference() {
     );
     // Direct proof the TruncateOldest path ran: it appends a
     // "[Context trimmed: ...]" system marker when it actually drops messages.
-    let trimmed_marker_present = calls.last().unwrap()
-        .request.conversation.messages.iter()
+    let trimmed_marker_present = calls
+        .last()
+        .unwrap()
+        .request
+        .conversation
+        .messages
+        .iter()
         .any(|m| m.text_content().contains("Context trimmed"));
-    assert!(trimmed_marker_present,
+    assert!(
+        trimmed_marker_present,
         "expected the TruncateOldest '[Context trimmed]' marker in the last request — \
-         ContextManager.trim_for_model did not run");
+         ContextManager.trim_for_model did not run"
+    );
 }
 
 // ─── Token-budget termination guardrail ─────────────────────────────────────
@@ -397,29 +488,44 @@ async fn token_budget_terminates_run_before_iteration_cap() {
     // Script more tool_calls than the budget allows — the budget must bind
     // before the queue exhausts (MockProvider returns a default DirectAnswer
     // on queue exhaustion, which would mask the budget termination).
-    let script: Vec<_> = (0..8).map(|_| {
-        ScriptedResponse::tool_call("read_file", serde_json::json!({"path": "/test.txt"}))
-    }).collect();
+    let script: Vec<_> = (0..8)
+        .map(|_| ScriptedResponse::tool_call("read_file", serde_json::json!({"path": "/test.txt"})))
+        .collect();
     let provider = MockProvider::from_script(script);
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(50), // high — budget must be the binding constraint
-        token_budget: Some(oneai_core::budget::TokenBudget::new(500)), // 500 / 230-per-iter ≈ 2 iters
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(50), // high — budget must be the binding constraint
+            token_budget: Some(oneai_core::budget::TokenBudget::new(500)), // 500 / 230-per-iter ≈ 2 iters
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("read /test.txt repeatedly").await.unwrap();
 
     // Budget exhausted, not natural completion.
-    assert!(!result.completed, "run must terminate on budget exhaustion, not complete");
+    assert!(
+        !result.completed,
+        "run must terminate on budget exhaustion, not complete"
+    );
     // A clear budget-exhausted note was surfaced (not a silent empty result).
-    assert!(result.final_answer.contains("budget of 500 tokens exhausted"),
-        "expected budget-exhausted note, got: {}", result.final_answer);
+    assert!(
+        result
+            .final_answer
+            .contains("budget of 500 tokens exhausted"),
+        "expected budget-exhausted note, got: {}",
+        result.final_answer
+    );
     // Budget bound well before the iteration cap.
-    assert!(result.iterations <= 3,
-        "budget should bind by ~3 iters (500 tokens / 230 per iter), got {}", result.iterations);
+    assert!(
+        result.iterations <= 3,
+        "budget should bind by ~3 iters (500 tokens / 230 per iter), got {}",
+        result.iterations
+    );
 }
 
 // ─── Scenario 3: Multi-step tool calls ───────────────────────────────────────
@@ -433,16 +539,23 @@ async fn e2e_scenario_3_multi_tool_calls() {
 
     let provider = MockProvider::from_script(vec![
         ScriptedResponse::tool_call("read_file", serde_json::json!({"path": "/test.rs"})),
-        ScriptedResponse::tool_call("edit_file", serde_json::json!({"path": "/test.rs", "changes": "add safety check"})),
+        ScriptedResponse::tool_call(
+            "edit_file",
+            serde_json::json!({"path": "/test.rs", "changes": "add safety check"}),
+        ),
         ScriptedResponse::direct_answer("I've fixed the bug in /test.rs"),
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file), Arc::new(edit_file)], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file), Arc::new(edit_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("Fix the bug in /test.rs").await.unwrap();
 
@@ -466,32 +579,47 @@ async fn e2e_scenario_4_paradigm_switch() {
         ScriptedResponse::direct_answer("Plan: step 1 → step 2 → step 3"),
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let observer = TestObserver {
         events: Arc::new(Mutex::new(Vec::new())),
     };
 
-    let result = agent_loop.run_with_observer("Plan the implementation", &observer).await.unwrap();
+    let result = agent_loop
+        .run_with_observer("Plan the implementation", &observer)
+        .await
+        .unwrap();
 
     assert!(result.completed);
     assert_eq!(result.active_paradigm, ParadigmKind::Plan);
 
     // Verify observer received paradigm switch event
     let events = observer.events.lock().unwrap();
-    let paradigm_switches = events.iter().filter(|e| matches!(e, TestEvent::ParadigmSwitch(ParadigmKind::Plan))).count();
+    let paradigm_switches = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::ParadigmSwitch(ParadigmKind::Plan)))
+        .count();
     assert_eq!(paradigm_switches, 1);
 
     // Verify conversation contains Plan paradigm system prompt
-    let has_plan_prompt = result.conversation.messages.iter().any(|m| {
-        m.role == Role::System && m.text_content().contains("planning agent")
-    });
-    assert!(has_plan_prompt, "Conversation should contain Plan paradigm system prompt");
+    let has_plan_prompt = result
+        .conversation
+        .messages
+        .iter()
+        .any(|m| m.role == Role::System && m.text_content().contains("planning agent"));
+    assert!(
+        has_plan_prompt,
+        "Conversation should contain Plan paradigm system prompt"
+    );
 }
 
 // ─── Scenario 5: Sub-agent delegation ─────────────────────────────────────────
@@ -501,7 +629,11 @@ struct MockSubAgentFactory;
 
 #[async_trait::async_trait]
 impl SubAgentFactory for MockSubAgentFactory {
-    async fn create(&self, kind: SubAgentKind, budget: TokenBudget) -> oneai_core::error::Result<Box<dyn crate::sub_agent::SubAgent>> {
+    async fn create(
+        &self,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+    ) -> oneai_core::error::Result<Box<dyn crate::sub_agent::SubAgent>> {
         Ok(Box::new(MockSubAgent { kind, budget }))
     }
     fn available_kinds(&self) -> Vec<SubAgentKind> {
@@ -529,8 +661,12 @@ impl crate::sub_agent::SubAgent for MockSubAgent {
             tokens_used: 3000,
         })
     }
-    fn kind(&self) -> &SubAgentKind { &self.kind }
-    fn budget(&self) -> &TokenBudget { &self.budget }
+    fn kind(&self) -> &SubAgentKind {
+        &self.kind
+    }
+    fn budget(&self) -> &TokenBudget {
+        &self.budget
+    }
 }
 
 #[tokio::test]
@@ -569,7 +705,10 @@ async fn e2e_scenario_5_sub_agent_delegation() {
         events: Arc::new(Mutex::new(Vec::new())),
     };
 
-    let result = agent_loop.run_with_observer("Search for bugs", &observer).await.unwrap();
+    let result = agent_loop
+        .run_with_observer("Search for bugs", &observer)
+        .await
+        .unwrap();
 
     assert!(result.completed);
     assert!(!result.sub_agent_results.is_empty());
@@ -577,7 +716,10 @@ async fn e2e_scenario_5_sub_agent_delegation() {
 
     // Verify observer received delegate event
     let events = observer.events.lock().unwrap();
-    let delegate_events = events.iter().filter(|e| matches!(e, TestEvent::Delegate(_, SubAgentKind::Explore))).count();
+    let delegate_events = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::Delegate(_, SubAgentKind::Explore)))
+        .count();
     assert_eq!(delegate_events, 1);
 
     // Verify observer also received the completion callback pairing with the
@@ -586,7 +728,10 @@ async fn e2e_scenario_5_sub_agent_delegation() {
         .iter()
         .filter(|e| matches!(e, TestEvent::DelegateComplete(s) if s.agent_kind == SubAgentKind::Explore && s.summary.contains("Explored")))
         .count();
-    assert_eq!(complete_events, 1, "expected exactly one DelegateComplete event for the Explore sub-agent");
+    assert_eq!(
+        complete_events, 1,
+        "expected exactly one DelegateComplete event for the Explore sub-agent"
+    );
 }
 
 // ─── Scenario 5b/5c: Parallel + dependency-aware multi-delegation ────────────
@@ -617,13 +762,21 @@ impl RecordingSubAgentFactory {
             runs: Arc::new(Mutex::new(Vec::new())),
         }
     }
-    fn peak(&self) -> usize { self.peak.load(Ordering::SeqCst) }
-    fn runs(&self) -> Vec<(String, String)> { self.runs.lock().unwrap().clone() }
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+    fn runs(&self) -> Vec<(String, String)> {
+        self.runs.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
 impl SubAgentFactory for RecordingSubAgentFactory {
-    async fn create(&self, kind: SubAgentKind, _budget: TokenBudget) -> oneai_core::error::Result<Box<dyn crate::sub_agent::SubAgent>> {
+    async fn create(
+        &self,
+        kind: SubAgentKind,
+        _budget: TokenBudget,
+    ) -> oneai_core::error::Result<Box<dyn crate::sub_agent::SubAgent>> {
         Ok(Box::new(RecordingSubAgent {
             kind,
             active: self.active.clone(),
@@ -661,7 +814,10 @@ impl crate::sub_agent::SubAgent for RecordingSubAgent {
         // Update peak via CAS loop.
         let mut observed_peak = self.peak.load(Ordering::SeqCst);
         while cur > observed_peak {
-            match self.peak.compare_exchange(observed_peak, cur, Ordering::SeqCst, Ordering::SeqCst) {
+            match self
+                .peak
+                .compare_exchange(observed_peak, cur, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 Ok(_) => break,
                 Err(v) => observed_peak = v,
             }
@@ -679,18 +835,20 @@ impl crate::sub_agent::SubAgent for RecordingSubAgent {
             tokens_used: 1000,
         })
     }
-    fn kind(&self) -> &SubAgentKind { &self.kind }
+    fn kind(&self) -> &SubAgentKind {
+        &self.kind
+    }
     fn budget(&self) -> &TokenBudget {
-        static BUDGET: TokenBudget = TokenBudget { total: 5000, consumed: 0 };
+        static BUDGET: TokenBudget = TokenBudget {
+            total: 5000,
+            consumed: 0,
+        };
         &BUDGET
     }
 }
 
 /// Helper: build an AgentLoop wired to a given sub-agent factory.
-fn build_delegating_loop(
-    provider: MockProvider,
-    factory: Arc<dyn SubAgentFactory>,
-) -> AgentLoop {
+fn build_delegating_loop(provider: MockProvider, factory: Arc<dyn SubAgentFactory>) -> AgentLoop {
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
         Arc::new(tokio::sync::RwLock::new(HashMap::new()));
     AgentLoop::new(
@@ -743,11 +901,24 @@ async fn e2e_parallel_delegation() {
     assert!(result.completed);
 
     let events = observer.events.lock().unwrap();
-    let delegate_events = events.iter().filter(|e| matches!(e, TestEvent::Delegate(_, _))).count();
-    assert_eq!(delegate_events, 3, "expected 3 Delegate events (one per task)");
-    let complete_events = events.iter().filter(|e| matches!(e, TestEvent::DelegateComplete(_))).count();
+    let delegate_events = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::Delegate(_, _)))
+        .count();
+    assert_eq!(
+        delegate_events, 3,
+        "expected 3 Delegate events (one per task)"
+    );
+    let complete_events = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::DelegateComplete(_)))
+        .count();
     assert_eq!(complete_events, 3, "expected 3 DelegateComplete events");
-    assert_eq!(result.sub_agent_results.len(), 3, "all 3 summaries fed back");
+    assert_eq!(
+        result.sub_agent_results.len(),
+        3,
+        "all 3 summaries fed back"
+    );
 
     // The crux of parallelism: with 3 independent tasks, at least 2 must be
     // active at the same instant. A serial implementation would peak at 1.
@@ -824,7 +995,6 @@ async fn e2e_dependency_cycle_errors() {
     );
 }
 
-
 // ─── Scenario 6: Approval gate — tool denied ──────────────────────────────────
 
 #[tokio::test]
@@ -832,14 +1002,18 @@ async fn e2e_scenario_6_approval_deny() {
     let shell_tool = MockTool::shell_mock();
     let shell_log = shell_tool.call_log();
 
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::tool_call("shell", serde_json::json!({"command": "rm -rf /"})),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::tool_call(
+        "shell",
+        serde_json::json!({"command": "rm -rf /"}),
+    )]);
 
     // Use BlockingApprovalGate — always denies Full-permission tools
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
         let mut map = HashMap::new();
-        map.insert("shell".to_string(), Arc::new(shell_tool) as Arc<dyn oneai_core::traits::Tool>);
+        map.insert(
+            "shell".to_string(),
+            Arc::new(shell_tool) as Arc<dyn oneai_core::traits::Tool>,
+        );
         Arc::new(tokio::sync::RwLock::new(map))
     };
 
@@ -878,28 +1052,35 @@ async fn e2e_scenario_6_approval_deny() {
 
 #[tokio::test]
 async fn e2e_scenario_7_streaming() {
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("The answer is streaming"),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer(
+        "The answer is streaming",
+    )]);
 
     // Streaming mode works but the final answer comes from the assembled response
     // The MockProvider's streaming sends complete blocks per chunk, which the
     // IncrementalStreamParser processes differently from real SSE streams.
     // For a complete streaming E2E, we verify the loop completes and
     // observer receives stream chunks.
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        use_streaming: true,
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            use_streaming: true,
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let observer = TestObserver {
         events: Arc::new(Mutex::new(Vec::new())),
     };
 
-    let result = agent_loop.run_with_observer("What is the answer?", &observer).await.unwrap();
+    let result = agent_loop
+        .run_with_observer("What is the answer?", &observer)
+        .await
+        .unwrap();
 
     assert!(result.completed);
     // The final answer is assembled from the streaming response.
@@ -909,8 +1090,14 @@ async fn e2e_scenario_7_streaming() {
 
     // Verify the loop ran — observer should have received events
     let events = observer.events.lock().unwrap();
-    let iteration_starts = events.iter().filter(|e| matches!(e, TestEvent::IterationStart(_, _))).count();
-    assert!(iteration_starts >= 1, "Observer should receive at least 1 iteration start");
+    let iteration_starts = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::IterationStart(_, _)))
+        .count();
+    assert!(
+        iteration_starts >= 1,
+        "Observer should receive at least 1 iteration start"
+    );
 }
 
 // ─── Scenario 8: Error recovery ──────────────────────────────────────────────
@@ -923,12 +1110,17 @@ async fn e2e_scenario_8_error_recovery() {
 
     let provider = MockProvider::from_script(vec![
         ScriptedResponse::tool_call("shell", serde_json::json!({"command": "timeout_command"})),
-        ScriptedResponse::direct_answer("The command timed out, but I have an alternative approach"),
+        ScriptedResponse::direct_answer(
+            "The command timed out, but I have an alternative approach",
+        ),
     ]);
 
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
         let mut map = HashMap::new();
-        map.insert("shell".to_string(), Arc::new(shell_tool) as Arc<dyn oneai_core::traits::Tool>);
+        map.insert(
+            "shell".to_string(),
+            Arc::new(shell_tool) as Arc<dyn oneai_core::traits::Tool>,
+        );
         Arc::new(tokio::sync::RwLock::new(map))
     };
 
@@ -964,30 +1156,34 @@ async fn e2e_scenario_8_error_recovery() {
     assert_eq!(shell_log.lock().await.len(), 1);
 
     // The final answer should mention the error or alternative
-    assert!(result.final_answer.contains("timed out") || result.final_answer.contains("alternative"));
+    assert!(
+        result.final_answer.contains("timed out") || result.final_answer.contains("alternative")
+    );
 }
 
 // ─── Additional: Thinking then answer ──────────────────────────────────────────
 
 #[tokio::test]
 async fn e2e_thinking_then_answer() {
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::thinking_then_answer(
-            "Let me analyze the problem...",
-            "The solution is to use pattern matching"
-        ),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::thinking_then_answer(
+        "Let me analyze the problem...",
+        "The solution is to use pattern matching",
+    )]);
 
     // With Bug 1 fix: Thinking blocks are now properly handled.
     // In non-streaming mode, thinking blocks are part of the response
     // and parse_decision extracts only text parts.
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        use_streaming: false,
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            use_streaming: false,
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("Solve the problem").await.unwrap();
 
@@ -999,33 +1195,44 @@ async fn e2e_thinking_then_answer() {
 
 #[tokio::test]
 async fn e2e_streaming_thinking() {
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::thinking_then_answer(
-            "I need to consider the constraints",
-            "The answer is 42"
-        ),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::thinking_then_answer(
+        "I need to consider the constraints",
+        "The answer is 42",
+    )]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        use_streaming: true,
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            use_streaming: true,
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let observer = TestObserver {
         events: Arc::new(Mutex::new(Vec::new())),
     };
 
-    let result = agent_loop.run_with_observer("What is the answer?", &observer).await.unwrap();
+    let result = agent_loop
+        .run_with_observer("What is the answer?", &observer)
+        .await
+        .unwrap();
 
     assert!(result.completed);
 
     // Verify that thinking fragments were received by the observer
     let events = observer.events.lock().unwrap();
-    let thinking_events = events.iter().filter(|e| matches!(e, TestEvent::Thinking(_))).count();
-    assert!(thinking_events > 0, "Observer should receive thinking events during streaming");
+    let thinking_events = events
+        .iter()
+        .filter(|e| matches!(e, TestEvent::Thinking(_)))
+        .count();
+    assert!(
+        thinking_events > 0,
+        "Observer should receive thinking events during streaming"
+    );
 }
 
 // ─── Phase 1: Lifecycle Hooks — PreToolUse deny ────────────────────────────────
@@ -1047,8 +1254,14 @@ async fn e2e_hooks_pre_tool_use_deny() {
 
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
         let mut map = HashMap::new();
-        map.insert("read_file".to_string(), Arc::new(read_file) as Arc<dyn oneai_core::traits::Tool>);
-        map.insert("shell".to_string(), Arc::new(shell_tool) as Arc<dyn oneai_core::traits::Tool>);
+        map.insert(
+            "read_file".to_string(),
+            Arc::new(read_file) as Arc<dyn oneai_core::traits::Tool>,
+        );
+        map.insert(
+            "shell".to_string(),
+            Arc::new(shell_tool) as Arc<dyn oneai_core::traits::Tool>,
+        );
         Arc::new(tokio::sync::RwLock::new(map))
     };
 
@@ -1084,7 +1297,11 @@ async fn e2e_hooks_pre_tool_use_deny() {
     // The shell tool should have been denied by the hook
     assert!(result.completed);
     // The final answer should mention the denial or the alternative approach
-    assert!(result.final_answer.contains("Denied") || result.final_answer.contains("denied") || result.completed);
+    assert!(
+        result.final_answer.contains("Denied")
+            || result.final_answer.contains("denied")
+            || result.completed
+    );
 }
 
 // ─── Phase 1: Lifecycle Hooks — Audit logging ──────────────────────────────────
@@ -1101,11 +1318,15 @@ async fn e2e_hooks_audit_log() {
         ScriptedResponse::direct_answer("The file says: test content"),
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     // Register the audit hook
     let registry_arc = agent_loop.hook_registry();
@@ -1119,7 +1340,10 @@ async fn e2e_hooks_audit_log() {
 
     // Verify audit log entries were recorded
     let log_entries = audit_hook.get_log().await;
-    assert!(log_entries.len() > 0, "Audit hook should have recorded tool call events");
+    assert!(
+        !log_entries.is_empty(),
+        "Audit hook should have recorded tool call events"
+    );
 }
 
 // ─── Phase 1: Interrupt/Resume ────────────────────────────────────────────────
@@ -1128,15 +1352,17 @@ async fn e2e_hooks_audit_log() {
 async fn e2e_interrupt_resume() {
     use oneai_core::{InterruptReason, ResumeAction, ResumeSignal};
 
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("First answer"),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer("First answer")]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        inject_skills: false,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     // Request an interrupt
     agent_loop.request_interrupt(InterruptReason::HumanFeedbackRequested {
@@ -1147,7 +1373,10 @@ async fn e2e_interrupt_resume() {
         events: Arc::new(Mutex::new(Vec::new())),
     };
 
-    let _result = agent_loop.run_with_observer("Do something", &observer).await.unwrap();
+    let _result = agent_loop
+        .run_with_observer("Do something", &observer)
+        .await
+        .unwrap();
 
     // The loop should have been interrupted
     // Since we're using MockProvider with immediate direct answer,
@@ -1155,15 +1384,19 @@ async fn e2e_interrupt_resume() {
     // depending on timing. Verify the loop handled the interrupt.
 
     // Resume with feedback
-    let new_provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("Proceeding with feedback"),
-    ]);
+    let new_provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer(
+        "Proceeding with feedback",
+    )]);
 
-    let new_agent_loop = build_test_agent_loop(new_provider, vec![], AgentLoopConfig {
-        inject_skills: false,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let new_agent_loop = build_test_agent_loop(
+        new_provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let signal = ResumeSignal {
         interrupt_id: "test".to_string(),
@@ -1175,7 +1408,10 @@ async fn e2e_interrupt_resume() {
         events: Arc::new(Mutex::new(Vec::new())),
     };
 
-    let resume_result = new_agent_loop.resume_from_interrupt(signal, &resume_observer).await.unwrap();
+    let resume_result = new_agent_loop
+        .resume_from_interrupt(signal, &resume_observer)
+        .await
+        .unwrap();
     assert!(resume_result.completed);
 }
 
@@ -1186,31 +1422,36 @@ async fn e2e_structured_output_valid() {
     use oneai_core::StructuredOutputConfig;
 
     // Provider returns valid JSON matching the schema
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer(serde_json::json!({
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer(
+        serde_json::json!({
             "answer": "42",
             "confidence": 0.95
-        }).to_string()),
-    ]);
+        })
+        .to_string(),
+    )]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        inject_skills: false,
-        structured_output: Some(StructuredOutputConfig {
-            schema: serde_json::json!({
-                "type": "object",
-                "required": ["answer"],
-                "properties": {
-                    "answer": { "type": "string" },
-                    "confidence": { "type": "number" }
-                }
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            structured_output: Some(StructuredOutputConfig {
+                schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["answer"],
+                    "properties": {
+                        "answer": { "type": "string" },
+                        "confidence": { "type": "number" }
+                    }
+                }),
+                max_retries: 2,
+                re_prompt_on_failure: true,
+                error_prompt_template: None,
             }),
-            max_retries: 2,
-            re_prompt_on_failure: true,
-            error_prompt_template: None,
-        }),
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("What is the answer?").await.unwrap();
 
@@ -1228,23 +1469,27 @@ async fn e2e_structured_output_invalid_then_valid() {
         ScriptedResponse::direct_answer(serde_json::json!({"answer": "42"}).to_string()), // Valid
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        inject_skills: false,
-        structured_output: Some(StructuredOutputConfig {
-            schema: serde_json::json!({
-                "type": "object",
-                "required": ["answer"],
-                "properties": {
-                    "answer": { "type": "string" }
-                }
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            structured_output: Some(StructuredOutputConfig {
+                schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["answer"],
+                    "properties": {
+                        "answer": { "type": "string" }
+                    }
+                }),
+                max_retries: 2,
+                re_prompt_on_failure: true,
+                error_prompt_template: None,
             }),
-            max_retries: 2,
-            re_prompt_on_failure: true,
-            error_prompt_template: None,
-        }),
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("What is the answer?").await.unwrap();
 
@@ -1262,23 +1507,32 @@ async fn e2e_structured_output_max_retries_exhausted() {
         ScriptedResponse::direct_answer("Still not JSON"),
     ]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        inject_skills: false,
-        structured_output: Some(StructuredOutputConfig {
-            schema: serde_json::json!({"type": "object", "required": ["answer"]}),
-            max_retries: 1, // Only one retry attempt
-            re_prompt_on_failure: true,
-            error_prompt_template: None,
-        }),
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            structured_output: Some(StructuredOutputConfig {
+                schema: serde_json::json!({"type": "object", "required": ["answer"]}),
+                max_retries: 1, // Only one retry attempt
+                re_prompt_on_failure: true,
+                error_prompt_template: None,
+            }),
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("What is the answer?").await.unwrap();
 
     assert!(result.completed);
     // The final answer should contain the validation failure message
-    assert!(result.final_answer.contains("StructuredOutput validation failed") || result.final_answer.contains("not valid JSON"));
+    assert!(
+        result
+            .final_answer
+            .contains("StructuredOutput validation failed")
+            || result.final_answer.contains("not valid JSON")
+    );
 }
 
 // ─── Scenario 9: Parallel sub-agent delegation with AsyncTaskRunner ──────────────
@@ -1291,8 +1545,14 @@ async fn e2e_scenario_9_parallel_sub_agent_delegation() {
     let runner = AsyncTaskRunner::new(Arc::new(MockSubAgentFactory));
 
     // Submit two tasks in parallel
-    let id1 = runner.submit("Find authentication code", SubAgentKind::Explore).await.unwrap();
-    let id2 = runner.submit("Find database queries", SubAgentKind::Explore).await.unwrap();
+    let id1 = runner
+        .submit("Find authentication code", SubAgentKind::Explore)
+        .await
+        .unwrap();
+    let id2 = runner
+        .submit("Find database queries", SubAgentKind::Explore)
+        .await
+        .unwrap();
 
     // Wait for both to complete
     let r1 = runner.wait_for(&id1).await.unwrap();
@@ -1315,8 +1575,8 @@ async fn e2e_scenario_9_parallel_sub_agent_delegation() {
 
 #[tokio::test]
 async fn e2e_scenario_10_sub_agent_structured_output() {
-    use crate::sub_agent::SubAgentKind;
     use crate::structured_output::validate_json_schema;
+    use crate::sub_agent::SubAgentKind;
 
     // Create a sub-agent with structured output validation
     let schema = serde_json::json!({
@@ -1339,13 +1599,22 @@ async fn e2e_scenario_10_sub_agent_structured_output() {
 
     // Validate directly using the validate_json_schema function
     let validation = validate_json_schema(&valid_summary.summary, &schema);
-    assert!(validation.passed, "Valid JSON should pass schema validation");
+    assert!(
+        validation.passed,
+        "Valid JSON should pass schema validation"
+    );
 
     // Create a mock summary that should fail validation
     let invalid_summary_text = "This is not JSON at all";
     let invalid_validation = validate_json_schema(invalid_summary_text, &schema);
-    assert!(!invalid_validation.passed, "Non-JSON text should fail schema validation");
-    assert!(invalid_validation.errors.iter().any(|e| e.message.contains("not valid JSON")));
+    assert!(
+        !invalid_validation.passed,
+        "Non-JSON text should fail schema validation"
+    );
+    assert!(invalid_validation
+        .errors
+        .iter()
+        .any(|e| e.message.contains("not valid JSON")));
 }
 
 // ─── Scenario 11: StateGraph-driven ReAct loop ────────────────────────────────
@@ -1405,27 +1674,32 @@ async fn e2e_scenario_11_state_graph_react_loop() {
     graph.add_terminal("end".to_string());
 
     // Mock provider returns a direct answer (no tool calls)
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("The answer is 42"),
-    ]);
+    let provider =
+        MockProvider::from_script(vec![ScriptedResponse::direct_answer("The answer is 42")]);
 
-    let agent_loop = build_test_agent_loop(provider, vec![], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let observer = TestObserver {
         events: Arc::new(Mutex::new(Vec::new())),
     };
 
     // Run with StateGraph
-    let _result = agent_loop.run_with_state_graph(
-        "What is the answer?",
-        "test-react-loop",  // This won't match DomainPack → falls back to manual graph
-        &observer,
-    ).await;
+    let _result = agent_loop
+        .run_with_state_graph(
+            "What is the answer?",
+            "test-react-loop", // This won't match DomainPack → falls back to manual graph
+            &observer,
+        )
+        .await;
 
     // Since there's no StateGraph "test-react-loop" in the DomainPack,
     // the method falls back to standard AgentLoop execution.
@@ -1433,12 +1707,12 @@ async fn e2e_scenario_11_state_graph_react_loop() {
 
     // Direct test: build executor with DirectProviderActionExecutor
     let provider2 = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("The answer is 42"),  // think node
+        ScriptedResponse::direct_answer("The answer is 42"), // think node
         ScriptedResponse::direct_answer("Final answer: 42"), // end node
     ]);
 
-    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>>
-        = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
     let action_executor = Arc::new(oneai_workflow::DirectProviderActionExecutor::new(
         Arc::new(provider2),
@@ -1456,13 +1730,22 @@ async fn e2e_scenario_11_state_graph_react_loop() {
     );
 
     let mut initial_state = oneai_workflow::GraphState::new();
-    initial_state.conversation.add_message(oneai_core::Message::user("What is the answer?"));
-    initial_state.conversation.add_message(oneai_core::Message::system("You are a helpful agent."));
-    initial_state.variables.insert("task".to_string(), "What is the answer?".to_string());
+    initial_state
+        .conversation
+        .add_message(oneai_core::Message::user("What is the answer?"));
+    initial_state
+        .conversation
+        .add_message(oneai_core::Message::system("You are a helpful agent."));
+    initial_state
+        .variables
+        .insert("task".to_string(), "What is the answer?".to_string());
 
     let graph_result = executor.execute(&graph, initial_state).await.unwrap();
 
-    assert!(graph_result.completed, "StateGraph should complete successfully");
+    assert!(
+        graph_result.completed,
+        "StateGraph should complete successfully"
+    );
     assert_eq!(graph_result.terminal_node, Some("end".to_string()));
     // The end node's LlmInfer produces "Final answer: 42"
     assert!(graph_result.final_state.last_result.unwrap().contains("42"));
@@ -1470,7 +1753,10 @@ async fn e2e_scenario_11_state_graph_react_loop() {
 
     // Verify that parsed_decision was set during execution
     let decision = graph_result.final_state.parsed_decision.unwrap();
-    assert!(decision.is_final(), "Direct answer should be marked as final");
+    assert!(
+        decision.is_final(),
+        "Direct answer should be marked as final"
+    );
 }
 
 // ─── Scenario 12: StateGraph with paradigm switch ──────────────────────────────
@@ -1546,12 +1832,12 @@ async fn e2e_scenario_12_state_graph_paradigm_switch() {
     graph.add_terminal("end".to_string());
 
     // Mock provider
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("Plan: step 1 → step 2 → step 3"),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer(
+        "Plan: step 1 → step 2 → step 3",
+    )]);
 
-    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>>
-        = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
     let action_executor = Arc::new(oneai_workflow::DirectProviderActionExecutor::new(
         Arc::new(provider),
@@ -1566,14 +1852,19 @@ async fn e2e_scenario_12_state_graph_paradigm_switch() {
     );
 
     let mut initial_state = oneai_workflow::GraphState::new();
-    initial_state.conversation.add_message(oneai_core::Message::user("Plan the implementation"));
+    initial_state
+        .conversation
+        .add_message(oneai_core::Message::user("Plan the implementation"));
     initial_state.active_paradigm = Some("react".to_string());
 
     let graph_result = executor.execute(&graph, initial_state).await.unwrap();
 
     assert!(graph_result.completed);
     // After SwitchParadigm node, active_paradigm should be "plan"
-    assert_eq!(graph_result.final_state.active_paradigm, Some("plan".to_string()));
+    assert_eq!(
+        graph_result.final_state.active_paradigm,
+        Some("plan".to_string())
+    );
 }
 
 // ─── Scenario 13: StateGraph edge condition routing ──────────────────────────
@@ -1630,12 +1921,12 @@ async fn e2e_scenario_13_state_graph_decision_routing() {
     graph.add_terminal("end".to_string());
 
     // Mock provider returns a direct answer
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("The final answer is 42"),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer(
+        "The final answer is 42",
+    )]);
 
-    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>>
-        = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
     let action_executor = Arc::new(oneai_workflow::DirectProviderActionExecutor::new(
         Arc::new(provider),
@@ -1650,15 +1941,22 @@ async fn e2e_scenario_13_state_graph_decision_routing() {
     );
 
     let mut initial_state = oneai_workflow::GraphState::new();
-    initial_state.conversation.add_message(oneai_core::Message::user("What is the answer?"));
-    initial_state.conversation.add_message(oneai_core::Message::system("Answer the question."));
+    initial_state
+        .conversation
+        .add_message(oneai_core::Message::user("What is the answer?"));
+    initial_state
+        .conversation
+        .add_message(oneai_core::Message::system("Answer the question."));
 
     let graph_result = executor.execute(&graph, initial_state).await.unwrap();
 
     assert!(graph_result.completed);
     // Verify parsed_decision was set and routing worked correctly
     let decision = graph_result.final_state.parsed_decision.as_ref().unwrap();
-    assert!(decision.is_final(), "Should be DirectAnswer → IsFinalAnswer routes to end");
+    assert!(
+        decision.is_final(),
+        "Should be DirectAnswer → IsFinalAnswer routes to end"
+    );
     assert!(!decision.has_tool_calls(), "Should not have tool calls");
 }
 
@@ -1701,15 +1999,18 @@ impl oneai_core::traits::InteractionGate for MockInteractionGate {
     ) -> oneai_core::error::Result<oneai_core::InteractionResponse> {
         match req {
             oneai_core::InteractionRequest::PlanDecision { .. } => {
-                self.saw_plan_decision.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.saw_plan_decision
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(self.plan_decision_resp.clone())
             }
             oneai_core::InteractionRequest::PlanReview { .. } => {
-                self.saw_plan_review.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.saw_plan_review
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(self.plan_review_resp.clone())
             }
             oneai_core::InteractionRequest::ToolApproval { .. } => {
-                self.saw_tool_approval.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.saw_tool_approval
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(oneai_core::InteractionResponse::Proceed)
             }
             _ => Ok(oneai_core::InteractionResponse::Proceed),
@@ -1730,9 +2031,10 @@ fn build_plan_mode_loop(
     provider: MockProvider,
     gate: Arc<dyn oneai_core::traits::InteractionGate>,
 ) -> AgentLoop {
-    let tools_map = Arc::new(tokio::sync::RwLock::new(
-        std::collections::HashMap::<String, Arc<dyn oneai_core::traits::Tool>>::new(),
-    ));
+    let tools_map = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::<
+        String,
+        Arc<dyn oneai_core::traits::Tool>,
+    >::new()));
     AgentLoop::new(
         Arc::new(provider),
         tools_map,
@@ -1776,7 +2078,9 @@ async fn interaction_gate_plan_review_proceed() {
     let loop_ = build_plan_mode_loop(provider, gate.clone());
     let result = loop_.run("do the thing").await.unwrap();
 
-    assert!(gate.saw_plan_review.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(gate
+        .saw_plan_review
+        .load(std::sync::atomic::Ordering::Relaxed));
     assert!(result.final_answer.contains("executed"));
 }
 
@@ -1811,8 +2115,12 @@ async fn interaction_gate_plan_decision_choose_then_review() {
     let loop_ = build_plan_mode_loop(provider, gate.clone());
     let result = loop_.run("do it correctly").await.unwrap();
 
-    assert!(gate.saw_plan_decision.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(gate.saw_plan_review.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(gate
+        .saw_plan_decision
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(gate
+        .saw_plan_review
+        .load(std::sync::atomic::Ordering::Relaxed));
     assert!(result.final_answer.contains("done"));
 }
 
@@ -1878,8 +2186,8 @@ async fn working_state_persists_plan_and_progress() {
         ScriptedResponse::direct_answer("done"),
     ]);
     let gate = Arc::new(MockInteractionGate::new());
-    let loop_ = build_plan_mode_loop(provider, gate.clone())
-        .with_working_state_store(store.clone());
+    let loop_ =
+        build_plan_mode_loop(provider, gate.clone()).with_working_state_store(store.clone());
     let result = loop_.run("ship feature X").await.unwrap();
     assert!(result.final_answer.contains("done"));
 
@@ -1954,22 +2262,32 @@ async fn working_state_compaction_fires_and_preserves_state() {
         ScriptedResponse::direct_answer("done"),
     ]);
     let gate = Arc::new(MockInteractionGate::new());
-    let loop_ = build_plan_mode_loop(provider, gate.clone())
-        .with_working_state_store(store.clone());
+    let loop_ =
+        build_plan_mode_loop(provider, gate.clone()).with_working_state_store(store.clone());
     let result = loop_.run("big task").await.unwrap();
     assert!(result.final_answer.contains("done"));
 
-    let task_id = store.list_open_tasks("", "").await.unwrap()[0].task_id.clone();
+    let task_id = store.list_open_tasks("", "").await.unwrap()[0]
+        .task_id
+        .clone();
     let ws = store.get_task(&task_id).await.unwrap().unwrap();
     // All 5 steps survived compaction (folded into the snapshot).
-    assert_eq!(ws.steps.len(), 5, "all steps must survive compaction; got {:?}", ws.steps);
+    assert_eq!(
+        ws.steps.len(),
+        5,
+        "all steps must survive compaction; got {:?}",
+        ws.steps
+    );
     assert_eq!(ws.goal, "big task");
 
     // The log must have been compacted — far fewer than the 6 raw events.
     // (Snapshot-in-log: 1 snapshot + 1 tail = 2.)
     let log_path = tmp.path().join("tasks").join(format!("{}.jsonl", task_id));
-    let line_count = std::fs::read_to_string(&log_path).unwrap().lines()
-        .filter(|l| !l.trim().is_empty()).count();
+    let line_count = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
     assert!(
         line_count <= 3,
         "compaction should have shrunk the log; got {line_count} lines"
@@ -1984,9 +2302,7 @@ async fn working_state_compaction_fires_and_preserves_state() {
 /// Helper: build a non-plan-mode AgentLoop, returning a cloned handle to the
 /// MockProvider so the test can inspect the recorded InferenceRequest (and
 /// the tool definitions that were sent to the model).
-fn build_meta_tool_loop(
-    provider: MockProvider,
-) -> (AgentLoop, Arc<MockProvider>) {
+fn build_meta_tool_loop(provider: MockProvider) -> (AgentLoop, Arc<MockProvider>) {
     let provider_arc = Arc::new(provider);
     let handle = Arc::clone(&provider_arc);
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
@@ -2031,27 +2347,34 @@ fn build_meta_tool_loop(
 /// non-mock providers.
 #[tokio::test]
 async fn e2e_meta_tools_injected_in_normal_mode() {
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("done"),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer("done")]);
     let (loop_, provider_handle) = build_meta_tool_loop(provider);
 
     let observer = TestObserver {
         events: Arc::new(Mutex::new(Vec::new())),
     };
-    let _result = loop_.run_with_observer("do something", &observer).await.unwrap();
+    let _result = loop_
+        .run_with_observer("do something", &observer)
+        .await
+        .unwrap();
 
     let log = provider_handle.call_log().await;
     assert!(!log.is_empty(), "at least one inference call expected");
-    let sent_tools: Vec<String> = log[0].request.tools.iter()
-        .map(|d| d.name.clone()).collect();
+    let sent_tools: Vec<String> = log[0]
+        .request
+        .tools
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
     assert!(
         sent_tools.iter().any(|n| n == "delegate"),
-        "delegate meta-tool must be injected; got: {:?}", sent_tools
+        "delegate meta-tool must be injected; got: {:?}",
+        sent_tools
     );
     assert!(
         sent_tools.iter().any(|n| n == "switch_paradigm"),
-        "switch_paradigm meta-tool must be injected; got: {:?}", sent_tools
+        "switch_paradigm meta-tool must be injected; got: {:?}",
+        sent_tools
     );
 }
 
@@ -2102,20 +2425,27 @@ async fn e2e_meta_tools_not_injected_in_plan_mode() {
 
     let log = provider_handle.call_log().await;
     assert!(!log.is_empty(), "at least one inference call expected");
-    let sent_tools: Vec<String> = log[0].request.tools.iter()
-        .map(|d| d.name.clone()).collect();
+    let sent_tools: Vec<String> = log[0]
+        .request
+        .tools
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
     assert!(
         !sent_tools.iter().any(|n| n == "delegate"),
-        "delegate must NOT be injected in plan mode; got: {:?}", sent_tools
+        "delegate must NOT be injected in plan mode; got: {:?}",
+        sent_tools
     );
     assert!(
         !sent_tools.iter().any(|n| n == "switch_paradigm"),
-        "switch_paradigm must NOT be injected in plan mode; got: {:?}", sent_tools
+        "switch_paradigm must NOT be injected in plan mode; got: {:?}",
+        sent_tools
     );
     // exit_plan_mode should still be present in plan mode.
     assert!(
         sent_tools.iter().any(|n| n == "exit_plan_mode"),
-        "exit_plan_mode should be exposed in plan mode; got: {:?}", sent_tools
+        "exit_plan_mode should be exposed in plan mode; got: {:?}",
+        sent_tools
     );
 }
 
@@ -2126,7 +2456,9 @@ async fn e2e_meta_tools_not_injected_in_plan_mode() {
 struct StubMarkerSource;
 #[async_trait::async_trait]
 impl oneai_domain::ContextSource for StubMarkerSource {
-    fn key(&self) -> &str { "stub_marker" }
+    fn key(&self) -> &str {
+        "stub_marker"
+    }
     async fn load(&self) -> oneai_core::error::Result<String> {
         Ok("STUB-MARKER-CONTENT".to_string())
     }
@@ -2140,17 +2472,14 @@ impl oneai_domain::ContextSource for StubMarkerSource {
 /// normal turns. Also asserts plan_state metadata is seeded for Q3 reseed.
 #[tokio::test]
 async fn e2e_assembled_context_and_task_anchor_reach_request() {
-    let provider = MockProvider::from_script(vec![
-        ScriptedResponse::direct_answer("done"),
-    ]);
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer("done")]);
     let provider_arc = Arc::new(provider);
     let provider_handle = Arc::clone(&provider_arc) as Arc<MockProvider>;
 
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
         Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
-    let sources: Vec<Arc<dyn oneai_domain::ContextSource>> =
-        vec![Arc::new(StubMarkerSource)];
+    let sources: Vec<Arc<dyn oneai_domain::ContextSource>> = vec![Arc::new(StubMarkerSource)];
     let context_assembler = ContextAssembler::with_context_sources(sources);
 
     let loop_ = AgentLoop::new(
@@ -2174,28 +2503,47 @@ async fn e2e_assembled_context_and_task_anchor_reach_request() {
         },
     );
 
-    let result = loop_.run_with_observer(
-        "Refactor the auth module to use JWT",
-        &TestObserver { events: Arc::new(Mutex::new(Vec::new())) },
-    ).await.unwrap();
+    let result = loop_
+        .run_with_observer(
+            "Refactor the auth module to use JWT",
+            &TestObserver {
+                events: Arc::new(Mutex::new(Vec::new())),
+            },
+        )
+        .await
+        .unwrap();
     assert!(result.completed);
 
     let log = provider_handle.call_log().await;
     assert!(!log.is_empty(), "at least one inference call expected");
-    let req_text: String = log[0].request.conversation.messages.iter()
-        .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
+    let req_text: String = log[0]
+        .request
+        .conversation
+        .messages
+        .iter()
+        .map(|m| m.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Q2: the pinned TaskAnchor block (original task) is in the request.
-    assert!(req_text.contains("[Task Anchor]"),
-        "TaskAnchor block missing from request: {req_text}");
-    assert!(req_text.contains("Refactor the auth module to use JWT"),
-        "original task missing from TaskAnchor: {req_text}");
+    assert!(
+        req_text.contains("[Task Anchor]"),
+        "TaskAnchor block missing from request: {req_text}"
+    );
+    assert!(
+        req_text.contains("Refactor the auth module to use JWT"),
+        "original task missing from TaskAnchor: {req_text}"
+    );
     // The ContextSource block reaches the request on a normal turn (the
     // dropped-assembled bug would have omitted this).
-    assert!(req_text.contains("[Context: stub_marker]"),
-        "ContextSource block missing from request: {req_text}");
-    assert!(req_text.contains("STUB-MARKER-CONTENT"),
-        "ContextSource content missing from request: {req_text}");
+    assert!(
+        req_text.contains("[Context: stub_marker]"),
+        "ContextSource block missing from request: {req_text}"
+    );
+    assert!(
+        req_text.contains("STUB-MARKER-CONTENT"),
+        "ContextSource content missing from request: {req_text}"
+    );
 }
 
 // ─── Recovery: transient tool failure → real retry with backoff ───────────────
@@ -2218,7 +2566,10 @@ struct FlakyReadTool {
 
 impl FlakyReadTool {
     fn new(fail_until: usize) -> Self {
-        Self { calls: Arc::new(AtomicUsize::new(0)), fail_until }
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail_until,
+        }
     }
     fn call_count(&self) -> Arc<AtomicUsize> {
         self.calls.clone()
@@ -2227,12 +2578,18 @@ impl FlakyReadTool {
 
 #[async_trait::async_trait]
 impl oneai_core::traits::Tool for FlakyReadTool {
-    fn name(&self) -> &str { "read_file" }
-    fn description(&self) -> &str { "Read a file (flaky for testing recovery retry)" }
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn description(&self) -> &str {
+        "Read a file (flaky for testing recovery retry)"
+    }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]})
     }
-    fn risk_level(&self) -> oneai_core::RiskLevel { oneai_core::RiskLevel::Low }
+    fn risk_level(&self) -> oneai_core::RiskLevel {
+        oneai_core::RiskLevel::Low
+    }
     async fn execute(&self, _args: serde_json::Value) -> oneai_core::error::Result<ToolOutput> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if n <= self.fail_until {
@@ -2264,7 +2621,10 @@ async fn e2e_recovery_retry_re_executes_transient_failure() {
 
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
         let mut map = HashMap::new();
-        map.insert("read_file".to_string(), Arc::new(tool) as Arc<dyn oneai_core::traits::Tool>);
+        map.insert(
+            "read_file".to_string(),
+            Arc::new(tool) as Arc<dyn oneai_core::traits::Tool>,
+        );
         Arc::new(tokio::sync::RwLock::new(map))
     };
 
@@ -2297,13 +2657,22 @@ async fn e2e_recovery_retry_re_executes_transient_failure() {
 
     let result = agent_loop.run("Read the file").await.unwrap();
 
-    assert!(result.completed, "loop should complete after recovery retry succeeds");
+    assert!(
+        result.completed,
+        "loop should complete after recovery retry succeeds"
+    );
     // 1 initial failure + 1 retry that succeeds = 2 calls. Proves the tool was
     // re-executed rather than the failure merely being announced.
-    assert_eq!(call_count.load(Ordering::SeqCst), 2,
-        "recovery should have re-executed the tool after the transient failure");
-    assert!(result.final_answer.contains("done reading"),
-        "final answer should reflect the successful retry: {}", result.final_answer);
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "recovery should have re-executed the tool after the transient failure"
+    );
+    assert!(
+        result.final_answer.contains("done reading"),
+        "final answer should reflect the successful retry: {}",
+        result.final_answer
+    );
 }
 
 // ─── gap-analysis #4: OTEL metrics actually recorded during a run ────────────
@@ -2323,24 +2692,40 @@ async fn otel_metrics_recorded_during_run() {
     ]);
     let metrics = Arc::new(oneai_trace::OtelMetricsProvider::new());
 
-    let agent_loop = build_test_agent_loop(provider, vec![Arc::new(read_file)], AgentLoopConfig {
-        inject_skills: false,
-        thinking_budget: None,
-        hard_max_iterations: Some(10),
-        metrics_provider: Some(metrics.clone()),
-        ..AgentLoopConfig::default()
-    });
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            metrics_provider: Some(metrics.clone()),
+            ..AgentLoopConfig::default()
+        },
+    );
 
     let result = agent_loop.run("read /test.txt").await.unwrap();
     assert!(result.completed, "run should complete normally");
 
     let snap = metrics.snapshot();
-    assert!(snap.inference_request_count >= 1,
-        "inference counter must move off zero: {:?}", snap);
-    assert!(snap.total_tokens_used > 0,
-        "token counter must move off zero (MockProvider returns real usage): {:?}", snap);
-    assert!(snap.tool_call_count >= 1,
-        "tool-call counter must move off zero: {:?}", snap);
-    assert!(snap.tool_success_count >= 1,
-        "successful read_file should bump tool_success_count: {:?}", snap);
+    assert!(
+        snap.inference_request_count >= 1,
+        "inference counter must move off zero: {:?}",
+        snap
+    );
+    assert!(
+        snap.total_tokens_used > 0,
+        "token counter must move off zero (MockProvider returns real usage): {:?}",
+        snap
+    );
+    assert!(
+        snap.tool_call_count >= 1,
+        "tool-call counter must move off zero: {:?}",
+        snap
+    );
+    assert!(
+        snap.tool_success_count >= 1,
+        "successful read_file should bump tool_success_count: {:?}",
+        snap
+    );
 }

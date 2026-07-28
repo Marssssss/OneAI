@@ -54,22 +54,22 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-pub mod server;
-pub mod transport;
-pub mod handler;
-pub mod router;
-pub mod plugin;
-pub mod config;
 pub mod client;
+pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod handler;
+pub mod plugin;
+pub mod router;
+pub mod server;
+pub mod transport;
 
-pub use server::*;
-pub use transport::*;
-pub use handler::*;
-pub use router::*;
-pub use plugin::*;
-pub use config::*;
 pub use client::McpClient;
+pub use config::*;
 pub use discovery::McpDiscovery;
 pub use error::{McpError, Result as McpResult};
+pub use handler::*;
+pub use plugin::*;
+pub use router::*;
+pub use server::*;
+pub use transport::*;

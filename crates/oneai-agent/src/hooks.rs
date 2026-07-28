@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use oneai_core::{HookPoint, HookResult, HookContext};
 use oneai_core::traits::LifecycleHook;
+use oneai_core::{HookContext, HookPoint, HookResult};
 
 // ─── HookRegistry ────────────────────────────────────────────────────────────
 
@@ -142,7 +142,9 @@ impl HookRegistry {
                     deny_reason = Some(reason.clone());
                     break;
                 }
-                HookResult::Modify { modified_args: args } => {
+                HookResult::Modify {
+                    modified_args: args,
+                } => {
                     // Last Modify wins — progressive modification
                     modified_args = Some(args.clone());
                 }
@@ -152,9 +154,13 @@ impl HookRegistry {
         if let Some(reason) = deny_reason {
             ResolvedHookAction::Deny { reason }
         } else if let Some(args) = modified_args {
-            ResolvedHookAction::Modify { modified_args: args }
+            ResolvedHookAction::Modify {
+                modified_args: args,
+            }
         } else {
-            ResolvedHookAction::Allow { args: original_args.clone() }
+            ResolvedHookAction::Allow {
+                args: original_args.clone(),
+            }
         }
     }
 
@@ -178,7 +184,9 @@ impl HookRegistry {
                     deny_reason = Some(reason.clone());
                     break;
                 }
-                HookResult::Modify { modified_args: args } => {
+                HookResult::Modify {
+                    modified_args: args,
+                } => {
                     modified_args = Some(args.clone());
                 }
             }
@@ -187,9 +195,13 @@ impl HookRegistry {
         if let Some(reason) = deny_reason {
             ResolvedHookAction::Deny { reason }
         } else if let Some(args) = modified_args {
-            ResolvedHookAction::Modify { modified_args: args }
+            ResolvedHookAction::Modify {
+                modified_args: args,
+            }
         } else {
-            ResolvedHookAction::Allow { args: serde_json::json!({}) }
+            ResolvedHookAction::Allow {
+                args: serde_json::json!({}),
+            }
         }
     }
 }
@@ -285,8 +297,13 @@ impl LifecycleHook for AuditLogHook {
             point: context.point.clone(),
             tool_name: context.tool_name.clone(),
             tool_args: context.tool_args.clone(),
-            tool_output_summary: context.tool_output.as_ref()
-                .map(|o| if o.success { o.content.clone() } else { o.error.clone().unwrap_or_default() }),
+            tool_output_summary: context.tool_output.as_ref().map(|o| {
+                if o.success {
+                    o.content.clone()
+                } else {
+                    o.error.clone().unwrap_or_default()
+                }
+            }),
             iteration: context.iteration,
         };
         self.log.write().await.push(entry);
@@ -361,7 +378,9 @@ impl LifecycleHook for SafetyConstraintHook {
         // Check denied patterns (substring matching)
         for (denied_tool, arg_substring) in &self.denied_patterns {
             if denied_tool == tool_name {
-                let args_str = context.tool_args.as_ref()
+                let args_str = context
+                    .tool_args
+                    .as_ref()
                     .map(|a| a.to_string())
                     .unwrap_or_default();
                 if args_str.contains(arg_substring) {
@@ -407,7 +426,9 @@ mod tests {
         async fn run(&self, _context: HookContext) -> HookResult {
             HookResult::Allow
         }
-        fn name(&self) -> &str { "always_allow" }
+        fn name(&self) -> &str {
+            "always_allow"
+        }
     }
 
     /// A test hook that always denies.
@@ -420,9 +441,13 @@ mod tests {
             vec![HookPoint::PreToolUse]
         }
         async fn run(&self, _context: HookContext) -> HookResult {
-            HookResult::Deny { reason: "test deny".to_string() }
+            HookResult::Deny {
+                reason: "test deny".to_string(),
+            }
         }
-        fn name(&self) -> &str { "always_deny" }
+        fn name(&self) -> &str {
+            "always_deny"
+        }
     }
 
     /// A test hook that modifies args.
@@ -435,9 +460,13 @@ mod tests {
             vec![HookPoint::PreToolUse]
         }
         async fn run(&self, _context: HookContext) -> HookResult {
-            HookResult::Modify { modified_args: serde_json::json!({"modified": true}) }
+            HookResult::Modify {
+                modified_args: serde_json::json!({"modified": true}),
+            }
         }
-        fn name(&self) -> &str { "modify_args" }
+        fn name(&self) -> &str {
+            "modify_args"
+        }
     }
 
     #[test]
@@ -471,12 +500,11 @@ mod tests {
     fn test_resolve_pre_tool_use_deny_overrides_allow() {
         let results = vec![
             HookResult::Allow,
-            HookResult::Deny { reason: "blocked".to_string() },
+            HookResult::Deny {
+                reason: "blocked".to_string(),
+            },
         ];
-        let action = HookRegistry::resolve_pre_tool_use_results(
-            &results,
-            &serde_json::json!({}),
-        );
+        let action = HookRegistry::resolve_pre_tool_use_results(&results, &serde_json::json!({}));
         assert!(matches!(action, ResolvedHookAction::Deny { reason: _ }));
     }
 
@@ -484,7 +512,9 @@ mod tests {
     fn test_resolve_pre_tool_use_modify_overrides_allow() {
         let results = vec![
             HookResult::Allow,
-            HookResult::Modify { modified_args: serde_json::json!({"safe": true}) },
+            HookResult::Modify {
+                modified_args: serde_json::json!({"safe": true}),
+            },
         ];
         let action = HookRegistry::resolve_pre_tool_use_results(
             &results,
@@ -501,13 +531,14 @@ mod tests {
     #[test]
     fn test_resolve_pre_tool_use_deny_overrides_modify() {
         let results = vec![
-            HookResult::Modify { modified_args: serde_json::json!({"safe": true}) },
-            HookResult::Deny { reason: "blocked".to_string() },
+            HookResult::Modify {
+                modified_args: serde_json::json!({"safe": true}),
+            },
+            HookResult::Deny {
+                reason: "blocked".to_string(),
+            },
         ];
-        let action = HookRegistry::resolve_pre_tool_use_results(
-            &results,
-            &serde_json::json!({}),
-        );
+        let action = HookRegistry::resolve_pre_tool_use_results(&results, &serde_json::json!({}));
         assert!(matches!(action, ResolvedHookAction::Deny { .. }));
     }
 

@@ -194,14 +194,20 @@ impl OtelMetricsProvider {
 
     /// Record inference latency in milliseconds (adds to histogram sum).
     pub fn record_inference_latency(&self, latency_ms: u64) {
-        self.total_inference_latency_ms.fetch_add(latency_ms, Ordering::Relaxed);
+        self.total_inference_latency_ms
+            .fetch_add(latency_ms, Ordering::Relaxed);
     }
 
     /// Record token usage (adds to counters).
     pub fn record_tokens(&self, prompt_tokens: u32, completion_tokens: u32) {
-        self.total_prompt_tokens.fetch_add(prompt_tokens as u64, Ordering::Relaxed);
-        self.total_completion_tokens.fetch_add(completion_tokens as u64, Ordering::Relaxed);
-        self.total_tokens_used.fetch_add((prompt_tokens + completion_tokens) as u64, Ordering::Relaxed);
+        self.total_prompt_tokens
+            .fetch_add(prompt_tokens as u64, Ordering::Relaxed);
+        self.total_completion_tokens
+            .fetch_add(completion_tokens as u64, Ordering::Relaxed);
+        self.total_tokens_used.fetch_add(
+            (prompt_tokens + completion_tokens) as u64,
+            Ordering::Relaxed,
+        );
     }
 
     /// Record an error (increments error_count).
@@ -226,7 +232,8 @@ impl OtelMetricsProvider {
 
     /// Record session duration in milliseconds (adds to histogram sum).
     pub fn record_session_duration(&self, duration_ms: u64) {
-        self.total_session_duration_ms.fetch_add(duration_ms, Ordering::Relaxed);
+        self.total_session_duration_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
     }
 
     /// Update STM entry count gauge.
@@ -288,21 +295,33 @@ impl OtelMetricsProvider {
     pub fn avg_inference_latency(&self) -> f64 {
         let total = self.total_inference_latency_ms.load(Ordering::Relaxed);
         let count = self.inference_request_count.load(Ordering::Relaxed);
-        if count == 0 { 0.0 } else { total as f64 / count as f64 }
+        if count == 0 {
+            0.0
+        } else {
+            total as f64 / count as f64
+        }
     }
 
     /// Compute tool success rate (0.0 to 1.0).
     pub fn tool_success_rate(&self) -> f64 {
         let total = self.tool_call_count.load(Ordering::Relaxed);
         let success = self.tool_success_count.load(Ordering::Relaxed);
-        if total == 0 { 0.0 } else { success as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            success as f64 / total as f64
+        }
     }
 
     /// Compute approval denial rate (0.0 to 1.0).
     pub fn approval_denial_rate(&self) -> f64 {
         let total = self.approval_request_count.load(Ordering::Relaxed);
         let denials = self.approval_denial_count.load(Ordering::Relaxed);
-        if total == 0 { 0.0 } else { denials as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            denials as f64 / total as f64
+        }
     }
 }
 
@@ -439,14 +458,16 @@ mod tests {
         let provider = Arc::new(OtelMetricsProvider::new());
 
         // Simulate concurrent recording from multiple threads
-        let handles: Vec<_> = (0..10).map(|i| {
-            let p = provider.clone();
-            std::thread::spawn(move || {
-                p.record_tool_call(&format!("tool_{}", i), true);
-                p.record_inference_request();
-                p.record_tokens(100, 50);
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let p = provider.clone();
+                std::thread::spawn(move || {
+                    p.record_tool_call(&format!("tool_{}", i), true);
+                    p.record_inference_request();
+                    p.record_tokens(100, 50);
+                })
             })
-        }).collect();
+            .collect();
 
         for h in handles {
             h.join().unwrap();

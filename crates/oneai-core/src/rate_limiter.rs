@@ -198,7 +198,11 @@ impl RateLimitConfig {
     }
 
     /// Add a per-provider rate limit override.
-    pub fn with_provider_limit(mut self, provider: impl Into<String>, limit: ProviderRateLimit) -> Self {
+    pub fn with_provider_limit(
+        mut self,
+        provider: impl Into<String>,
+        limit: ProviderRateLimit,
+    ) -> Self {
         self.per_provider_limits.insert(provider.into(), limit);
         self
     }
@@ -225,7 +229,10 @@ impl RateLimitConfig {
         self.per_provider_limits
             .get(provider)
             .cloned()
-            .unwrap_or(ProviderRateLimit::new(self.max_calls_per_minute, self.max_calls_per_hour))
+            .unwrap_or(ProviderRateLimit::new(
+                self.max_calls_per_minute,
+                self.max_calls_per_hour,
+            ))
     }
 }
 
@@ -300,11 +307,15 @@ impl RateLimiter for TokenWindowRateLimiter {
         let minute_calls = Self::count_minute_calls(&times, &now);
         let hour_calls = Self::count_hour_calls(&times, &now);
 
-        let minute_remaining = limits.max_calls_per_minute.saturating_sub(minute_calls as u64);
+        let minute_remaining = limits
+            .max_calls_per_minute
+            .saturating_sub(minute_calls as u64);
         let hour_remaining = limits.max_calls_per_hour.saturating_sub(hour_calls as u64);
 
         if minute_remaining > 0 && hour_remaining > 0 {
-            Ok(RateLimitStatus::allowed(minute_remaining.min(hour_remaining)))
+            Ok(RateLimitStatus::allowed(
+                minute_remaining.min(hour_remaining),
+            ))
         } else {
             // Compute wait time: either wait for minute window reset or hour window reset
             let wait_seconds = if minute_remaining == 0 {
@@ -312,13 +323,18 @@ impl RateLimiter for TokenWindowRateLimiter {
             } else {
                 3600 // Wait ~1 hour for hour window to slide
             };
-            Ok(RateLimitStatus::denied(wait_seconds, Some(now + chrono::Duration::seconds(wait_seconds as i64))))
+            Ok(RateLimitStatus::denied(
+                wait_seconds,
+                Some(now + chrono::Duration::seconds(wait_seconds as i64)),
+            ))
         }
     }
 
     async fn record_call(&self, provider: &str) -> Result<()> {
         let mut call_times = self.call_times.write().await;
-        let times = call_times.entry(provider.to_string()).or_insert_with(Vec::new);
+        let times = call_times
+            .entry(provider.to_string())
+            .or_insert_with(Vec::new);
         times.push(Utc::now());
 
         // Prune old entries (keep only last 2 hours to avoid unbounded growth)
@@ -408,8 +424,8 @@ mod tests {
 
     #[test]
     fn test_rate_limit_config_with_provider_override() {
-        let config = RateLimitConfig::new()
-            .with_provider_limit("openai", ProviderRateLimit::openai_tier1());
+        let config =
+            RateLimitConfig::new().with_provider_limit("openai", ProviderRateLimit::openai_tier1());
 
         let effective = config.effective_limits("openai");
         assert_eq!(effective.max_calls_per_minute, 500);

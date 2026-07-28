@@ -7,12 +7,10 @@
 use crate::constrained::ConstrainedDecoder;
 use crate::fallback::FallbackLoop;
 use crate::fuzzy::FuzzyJsonRepair;
-use oneai_core::{
-    ContentBlock, OneAIError, ParsedOutput, ParsingLayer,
-};
+use async_trait::async_trait;
 use oneai_core::error::ParserError;
 use oneai_core::traits::{LlmProvider, OutputParser};
-use async_trait::async_trait;
+use oneai_core::{ContentBlock, OneAIError, ParsedOutput, ParsingLayer};
 
 /// The complete 3-layer parsing defense orchestrator.
 pub struct ThreeLayerParser {
@@ -65,7 +63,10 @@ impl ThreeLayerParser {
     /// Parse tool calls from model output.
     ///
     /// Attempts to extract ContentBlock::ToolCall from the raw output.
-    pub fn parse_tool_calls(&self, raw: &str) -> std::result::Result<Vec<ContentBlock>, OneAIError> {
+    pub fn parse_tool_calls(
+        &self,
+        raw: &str,
+    ) -> std::result::Result<Vec<ContentBlock>, OneAIError> {
         // Try parsing as JSON first
         let parsed = self.fuzzy.repair_and_parse(raw)?;
 
@@ -97,7 +98,10 @@ impl ThreeLayerParser {
         }
 
         // Single function call format
-        if let Some(function) = parsed.get("function_call").or_else(|| parsed.get("tool_call")) {
+        if let Some(function) = parsed
+            .get("function_call")
+            .or_else(|| parsed.get("tool_call"))
+        {
             let id = function
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -138,10 +142,7 @@ impl OutputParser for ThreeLayerParser {
     /// here, making Layer 2 reachable on the hot path (the gap analysis found
     /// it was bypassed). Truly unrepairable args still error, which the agent
     /// loop feeds back to the model as a self-correction prompt (Layer 3).
-    fn repair_tool_args(
-        &self,
-        raw: &str,
-    ) -> std::result::Result<serde_json::Value, OneAIError> {
+    fn repair_tool_args(&self, raw: &str) -> std::result::Result<serde_json::Value, OneAIError> {
         self.fuzzy.repair_and_parse(raw)
     }
 
@@ -155,7 +156,9 @@ impl OutputParser for ThreeLayerParser {
             // Layer 1 succeeded — output is guaranteed correct at generation time
             if let Ok(_val) = serde_json::from_str::<serde_json::Value>(raw_output) {
                 return Ok(ParsedOutput {
-                    content: vec![ContentBlock::Text { text: raw_output.to_string() }],
+                    content: vec![ContentBlock::Text {
+                        text: raw_output.to_string(),
+                    }],
                     parsing_layer: ParsingLayer::ConstrainedDecoding,
                     fallback_retries: 0,
                 });
@@ -170,7 +173,9 @@ impl OutputParser for ThreeLayerParser {
                 let tool_calls = self.parse_tool_calls(raw_output).unwrap_or_default();
 
                 let content = if tool_calls.is_empty() {
-                    vec![ContentBlock::Text { text: raw_output.to_string() }]
+                    vec![ContentBlock::Text {
+                        text: raw_output.to_string(),
+                    }]
                 } else {
                     tool_calls
                 };
@@ -192,13 +197,15 @@ impl OutputParser for ThreeLayerParser {
             // The self-correction requires the original InferenceRequest context.
             // This is handled at the agent loop level, not in the parser directly.
             // For now, return the error — the agent loop will handle Layer 3.
-            return Err(OneAIError::Parser(ParserError::FuzzyRepairFailed(
-                format!("Fuzzy repair failed, Layer 3 requires agent loop context: {}", &raw_output[..raw_output.len().min(200)]),
-            )));
+            return Err(OneAIError::Parser(ParserError::FuzzyRepairFailed(format!(
+                "Fuzzy repair failed, Layer 3 requires agent loop context: {}",
+                &raw_output[..raw_output.len().min(200)]
+            ))));
         }
 
-        Err(OneAIError::Parser(ParserError::FuzzyRepairFailed(
-            format!("No provider configured for Layer 3 fallback: {}", &raw_output[..raw_output.len().min(200)]),
-        )))
+        Err(OneAIError::Parser(ParserError::FuzzyRepairFailed(format!(
+            "No provider configured for Layer 3 fallback: {}",
+            &raw_output[..raw_output.len().min(200)]
+        ))))
     }
 }

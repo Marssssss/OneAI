@@ -13,8 +13,8 @@ use oneai_core::traits::Tool;
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
 
-use crate::types::{OneAIErrorView, ProviderConfigView, EmbeddingConfigView};
 use crate::app::OneAIApp;
+use crate::types::{EmbeddingConfigView, OneAIErrorView, ProviderConfigView};
 
 /// UniFFI-exported AppBuilder wrapper.
 ///
@@ -236,7 +236,11 @@ impl OneAIAppBuilder {
         let app = builder
             .build()
             .await
-            .map(|app| Arc::new(OneAIApp { inner: Arc::new(app) }))
+            .map(|app| {
+                Arc::new(OneAIApp {
+                    inner: Arc::new(app),
+                })
+            })
             .map_err(OneAIErrorView::from)?;
         for tool in extras {
             if let Err(e) = app.inner.register_tool(tool).await {
@@ -250,7 +254,7 @@ impl OneAIAppBuilder {
 impl OneAIAppBuilder {
     /// Take the inner builder out of the mutex.
     fn take_inner(&self) -> oneai_app::AppBuilder {
-        self.inner.lock().unwrap().take().unwrap_or_else(oneai_app::AppBuilder::new)
+        self.inner.lock().unwrap().take().unwrap_or_default()
     }
 
     /// Take the extra tools (web_search/web_fetch from `default_tools`) out
@@ -289,10 +293,16 @@ mod tests {
         let builder = builder.default_parser();
         let app = builder.build().await.expect("Build should succeed");
 
-        app.inner.register_tool(Arc::new(oneai_tool::ShellTool::new())).await.unwrap();
+        app.inner
+            .register_tool(Arc::new(oneai_tool::ShellTool::new()))
+            .await
+            .unwrap();
 
         let session = app.inner.create_session();
-        let result = session.execute_tool("shell", serde_json::json!({"command": "echo test"})).await.unwrap();
+        let result = session
+            .execute_tool("shell", serde_json::json!({"command": "echo test"}))
+            .await
+            .unwrap();
         assert!(!result.success);
     }
 

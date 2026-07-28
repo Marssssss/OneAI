@@ -7,9 +7,8 @@
 //! The EvalSuiteBuilder provides a fluent API for constructing suites,
 //! mirroring the DomainPackBuilder pattern.
 
-use std::sync::Arc;
 use std::collections::HashMap;
-
+use std::sync::Arc;
 
 use crate::eval_case::EvalCase;
 use crate::eval_metric::EvalMetric;
@@ -77,7 +76,8 @@ impl EvalSuite {
 
     /// Filter cases by metadata key-value pair.
     pub fn filter_cases(&self, key: &str, value: &str) -> Vec<&EvalCase> {
-        self.cases.iter()
+        self.cases
+            .iter()
             .filter(|c| c.metadata.get(key).map(|v| v == value).unwrap_or(false))
             .collect()
     }
@@ -220,7 +220,8 @@ impl SuiteRegistry {
 
     /// List all registered suites with brief descriptions.
     pub fn list(&self) -> Vec<(&str, &str)> {
-        self.suites.values()
+        self.suites
+            .values()
             .map(|s| (s.name.as_str(), s.description.as_str()))
             .collect()
     }
@@ -240,8 +241,8 @@ impl Default for SuiteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval_case::ExpectedOutput;
     use crate::builtin_metrics::ExactMatchMetric;
+    use crate::eval_case::ExpectedOutput;
 
     #[test]
     fn test_eval_suite_builder() {
@@ -263,9 +264,21 @@ mod tests {
     #[test]
     fn test_eval_suite_filter_cases() {
         let suite = EvalSuiteBuilder::new("test")
-            .case(EvalCase::new("a", ExpectedOutput::exact("1")).difficulty(1).domain("math"))
-            .case(EvalCase::new("b", ExpectedOutput::exact("2")).difficulty(3).domain("coding"))
-            .case(EvalCase::new("c", ExpectedOutput::exact("3")).difficulty(5).domain("math"))
+            .case(
+                EvalCase::new("a", ExpectedOutput::exact("1"))
+                    .difficulty(1)
+                    .domain("math"),
+            )
+            .case(
+                EvalCase::new("b", ExpectedOutput::exact("2"))
+                    .difficulty(3)
+                    .domain("coding"),
+            )
+            .case(
+                EvalCase::new("c", ExpectedOutput::exact("3"))
+                    .difficulty(5)
+                    .domain("math"),
+            )
             .build();
 
         let math_cases = suite.filter_cases("domain", "math");

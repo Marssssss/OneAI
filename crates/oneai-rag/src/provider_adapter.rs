@@ -80,7 +80,10 @@ impl EnvProbe {
 
     /// Read an env var's value (empty values are treated as absent).
     pub fn env_get(&self, name: &str) -> Option<&str> {
-        self.env.get(name).filter(|v| !v.is_empty()).map(|v| v.as_str())
+        self.env
+            .get(name)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.as_str())
     }
 
     /// Whether a non-empty env var is present.
@@ -130,17 +133,47 @@ pub fn should_continue(err: &OneAIError) -> bool {
     let msg = err.to_string().to_lowercase();
     const PATTERNS: &[&str] = &[
         // service-side retryable
-        "429", "rate limit", "rate_limit", "rate-limit", "too many requests",
-        "resource has been exhausted", "tokens per day", "quota",
-        "500", "502", "503", "504", "505", "cloudflare",
+        "429",
+        "rate limit",
+        "rate_limit",
+        "rate-limit",
+        "too many requests",
+        "resource has been exhausted",
+        "tokens per day",
+        "quota",
+        "500",
+        "502",
+        "503",
+        "504",
+        "505",
+        "cloudflare",
         // transport
-        "econnreset", "econnrefused", "etimedout", "epipe", "und_err",
-        "socket hang up", "socket terminated", "connection reset",
-        "connection refused", "connection aborted", "connection timed out",
-        "ehostunreach", "enetunreach", "econnaborted", "eai_again",
-        "timed out", "network error", "fetch failed",
+        "econnreset",
+        "econnrefused",
+        "etimedout",
+        "epipe",
+        "und_err",
+        "socket hang up",
+        "socket terminated",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "connection timed out",
+        "ehostunreach",
+        "enetunreach",
+        "econnaborted",
+        "eai_again",
+        "timed out",
+        "network error",
+        "fetch failed",
         // auth / missing key → try the next provider instead of hard-failing
-        "401", "403", "unauthorized", "forbidden", "api key", "apikey", "missing",
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "api key",
+        "apikey",
+        "missing",
     ];
     PATTERNS.iter().any(|p| msg.contains(p))
 }
@@ -176,7 +209,11 @@ pub trait EmbeddingProviderAdapter: Send + Sync {
 
     /// Build the service. `config.api_key` is resolved by the caller
     /// (config → env fallback) before this is called.
-    fn create(&self, config: &EmbeddingConfig, probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>>;
+    fn create(
+        &self,
+        config: &EmbeddingConfig,
+        probe: &EnvProbe,
+    ) -> Result<Arc<dyn EmbeddingService>>;
 }
 
 // Resolve the effective model: explicit override → adapter default.
@@ -201,7 +238,11 @@ fn resolve_api_key(config: &EmbeddingConfig, env_var: &str, probe: &EnvProbe) ->
 /// Whether a non-empty api key is available for a key-requiring provider
 /// (explicit config field, or the provider's env var).
 fn key_available(config: &EmbeddingConfig, env_var: &str, probe: &EnvProbe) -> bool {
-    config.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false)
+    config
+        .api_key
+        .as_deref()
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
         || probe.env_key_present(env_var)
 }
 
@@ -222,10 +263,18 @@ pub struct BgeM3Adapter;
 pub struct OpenAiCompatAdapter;
 
 impl EmbeddingProviderAdapter for OpenAiAdapter {
-    fn id(&self) -> EmbeddingProvider { EmbeddingProvider::OpenAi }
-    fn default_model(&self) -> &str { "text-embedding-3-small" }
-    fn requires_api_key(&self) -> bool { true }
-    fn auth_env_var(&self) -> Option<&'static str> { Some("OPENAI_API_KEY") }
+    fn id(&self) -> EmbeddingProvider {
+        EmbeddingProvider::OpenAi
+    }
+    fn default_model(&self) -> &str {
+        "text-embedding-3-small"
+    }
+    fn requires_api_key(&self) -> bool {
+        true
+    }
+    fn auth_env_var(&self) -> Option<&'static str> {
+        Some("OPENAI_API_KEY")
+    }
     fn available(&self, probe: &EnvProbe, config: &EmbeddingConfig) -> Availability {
         if key_available(config, "OPENAI_API_KEY", probe) {
             Availability::Available
@@ -233,23 +282,38 @@ impl EmbeddingProviderAdapter for OpenAiAdapter {
             Availability::Missing("OPENAI_API_KEY")
         }
     }
-    fn create(&self, config: &EmbeddingConfig, probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>> {
-        let key = resolve_api_key(config, "OPENAI_API_KEY", probe)
-            .ok_or_else(|| OneAIError::Embedding("OpenAI embedding requires OPENAI_API_KEY".into()))?;
+    fn create(
+        &self,
+        config: &EmbeddingConfig,
+        probe: &EnvProbe,
+    ) -> Result<Arc<dyn EmbeddingService>> {
+        let key = resolve_api_key(config, "OPENAI_API_KEY", probe).ok_or_else(|| {
+            OneAIError::Embedding("OpenAI embedding requires OPENAI_API_KEY".into())
+        })?;
         let model = resolve_model(config, self.default_model());
         let base = config
             .base_url
             .clone()
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        Ok(Arc::new(OpenAIEmbeddingService::with_base_url(key, model, base)))
+        Ok(Arc::new(OpenAIEmbeddingService::with_base_url(
+            key, model, base,
+        )))
     }
 }
 
 impl EmbeddingProviderAdapter for VoyageAdapter {
-    fn id(&self) -> EmbeddingProvider { EmbeddingProvider::Voyage }
-    fn default_model(&self) -> &str { "voyage-3" }
-    fn requires_api_key(&self) -> bool { true }
-    fn auth_env_var(&self) -> Option<&'static str> { Some("VOYAGE_API_KEY") }
+    fn id(&self) -> EmbeddingProvider {
+        EmbeddingProvider::Voyage
+    }
+    fn default_model(&self) -> &str {
+        "voyage-3"
+    }
+    fn requires_api_key(&self) -> bool {
+        true
+    }
+    fn auth_env_var(&self) -> Option<&'static str> {
+        Some("VOYAGE_API_KEY")
+    }
     fn available(&self, probe: &EnvProbe, config: &EmbeddingConfig) -> Availability {
         if key_available(config, "VOYAGE_API_KEY", probe) {
             Availability::Available
@@ -257,23 +321,38 @@ impl EmbeddingProviderAdapter for VoyageAdapter {
             Availability::Missing("VOYAGE_API_KEY")
         }
     }
-    fn create(&self, config: &EmbeddingConfig, probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>> {
-        let key = resolve_api_key(config, "VOYAGE_API_KEY", probe)
-            .ok_or_else(|| OneAIError::Embedding("Voyage embedding requires VOYAGE_API_KEY".into()))?;
+    fn create(
+        &self,
+        config: &EmbeddingConfig,
+        probe: &EnvProbe,
+    ) -> Result<Arc<dyn EmbeddingService>> {
+        let key = resolve_api_key(config, "VOYAGE_API_KEY", probe).ok_or_else(|| {
+            OneAIError::Embedding("Voyage embedding requires VOYAGE_API_KEY".into())
+        })?;
         let model = resolve_model(config, self.default_model());
         let base = config
             .base_url
             .clone()
             .unwrap_or_else(|| "https://api.voyageai.com/v1".to_string());
-        Ok(Arc::new(VoyageEmbeddingService::with_base_url(key, model, base)))
+        Ok(Arc::new(VoyageEmbeddingService::with_base_url(
+            key, model, base,
+        )))
     }
 }
 
 impl EmbeddingProviderAdapter for OllamaAdapter {
-    fn id(&self) -> EmbeddingProvider { EmbeddingProvider::Ollama }
-    fn default_model(&self) -> &str { "nomic-embed-text" }
-    fn requires_api_key(&self) -> bool { false }
-    fn auth_env_var(&self) -> Option<&'static str> { None }
+    fn id(&self) -> EmbeddingProvider {
+        EmbeddingProvider::Ollama
+    }
+    fn default_model(&self) -> &str {
+        "nomic-embed-text"
+    }
+    fn requires_api_key(&self) -> bool {
+        false
+    }
+    fn auth_env_var(&self) -> Option<&'static str> {
+        None
+    }
     fn available(&self, probe: &EnvProbe, config: &EmbeddingConfig) -> Availability {
         // base_url override → treat as configured (assume reachable); else TCP-probe default.
         if config.base_url.is_some() {
@@ -285,7 +364,11 @@ impl EmbeddingProviderAdapter for OllamaAdapter {
             Availability::Unavailable("ollama not reachable at localhost:11434")
         }
     }
-    fn create(&self, config: &EmbeddingConfig, _probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>> {
+    fn create(
+        &self,
+        config: &EmbeddingConfig,
+        _probe: &EnvProbe,
+    ) -> Result<Arc<dyn EmbeddingService>> {
         let base = config
             .base_url
             .clone()
@@ -295,15 +378,25 @@ impl EmbeddingProviderAdapter for OllamaAdapter {
             .as_ref()
             .map(|m| m.as_str().to_string())
             .unwrap_or_else(|| self.default_model().to_string());
-        Ok(Arc::new(OllamaEmbeddingService::with_url_and_model(base, model)))
+        Ok(Arc::new(OllamaEmbeddingService::with_url_and_model(
+            base, model,
+        )))
     }
 }
 
 impl EmbeddingProviderAdapter for FastEmbedAdapter {
-    fn id(&self) -> EmbeddingProvider { EmbeddingProvider::FastEmbed }
-    fn default_model(&self) -> &str { "all-MiniLM-L6-v2" }
-    fn requires_api_key(&self) -> bool { false }
-    fn auth_env_var(&self) -> Option<&'static str> { None }
+    fn id(&self) -> EmbeddingProvider {
+        EmbeddingProvider::FastEmbed
+    }
+    fn default_model(&self) -> &str {
+        "all-MiniLM-L6-v2"
+    }
+    fn requires_api_key(&self) -> bool {
+        false
+    }
+    fn auth_env_var(&self) -> Option<&'static str> {
+        None
+    }
     fn available(&self, _probe: &EnvProbe, _config: &EmbeddingConfig) -> Availability {
         // FastEmbed local ONNX: no key, offline-capable after a one-time model
         // download. It is the auto-chain's last-resort so users with no embedding
@@ -312,7 +405,11 @@ impl EmbeddingProviderAdapter for FastEmbedAdapter {
         // first use), `MemoryManager`'s fail-safe catches it → keyword recall.
         Availability::Available
     }
-    fn create(&self, config: &EmbeddingConfig, _probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>> {
+    fn create(
+        &self,
+        config: &EmbeddingConfig,
+        _probe: &EnvProbe,
+    ) -> Result<Arc<dyn EmbeddingService>> {
         let model = resolve_model(config, self.default_model());
         Ok(Arc::new(FastEmbedService::with_model(model)))
     }
@@ -320,10 +417,18 @@ impl EmbeddingProviderAdapter for FastEmbedAdapter {
 
 #[cfg(feature = "ort")]
 impl EmbeddingProviderAdapter for BgeM3Adapter {
-    fn id(&self) -> EmbeddingProvider { EmbeddingProvider::BgeM3 }
-    fn default_model(&self) -> &str { "bge-m3" }
-    fn requires_api_key(&self) -> bool { false }
-    fn auth_env_var(&self) -> Option<&'static str> { None }
+    fn id(&self) -> EmbeddingProvider {
+        EmbeddingProvider::BgeM3
+    }
+    fn default_model(&self) -> &str {
+        "bge-m3"
+    }
+    fn requires_api_key(&self) -> bool {
+        false
+    }
+    fn auth_env_var(&self) -> Option<&'static str> {
+        None
+    }
     fn available(&self, probe: &EnvProbe, _config: &EmbeddingConfig) -> Availability {
         // BGE-M3 is the auto-chain's preferred local embedder when the `ort`
         // feature is on AND the model files are present on disk — CJK-strong,
@@ -331,15 +436,23 @@ impl EmbeddingProviderAdapter for BgeM3Adapter {
         // (the keyless last-resort that downloads lazily).
         match bge_m3_model_dir(probe) {
             Some(dir) if bge_m3_model_present(&dir) => Availability::Available,
-            _ => Availability::Missing("BGE_M3_DIR (or ~/.oneai/models/bge-m3 with model.onnx + tokenizer.json)"),
+            _ => Availability::Missing(
+                "BGE_M3_DIR (or ~/.oneai/models/bge-m3 with model.onnx + tokenizer.json)",
+            ),
         }
     }
-    fn create(&self, _config: &EmbeddingConfig, probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>> {
-        let dir = bge_m3_model_dir(probe)
-            .ok_or_else(|| OneAIError::Embedding(
+    fn create(
+        &self,
+        _config: &EmbeddingConfig,
+        probe: &EnvProbe,
+    ) -> Result<Arc<dyn EmbeddingService>> {
+        let dir = bge_m3_model_dir(probe).ok_or_else(|| {
+            OneAIError::Embedding(
                 "BGE-M3 model dir not found — set BGE_M3_DIR or place model.onnx + tokenizer.json \
-                 under ~/.oneai/models/bge-m3".into()
-            ))?;
+                 under ~/.oneai/models/bge-m3"
+                    .into(),
+            )
+        })?;
         Ok(Arc::new(oneai_vector::BgeM3Embedder::new(&dir)?))
     }
 }
@@ -369,13 +482,25 @@ fn bge_m3_model_present(dir: &str) -> bool {
 }
 
 impl EmbeddingProviderAdapter for OpenAiCompatAdapter {
-    fn id(&self) -> EmbeddingProvider { EmbeddingProvider::OpenAiCompat }
-    fn default_model(&self) -> &str { "text-embedding-3-small" }
-    fn requires_api_key(&self) -> bool { true }
-    fn auth_env_var(&self) -> Option<&'static str> { Some("ONEAI_EMBEDDING_API_KEY") }
+    fn id(&self) -> EmbeddingProvider {
+        EmbeddingProvider::OpenAiCompat
+    }
+    fn default_model(&self) -> &str {
+        "text-embedding-3-small"
+    }
+    fn requires_api_key(&self) -> bool {
+        true
+    }
+    fn auth_env_var(&self) -> Option<&'static str> {
+        Some("ONEAI_EMBEDDING_API_KEY")
+    }
     fn available(&self, probe: &EnvProbe, config: &EmbeddingConfig) -> Availability {
         let has_key = key_available(config, "ONEAI_EMBEDDING_API_KEY", probe);
-        let has_base = config.base_url.as_deref().map(|b| !b.is_empty()).unwrap_or(false)
+        let has_base = config
+            .base_url
+            .as_deref()
+            .map(|b| !b.is_empty())
+            .unwrap_or(false)
             || probe.env_key_present("ONEAI_EMBEDDING_BASE_URL");
         match (has_key, has_base) {
             (true, true) => Availability::Available,
@@ -383,7 +508,11 @@ impl EmbeddingProviderAdapter for OpenAiCompatAdapter {
             (_, false) => Availability::Missing("ONEAI_EMBEDDING_BASE_URL"),
         }
     }
-    fn create(&self, config: &EmbeddingConfig, probe: &EnvProbe) -> Result<Arc<dyn EmbeddingService>> {
+    fn create(
+        &self,
+        config: &EmbeddingConfig,
+        probe: &EnvProbe,
+    ) -> Result<Arc<dyn EmbeddingService>> {
         let key = resolve_api_key(config, "ONEAI_EMBEDDING_API_KEY", probe).ok_or_else(|| {
             OneAIError::Embedding("openai-compat embedding requires ONEAI_EMBEDDING_API_KEY".into())
         })?;
@@ -391,9 +520,13 @@ impl EmbeddingProviderAdapter for OpenAiCompatAdapter {
             .base_url
             .clone()
             .or_else(|| probe.env_get("ONEAI_EMBEDDING_BASE_URL").map(String::from))
-            .ok_or_else(|| OneAIError::Embedding("openai-compat embedding requires base_url".into()))?;
+            .ok_or_else(|| {
+                OneAIError::Embedding("openai-compat embedding requires base_url".into())
+            })?;
         let model = resolve_model(config, self.default_model());
-        Ok(Arc::new(OpenAIEmbeddingService::with_base_url(key, model, base)))
+        Ok(Arc::new(OpenAIEmbeddingService::with_base_url(
+            key, model, base,
+        )))
     }
 }
 
@@ -408,14 +541,18 @@ impl EmbeddingProviderRegistry {
     /// The built-in adapter set (OpenAI / Voyage / Ollama / BgeM3 under `ort` /
     /// FastEmbed / OpenAI-compat).
     pub fn builtin() -> Self {
-        let mut adapters: HashMap<EmbeddingProvider, Box<dyn EmbeddingProviderAdapter>> = HashMap::new();
+        let mut adapters: HashMap<EmbeddingProvider, Box<dyn EmbeddingProviderAdapter>> =
+            HashMap::new();
         adapters.insert(EmbeddingProvider::OpenAi, Box::new(OpenAiAdapter));
         adapters.insert(EmbeddingProvider::Voyage, Box::new(VoyageAdapter));
         adapters.insert(EmbeddingProvider::Ollama, Box::new(OllamaAdapter));
         #[cfg(feature = "ort")]
         adapters.insert(EmbeddingProvider::BgeM3, Box::new(BgeM3Adapter));
         adapters.insert(EmbeddingProvider::FastEmbed, Box::new(FastEmbedAdapter));
-        adapters.insert(EmbeddingProvider::OpenAiCompat, Box::new(OpenAiCompatAdapter));
+        adapters.insert(
+            EmbeddingProvider::OpenAiCompat,
+            Box::new(OpenAiCompatAdapter),
+        );
         Self { adapters }
     }
 
@@ -470,7 +607,10 @@ impl EmbeddingResolver {
     }
 
     /// Resolve a config against an explicit probe (testable).
-    pub fn resolve_with(config: &EmbeddingConfig, probe: &EnvProbe) -> Result<Option<EmbeddingServiceRegistry>> {
+    pub fn resolve_with(
+        config: &EmbeddingConfig,
+        probe: &EnvProbe,
+    ) -> Result<Option<EmbeddingServiceRegistry>> {
         let reg = builtin_registry();
         let (primary, fallback) = if config.provider == EmbeddingProvider::Auto {
             Self::resolve_auto(config, probe, reg)?
@@ -479,7 +619,9 @@ impl EmbeddingResolver {
         };
         match (primary, fallback) {
             (None, None) => {
-                tracing::info!("no embedding provider available; memory recall falls back to keyword matching");
+                tracing::info!(
+                    "no embedding provider available; memory recall falls back to keyword matching"
+                );
                 Ok(None)
             }
             (Some(p), None) => Ok(Some(EmbeddingServiceRegistry::new(p))),
@@ -493,7 +635,10 @@ impl EmbeddingResolver {
         config: &EmbeddingConfig,
         probe: &EnvProbe,
         reg: &EmbeddingProviderRegistry,
-    ) -> Result<(Option<Arc<dyn EmbeddingService>>, Option<Arc<dyn EmbeddingService>>)> {
+    ) -> Result<(
+        Option<Arc<dyn EmbeddingService>>,
+        Option<Arc<dyn EmbeddingService>>,
+    )> {
         let mut created: Vec<Arc<dyn EmbeddingService>> = Vec::new();
         for &p in AUTO_CHAIN {
             let adapter = match reg.get(p) {
@@ -529,7 +674,10 @@ impl EmbeddingResolver {
         config: &EmbeddingConfig,
         probe: &EnvProbe,
         reg: &EmbeddingProviderRegistry,
-    ) -> Result<(Option<Arc<dyn EmbeddingService>>, Option<Arc<dyn EmbeddingService>>)> {
+    ) -> Result<(
+        Option<Arc<dyn EmbeddingService>>,
+        Option<Arc<dyn EmbeddingService>>,
+    )> {
         let primary = Self::resolve_one(config, config.provider, probe, reg)?;
         let fallback = match config.fallback {
             Some(fb) if fb != config.provider => Self::resolve_one(config, fb, probe, reg)?,
@@ -571,22 +719,34 @@ mod tests {
     #[test]
     fn openai_available_with_env_key() {
         let probe = EnvProbe::empty().with_env("OPENAI_API_KEY", "sk-x");
-        assert!(matches!(OpenAiAdapter.available(&probe, &EmbeddingConfig::default()), Availability::Available));
+        assert!(matches!(
+            OpenAiAdapter.available(&probe, &EmbeddingConfig::default()),
+            Availability::Available
+        ));
     }
 
     #[test]
     fn openai_missing_without_key() {
         let probe = EnvProbe::empty();
-        assert!(matches!(OpenAiAdapter.available(&probe, &EmbeddingConfig::default()), Availability::Missing(_)));
+        assert!(matches!(
+            OpenAiAdapter.available(&probe, &EmbeddingConfig::default()),
+            Availability::Missing(_)
+        ));
     }
 
     #[test]
     fn voyage_uses_voyage_key_not_anthropic() {
         // ANTHROPIC_API_KEY must NOT satisfy the voyage adapter — embedding keys are independent of LLM keys.
         let probe = EnvProbe::empty().with_env("ANTHROPIC_API_KEY", "sk-ant");
-        assert!(matches!(VoyageAdapter.available(&probe, &EmbeddingConfig::default()), Availability::Missing(_)));
+        assert!(matches!(
+            VoyageAdapter.available(&probe, &EmbeddingConfig::default()),
+            Availability::Missing(_)
+        ));
         let probe = probe.with_env("VOYAGE_API_KEY", "pa-xxx");
-        assert!(matches!(VoyageAdapter.available(&probe, &EmbeddingConfig::default()), Availability::Available));
+        assert!(matches!(
+            VoyageAdapter.available(&probe, &EmbeddingConfig::default()),
+            Availability::Available
+        ));
     }
 
     #[test]
@@ -594,10 +754,16 @@ mod tests {
         let probe = EnvProbe::empty()
             .with_env("ONEAI_EMBEDDING_API_KEY", "k")
             .with_env("ONEAI_EMBEDDING_BASE_URL", "https://relay/v1");
-        assert!(matches!(OpenAiCompatAdapter.available(&probe, &EmbeddingConfig::default()), Availability::Available));
+        assert!(matches!(
+            OpenAiCompatAdapter.available(&probe, &EmbeddingConfig::default()),
+            Availability::Available
+        ));
         // missing base url → missing
         let probe = EnvProbe::empty().with_env("ONEAI_EMBEDDING_API_KEY", "k");
-        assert!(matches!(OpenAiCompatAdapter.available(&probe, &EmbeddingConfig::default()), Availability::Missing(_)));
+        assert!(matches!(
+            OpenAiCompatAdapter.available(&probe, &EmbeddingConfig::default()),
+            Availability::Missing(_)
+        ));
     }
 
     #[test]
@@ -606,14 +772,18 @@ mod tests {
         // download, so it is the auto-chain's last-resort: no-key users still
         // get real semantic recall rather than keyword matching.
         let probe = EnvProbe::empty();
-        assert!(matches!(FastEmbedAdapter.available(&probe, &EmbeddingConfig::default()), Availability::Available));
+        assert!(matches!(
+            FastEmbedAdapter.available(&probe, &EmbeddingConfig::default()),
+            Availability::Available
+        ));
     }
 
     #[test]
     fn auto_falls_back_to_fastembed_when_no_keys() {
         // Auto with no keys/ollama → FastEmbed (real local ONNX), NOT None.
         let probe = EnvProbe::empty();
-        let resolved = EmbeddingResolver::resolve_with(&EmbeddingConfig::default(), &probe).unwrap();
+        let resolved =
+            EmbeddingResolver::resolve_with(&EmbeddingConfig::default(), &probe).unwrap();
         let reg = resolved.expect("auto should resolve to FastEmbed as last resort");
         assert_eq!(reg.model().as_str(), "all-MiniLM-L6-v2");
     }
@@ -624,9 +794,14 @@ mod tests {
         let probe = EnvProbe::empty()
             .with_env("VOYAGE_API_KEY", "pa")
             .with_env("OPENAI_API_KEY", "sk");
-        let resolved = EmbeddingResolver::resolve_with(&EmbeddingConfig::default(), &probe).unwrap();
+        let resolved =
+            EmbeddingResolver::resolve_with(&EmbeddingConfig::default(), &probe).unwrap();
         let reg = resolved.expect("registry should exist");
-        assert_eq!(reg.model().as_str(), "voyage-3", "voyage precedes openai in the auto chain");
+        assert_eq!(
+            reg.model().as_str(),
+            "voyage-3",
+            "voyage precedes openai in the auto chain"
+        );
     }
 
     #[test]

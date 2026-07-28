@@ -71,7 +71,10 @@ impl Tool for SkillTool {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
-                error: Some("No skill name provided. Use a name from the 'Available skills' list.".to_string()),
+                error: Some(
+                    "No skill name provided. Use a name from the 'Available skills' list."
+                        .to_string(),
+                ),
             });
         }
 
@@ -133,7 +136,10 @@ mod tests {
         registry.register(sample_skill()).await.unwrap();
         let tool = SkillTool::new(registry);
 
-        let out = tool.execute(serde_json::json!({"skill": "creative-writing"})).await.unwrap();
+        let out = tool
+            .execute(serde_json::json!({"skill": "creative-writing"}))
+            .await
+            .unwrap();
         assert!(out.success);
         assert!(out.content.contains("creative writing expert"));
         assert!(out.content.contains("Skill activated: creative-writing"));
@@ -145,7 +151,10 @@ mod tests {
         registry.register(sample_skill()).await.unwrap();
         let tool = SkillTool::new(registry);
 
-        let out = tool.execute(serde_json::json!({"skill": "nope"})).await.unwrap();
+        let out = tool
+            .execute(serde_json::json!({"skill": "nope"}))
+            .await
+            .unwrap();
         assert!(!out.success);
         assert!(out.error.unwrap().contains("creative-writing"));
     }

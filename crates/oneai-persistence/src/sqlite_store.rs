@@ -21,13 +21,13 @@
 //!   (acceptable for <10K entries; future: use HNSW or FTS5 vector extension)
 //! - One database file for all tables (sessions / STM / LTM / usage)
 
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
-use oneai_core::{Conversation, MemoryEntry, MemoryFact, SessionInfo};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::MemoryPersistence;
+use oneai_core::{Conversation, MemoryEntry, MemoryFact, SessionInfo};
 
 // ─── SqliteSessionStore ─────────────────────────────────────────────────────
 
@@ -50,7 +50,9 @@ impl SqliteSessionStore {
     /// The database file will be created if it doesn't exist.
     /// The schema (tables + indexes) is auto-created on first connection.
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
-        Self { db_path: db_path.into() }
+        Self {
+            db_path: db_path.into(),
+        }
     }
 
     /// Create a SQLite session store with the default path (`~/.oneai/oneai.db`).
@@ -70,10 +72,13 @@ impl SqliteSessionStore {
     /// Called internally by each method. Creates all tables and indexes
     /// automatically if they don't exist.
     fn open_connection(&self) -> std::result::Result<rusqlite::Connection, OneAIError> {
-        let conn = rusqlite::Connection::open(&self.db_path)
-            .map_err(|e| OneAIError::Persistence(
-                format!("Failed to open SQLite database at {}: {}", self.db_path.display(), e)
-            ))?;
+        let conn = rusqlite::Connection::open(&self.db_path).map_err(|e| {
+            OneAIError::Persistence(format!(
+                "Failed to open SQLite database at {}: {}",
+                self.db_path.display(),
+                e
+            ))
+        })?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS conversations (
@@ -146,10 +151,7 @@ impl SqliteSessionStore {
             "ALTER TABLE memories ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0",
             [],
         );
-        let _ = conn.execute(
-            "ALTER TABLE memories ADD COLUMN superseded_at TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE memories ADD COLUMN superseded_at TEXT", []);
         // Core-memory pin flag (folds the old process-local pin set onto the
         // fact so pin state survives a restart + SQLite round-trip). Defaults
         // to 0 (not pinned) for legacy rows.
@@ -159,10 +161,7 @@ impl SqliteSessionStore {
         );
         // Same pattern for the `title` column on `conversations` (added for
         // session-list previews). Legacy dbs get the column added as NULL.
-        let _ = conn.execute(
-            "ALTER TABLE conversations ADD COLUMN title TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT", []);
         // And the `metadata_json` column, added so a resumed conversation
         // retains its metadata — notably `metadata["title"]` set by group-chat
         // scenarios (e.g. "面试演练·前端工程师"). Without it, resume drops the
@@ -186,7 +185,9 @@ impl SqliteSessionStore {
 
 /// Serialize a MemoryEntry's embedding as JSON.
 fn serialize_embedding(embedding: &Option<Vec<f32>>) -> Option<String> {
-    embedding.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default())
+    embedding
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
 }
 
 /// Deserialize a JSON string back to Vec<f32>.
@@ -228,7 +229,9 @@ fn conversation_title(conversation: &Conversation, max: usize) -> Option<String>
         }
         return Some(normalized);
     }
-    let first_user = conversation.messages.iter()
+    let first_user = conversation
+        .messages
+        .iter()
         .find(|m| matches!(m.role, oneai_core::Role::User))?;
     let text = first_user.text_content();
     let trimmed = text.trim();
@@ -246,7 +249,11 @@ fn normalize_title(text: &str, max: usize) -> String {
         collapsed
     } else {
         // Truncate on a char boundary to avoid splitting a multi-byte char.
-        let end = collapsed.char_indices().nth(max).map(|(i, _)| i).unwrap_or(collapsed.len());
+        let end = collapsed
+            .char_indices()
+            .nth(max)
+            .map(|(i, _)| i)
+            .unwrap_or(collapsed.len());
         format!("{}…", &collapsed[..end])
     }
 }
@@ -278,9 +285,13 @@ impl MemoryPersistence for SqliteSessionStore {
         conn.execute(
             "DELETE FROM stm_entries WHERE session_id = ?1",
             rusqlite::params![session_id],
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to clear STM entries for session '{}': {}", session_id, e)
-        ))?;
+        )
+        .map_err(|e| {
+            OneAIError::Persistence(format!(
+                "Failed to clear STM entries for session '{}': {}",
+                session_id, e
+            ))
+        })?;
 
         // Insert new entries with position ordering
         for (position, entry) in entries.iter().enumerate() {
@@ -305,37 +316,44 @@ impl MemoryPersistence for SqliteSessionStore {
             ))?;
         }
 
-        tracing::debug!("Saved {} STM entries for session '{}'", entries.len(), session_id);
+        tracing::debug!(
+            "Saved {} STM entries for session '{}'",
+            entries.len(),
+            session_id
+        );
         Ok(())
     }
 
     async fn load_stm(&self, session_id: &str) -> Result<Vec<MemoryEntry>> {
         let conn = self.open_connection()?;
 
-        let mut stmt = conn.prepare(
-            "SELECT id, content, timestamp, embedding_json, metadata_json \
-             FROM stm_entries WHERE session_id = ?1 ORDER BY position ASC"
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to prepare STM load query: {}", e)
-        ))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, timestamp, embedding_json, metadata_json \
+             FROM stm_entries WHERE session_id = ?1 ORDER BY position ASC",
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to prepare STM load query: {}", e))
+            })?;
 
-        let rows = stmt.query_map(rusqlite::params![session_id], |row| {
-            let id: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let timestamp_str: String = row.get(2)?;
-            let embedding_json: Option<String> = row.get(3)?;
-            let metadata_json: String = row.get(4)?;
-            Ok((id, content, timestamp_str, embedding_json, metadata_json))
-        }).map_err(|e| OneAIError::Persistence(
-            format!("Failed to execute STM load query: {}", e)
-        ))?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_id], |row| {
+                let id: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let timestamp_str: String = row.get(2)?;
+                let embedding_json: Option<String> = row.get(3)?;
+                let metadata_json: String = row.get(4)?;
+                Ok((id, content, timestamp_str, embedding_json, metadata_json))
+            })
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to execute STM load query: {}", e))
+            })?;
 
         let mut entries = Vec::new();
         for row in rows {
-            let (id, content, timestamp_str, embedding_json, metadata_json) = row
-                .map_err(|e| OneAIError::Persistence(
-                    format!("Failed to read STM entry row: {}", e)
-                ))?;
+            let (id, content, timestamp_str, embedding_json, metadata_json) = row.map_err(|e| {
+                OneAIError::Persistence(format!("Failed to read STM entry row: {}", e))
+            })?;
             let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
@@ -351,7 +369,11 @@ impl MemoryPersistence for SqliteSessionStore {
             });
         }
 
-        tracing::debug!("Loaded {} STM entries for session '{}'", entries.len(), session_id);
+        tracing::debug!(
+            "Loaded {} STM entries for session '{}'",
+            entries.len(),
+            session_id
+        );
         Ok(entries)
     }
 
@@ -360,9 +382,13 @@ impl MemoryPersistence for SqliteSessionStore {
         conn.execute(
             "DELETE FROM stm_entries WHERE session_id = ?1",
             rusqlite::params![session_id],
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to clear STM for session '{}': {}", session_id, e)
-        ))?;
+        )
+        .map_err(|e| {
+            OneAIError::Persistence(format!(
+                "Failed to clear STM for session '{}': {}",
+                session_id, e
+            ))
+        })?;
 
         tracing::debug!("Cleared STM entries for session '{}'", session_id);
         Ok(())
@@ -419,9 +445,10 @@ impl MemoryPersistence for SqliteSessionStore {
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(OneAIError::Persistence(
-                format!("Failed to load LTM entry '{}': {}", id, e)
-            )),
+            Err(e) => Err(OneAIError::Persistence(format!(
+                "Failed to load LTM entry '{}': {}",
+                id, e
+            ))),
         }
     }
 
@@ -430,31 +457,34 @@ impl MemoryPersistence for SqliteSessionStore {
 
         // Use LIKE for case-insensitive keyword search
         let pattern = format!("%{}%", keyword);
-        let mut stmt = conn.prepare(
-            "SELECT id, content, timestamp, embedding_json, metadata_json \
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, timestamp, embedding_json, metadata_json \
              FROM ltm_entries WHERE content LIKE ?1 OR metadata_json LIKE ?1 \
-             ORDER BY timestamp DESC LIMIT ?2"
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to prepare LTM keyword search: {}", e)
-        ))?;
+             ORDER BY timestamp DESC LIMIT ?2",
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to prepare LTM keyword search: {}", e))
+            })?;
 
-        let rows = stmt.query_map(rusqlite::params![pattern, top_k], |row| {
-            let id: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let timestamp_str: String = row.get(2)?;
-            let embedding_json: Option<String> = row.get(3)?;
-            let metadata_json: String = row.get(4)?;
-            Ok((id, content, timestamp_str, embedding_json, metadata_json))
-        }).map_err(|e| OneAIError::Persistence(
-            format!("Failed to execute LTM keyword search: {}", e)
-        ))?;
+        let rows = stmt
+            .query_map(rusqlite::params![pattern, top_k], |row| {
+                let id: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let timestamp_str: String = row.get(2)?;
+                let embedding_json: Option<String> = row.get(3)?;
+                let metadata_json: String = row.get(4)?;
+                Ok((id, content, timestamp_str, embedding_json, metadata_json))
+            })
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to execute LTM keyword search: {}", e))
+            })?;
 
         let mut entries = Vec::new();
         for row in rows {
-            let (id, content, timestamp_str, embedding_json, metadata_json) = row
-                .map_err(|e| OneAIError::Persistence(
-                    format!("Failed to read LTM entry row: {}", e)
-                ))?;
+            let (id, content, timestamp_str, embedding_json, metadata_json) = row.map_err(|e| {
+                OneAIError::Persistence(format!("Failed to read LTM entry row: {}", e))
+            })?;
             let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
@@ -470,39 +500,50 @@ impl MemoryPersistence for SqliteSessionStore {
             });
         }
 
-        tracing::debug!("Found {} LTM entries for keyword '{}'", entries.len(), keyword);
+        tracing::debug!(
+            "Found {} LTM entries for keyword '{}'",
+            entries.len(),
+            keyword
+        );
         Ok(entries)
     }
 
-    async fn search_ltm_embedding(&self, query: &[f32], top_k: usize) -> Result<Vec<(MemoryEntry, f32)>> {
+    async fn search_ltm_embedding(
+        &self,
+        query: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
         let conn = self.open_connection()?;
 
         // Load all entries that have embeddings
-        let mut stmt = conn.prepare(
-            "SELECT id, content, timestamp, embedding_json, metadata_json \
-             FROM ltm_entries WHERE embedding_json IS NOT NULL AND embedding_json != ''"
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to prepare LTM embedding search: {}", e)
-        ))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content, timestamp, embedding_json, metadata_json \
+             FROM ltm_entries WHERE embedding_json IS NOT NULL AND embedding_json != ''",
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to prepare LTM embedding search: {}", e))
+            })?;
 
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let timestamp_str: String = row.get(2)?;
-            let embedding_json: Option<String> = row.get(3)?;
-            let metadata_json: String = row.get(4)?;
-            Ok((id, content, timestamp_str, embedding_json, metadata_json))
-        }).map_err(|e| OneAIError::Persistence(
-            format!("Failed to execute LTM embedding search: {}", e)
-        ))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let timestamp_str: String = row.get(2)?;
+                let embedding_json: Option<String> = row.get(3)?;
+                let metadata_json: String = row.get(4)?;
+                Ok((id, content, timestamp_str, embedding_json, metadata_json))
+            })
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to execute LTM embedding search: {}", e))
+            })?;
 
         // Compute cosine similarity for each entry
         let mut scored: Vec<(MemoryEntry, f32)> = Vec::new();
         for row in rows {
-            let (id, content, timestamp_str, embedding_json, metadata_json) = row
-                .map_err(|e| OneAIError::Persistence(
-                    format!("Failed to read LTM entry row: {}", e)
-                ))?;
+            let (id, content, timestamp_str, embedding_json, metadata_json) = row.map_err(|e| {
+                OneAIError::Persistence(format!("Failed to read LTM entry row: {}", e))
+            })?;
             let entry_embedding = embedding_json.and_then(|json| deserialize_embedding(&json));
             if let Some(entry_vec) = &entry_embedding {
                 let score = cosine_similarity(query, entry_vec);
@@ -512,13 +553,16 @@ impl MemoryPersistence for SqliteSessionStore {
                         .unwrap_or_else(|_| chrono::Utc::now());
                     let metadata = deserialize_metadata(&metadata_json);
 
-                    scored.push((MemoryEntry {
-                        id,
-                        content,
-                        timestamp,
-                        embedding: entry_embedding,
-                        metadata,
-                    }, score));
+                    scored.push((
+                        MemoryEntry {
+                            id,
+                            content,
+                            timestamp,
+                            embedding: entry_embedding,
+                            metadata,
+                        },
+                        score,
+                    ));
                 }
             }
         }
@@ -527,7 +571,11 @@ impl MemoryPersistence for SqliteSessionStore {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(top_k);
 
-        tracing::debug!("Found {} LTM entries by embedding (top {})", scored.len(), top_k);
+        tracing::debug!(
+            "Found {} LTM entries by embedding (top {})",
+            scored.len(),
+            top_k
+        );
         Ok(scored)
     }
 
@@ -536,9 +584,10 @@ impl MemoryPersistence for SqliteSessionStore {
         conn.execute(
             "DELETE FROM ltm_entries WHERE id = ?1",
             rusqlite::params![id],
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to delete LTM entry '{}': {}", id, e)
-        ))?;
+        )
+        .map_err(|e| {
+            OneAIError::Persistence(format!("Failed to delete LTM entry '{}': {}", id, e))
+        })?;
 
         tracing::debug!("Deleted LTM entry '{}'", id);
         Ok(())
@@ -547,9 +596,7 @@ impl MemoryPersistence for SqliteSessionStore {
     async fn clear_ltm(&self) -> Result<()> {
         let conn = self.open_connection()?;
         conn.execute("DELETE FROM ltm_entries", [])
-            .map_err(|e| OneAIError::Persistence(
-                format!("Failed to clear LTM entries: {}", e)
-            ))?;
+            .map_err(|e| OneAIError::Persistence(format!("Failed to clear LTM entries: {}", e)))?;
 
         tracing::debug!("Cleared all LTM entries");
         Ok(())
@@ -559,22 +606,23 @@ impl MemoryPersistence for SqliteSessionStore {
 
     async fn save_conversation(&self, id: &str, conversation: &Conversation) -> Result<()> {
         let conn = self.open_connection()?;
-        let messages_json = serde_json::to_string(&conversation.messages)
-            .map_err(|e| OneAIError::Persistence(
-                format!("Failed to serialize conversation '{}': {}", id, e)
-            ))?;
+        let messages_json = serde_json::to_string(&conversation.messages).map_err(|e| {
+            OneAIError::Persistence(format!("Failed to serialize conversation '{}': {}", id, e))
+        })?;
         let metadata_json = serialize_metadata(&conversation.metadata);
         let now = chrono::Utc::now().to_rfc3339();
         let title = conversation_title(conversation, 80);
 
         // Check if conversation already exists
-        let exists: bool = conn.query_row(
-            "SELECT COUNT(*) FROM conversations WHERE id = ?1",
-            rusqlite::params![id],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to check conversation existence: {}", e)
-        ))?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get::<_, i64>(0).map(|c| c > 0),
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to check conversation existence: {}", e))
+            })?;
 
         if exists {
             // Recompute the title on update too — the first user message could
@@ -596,7 +644,11 @@ impl MemoryPersistence for SqliteSessionStore {
             ))?;
         }
 
-        tracing::debug!("Saved conversation '{}' ({} messages)", id, conversation.messages.len());
+        tracing::debug!(
+            "Saved conversation '{}' ({} messages)",
+            id,
+            conversation.messages.len()
+        );
         Ok(())
     }
 
@@ -617,9 +669,12 @@ impl MemoryPersistence for SqliteSessionStore {
         match result {
             Ok((messages_json, metadata_json, title)) => {
                 let messages: Vec<oneai_core::Message> = serde_json::from_str(&messages_json)
-                    .map_err(|e| OneAIError::Persistence(
-                        format!("Failed to deserialize conversation '{}': {}", id, e)
-                    ))?;
+                    .map_err(|e| {
+                        OneAIError::Persistence(format!(
+                            "Failed to deserialize conversation '{}': {}",
+                            id, e
+                        ))
+                    })?;
                 let mut conversation = Conversation::with_id(id.to_string());
                 conversation.messages = messages;
                 // Restore metadata so a resumed session keeps its title
@@ -636,21 +691,25 @@ impl MemoryPersistence for SqliteSessionStore {
                 // scenario name. Promote it into metadata["title"] so the next
                 // save preserves it instead of re-deriving from the first user
                 // message (which would clobber "面试演练·前端工程师").
-                if conversation.metadata.get("title").map(|s| s.is_empty()).unwrap_or(true) {
+                if conversation
+                    .metadata
+                    .get("title")
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true)
+                {
                     if let Some(t) = title {
                         if !t.is_empty() {
-                            conversation
-                                .metadata
-                                .insert("title".to_string(), t);
+                            conversation.metadata.insert("title".to_string(), t);
                         }
                     }
                 }
                 Ok(Some(conversation))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(OneAIError::Persistence(
-                format!("Failed to load conversation '{}': {}", id, e)
-            )),
+            Err(e) => Err(OneAIError::Persistence(format!(
+                "Failed to load conversation '{}': {}",
+                id, e
+            ))),
         }
     }
 
@@ -662,41 +721,44 @@ impl MemoryPersistence for SqliteSessionStore {
             format!("Failed to prepare conversation list query: {}", e)
         ))?;
 
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let created_at: String = row.get(1)?;
-            let updated_at: String = row.get(2)?;
-            let messages_json: String = row.get(3)?;
-            let title: Option<String> = row.get(4)?;
-            // Count ONLY the messages a UI actually renders. The macOS/Android
-            // chat views replay user + non-empty-text assistant turns (system /
-            // tool / empty-assistant messages are filtered out — see the Swift
-            // `loadSession`). Counting every stored message here made the sidebar
-            // "N 条" diverge from the visible bubble count, especially in
-            // group-chat (multi-speaker) and tool-heavy turns. Parse as
-            // `Message` and mirror that render filter exactly so the listed
-            // count matches what the user sees, for every session.
-            let count = serde_json::from_str::<Vec<oneai_core::Message>>(&messages_json)
-                .map(|msgs| {
-                    msgs.iter()
-                        .filter(|m| {
-                            matches!(m.role, oneai_core::Role::User | oneai_core::Role::Assistant)
-                                && !m.text_content().trim().is_empty()
-                        })
-                        .count()
-                })
-                .unwrap_or(0);
-            Ok((id, created_at, updated_at, count, title))
-        }).map_err(|e| OneAIError::Persistence(
-            format!("Failed to execute conversation list query: {}", e)
-        ))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let created_at: String = row.get(1)?;
+                let updated_at: String = row.get(2)?;
+                let messages_json: String = row.get(3)?;
+                let title: Option<String> = row.get(4)?;
+                // Count ONLY the messages a UI actually renders. The macOS/Android
+                // chat views replay user + non-empty-text assistant turns (system /
+                // tool / empty-assistant messages are filtered out — see the Swift
+                // `loadSession`). Counting every stored message here made the sidebar
+                // "N 条" diverge from the visible bubble count, especially in
+                // group-chat (multi-speaker) and tool-heavy turns. Parse as
+                // `Message` and mirror that render filter exactly so the listed
+                // count matches what the user sees, for every session.
+                let count = serde_json::from_str::<Vec<oneai_core::Message>>(&messages_json)
+                    .map(|msgs| {
+                        msgs.iter()
+                            .filter(|m| {
+                                matches!(
+                                    m.role,
+                                    oneai_core::Role::User | oneai_core::Role::Assistant
+                                ) && !m.text_content().trim().is_empty()
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                Ok((id, created_at, updated_at, count, title))
+            })
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to execute conversation list query: {}", e))
+            })?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let (id, created_at_str, updated_at_str, message_count, title) = row
-                .map_err(|e| OneAIError::Persistence(
-                    format!("Failed to read conversation row: {}", e)
-                ))?;
+            let (id, created_at_str, updated_at_str, message_count, title) = row.map_err(|e| {
+                OneAIError::Persistence(format!("Failed to read conversation row: {}", e))
+            })?;
             let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
@@ -704,7 +766,13 @@ impl MemoryPersistence for SqliteSessionStore {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
 
-            sessions.push(SessionInfo::with_title(id, created_at, updated_at, message_count, title));
+            sessions.push(SessionInfo::with_title(
+                id,
+                created_at,
+                updated_at,
+                message_count,
+                title,
+            ));
         }
 
         tracing::debug!("Listed {} conversations", sessions.len());
@@ -715,14 +783,23 @@ impl MemoryPersistence for SqliteSessionStore {
         let conn = self.open_connection()?;
 
         // Delete conversation and its STM entries
-        conn.execute("DELETE FROM stm_entries WHERE session_id = ?1", rusqlite::params![id])
-            .map_err(|e| OneAIError::Persistence(
-                format!("Failed to delete STM entries for session '{}': {}", id, e)
-            ))?;
-        conn.execute("DELETE FROM conversations WHERE id = ?1", rusqlite::params![id])
-            .map_err(|e| OneAIError::Persistence(
-                format!("Failed to delete conversation '{}': {}", id, e)
-            ))?;
+        conn.execute(
+            "DELETE FROM stm_entries WHERE session_id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| {
+            OneAIError::Persistence(format!(
+                "Failed to delete STM entries for session '{}': {}",
+                id, e
+            ))
+        })?;
+        conn.execute(
+            "DELETE FROM conversations WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| {
+            OneAIError::Persistence(format!("Failed to delete conversation '{}': {}", id, e))
+        })?;
 
         tracing::debug!("Deleted conversation '{}' and its STM entries", id);
         Ok(())
@@ -732,8 +809,12 @@ impl MemoryPersistence for SqliteSessionStore {
 
     async fn store_fact(&self, fact: &MemoryFact) -> Result<()> {
         let conn = self.open_connection()?;
-        let embedding_json = fact.embedding.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-        let metadata_json = serde_json::to_string(&fact.metadata).unwrap_or_else(|_| "{}".to_string());
+        let embedding_json = fact
+            .embedding
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let metadata_json =
+            serde_json::to_string(&fact.metadata).unwrap_or_else(|_| "{}".to_string());
         let created = fact.created_at.to_rfc3339();
         let updated = fact.updated_at.to_rfc3339();
         let superseded_at = fact.superseded_at.map(|t| t.to_rfc3339());
@@ -761,12 +842,25 @@ impl MemoryPersistence for SqliteSessionStore {
              superseded_at = excluded.superseded_at, \
              pinned = excluded.pinned",
             rusqlite::params![
-                fact.id, fact.user_id, fact.session_id, fact.fact_type.as_str(),
-                fact.subject, fact.predicate, fact.content, embedding_json, metadata_json,
-                created, updated, fact.version, fact.importance,
-                fact.superseded, superseded_at, fact.pinned,
+                fact.id,
+                fact.user_id,
+                fact.session_id,
+                fact.fact_type.as_str(),
+                fact.subject,
+                fact.predicate,
+                fact.content,
+                embedding_json,
+                metadata_json,
+                created,
+                updated,
+                fact.version,
+                fact.importance,
+                fact.superseded,
+                superseded_at,
+                fact.pinned,
             ],
-        ).map_err(|e| OneAIError::Persistence(format!("Failed to store fact: {}", e)))?;
+        )
+        .map_err(|e| OneAIError::Persistence(format!("Failed to store fact: {}", e)))?;
         Ok(())
     }
 
@@ -774,52 +868,63 @@ impl MemoryPersistence for SqliteSessionStore {
         let conn = self.open_connection()?;
         // Empty session_id → all facts for the user (cross-session habits);
         // otherwise scope to that session.
-        let mut stmt = conn.prepare(
-            "SELECT id, user_id, session_id, fact_type, subject, predicate, content, \
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, user_id, session_id, fact_type, subject, predicate, content, \
              embedding_json, metadata_json, created_at, updated_at, version, importance, \
              superseded, superseded_at, pinned \
-             FROM memories WHERE user_id = ?1 AND (?2 = '' OR session_id = ?2)"
-        ).map_err(|e| OneAIError::Persistence(format!("Failed to prepare fact query: {}", e)))?;
+             FROM memories WHERE user_id = ?1 AND (?2 = '' OR session_id = ?2)",
+            )
+            .map_err(|e| OneAIError::Persistence(format!("Failed to prepare fact query: {}", e)))?;
 
-        let rows = stmt.query_map(rusqlite::params![user_id, session_id], |row| {
-            let embedding_json: Option<String> = row.get(7)?;
-            let metadata_json: String = row.get(8)?;
-            let embedding = embedding_json
-                .and_then(|s| serde_json::from_str::<Vec<f32>>(&s).ok());
-            let metadata: HashMap<String, String> = serde_json::from_str(&metadata_json)
-                .unwrap_or_default();
-            let created = chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
-                .map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
-            let updated = chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                .map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
-            let superseded: i64 = row.get(13)?;
-            let superseded_at = row.get::<_, Option<String>>(14)?
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                .map(|d| d.with_timezone(&chrono::Utc));
-            let pinned: i64 = row.get(15)?;
-            Ok(MemoryFact {
-                id: row.get(0)?,
-                user_id: row.get(1)?,
-                session_id: row.get(2)?,
-                fact_type: oneai_core::FactType::new(row.get::<_, String>(3)?),
-                subject: row.get(4)?,
-                predicate: row.get(5)?,
-                content: row.get(6)?,
-                embedding,
-                metadata,
-                importance: row.get::<_, f64>(12)? as f32,
-                created_at: created,
-                updated_at: updated,
-                version: row.get(11)?,
-                superseded: superseded != 0,
-                superseded_at,
-                pinned: pinned != 0,
+        let rows = stmt
+            .query_map(rusqlite::params![user_id, session_id], |row| {
+                let embedding_json: Option<String> = row.get(7)?;
+                let metadata_json: String = row.get(8)?;
+                let embedding =
+                    embedding_json.and_then(|s| serde_json::from_str::<Vec<f32>>(&s).ok());
+                let metadata: HashMap<String, String> =
+                    serde_json::from_str(&metadata_json).unwrap_or_default();
+                let created = chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                let updated = chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                let superseded: i64 = row.get(13)?;
+                let superseded_at = row
+                    .get::<_, Option<String>>(14)?
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|d| d.with_timezone(&chrono::Utc));
+                let pinned: i64 = row.get(15)?;
+                Ok(MemoryFact {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    session_id: row.get(2)?,
+                    fact_type: oneai_core::FactType::new(row.get::<_, String>(3)?),
+                    subject: row.get(4)?,
+                    predicate: row.get(5)?,
+                    content: row.get(6)?,
+                    embedding,
+                    metadata,
+                    importance: row.get::<_, f64>(12)? as f32,
+                    created_at: created,
+                    updated_at: updated,
+                    version: row.get(11)?,
+                    superseded: superseded != 0,
+                    superseded_at,
+                    pinned: pinned != 0,
+                })
             })
-        }).map_err(|e| OneAIError::Persistence(format!("Failed to query facts: {}", e)))?;
+            .map_err(|e| OneAIError::Persistence(format!("Failed to query facts: {}", e)))?;
 
         let mut facts = Vec::new();
         for row in rows {
-            facts.push(row.map_err(|e| OneAIError::Persistence(format!("Failed to read fact row: {}", e)))?);
+            facts.push(
+                row.map_err(|e| {
+                    OneAIError::Persistence(format!("Failed to read fact row: {}", e))
+                })?,
+            );
         }
         Ok(facts)
     }
@@ -919,7 +1024,11 @@ mod tests {
     #[tokio::test]
     async fn test_ltm_save_load() {
         let (store, _dir) = make_store();
-        let entry = make_entry("ltm1", "Rust programming language", Some(vec![0.1, 0.2, 0.3]));
+        let entry = make_entry(
+            "ltm1",
+            "Rust programming language",
+            Some(vec![0.1, 0.2, 0.3]),
+        );
 
         store.save_ltm(&entry).await.unwrap();
         let loaded = store.load_ltm("ltm1").await.unwrap();
@@ -942,9 +1051,18 @@ mod tests {
     async fn test_ltm_keyword_search() {
         let (store, _dir) = make_store();
 
-        store.save_ltm(&make_entry("ltm1", "Rust programming language", None)).await.unwrap();
-        store.save_ltm(&make_entry("ltm2", "Python programming language", None)).await.unwrap();
-        store.save_ltm(&make_entry("ltm3", "The weather is sunny", None)).await.unwrap();
+        store
+            .save_ltm(&make_entry("ltm1", "Rust programming language", None))
+            .await
+            .unwrap();
+        store
+            .save_ltm(&make_entry("ltm2", "Python programming language", None))
+            .await
+            .unwrap();
+        store
+            .save_ltm(&make_entry("ltm3", "The weather is sunny", None))
+            .await
+            .unwrap();
 
         let results = store.search_ltm_keyword("programming", 10).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -958,11 +1076,23 @@ mod tests {
     async fn test_ltm_embedding_search() {
         let (store, _dir) = make_store();
 
-        store.save_ltm(&make_entry("ltm1", "Rust doc", Some(vec![0.1, 0.2, 0.3]))).await.unwrap();
-        store.save_ltm(&make_entry("ltm2", "Python doc", Some(vec![0.4, 0.5, 0.6]))).await.unwrap();
-        store.save_ltm(&make_entry("ltm3", "No embedding doc", None)).await.unwrap(); // No embedding
+        store
+            .save_ltm(&make_entry("ltm1", "Rust doc", Some(vec![0.1, 0.2, 0.3])))
+            .await
+            .unwrap();
+        store
+            .save_ltm(&make_entry("ltm2", "Python doc", Some(vec![0.4, 0.5, 0.6])))
+            .await
+            .unwrap();
+        store
+            .save_ltm(&make_entry("ltm3", "No embedding doc", None))
+            .await
+            .unwrap(); // No embedding
 
-        let results = store.search_ltm_embedding(&[0.1, 0.2, 0.35], 2).await.unwrap();
+        let results = store
+            .search_ltm_embedding(&[0.1, 0.2, 0.35], 2)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
         // "Rust doc" should be most similar to the query
         assert!(results[0].0.content.contains("Rust"));
@@ -972,7 +1102,10 @@ mod tests {
     #[tokio::test]
     async fn test_ltm_delete() {
         let (store, _dir) = make_store();
-        store.save_ltm(&make_entry("ltm1", "Test content", None)).await.unwrap();
+        store
+            .save_ltm(&make_entry("ltm1", "Test content", None))
+            .await
+            .unwrap();
 
         store.delete_ltm("ltm1").await.unwrap();
         let loaded = store.load_ltm("ltm1").await.unwrap();
@@ -982,8 +1115,14 @@ mod tests {
     #[tokio::test]
     async fn test_ltm_clear() {
         let (store, _dir) = make_store();
-        store.save_ltm(&make_entry("ltm1", "First", None)).await.unwrap();
-        store.save_ltm(&make_entry("ltm2", "Second", None)).await.unwrap();
+        store
+            .save_ltm(&make_entry("ltm1", "First", None))
+            .await
+            .unwrap();
+        store
+            .save_ltm(&make_entry("ltm2", "Second", None))
+            .await
+            .unwrap();
 
         store.clear_ltm().await.unwrap();
         let results = store.search_ltm_keyword("First", 10).await.unwrap();
@@ -993,8 +1132,14 @@ mod tests {
     #[tokio::test]
     async fn test_ltm_overwrite() {
         let (store, _dir) = make_store();
-        store.save_ltm(&make_entry("ltm1", "Original content", None)).await.unwrap();
-        store.save_ltm(&make_entry("ltm1", "Updated content", Some(vec![0.5]))).await.unwrap();
+        store
+            .save_ltm(&make_entry("ltm1", "Original content", None))
+            .await
+            .unwrap();
+        store
+            .save_ltm(&make_entry("ltm1", "Updated content", Some(vec![0.5])))
+            .await
+            .unwrap();
 
         let loaded = store.load_ltm("ltm1").await.unwrap().unwrap();
         assert_eq!(loaded.content, "Updated content");
@@ -1121,8 +1266,12 @@ mod tests {
 
         let mut conv = Conversation::with_id("conv1".to_string());
         conv.add_message(oneai_core::Message::system("system prompt".to_string()));
-        conv.add_message(oneai_core::Message::user("How do I parse JSON in Rust?".to_string()));
-        conv.add_message(oneai_core::Message::assistant("Use serde_json…".to_string()));
+        conv.add_message(oneai_core::Message::user(
+            "How do I parse JSON in Rust?".to_string(),
+        ));
+        conv.add_message(oneai_core::Message::assistant(
+            "Use serde_json…".to_string(),
+        ));
         store.save_conversation("conv1", &conv).await.unwrap();
 
         let sessions = store.list_conversations().await.unwrap();
@@ -1137,18 +1286,35 @@ mod tests {
     #[tokio::test]
     async fn test_conversation_title_collapses_and_truncates() {
         let (store, _dir) = make_store();
-        let long = "line one\nline two   with\ttabs and  many     spaces ".to_string()
+        let long = "line one\nline two   with\ttabs and  many     spaces "
+            .to_string()
             .repeat(20); // well over 80 chars, with embedded newlines/runs
         let mut conv = Conversation::with_id("c".to_string());
         conv.add_message(oneai_core::Message::user(long));
         store.save_conversation("c", &conv).await.unwrap();
 
-        let title = store.list_conversations().await.unwrap()[0].title.clone().unwrap();
-        assert!(!title.contains('\n'), "newlines must be collapsed: {title:?}");
-        assert!(!title.contains("  "), "whitespace runs must be collapsed: {title:?}");
-        assert!(title.ends_with('…'), "long title must be truncated with ellipsis: {title:?}");
+        let title = store.list_conversations().await.unwrap()[0]
+            .title
+            .clone()
+            .unwrap();
+        assert!(
+            !title.contains('\n'),
+            "newlines must be collapsed: {title:?}"
+        );
+        assert!(
+            !title.contains("  "),
+            "whitespace runs must be collapsed: {title:?}"
+        );
+        assert!(
+            title.ends_with('…'),
+            "long title must be truncated with ellipsis: {title:?}"
+        );
         // Truncation targets 80 chars + ellipsis.
-        assert!(title.chars().count() <= 81, "title too long: {} chars", title.chars().count());
+        assert!(
+            title.chars().count() <= 81,
+            "title too long: {} chars",
+            title.chars().count()
+        );
     }
 
     #[tokio::test]
@@ -1182,9 +1348,12 @@ mod tests {
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);",
-            ).unwrap();
+            )
+            .unwrap();
             let now = chrono::Utc::now().to_rfc3339();
-            let msgs = serde_json::to_string(&vec![oneai_core::Message::user("legacy".to_string())]).unwrap();
+            let msgs =
+                serde_json::to_string(&vec![oneai_core::Message::user("legacy".to_string())])
+                    .unwrap();
             conn.execute(
                 "INSERT INTO conversations (id, messages_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params!["legacy_conv", msgs, now, now],
@@ -1195,7 +1364,10 @@ mod tests {
         // tempdir alive for the duration of the test.)
         let _ = &dir;
         let sessions = store.list_conversations().await.unwrap();
-        let legacy = sessions.iter().find(|s| s.id == "legacy_conv").expect("legacy row present");
+        let legacy = sessions
+            .iter()
+            .find(|s| s.id == "legacy_conv")
+            .expect("legacy row present");
         assert_eq!(legacy.title, None, "legacy row has no title until re-saved");
         assert_eq!(legacy.message_count, 1);
     }
@@ -1235,19 +1407,30 @@ mod tests {
 
         // First "session" — save data
         let store1 = SqliteSessionStore::new(&db_path);
-        let entry = make_entry("ltm_persist", "Important knowledge about Rust", Some(vec![0.1, 0.2]));
+        let entry = make_entry(
+            "ltm_persist",
+            "Important knowledge about Rust",
+            Some(vec![0.1, 0.2]),
+        );
         store1.save_ltm(&entry).await.unwrap();
 
         let mut conv = Conversation::with_id("persist_conv".to_string());
         conv.add_message(oneai_core::Message::user("What is Rust?".to_string()));
-        store1.save_conversation("persist_conv", &conv).await.unwrap();
+        store1
+            .save_conversation("persist_conv", &conv)
+            .await
+            .unwrap();
 
         // Second "session" (simulates restart — new SqliteSessionStore instance)
         let store2 = SqliteSessionStore::new(&db_path);
         let loaded_ltm = store2.load_ltm("ltm_persist").await.unwrap().unwrap();
         assert_eq!(loaded_ltm.content, "Important knowledge about Rust");
 
-        let loaded_conv = store2.load_conversation("persist_conv").await.unwrap().unwrap();
+        let loaded_conv = store2
+            .load_conversation("persist_conv")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded_conv.messages[0].text_content(), "What is Rust?");
     }
 
@@ -1298,7 +1481,14 @@ mod fact_tests {
     use super::*;
     use oneai_core::{FactType, MemoryFact};
 
-    fn fact(id: &str, user: &str, sess: &str, subject: &str, content: &str, version: u32) -> MemoryFact {
+    fn fact(
+        id: &str,
+        user: &str,
+        sess: &str,
+        subject: &str,
+        content: &str,
+        version: u32,
+    ) -> MemoryFact {
         MemoryFact {
             id: id.to_string(),
             user_id: user.to_string(),
@@ -1328,10 +1518,14 @@ mod fact_tests {
     #[tokio::test]
     async fn store_fact_upserts_on_conflict() {
         let s = tmp_store();
-        s.store_fact(&fact("f1", "alice", "s1", "user.pm", "npm", 1)).await.unwrap();
+        s.store_fact(&fact("f1", "alice", "s1", "user.pm", "npm", 1))
+            .await
+            .unwrap();
         // Same key, new content → update, version bump (version field is ignored
         // on update path; DB bumps memories.version).
-        s.store_fact(&fact("f1b", "alice", "s1", "user.pm", "pnpm", 1)).await.unwrap();
+        s.store_fact(&fact("f1b", "alice", "s1", "user.pm", "pnpm", 1))
+            .await
+            .unwrap();
         let loaded = s.load_facts("alice", "s1").await.unwrap();
         assert_eq!(loaded.len(), 1); // not duplicated
         assert_eq!(loaded[0].content, "pnpm");
@@ -1341,9 +1535,15 @@ mod fact_tests {
     #[tokio::test]
     async fn load_facts_cross_session_for_user() {
         let s = tmp_store();
-        s.store_fact(&fact("f1", "alice", "s1", "user.pm", "pnpm", 1)).await.unwrap();
-        s.store_fact(&fact("f2", "alice", "s2", "user.runner", "vitest", 1)).await.unwrap();
-        s.store_fact(&fact("f3", "bob", "s1", "user.pm", "npm", 1)).await.unwrap();
+        s.store_fact(&fact("f1", "alice", "s1", "user.pm", "pnpm", 1))
+            .await
+            .unwrap();
+        s.store_fact(&fact("f2", "alice", "s2", "user.runner", "vitest", 1))
+            .await
+            .unwrap();
+        s.store_fact(&fact("f3", "bob", "s1", "user.pm", "npm", 1))
+            .await
+            .unwrap();
         // Empty session → all of alice's facts across sessions.
         let alice_all = s.load_facts("alice", "").await.unwrap();
         assert_eq!(alice_all.len(), 2);
@@ -1366,7 +1566,9 @@ mod fact_tests {
         pinned.pinned = true;
         s.store_fact(&pinned).await.unwrap();
         // A non-pinned sibling for contrast.
-        s.store_fact(&fact("f2", "alice", "s1", "user.runner", "vitest", 1)).await.unwrap();
+        s.store_fact(&fact("f2", "alice", "s1", "user.runner", "vitest", 1))
+            .await
+            .unwrap();
 
         let loaded = s.load_facts("alice", "s1").await.unwrap();
         let pm = loaded.iter().find(|f| f.subject == "user.pm").unwrap();

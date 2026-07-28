@@ -9,20 +9,23 @@
 //! function pointer at init, which receives JSON-encoded tool-approval
 //! request strings and sends responses back via another callback.
 
-mod gate;
 mod callback_bridge;
+mod gate;
 
 use oneai_core::RiskLevel;
 
-pub use gate::{IOSInteractionGate, IOSInteractionBridge};
 pub use callback_bridge::CallbackInteractionBridge;
+pub use gate::{IOSInteractionBridge, IOSInteractionGate};
 
 /// Factory for creating iOS interaction gates.
 pub struct IOSInteractionGateFactory;
 
 impl IOSInteractionGateFactory {
     /// Create an iOS interaction gate with an auto-proceed threshold.
-    pub fn create(buffer_size: usize, threshold: RiskLevel) -> (IOSInteractionGate, IOSInteractionBridge) {
+    pub fn create(
+        buffer_size: usize,
+        threshold: RiskLevel,
+    ) -> (IOSInteractionGate, IOSInteractionBridge) {
         IOSInteractionGate::new(buffer_size, threshold)
     }
 

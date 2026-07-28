@@ -12,9 +12,9 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use oneai_core::{AgentState, CheckpointInfo};
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::StatePersistence;
+use oneai_core::{AgentState, CheckpointInfo};
 
 /// File-based state persistence implementation.
 ///
@@ -52,12 +52,15 @@ impl FilePersistence {
 
     /// Ensure the base directory exists.
     async fn ensure_directory(&self) -> Result<()> {
-        tokio::fs::create_dir_all(&self.base_path).await.map_err(|e| {
-            OneAIError::Persistence(format!(
-                "Failed to create checkpoint directory '{}': {}",
-                self.base_path.display(), e
-            ))
-        })
+        tokio::fs::create_dir_all(&self.base_path)
+            .await
+            .map_err(|e| {
+                OneAIError::Persistence(format!(
+                    "Failed to create checkpoint directory '{}': {}",
+                    self.base_path.display(),
+                    e
+                ))
+            })
     }
 }
 
@@ -85,7 +88,8 @@ impl StatePersistence for FilePersistence {
         tokio::fs::write(&path, json).await.map_err(|e| {
             OneAIError::Persistence(format!(
                 "Failed to write checkpoint file '{}': {}",
-                path.display(), e
+                path.display(),
+                e
             ))
         })?;
 
@@ -102,7 +106,8 @@ impl StatePersistence for FilePersistence {
         let json = tokio::fs::read_to_string(&path).await.map_err(|e| {
             OneAIError::Persistence(format!(
                 "Failed to read checkpoint file '{}': {}",
-                path.display(), e
+                path.display(),
+                e
             ))
         })?;
 
@@ -124,7 +129,8 @@ impl StatePersistence for FilePersistence {
         let mut entries = tokio::fs::read_dir(&self.base_path).await.map_err(|e| {
             OneAIError::Persistence(format!(
                 "Failed to read checkpoint directory '{}': {}",
-                self.base_path.display(), e
+                self.base_path.display(),
+                e
             ))
         })?;
 
@@ -135,20 +141,22 @@ impl StatePersistence for FilePersistence {
         })? {
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
-                let file_name = path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let file_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
                 // Try to load the state to get metadata
                 let json = tokio::fs::read_to_string(&path).await.map_err(|e| {
                     OneAIError::Persistence(format!(
-                        "Failed to read checkpoint '{}': {}", path.display(), e
+                        "Failed to read checkpoint '{}': {}",
+                        path.display(),
+                        e
                     ))
                 })?;
 
                 let state: AgentState = serde_json::from_str(&json).map_err(|e| {
                     OneAIError::Serialization(format!(
-                        "Failed to deserialize checkpoint '{}': {}", path.display(), e
+                        "Failed to deserialize checkpoint '{}': {}",
+                        path.display(),
+                        e
                     ))
                 })?;
 
@@ -179,7 +187,8 @@ impl StatePersistence for FilePersistence {
         tokio::fs::remove_file(&path).await.map_err(|e| {
             OneAIError::Persistence(format!(
                 "Failed to delete checkpoint file '{}': {}",
-                path.display(), e
+                path.display(),
+                e
             ))
         })?;
 

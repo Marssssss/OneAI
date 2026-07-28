@@ -1,8 +1,8 @@
 //! StateGraph visualization DTO — converts StateGraph data into JSON
 //! for the Studio frontend to render as SVG/D3.js graphs.
 
+use oneai_workflow::state_graph::{EdgeCondition, GraphEdge, GraphNode, NodeAction, StateGraph};
 use serde::{Deserialize, Serialize};
-use oneai_workflow::state_graph::{StateGraph, GraphNode, GraphEdge, NodeAction, EdgeCondition};
 
 // ─── GraphVisualization ──────────────────────────────────────────────
 
@@ -114,12 +114,12 @@ impl GraphVisualization {
     /// Reuses the label format from render_state_graph_ascii() but adds
     /// structured details for interactive UI.
     pub fn from_state_graph(graph: &StateGraph) -> Self {
-        let nodes: Vec<NodeView> = graph.nodes.values()
-            .map(|n| node_to_view(n))
-            .collect();
+        let nodes: Vec<NodeView> = graph.nodes.values().map(node_to_view).collect();
 
-        let edges: Vec<EdgeView> = graph.edges.values()
-            .flat_map(|edge_list| edge_list.iter().map(|e| edge_to_view(e)))
+        let edges: Vec<EdgeView> = graph
+            .edges
+            .values()
+            .flat_map(|edge_list| edge_list.iter().map(edge_to_view))
             .collect();
 
         Self {
@@ -145,8 +145,16 @@ fn node_to_view(node: &GraphNode) -> NodeView {
             temperature: _,
             max_tokens: _,
         } => {
-            let tools_str = if *include_tool_definitions { " +tools" } else { "" };
-            let prompt_str = if system_prompt_override.is_some() { " (custom prompt)" } else { "" };
+            let tools_str = if *include_tool_definitions {
+                " +tools"
+            } else {
+                ""
+            };
+            let prompt_str = if system_prompt_override.is_some() {
+                " (custom prompt)"
+            } else {
+                ""
+            };
             (
                 format!("🧠 LLM{}{}", tools_str, prompt_str),
                 "llm_infer".to_string(),
@@ -159,35 +167,51 @@ fn node_to_view(node: &GraphNode) -> NodeView {
                 }),
             )
         }
-        NodeAction::ToolCall { tool_name, args_template: _ } => (
+        NodeAction::ToolCall {
+            tool_name,
+            args_template: _,
+        } => (
             format!("🔧 {}", tool_name),
             "tool_call".to_string(),
             "Tool execution node".to_string(),
-            Some(NodeDetails::ToolCall { tool_name: tool_name.clone() }),
+            Some(NodeDetails::ToolCall {
+                tool_name: tool_name.clone(),
+            }),
         ),
-        NodeAction::Delegate { agent_kind, task_template: _ } => (
+        NodeAction::Delegate {
+            agent_kind,
+            task_template: _,
+        } => (
             format!("🤖 →{}", agent_kind),
             "delegate".to_string(),
             "Sub-agent delegation node".to_string(),
-            Some(NodeDetails::Delegate { agent_kind: agent_kind.clone() }),
+            Some(NodeDetails::Delegate {
+                agent_kind: agent_kind.clone(),
+            }),
         ),
         NodeAction::HumanApproval { description } => (
             format!("✋ {}", description),
             "human_approval".to_string(),
             "Human approval checkpoint".to_string(),
-            Some(NodeDetails::HumanApproval { description: description.clone() }),
+            Some(NodeDetails::HumanApproval {
+                description: description.clone(),
+            }),
         ),
         NodeAction::ConditionCheck { condition } => (
             format!("🔀 {}", condition),
             "condition_check".to_string(),
             "Routing condition node".to_string(),
-            Some(NodeDetails::ConditionCheck { condition: condition.clone() }),
+            Some(NodeDetails::ConditionCheck {
+                condition: condition.clone(),
+            }),
         ),
         NodeAction::SwitchParadigm { paradigm } => (
             format!("🔄 →{}", paradigm),
             "switch_paradigm".to_string(),
             "Paradigm switch node".to_string(),
-            Some(NodeDetails::SwitchParadigm { paradigm: paradigm.clone() }),
+            Some(NodeDetails::SwitchParadigm {
+                paradigm: paradigm.clone(),
+            }),
         ),
         // Catch-all for #[non_exhaustive] future variants
         _ => (
@@ -211,29 +235,48 @@ fn node_to_view(node: &GraphNode) -> NodeView {
 /// Convert a GraphEdge to an EdgeView.
 fn edge_to_view(edge: &GraphEdge) -> EdgeView {
     let (condition, label, is_unconditional) = match &edge.condition {
-        Some(EdgeCondition::HasToolCalls) =>
-            (Some("Model output contains tool calls".to_string()), "HasToolCalls".to_string(), false),
-        Some(EdgeCondition::IsFinalAnswer) =>
-            (Some("Model output is a final answer".to_string()), "IsFinalAnswer".to_string(), false),
-        Some(EdgeCondition::RequestsDelegation) =>
-            (Some("Model requests delegation".to_string()), "RequestsDelegation".to_string(), false),
-        Some(EdgeCondition::ErrorOccurred) =>
-            (Some("An error occurred".to_string()), "ErrorOccurred".to_string(), false),
-        Some(EdgeCondition::StateEquals { variable, value }) =>
-            (Some(format!("State {} = {}", variable, value)), format!("{}={}", variable, value), false),
-        Some(EdgeCondition::Always) =>
-            (None, String::new(), true),
-        Some(EdgeCondition::Custom { name, description }) =>
-            (Some(description.clone()), format!("Custom:{}", name), false),
-        Some(EdgeCondition::ParadigmEquals { paradigm }) =>
-            (Some(format!("Active paradigm = {}", paradigm)), format!("Paradigm={}", paradigm), false),
-        Some(EdgeCondition::IterationExceeds { count }) =>
-            (Some(format!("Iterations exceed {}", count)), format!("Iter>{}", count), false),
+        Some(EdgeCondition::HasToolCalls) => (
+            Some("Model output contains tool calls".to_string()),
+            "HasToolCalls".to_string(),
+            false,
+        ),
+        Some(EdgeCondition::IsFinalAnswer) => (
+            Some("Model output is a final answer".to_string()),
+            "IsFinalAnswer".to_string(),
+            false,
+        ),
+        Some(EdgeCondition::RequestsDelegation) => (
+            Some("Model requests delegation".to_string()),
+            "RequestsDelegation".to_string(),
+            false,
+        ),
+        Some(EdgeCondition::ErrorOccurred) => (
+            Some("An error occurred".to_string()),
+            "ErrorOccurred".to_string(),
+            false,
+        ),
+        Some(EdgeCondition::StateEquals { variable, value }) => (
+            Some(format!("State {} = {}", variable, value)),
+            format!("{}={}", variable, value),
+            false,
+        ),
+        Some(EdgeCondition::Always) => (None, String::new(), true),
+        Some(EdgeCondition::Custom { name, description }) => {
+            (Some(description.clone()), format!("Custom:{}", name), false)
+        }
+        Some(EdgeCondition::ParadigmEquals { paradigm }) => (
+            Some(format!("Active paradigm = {}", paradigm)),
+            format!("Paradigm={}", paradigm),
+            false,
+        ),
+        Some(EdgeCondition::IterationExceeds { count }) => (
+            Some(format!("Iterations exceed {}", count)),
+            format!("Iter>{}", count),
+            false,
+        ),
         // Catch-all for #[non_exhaustive] future variants
-        Some(_) =>
-            (None, String::new(), false),
-        None =>
-            (None, String::new(), true),
+        Some(_) => (None, String::new(), false),
+        None => (None, String::new(), true),
     };
 
     EdgeView {

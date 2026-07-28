@@ -169,18 +169,24 @@ pub struct StubPlatformCapabilities {
 
 impl StubPlatformCapabilities {
     pub fn new(platform_name: impl Into<String>) -> Self {
-        Self { platform_name: platform_name.into() }
+        Self {
+            platform_name: platform_name.into(),
+        }
     }
 }
 
 #[async_trait]
 impl PlatformCapabilities for StubPlatformCapabilities {
     async fn screenshot(&self) -> Result<ScreenshotResult> {
-        Err(crate::error::OneAIError::Platform("Screenshot not available in stub".to_string()))
+        Err(crate::error::OneAIError::Platform(
+            "Screenshot not available in stub".to_string(),
+        ))
     }
 
     async fn camera_stream(&self, _position: CameraPosition) -> Result<CameraStreamHandle> {
-        Err(crate::error::OneAIError::Platform("Camera not available in stub".to_string()))
+        Err(crate::error::OneAIError::Platform(
+            "Camera not available in stub".to_string(),
+        ))
     }
 
     fn filesystem_sandbox(&self) -> &dyn FilesystemSandbox {
@@ -199,10 +205,18 @@ impl PlatformCapabilities for StubPlatformCapabilities {
         })
     }
 
-    fn supports_screenshot(&self) -> bool { false }
-    fn supports_camera(&self) -> bool { false }
-    fn supports_notifications(&self) -> bool { false }
-    fn platform_name(&self) -> &'static str { "stub" }
+    fn supports_screenshot(&self) -> bool {
+        false
+    }
+    fn supports_camera(&self) -> bool {
+        false
+    }
+    fn supports_notifications(&self) -> bool {
+        false
+    }
+    fn platform_name(&self) -> &'static str {
+        "stub"
+    }
 }
 
 /// Stub filesystem sandbox — allows all paths (for testing/development).

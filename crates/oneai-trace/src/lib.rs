@@ -36,22 +36,21 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
 // When trace feature is enabled, use the full implementation
-#[cfg(feature = "trace")]
-mod span;
-#[cfg(feature = "trace")]
-mod event;
-#[cfg(feature = "trace")]
-mod context;
-#[cfg(feature = "trace")]
-mod tree;
-#[cfg(feature = "trace")]
-mod emitter;
 #[cfg(feature = "trace")]
 mod collector;
 #[cfg(feature = "trace")]
+mod context;
+#[cfg(feature = "trace")]
+mod emitter;
+#[cfg(feature = "trace")]
+mod event;
+#[cfg(feature = "trace")]
 mod metrics;
+#[cfg(feature = "trace")]
+mod span;
+#[cfg(feature = "trace")]
+mod tree;
 
 // OTEL exporter — available when both trace and otel features are enabled
 #[cfg(all(feature = "trace", feature = "otel"))]
@@ -66,36 +65,33 @@ mod noop;
 // ─── Public exports ──────────────────────────────────────────────────
 
 #[cfg(feature = "trace")]
-pub use span::{Span, SpanKind, SpanStatus};
-#[cfg(feature = "trace")]
-pub use event::{TraceEvent, EventKind};
+pub use collector::{FileCollector, InMemoryCollector, NoopCollector, TraceCollector};
 #[cfg(feature = "trace")]
 pub use context::TraceContext;
 #[cfg(feature = "trace")]
-pub use tree::{TraceTree, TraceMetadata};
-#[cfg(feature = "trace")]
 pub use emitter::TraceEmitter;
 #[cfg(feature = "trace")]
-pub use collector::{TraceCollector, InMemoryCollector, FileCollector, NoopCollector};
+pub use event::{EventKind, TraceEvent};
 #[cfg(feature = "trace")]
 pub use metrics::TraceMetrics;
+#[cfg(feature = "trace")]
+pub use span::{Span, SpanKind, SpanStatus};
+#[cfg(feature = "trace")]
+pub use tree::{TraceMetadata, TraceTree};
 
 // OTEL exports — available when both trace and otel features are enabled
 #[cfg(all(feature = "trace", feature = "otel"))]
 pub use otel_exporter::{
-    OtlpCollector, OtlpConfig, OtlpProtocol, OtlpExporter, ExportBatch,
-    HttpOtlpExporter, InMemoryOtlpExporter,
-    span_kind_to_otel, span_status_to_otel, event_kind_to_otel_name,
+    event_kind_to_otel_name, span_kind_to_otel, span_status_to_otel, ExportBatch, HttpOtlpExporter,
+    InMemoryOtlpExporter, OtlpCollector, OtlpConfig, OtlpExporter, OtlpProtocol,
 };
 #[cfg(all(feature = "trace", feature = "otel"))]
-pub use otel_metrics::{OtelMetricsProvider, MetricsSnapshot};
+pub use otel_metrics::{MetricsSnapshot, OtelMetricsProvider};
 
 #[cfg(not(feature = "trace"))]
 pub use noop::{
-    TraceContext, SpanKind, SpanStatus, EventKind,
-    Span, TraceEvent, TraceTree, TraceMetadata,
-    TraceEmitter, TraceCollector, TraceMetrics,
-    InMemoryCollector, FileCollector, NoopCollector,
+    EventKind, FileCollector, InMemoryCollector, NoopCollector, Span, SpanKind, SpanStatus,
+    TraceCollector, TraceContext, TraceEmitter, TraceEvent, TraceMetadata, TraceMetrics, TraceTree,
 };
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -103,8 +99,8 @@ pub use noop::{
 #[cfg(all(test, feature = "trace"))]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn test_span_creation() {
@@ -145,7 +141,10 @@ mod tests {
     fn test_span_events() {
         let mut span = Span::new(SpanKind::AGENT, "react_loop", None);
         span.add_event(TraceEvent::thought("I need to calculate 2+2"));
-        span.add_event(TraceEvent::action("calculator", &serde_json::json!({"expression": "2+2"})));
+        span.add_event(TraceEvent::action(
+            "calculator",
+            &serde_json::json!({"expression": "2+2"}),
+        ));
         span.add_event(TraceEvent::observation(true, "4"));
         assert_eq!(span.events.len(), 3);
         assert_eq!(span.events[0].kind, EventKind::Thought);
@@ -194,9 +193,11 @@ mod tests {
         let session_span = ctx.enter_span(SpanKind::SESSION, "session", None);
         ctx.set_attribute("session.id", serde_json::json!("test_123"));
 
-        ctx.log_event(EventKind::Thought, "agent.thought", HashMap::from([
-            ("input.message".to_string(), serde_json::json!("Hello")),
-        ]));
+        ctx.log_event(
+            EventKind::Thought,
+            "agent.thought",
+            HashMap::from([("input.message".to_string(), serde_json::json!("Hello"))]),
+        );
 
         ctx.exit_span(&session_span, SpanStatus::Ok);
 
@@ -242,9 +243,14 @@ mod tests {
 
         let session = ctx.enter_span(SpanKind::SESSION, "session", None);
         ctx.set_attribute("session.id", serde_json::json!("test_456"));
-        ctx.log_event(EventKind::Thought, "agent.thought", HashMap::from([
-            ("input.message".to_string(), serde_json::json!("What is Rust?")),
-        ]));
+        ctx.log_event(
+            EventKind::Thought,
+            "agent.thought",
+            HashMap::from([(
+                "input.message".to_string(),
+                serde_json::json!("What is Rust?"),
+            )]),
+        );
         ctx.exit_span(&session, SpanStatus::Ok);
 
         let tree = ctx.build_tree();

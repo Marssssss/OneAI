@@ -64,27 +64,27 @@
 //!   oneai graph show <n> — Render a state graph as ASCII
 //!   oneai graph run <n> <task> — Execute a state graph with a real LLM
 
-mod config;
-mod cmd_chat;
-mod cmd_run;
-mod cmd_tasks;
-mod cmd_pack;
-mod cmd_skill;
-mod cmd_eval;
-mod cmd_config;
-mod cmd_init;
-mod cmd_version;
-mod cmd_studio;
-mod cmd_mcp;
 mod cmd_a2a;
-mod cmd_wasm;
-mod cmd_session;
-mod cmd_memory;
+mod cmd_chat;
+mod cmd_config;
 mod cmd_embed;
-mod cmd_usage;
+mod cmd_eval;
+mod cmd_init;
+mod cmd_mcp;
+mod cmd_memory;
+mod cmd_pack;
 mod cmd_provider;
+mod cmd_run;
+mod cmd_session;
+mod cmd_skill;
+mod cmd_studio;
+mod cmd_tasks;
 mod cmd_token;
+mod cmd_usage;
+mod cmd_version;
+mod cmd_wasm;
 mod cmd_workflow;
+mod config;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -817,279 +817,372 @@ fn main() {
             // Default: launch TUI (same as "oneai chat" with no options)
             cmd_chat::cmd_chat(&config, None, None, None);
         }
-        Some(Commands::Chat { domain, model, user }) => {
-            cmd_chat::cmd_chat(&config, domain.as_deref(), model.as_deref(), user.as_deref());
+        Some(Commands::Chat {
+            domain,
+            model,
+            user,
+        }) => {
+            cmd_chat::cmd_chat(
+                &config,
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+            );
         }
-        Some(Commands::Run { prompt, domain, model, user }) => {
-            cmd_run::cmd_run(&prompt, &config, domain.as_deref(), model.as_deref(), user.as_deref());
+        Some(Commands::Run {
+            prompt,
+            domain,
+            model,
+            user,
+        }) => {
+            cmd_run::cmd_run(
+                &prompt,
+                &config,
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+            );
         }
-        Some(Commands::Studio { port, domain, model, user }) => {
-            cmd_studio::cmd_studio(&config, port, domain.as_deref(), model.as_deref(), user.as_deref());
+        Some(Commands::Studio {
+            port,
+            domain,
+            model,
+            user,
+        }) => {
+            cmd_studio::cmd_studio(
+                &config,
+                port,
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+            );
         }
-        Some(Commands::Pack { action }) => {
-            match action {
-                PackAction::List => cmd_pack::cmd_pack_list(),
-                PackAction::Show { name } => cmd_pack::cmd_pack_show(&name),
-                PackAction::Install { source } => cmd_pack::cmd_pack_install(&source),
-                PackAction::Validate { path } => cmd_pack::cmd_pack_validate(&path),
-                PackAction::Spec => cmd_pack::cmd_pack_spec(),
-                PackAction::Check { name } => cmd_pack::cmd_pack_check(&name),
+        Some(Commands::Pack { action }) => match action {
+            PackAction::List => cmd_pack::cmd_pack_list(),
+            PackAction::Show { name } => cmd_pack::cmd_pack_show(&name),
+            PackAction::Install { source } => cmd_pack::cmd_pack_install(&source),
+            PackAction::Validate { path } => cmd_pack::cmd_pack_validate(&path),
+            PackAction::Spec => cmd_pack::cmd_pack_spec(),
+            PackAction::Check { name } => cmd_pack::cmd_pack_check(&name),
+        },
+        Some(Commands::Skill { action }) => match action {
+            SkillAction::List => cmd_skill::cmd_skill_list(),
+            SkillAction::Show { name } => cmd_skill::cmd_skill_show(&name),
+        },
+        Some(Commands::Eval { action }) => match action {
+            EvalAction::List => cmd_eval::cmd_eval_list(),
+            EvalAction::Run {
+                name,
+                format,
+                profile,
+                record,
+            } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_eval::cmd_eval_run(&name, &format, profile, record));
             }
-        }
-        Some(Commands::Skill { action }) => {
-            match action {
-                SkillAction::List => cmd_skill::cmd_skill_list(),
-                SkillAction::Show { name } => cmd_skill::cmd_skill_show(&name),
+            EvalAction::Score { name } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_eval::cmd_eval_score(&name));
             }
-        }
-        Some(Commands::Eval { action }) => {
-            match action {
-                EvalAction::List => cmd_eval::cmd_eval_list(),
-                EvalAction::Run { name, format, profile, record } => {
-                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
-                    rt.block_on(cmd_eval::cmd_eval_run(&name, &format, profile, record));
-                }
-                EvalAction::Score { name } => {
-                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
-                    rt.block_on(cmd_eval::cmd_eval_score(&name));
-                }
-                EvalAction::Replay { path } => {
-                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
-                    rt.block_on(cmd_eval::cmd_eval_replay(&path));
-                }
-                EvalAction::Swebench {
-                    dataset,
-                    instances,
-                    workspace,
-                    python,
+            EvalAction::Replay { path } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_eval::cmd_eval_replay(&path));
+            }
+            EvalAction::Swebench {
+                dataset,
+                instances,
+                workspace,
+                python,
+                modal,
+                dataset_name,
+                limit,
+                format,
+                run_id,
+            } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_eval::cmd_eval_swebench(
+                    &dataset,
+                    instances.as_deref(),
+                    &workspace,
+                    python.as_deref(),
                     modal,
-                    dataset_name,
+                    &dataset_name,
                     limit,
-                    format,
-                    run_id,
-                } => {
-                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
-                    rt.block_on(cmd_eval::cmd_eval_swebench(
-                        &dataset,
-                        instances.as_deref(),
-                        &workspace,
-                        python.as_deref(),
-                        modal,
-                        &dataset_name,
-                        limit,
-                        &format,
-                        &run_id,
-                    ));
-                }
-                EvalAction::Memory {
-                    suite,
-                    data,
-                    metrics,
+                    &format,
+                    &run_id,
+                ));
+            }
+            EvalAction::Memory {
+                suite,
+                data,
+                metrics,
+                no_embedding,
+                k,
+                format,
+            } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_eval::cmd_eval_memory(
+                    &suite,
+                    data.as_deref(),
+                    &metrics,
                     no_embedding,
                     k,
-                    format,
-                } => {
-                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
-                    rt.block_on(cmd_eval::cmd_eval_memory(
-                        &suite, data.as_deref(), &metrics, no_embedding, k, &format,
-                    ));
-                }
+                    &format,
+                ));
             }
-        }
-        Some(Commands::Config { action }) => {
-            match action {
-                ConfigAction::Show => cmd_config::cmd_config_show(),
-                ConfigAction::Init => cmd_config::cmd_config_init(),
+        },
+        Some(Commands::Config { action }) => match action {
+            ConfigAction::Show => cmd_config::cmd_config_show(),
+            ConfigAction::Init => cmd_config::cmd_config_init(),
+        },
+        Some(Commands::Mcp { action }) => match action {
+            McpAction::Serve { domain } => {
+                cmd_mcp::cmd_mcp_serve(domain.as_deref());
             }
-        }
-        Some(Commands::Mcp { action }) => {
-            match action {
-                McpAction::Serve { domain } => {
-                    cmd_mcp::cmd_mcp_serve(domain.as_deref());
-                }
-                McpAction::List => cmd_mcp::cmd_mcp_list(),
-                McpAction::Add { name, transport, command, url, args, enabled } => {
-                    cmd_mcp::cmd_mcp_add(&name, &transport, command.as_deref(), url.as_deref(), args.as_deref(), enabled);
-                }
-                McpAction::Remove { name } => {
-                    cmd_mcp::cmd_mcp_remove(&name);
-                }
-                McpAction::Connect { name } => {
-                    cmd_mcp::cmd_mcp_connect(&name);
-                }
+            McpAction::List => cmd_mcp::cmd_mcp_list(),
+            McpAction::Add {
+                name,
+                transport,
+                command,
+                url,
+                args,
+                enabled,
+            } => {
+                cmd_mcp::cmd_mcp_add(
+                    &name,
+                    &transport,
+                    command.as_deref(),
+                    url.as_deref(),
+                    args.as_deref(),
+                    enabled,
+                );
             }
-        }
-        Some(Commands::A2a { action }) => {
-            match action {
-                A2aAction::Serve { domain } => {
-                    cmd_a2a::cmd_a2a_serve(domain.as_deref());
-                }
-                A2aAction::Discover { url } => {
-                    cmd_a2a::cmd_a2a_discover(&url);
-                }
-                A2aAction::List => {
-                    cmd_a2a::cmd_a2a_list();
-                }
-                A2aAction::Send { url, message } => {
-                    cmd_a2a::cmd_a2a_send(&url, &message);
-                }
+            McpAction::Remove { name } => {
+                cmd_mcp::cmd_mcp_remove(&name);
             }
-        }
-        Some(Commands::Wasm { action }) => {
-            match action {
-                WasmAction::List => cmd_wasm::cmd_wasm_list(),
-                WasmAction::Load { name, file } => cmd_wasm::cmd_wasm_load(&name, &file),
-                WasmAction::Run { name, input, input_file } => {
-                    cmd_wasm::cmd_wasm_run(&name, input.as_deref(), input_file.as_deref());
-                }
-                WasmAction::Health { name } => {
-                    cmd_wasm::cmd_wasm_health(name.as_deref());
-                }
-                WasmAction::Unload { name } => cmd_wasm::cmd_wasm_unload(&name),
-                WasmAction::Stats => cmd_wasm::cmd_wasm_stats(),
+            McpAction::Connect { name } => {
+                cmd_mcp::cmd_mcp_connect(&name);
             }
-        }
-        Some(Commands::Session { action }) => {
-            match action {
-                SessionAction::List => cmd_session::cmd_session_list(),
-                SessionAction::Resume { id } => cmd_session::cmd_session_resume(&id),
-                SessionAction::Delete { id } => cmd_session::cmd_session_delete(&id),
-                SessionAction::Info { id } => cmd_session::cmd_session_info(&id),
+        },
+        Some(Commands::A2a { action }) => match action {
+            A2aAction::Serve { domain } => {
+                cmd_a2a::cmd_a2a_serve(domain.as_deref());
             }
-        }
+            A2aAction::Discover { url } => {
+                cmd_a2a::cmd_a2a_discover(&url);
+            }
+            A2aAction::List => {
+                cmd_a2a::cmd_a2a_list();
+            }
+            A2aAction::Send { url, message } => {
+                cmd_a2a::cmd_a2a_send(&url, &message);
+            }
+        },
+        Some(Commands::Wasm { action }) => match action {
+            WasmAction::List => cmd_wasm::cmd_wasm_list(),
+            WasmAction::Load { name, file } => cmd_wasm::cmd_wasm_load(&name, &file),
+            WasmAction::Run {
+                name,
+                input,
+                input_file,
+            } => {
+                cmd_wasm::cmd_wasm_run(&name, input.as_deref(), input_file.as_deref());
+            }
+            WasmAction::Health { name } => {
+                cmd_wasm::cmd_wasm_health(name.as_deref());
+            }
+            WasmAction::Unload { name } => cmd_wasm::cmd_wasm_unload(&name),
+            WasmAction::Stats => cmd_wasm::cmd_wasm_stats(),
+        },
+        Some(Commands::Session { action }) => match action {
+            SessionAction::List => cmd_session::cmd_session_list(),
+            SessionAction::Resume { id } => cmd_session::cmd_session_resume(&id),
+            SessionAction::Delete { id } => cmd_session::cmd_session_delete(&id),
+            SessionAction::Info { id } => cmd_session::cmd_session_info(&id),
+        },
         Some(Commands::Tasks { action }) => match action {
             TasksAction::List { user, root } => {
                 cmd_tasks::cmd_tasks_list(user.as_deref(), root.as_deref())
             }
             TasksAction::Show { id, root } => cmd_tasks::cmd_tasks_show(&id, root.as_deref()),
-            TasksAction::Continue { id, domain, model, user, root } => cmd_tasks::cmd_tasks_continue(
-                &id, &config, domain.as_deref(), model.as_deref(), user.as_deref(), root.as_deref(),
+            TasksAction::Continue {
+                id,
+                domain,
+                model,
+                user,
+                root,
+            } => cmd_tasks::cmd_tasks_continue(
+                &id,
+                &config,
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+                root.as_deref(),
             ),
             TasksAction::Archive { id, root } => cmd_tasks::cmd_tasks_archive(&id, root.as_deref()),
         },
-        Some(Commands::Memory { action }) => {
-            match action {
-                MemoryAction::Search { query, user, top_k } => {
-                    cmd_memory::cmd_memory_search(&query, &user, top_k);
-                }
-                MemoryAction::List { user, session } => {
-                    cmd_memory::cmd_memory_list(&user, session.as_deref());
-                }
+        Some(Commands::Memory { action }) => match action {
+            MemoryAction::Search { query, user, top_k } => {
+                cmd_memory::cmd_memory_search(&query, &user, top_k);
             }
-        }
-        Some(Commands::Embed { action }) => {
-            match action {
-                EmbedAction::Generate { text, model, service, api_key } => {
-                    cmd_embed::cmd_embed_generate(&text, model.as_deref(), service.as_deref(), api_key.as_deref());
-                }
-                EmbedAction::Batch { texts, model, service, api_key } => {
-                    cmd_embed::cmd_embed_batch(&texts, model.as_deref(), service.as_deref(), api_key.as_deref());
-                }
-                EmbedAction::List => cmd_embed::cmd_embed_list(),
-                EmbedAction::Health { model, service, api_key } => {
-                    cmd_embed::cmd_embed_health(model.as_deref(), service.as_deref(), api_key.as_deref());
-                }
-                EmbedAction::Dimension { model, service, api_key } => {
-                    cmd_embed::cmd_embed_dimension(model.as_deref(), service.as_deref(), api_key.as_deref());
-                }
+            MemoryAction::List { user, session } => {
+                cmd_memory::cmd_memory_list(&user, session.as_deref());
             }
-        }
-        Some(Commands::Usage { action }) => {
-            match action {
-                UsageAction::Report => cmd_usage::cmd_usage_report(),
-                UsageAction::Session { id } => cmd_usage::cmd_usage_session(&id),
-                UsageAction::Export { format } => cmd_usage::cmd_usage_export(&format),
+        },
+        Some(Commands::Embed { action }) => match action {
+            EmbedAction::Generate {
+                text,
+                model,
+                service,
+                api_key,
+            } => {
+                cmd_embed::cmd_embed_generate(
+                    &text,
+                    model.as_deref(),
+                    service.as_deref(),
+                    api_key.as_deref(),
+                );
             }
-        }
-        Some(Commands::Provider { action }) => {
-            match action {
-                ProviderAction::Status => {
-                    cmd_provider::run_provider_status();
-                }
-                ProviderAction::FallbackLog { limit } => {
-                    cmd_provider::run_fallback_log_with_limit(&limit);
-                }
-                ProviderAction::Test => {
-                    cmd_provider::run_provider_test();
-                }
-                ProviderAction::Route { task, strategy } => {
-                    cmd_provider::run_route_dry_run(&task, &strategy);
-                }
-                ProviderAction::RouteLog { limit } => {
-                    cmd_provider::run_route_log(&limit);
-                }
-                ProviderAction::RouteConfig => {
-                    cmd_provider::run_route_config();
-                }
+            EmbedAction::Batch {
+                texts,
+                model,
+                service,
+                api_key,
+            } => {
+                cmd_embed::cmd_embed_batch(
+                    &texts,
+                    model.as_deref(),
+                    service.as_deref(),
+                    api_key.as_deref(),
+                );
             }
-        }
-        Some(Commands::Token { action }) => {
-            match action {
-                TokenAction::Count { text, model } => {
-                    cmd_token::run_token_count(&text, model.as_deref());
-                }
-                TokenAction::Estimate { model } => {
-                    cmd_token::run_token_estimate(model.as_deref());
-                }
-                TokenAction::Context { model } => {
-                    cmd_token::run_token_context(&model);
-                }
-                TokenAction::Models => {
-                    cmd_token::run_token_models();
-                }
-                TokenAction::Fits { text, model } => {
-                    cmd_token::run_token_fits(&text, &model);
-                }
-                TokenAction::Probe { model } => {
-                    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
-                    rt.block_on(cmd_token::run_token_probe(model.as_deref(), &config));
-                }
+            EmbedAction::List => cmd_embed::cmd_embed_list(),
+            EmbedAction::Health {
+                model,
+                service,
+                api_key,
+            } => {
+                cmd_embed::cmd_embed_health(
+                    model.as_deref(),
+                    service.as_deref(),
+                    api_key.as_deref(),
+                );
             }
-        }
-        Some(Commands::Workflow { action }) => {
-            match action {
-                WorkflowAction::List { domain } => {
-                    cmd_workflow::cmd_workflow_list(&config, domain.as_deref());
-                }
-                WorkflowAction::Show { name, domain } => {
-                    cmd_workflow::cmd_workflow_show(&name, &config, domain.as_deref());
-                }
-                WorkflowAction::Run { name, task, domain, model, user } => {
-                    cmd_workflow::cmd_workflow_run(
-                        &name,
-                        task.as_deref(),
-                        &config,
-                        domain.as_deref(),
-                        model.as_deref(),
-                        user.as_deref(),
-                    );
-                }
+            EmbedAction::Dimension {
+                model,
+                service,
+                api_key,
+            } => {
+                cmd_embed::cmd_embed_dimension(
+                    model.as_deref(),
+                    service.as_deref(),
+                    api_key.as_deref(),
+                );
             }
-        }
-        Some(Commands::Graph { action }) => {
-            match action {
-                GraphAction::List { domain } => {
-                    cmd_workflow::cmd_graph_list(&config, domain.as_deref());
-                }
-                GraphAction::Show { name, domain } => {
-                    cmd_workflow::cmd_graph_show(&name, &config, domain.as_deref());
-                }
-                GraphAction::Run { name, task, domain, model, user } => {
-                    cmd_workflow::cmd_graph_run(
-                        &name,
-                        &task,
-                        &config,
-                        domain.as_deref(),
-                        model.as_deref(),
-                        user.as_deref(),
-                    );
-                }
+        },
+        Some(Commands::Usage { action }) => match action {
+            UsageAction::Report => cmd_usage::cmd_usage_report(),
+            UsageAction::Session { id } => cmd_usage::cmd_usage_session(&id),
+            UsageAction::Export { format } => cmd_usage::cmd_usage_export(&format),
+        },
+        Some(Commands::Provider { action }) => match action {
+            ProviderAction::Status => {
+                cmd_provider::run_provider_status();
             }
-        }
+            ProviderAction::FallbackLog { limit } => {
+                cmd_provider::run_fallback_log_with_limit(&limit);
+            }
+            ProviderAction::Test => {
+                cmd_provider::run_provider_test();
+            }
+            ProviderAction::Route { task, strategy } => {
+                cmd_provider::run_route_dry_run(&task, &strategy);
+            }
+            ProviderAction::RouteLog { limit } => {
+                cmd_provider::run_route_log(&limit);
+            }
+            ProviderAction::RouteConfig => {
+                cmd_provider::run_route_config();
+            }
+        },
+        Some(Commands::Token { action }) => match action {
+            TokenAction::Count { text, model } => {
+                cmd_token::run_token_count(&text, model.as_deref());
+            }
+            TokenAction::Estimate { model } => {
+                cmd_token::run_token_estimate(model.as_deref());
+            }
+            TokenAction::Context { model } => {
+                cmd_token::run_token_context(&model);
+            }
+            TokenAction::Models => {
+                cmd_token::run_token_models();
+            }
+            TokenAction::Fits { text, model } => {
+                cmd_token::run_token_fits(&text, &model);
+            }
+            TokenAction::Probe { model } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_token::run_token_probe(model.as_deref(), &config));
+            }
+        },
+        Some(Commands::Workflow { action }) => match action {
+            WorkflowAction::List { domain } => {
+                cmd_workflow::cmd_workflow_list(&config, domain.as_deref());
+            }
+            WorkflowAction::Show { name, domain } => {
+                cmd_workflow::cmd_workflow_show(&name, &config, domain.as_deref());
+            }
+            WorkflowAction::Run {
+                name,
+                task,
+                domain,
+                model,
+                user,
+            } => {
+                cmd_workflow::cmd_workflow_run(
+                    &name,
+                    task.as_deref(),
+                    &config,
+                    domain.as_deref(),
+                    model.as_deref(),
+                    user.as_deref(),
+                );
+            }
+        },
+        Some(Commands::Graph { action }) => match action {
+            GraphAction::List { domain } => {
+                cmd_workflow::cmd_graph_list(&config, domain.as_deref());
+            }
+            GraphAction::Show { name, domain } => {
+                cmd_workflow::cmd_graph_show(&name, &config, domain.as_deref());
+            }
+            GraphAction::Run {
+                name,
+                task,
+                domain,
+                model,
+                user,
+            } => {
+                cmd_workflow::cmd_graph_run(
+                    &name,
+                    &task,
+                    &config,
+                    domain.as_deref(),
+                    model.as_deref(),
+                    user.as_deref(),
+                );
+            }
+        },
         Some(Commands::Version) => {
             cmd_version::cmd_version();
         }
-        Some(Commands::Init { format, path, force, no_llm }) => {
+        Some(Commands::Init {
+            format,
+            path,
+            force,
+            no_llm,
+        }) => {
             cmd_init::cmd_init(&config, Some(&format), path.as_deref(), force, no_llm);
         }
     }

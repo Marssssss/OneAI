@@ -107,7 +107,12 @@ impl SqliteVecBackend {
 
 #[async_trait]
 impl VectorBackend for SqliteVecBackend {
-    async fn upsert(&self, id: &str, embedding: &[f32], metadata: Metadata) -> oneai_core::Result<()> {
+    async fn upsert(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        metadata: Metadata,
+    ) -> oneai_core::Result<()> {
         if embedding.len() != self.dim {
             return Err(oneai_core::OneAIError::Rag(format!(
                 "SqliteVecBackend: dim mismatch (got {}, expected {})",
@@ -171,9 +176,10 @@ impl VectorBackend for SqliteVecBackend {
         let meta = self.meta.lock().await;
 
         let limit = match filter {
-            Some(f) if !f.metadata_eq.is_empty() && !f.metadata_in.is_empty() => {
-                (top_k.saturating_mul(OVER_FETCH_FACTOR)).min(MAX_FETCH).max(top_k)
-            }
+            Some(f) if !f.metadata_eq.is_empty() && !f.metadata_in.is_empty() => (top_k
+                .saturating_mul(OVER_FETCH_FACTOR))
+            .min(MAX_FETCH)
+            .max(top_k),
             _ => top_k.max(1),
         };
         let sql = "SELECT rowid, distance FROM vec_chunks WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2";
@@ -190,7 +196,8 @@ impl VectorBackend for SqliteVecBackend {
 
         let mut hits: Vec<VectorHit> = Vec::new();
         for r in rows {
-            let (rowid, dist) = r.map_err(|e| oneai_core::OneAIError::Rag(format!("vec0 row: {e}")))?;
+            let (rowid, dist) =
+                r.map_err(|e| oneai_core::OneAIError::Rag(format!("vec0 row: {e}")))?;
             let Some(id) = rowid_to_id.get(&rowid) else {
                 continue;
             };
@@ -213,7 +220,11 @@ impl VectorBackend for SqliteVecBackend {
         }
         // Sort defensively (KNN ORDER BY distance already orders, but post-
         // filtering may have removed rows; re-sort by similarity desc).
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(top_k);
         Ok(hits)
     }
@@ -224,8 +235,11 @@ impl VectorBackend for SqliteVecBackend {
         let mut rowid_to_id = self.rowid_to_id.lock().await;
         let mut meta = self.meta.lock().await;
         if let Some(rowid) = id_to_rowid.remove(id) {
-            conn.execute("DELETE FROM vec_chunks WHERE rowid = ?1", rusqlite::params![rowid])
-                .map_err(|e| oneai_core::OneAIError::Rag(format!("vec0 delete: {e}")))?;
+            conn.execute(
+                "DELETE FROM vec_chunks WHERE rowid = ?1",
+                rusqlite::params![rowid],
+            )
+            .map_err(|e| oneai_core::OneAIError::Rag(format!("vec0 delete: {e}")))?;
             rowid_to_id.remove(&rowid);
             meta.remove(id);
         }
@@ -249,15 +263,27 @@ mod tests {
     #[tokio::test]
     async fn knn_upsert_search_filter_delete() {
         let be = SqliteVecBackend::in_memory(4).unwrap();
-        be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::from([("k".into(), "x".into())]))
-            .await
-            .unwrap();
-        be.upsert("b", &[0.11, 0.21, 0.31, 0.41], Metadata::from([("k".into(), "y".into())]))
-            .await
-            .unwrap();
-        be.upsert("c", &[0.9, 0.8, 0.7, 0.6], Metadata::from([("k".into(), "x".into())]))
-            .await
-            .unwrap();
+        be.upsert(
+            "a",
+            &[0.1, 0.2, 0.3, 0.4],
+            Metadata::from([("k".into(), "x".into())]),
+        )
+        .await
+        .unwrap();
+        be.upsert(
+            "b",
+            &[0.11, 0.21, 0.31, 0.41],
+            Metadata::from([("k".into(), "y".into())]),
+        )
+        .await
+        .unwrap();
+        be.upsert(
+            "c",
+            &[0.9, 0.8, 0.7, 0.6],
+            Metadata::from([("k".into(), "x".into())]),
+        )
+        .await
+        .unwrap();
 
         let hits = be.search(&[0.1, 0.2, 0.3, 0.4], 3, None).await.unwrap();
         assert_eq!(hits[0].id, "a");
@@ -270,15 +296,22 @@ mod tests {
         assert!(hits.iter().all(|h| h.metadata["k"] == "x"));
 
         be.delete("b").await.unwrap();
-        let hits = be.search(&[0.11, 0.21, 0.31, 0.41], 10, None).await.unwrap();
+        let hits = be
+            .search(&[0.11, 0.21, 0.31, 0.41], 10, None)
+            .await
+            .unwrap();
         assert!(!hits.iter().any(|h| h.id == "b"));
     }
 
     #[tokio::test]
     async fn upsert_replaces_same_id() {
         let be = SqliteVecBackend::in_memory(4).unwrap();
-        be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::new()).await.unwrap();
-        be.upsert("a", &[0.9, 0.8, 0.7, 0.6], Metadata::new()).await.unwrap();
+        be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::new())
+            .await
+            .unwrap();
+        be.upsert("a", &[0.9, 0.8, 0.7, 0.6], Metadata::new())
+            .await
+            .unwrap();
         let hits = be.search(&[0.9, 0.8, 0.7, 0.6], 1, None).await.unwrap();
         assert_eq!(hits[0].id, "a");
         assert!(hits[0].score > 0.99);

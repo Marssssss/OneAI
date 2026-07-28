@@ -15,9 +15,9 @@
 //! for all local tool definitions.
 
 use async_trait::async_trait;
-use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
+use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
 
 // ─── PermissionLevel-aware Tool trait extension ─────────────────────────────
 
@@ -125,13 +125,17 @@ impl ShellTool {
     /// The backend wraps commands before execution, providing real isolation
     /// (Seatbelt on macOS, Docker on Linux, etc.). This replaces the
     /// regex-only approach with actual process-level restrictions.
-    pub fn with_sandbox_backend(backend: std::sync::Arc<dyn crate::sandbox::SandboxBackend>) -> Self {
+    pub fn with_sandbox_backend(
+        backend: std::sync::Arc<dyn crate::sandbox::SandboxBackend>,
+    ) -> Self {
         Self {
             blocked_patterns: default_blocked_patterns(),
             default_timeout_secs: 120,
             max_timeout_secs: 600,
             allowed_working_dirs: Vec::new(),
-            sandbox_mode: SandboxMode::Enabled { backend: Some(backend) },
+            sandbox_mode: SandboxMode::Enabled {
+                backend: Some(backend),
+            },
             max_output_bytes: 100_000,
         }
     }
@@ -146,7 +150,9 @@ impl ShellTool {
             default_timeout_secs: 120,
             max_timeout_secs: 600,
             allowed_working_dirs: Vec::new(),
-            sandbox_mode: SandboxMode::Disabled { reason: reason.into() },
+            sandbox_mode: SandboxMode::Disabled {
+                reason: reason.into(),
+            },
             max_output_bytes: 100_000,
         }
     }
@@ -240,7 +246,6 @@ fn default_blocked_patterns() -> Vec<regex::Regex> {
 /// but `resolve_shell` already prefers a POSIX `sh` there when one exists, so
 /// the non-blocked forms work cross-platform too.
 pub(crate) fn detect_shell_file_write(command: &str) -> Option<&'static str> {
-
     // Compile once per call — these are tiny patterns. Using a `static` Regex
     // would require a crate like `lazy_static`/`once_cell`; inline compile is
     // cheap enough for a per-command guard and keeps the dependency surface
@@ -285,7 +290,8 @@ pub(crate) fn detect_shell_file_write(command: &str) -> Option<&'static str> {
 
 /// Cached result of probing Windows for a POSIX `sh`. `None` means "no POSIX sh
 /// found; use PowerShell". Probed once per process.
-static WINDOWS_POSIX_SH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+static WINDOWS_POSIX_SH: std::sync::OnceLock<Option<std::path::PathBuf>> =
+    std::sync::OnceLock::new();
 
 /// Scan a sequence of directories for an `sh.exe` / `sh` executable. Pure and
 /// platform-agnostic so it can be unit-tested without a Windows host. Only
@@ -426,9 +432,7 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let command = args.get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
         if command.is_empty() {
             return Ok(ToolOutput {
@@ -444,8 +448,8 @@ impl Tool for ShellTool {
                 return Ok(ToolOutput {
                     success: false,
                     content: String::new(),
-                    error: Some(format!("Command blocked by safety policy: matches dangerous pattern. \
-                        If you need to run this command, disable sandbox mode with explicit justification.")),
+                    error: Some("Command blocked by safety policy: matches dangerous pattern. \
+                        If you need to run this command, disable sandbox mode with explicit justification.".to_string()),
                 });
             }
         }
@@ -506,7 +510,8 @@ impl Tool for ShellTool {
         let (shell, shell_arg) = resolve_shell();
 
         // Clamp timeout to max
-        let timeout = args.get("timeout")
+        let timeout = args
+            .get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_secs)
             .min(self.max_timeout_secs);
@@ -516,8 +521,9 @@ impl Tool for ShellTool {
             tokio::process::Command::new(shell)
                 .arg(shell_arg)
                 .arg(&effective_command)
-                .output()
-        ).await;
+                .output(),
+        )
+        .await;
 
         match result {
             Ok(Ok(output)) => {
@@ -670,9 +676,7 @@ impl Tool for FileReadTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let path = args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
             return Ok(ToolOutput {
@@ -687,7 +691,9 @@ impl Tool for FileReadTool {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
-                error: Some("Path traversal detected: paths containing '..' are not allowed".to_string()),
+                error: Some(
+                    "Path traversal detected: paths containing '..' are not allowed".to_string(),
+                ),
             });
         }
 
@@ -703,7 +709,8 @@ impl Tool for FileReadTool {
         }
 
         // Check file size
-        let file_size = tokio::fs::metadata(path).await
+        let file_size = tokio::fs::metadata(path)
+            .await
             .map(|m| m.len())
             .unwrap_or(0);
 
@@ -722,10 +729,9 @@ impl Tool for FileReadTool {
         let content = tokio::fs::read_to_string(path).await;
 
         // Apply offset + limit if specified
-        let offset = args.get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let limit = args.get("limit")
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.max_lines as u64) as usize;
 
@@ -740,14 +746,20 @@ impl Tool for FileReadTool {
                 let selected_lines = &lines[start..end];
 
                 // Format with line numbers (like cat -n)
-                let output = selected_lines.iter()
+                let output = selected_lines
+                    .iter()
                     .enumerate()
                     .map(|(i, line)| format!("{:>6}\t{}", start + i + 1, line))
                     .collect::<Vec<String>>()
                     .join("\n");
 
                 let header = if offset > 0 || end < total_lines {
-                    format!("Showing lines {}-{} of {} total lines\n\n", start + 1, end, total_lines)
+                    format!(
+                        "Showing lines {}-{} of {} total lines\n\n",
+                        start + 1,
+                        end,
+                        total_lines
+                    )
                 } else {
                     String::new()
                 };
@@ -795,11 +807,15 @@ impl Tool for FileReadTool {
 pub struct FileEditTool;
 
 impl FileEditTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for FileEditTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for FileEditTool {
@@ -864,16 +880,17 @@ impl Tool for FileEditTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let file_path = args.get("file_path")
+        let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        let old_string = args
+            .get("old_string")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let old_string = args.get("old_string")
+        let new_string = args
+            .get("new_string")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let new_string = args.get("new_string")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let replace_all = args.get("replace_all")
+        let replace_all = args
+            .get("replace_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -897,7 +914,9 @@ impl Tool for FileEditTool {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
-                error: Some("old_string and new_string are identical — no change needed".to_string()),
+                error: Some(
+                    "old_string and new_string are identical — no change needed".to_string(),
+                ),
             });
         }
 
@@ -979,11 +998,15 @@ impl Tool for FileEditTool {
 pub struct FileListTool;
 
 impl FileListTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for FileListTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for FileListTool {
@@ -1021,9 +1044,7 @@ impl Tool for FileListTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let path = args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
             return Ok(ToolOutput {
@@ -1086,11 +1107,15 @@ impl Tool for FileListTool {
 pub struct GrepTool;
 
 impl GrepTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for GrepTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for GrepTool {
@@ -1151,13 +1176,10 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let pattern = args.get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let path = args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
-        let file_pattern = args.get("file_pattern")
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let file_pattern = args
+            .get("file_pattern")
             .and_then(|v| v.as_str())
             .unwrap_or("*");
 
@@ -1216,7 +1238,9 @@ impl Tool for GrepTool {
 
                     // Check glob pattern match
                     let file_path_str = entry.path().to_string_lossy();
-                    let _relative_path = entry.path().strip_prefix(search_path)
+                    let _relative_path = entry
+                        .path()
+                        .strip_prefix(search_path)
                         .unwrap_or(entry.path())
                         .to_string_lossy();
 
@@ -1225,7 +1249,9 @@ impl Tool for GrepTool {
                         match glob_matcher {
                             Ok(gm) => {
                                 // Match against just the filename component
-                                let file_name = entry.path().file_name()
+                                let file_name = entry
+                                    .path()
+                                    .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_default();
                                 if !gm.matches(&file_name) {
@@ -1243,11 +1269,19 @@ impl Tool for GrepTool {
                             for (line_num, line) in text.lines().enumerate() {
                                 if re.is_match(line) {
                                     if match_count >= max_matches {
-                                        results.push(format!("... [truncated: {} matches found, showing first {}]",
-                                            match_count + 1, max_matches));
+                                        results.push(format!(
+                                            "... [truncated: {} matches found, showing first {}]",
+                                            match_count + 1,
+                                            max_matches
+                                        ));
                                         break;
                                     }
-                                    results.push(format!("{}:{}: {}", file_path_str, line_num + 1, line.trim()));
+                                    results.push(format!(
+                                        "{}:{}: {}",
+                                        file_path_str,
+                                        line_num + 1,
+                                        line.trim()
+                                    ));
                                     match_count += 1;
                                 }
                             }
@@ -1292,11 +1326,15 @@ impl Tool for GrepTool {
 pub struct GlobTool;
 
 impl GlobTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for GlobTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for GlobTool {
@@ -1349,12 +1387,8 @@ impl Tool for GlobTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let pattern = args.get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let path = args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         if pattern.is_empty() {
             return Ok(ToolOutput {
@@ -1391,7 +1425,10 @@ impl Tool for GlobTool {
                     match entry {
                         Ok(path) => {
                             if results.len() >= max_results {
-                                results.push(format!("... [truncated: more than {} files match]", max_results));
+                                results.push(format!(
+                                    "... [truncated: more than {} files match]",
+                                    max_results
+                                ));
                                 break;
                             }
                             results.push(path.to_string_lossy().to_string());
@@ -1437,11 +1474,15 @@ impl Tool for GlobTool {
 pub struct EnvironmentTool;
 
 impl EnvironmentTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for EnvironmentTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for EnvironmentTool {
@@ -1479,7 +1520,8 @@ impl Tool for EnvironmentTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let info_type = args.get("info_type")
+        let info_type = args
+            .get("info_type")
             .and_then(|v| v.as_str())
             .unwrap_or("all");
 
@@ -1526,11 +1568,15 @@ impl Tool for EnvironmentTool {
 pub struct NotebookEditTool;
 
 impl NotebookEditTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for NotebookEditTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for NotebookEditTool {
@@ -1586,7 +1632,8 @@ impl Tool for NotebookEditTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let notebook_path = args.get("notebook_path")
+        let notebook_path = args
+            .get("notebook_path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
@@ -1633,22 +1680,22 @@ impl Tool for NotebookEditTool {
                 };
 
                 // Get parameters
-                let cell_id = args.get("cell_id")
+                let cell_id = args.get("cell_id").and_then(|v| v.as_str()).unwrap_or("");
+                let new_source = args
+                    .get("new_source")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let new_source = args.get("new_source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let cell_type = args.get("cell_type")
+                let cell_type = args
+                    .get("cell_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("code");
-                let edit_mode = args.get("edit_mode")
+                let edit_mode = args
+                    .get("edit_mode")
                     .and_then(|v| v.as_str())
                     .unwrap_or("replace");
 
                 // Get the cells array
-                let cells = notebook.get_mut("cells")
-                    .and_then(|c| c.as_array_mut());
+                let cells = notebook.get_mut("cells").and_then(|c| c.as_array_mut());
 
                 if cells.is_none() {
                     return Ok(ToolOutput {
@@ -1672,13 +1719,14 @@ impl Tool for NotebookEditTool {
                             });
                         }
 
-                        let found = cells_mut.iter_mut().find(|cell| {
-                            cell.get("id").and_then(|v| v.as_str()) == Some(cell_id)
-                        });
+                        let found = cells_mut
+                            .iter_mut()
+                            .find(|cell| cell.get("id").and_then(|v| v.as_str()) == Some(cell_id));
 
                         if let Some(cell) = found {
                             // Update source — convert string to array of lines (ipynb format)
-                            let _source_lines: Vec<serde_json::Value> = new_source.lines()
+                            let _source_lines: Vec<serde_json::Value> = new_source
+                                .lines()
                                 .map(|line| serde_json::Value::String(format!("{}\n", line)))
                                 .chain(std::iter::once(serde_json::Value::String(String::new())))
                                 .collect::<Vec<_>>()
@@ -1696,13 +1744,17 @@ impl Tool for NotebookEditTool {
                             let source_array: Vec<serde_json::Value> = if lines.is_empty() {
                                 vec![serde_json::Value::String(String::new())]
                             } else {
-                                lines.iter().enumerate().map(|(i, line)| {
-                                    if i < lines.len() - 1 {
-                                        serde_json::Value::String(format!("{}\n", line))
-                                    } else {
-                                        serde_json::Value::String(line.to_string())
-                                    }
-                                }).collect()
+                                lines
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, line)| {
+                                        if i < lines.len() - 1 {
+                                            serde_json::Value::String(format!("{}\n", line))
+                                        } else {
+                                            serde_json::Value::String(line.to_string())
+                                        }
+                                    })
+                                    .collect()
                             };
 
                             cell.as_object_mut().unwrap().insert(
@@ -1714,11 +1766,18 @@ impl Tool for NotebookEditTool {
                                 serde_json::Value::String(cell_type.to_string()),
                             );
 
-                            let write_result = tokio::fs::write(notebook_path, serde_json::to_string_pretty(&notebook).unwrap()).await;
+                            let write_result = tokio::fs::write(
+                                notebook_path,
+                                serde_json::to_string_pretty(&notebook).unwrap(),
+                            )
+                            .await;
                             match write_result {
                                 Ok(_) => Ok(ToolOutput {
                                     success: true,
-                                    content: format!("Successfully replaced cell '{}' in {}", cell_id, notebook_path),
+                                    content: format!(
+                                        "Successfully replaced cell '{}' in {}",
+                                        cell_id, notebook_path
+                                    ),
                                     error: None,
                                 }),
                                 Err(e) => Ok(ToolOutput {
@@ -1766,11 +1825,18 @@ impl Tool for NotebookEditTool {
                             }
                         }
 
-                        let write_result = tokio::fs::write(notebook_path, serde_json::to_string_pretty(&notebook).unwrap()).await;
+                        let write_result = tokio::fs::write(
+                            notebook_path,
+                            serde_json::to_string_pretty(&notebook).unwrap(),
+                        )
+                        .await;
                         match write_result {
                             Ok(_) => Ok(ToolOutput {
                                 success: true,
-                                content: format!("Successfully inserted new cell in {}", notebook_path),
+                                content: format!(
+                                    "Successfully inserted new cell in {}",
+                                    notebook_path
+                                ),
                                 error: None,
                             }),
                             Err(e) => Ok(ToolOutput {
@@ -1803,11 +1869,18 @@ impl Tool for NotebookEditTool {
                             });
                         }
 
-                        let write_result = tokio::fs::write(notebook_path, serde_json::to_string_pretty(&notebook).unwrap()).await;
+                        let write_result = tokio::fs::write(
+                            notebook_path,
+                            serde_json::to_string_pretty(&notebook).unwrap(),
+                        )
+                        .await;
                         match write_result {
                             Ok(_) => Ok(ToolOutput {
                                 success: true,
-                                content: format!("Successfully deleted cell '{}' from {}", cell_id, notebook_path),
+                                content: format!(
+                                    "Successfully deleted cell '{}' from {}",
+                                    cell_id, notebook_path
+                                ),
                                 error: None,
                             }),
                             Err(e) => Ok(ToolOutput {
@@ -1820,7 +1893,10 @@ impl Tool for NotebookEditTool {
                     _ => Ok(ToolOutput {
                         success: false,
                         content: String::new(),
-                        error: Some(format!("Unknown edit_mode: '{}'. Use 'replace', 'insert', or 'delete'", edit_mode)),
+                        error: Some(format!(
+                            "Unknown edit_mode: '{}'. Use 'replace', 'insert', or 'delete'",
+                            edit_mode
+                        )),
                     }),
                 }
             }
@@ -1842,11 +1918,15 @@ impl Tool for NotebookEditTool {
 pub struct FileDeleteTool;
 
 impl FileDeleteTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for FileDeleteTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PermissionAwareTool for FileDeleteTool {
@@ -1884,9 +1964,7 @@ impl Tool for FileDeleteTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let path = args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if path.is_empty() {
             return Ok(ToolOutput {
@@ -2018,9 +2096,7 @@ impl Tool for WebFetchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let url = args.get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
 
         if url.is_empty() {
             return Ok(ToolOutput {
@@ -2042,10 +2118,12 @@ impl Tool for WebFetchTool {
         // Fetch the URL content
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            self.client.get(url)
+            self.client
+                .get(url)
                 .header("User-Agent", "OneAI-Agent/0.1.0")
-                .send()
-        ).await;
+                .send(),
+        )
+        .await;
 
         match result {
             Ok(Ok(response)) => {
@@ -2054,7 +2132,11 @@ impl Tool for WebFetchTool {
                     return Ok(ToolOutput {
                         success: false,
                         content: String::new(),
-                        error: Some(format!("HTTP error {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("Unknown"))),
+                        error: Some(format!(
+                            "HTTP error {}: {}",
+                            status.as_u16(),
+                            status.canonical_reason().unwrap_or("Unknown")
+                        )),
                     });
                 }
 
@@ -2103,7 +2185,10 @@ impl Tool for WebFetchTool {
             Err(_) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
-                error: Some(format!("Request timed out after {} seconds", self.timeout_secs)),
+                error: Some(format!(
+                    "Request timed out after {} seconds",
+                    self.timeout_secs
+                )),
             }),
         }
     }
@@ -2234,11 +2319,10 @@ impl Tool for WebSearchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let query = args.get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
-        let max_results = args.get("max_results")
+        let max_results = args
+            .get("max_results")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.max_results as u64) as usize;
 
@@ -2251,8 +2335,8 @@ impl Tool for WebSearchTool {
         }
 
         // Determine search backend from environment
-        let backend = std::env::var("ONEAI_SEARCH_BACKEND")
-            .unwrap_or_else(|_| "duckduckgo".to_string());
+        let backend =
+            std::env::var("ONEAI_SEARCH_BACKEND").unwrap_or_else(|_| "duckduckgo".to_string());
 
         let results = match backend.to_lowercase().as_str() {
             "google" => self.search_google(query, max_results).await,
@@ -2270,14 +2354,20 @@ impl Tool for WebSearchTool {
                         error: None,
                     })
                 } else {
-                    let content = results.iter()
+                    let content = results
+                        .iter()
                         .map(|r| format!("## {}\n{}\n[{}]({})", r.title, r.snippet, r.url, r.url))
                         .collect::<Vec<_>>()
                         .join("\n\n");
 
                     Ok(ToolOutput {
                         success: true,
-                        content: format!("Found {} results for '{}':\n\n{}", results.len(), query, content),
+                        content: format!(
+                            "Found {} results for '{}':\n\n{}",
+                            results.len(),
+                            query,
+                            content
+                        ),
                         error: None,
                     })
                 }
@@ -2295,7 +2385,11 @@ impl WebSearchTool {
     /// Search using Google Custom Search API.
     ///
     /// Requires ONEAI_SEARCH_API_KEY and ONEAI_SEARCH_CX environment variables.
-    async fn search_google(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+    async fn search_google(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> std::result::Result<Vec<SearchResult>, String> {
         let api_key = std::env::var("ONEAI_SEARCH_API_KEY")
             .map_err(|_| "ONEAI_SEARCH_API_KEY not set — required for Google Search")?;
         let cx = std::env::var("ONEAI_SEARCH_CX")
@@ -2303,17 +2397,20 @@ impl WebSearchTool {
 
         let url = format!(
             "https://www.googleapis.com/customsearch/v1?key={}&cx={}&q={}&num={}",
-            api_key, cx,
+            api_key,
+            cx,
             urlencoding::encode(query),
             max_results.min(10)
         );
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            self.client.get(&url)
+            self.client
+                .get(&url)
                 .header("User-Agent", "OneAI-Agent/0.1.0")
-                .send()
-        ).await;
+                .send(),
+        )
+        .await;
 
         match result {
             Ok(Ok(response)) => {
@@ -2322,31 +2419,55 @@ impl WebSearchTool {
                     return Err(format!("Google Search API error: {}", status));
                 }
 
-                let body: serde_json::Value = response.json().await
+                let body: serde_json::Value = response
+                    .json()
+                    .await
                     .map_err(|e| format!("Failed to parse Google Search response: {}", e))?;
 
-                let items = body.get("items")
+                let items = body
+                    .get("items")
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
 
-                Ok(items.iter().take(max_results).map(|item| {
-                    SearchResult {
-                        title: item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        url: item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    }
-                }).collect())
+                Ok(items
+                    .iter()
+                    .take(max_results)
+                    .map(|item| SearchResult {
+                        title: item
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        url: item
+                            .get("link")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        snippet: item
+                            .get("snippet")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect())
             }
             Ok(Err(e)) => Err(format!("Google Search request failed: {}", e)),
-            Err(_) => Err(format!("Google Search timed out after {} seconds", self.timeout_secs)),
+            Err(_) => Err(format!(
+                "Google Search timed out after {} seconds",
+                self.timeout_secs
+            )),
         }
     }
 
     /// Search using Bing Search API.
     ///
     /// Requires ONEAI_SEARCH_API_KEY environment variable.
-    async fn search_bing(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+    async fn search_bing(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> std::result::Result<Vec<SearchResult>, String> {
         let api_key = std::env::var("ONEAI_SEARCH_API_KEY")
             .map_err(|_| "ONEAI_SEARCH_API_KEY not set — required for Bing Search")?;
 
@@ -2358,11 +2479,13 @@ impl WebSearchTool {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            self.client.get(&url)
+            self.client
+                .get(&url)
                 .header("User-Agent", "OneAI-Agent/0.1.0")
                 .header("Ocp-Apim-Subscription-Key", &api_key)
-                .send()
-        ).await;
+                .send(),
+        )
+        .await;
 
         match result {
             Ok(Ok(response)) => {
@@ -2371,32 +2494,56 @@ impl WebSearchTool {
                     return Err(format!("Bing Search API error: {}", status));
                 }
 
-                let body: serde_json::Value = response.json().await
+                let body: serde_json::Value = response
+                    .json()
+                    .await
                     .map_err(|e| format!("Failed to parse Bing Search response: {}", e))?;
 
-                let pages = body.get("webPages")
+                let pages = body
+                    .get("webPages")
                     .and_then(|v| v.get("value"))
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
 
-                Ok(pages.iter().take(max_results).map(|item| {
-                    SearchResult {
-                        title: item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        url: item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    }
-                }).collect())
+                Ok(pages
+                    .iter()
+                    .take(max_results)
+                    .map(|item| SearchResult {
+                        title: item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        url: item
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        snippet: item
+                            .get("snippet")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect())
             }
             Ok(Err(e)) => Err(format!("Bing Search request failed: {}", e)),
-            Err(_) => Err(format!("Bing Search timed out after {} seconds", self.timeout_secs)),
+            Err(_) => Err(format!(
+                "Bing Search timed out after {} seconds",
+                self.timeout_secs
+            )),
         }
     }
 
     /// Search using SerpAPI.
     ///
     /// Requires ONEAI_SEARCH_API_KEY environment variable.
-    async fn search_serpapi(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+    async fn search_serpapi(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> std::result::Result<Vec<SearchResult>, String> {
         let api_key = std::env::var("ONEAI_SEARCH_API_KEY")
             .map_err(|_| "ONEAI_SEARCH_API_KEY not set — required for SerpAPI")?;
 
@@ -2409,10 +2556,12 @@ impl WebSearchTool {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            self.client.get(&url)
+            self.client
+                .get(&url)
                 .header("User-Agent", "OneAI-Agent/0.1.0")
-                .send()
-        ).await;
+                .send(),
+        )
+        .await;
 
         match result {
             Ok(Ok(response)) => {
@@ -2421,24 +2570,44 @@ impl WebSearchTool {
                     return Err(format!("SerpAPI error: {}", status));
                 }
 
-                let body: serde_json::Value = response.json().await
+                let body: serde_json::Value = response
+                    .json()
+                    .await
                     .map_err(|e| format!("Failed to parse SerpAPI response: {}", e))?;
 
-                let results = body.get("organic_results")
+                let results = body
+                    .get("organic_results")
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
 
-                Ok(results.iter().take(max_results).map(|item| {
-                    SearchResult {
-                        title: item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        url: item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    }
-                }).collect())
+                Ok(results
+                    .iter()
+                    .take(max_results)
+                    .map(|item| SearchResult {
+                        title: item
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        url: item
+                            .get("link")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        snippet: item
+                            .get("snippet")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect())
             }
             Ok(Err(e)) => Err(format!("SerpAPI request failed: {}", e)),
-            Err(_) => Err(format!("SerpAPI timed out after {} seconds", self.timeout_secs)),
+            Err(_) => Err(format!(
+                "SerpAPI timed out after {} seconds",
+                self.timeout_secs
+            )),
         }
     }
 
@@ -2446,7 +2615,11 @@ impl WebSearchTool {
     ///
     /// Uses DuckDuckGo's HTML search endpoint and parses the results.
     /// This is the default backend when no API key is configured.
-    async fn search_duckduckgo(&self, query: &str, max_results: usize) -> std::result::Result<Vec<SearchResult>, String> {
+    async fn search_duckduckgo(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> std::result::Result<Vec<SearchResult>, String> {
         // DuckDuckGo HTML search endpoint
         let url = format!(
             "https://html.duckduckgo.com/html/?q={}",
@@ -2455,10 +2628,12 @@ impl WebSearchTool {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
-            self.client.get(&url)
+            self.client
+                .get(&url)
                 .header("User-Agent", "Mozilla/5.0 (compatible; OneAI-Agent/0.1.0)")
-                .send()
-        ).await;
+                .send(),
+        )
+        .await;
 
         match result {
             Ok(Ok(response)) => {
@@ -2467,7 +2642,9 @@ impl WebSearchTool {
                     return Err(format!("DuckDuckGo search error: {}", status));
                 }
 
-                let html = response.text().await
+                let html = response
+                    .text()
+                    .await
                     .map_err(|e| format!("Failed to read DuckDuckGo response: {}", e))?;
 
                 // Parse DuckDuckGo HTML results
@@ -2476,8 +2653,12 @@ impl WebSearchTool {
                 let mut results = Vec::new();
 
                 // Simple regex-based parsing of DuckDuckGo HTML results
-                let title_re = regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
-                let snippet_re = regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
+                let title_re = regex::Regex::new(
+                    r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#,
+                )
+                .unwrap();
+                let snippet_re =
+                    regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
 
                 for (idx, cap) in title_re.captures_iter(&html).enumerate() {
                     let url_raw = cap.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -2502,9 +2683,12 @@ impl WebSearchTool {
                     let title = html_entities_clean(title_raw);
 
                     // Find matching snippet (after this title in the HTML)
-                    let snippet = snippet_re.captures_iter(&html)
+                    let snippet = snippet_re
+                        .captures_iter(&html)
                         .nth(idx)
-                        .map(|cap| html_entities_clean(cap.get(1).map(|m| m.as_str()).unwrap_or("")))
+                        .map(|cap| {
+                            html_entities_clean(cap.get(1).map(|m| m.as_str()).unwrap_or(""))
+                        })
                         .unwrap_or_default();
 
                     results.push(SearchResult {
@@ -2521,7 +2705,10 @@ impl WebSearchTool {
                 Ok(results)
             }
             Ok(Err(e)) => Err(format!("DuckDuckGo request failed: {}", e)),
-            Err(_) => Err(format!("DuckDuckGo timed out after {} seconds", self.timeout_secs)),
+            Err(_) => Err(format!(
+                "DuckDuckGo timed out after {} seconds",
+                self.timeout_secs
+            )),
         }
     }
 }
@@ -2598,38 +2785,50 @@ impl BrowserTool {
     /// Navigate to a URL and extract page content.
     async fn navigate(&self, url: &str) -> Result<ToolOutput> {
         let result = tokio::time::timeout(self.timeout, async {
-            let response = self.client.get(url).send().await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("Browser navigate error for {}: {}", url, e)
-                ))?;
+            let response = self.client.get(url).send().await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!(
+                    "Browser navigate error for {}: {}",
+                    url, e
+                ))
+            })?;
 
             if !response.status().is_success() {
-                return Err(oneai_core::error::OneAIError::Provider(
-                    format!("Browser navigate returned status {} for {}", response.status().as_u16(), url)
-                ));
+                return Err(oneai_core::error::OneAIError::Provider(format!(
+                    "Browser navigate returned status {} for {}",
+                    response.status().as_u16(),
+                    url
+                )));
             }
 
-            let html = response.text().await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("Browser navigate read error: {}", e)
-                ))?;
+            let html = response.text().await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!(
+                    "Browser navigate read error: {}",
+                    e
+                ))
+            })?;
 
             // Convert HTML to structured Markdown
             let markdown = html2text::from_read(html.as_bytes(), 200);
 
             Ok::<String, oneai_core::error::OneAIError>(markdown)
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(Ok(markdown)) => {
                 // Truncate if too long (prevent context overflow, char-boundary-safe for CJK)
                 let content = if markdown.len() > 10000 {
-                    let end = markdown.char_indices()
+                    let end = markdown
+                        .char_indices()
                         .take_while(|(i, _)| *i < 10000)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())
                         .unwrap_or(0);
-                    format!("{}... [truncated, total {} chars]", &markdown[..end], markdown.len())
+                    format!(
+                        "{}... [truncated, total {} chars]",
+                        &markdown[..end],
+                        markdown.len()
+                    )
                 } else {
                     markdown
                 };
@@ -2647,7 +2846,11 @@ impl BrowserTool {
             Err(_) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
-                error: Some(format!("Browser navigate timed out after {} seconds for {}", self.timeout.as_secs(), url)),
+                error: Some(format!(
+                    "Browser navigate timed out after {} seconds for {}",
+                    self.timeout.as_secs(),
+                    url
+                )),
             }),
         }
     }
@@ -2667,36 +2870,45 @@ impl BrowserTool {
         let extracted = match selector {
             "links" | "a" => {
                 // Extract links from the content (lines containing http/https URLs)
-                content.lines()
+                content
+                    .lines()
                     .filter(|l| l.contains("http://") || l.contains("https://"))
                     .collect::<Vec<_>>()
                     .join("\n")
             }
             "headings" | "h" => {
                 // Extract heading lines (lines starting with # in markdown)
-                content.lines()
+                content
+                    .lines()
                     .filter(|l| l.trim().starts_with('#'))
                     .collect::<Vec<_>>()
                     .join("\n")
             }
             "text" | "p" => {
                 // Extract paragraph text (lines not starting with # or [)
-                content.lines()
-                    .filter(|l| !l.trim().starts_with('#') && !l.trim().starts_with('[') && !l.trim().is_empty())
+                content
+                    .lines()
+                    .filter(|l| {
+                        !l.trim().starts_with('#')
+                            && !l.trim().starts_with('[')
+                            && !l.trim().is_empty()
+                    })
                     .take(50) // Limit to 50 lines
                     .collect::<Vec<_>>()
                     .join("\n")
             }
             "title" => {
                 // Extract just the first heading
-                content.lines()
+                content
+                    .lines()
                     .find(|l| l.trim().starts_with('#'))
                     .map(|l| l.trim().to_string())
                     .unwrap_or_else(|| "No title found".to_string())
             }
             other => {
                 // Generic: search for lines containing the selector keyword
-                content.lines()
+                content
+                    .lines()
                     .filter(|l| l.contains(other))
                     .take(20)
                     .collect::<Vec<_>>()
@@ -2708,7 +2920,8 @@ impl BrowserTool {
             "No content found matching selector".to_string()
         } else if extracted.len() > 5000 {
             // Char-boundary-safe truncation for CJK content
-            let end = extracted.char_indices()
+            let end = extracted
+                .char_indices()
                 .take_while(|(i, _)| *i < 5000)
                 .last()
                 .map(|(i, c)| i + c.len_utf8())
@@ -2728,25 +2941,28 @@ impl BrowserTool {
     /// Submit a form via HTTP POST.
     async fn form_submit(&self, url: &str, data: &serde_json::Value) -> Result<ToolOutput> {
         let result = tokio::time::timeout(self.timeout, async {
-            let response = self.client.post(url)
-                .json(data)
-                .send().await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("Browser form submit error for {}: {}", url, e)
-                ))?;
+            let response = self.client.post(url).json(data).send().await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!(
+                    "Browser form submit error for {}: {}",
+                    url, e
+                ))
+            })?;
 
             let status = response.status();
-            let body = response.text().await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("Browser form submit read error: {}", e)
-                ))?;
+            let body = response.text().await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!(
+                    "Browser form submit read error: {}",
+                    e
+                ))
+            })?;
 
             // Try to convert response body to markdown if it's HTML
             let content = if body.contains("<html") || body.contains("<!DOCTYPE") {
                 let md = html2text::from_read(body.as_bytes(), 200);
                 if md.len() > 5000 {
                     // Char-boundary-safe truncation for CJK content
-                    let end = md.char_indices()
+                    let end = md
+                        .char_indices()
                         .take_while(|(i, _)| *i < 5000)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())
@@ -2757,7 +2973,8 @@ impl BrowserTool {
                 }
             } else if body.len() > 5000 {
                 // Char-boundary-safe truncation for CJK content
-                let end = body.char_indices()
+                let end = body
+                    .char_indices()
                     .take_while(|(i, _)| *i < 5000)
                     .last()
                     .map(|(i, c)| i + c.len_utf8())
@@ -2768,7 +2985,8 @@ impl BrowserTool {
             };
 
             Ok::<String, oneai_core::error::OneAIError>(content)
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(Ok(content)) => Ok(ToolOutput {
@@ -2784,19 +3002,26 @@ impl BrowserTool {
             Err(_) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
-                error: Some(format!("Browser form submit timed out after {} seconds", self.timeout.as_secs())),
+                error: Some(format!(
+                    "Browser form submit timed out after {} seconds",
+                    self.timeout.as_secs()
+                )),
             }),
         }
     }
 }
 
 impl Default for BrowserTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl Tool for BrowserTool {
-    fn name(&self) -> &str { "browser" }
+    fn name(&self) -> &str {
+        "browser"
+    }
 
     fn description(&self) -> &str {
         "Web page browser — navigate URLs, extract content, submit forms. \
@@ -2832,15 +3057,16 @@ impl Tool for BrowserTool {
         })
     }
 
-    fn risk_level(&self) -> RiskLevel { RiskLevel::Medium }
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Medium
+    }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let action = args.get("action")
+        let action = args
+            .get("action")
             .and_then(|a| a.as_str())
             .unwrap_or("navigate");
-        let url = args.get("url")
-            .and_then(|u| u.as_str())
-            .unwrap_or("");
+        let url = args.get("url").and_then(|u| u.as_str()).unwrap_or("");
 
         if url.is_empty() {
             return Ok(ToolOutput {
@@ -2853,7 +3079,8 @@ impl Tool for BrowserTool {
         match action {
             "navigate" => self.navigate(url).await,
             "extract" => {
-                let selector = args.get("selector")
+                let selector = args
+                    .get("selector")
                     .and_then(|s| s.as_str())
                     .unwrap_or("text");
                 self.extract(url, selector).await
@@ -2865,12 +3092,17 @@ impl Tool for BrowserTool {
             other => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
-                error: Some(format!("browser: unknown action '{}'. Use: navigate, extract, form_submit", other)),
+                error: Some(format!(
+                    "browser: unknown action '{}'. Use: navigate, extract, form_submit",
+                    other
+                )),
             }),
         }
     }
 }
 
 impl PermissionAwareTool for BrowserTool {
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Standard }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Standard
+    }
 }

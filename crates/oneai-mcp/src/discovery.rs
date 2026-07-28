@@ -17,9 +17,9 @@
 //! }
 //! ```
 
-use oneai_tool::mcp_real::{McpServerConfig, McpToolInfo};
 use crate::client::McpClient;
 use crate::error::McpError;
+use oneai_tool::mcp_real::{McpServerConfig, McpToolInfo};
 
 // ─── McpDiscovery ────────────────────────────────────────────────────────────────
 
@@ -52,15 +52,21 @@ impl McpDiscovery {
     /// };
     /// let tools = McpDiscovery::connect_and_discover(&config).await?;
     /// ```
-    pub async fn connect_and_discover(config: &McpServerConfig) -> crate::error::Result<Vec<McpToolInfo>> {
+    pub async fn connect_and_discover(
+        config: &McpServerConfig,
+    ) -> crate::error::Result<Vec<McpToolInfo>> {
         let client = McpClient::from_config(config.clone());
 
         // Connect
-        client.connect().await
+        client
+            .connect()
+            .await
             .map_err(|e| McpError::Connection(format!("Discovery connection failed: {}", e)))?;
 
         // Discover tools
-        let tools = client.discover_tools().await
+        let tools = client
+            .discover_tools()
+            .await
             .map_err(|e| McpError::Discovery(format!("Discovery failed: {}", e)))?;
 
         // Disconnect (best effort — don't fail if disconnect fails)
@@ -72,7 +78,10 @@ impl McpDiscovery {
     /// Discover tools from a stdio-based MCP server.
     ///
     /// Convenience method that creates the config and performs discovery.
-    pub async fn discover_stdio(command: &str, args: &[&str]) -> crate::error::Result<Vec<McpToolInfo>> {
+    pub async fn discover_stdio(
+        command: &str,
+        args: &[&str],
+    ) -> crate::error::Result<Vec<McpToolInfo>> {
         let config = McpServerConfig {
             name: "discovery-stdio".to_string(),
             transport: oneai_tool::mcp_real::McpTransport::Stdio {

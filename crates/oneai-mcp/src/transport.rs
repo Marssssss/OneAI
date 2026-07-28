@@ -55,10 +55,9 @@ impl McpStdioTransport {
 
         loop {
             // Read data from stdin
-            let n = reader.read(&mut buffer).await
-                .map_err(|e| oneai_core::error::OneAIError::Provider(
-                    format!("MCP stdin read error: {}", e)
-                ))?;
+            let n = reader.read(&mut buffer).await.map_err(|e| {
+                oneai_core::error::OneAIError::Provider(format!("MCP stdin read error: {}", e))
+            })?;
 
             if n == 0 {
                 // EOF — stdin closed, client has disconnected
@@ -94,20 +93,17 @@ impl McpStdioTransport {
         writer: &mut tokio::io::BufWriter<tokio::io::Stdout>,
         message: &serde_json::Value,
     ) -> oneai_core::error::Result<()> {
-        let json_str = serde_json::to_string(message)
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("JSON serialization error: {}", e)
-            ))?;
+        let json_str = serde_json::to_string(message).map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!("JSON serialization error: {}", e))
+        })?;
 
         let frame = format!("Content-Length: {}\r\n\r\n{}", json_str.len(), json_str);
-        writer.write_all(frame.as_bytes()).await
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("MCP stdout write error: {}", e)
-            ))?;
-        writer.flush().await
-            .map_err(|e| oneai_core::error::OneAIError::Provider(
-                format!("MCP stdout flush error: {}", e)
-            ))?;
+        writer.write_all(frame.as_bytes()).await.map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!("MCP stdout write error: {}", e))
+        })?;
+        writer.flush().await.map_err(|e| {
+            oneai_core::error::OneAIError::Provider(format!("MCP stdout flush error: {}", e))
+        })?;
 
         Ok(())
     }
@@ -182,14 +178,19 @@ impl McpFramingParser {
 }
 
 impl Default for McpFramingParser {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Find the end of the HTTP-like header section (\r\n\r\n).
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     for i in 0..buffer.len().saturating_sub(3) {
-        if buffer[i] == b'\r' && buffer[i+1] == b'\n'
-            && buffer[i+2] == b'\r' && buffer[i+3] == b'\n' {
+        if buffer[i] == b'\r'
+            && buffer[i + 1] == b'\n'
+            && buffer[i + 2] == b'\r'
+            && buffer[i + 3] == b'\n'
+        {
             return Some(i + 4); // Include the final \r\n\r\n
         }
     }
@@ -200,7 +201,8 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 fn parse_content_length(header: &str) -> Option<usize> {
     for line in header.lines() {
         if line.starts_with("Content-Length:") || line.starts_with("Content-Length: ") {
-            let value = line.trim_start_matches("Content-Length:")
+            let value = line
+                .trim_start_matches("Content-Length:")
                 .trim()
                 .parse::<usize>()
                 .ok()?;
@@ -236,7 +238,10 @@ mod tests {
         let str2 = serde_json::to_string(&json2).unwrap();
         let frame = format!(
             "Content-Length: {}\r\n\r\n{}Content-Length: {}\r\n\r\n{}",
-            str1.len(), str1, str2.len(), str2
+            str1.len(),
+            str1,
+            str2.len(),
+            str2
         );
 
         let mut parser = McpFramingParser::new();
@@ -263,12 +268,18 @@ mod tests {
     fn test_parse_content_length() {
         assert_eq!(parse_content_length("Content-Length: 42\r\n\r\n"), Some(42));
         assert_eq!(parse_content_length("Content-Length: 0\r\n\r\n"), Some(0));
-        assert_eq!(parse_content_length("Some-Other-Header: blah\r\n\r\n"), None);
+        assert_eq!(
+            parse_content_length("Some-Other-Header: blah\r\n\r\n"),
+            None
+        );
     }
 
     #[test]
     fn test_find_header_end() {
-        assert_eq!(find_header_end(b"Content-Length: 10\r\n\r\n1234567890"), Some(22));
+        assert_eq!(
+            find_header_end(b"Content-Length: 10\r\n\r\n1234567890"),
+            Some(22)
+        );
         assert_eq!(find_header_end(b"no header here"), None);
     }
 

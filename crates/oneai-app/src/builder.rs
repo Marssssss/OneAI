@@ -10,45 +10,51 @@
 
 use std::sync::Arc;
 
+use oneai_core::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, ThresholdCircuitBreaker};
 use oneai_core::error::Result;
-use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, EmbeddingService, MemoryPersistence, RetrievalBackend, RerankerProvider, VectorBackend};
-use oneai_core::{Conversation, SessionInfo};
-use oneai_core::EmbeddingConfig;
-use oneai_core::usage::{UsageTracker, InMemoryUsageTracker};
-use oneai_core::rate_limiter::{RateLimiter, TokenWindowRateLimiter, RateLimitConfig};
-use oneai_core::circuit_breaker::{CircuitBreaker, ThresholdCircuitBreaker, CircuitBreakerConfig};
 use oneai_core::platform::{Platform, PlatformAdapter};
-use oneai_core::{ModelConfig, CloudProviderKind};
+use oneai_core::rate_limiter::{RateLimitConfig, RateLimiter, TokenWindowRateLimiter};
+use oneai_core::traits::{
+    EmbeddingService, InteractionGate, LlmProvider, MemoryPersistence, OutputParser,
+    RerankerProvider, RetrievalBackend, Tool, VectorBackend,
+};
+use oneai_core::usage::{InMemoryUsageTracker, UsageTracker};
+use oneai_core::ContextManager;
+use oneai_core::ContextManagerConfig;
+use oneai_core::EmbeddingConfig;
 use oneai_core::ProviderPoolConfig;
 use oneai_core::SmartRouteConfig;
 use oneai_core::TokenCounter;
-use oneai_core::ContextManager;
-use oneai_core::ContextManagerConfig;
+use oneai_core::{CloudProviderKind, ModelConfig};
+use oneai_core::{Conversation, SessionInfo};
 
 use oneai_provider::{ProviderPool, SmartRouter};
 
-use oneai_tool::{
-    ToolExecutor, ToolRegistry, InteractionGateConfig, NoopInteractionGate,
-    ChannelInteractionGate, ThresholdInteractionGate,
-};
 use oneai_memory::{MemoryManager, MemoryManagerConfig};
+use oneai_parser::ThreeLayerParser;
+use oneai_persistence::FilePersistence;
 use oneai_rag::DocumentIndex;
 use oneai_rag::EmbeddingConfigExt;
 use oneai_skill::SkillSelector;
-use oneai_parser::ThreeLayerParser;
+use oneai_tool::{
+    ChannelInteractionGate, InteractionGateConfig, NoopInteractionGate, ThresholdInteractionGate,
+    ToolExecutor, ToolRegistry,
+};
+use oneai_trace::{InMemoryCollector, TraceContext, TraceEmitter};
 use oneai_workflow::WorkflowExecutor;
-use oneai_persistence::FilePersistence;
-use oneai_trace::{TraceContext, TraceEmitter, InMemoryCollector};
 
 use oneai_domain::{DomainPack, MergedDomainPack};
 
 use oneai_a2a::A2AClient;
 
-use oneai_wasm::{WasmRuntime, WasmRuntimeConfig, WasmModuleManager, WasmActionTool, WasmModuleRegistry, WasmResourceMonitor};
+use oneai_wasm::{
+    WasmActionTool, WasmModuleManager, WasmModuleRegistry, WasmResourceMonitor, WasmRuntime,
+    WasmRuntimeConfig,
+};
 
 use oneai_mcp::{McpPluginRegistry, McpServerHost};
 
-use oneai_a2a::{A2AServerHost, TaskStore, AgentCard};
+use oneai_a2a::{A2AServerHost, AgentCard, TaskStore};
 
 use oneai_persistence::SqliteSessionStore;
 
@@ -326,7 +332,10 @@ impl AppBuilder {
     pub fn channel_interaction_gate(
         mut self,
         buffer_size: usize,
-    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>,
+    ) {
         let (gate, receiver) = ChannelInteractionGate::new(buffer_size);
         self.interaction_gate = Some(Arc::new(gate));
         (self, receiver)
@@ -337,7 +346,10 @@ impl AppBuilder {
         mut self,
         buffer_size: usize,
         config: InteractionGateConfig,
-    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>,
+    ) {
         let (gate, receiver) = ChannelInteractionGate::with_config(buffer_size, config);
         self.interaction_gate = Some(Arc::new(gate));
         (self, receiver)
@@ -349,12 +361,12 @@ impl AppBuilder {
         mut self,
         buffer_size: usize,
         threshold: oneai_core::RiskLevel,
-    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
-        let (gate, receiver) = ThresholdInteractionGate::new(
-            buffer_size,
-            threshold,
-            InteractionGateConfig::default(),
-        );
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>,
+    ) {
+        let (gate, receiver) =
+            ThresholdInteractionGate::new(buffer_size, threshold, InteractionGateConfig::default());
         self.interaction_gate = Some(Arc::new(gate));
         (self, receiver)
     }
@@ -367,7 +379,10 @@ impl AppBuilder {
         buffer_size: usize,
         threshold: oneai_core::RiskLevel,
         config: InteractionGateConfig,
-    ) -> (Self, tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>) {
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>,
+    ) {
         let (gate, receiver) = ThresholdInteractionGate::new(buffer_size, threshold, config);
         self.interaction_gate = Some(Arc::new(gate));
         (self, receiver)
@@ -429,18 +444,16 @@ impl AppBuilder {
 
     /// Enable in-memory tracing (stores all spans for later JSON export).
     pub fn trace_in_memory(mut self) -> Self {
-        let ctx = TraceEmitter::global().create_context_with_collector(
-            Arc::new(InMemoryCollector::new())
-        );
+        let ctx = TraceEmitter::global()
+            .create_context_with_collector(Arc::new(InMemoryCollector::new()));
         self.trace_context = Some(ctx);
         self
     }
 
     /// Enable file-based tracing (writes JSON to the specified path).
     pub fn trace_to_file(mut self, path: &str) -> Self {
-        let ctx = TraceEmitter::global().create_context_with_collector(
-            Arc::new(oneai_trace::FileCollector::new(path))
-        );
+        let ctx = TraceEmitter::global()
+            .create_context_with_collector(Arc::new(oneai_trace::FileCollector::new(path)));
         self.trace_context = Some(ctx);
         self
     }
@@ -482,9 +495,7 @@ impl AppBuilder {
         // point at the collector's HTTP port (default 4318).
         let config = oneai_trace::OtlpConfig::http(endpoint, "oneai-agent");
         let collector = oneai_trace::OtlpCollector::new(config);
-        let ctx = TraceEmitter::global().create_context_with_collector(
-            Arc::new(collector)
-        );
+        let ctx = TraceEmitter::global().create_context_with_collector(Arc::new(collector));
         self.trace_context = Some(ctx);
         self
     }
@@ -495,9 +506,7 @@ impl AppBuilder {
     pub fn trace_otel_http(mut self, endpoint: &str) -> Self {
         let config = oneai_trace::OtlpConfig::http(endpoint, "oneai-agent");
         let collector = oneai_trace::OtlpCollector::new(config);
-        let ctx = TraceEmitter::global().create_context_with_collector(
-            Arc::new(collector)
-        );
+        let ctx = TraceEmitter::global().create_context_with_collector(Arc::new(collector));
         self.trace_context = Some(ctx);
         self
     }
@@ -506,9 +515,7 @@ impl AppBuilder {
     #[cfg(feature = "otel")]
     pub fn trace_otel_config(mut self, config: oneai_trace::OtlpConfig) -> Self {
         let collector = oneai_trace::OtlpCollector::new(config);
-        let ctx = TraceEmitter::global().create_context_with_collector(
-            Arc::new(collector)
-        );
+        let ctx = TraceEmitter::global().create_context_with_collector(Arc::new(collector));
         self.trace_context = Some(ctx);
         self
     }
@@ -552,12 +559,10 @@ impl AppBuilder {
     pub fn with_memory_reflection(mut self) -> Self {
         if let Some(provider) = &self.provider {
             let config = MemoryManagerConfig::default();
-            self.memory_manager = Some(Arc::new(
-                MemoryManager::with_compressor_and_reflection(
-                    config,
-                    provider.clone(),
-                )
-            ));
+            self.memory_manager = Some(Arc::new(MemoryManager::with_compressor_and_reflection(
+                config,
+                provider.clone(),
+            )));
         }
         // If no provider is set yet, reflection will be enabled when
         // the provider is set (via the build() method).
@@ -630,7 +635,11 @@ impl AppBuilder {
     ///     .domain_pack_from_source(&source, ".")  // ← install + load
     ///     .build()?;
     /// ```
-    pub fn domain_pack_from_source(mut self, source: &oneai_domain::PackSource, project_dir: &str) -> Self {
+    pub fn domain_pack_from_source(
+        mut self,
+        source: &oneai_domain::PackSource,
+        project_dir: &str,
+    ) -> Self {
         let registry = oneai_domain::PackRegistry::default_path();
         let pack_name = registry.install(source);
         if let Ok(name) = pack_name {
@@ -685,8 +694,7 @@ impl AppBuilder {
     /// Default: strict pure-computation sandbox (no WASI, 1MB memory, 100K fuel).
     /// Also registers WASM action tools (compute, sort, filter, extract).
     pub fn default_wasm_runtime(self) -> Self {
-        let runtime = WasmRuntime::with_defaults()
-            .expect("WASM runtime creation should succeed");
+        let runtime = WasmRuntime::with_defaults().expect("WASM runtime creation should succeed");
         let app = self.wasm_runtime(Arc::new(runtime));
 
         // Register WASM action tools
@@ -695,8 +703,7 @@ impl AppBuilder {
 
     /// Use a WASM runtime with custom configuration.
     pub fn wasm_runtime_with_config(mut self, config: WasmRuntimeConfig) -> Self {
-        let runtime = WasmRuntime::new(config)
-            .expect("WASM runtime creation should succeed");
+        let runtime = WasmRuntime::new(config).expect("WASM runtime creation should succeed");
         self.wasm_runtime = Some(Arc::new(runtime));
         self.register_wasm_action_tools()
     }
@@ -1014,7 +1021,10 @@ impl AppBuilder {
     pub fn default_provider_pool_anthropic(self) -> Self {
         let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
         let openai_key = std::env::var("OPENAI_API_KEY").ok();
-        self.provider_pool_config(ProviderPoolConfig::anthropic_primary(anthropic_key, openai_key))
+        self.provider_pool_config(ProviderPoolConfig::anthropic_primary(
+            anthropic_key,
+            openai_key,
+        ))
     }
 
     /// Use the default OpenAI-primary provider pool.
@@ -1023,7 +1033,10 @@ impl AppBuilder {
     pub fn default_provider_pool_openai(self) -> Self {
         let openai_key = std::env::var("OPENAI_API_KEY").ok();
         let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
-        self.provider_pool_config(ProviderPoolConfig::openai_primary(openai_key, anthropic_key))
+        self.provider_pool_config(ProviderPoolConfig::openai_primary(
+            openai_key,
+            anthropic_key,
+        ))
     }
 
     /// Use the default local-first provider pool.
@@ -1196,7 +1209,10 @@ impl AppBuilder {
     /// model context-window sizes (L1 user config > L2 provider probe > L3
     /// built-in library). When set, it is attached to the token counter and
     /// context manager at build time.
-    pub fn model_context_resolver(mut self, resolver: Arc<oneai_core::ModelContextResolver>) -> Self {
+    pub fn model_context_resolver(
+        mut self,
+        resolver: Arc<oneai_core::ModelContextResolver>,
+    ) -> Self {
         self.model_context_resolver = Some(resolver);
         self
     }
@@ -1231,9 +1247,7 @@ impl AppBuilder {
         // Wire SqliteSessionStore into the MemoryManager
         if self.memory_manager.is_none() {
             let config = MemoryManagerConfig::default();
-            self.memory_manager = Some(Arc::new(
-                MemoryManager::with_persistence(config, store),
-            ));
+            self.memory_manager = Some(Arc::new(MemoryManager::with_persistence(config, store)));
         } else {
             // If a MemoryManager was already created (e.g., with_compressor_and_reflection),
             // we need to recreate it with persistence. Since we can't mutate Arc<MemoryManager>,
@@ -1262,9 +1276,7 @@ impl AppBuilder {
         // Wire SqliteSessionStore into the MemoryManager
         if self.memory_manager.is_none() {
             let config = MemoryManagerConfig::default();
-            self.memory_manager = Some(Arc::new(
-                MemoryManager::with_persistence(config, store),
-            ));
+            self.memory_manager = Some(Arc::new(MemoryManager::with_persistence(config, store)));
         }
 
         self
@@ -1410,13 +1422,13 @@ impl AppBuilder {
         // The unified interaction gate defaults to Noop (every point disabled,
         // zero latency) — production runs without a UI are not blocked. A TUI or
         // platform app wires a Channel/Threshold gate via the interaction_gate* builders.
-        let interaction_gate = self.interaction_gate.unwrap_or_else(|| {
-            Arc::new(NoopInteractionGate)
-        });
+        let interaction_gate = self
+            .interaction_gate
+            .unwrap_or_else(|| Arc::new(NoopInteractionGate));
 
-        let parser = self.parser.unwrap_or_else(|| {
-            Arc::new(ThreeLayerParser::new())
-        });
+        let parser = self
+            .parser
+            .unwrap_or_else(|| Arc::new(ThreeLayerParser::new()));
 
         // Merge domain packs (if any)
         let merged_domain_pack = if self.domain_packs.is_empty() {
@@ -1426,15 +1438,16 @@ impl AppBuilder {
         };
 
         // Create WASM module manager if runtime is provided
-        let wasm_module_manager = self.wasm_runtime.as_ref().map(|rt| {
-            WasmModuleManager::new(rt.clone())
-        });
+        let wasm_module_manager = self
+            .wasm_runtime
+            .as_ref()
+            .map(|rt| WasmModuleManager::new(rt.clone()));
 
         // Auto-create WASM module registry if runtime is set but no registry
         let wasm_module_registry = self.wasm_module_registry.or_else(|| {
-            self.wasm_runtime.as_ref().map(|rt| {
-                WasmModuleRegistry::new(rt.clone())
-            })
+            self.wasm_runtime
+                .as_ref()
+                .map(|rt| WasmModuleRegistry::new(rt.clone()))
         });
 
         // Auto-create WASM resource monitor if runtime is set but no monitor
@@ -1490,7 +1503,9 @@ impl AppBuilder {
         if let Some(_registry) = &mcp_plugin_registry {
             // Note: connect_all_enabled() is async and mutable, so we need to handle it carefully
             // We'll register tools in the build flow after creating the mutable registry
-            tracing::info!("MCP plugin registry configured — tools will be registered at build time");
+            tracing::info!(
+                "MCP plugin registry configured — tools will be registered at build time"
+            );
         }
 
         // Create MCP server host if enabled
@@ -1505,7 +1520,10 @@ impl AppBuilder {
             let agent_card = if let Some(card) = self.a2a_server_agent_card {
                 card
             } else if let Some(domain) = &merged_domain_pack {
-                oneai_a2a::agent_card_from_domain_pack(&domain.as_ref().to_domain_pack(), "http://localhost:8080")
+                oneai_a2a::agent_card_from_domain_pack(
+                    &domain.as_ref().to_domain_pack(),
+                    "http://localhost:8080",
+                )
             } else {
                 AgentCard::new("oneai-agent", "OneAI Agent", "http://localhost:8080")
             };
@@ -1519,30 +1537,34 @@ impl AppBuilder {
         // config is auto-resolved (provider=Auto probes env/ollama; absent →
         // None, and memory recall falls back to keyword matching).
         let embedding_service = self.embedding_service.or_else(|| {
-            self.embedding_config.as_ref().and_then(|config| {
-                match config.build_service() {
+            self.embedding_config
+                .as_ref()
+                .and_then(|config| match config.build_service() {
                     Ok(Some(service)) => Some(service),
                     Ok(None) => {
-                        tracing::info!("No embedding provider resolved; memory recall uses keyword matching");
+                        tracing::info!(
+                            "No embedding provider resolved; memory recall uses keyword matching"
+                        );
                         None
                     }
                     Err(err) => {
                         tracing::warn!("Failed to resolve embedding service from config: {}", err);
                         None
                     }
-                }
-            })
+                })
         });
 
         // Wire embedding service into MemoryManager if configured
         let memory_manager = if embedding_service.is_some() && self.memory_manager.is_none() {
             // Create MemoryManager with embedding service
             let config = MemoryManagerConfig::default();
-            Arc::new(MemoryManager::with_embedding(config, embedding_service.clone().unwrap()))
+            Arc::new(MemoryManager::with_embedding(
+                config,
+                embedding_service.clone().unwrap(),
+            ))
         } else {
-            self.memory_manager.unwrap_or_else(|| {
-                Arc::new(MemoryManager::new())
-            })
+            self.memory_manager
+                .unwrap_or_else(|| Arc::new(MemoryManager::new()))
         };
 
         // Default retrieval stack (oneai-vector): wire an InMemoryVectorBackend
@@ -1570,7 +1592,8 @@ impl AppBuilder {
                     DocumentIndex::with_default_stack(
                         embedding_service.clone(),
                         self.reranker.clone(),
-                    ).await?
+                    )
+                    .await?
                 };
                 self.rag_index = Some(Arc::new(index));
             }
@@ -1586,10 +1609,14 @@ impl AppBuilder {
                 let mm = memory_manager.clone();
                 let recall_cfg = domain.memory_profile.recall.clone();
                 self.tool_registry
-                    .register(Arc::new(oneai_memory::MemorySearchTool::with_recall_config(mm.clone(), recall_cfg)) as Arc<dyn Tool>)
+                    .register(Arc::new(oneai_memory::MemorySearchTool::with_recall_config(
+                        mm.clone(),
+                        recall_cfg,
+                    )) as Arc<dyn Tool>)
                     .await?;
                 self.tool_registry
-                    .register(Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone())) as Arc<dyn Tool>)
+                    .register(Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone()))
+                        as Arc<dyn Tool>)
                     .await?;
                 self.tool_registry
                     .register(Arc::new(oneai_memory::ArchivalInsertTool::new(mm)) as Arc<dyn Tool>)
@@ -1601,8 +1628,10 @@ impl AppBuilder {
         let usage_tracker = self.usage_tracker.or_else(|| {
             if let Some(store) = &self.sqlite_store {
                 // Auto-create persistent tracker if persistence is available
-                Some(Arc::new(oneai_persistence::SqliteUsageTracker::from_store(store))
-                    as Arc<dyn UsageTracker>)
+                Some(
+                    Arc::new(oneai_persistence::SqliteUsageTracker::from_store(store))
+                        as Arc<dyn UsageTracker>,
+                )
             } else {
                 None
             }
@@ -1743,7 +1772,9 @@ impl AppBuilder {
         // If a provider pool is configured, use it as the provider
         // (pool implements LlmProvider, so it's a drop-in replacement)
         let provider = self.provider.or_else(|| {
-            provider_pool.clone().map(|pool| pool as Arc<dyn LlmProvider>)
+            provider_pool
+                .clone()
+                .map(|pool| pool as Arc<dyn LlmProvider>)
         });
 
         // Seed L1 provider-extras from the resolved provider's ModelConfig.extra
@@ -1796,9 +1827,9 @@ impl AppBuilder {
             parser,
             memory_manager,
             rag_index: self.rag_index,
-            skill_selector: self.skill_selector.unwrap_or_else(|| {
-                Arc::new(SkillSelector::new())
-            }),
+            skill_selector: self
+                .skill_selector
+                .unwrap_or_else(|| Arc::new(SkillSelector::new())),
             skill_registry: self.skill_registry,
             active_skill: Arc::new(tokio::sync::RwLock::new(None)),
             persistence: self.persistence,
@@ -2111,8 +2142,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_tool::CalculatorTool;
     use oneai_core::platform::PlatformAdapter;
+    use oneai_tool::CalculatorTool;
 
     #[tokio::test]
     async fn test_app_builder_default_build() {
@@ -2135,12 +2166,17 @@ mod tests {
             .await
             .expect("Build should succeed");
 
-        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+        app.register_tool(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         let session = app.create_session();
 
         // Execute calculator via session
-        let result = session.execute_tool("calculator", serde_json::json!({"expression": "2+3"})).await.unwrap();
+        let result = session
+            .execute_tool("calculator", serde_json::json!({"expression": "2+3"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5");
     }
@@ -2193,12 +2229,17 @@ mod tests {
             .await
             .expect("Build should succeed");
 
-        app.register_tool(Arc::new(oneai_tool::ShellTool::new())).await.unwrap();
+        app.register_tool(Arc::new(oneai_tool::ShellTool::new()))
+            .await
+            .unwrap();
 
         let session = app.create_session();
 
         // Shell is high-risk — should be denied by the deny-all gate
-        let result = session.execute_tool("shell", serde_json::json!({"command": "echo test"})).await.unwrap();
+        let result = session
+            .execute_tool("shell", serde_json::json!({"command": "echo test"}))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("denied"));
     }
@@ -2232,15 +2273,23 @@ mod tests {
             .expect("Build should succeed");
 
         // Stub auto-proceeds (every point disabled), so tools should work
-        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+        app.register_tool(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
         let session = app.create_session();
 
-        let result = session.execute_tool("calculator", serde_json::json!({"expression": "2+2"})).await.unwrap();
+        let result = session
+            .execute_tool("calculator", serde_json::json!({"expression": "2+2"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "4");
 
         // Platform should be set by the adapter
-        assert!(matches!(app.platform(), Platform::Macos | Platform::Linux | Platform::Windows));
+        assert!(matches!(
+            app.platform(),
+            Platform::Macos | Platform::Linux | Platform::Windows
+        ));
     }
 
     #[tokio::test]
@@ -2261,7 +2310,7 @@ mod tests {
     async fn test_app_with_mcp_server_host() {
         let app = AppBuilder::new()
             .noop_interaction_gate()
-            .mcp_server_host()  // ← enable MCP server hosting
+            .mcp_server_host() // ← enable MCP server hosting
             .build()
             .await
             .expect("Build should succeed");
@@ -2279,7 +2328,7 @@ mod tests {
         let registry = oneai_mcp::McpPluginRegistry::new();
         let app = AppBuilder::new()
             .noop_interaction_gate()
-            .mcp_plugin_registry(registry)  // ← set MCP plugin registry
+            .mcp_plugin_registry(registry) // ← set MCP plugin registry
             .build()
             .await
             .expect("Build should succeed");
@@ -2295,7 +2344,7 @@ mod tests {
     async fn test_app_with_mcp_servers_from_config() {
         let app = AppBuilder::new()
             .noop_interaction_gate()
-            .mcp_servers_from_config()  // ← load MCP servers from config file
+            .mcp_servers_from_config() // ← load MCP servers from config file
             .build()
             .await
             .expect("Build should succeed");
@@ -2317,19 +2366,25 @@ mod tests {
             .await
             .expect("Build should succeed");
 
-        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+        app.register_tool(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         // Verify the MCP server host has the tool
         let host = app.mcp_server_host().unwrap();
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {}
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .await;
 
         let result = response.get("result").unwrap();
         let tools = result.get("tools").unwrap().as_array().unwrap();
-        assert!(tools.iter().any(|t| t.get("name").and_then(|n| n.as_str()) == Some("calculator")));
+        assert!(tools
+            .iter()
+            .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("calculator")));
     }
 }

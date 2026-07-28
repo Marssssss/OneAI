@@ -2,9 +2,9 @@
 //!
 //! Enables checkpoint time-travel: listing, viewing, and restoring checkpoints.
 
-use serde::{Deserialize, Serialize};
-use oneai_core::CheckpointInfo;
 use oneai_core::AgentState;
+use oneai_core::CheckpointInfo;
+use serde::{Deserialize, Serialize};
 
 // ─── CheckpointListView ──────────────────────────────────────────────
 
@@ -92,7 +92,8 @@ impl CheckpointListView {
     pub fn from_checkpoint_infos(infos: &[CheckpointInfo]) -> Self {
         Self {
             total: infos.len(),
-            checkpoints: infos.iter()
+            checkpoints: infos
+                .iter()
                 .map(CheckpointEntryView::from_checkpoint_info)
                 .collect(),
         }
@@ -117,7 +118,8 @@ impl CheckpointDetailView {
 
 /// Extract paradigm from description string like "Session xxx - paradigm react - step 3".
 fn extract_paradigm(description: &str) -> String {
-    description.split(" - ")
+    description
+        .split(" - ")
         .find_map(|part| {
             if part.starts_with("paradigm ") {
                 Some(part.strip_prefix("paradigm ").unwrap_or("").to_string())
@@ -130,26 +132,33 @@ fn extract_paradigm(description: &str) -> String {
 
 /// Extract step number from description string.
 fn extract_step(description: &str) -> Option<String> {
-    description.split(" - ")
-        .find_map(|part| {
-            if part.starts_with("step ") {
-                Some(part.strip_prefix("step ").unwrap_or("").to_string())
-            } else {
-                None
-            }
-        })
+    description.split(" - ").find_map(|part| {
+        if part.starts_with("step ") {
+            Some(part.strip_prefix("step ").unwrap_or("").to_string())
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_checkpoint_info(id: &str, session_id: &str, paradigm: &str, step: usize) -> CheckpointInfo {
+    fn make_checkpoint_info(
+        id: &str,
+        session_id: &str,
+        paradigm: &str,
+        step: usize,
+    ) -> CheckpointInfo {
         CheckpointInfo {
             id: id.to_string(),
             session_id: session_id.to_string(),
             timestamp: chrono::Utc::now(),
-            description: format!("Session {} - paradigm {} - step {}", session_id, paradigm, step),
+            description: format!(
+                "Session {} - paradigm {} - step {}",
+                session_id, paradigm, step
+            ),
         }
     }
 
@@ -178,9 +187,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_list_view_json() {
-        let infos = vec![
-            make_checkpoint_info("cp_1", "sess_1", "react", 3),
-        ];
+        let infos = vec![make_checkpoint_info("cp_1", "sess_1", "react", 3)];
 
         let view = CheckpointListView::from_checkpoint_infos(&infos);
         let json = serde_json::to_string_pretty(&view).unwrap();
@@ -190,15 +197,27 @@ mod tests {
 
     #[test]
     fn test_extract_paradigm() {
-        assert_eq!(extract_paradigm("Session s1 - paradigm react - step 3"), "react");
-        assert_eq!(extract_paradigm("Session s1 - paradigm plan - step 1"), "plan");
+        assert_eq!(
+            extract_paradigm("Session s1 - paradigm react - step 3"),
+            "react"
+        );
+        assert_eq!(
+            extract_paradigm("Session s1 - paradigm plan - step 1"),
+            "plan"
+        );
         assert_eq!(extract_paradigm("unknown format"), "unknown");
     }
 
     #[test]
     fn test_extract_step() {
-        assert_eq!(extract_step("Session s1 - paradigm react - step 3"), Some("3".to_string()));
-        assert_eq!(extract_step("Session s1 - paradigm plan - step 1"), Some("1".to_string()));
+        assert_eq!(
+            extract_step("Session s1 - paradigm react - step 3"),
+            Some("3".to_string())
+        );
+        assert_eq!(
+            extract_step("Session s1 - paradigm plan - step 1"),
+            Some("1".to_string())
+        );
         assert_eq!(extract_step("no step info"), None);
     }
 }

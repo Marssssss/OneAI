@@ -3,12 +3,12 @@
 //! This command runs a single inference without the TUI, suitable for
 //! scripting, CI pipelines, and batch processing. Output goes to stdout.
 
-use std::sync::Arc;
 use oneai_app::AppBuilder;
 use oneai_tool::CalculatorTool;
+use std::sync::Arc;
 
-use crate::config::OneaiConfig;
 use crate::cmd_pack::get_builtin_pack;
+use crate::config::OneaiConfig;
 
 /// Run a single inference and output the result to stdout.
 ///
@@ -36,7 +36,10 @@ pub fn cmd_run(
     let domain_name = config.default_domain_pack(domain_override);
     let domain_pack = get_builtin_pack(&domain_name, ".");
     if domain_pack.is_none() {
-        eprintln!("Error: Unknown domain pack '{}'. Available: coding, research, general", domain_name);
+        eprintln!(
+            "Error: Unknown domain pack '{}'. Available: coding, research, general",
+            domain_name
+        );
         std::process::exit(1);
     }
 
@@ -68,11 +71,15 @@ pub fn cmd_run(
         for tool in &pack.tools {
             app.register_tool(tool.clone()).await.unwrap();
         }
-        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
-        // Register the `skill` tool (progressive disclosure Tier2/Tier3).
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(app.skill_registry.clone())))
+        app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
+        // Register the `skill` tool (progressive disclosure Tier2/Tier3).
+        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
+            app.skill_registry.clone(),
+        )))
+        .await
+        .unwrap();
 
         let mut session = app.create_session();
 
@@ -85,7 +92,10 @@ pub fn cmd_run(
             if agent_result.completed {
                 println!("{}", agent_result.final_answer);
             } else {
-                eprintln!("Agent did not reach a final answer after {} iterations.", agent_result.iterations);
+                eprintln!(
+                    "Agent did not reach a final answer after {} iterations.",
+                    agent_result.iterations
+                );
                 // Still output the best answer we have
                 println!("{}", agent_result.final_answer);
             }

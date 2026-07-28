@@ -14,30 +14,29 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
-pub mod openai;
 pub mod anthropic;
 pub mod gemini;
-pub mod ollama;
-pub mod provider_factory;
 pub mod model_router;
+pub mod ollama;
+pub mod openai;
+pub mod provider_factory;
 pub mod provider_pool;
-pub mod smart_router;
 pub mod retry;
+pub mod smart_router;
 
-pub use openai::OpenAIProvider;
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
+pub use model_router::{ModelRouter, RouteDecision, RouteProviderKind, RouteRule};
 pub use ollama::OllamaProvider;
-pub use provider_factory::ProviderFactory;
-pub use model_router::{ModelRouter, RouteRule, RouteDecision, RouteProviderKind};
-pub use provider_pool::{ProviderPool, ProviderEntry};
-pub use smart_router::SmartRouter;
-pub use retry::ProviderRetryConfig;
-pub use oneai_core::TokenCounter;
-pub use oneai_core::HeuristicTokenCounter;
+pub use oneai_core::ContextFitResult;
 pub use oneai_core::ContextManager;
 pub use oneai_core::ContextManagerConfig;
 pub use oneai_core::ContextTrimmingStrategy;
 pub use oneai_core::ContextWindowProfile;
-pub use oneai_core::ContextFitResult;
+pub use oneai_core::HeuristicTokenCounter;
+pub use oneai_core::TokenCounter;
+pub use openai::OpenAIProvider;
+pub use provider_factory::ProviderFactory;
+pub use provider_pool::{ProviderEntry, ProviderPool};
+pub use retry::ProviderRetryConfig;
+pub use smart_router::SmartRouter;

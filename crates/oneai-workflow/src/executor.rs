@@ -21,8 +21,8 @@ use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{InteractionGate, LlmProvider, Tool};
 use oneai_core::{Conversation, InferenceRequest, Message};
 
+use crate::config::{RetryPolicy, WorkflowConfig};
 use crate::dag::WorkflowDag;
-use crate::config::{WorkflowConfig, RetryPolicy};
 
 /// The status of a workflow step execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,7 +92,8 @@ impl WorkflowResult {
 
     /// Get all completed step IDs.
     pub fn completed_steps(&self) -> Vec<String> {
-        self.step_results.iter()
+        self.step_results
+            .iter()
             .filter(|(_, r)| r.status == StepStatus::Completed)
             .map(|(id, _)| id.clone())
             .collect()
@@ -100,7 +101,8 @@ impl WorkflowResult {
 
     /// Get all failed step IDs.
     pub fn failed_steps(&self) -> Vec<String> {
-        self.step_results.iter()
+        self.step_results
+            .iter()
             .filter(|(_, r)| r.status == StepStatus::Failed)
             .map(|(id, _)| id.clone())
             .collect()
@@ -216,7 +218,10 @@ impl WorkflowExecutor {
 
     /// Register a tool for workflow step execution.
     pub async fn register_tool(&self, tool: Arc<dyn Tool>) {
-        self.tools.write().await.insert(tool.name().to_string(), tool);
+        self.tools
+            .write()
+            .await
+            .insert(tool.name().to_string(), tool);
     }
 
     /// Get a handle to the internal tool registry (Arc<RwLock<HashMap>>).
@@ -241,15 +246,18 @@ impl WorkflowExecutor {
         let mut completed_levels = 0;
 
         // Mark all steps as pending initially
-        for (id, _) in &dag.nodes {
-            step_results.insert(id.clone(), StepResult {
-                step_id: id.clone(),
-                status: StepStatus::Pending,
-                output: None,
-                error: None,
-                retries_used: 0,
-                execution_time_ms: None,
-            });
+        for id in dag.nodes.keys() {
+            step_results.insert(
+                id.clone(),
+                StepResult {
+                    step_id: id.clone(),
+                    status: StepStatus::Pending,
+                    output: None,
+                    error: None,
+                    retries_used: 0,
+                    execution_time_ms: None,
+                },
+            );
         }
 
         // Execute each level
@@ -263,7 +271,9 @@ impl WorkflowExecutor {
                     if let Some(node) = dag.get_node(step_id) {
                         for dep_id in &node.depends_on {
                             if let Some(dep_result) = step_results.get(dep_id) {
-                                if dep_result.status == StepStatus::Failed || dep_result.status == StepStatus::Skipped {
+                                if dep_result.status == StepStatus::Failed
+                                    || dep_result.status == StepStatus::Skipped
+                                {
                                     skip_level = true;
                                     break;
                                 }
@@ -309,15 +319,16 @@ impl WorkflowExecutor {
                         interaction_gate,
                         context_snapshot,
                         provider,
-                    ).await
+                    )
+                    .await
                 }));
             }
 
             // Collect results from all steps in this level
             for future in level_futures {
-                let result = future.await.map_err(|e| {
-                    OneAIError::Workflow(format!("Task join error: {}", e))
-                })?;
+                let result = future
+                    .await
+                    .map_err(|e| OneAIError::Workflow(format!("Task join error: {}", e)))?;
 
                 match result {
                     Ok(step_result) => {
@@ -340,7 +351,8 @@ impl WorkflowExecutor {
 
         let total_time_ms = start_time.elapsed().as_millis() as u64;
 
-        let success = step_results.values()
+        let success = step_results
+            .values()
             .all(|r| r.status == StepStatus::Completed || r.status == StepStatus::Skipped);
 
         Ok(WorkflowResult {
@@ -381,15 +393,16 @@ async fn execute_step(
     // ─── Template interpolation ──────────────────────────────────────────
     // Interpolate {{variable}} patterns in step.tool_args and step.prompt
     // using context.step_outputs and context.variables.
-    let interpolated_prompt = step.prompt.as_ref()
+    let interpolated_prompt = step
+        .prompt
+        .as_ref()
         .map(|p| interpolate_template(p, &context));
-    let interpolated_tool_args = step.tool_args.as_ref()
-        .map(|a| {
-            // Interpolate string values in the JSON
-            let json_str = serde_json::to_string(a).unwrap_or_default();
-            let interpolated = interpolate_template(&json_str, &context);
-            serde_json::from_str(&interpolated).unwrap_or_else(|_| a.clone())
-        });
+    let interpolated_tool_args = step.tool_args.as_ref().map(|a| {
+        // Interpolate string values in the JSON
+        let json_str = serde_json::to_string(a).unwrap_or_default();
+        let interpolated = interpolate_template(&json_str, &context);
+        serde_json::from_str(&interpolated).unwrap_or_else(|_| a.clone())
+    });
 
     // If this step requires approval, request it
     if step.requires_approval {
@@ -446,92 +459,95 @@ async fn execute_step(
 
     // Execute with retry loop
     for attempt in 0..=retry_policy.max_retries {
-        let exec_result: std::result::Result<oneai_core::ToolOutput, OneAIError> = if let Some(tool_name) = &step.tool {
-            // Tool-based step — read from RwLock
-            let tools_map = tools.read().await;
-            let tool = tools_map.get(tool_name);
-            if let Some(tool) = tool {
-                // Use interpolated args if available, otherwise use original args
-                let args = match &interpolated_tool_args {
-                    Some(a) => a.clone(),
-                    None => step.tool_args.clone().unwrap_or(serde_json::json!({})),
-                };                let timeout = timeout_secs.unwrap_or(60);
+        let exec_result: std::result::Result<oneai_core::ToolOutput, OneAIError> =
+            if let Some(tool_name) = &step.tool {
+                // Tool-based step — read from RwLock
+                let tools_map = tools.read().await;
+                let tool = tools_map.get(tool_name);
+                if let Some(tool) = tool {
+                    // Use interpolated args if available, otherwise use original args
+                    let args = match &interpolated_tool_args {
+                        Some(a) => a.clone(),
+                        None => step.tool_args.clone().unwrap_or(serde_json::json!({})),
+                    };
+                    let timeout = timeout_secs.unwrap_or(60);
 
-                let timeout_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(timeout),
-                    tool.execute(args.clone()),
-                ).await;
+                    let timeout_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout),
+                        tool.execute(args.clone()),
+                    )
+                    .await;
 
-                match timeout_result {
-                    Ok(inner_result) => inner_result, // Result<ToolOutput, OneAIError>
-                    Err(_) => Err(OneAIError::Timeout(format!(
-                        "Step '{}' timed out after {} seconds", step_id, timeout
-                    ))),
+                    match timeout_result {
+                        Ok(inner_result) => inner_result, // Result<ToolOutput, OneAIError>
+                        Err(_) => Err(OneAIError::Timeout(format!(
+                            "Step '{}' timed out after {} seconds",
+                            step_id, timeout
+                        ))),
+                    }
+                } else {
+                    Err(OneAIError::Workflow(format!(
+                        "Tool '{}' not found for step '{}'",
+                        tool_name, step_id
+                    )))
                 }
-            } else {
-                Err(OneAIError::Workflow(format!(
-                    "Tool '{}' not found for step '{}'",
-                    tool_name, step_id
-                )))
-            }
-        } else if let Some(provider) = &provider {
-            // Prompt-based step with LLM provider — execute actual inference
-            let prompt_text = match &interpolated_prompt {
-                Some(p) => p.clone(),
-                None => step.prompt.clone().unwrap_or_default(),
-            };
-            if prompt_text.is_empty() {
-                Ok(oneai_core::ToolOutput {
-                    success: true,
-                    content: String::new(),
-                    error: None,
-                })
-            } else {
-                // Build a minimal inference request with the interpolated prompt
-                let mut conversation = Conversation::new();
-                conversation.add_message(Message::system(
-                    "You are executing a step in a deterministic workflow. Respond concisely."
-                ));
-                conversation.add_message(Message::user(prompt_text));
-
-                let request = InferenceRequest {
-                    conversation,
-                    tools: vec![], // No tools for prompt steps
-                    max_tokens: Some(2048),
-                    temperature: Some(0.3),
-                    top_p: None,
-                    stop_sequences: vec![],
-                    constrained_output: None,
-                    thinking_budget: None,
-                    metadata: HashMap::new(),
+            } else if let Some(provider) = &provider {
+                // Prompt-based step with LLM provider — execute actual inference
+                let prompt_text = match &interpolated_prompt {
+                    Some(p) => p.clone(),
+                    None => step.prompt.clone().unwrap_or_default(),
                 };
+                if prompt_text.is_empty() {
+                    Ok(oneai_core::ToolOutput {
+                        success: true,
+                        content: String::new(),
+                        error: None,
+                    })
+                } else {
+                    // Build a minimal inference request with the interpolated prompt
+                    let mut conversation = Conversation::new();
+                    conversation.add_message(Message::system(
+                        "You are executing a step in a deterministic workflow. Respond concisely.",
+                    ));
+                    conversation.add_message(Message::user(prompt_text));
 
-                let response = provider.infer(request).await;
-                match response {
-                    Ok(inference_response) => {
-                        Ok(oneai_core::ToolOutput {
+                    let request = InferenceRequest {
+                        conversation,
+                        tools: vec![], // No tools for prompt steps
+                        max_tokens: Some(2048),
+                        temperature: Some(0.3),
+                        top_p: None,
+                        stop_sequences: vec![],
+                        constrained_output: None,
+                        thinking_budget: None,
+                        metadata: HashMap::new(),
+                    };
+
+                    let response = provider.infer(request).await;
+                    match response {
+                        Ok(inference_response) => Ok(oneai_core::ToolOutput {
                             success: true,
                             content: inference_response.message.text_content(),
                             error: None,
-                        })
+                        }),
+                        Err(e) => Err(OneAIError::Provider(format!(
+                            "LLM inference failed for step '{}': {}",
+                            step_id, e
+                        ))),
                     }
-                    Err(e) => Err(OneAIError::Provider(format!(
-                        "LLM inference failed for step '{}': {}", step_id, e
-                    ))),
                 }
-            }
-        } else {
-            // No tool defined and no provider — just return interpolated prompt
-            let prompt_text = match &interpolated_prompt {
-                Some(p) => p.clone(),
-                None => step.prompt.clone().unwrap_or_default(),
+            } else {
+                // No tool defined and no provider — just return interpolated prompt
+                let prompt_text = match &interpolated_prompt {
+                    Some(p) => p.clone(),
+                    None => step.prompt.clone().unwrap_or_default(),
+                };
+                Ok(oneai_core::ToolOutput {
+                    success: true,
+                    content: prompt_text,
+                    error: None,
+                })
             };
-            Ok(oneai_core::ToolOutput {
-                success: true,
-                content: prompt_text,
-                error: None,
-            })
-        };
 
         match exec_result {
             Ok(output) => {
@@ -545,7 +561,11 @@ async fn execute_step(
                         execution_time_ms: Some(start_time.elapsed().as_millis() as u64),
                     });
                 } else {
-                    last_error = Some(output.error.unwrap_or_else(|| "Tool execution failed".to_string()));
+                    last_error = Some(
+                        output
+                            .error
+                            .unwrap_or_else(|| "Tool execution failed".to_string()),
+                    );
                 }
             }
             Err(e) => {
@@ -557,9 +577,10 @@ async fn execute_step(
 
         if attempt < retry_policy.max_retries {
             // Wait before retry
-            tokio::time::sleep(
-                std::time::Duration::from_secs(retry_policy.retry_delay_secs)
-            ).await;
+            tokio::time::sleep(std::time::Duration::from_secs(
+                retry_policy.retry_delay_secs,
+            ))
+            .await;
         }
     }
 
@@ -653,7 +674,10 @@ mod interpolation_tests {
         context.set_step_output("read_diff", "auth.rs changes");
         context.set_variable("focus", "security");
 
-        let result = interpolate_template("Review {{read_diff_output}} with focus on {{focus}}", &context);
+        let result = interpolate_template(
+            "Review {{read_diff_output}} with focus on {{focus}}",
+            &context,
+        );
         assert_eq!(result, "Review auth.rs changes with focus on security");
     }
 

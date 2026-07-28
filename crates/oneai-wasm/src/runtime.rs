@@ -12,10 +12,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use wasmtime::{Config, Engine, Module, Store, Linker};
+use wasmtime::{Config, Engine, Linker, Module, Store};
 
 use crate::config::WasmRuntimeConfig;
-use crate::error::{WasmError, Result};
+use crate::error::{Result, WasmError};
 use crate::wasi::build_wasi_p1_ctx;
 
 /// WASM sandbox execution runtime — based on Wasmtime.
@@ -73,8 +73,9 @@ impl WasmRuntime {
         // Performance settings
         wasmtime_config.cranelift_opt_level(wasmtime::OptLevel::Speed);
 
-        let engine = Engine::new(&wasmtime_config)
-            .map_err(|e| WasmError::CompilationFailed(format!("Failed to create Wasmtime Engine: {}", e)))?;
+        let engine = Engine::new(&wasmtime_config).map_err(|e| {
+            WasmError::CompilationFailed(format!("Failed to create Wasmtime Engine: {}", e))
+        })?;
 
         let config_clone = config.clone();
 
@@ -112,8 +113,9 @@ impl WasmRuntime {
     /// module name will return the cached compiled module.
     pub async fn compile_module(&self, name: &str, wasm_bytes: &[u8]) -> Result<Module> {
         // Compile the module
-        let module = Module::from_binary(&self.engine, wasm_bytes)
-            .map_err(|e| WasmError::CompilationFailed(format!("Failed to compile WASM module '{}': {}", name, e)))?;
+        let module = Module::from_binary(&self.engine, wasm_bytes).map_err(|e| {
+            WasmError::CompilationFailed(format!("Failed to compile WASM module '{}': {}", name, e))
+        })?;
 
         // Cache the module
         {
@@ -170,7 +172,9 @@ impl WasmRuntime {
 
         // Initialize fuel using set_fuel (v45 API)
         if let Some(fuel_limit) = self.config.fuel_limit {
-            store.set_fuel(fuel_limit).expect("fuel consumption should be enabled");
+            store
+                .set_fuel(fuel_limit)
+                .expect("fuel consumption should be enabled");
         }
 
         // Set epoch deadline for interrupt support
@@ -197,8 +201,12 @@ impl WasmRuntime {
 
         // Register WASI P1 host functions if WASI is enabled
         if self.config.wasi_config.enabled() {
-            wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state: &mut WasmStoreState| state.wasi_p1_ctx_mut())
-                .map_err(|e| WasmError::WasiInitFailed(format!("Failed to add WASI P1 to linker: {}", e)))?;
+            wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state: &mut WasmStoreState| {
+                state.wasi_p1_ctx_mut()
+            })
+            .map_err(|e| {
+                WasmError::WasiInitFailed(format!("Failed to add WASI P1 to linker: {}", e))
+            })?;
         }
 
         Ok(linker)
@@ -341,20 +349,26 @@ impl WasmStoreState {
         // This should only be called when WASI is enabled.
         // If WASI is disabled, the linker won't have WASI functions,
         // so this closure is never invoked by the linker.
-        self.wasi_p1_ctx.as_mut().expect("WASI P1 context should be present when WASI linker functions are called")
+        self.wasi_p1_ctx
+            .as_mut()
+            .expect("WASI P1 context should be present when WASI linker functions are called")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use crate::wasi::WasiConfig;
+    use std::time::Duration;
 
     #[test]
     fn test_wasm_runtime_creation() {
         let runtime = WasmRuntime::new(WasmRuntimeConfig::default());
-        assert!(runtime.is_ok(), "Failed to create WasmRuntime: {:?}", runtime.err());
+        assert!(
+            runtime.is_ok(),
+            "Failed to create WasmRuntime: {:?}",
+            runtime.err()
+        );
     }
 
     #[test]
@@ -391,23 +405,34 @@ mod tests {
         // Store should be created with WasmStoreState
         // Fuel should be initialized via set_fuel
         let fuel = store.get_fuel();
-        assert!(fuel.is_ok(), "Fuel should be available since consume_fuel is enabled");
+        assert!(
+            fuel.is_ok(),
+            "Fuel should be available since consume_fuel is enabled"
+        );
         let fuel_remaining = fuel.unwrap();
-        assert_eq!(fuel_remaining, 100_000, "Fuel should be initialized to 100,000");
+        assert_eq!(
+            fuel_remaining, 100_000,
+            "Fuel should be initialized to 100,000"
+        );
     }
 
     #[test]
     fn test_wasm_runtime_create_linker() {
         let runtime = WasmRuntime::with_defaults().unwrap();
         let linker = runtime.create_linker();
-        assert!(linker.is_ok(), "Failed to create linker: {:?}", linker.err());
+        assert!(
+            linker.is_ok(),
+            "Failed to create linker: {:?}",
+            linker.err()
+        );
     }
 
     #[test]
     fn test_wasm_runtime_create_store_with_wasi() {
-        let wasi_config = WasiConfig::restricted(vec![
-            crate::wasi::WasiDirConfig::readonly(std::path::PathBuf::from("/tmp"), "/tmp"),
-        ]);
+        let wasi_config = WasiConfig::restricted(vec![crate::wasi::WasiDirConfig::readonly(
+            std::path::PathBuf::from("/tmp"),
+            "/tmp",
+        )]);
         let config = WasmRuntimeConfig::default().with_wasi_config(wasi_config);
         let runtime = WasmRuntime::new(config).unwrap();
         let store = runtime.create_store();
@@ -418,20 +443,31 @@ mod tests {
 
     #[test]
     fn test_wasm_runtime_create_linker_with_wasi() {
-        let wasi_config = WasiConfig::restricted(vec![
-            crate::wasi::WasiDirConfig::readonly(std::path::PathBuf::from("/tmp"), "/tmp"),
-        ]);
+        let wasi_config = WasiConfig::restricted(vec![crate::wasi::WasiDirConfig::readonly(
+            std::path::PathBuf::from("/tmp"),
+            "/tmp",
+        )]);
         let config = WasmRuntimeConfig::default().with_wasi_config(wasi_config);
         let runtime = WasmRuntime::new(config).unwrap();
         let linker = runtime.create_linker();
-        assert!(linker.is_ok(), "Failed to create linker with WASI: {:?}", linker.err());
+        assert!(
+            linker.is_ok(),
+            "Failed to create linker with WASI: {:?}",
+            linker.err()
+        );
     }
 
     #[test]
     fn test_wasm_host_state_env_whitelist() {
         let state = WasmHostState::new();
-        assert_eq!(state.get_env("ONEAI_TOOL_MODE"), Some(&"sandbox".to_string()));
-        assert_eq!(state.get_env("ONEAI_MAX_MEMORY_PAGES"), Some(&"16".to_string()));
+        assert_eq!(
+            state.get_env("ONEAI_TOOL_MODE"),
+            Some(&"sandbox".to_string())
+        );
+        assert_eq!(
+            state.get_env("ONEAI_MAX_MEMORY_PAGES"),
+            Some(&"16".to_string())
+        );
         assert_eq!(state.get_env("PATH"), None);
         assert_eq!(state.get_env("HOME"), None);
     }
@@ -453,7 +489,10 @@ mod tests {
         let host_state = WasmHostState::new();
         let store_state = WasmStoreState::new(host_state);
         assert!(store_state.wasi_p1_ctx.is_none());
-        assert_eq!(store_state.host_state().get_env("ONEAI_TOOL_MODE"), Some(&"sandbox".to_string()));
+        assert_eq!(
+            store_state.host_state().get_env("ONEAI_TOOL_MODE"),
+            Some(&"sandbox".to_string())
+        );
     }
 
     #[test]
@@ -462,7 +501,10 @@ mod tests {
         let wasi_p1_ctx = wasmtime_wasi::WasiCtx::builder().build_p1();
         let store_state = WasmStoreState::with_wasi(host_state, wasi_p1_ctx);
         assert!(store_state.wasi_p1_ctx.is_some());
-        assert_eq!(store_state.host_state().get_env("ONEAI_TOOL_MODE"), Some(&"sandbox".to_string()));
+        assert_eq!(
+            store_state.host_state().get_env("ONEAI_TOOL_MODE"),
+            Some(&"sandbox".to_string())
+        );
     }
 
     #[test]

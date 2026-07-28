@@ -48,7 +48,10 @@ pub fn draw_plan_panel(f: &mut Frame, rect: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .title(Span::styled(header, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(
+            header,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
 
     let items: Vec<ListItem> = plan
         .steps
@@ -61,7 +64,10 @@ pub fn draw_plan_panel(f: &mut Frame, rect: Rect, app: &App) {
         .style(Style::default().fg(TEXT));
 
     // Highlight the in-progress step.
-    let active_idx = plan.steps.iter().position(|s| s.status == PlanStepStatus::InProgress);
+    let active_idx = plan
+        .steps
+        .iter()
+        .position(|s| s.status == PlanStepStatus::InProgress);
     let mut state = ListState::default();
     if let Some(i) = active_idx {
         state.select(Some(i));
@@ -87,7 +93,14 @@ fn render_step_line(step: &PlanStep) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{} ", icon), Style::default().fg(color)),
         Span::styled(format!("[{}] ", step.id), Style::default().fg(DIM)),
-        Span::styled(step.description.clone(), Style::default().fg(if step.status == PlanStepStatus::Completed { DIM } else { TEXT })),
+        Span::styled(
+            step.description.clone(),
+            Style::default().fg(if step.status == PlanStepStatus::Completed {
+                DIM
+            } else {
+                TEXT
+            }),
+        ),
         Span::styled(active, Style::default().fg(color)),
     ])
 }
@@ -127,7 +140,10 @@ pub fn build_plan_approval_lines(app: &App) -> Vec<Line<'static>> {
     let has_details = plan_text.lines().any(|l| !l.is_empty());
     if has_details {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("Details:", Style::default().fg(DIM))));
+        lines.push(Line::from(Span::styled(
+            "Details:",
+            Style::default().fg(DIM),
+        )));
         for raw in plan_text.lines() {
             if raw.is_empty() {
                 lines.push(Line::from(""));
@@ -199,8 +215,8 @@ pub fn draw_plan_approval(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),          // plan text + steps
-            Constraint::Length(1),       // buttons row
+            Constraint::Min(0),    // plan text + steps
+            Constraint::Length(1), // buttons row
         ])
         .split(inner);
 
@@ -231,7 +247,9 @@ pub fn draw_plan_approval(f: &mut Frame, area: Rect, app: &App) {
     for (i, (label, color)) in opts.iter().enumerate() {
         let selected = i == app.plan_approval_selected_index;
         let style = if selected {
-            Style::default().fg(*color).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            Style::default()
+                .fg(*color)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
             Style::default().fg(*color)
         };
@@ -257,16 +275,23 @@ pub fn draw_plan_decision(f: &mut Frame, area: Rect, app: &App) {
 
     let popup = centered_rect(60, 20, area);
     f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Plan decision ", Style::default().fg(WARNING).add_modifier(Modifier::BOLD)));
+    let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        " Plan decision ",
+        Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
+    ));
     f.render_widget(block, popup);
 
-    let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+    let inner = popup.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
 
     // Build the popup body: question, context, options, prompt / input box.
     let mut content: Vec<Line> = Vec::new();
-    content.push(Line::styled(state.question.clone(), Style::default().fg(TEXT).add_modifier(Modifier::BOLD)));
+    content.push(Line::styled(
+        state.question.clone(),
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+    ));
     if !state.context.is_empty() {
         for l in textwrap_line(&state.context, 76) {
             content.push(Line::styled(l, Style::default().fg(DIM)));
@@ -280,7 +305,10 @@ pub fn draw_plan_decision(f: &mut Frame, area: Rect, app: &App) {
             format!("{} {} — {}", marker, opt.label, opt.description),
             Style::default().fg(color),
         ));
-        content.push(Line::styled(format!("     tradeoff: {}", opt.tradeoffs), Style::default().fg(DIM)));
+        content.push(Line::styled(
+            format!("     tradeoff: {}", opt.tradeoffs),
+            Style::default().fg(DIM),
+        ));
     }
     content.push(Span::raw("").into());
     if let Some(buf) = &app.plan_revise_input {

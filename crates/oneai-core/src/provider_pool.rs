@@ -56,7 +56,9 @@ pub struct ProviderEntryConfig {
     pub cooldown_secs: u64,
 }
 
-fn default_cooldown_secs() -> u64 { 30 }
+fn default_cooldown_secs() -> u64 {
+    30
+}
 
 impl ProviderEntryConfig {
     /// Create a new provider entry config.
@@ -112,7 +114,9 @@ pub struct ProviderPoolConfig {
     pub degradation_rules: Vec<DegradationRule>,
 }
 
-fn default_max_fallbacks() -> usize { 3 }
+fn default_max_fallbacks() -> usize {
+    3
+}
 
 impl Default for ProviderPoolConfig {
     fn default() -> Self {
@@ -163,17 +167,17 @@ impl ProviderPoolConfig {
     }
 
     /// Anthropic-primary preset pool: Anthropic Sonnet → OpenAI gpt-4o → Ollama qwen2.5.
-    pub fn anthropic_primary(
-        anthropic_key: Option<String>,
-        openai_key: Option<String>,
-    ) -> Self {
+    pub fn anthropic_primary(anthropic_key: Option<String>, openai_key: Option<String>) -> Self {
         let mut entries = Vec::new();
 
         // Primary: Anthropic Sonnet
         if anthropic_key.is_some() {
             entries.push(ProviderEntryConfig::new(
                 "anthropic",
-                ModelConfig::anthropic(anthropic_key.unwrap(), "claude-sonnet-4-6-20250514".to_string()),
+                ModelConfig::anthropic(
+                    anthropic_key.unwrap(),
+                    "claude-sonnet-4-6-20250514".to_string(),
+                ),
                 0,
             ));
         }
@@ -188,20 +192,16 @@ impl ProviderPoolConfig {
         }
 
         // Tertiary: Ollama (always available if local)
-        entries.push(ProviderEntryConfig::new(
-            "ollama",
-            ModelConfig::ollama("qwen2.5:7b".to_string()),
-            2,
-        ).with_cooldown(5));
+        entries.push(
+            ProviderEntryConfig::new("ollama", ModelConfig::ollama("qwen2.5:7b".to_string()), 2)
+                .with_cooldown(5),
+        );
 
         Self::new(entries).with_default_degradation()
     }
 
     /// OpenAI-primary preset pool: OpenAI gpt-4o → Anthropic Sonnet → Ollama qwen2.5.
-    pub fn openai_primary(
-        openai_key: Option<String>,
-        anthropic_key: Option<String>,
-    ) -> Self {
+    pub fn openai_primary(openai_key: Option<String>, anthropic_key: Option<String>) -> Self {
         let mut entries = Vec::new();
 
         if openai_key.is_some() {
@@ -215,16 +215,18 @@ impl ProviderPoolConfig {
         if anthropic_key.is_some() {
             entries.push(ProviderEntryConfig::new(
                 "anthropic",
-                ModelConfig::anthropic(anthropic_key.unwrap(), "claude-sonnet-4-6-20250514".to_string()),
+                ModelConfig::anthropic(
+                    anthropic_key.unwrap(),
+                    "claude-sonnet-4-6-20250514".to_string(),
+                ),
                 1,
             ));
         }
 
-        entries.push(ProviderEntryConfig::new(
-            "ollama",
-            ModelConfig::ollama("qwen2.5:7b".to_string()),
-            2,
-        ).with_cooldown(5));
+        entries.push(
+            ProviderEntryConfig::new("ollama", ModelConfig::ollama("qwen2.5:7b".to_string()), 2)
+                .with_cooldown(5),
+        );
 
         Self::new(entries).with_default_degradation()
     }
@@ -233,11 +235,10 @@ impl ProviderPoolConfig {
     pub fn local_first(openai_key: Option<String>, anthropic_key: Option<String>) -> Self {
         let mut entries = Vec::new();
 
-        entries.push(ProviderEntryConfig::new(
-            "ollama",
-            ModelConfig::ollama("qwen2.5:7b".to_string()),
-            0,
-        ).with_cooldown(5));
+        entries.push(
+            ProviderEntryConfig::new("ollama", ModelConfig::ollama("qwen2.5:7b".to_string()), 0)
+                .with_cooldown(5),
+        );
 
         if openai_key.is_some() {
             entries.push(ProviderEntryConfig::new(
@@ -250,7 +251,10 @@ impl ProviderPoolConfig {
         if anthropic_key.is_some() {
             entries.push(ProviderEntryConfig::new(
                 "anthropic",
-                ModelConfig::anthropic(anthropic_key.unwrap(), "claude-haiku-4-5-20251001".to_string()),
+                ModelConfig::anthropic(
+                    anthropic_key.unwrap(),
+                    "claude-haiku-4-5-20251001".to_string(),
+                ),
                 2,
             ));
         }
@@ -299,7 +303,10 @@ pub enum FallbackReason {
 impl FallbackReason {
     /// Whether this fallback was triggered by a provider failure.
     pub fn is_provider_failure(&self) -> bool {
-        matches!(self, Self::CircuitOpen | Self::ProviderError(_) | Self::Timeout)
+        matches!(
+            self,
+            Self::CircuitOpen | Self::ProviderError(_) | Self::Timeout
+        )
     }
 
     /// Whether this fallback was triggered by a policy (rate limit).
@@ -314,8 +321,10 @@ impl FallbackReason {
             Self::RateLimitExceeded => "Rate limit exceeded".to_string(),
             Self::ProviderError(e) => format!("Provider error: {}", e),
             Self::Timeout => "Request timed out".to_string(),
-            Self::ModelDegradation { from_model, to_model } =>
-                format!("Model degradation: {} → {}", from_model, to_model),
+            Self::ModelDegradation {
+                from_model,
+                to_model,
+            } => format!("Model degradation: {} → {}", from_model, to_model),
         }
     }
 }
@@ -426,38 +435,43 @@ impl DegradationRule {
 
     /// Anthropic degradation: Opus → Sonnet → Haiku.
     pub fn anthropic() -> Self {
-        Self::new("anthropic", vec![
-            "claude-opus-4-8".to_string(),
-            "claude-sonnet-4-6-20250514".to_string(),
-            "claude-haiku-4-5-20251001".to_string(),
-        ])
+        Self::new(
+            "anthropic",
+            vec![
+                "claude-opus-4-8".to_string(),
+                "claude-sonnet-4-6-20250514".to_string(),
+                "claude-haiku-4-5-20251001".to_string(),
+            ],
+        )
     }
 
     /// OpenAI degradation: o3-pro → gpt-4o → gpt-4o-mini.
     pub fn openai() -> Self {
-        Self::new("openai", vec![
-            "o3-pro".to_string(),
-            "gpt-4o".to_string(),
-            "gpt-4o-mini".to_string(),
-        ])
+        Self::new(
+            "openai",
+            vec![
+                "o3-pro".to_string(),
+                "gpt-4o".to_string(),
+                "gpt-4o-mini".to_string(),
+            ],
+        )
     }
 
     /// Gemini degradation: 2.5-pro → 2.5-flash → 2.0-flash.
     pub fn gemini() -> Self {
-        Self::new("gemini", vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.0-flash".to_string(),
-        ])
+        Self::new(
+            "gemini",
+            vec![
+                "gemini-2.5-pro".to_string(),
+                "gemini-2.5-flash".to_string(),
+                "gemini-2.0-flash".to_string(),
+            ],
+        )
     }
 
     /// Default preset rules for all major providers.
     pub fn default_presets() -> Vec<Self> {
-        vec![
-            Self::anthropic(),
-            Self::openai(),
-            Self::gemini(),
-        ]
+        vec![Self::anthropic(), Self::openai(), Self::gemini()]
     }
 
     /// Get the next degraded model after the given model in this chain.
@@ -483,7 +497,10 @@ impl DegradationRule {
     }
 
     /// Find the degradation rule for a given provider family.
-    pub fn find_for_provider<'a>(rules: &'a [DegradationRule], provider: &str) -> Option<&'a DegradationRule> {
+    pub fn find_for_provider<'a>(
+        rules: &'a [DegradationRule],
+        provider: &str,
+    ) -> Option<&'a DegradationRule> {
         rules.iter().find(|r| r.provider_family == provider)
     }
 }
@@ -584,7 +601,10 @@ impl ProviderPoolStatus {
 
     /// Number of healthy providers.
     pub fn healthy_provider_count(&self) -> usize {
-        self.provider_health.values().filter(|h| h.is_available).count()
+        self.provider_health
+            .values()
+            .filter(|h| h.is_available)
+            .count()
     }
 }
 
@@ -694,8 +714,7 @@ mod tests {
 
     #[test]
     fn test_entry_config_with_cooldown() {
-        let entry = ProviderEntryConfig::new("ollama", ollama_config(), 2)
-            .with_cooldown(5);
+        let entry = ProviderEntryConfig::new("ollama", ollama_config(), 2).with_cooldown(5);
         assert_eq!(entry.cooldown_secs, 5);
     }
 
@@ -724,7 +743,11 @@ mod tests {
     #[test]
     fn test_pool_config_add_entry() {
         let config = ProviderPoolConfig::default()
-            .add_entry(ProviderEntryConfig::new("anthropic", anthropic_config("key"), 0))
+            .add_entry(ProviderEntryConfig::new(
+                "anthropic",
+                anthropic_config("key"),
+                0,
+            ))
             .add_entry(ProviderEntryConfig::new("openai", openai_config("key"), 1));
         assert_eq!(config.entry_count(), 2);
     }
@@ -746,7 +769,11 @@ mod tests {
     fn test_pool_config_sorted_entries() {
         let config = ProviderPoolConfig::default()
             .add_entry(ProviderEntryConfig::new("openai", openai_config("key"), 1))
-            .add_entry(ProviderEntryConfig::new("anthropic", anthropic_config("key"), 0))
+            .add_entry(ProviderEntryConfig::new(
+                "anthropic",
+                anthropic_config("key"),
+                0,
+            ))
             .add_entry(ProviderEntryConfig::new("ollama", ollama_config(), 2));
         let sorted = config.sorted_entries();
         assert_eq!(sorted[0].name, "anthropic");
@@ -829,7 +856,8 @@ mod tests {
             FallbackReason::ModelDegradation {
                 from_model: "opus".to_string(),
                 to_model: "sonnet".to_string(),
-            }.description(),
+            }
+            .description(),
             "Model degradation: opus → sonnet"
         );
     }
@@ -856,19 +884,24 @@ mod tests {
     #[test]
     fn test_fallback_event_with_iteration() {
         let event = FallbackEvent::new(
-            "anthropic", "openai",
+            "anthropic",
+            "openai",
             FallbackReason::ProviderError("503".to_string()),
-            "claude-opus", "gpt-4o",
-        ).with_iteration(5);
+            "claude-opus",
+            "gpt-4o",
+        )
+        .with_iteration(5);
         assert_eq!(event.iteration, 5);
     }
 
     #[test]
     fn test_fallback_event_summary() {
         let event = FallbackEvent::new(
-            "anthropic", "openai",
+            "anthropic",
+            "openai",
             FallbackReason::CircuitOpen,
-            "claude-sonnet", "gpt-4o",
+            "claude-sonnet",
+            "gpt-4o",
         );
         let summary = event.summary();
         assert!(summary.contains("anthropic → openai"));
@@ -956,12 +989,28 @@ mod tests {
     #[test]
     fn test_pool_status_healthy_provider() {
         let mut status = ProviderPoolStatus::new("anthropic", "claude-sonnet", 3);
-        status.provider_health.insert("anthropic".to_string(), ProviderHealthStatus::new(
-            "anthropic", "claude-sonnet", 0, true, Some("closed".to_string()), Some(0),
-        ));
-        status.provider_health.insert("openai".to_string(), ProviderHealthStatus::new(
-            "openai", "gpt-4o", 1, false, Some("open".to_string()), Some(5),
-        ));
+        status.provider_health.insert(
+            "anthropic".to_string(),
+            ProviderHealthStatus::new(
+                "anthropic",
+                "claude-sonnet",
+                0,
+                true,
+                Some("closed".to_string()),
+                Some(0),
+            ),
+        );
+        status.provider_health.insert(
+            "openai".to_string(),
+            ProviderHealthStatus::new(
+                "openai",
+                "gpt-4o",
+                1,
+                false,
+                Some("open".to_string()),
+                Some(5),
+            ),
+        );
         assert!(status.has_healthy_provider());
         assert_eq!(status.healthy_provider_count(), 1);
     }
@@ -973,14 +1022,18 @@ mod tests {
         let log = InMemoryFallbackLog::new();
 
         let event1 = FallbackEvent::new(
-            "anthropic", "openai",
+            "anthropic",
+            "openai",
             FallbackReason::CircuitOpen,
-            "claude-sonnet", "gpt-4o",
+            "claude-sonnet",
+            "gpt-4o",
         );
         let event2 = FallbackEvent::new(
-            "openai", "ollama",
+            "openai",
+            "ollama",
             FallbackReason::ProviderError("timeout".to_string()),
-            "gpt-4o", "qwen2.5",
+            "gpt-4o",
+            "qwen2.5",
         );
 
         log.log_fallback(event1);
@@ -998,9 +1051,11 @@ mod tests {
     fn test_in_memory_fallback_log_clear() {
         let log = InMemoryFallbackLog::new();
         log.log_fallback(FallbackEvent::new(
-            "anthropic", "openai",
+            "anthropic",
+            "openai",
             FallbackReason::CircuitOpen,
-            "claude-sonnet", "gpt-4o",
+            "claude-sonnet",
+            "gpt-4o",
         ));
         assert_eq!(log.total_count(), 1);
         log.clear();
@@ -1013,9 +1068,11 @@ mod tests {
         // Log more than 1000 events — should cap at 1000
         for i in 0..1100 {
             log.log_fallback(FallbackEvent::new(
-                format!("p{}", i), format!("p{}", i + 1),
+                format!("p{}", i),
+                format!("p{}", i + 1),
                 FallbackReason::ProviderError(format!("err {}", i)),
-                format!("m{}", i), format!("m{}", i + 1),
+                format!("m{}", i),
+                format!("m{}", i + 1),
             ));
         }
         assert_eq!(log.total_count(), 1000);

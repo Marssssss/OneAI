@@ -114,13 +114,17 @@ impl WorkflowDag {
         }
 
         // Find roots (nodes with no dependencies)
-        self.roots = self.nodes.values()
+        self.roots = self
+            .nodes
+            .values()
             .filter(|n| n.depends_on.is_empty())
             .map(|n| n.id.clone())
             .collect();
 
         // Find leaves (nodes with no children)
-        self.leaves = self.nodes.values()
+        self.leaves = self
+            .nodes
+            .values()
             .filter(|n| n.children.is_empty())
             .map(|n| n.id.clone())
             .collect();
@@ -164,8 +168,7 @@ impl WorkflowDag {
                     continue;
                 }
                 // Check if all dependencies are assigned
-                let all_deps_done = node.depends_on.iter()
-                    .all(|dep| assigned.contains(dep));
+                let all_deps_done = node.depends_on.iter().all(|dep| assigned.contains(dep));
                 if all_deps_done {
                     next_level.push(id.clone());
                 }
@@ -195,7 +198,8 @@ impl WorkflowDag {
         if level >= self.levels.len() {
             return Vec::new();
         }
-        self.levels[level].iter()
+        self.levels[level]
+            .iter()
             .filter_map(|id| self.nodes.get(id))
             .collect()
     }
@@ -210,15 +214,15 @@ impl WorkflowDag {
     /// Uses Kahn's algorithm — if after removing all nodes with no
     /// dependencies, some nodes remain, there's a cycle.
     pub fn has_cycle(&self) -> bool {
-        let mut in_degree: HashMap<String, usize> = self.nodes.keys()
-            .map(|id| (id.clone(), 0))
-            .collect();
+        let mut in_degree: HashMap<String, usize> =
+            self.nodes.keys().map(|id| (id.clone(), 0)).collect();
 
         for node in self.nodes.values() {
             in_degree.insert(node.id.clone(), node.depends_on.len());
         }
 
-        let mut queue: VecDeque<String> = in_degree.iter()
+        let mut queue: VecDeque<String> = in_degree
+            .iter()
             .filter(|(_, deg)| **deg == 0)
             .map(|(id, _)| id.clone())
             .collect();

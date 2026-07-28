@@ -221,7 +221,10 @@ impl WorkingStatePolicy {
                     .compaction
                     .event_threshold
                     .min(other.compaction.event_threshold),
-                keep_recent: primary.compaction.keep_recent.min(other.compaction.keep_recent),
+                keep_recent: primary
+                    .compaction
+                    .keep_recent
+                    .min(other.compaction.keep_recent),
             },
             max_age_before_archive: primary
                 .max_age_before_archive
@@ -423,8 +426,12 @@ mod tests {
         let p = MemoryProfile::coding();
         assert_eq!(p.name, "coding");
         assert!(p.enable_memory_tools);
-        assert!(p.extraction_schema.contains(&FactType::new("user_tooling_pref")));
-        assert!(p.habit_fact_types.contains(&FactType::new("user_tooling_pref")));
+        assert!(p
+            .extraction_schema
+            .contains(&FactType::new("user_tooling_pref")));
+        assert!(p
+            .habit_fact_types
+            .contains(&FactType::new("user_tooling_pref")));
         assert!(p.extraction_schema.contains(&FactType::new("decision")));
         // decisions are session-scoped, not habits
         assert!(!p.habit_fact_types.contains(&FactType::new("decision")));
@@ -437,14 +444,20 @@ mod tests {
         let m = MemoryProfile::merge(&a, &b);
         assert!(m.extraction_schema.contains(&FactType::new("decision")));
         assert!(m.extraction_schema.contains(&FactType::new("claim")));
-        assert!(m.habit_fact_types.contains(&FactType::new("user_tooling_pref")));
+        assert!(m
+            .habit_fact_types
+            .contains(&FactType::new("user_tooling_pref")));
         assert!(m.habit_fact_types.contains(&FactType::new("source")));
     }
 
     #[test]
     fn test_merge_takes_min_budget_and_or_tools() {
-        let a = MemoryProfile::new("a").core_budget_tokens(2000).enable_memory_tools(true);
-        let b = MemoryProfile::new("b").core_budget_tokens(1000).enable_memory_tools(false);
+        let a = MemoryProfile::new("a")
+            .core_budget_tokens(2000)
+            .enable_memory_tools(true);
+        let b = MemoryProfile::new("b")
+            .core_budget_tokens(1000)
+            .enable_memory_tools(false);
         let m = MemoryProfile::merge(&a, &b);
         assert_eq!(m.core_budget_tokens, 1000); // min
         assert!(m.enable_memory_tools); // OR
@@ -468,7 +481,10 @@ mod tests {
     fn test_working_state_policy_presets() {
         let c = WorkingStatePolicy::coding();
         assert_eq!(c.storage_root, StorageRoot::InRepo);
-        assert_eq!(c.ground_truth_reconciliation, GroundTruthReconciliation::Git);
+        assert_eq!(
+            c.ground_truth_reconciliation,
+            GroundTruthReconciliation::Git
+        );
         assert_eq!(c.retention, Retention::ArchiveOnComplete);
         assert_eq!(c.thickness, WorkingStateThickness::Thin);
         assert_eq!(c.compaction.event_threshold, 200);
@@ -476,7 +492,10 @@ mod tests {
 
         let a = WorkingStatePolicy::assistant();
         assert_eq!(a.storage_root, StorageRoot::HomeDir);
-        assert_eq!(a.ground_truth_reconciliation, GroundTruthReconciliation::None);
+        assert_eq!(
+            a.ground_truth_reconciliation,
+            GroundTruthReconciliation::None
+        );
         assert_eq!(a.retention, Retention::Keep);
         assert_eq!(a.thickness, WorkingStateThickness::Thick);
         assert_eq!(a.compaction.event_threshold, 500);
@@ -485,21 +504,30 @@ mod tests {
     #[test]
     fn test_coding_profile_carries_coding_working_state_policy() {
         let p = MemoryProfile::coding();
-        assert_eq!(p.working_state.ground_truth_reconciliation, GroundTruthReconciliation::Git);
+        assert_eq!(
+            p.working_state.ground_truth_reconciliation,
+            GroundTruthReconciliation::Git
+        );
         assert_eq!(p.working_state.storage_root, StorageRoot::InRepo);
     }
 
     #[test]
     fn test_research_profile_carries_assistant_working_state_policy() {
         let p = MemoryProfile::research();
-        assert_eq!(p.working_state.ground_truth_reconciliation, GroundTruthReconciliation::None);
+        assert_eq!(
+            p.working_state.ground_truth_reconciliation,
+            GroundTruthReconciliation::None
+        );
         assert_eq!(p.working_state.storage_root, StorageRoot::HomeDir);
     }
 
     #[test]
     fn test_working_state_merge_takes_min_compaction() {
         // Coding (200/50) merged with assistant (500/100) → min = 200/50.
-        let m = WorkingStatePolicy::merge(&WorkingStatePolicy::coding(), &WorkingStatePolicy::assistant());
+        let m = WorkingStatePolicy::merge(
+            &WorkingStatePolicy::coding(),
+            &WorkingStatePolicy::assistant(),
+        );
         assert_eq!(m.compaction.event_threshold, 200);
         assert_eq!(m.compaction.keep_recent, 50);
         // Primary's storage_root wins (coding → InRepo) even though assistant is HomeDir.

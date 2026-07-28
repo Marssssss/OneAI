@@ -24,8 +24,8 @@ use oneai_core::error::Result;
 use oneai_trace::TraceMetrics;
 
 use crate::efficiency::EfficiencyProfile;
-use crate::eval_result::{EvalReport, EvalResult};
 use crate::eval_metric::EvalJudge;
+use crate::eval_result::{EvalReport, EvalResult};
 use crate::swebench::instance::SwebenchInstance;
 use crate::swebench::judge::SwebenchJudge;
 use crate::swebench::leaderboard::SWEBENCH_RESOLVED_METRIC;
@@ -73,7 +73,10 @@ pub struct SwebenchRunner {
 impl SwebenchRunner {
     /// Create a runner from a configured `App` + config.
     pub fn new(app: oneai_app::App, config: SwebenchRunnerConfig) -> Self {
-        Self { app: Arc::new(app), config }
+        Self {
+            app: Arc::new(app),
+            config,
+        }
     }
 
     /// Run a batch of instances and produce an `EvalReport`.
@@ -108,7 +111,8 @@ impl SwebenchRunner {
         }
         if !instance.is_runnable() {
             result.error = Some(format!(
-                "instance not runnable (missing repo/base_commit): {}", instance.instance_id
+                "instance not runnable (missing repo/base_commit): {}",
+                instance.instance_id
             ));
             result.duration_ms = start.elapsed().as_millis() as u64;
             return result;
@@ -125,7 +129,7 @@ impl SwebenchRunner {
                 return result;
             }
         };
-        result.set_metadata("dur_clone_ms", &t_clone.elapsed().as_millis().to_string());
+        result.set_metadata("dur_clone_ms", t_clone.elapsed().as_millis().to_string());
 
         // 2 + 3. drive the agent + collect usage/trace (mirrors EvalRunner.run_agent_for_case)
         self.drive_agent(instance, &clone_dir, &mut result).await;
@@ -140,7 +144,7 @@ impl SwebenchRunner {
                 return result;
             }
         };
-        result.set_metadata("dur_diff_ms", &t_diff.elapsed().as_millis().to_string());
+        result.set_metadata("dur_diff_ms", t_diff.elapsed().as_millis().to_string());
         result.actual_output = patch.clone();
         result.set_metadata("patch", &patch);
 
@@ -156,11 +160,8 @@ impl SwebenchRunner {
         );
         let t_judge = Instant::now();
         let score = judge.judge(&instance.problem_statement, &patch).await;
-        result.set_metadata("dur_judge_ms", &t_judge.elapsed().as_millis().to_string());
-        result.set_metadata(
-            "resolved",
-            if score.passed { "true" } else { "false" },
-        );
+        result.set_metadata("dur_judge_ms", t_judge.elapsed().as_millis().to_string());
+        result.set_metadata("resolved", if score.passed { "true" } else { "false" });
         result.add_score(SWEBENCH_RESOLVED_METRIC, score);
         // tests_status summary is embedded in the score reason; mirror it for
         // any consumer that wants the raw breakdown.
@@ -261,7 +262,7 @@ impl SwebenchRunner {
         let t_agent = Instant::now();
         let agent_result = session.run_agent_silent(&prompt).await;
         let dur_agent_ms = t_agent.elapsed().as_millis();
-        result.set_metadata("dur_agent_ms", &dur_agent_ms.to_string());
+        result.set_metadata("dur_agent_ms", dur_agent_ms.to_string());
         match agent_result {
             Ok(loop_result) => {
                 // The agent's textual answer isn't the SWE-bench output (the
@@ -293,7 +294,7 @@ impl SwebenchRunner {
                 }
             }
             Err(e) => {
-                result.set_metadata("agent_error", &e.to_string());
+                result.set_metadata("agent_error", e.to_string());
             }
         }
 
@@ -358,7 +359,12 @@ mod tests {
 
         // git init + commit a file so there's a real base_commit to checkout.
         let run = |args: &[&str]| {
-            Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap()
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
         };
         run(&["init", "-q"]);
         run(&["config", "user.email", "t@t"]);
@@ -458,21 +464,41 @@ mod tests {
         // mock direct_answer reports 100 prompt / 50 completion tokens and runs
         // one inference). Regression guard for the AppSession→AgentLoopConfig
         // propagation: previously usage_tracker was None and these stayed at 0.
-        assert!(r.api_calls > 0, "api_calls should be recorded, got {}", r.api_calls);
-        assert!(r.prompt_tokens > 0, "prompt_tokens should be recorded, got {}", r.prompt_tokens);
-        assert!(r.completion_tokens > 0, "completion_tokens should be recorded, got {}", r.completion_tokens);
+        assert!(
+            r.api_calls > 0,
+            "api_calls should be recorded, got {}",
+            r.api_calls
+        );
+        assert!(
+            r.prompt_tokens > 0,
+            "prompt_tokens should be recorded, got {}",
+            r.prompt_tokens
+        );
+        assert!(
+            r.completion_tokens > 0,
+            "completion_tokens should be recorded, got {}",
+            r.completion_tokens
+        );
 
         // 效率 axis: phase wall-clock keys are stamped for every phase...
-        for key in ["dur_clone_ms", "dur_agent_ms", "dur_diff_ms", "dur_judge_ms"] {
+        for key in [
+            "dur_clone_ms",
+            "dur_agent_ms",
+            "dur_diff_ms",
+            "dur_judge_ms",
+        ] {
             assert!(r.metadata.contains_key(key), "missing timing key {}", key);
         }
         // ...and the trace-derived decomposition is populated now that
         // trace_context is wired into the loop. The mock runs one direct_answer
         // inference → at least one LLM span recorded.
         let timing = r.metadata.get("timing").expect("timing metadata present");
-        let tb: EfficiencyProfile =
-            serde_json::from_str(timing).expect("timing JSON parses");
-        assert!(tb.inference_calls >= 1, "expected ≥1 inference span, got {}", tb.inference_calls);
+        let tb: EfficiencyProfile = serde_json::from_str(timing).expect("timing JSON parses");
+        assert!(
+            tb.inference_calls >= 1,
+            "expected ≥1 inference span, got {}",
+            tb.inference_calls
+        );
         // NOTE: we deliberately do not assert `dur_ms > 0` — the mock provider
         // returns in <1ms, so the agent wall-clock can round to 0ms. Real runs
         // take seconds. The inference_calls ≥ 1 check above is the real signal
@@ -504,15 +530,12 @@ mod tests {
                 "I would fix this but I'm a mock.",
             ));
 
-        let project_dir = std::env::temp_dir()
-            .to_string_lossy()
-            .into_owned();
+        let project_dir = std::env::temp_dir().to_string_lossy().into_owned();
         let coding_pack = oneai_domain::coding_pack(&project_dir);
 
         let workspace = std::env::temp_dir().join(format!(
             "oneai_swebench_dom_{}",
-            std::sync::atomic::AtomicU64::new(0)
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
 
         let app = oneai_app::AppBuilder::new()
@@ -561,10 +584,12 @@ mod tests {
         // 效率 axis: the domain branch must hand trace_context to the loop so
         // LLM spans land in the tree (previously infer=0ms×0 in real runs).
         let timing = r.metadata.get("timing").expect("timing metadata present");
-        let tb: EfficiencyProfile =
-            serde_json::from_str(timing).expect("timing JSON parses");
-        assert!(tb.inference_calls >= 1,
-            "domain branch should produce ≥1 LLM span, got {}", tb.inference_calls);
+        let tb: EfficiencyProfile = serde_json::from_str(timing).expect("timing JSON parses");
+        assert!(
+            tb.inference_calls >= 1,
+            "domain branch should produce ≥1 LLM span, got {}",
+            tb.inference_calls
+        );
     }
 
     #[tokio::test]
@@ -586,16 +611,17 @@ mod tests {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-            ..Default::default()};
+            ..Default::default()
+        };
         let provider: std::sync::Arc<dyn oneai_core::traits::LlmProvider> =
-            std::sync::Arc::new(oneai_agent::mock_provider::MockProvider::from_script(
-                vec![oneai_agent::mock_provider::ScriptedResponse::custom(
+            std::sync::Arc::new(oneai_agent::mock_provider::MockProvider::from_script(vec![
+                oneai_agent::mock_provider::ScriptedResponse::custom(
                     vec![oneai_core::ContentBlock::Text {
                         text: "I would fix this but I'm a mock.".to_string(),
                     }],
                     zero_usage,
-                )],
-            ));
+                ),
+            ]));
 
         let project_dir = std::env::temp_dir().to_string_lossy().into_owned();
         let coding_pack = oneai_domain::coding_pack(&project_dir);
@@ -648,11 +674,21 @@ mod tests {
         // Provider gave no usage → loop counted locally → non-zero tokens,
         // and the call is flagged estimated.
         assert!(r.api_calls > 0, "api_calls should be recorded");
-        assert_eq!(r.estimated_calls, r.api_calls,
+        assert_eq!(
+            r.estimated_calls, r.api_calls,
             "all calls should be estimated when provider omits usage, got {}/{}",
-            r.estimated_calls, r.api_calls);
-        assert!(r.prompt_tokens > 0, "prompt_tokens should be estimated > 0, got {}", r.prompt_tokens);
-        assert!(r.completion_tokens > 0, "completion_tokens should be estimated > 0, got {}", r.completion_tokens);
+            r.estimated_calls, r.api_calls
+        );
+        assert!(
+            r.prompt_tokens > 0,
+            "prompt_tokens should be estimated > 0, got {}",
+            r.prompt_tokens
+        );
+        assert!(
+            r.completion_tokens > 0,
+            "completion_tokens should be estimated > 0, got {}",
+            r.completion_tokens
+        );
     }
 
     #[tokio::test]
@@ -682,7 +718,11 @@ mod tests {
         let report = runner.run(&[instance]).await.expect("run ok");
         assert_eq!(report.results.len(), 1);
         assert!(report.results[0].error.is_some());
-        assert!(report.results[0].error.as_ref().unwrap().contains("provider"));
+        assert!(report.results[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("provider"));
     }
 
     #[test]

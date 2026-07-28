@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use oneai_core::traits::Tool;
 use oneai_agent::AgentLoop;
+use oneai_core::traits::Tool;
 
 use crate::callback::{CallbackObserver, ChatEventCallback};
 use crate::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
-use crate::types::{ToolOutputView, OneAIErrorView, PlatformView, SessionInfoView, MessageView};
+use crate::types::{MessageView, OneAIErrorView, PlatformView, SessionInfoView, ToolOutputView};
 
 /// UniFFI-exported App wrapper.
 ///
@@ -44,7 +44,11 @@ impl OneAIApp {
     pub async fn create_session_with_id(&self, id: String) -> Arc<OneAISession> {
         let inner_session = self.inner.create_session_with_id(&id).await;
         let session_id = inner_session.session_id().to_string();
-        tracing::info!("create_session_with_id (resume) requested_id={} resolved_id={}", id, session_id);
+        tracing::info!(
+            "create_session_with_id (resume) requested_id={} resolved_id={}",
+            id,
+            session_id
+        );
         Arc::new(OneAISession {
             session_id,
             inner: tokio::sync::Mutex::new(inner_session),
@@ -58,21 +62,30 @@ impl OneAIApp {
     /// is needed.
     #[uniffi::method]
     pub async fn list_conversations(&self) -> Vec<SessionInfoView> {
-        self.inner.list_conversations().await
-            .into_iter().map(SessionInfoView::from).collect()
+        self.inner
+            .list_conversations()
+            .await
+            .into_iter()
+            .map(SessionInfoView::from)
+            .collect()
     }
 
     /// Delete a saved conversation (and its STM entries) by id. No-op when
     /// SQLite persistence is not enabled.
     #[uniffi::method]
     pub async fn delete_conversation(&self, id: String) -> Result<(), OneAIErrorView> {
-        self.inner.delete_conversation(&id).await.map_err(OneAIErrorView::from)
+        self.inner
+            .delete_conversation(&id)
+            .await
+            .map_err(OneAIErrorView::from)
     }
 
     /// Register a tool.
     #[uniffi::method]
     pub async fn register_tool(&self, tool: Arc<OneAIToolWrapper>) -> Result<(), OneAIErrorView> {
-        self.inner.register_tool(tool.inner.clone()).await
+        self.inner
+            .register_tool(tool.inner.clone())
+            .await
             .map_err(OneAIErrorView::from)
     }
 
@@ -140,28 +153,43 @@ impl OneAISession {
     #[uniffi::method]
     pub async fn send_user_message(&self, text: String) -> Result<(), OneAIErrorView> {
         let mut inner = self.inner.lock().await;
-        inner.send_user_message(text).await
+        inner
+            .send_user_message(text)
+            .await
             .map_err(OneAIErrorView::from)
     }
 
     /// Execute a tool by name.
     #[uniffi::method]
-    pub async fn execute_tool(&self, name: String, args_json: String) -> Result<ToolOutputView, OneAIErrorView> {
+    pub async fn execute_tool(
+        &self,
+        name: String,
+        args_json: String,
+    ) -> Result<ToolOutputView, OneAIErrorView> {
         let inner = self.inner.lock().await;
-        let args: serde_json::Value = serde_json::from_str(&args_json)
-            .unwrap_or(serde_json::json!({}));
-        inner.execute_tool(&name, args).await
+        let args: serde_json::Value =
+            serde_json::from_str(&args_json).unwrap_or(serde_json::json!({}));
+        inner
+            .execute_tool(&name, args)
+            .await
             .map(ToolOutputView::from)
             .map_err(OneAIErrorView::from)
     }
 
     /// Retrieve relevant context from memory.
     #[uniffi::method]
-    pub async fn retrieve_memory(&self, query: String, top_k: u32) -> Result<String, OneAIErrorView> {
+    pub async fn retrieve_memory(
+        &self,
+        query: String,
+        top_k: u32,
+    ) -> Result<String, OneAIErrorView> {
         let inner = self.inner.lock().await;
-        inner.retrieve_memory(&query, top_k as usize).await
+        inner
+            .retrieve_memory(&query, top_k as usize)
+            .await
             .map(|entries| {
-                entries.iter()
+                entries
+                    .iter()
                     .map(|e| e.content.clone())
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -185,10 +213,17 @@ impl OneAISession {
         task: String,
         callback: Arc<dyn ChatEventCallback>,
     ) -> Result<(), OneAIErrorView> {
-        tracing::info!("run_task start id={} task_len={}", self.session_id, task.len());
+        tracing::info!(
+            "run_task start id={} task_len={}",
+            self.session_id,
+            task.len()
+        );
         let observer = CallbackObserver::new(callback);
         let mut inner = self.inner.lock().await;
-        match inner.run_agent(&task, &observer, self.interrupt_slot.clone()).await {
+        match inner
+            .run_agent(&task, &observer, self.interrupt_slot.clone())
+            .await
+        {
             Ok(_result) => {
                 tracing::info!("run_task end ok id={}", self.session_id);
                 Ok(())
@@ -217,7 +252,12 @@ impl OneAISession {
     #[uniffi::method]
     pub async fn messages(&self) -> Vec<MessageView> {
         let inner = self.inner.lock().await;
-        inner.conversation().messages.iter().map(MessageView::from).collect()
+        inner
+            .conversation()
+            .messages
+            .iter()
+            .map(MessageView::from)
+            .collect()
     }
 
     /// Persist the current in-memory conversation to SQLite immediately.
@@ -230,7 +270,8 @@ impl OneAISession {
     #[uniffi::method]
     pub async fn save(&self) -> Result<(), OneAIErrorView> {
         let inner = self.inner.lock().await;
-        inner.memory_manager()
+        inner
+            .memory_manager()
             .save_session(inner.session_id(), inner.conversation())
             .await
             .map_err(OneAIErrorView::from)
@@ -282,7 +323,10 @@ mod tests {
         let app = builder.build().await.expect("Build should succeed");
 
         let session = app.create_session();
-        session.send_user_message("Hello from UniFFI!".to_string()).await.unwrap();
+        session
+            .send_user_message("Hello from UniFFI!".to_string())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -297,7 +341,13 @@ mod tests {
         app.register_tool(calc_wrapper).await.unwrap();
 
         let session = app.create_session();
-        let result = session.execute_tool("calculator".to_string(), "{\"expression\":\"2+3\"}".to_string()).await.unwrap();
+        let result = session
+            .execute_tool(
+                "calculator".to_string(),
+                "{\"expression\":\"2+3\"}".to_string(),
+            )
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5");
     }
@@ -336,7 +386,10 @@ mod tests {
             inner.memory_manager().archive_facts(vec![fact]).await;
         }
 
-        let results = session.retrieve_memory("programming".to_string(), 5).await.unwrap();
+        let results = session
+            .retrieve_memory("programming".to_string(), 5)
+            .await
+            .unwrap();
         assert!(!results.is_empty());
         assert!(results.contains("Rust"));
     }
@@ -359,9 +412,7 @@ mod tests {
         // Build an App with a MockProvider directly (provider_config would
         // construct a real network provider; for a unit test we inject the
         // mock via the underlying oneai_app::AppBuilder).
-        let provider = Arc::new(oneai_agent::MockProvider::always_answers(
-            "Hello from mock",
-        ));
+        let provider = Arc::new(oneai_agent::MockProvider::always_answers("Hello from mock"));
         let app_inner = oneai_app::AppBuilder::new()
             .provider(provider)
             .noop_interaction_gate()
@@ -369,7 +420,9 @@ mod tests {
             .build()
             .await
             .expect("build");
-        let app = OneAIApp { inner: Arc::new(app_inner) };
+        let app = OneAIApp {
+            inner: Arc::new(app_inner),
+        };
         let session = app.create_session();
 
         let cb = Arc::new(CollectingCallback {
@@ -441,7 +494,9 @@ mod tests {
             .build()
             .await
             .expect("build");
-        Arc::new(OneAIApp { inner: Arc::new(app_inner) })
+        Arc::new(OneAIApp {
+            inner: Arc::new(app_inner),
+        })
     }
 
     #[tokio::test]
@@ -486,7 +541,10 @@ mod tests {
             review_loop: None,
         };
         let res = app.create_group_session(scenario);
-        assert!(res.is_err(), "scripted order referencing an unknown member must error");
+        assert!(
+            res.is_err(),
+            "scripted order referencing an unknown member must error"
+        );
     }
 
     // ─── S4: session persistence / resume / list / delete ──────────────
@@ -518,7 +576,9 @@ mod tests {
             .build()
             .await
             .expect("build");
-        Arc::new(OneAIApp { inner: Arc::new(app_inner) })
+        Arc::new(OneAIApp {
+            inner: Arc::new(app_inner),
+        })
     }
 
     // `CollectingCallback` is defined above (next to
@@ -532,23 +592,46 @@ mod tests {
         // 1. New session, run a task → auto-saves under its id.
         let session = app.create_session();
         let id = session.session_id();
-        let cb = Arc::new(CollectingCallback { events: std::sync::Mutex::new(Vec::new()) });
-        session.run_task("Say hello".to_string(), cb).await.expect("run_task");
+        let cb = Arc::new(CollectingCallback {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        session
+            .run_task("Say hello".to_string(), cb)
+            .await
+            .expect("run_task");
 
         // 2. list_conversations includes it.
         let list = app.list_conversations().await;
         let found = list.iter().find(|s| s.id == id);
-        assert!(found.is_some(), "saved session must appear in list: {:?}", list);
+        assert!(
+            found.is_some(),
+            "saved session must appear in list: {:?}",
+            list
+        );
         assert!(found.unwrap().message_count >= 2, "user+assistant messages");
 
         // 3. Resume by id → messages() replays user + assistant text.
         let resumed = app.create_session_with_id(id.to_string()).await;
         let msgs = resumed.messages().await;
-        let user_text = msgs.iter().find(|m| m.role == "user").map(|m| m.text.as_str());
-        let asst_text = msgs.iter().find(|m| m.role == "assistant").map(|m| m.text.as_str());
-        assert_eq!(user_text, Some("Say hello"), "user turn must be restored: {:?}", msgs);
-        assert!(asst_text.unwrap_or_default().contains("Hello from mock"),
-            "assistant turn must be restored: {:?}", msgs);
+        let user_text = msgs
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.text.as_str());
+        let asst_text = msgs
+            .iter()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.text.as_str());
+        assert_eq!(
+            user_text,
+            Some("Say hello"),
+            "user turn must be restored: {:?}",
+            msgs
+        );
+        assert!(
+            asst_text.unwrap_or_default().contains("Hello from mock"),
+            "assistant turn must be restored: {:?}",
+            msgs
+        );
     }
 
     #[tokio::test]
@@ -558,8 +641,13 @@ mod tests {
 
         let session = app.create_session();
         let id = session.session_id().to_string();
-        let cb = Arc::new(CollectingCallback { events: std::sync::Mutex::new(Vec::new()) });
-        session.run_task("hi".to_string(), cb).await.expect("run_task");
+        let cb = Arc::new(CollectingCallback {
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        session
+            .run_task("hi".to_string(), cb)
+            .await
+            .expect("run_task");
 
         assert!(app.list_conversations().await.iter().any(|s| s.id == id));
         app.delete_conversation(id.clone()).await.expect("delete");
@@ -575,8 +663,13 @@ mod tests {
         let app = app_with_sqlite(&db).await;
 
         // Unknown id → empty conversation, no error.
-        let resumed = app.create_session_with_id("never-saved-id".to_string()).await;
+        let resumed = app
+            .create_session_with_id("never-saved-id".to_string())
+            .await;
         assert_eq!(resumed.session_id(), "never-saved-id");
-        assert!(resumed.messages().await.is_empty(), "unknown id must load empty history");
+        assert!(
+            resumed.messages().await.is_empty(),
+            "unknown id must load empty history"
+        );
     }
 }

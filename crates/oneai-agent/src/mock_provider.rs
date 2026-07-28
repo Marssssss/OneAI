@@ -23,20 +23,20 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 
-use oneai_core::{
-    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk,
-    Message, ModelCapability, ModelConfig, Role, TokenUsage,
-};
 use oneai_core::error::OneAIError;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{
+    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk, Message,
+    ModelCapability, ModelConfig, Role, TokenUsage,
+};
 
 // ─── ScriptedResponse ────────────────────────────────────────────────────────
 
@@ -72,7 +72,11 @@ pub struct DelegateSpec {
 
 impl DelegateSpec {
     /// A delegation with no dependencies (runs in parallel with its peers).
-    pub fn new(id: impl Into<String>, task: impl Into<String>, agent_type: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        task: impl Into<String>,
+        agent_type: impl Into<String>,
+    ) -> Self {
         Self {
             task: task.into(),
             agent_type: agent_type.into(),
@@ -94,7 +98,6 @@ impl DelegateSpec {
     }
 }
 
-
 impl ScriptedResponse {
     /// Create a DirectAnswer response — the model produces a final text answer.
     ///
@@ -106,7 +109,8 @@ impl ScriptedResponse {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -118,7 +122,7 @@ impl ScriptedResponse {
         let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
         Self {
             content: vec![ContentBlock::ToolCall {
-                id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
                 name: tool_name.to_string(),
                 args: args_str,
             }],
@@ -126,7 +130,8 @@ impl ScriptedResponse {
                 prompt_tokens: 200,
                 completion_tokens: 30,
                 total_tokens: 230,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -146,21 +151,25 @@ impl ScriptedResponse {
                 prompt_tokens: 200,
                 completion_tokens: 30,
                 total_tokens: 230,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
 
     /// Create a response with multiple tool calls in parallel.
     pub fn tool_calls(calls: Vec<(String, serde_json::Value)>) -> Self {
-        let content: Vec<ContentBlock> = calls.iter().map(|(name, args)| {
-            let args_str = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
-            ContentBlock::ToolCall {
-                id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
-                name: name.clone(),
-                args: args_str,
-            }
-        }).collect();
+        let content: Vec<ContentBlock> = calls
+            .iter()
+            .map(|(name, args)| {
+                let args_str = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+                ContentBlock::ToolCall {
+                    id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    name: name.clone(),
+                    args: args_str,
+                }
+            })
+            .collect();
 
         Self {
             content,
@@ -168,7 +177,8 @@ impl ScriptedResponse {
                 prompt_tokens: 200,
                 completion_tokens: 60,
                 total_tokens: 260,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -204,7 +214,7 @@ impl ScriptedResponse {
         }
         Self {
             content: vec![ContentBlock::ToolCall {
-                id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
                 name: "delegate".to_string(),
                 args: serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
             }],
@@ -212,7 +222,8 @@ impl ScriptedResponse {
                 prompt_tokens: 150,
                 completion_tokens: 40,
                 total_tokens: 190,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -225,29 +236,33 @@ impl ScriptedResponse {
     /// `DelegateSpec` is a plain test value type; ids are required here so the
     /// caller controls the DAG explicitly.
     pub fn delegate_batch(specs: Vec<DelegateSpec>) -> Self {
-        let content: Vec<ContentBlock> = specs.into_iter().map(|spec| {
-            let mut args = serde_json::json!({
-                "task": spec.task,
-                "agent_type": spec.agent_type,
-                "budget_tokens": spec.budget_tokens,
-                "id": spec.id,
-            });
-            if !spec.depends_on.is_empty() {
-                args["depends_on"] = serde_json::json!(spec.depends_on);
-            }
-            ContentBlock::ToolCall {
-                id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
-                name: "delegate".to_string(),
-                args: serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
-            }
-        }).collect();
+        let content: Vec<ContentBlock> = specs
+            .into_iter()
+            .map(|spec| {
+                let mut args = serde_json::json!({
+                    "task": spec.task,
+                    "agent_type": spec.agent_type,
+                    "budget_tokens": spec.budget_tokens,
+                    "id": spec.id,
+                });
+                if !spec.depends_on.is_empty() {
+                    args["depends_on"] = serde_json::json!(spec.depends_on);
+                }
+                ContentBlock::ToolCall {
+                    id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    name: "delegate".to_string(),
+                    args: serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
+                }
+            })
+            .collect();
         Self {
             content,
             usage: TokenUsage {
                 prompt_tokens: 200,
                 completion_tokens: 80,
                 total_tokens: 280,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -256,17 +271,19 @@ impl ScriptedResponse {
     pub fn switch_paradigm(paradigm: &str) -> Self {
         Self {
             content: vec![ContentBlock::ToolCall {
-                id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
                 name: "switch_paradigm".to_string(),
                 args: serde_json::to_string(&serde_json::json!({
                     "paradigm": paradigm,
-                })).unwrap_or_else(|_| "{}".to_string()),
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
             }],
             usage: TokenUsage {
                 prompt_tokens: 100,
                 completion_tokens: 20,
                 total_tokens: 120,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -277,26 +294,37 @@ impl ScriptedResponse {
     pub fn thinking_then_answer(thinking: &str, answer: &str) -> Self {
         Self {
             content: vec![
-                ContentBlock::Thinking { text: thinking.to_string() },
-                ContentBlock::Text { text: answer.to_string() },
+                ContentBlock::Thinking {
+                    text: thinking.to_string(),
+                },
+                ContentBlock::Text {
+                    text: answer.to_string(),
+                },
             ],
             usage: TokenUsage {
                 prompt_tokens: 100,
                 completion_tokens: 80, // thinking + answer
                 total_tokens: 180,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
 
     /// Create a response with thinking content followed by a tool call.
-    pub fn thinking_then_tool_call(thinking: &str, tool_name: &str, args: serde_json::Value) -> Self {
+    pub fn thinking_then_tool_call(
+        thinking: &str,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Self {
         let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
         Self {
             content: vec![
-                ContentBlock::Thinking { text: thinking.to_string() },
+                ContentBlock::Thinking {
+                    text: thinking.to_string(),
+                },
                 ContentBlock::ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                    id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
                     name: tool_name.to_string(),
                     args: args_str,
                 },
@@ -305,7 +333,8 @@ impl ScriptedResponse {
                 prompt_tokens: 150,
                 completion_tokens: 60,
                 total_tokens: 210,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -325,9 +354,11 @@ impl ScriptedResponse {
         let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
         Self {
             content: vec![
-                ContentBlock::Text { text: text.to_string() },
+                ContentBlock::Text {
+                    text: text.to_string(),
+                },
                 ContentBlock::ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                    id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
                     name: tool_name.to_string(),
                     args: args_str,
                 },
@@ -336,7 +367,8 @@ impl ScriptedResponse {
                 prompt_tokens: 200,
                 completion_tokens: 80,
                 total_tokens: 280,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -352,7 +384,8 @@ impl ScriptedResponse {
                 prompt_tokens: 100,
                 completion_tokens: 0,
                 total_tokens: 100,
-            ..Default::default()},
+                ..Default::default()
+            },
             model: "mock-model".to_string(),
         }
     }
@@ -478,7 +511,8 @@ impl MockProvider {
                     prompt_tokens: 50,
                     completion_tokens: 20,
                     total_tokens: 70,
-            ..Default::default()},
+                    ..Default::default()
+                },
                 model: "mock-model".to_string(),
                 metadata: HashMap::new(),
             }
@@ -488,7 +522,10 @@ impl MockProvider {
 
 #[async_trait]
 impl LlmProvider for MockProvider {
-    async fn infer(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+    async fn infer(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
         let mut index = self.current_index.lock().await;
 
         // Log this call
@@ -506,7 +543,8 @@ impl LlmProvider for MockProvider {
     async fn infer_stream(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         let mut index = self.current_index.lock().await;
 
         // Log this call
@@ -549,7 +587,9 @@ impl LlmProvider for MockProvider {
                             is_final: false,
                             usage: None,
                             model: Some(response.model.clone()),
-                        }).await.ok();
+                        })
+                        .await
+                        .ok();
 
                         // Phase 2: emit arg fragments (~20 chars each)
                         if !args.is_empty() {
@@ -560,14 +600,16 @@ impl LlmProvider for MockProvider {
                                 let fragment: String = chars[start..end].iter().collect();
                                 tx.send(InferenceStreamChunk {
                                     content: vec![ContentBlock::ToolCall {
-                                        id: String::new(),    // Empty id = arg continuation
-                                        name: String::new(),  // Empty name = arg continuation
+                                        id: String::new(),   // Empty id = arg continuation
+                                        name: String::new(), // Empty name = arg continuation
                                         args: fragment,
                                     }],
                                     is_final: false,
                                     usage: None,
                                     model: Some(response.model.clone()),
-                                }).await.ok();
+                                })
+                                .await
+                                .ok();
                             }
                         }
                     }
@@ -580,13 +622,13 @@ impl LlmProvider for MockProvider {
                                 let end = std::cmp::min(start + chunk_size, chars.len());
                                 let fragment: String = chars[start..end].iter().collect();
                                 tx.send(InferenceStreamChunk {
-                                    content: vec![ContentBlock::Thinking {
-                                        text: fragment,
-                                    }],
+                                    content: vec![ContentBlock::Thinking { text: fragment }],
                                     is_final: false,
                                     usage: None,
                                     model: Some(response.model.clone()),
-                                }).await.ok();
+                                })
+                                .await
+                                .ok();
                             }
                         }
                     }
@@ -597,7 +639,9 @@ impl LlmProvider for MockProvider {
                             is_final: false,
                             usage: None,
                             model: Some(response.model.clone()),
-                        }).await.ok();
+                        })
+                        .await
+                        .ok();
                     }
                 }
             }
@@ -608,7 +652,9 @@ impl LlmProvider for MockProvider {
                 is_final: true,
                 usage: Some(response.usage.clone()),
                 model: Some(response.model.clone()),
-            }).await.ok();
+            })
+            .await
+            .ok();
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -632,9 +678,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_provider_direct_answer() {
-        let provider = MockProvider::from_script(vec![
-            ScriptedResponse::direct_answer("The answer is 42"),
-        ]);
+        let provider =
+            MockProvider::from_script(vec![ScriptedResponse::direct_answer("The answer is 42")]);
 
         let req = InferenceRequest {
             conversation: oneai_core::Conversation::new(),
@@ -652,7 +697,9 @@ mod tests {
         assert_eq!(response.message.content.len(), 1);
         assert_eq!(
             response.message.content[0],
-            ContentBlock::Text { text: "The answer is 42".to_string() }
+            ContentBlock::Text {
+                text: "The answer is 42".to_string()
+            }
         );
         assert_eq!(provider.call_count().await, 1);
     }
@@ -687,7 +734,9 @@ mod tests {
         let response2 = provider.infer(req).await.unwrap();
         assert_eq!(
             response2.message.content[0],
-            ContentBlock::Text { text: "The file says hello".to_string() }
+            ContentBlock::Text {
+                text: "The file says hello".to_string()
+            }
         );
 
         assert_eq!(provider.call_count().await, 2);
@@ -695,9 +744,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_provider_script_exhaustion() {
-        let provider = MockProvider::from_script(vec![
-            ScriptedResponse::direct_answer("First answer"),
-        ]);
+        let provider =
+            MockProvider::from_script(vec![ScriptedResponse::direct_answer("First answer")]);
 
         let req = InferenceRequest {
             conversation: oneai_core::Conversation::new(),
@@ -715,14 +763,18 @@ mod tests {
         let response1 = provider.infer(req.clone()).await.unwrap();
         assert_eq!(
             response1.message.content[0],
-            ContentBlock::Text { text: "First answer".to_string() }
+            ContentBlock::Text {
+                text: "First answer".to_string()
+            }
         );
 
         // Second call — script exhausted, returns default
         let response2 = provider.infer(req).await.unwrap();
         assert_eq!(
             response2.message.content[0],
-            ContentBlock::Text { text: "I have completed the task.".to_string() }
+            ContentBlock::Text {
+                text: "I have completed the task.".to_string()
+            }
         );
 
         assert!(provider.is_exhausted().await);
@@ -730,9 +782,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_provider_streaming() {
-        let provider = MockProvider::from_script(vec![
-            ScriptedResponse::direct_answer("Hello world"),
-        ]);
+        let provider =
+            MockProvider::from_script(vec![ScriptedResponse::direct_answer("Hello world")]);
 
         let req = InferenceRequest {
             conversation: oneai_core::Conversation::new(),
@@ -759,9 +810,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_provider_delegate() {
-        let provider = MockProvider::from_script(vec![
-            ScriptedResponse::delegate("search for bugs", "Explore", 5000),
-        ]);
+        let provider = MockProvider::from_script(vec![ScriptedResponse::delegate(
+            "search for bugs",
+            "Explore",
+            5000,
+        )]);
 
         let req = InferenceRequest {
             conversation: oneai_core::Conversation::new(),
@@ -782,9 +835,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_provider_switch_paradigm() {
-        let provider = MockProvider::from_script(vec![
-            ScriptedResponse::switch_paradigm("plan"),
-        ]);
+        let provider = MockProvider::from_script(vec![ScriptedResponse::switch_paradigm("plan")]);
 
         let req = InferenceRequest {
             conversation: oneai_core::Conversation::new(),
@@ -833,12 +884,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_provider_thinking_then_answer() {
-        let provider = MockProvider::from_script(vec![
-            ScriptedResponse::thinking_then_answer(
-                "Let me think about this...",
-                "The answer is 42"
-            ),
-        ]);
+        let provider = MockProvider::from_script(vec![ScriptedResponse::thinking_then_answer(
+            "Let me think about this...",
+            "The answer is 42",
+        )]);
 
         let req = InferenceRequest {
             conversation: oneai_core::Conversation::new(),

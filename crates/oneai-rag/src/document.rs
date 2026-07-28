@@ -49,10 +49,7 @@ impl Document {
     }
 
     /// Create a document with metadata.
-    pub fn with_metadata(
-        content: impl Into<String>,
-        metadata: HashMap<String, String>,
-    ) -> Self {
+    pub fn with_metadata(content: impl Into<String>, metadata: HashMap<String, String>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             content: content.into(),
@@ -173,9 +170,10 @@ impl ChunkingStrategy {
     /// Chunk text content according to this strategy.
     pub fn chunk(&self, content: &str, document_id: &str) -> Vec<Chunk> {
         match self {
-            ChunkingStrategy::FixedSize { chunk_size, overlap } => {
-                self.chunk_fixed_size(content, document_id, *chunk_size, *overlap)
-            }
+            ChunkingStrategy::FixedSize {
+                chunk_size,
+                overlap,
+            } => self.chunk_fixed_size(content, document_id, *chunk_size, *overlap),
             ChunkingStrategy::SentenceBoundary { max_chunk_size } => {
                 self.chunk_by_sentences(content, document_id, *max_chunk_size)
             }
@@ -227,7 +225,8 @@ impl ChunkingStrategy {
         max_chunk_size: usize,
     ) -> Vec<Chunk> {
         // Split by sentence-ending punctuation followed by whitespace
-        let sentence_boundaries: Vec<usize> = content.char_indices()
+        let sentence_boundaries: Vec<usize> = content
+            .char_indices()
             .filter(|(i, c)| {
                 // Match period, question mark, exclamation followed by whitespace
                 if *c == '.' || *c == '?' || *c == '!' {
@@ -256,7 +255,8 @@ impl ChunkingStrategy {
         max_chunk_size: usize,
     ) -> Vec<Chunk> {
         // Split by double newline (paragraph boundary)
-        let paragraph_boundaries: Vec<usize> = content.match_indices("\n\n")
+        let paragraph_boundaries: Vec<usize> = content
+            .match_indices("\n\n")
             .map(|(i, _)| i + 2) // Skip the double newline
             .collect();
 
@@ -279,7 +279,8 @@ impl ChunkingStrategy {
         let mut start = 0;
 
         // Add end-of-content as final boundary
-        let all_boundaries: Vec<usize> = boundaries.iter()
+        let all_boundaries: Vec<usize> = boundaries
+            .iter()
             .filter(|b| **b < content.len())
             .cloned()
             .chain(std::iter::once(content.len()))
@@ -289,7 +290,8 @@ impl ChunkingStrategy {
             if boundary - start > max_chunk_size && boundary > start {
                 // Split further with fixed-size within this boundary region
                 let sub_content = &content[start..boundary];
-                let sub_chunks = self.chunk_fixed_size(sub_content, document_id, max_chunk_size, 32);
+                let sub_chunks =
+                    self.chunk_fixed_size(sub_content, document_id, max_chunk_size, 32);
                 for sub_chunk in sub_chunks {
                     chunks.push(Chunk::new(
                         document_id,
@@ -342,7 +344,10 @@ mod tests {
 
     #[test]
     fn test_fixed_size_chunking() {
-        let mut doc = Document::with_id("doc1", "Hello world this is a test document with some content for chunking");
+        let mut doc = Document::with_id(
+            "doc1",
+            "Hello world this is a test document with some content for chunking",
+        );
         let strategy = ChunkingStrategy::FixedSize {
             chunk_size: 20,
             overlap: 5,
@@ -373,7 +378,8 @@ mod tests {
 
     #[test]
     fn test_sentence_boundary_chunking() {
-        let content = "Hello world. This is a test. How are you doing today? I hope well! End of text.";
+        let content =
+            "Hello world. This is a test. How are you doing today? I hope well! End of text.";
         let mut doc = Document::with_id("doc1", content);
         let strategy = ChunkingStrategy::SentenceBoundary {
             max_chunk_size: 100,

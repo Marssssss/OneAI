@@ -13,12 +13,12 @@
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use oneai_core::{
-    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk,
-    ModelCapability, ModelConfig, Message, Role, TokenUsage,
-};
 use oneai_core::error::OneAIError;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{
+    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk, Message,
+    ModelCapability, ModelConfig, Role, TokenUsage,
+};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -46,12 +46,26 @@ impl GeminiProvider {
     /// Get the Gemini generateContent endpoint URL.
     fn generate_url(&self) -> String {
         let api_key = self.config.api_key.as_deref().unwrap_or("");
-        let model = self.config.model_name.as_deref().unwrap_or("gemini-2.0-flash");
+        let model = self
+            .config
+            .model_name
+            .as_deref()
+            .unwrap_or("gemini-2.0-flash");
 
         // Check for Vertex AI mode
         if self.config.extra.get("api_mode").map(|s| s.as_str()) == Some("vertex_ai") {
-            let region = self.config.extra.get("region").map(|s| s.as_str()).unwrap_or("us-central1");
-            let project = self.config.extra.get("project").cloned().unwrap_or_else(|| "default".to_string());
+            let region = self
+                .config
+                .extra
+                .get("region")
+                .map(|s| s.as_str())
+                .unwrap_or("us-central1");
+            let project = self
+                .config
+                .extra
+                .get("project")
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
             format!(
                 "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
                 region, project, region, model
@@ -67,11 +81,25 @@ impl GeminiProvider {
     /// Get the Gemini streamGenerateContent endpoint URL.
     fn stream_url(&self) -> String {
         let api_key = self.config.api_key.as_deref().unwrap_or("");
-        let model = self.config.model_name.as_deref().unwrap_or("gemini-2.0-flash");
+        let model = self
+            .config
+            .model_name
+            .as_deref()
+            .unwrap_or("gemini-2.0-flash");
 
         if self.config.extra.get("api_mode").map(|s| s.as_str()) == Some("vertex_ai") {
-            let region = self.config.extra.get("region").map(|s| s.as_str()).unwrap_or("us-central1");
-            let project = self.config.extra.get("project").cloned().unwrap_or_else(|| "default".to_string());
+            let region = self
+                .config
+                .extra
+                .get("region")
+                .map(|s| s.as_str())
+                .unwrap_or("us-central1");
+            let project = self
+                .config
+                .extra
+                .get("project")
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
             format!(
                 "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}/publishers/google/models/{}:streamGenerateContent?alt=sse",
                 region, project, region, model
@@ -214,30 +242,38 @@ impl GeminiProvider {
         }
         if let Some(temperature) = req.temperature {
             generation_config["temperature"] = Value::Number(
-                serde_json::Number::from_f64(temperature as f64).unwrap_or(serde_json::Number::from(1))
+                serde_json::Number::from_f64(temperature as f64)
+                    .unwrap_or(serde_json::Number::from(1)),
             );
         }
         if let Some(top_p) = req.top_p {
             generation_config["topP"] = Value::Number(
-                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1))
+                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1)),
             );
         }
         if !req.stop_sequences.is_empty() {
             generation_config["stopSequences"] = Value::Array(
-                req.stop_sequences.iter().map(|s| Value::String(s.clone())).collect()
+                req.stop_sequences
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
             );
         }
         body["generationConfig"] = generation_config;
 
         // Add tool declarations (Gemini format)
         if !req.tools.is_empty() {
-            let declarations: Vec<Value> = req.tools.iter().map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters_schema,
+            let declarations: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters_schema,
+                    })
                 })
-            }).collect();
+                .collect();
 
             body["tools"] = serde_json::json!([
                 {
@@ -250,16 +286,19 @@ impl GeminiProvider {
     }
 
     /// Parse a Gemini generateContent response.
-    fn parse_response(json: &Value, model: &str) -> std::result::Result<InferenceResponse, OneAIError> {
-        let candidates = json.get("candidates")
-            .and_then(|c| c.as_array());
+    fn parse_response(
+        json: &Value,
+        model: &str,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
+        let candidates = json.get("candidates").and_then(|c| c.as_array());
 
         let mut content_blocks = Vec::new();
         let mut finish_reason = "stop".to_string();
 
         if let Some(candidates) = candidates {
             if let Some(candidate) = candidates.first() {
-                finish_reason = candidate.get("finishReason")
+                finish_reason = candidate
+                    .get("finishReason")
                     .and_then(|r| r.as_str())
                     .unwrap_or("stop")
                     .to_string();
@@ -270,14 +309,25 @@ impl GeminiProvider {
                     if let Some(parts) = parts {
                         for part in parts {
                             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                content_blocks.push(ContentBlock::Text { text: text.to_string() });
+                                content_blocks.push(ContentBlock::Text {
+                                    text: text.to_string(),
+                                });
                             }
                             if let Some(fc) = part.get("functionCall") {
-                                let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                                let args = fc.get("args").cloned()
+                                let name = fc
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let args = fc
+                                    .get("args")
+                                    .cloned()
                                     .unwrap_or(Value::Object(serde_json::Map::new()));
                                 // Gemini doesn't provide call IDs — generate one
-                                let id = format!("call_{}", &uuid::Uuid::new_v4().to_string().replace("-", "")[..8]);
+                                let id = format!(
+                                    "call_{}",
+                                    &uuid::Uuid::new_v4().to_string().replace("-", "")[..8]
+                                );
                                 content_blocks.push(ContentBlock::ToolCall {
                                     id,
                                     name,
@@ -290,15 +340,29 @@ impl GeminiProvider {
             }
         }
 
-        let usage = json.get("usageMetadata").map(|u| TokenUsage {
-            prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()}).unwrap_or(TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            ..Default::default()});
+        let usage = json
+            .get("usageMetadata")
+            .map(|u| TokenUsage {
+                prompt_tokens: u
+                    .get("promptTokenCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                completion_tokens: u
+                    .get("candidatesTokenCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                total_tokens: u
+                    .get("totalTokenCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                ..Default::default()
+            })
+            .unwrap_or(TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                ..Default::default()
+            });
 
         Ok(InferenceResponse {
             message: Message {
@@ -315,12 +379,21 @@ impl GeminiProvider {
 
 #[async_trait]
 impl LlmProvider for GeminiProvider {
-    async fn infer(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+    async fn infer(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
         let body = self.to_gemini_request(&req);
         let url = self.generate_url();
-        let model = self.config.model_name.as_deref().unwrap_or("gemini-2.0-flash").to_string();
+        let model = self
+            .config
+            .model_name
+            .as_deref()
+            .unwrap_or("gemini-2.0-flash")
+            .to_string();
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -330,23 +403,34 @@ impl LlmProvider for GeminiProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
-            return Err(OneAIError::Provider(format!("Gemini API error {}: {}", status, text)));
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
+            return Err(OneAIError::Provider(format!(
+                "Gemini API error {}: {}",
+                status, text
+            )));
         }
 
-        let json: Value = response.json().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| OneAIError::Network(e.to_string()))?;
         Self::parse_response(&json, &model)
     }
 
     async fn infer_stream(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         let body = self.to_gemini_request(&req);
         let url = self.stream_url();
         let model_name = self.config.model_name.clone();
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -356,8 +440,14 @@ impl LlmProvider for GeminiProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
-            return Err(OneAIError::Provider(format!("Gemini API error {}: {}", status, text)));
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
+            return Err(OneAIError::Provider(format!(
+                "Gemini API error {}: {}",
+                status, text
+            )));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -378,14 +468,15 @@ impl LlmProvider for GeminiProvider {
 
                             // Check for usageMetadata
                             if let Some(usage) = json.get("usageMetadata") {
-                                prompt_tokens_from_start = usage.get("promptTokenCount")
+                                prompt_tokens_from_start = usage
+                                    .get("promptTokenCount")
                                     .and_then(|v| v.as_u64())
-                                    .unwrap_or(0) as u32;
+                                    .unwrap_or(0)
+                                    as u32;
                             }
 
                             // Parse candidates
-                            let candidates = json.get("candidates")
-                                .and_then(|c| c.as_array());
+                            let candidates = json.get("candidates").and_then(|c| c.as_array());
 
                             if let Some(candidates) = candidates {
                                 for candidate in candidates {
@@ -394,61 +485,85 @@ impl LlmProvider for GeminiProvider {
                                         let parts = content.get("parts").and_then(|p| p.as_array());
                                         if let Some(parts) = parts {
                                             for part in parts {
-                                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                if let Some(text) =
+                                                    part.get("text").and_then(|t| t.as_str())
+                                                {
                                                     if !text.is_empty() {
-                                                        let _ = tx.send(InferenceStreamChunk {
-                                                            content: vec![ContentBlock::Text { text: text.to_string() }],
-                                                            is_final: false,
-                                                            usage: None,
-                                                            model: model_name.clone(),
-                                                        }).await;
+                                                        let _ = tx
+                                                            .send(InferenceStreamChunk {
+                                                                content: vec![ContentBlock::Text {
+                                                                    text: text.to_string(),
+                                                                }],
+                                                                is_final: false,
+                                                                usage: None,
+                                                                model: model_name.clone(),
+                                                            })
+                                                            .await;
                                                     }
                                                 }
                                                 if let Some(fc) = part.get("functionCall") {
-                                                    let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                                                    let args = fc.get("args").cloned()
-                                                        .unwrap_or(Value::Object(serde_json::Map::new()));
-                                                    let id = format!("call_{}", &uuid::Uuid::new_v4().to_string().replace("-", "")[..8]);
+                                                    let name = fc
+                                                        .get("name")
+                                                        .and_then(|n| n.as_str())
+                                                        .unwrap_or("")
+                                                        .to_string();
+                                                    let args = fc.get("args").cloned().unwrap_or(
+                                                        Value::Object(serde_json::Map::new()),
+                                                    );
+                                                    let id = format!(
+                                                        "call_{}",
+                                                        &uuid::Uuid::new_v4()
+                                                            .to_string()
+                                                            .replace("-", "")[..8]
+                                                    );
 
-                                                    let _ = tx.send(InferenceStreamChunk {
-                                                        content: vec![ContentBlock::ToolCall {
-                                                            id,
-                                                            name,
-                                                            args: args.to_string(),
-                                                        }],
-                                                        is_final: false,
-                                                        usage: None,
-                                                        model: model_name.clone(),
-                                                    }).await;
+                                                    let _ = tx
+                                                        .send(InferenceStreamChunk {
+                                                            content: vec![ContentBlock::ToolCall {
+                                                                id,
+                                                                name,
+                                                                args: args.to_string(),
+                                                            }],
+                                                            is_final: false,
+                                                            usage: None,
+                                                            model: model_name.clone(),
+                                                        })
+                                                        .await;
                                                 }
                                             }
                                         }
                                     }
 
                                     // Check finish reason
-                                    let finish_reason = candidate.get("finishReason")
+                                    let finish_reason = candidate
+                                        .get("finishReason")
                                         .and_then(|r| r.as_str())
                                         .unwrap_or("");
 
                                     if finish_reason == "STOP" || finish_reason == "stop" {
                                         // Final chunk — send usage and is_final
-                                        let output_tokens = json.get("usageMetadata")
+                                        let output_tokens = json
+                                            .get("usageMetadata")
                                             .and_then(|u| u.get("candidatesTokenCount"))
                                             .and_then(|v| v.as_u64())
-                                            .unwrap_or(0) as u32;
+                                            .unwrap_or(0)
+                                            as u32;
 
                                         let usage = TokenUsage {
                                             prompt_tokens: prompt_tokens_from_start,
                                             completion_tokens: output_tokens,
                                             total_tokens: prompt_tokens_from_start + output_tokens,
-            ..Default::default()};
+                                            ..Default::default()
+                                        };
 
-                                        let _ = tx.send(InferenceStreamChunk {
-                                            content: vec![],
-                                            is_final: true,
-                                            usage: Some(usage),
-                                            model: model_name.clone(),
-                                        }).await;
+                                        let _ = tx
+                                            .send(InferenceStreamChunk {
+                                                content: vec![],
+                                                is_final: true,
+                                                usage: Some(usage),
+                                                model: model_name.clone(),
+                                            })
+                                            .await;
                                         break;
                                     }
                                 }

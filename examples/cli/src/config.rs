@@ -4,8 +4,8 @@
 //! environment variables and defaults. Priority order:
 //!   CLI arguments > environment variables > config.toml > defaults
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Full OneAI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,7 +133,11 @@ impl OneaiConfig {
         let path = Self::default_path();
         if path.exists() {
             Self::load_from(&path).unwrap_or_else(|e| {
-                eprintln!("Warning: Failed to load config from {}: {}", path.display(), e);
+                eprintln!(
+                    "Warning: Failed to load config from {}: {}",
+                    path.display(),
+                    e
+                );
                 Self::default()
             })
         } else {
@@ -163,9 +167,15 @@ impl OneaiConfig {
     /// Priority: env vars > config file > defaults
     pub fn to_model_config(&self) -> Option<oneai_core::ModelConfig> {
         // Environment variables override config file
-        let api_key = std::env::var("ONEAI_API_KEY").ok().or(self.provider.api_key.clone());
-        let base_url = std::env::var("ONEAI_BASE_URL").ok().or(self.provider.base_url.clone());
-        let model = std::env::var("ONEAI_MODEL").ok().unwrap_or(self.provider.model.clone());
+        let api_key = std::env::var("ONEAI_API_KEY")
+            .ok()
+            .or(self.provider.api_key.clone());
+        let base_url = std::env::var("ONEAI_BASE_URL")
+            .ok()
+            .or(self.provider.base_url.clone());
+        let model = std::env::var("ONEAI_MODEL")
+            .ok()
+            .unwrap_or(self.provider.model.clone());
 
         if api_key.is_none() && base_url.is_none() {
             return None;
@@ -205,7 +215,8 @@ impl OneaiConfig {
 
     /// Get the default domain pack name, with optional CLI override.
     pub fn default_domain_pack(&self, domain_override: Option<&str>) -> String {
-        domain_override.map(|s| s.to_string())
+        domain_override
+            .map(|s| s.to_string())
             .unwrap_or_else(|| self.domain.default_pack.clone())
     }
 }
@@ -224,14 +235,23 @@ model = "voyage-3"
 fallback = "openai"
 "#;
         let cfg: OneaiConfig = toml::from_str(toml_src).unwrap();
-        assert_eq!(cfg.embedding.provider, oneai_core::EmbeddingProvider::Voyage);
+        assert_eq!(
+            cfg.embedding.provider,
+            oneai_core::EmbeddingProvider::Voyage
+        );
         assert_eq!(cfg.embedding.api_key.as_deref(), Some("pa-test"));
         assert_eq!(cfg.embedding.model.as_ref().unwrap().as_str(), "voyage-3");
-        assert_eq!(cfg.embedding.fallback, Some(oneai_core::EmbeddingProvider::OpenAi));
+        assert_eq!(
+            cfg.embedding.fallback,
+            Some(oneai_core::EmbeddingProvider::OpenAi)
+        );
         // re-serialize and parse back — stable round-trip
         let s = toml::to_string_pretty(&cfg).unwrap();
         let cfg2: OneaiConfig = toml::from_str(&s).unwrap();
-        assert_eq!(cfg2.embedding.provider, oneai_core::EmbeddingProvider::Voyage);
+        assert_eq!(
+            cfg2.embedding.provider,
+            oneai_core::EmbeddingProvider::Voyage
+        );
     }
 
     #[test]

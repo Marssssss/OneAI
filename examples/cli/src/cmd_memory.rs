@@ -20,7 +20,8 @@ pub fn cmd_memory_search(query: &str, user: &str, top_k: usize) {
 
     match facts {
         Ok(all) => {
-            let mut hits: Vec<_> = all.into_iter()
+            let mut hits: Vec<_> = all
+                .into_iter()
                 .filter(|f| {
                     keyword_matches(&f.content, query)
                         || keyword_matches(&f.subject, query)
@@ -38,9 +39,16 @@ pub fn cmd_memory_search(query: &str, user: &str, top_k: usize) {
             println!("Memories matching '{}' (user: {}):", query, user);
             println!("{}", "-".repeat(80));
             for f in &hits {
-                println!("- [{}] {} {}: {}", f.fact_type, f.subject, f.predicate, f.content);
-                println!("    session: {} | v{} | updated: {}",
-                    f.session_id, f.version, f.updated_at.to_rfc3339());
+                println!(
+                    "- [{}] {} {}: {}",
+                    f.fact_type, f.subject, f.predicate, f.content
+                );
+                println!(
+                    "    session: {} | v{} | updated: {}",
+                    f.session_id,
+                    f.version,
+                    f.updated_at.to_rfc3339()
+                );
             }
             println!("\n{} fact(s).", hits.len());
         }
@@ -56,9 +64,7 @@ pub fn cmd_memory_list(user: &str, session: Option<&str>) {
     let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    let facts = rt.block_on(async {
-        store.load_facts(user, session.unwrap_or("")).await
-    });
+    let facts = rt.block_on(async { store.load_facts(user, session.unwrap_or("")).await });
 
     match facts {
         Ok(facts) => {
@@ -68,13 +74,22 @@ pub fn cmd_memory_list(user: &str, session: Option<&str>) {
                 println!("or the agent archives them via memory tools.");
                 return;
             }
-            let scope = session.map(|s| format!("session {}", s)).unwrap_or_else(|| "all sessions".to_string());
+            let scope = session
+                .map(|s| format!("session {}", s))
+                .unwrap_or_else(|| "all sessions".to_string());
             println!("Memories for user '{}' ({}):", user, scope);
             println!("{}", "-".repeat(80));
             for f in &facts {
-                println!("- [{}] {} {}: {}", f.fact_type, f.subject, f.predicate, f.content);
-                println!("    session: {} | v{} | updated: {}",
-                    f.session_id, f.version, f.updated_at.to_rfc3339());
+                println!(
+                    "- [{}] {} {}: {}",
+                    f.fact_type, f.subject, f.predicate, f.content
+                );
+                println!(
+                    "    session: {} | v{} | updated: {}",
+                    f.session_id,
+                    f.version,
+                    f.updated_at.to_rfc3339()
+                );
             }
             println!("\n{} fact(s).", facts.len());
         }

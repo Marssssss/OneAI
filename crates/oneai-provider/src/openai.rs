@@ -10,19 +10,19 @@
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
-use oneai_core::{
-    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk,
-    ModelCapability, ModelConfig, Message, Role, TokenUsage,
-};
 use oneai_core::error::OneAIError;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{
+    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk, Message,
+    ModelCapability, ModelConfig, Role, TokenUsage,
+};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::retry::{ProviderRetryConfig, is_retryable_status, send_with_retry};
+use crate::retry::{is_retryable_status, send_with_retry, ProviderRetryConfig};
 
 /// OpenAI-compatible LLM provider.
 ///
@@ -61,7 +61,11 @@ impl OpenAIProvider {
     /// Create with custom retry configuration.
     pub fn with_retry_config(config: ModelConfig, retry_config: ProviderRetryConfig) -> Self {
         let client = Client::new();
-        Self { config, client, retry_config }
+        Self {
+            config,
+            client,
+            retry_config,
+        }
     }
 
     /// Set the retry configuration (builder pattern).
@@ -96,7 +100,9 @@ impl OpenAIProvider {
             //   { role: "assistant", content: null|"text", tool_calls: [...] }
             // The content field MUST be present (null if no text) — some providers
             // (智谱GLM, 阿里百炼) reject requests where content is absent entirely.
-            let tool_call_blocks: Vec<Value> = msg.content.iter()
+            let tool_call_blocks: Vec<Value> = msg
+                .content
+                .iter()
                 .filter_map(|block| match block {
                     ContentBlock::ToolCall { id, name, args } => Some(serde_json::json!({
                         "id": id,
@@ -131,24 +137,36 @@ impl OpenAIProvider {
                 // Tool result message — extract raw content from ToolResult blocks
                 // (joining multiple ToolResult blocks if present, though typically
                 // each tool result message has exactly one ToolResult block)
-                let parts: Vec<String> = msg.content.iter()
+                let parts: Vec<String> = msg
+                    .content
+                    .iter()
                     .filter_map(|block| match block {
                         ContentBlock::ToolResult { content, .. } => Some(content.clone()),
                         ContentBlock::Text { text } => Some(text.clone()),
                         _ => None,
                     })
                     .collect();
-                if parts.is_empty() { None } else { Some(parts.join("\n")) }
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join("\n"))
+                }
             } else {
                 // Assistant/user/system messages — extract text content only
                 // (tool calls are already extracted above as separate tool_calls field)
-                let parts: Vec<String> = msg.content.iter()
+                let parts: Vec<String> = msg
+                    .content
+                    .iter()
                     .filter_map(|block| match block {
                         ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,  // ToolCall, ToolResult, Thinking, Image, File — skip
+                        _ => None, // ToolCall, ToolResult, Thinking, Image, File — skip
                     })
                     .collect();
-                if parts.is_empty() { None } else { Some(parts.join("\n")) }
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join("\n"))
+                }
             };
 
             // Set content field — MUST be present for all message types.
@@ -183,27 +201,41 @@ impl OpenAIProvider {
             body["max_tokens"] = Value::Number(max_tokens.into());
         }
         if let Some(temperature) = req.temperature {
-            body["temperature"] = Value::Number(serde_json::Number::from_f64(temperature as f64).unwrap_or(serde_json::Number::from(1)));
+            body["temperature"] = Value::Number(
+                serde_json::Number::from_f64(temperature as f64)
+                    .unwrap_or(serde_json::Number::from(1)),
+            );
         }
         if let Some(top_p) = req.top_p {
-            body["top_p"] = Value::Number(serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1)));
+            body["top_p"] = Value::Number(
+                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1)),
+            );
         }
         if !req.stop_sequences.is_empty() {
-            body["stop"] = Value::Array(req.stop_sequences.iter().map(|s| Value::String(s.clone())).collect());
+            body["stop"] = Value::Array(
+                req.stop_sequences
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
+            );
         }
 
         // Add tool definitions
         if !req.tools.is_empty() {
-            let tools_json = req.tools.iter().map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters_schema,
-                    }
+            let tools_json = req
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters_schema,
+                        }
+                    })
                 })
-            }).collect::<Vec<Value>>();
+                .collect::<Vec<Value>>();
             body["tools"] = Value::Array(tools_json);
         }
 
@@ -228,60 +260,94 @@ impl OpenAIProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAIProvider {
-    async fn infer(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+    async fn infer(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
         let body = self.to_openai_request(&req);
         let url = self.chat_url();
 
         // Log a compact summary at info level — message roles and key fields
         // This is essential when providers reject requests — we can see exactly
         // what format was sent (especially tool call / tool result message structure).
-        let messages_summary: Vec<String> = body.get("messages")
+        let messages_summary: Vec<String> = body
+            .get("messages")
             .and_then(|m| m.as_array())
-            .map(|arr| arr.iter().map(|msg| {
-                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("?");
-                let has_tc = msg.get("tool_calls").is_some();
-                let has_tcid = msg.get("tool_call_id").is_some();
-                let content_preview = msg.get("content").map(|c| {
-                    if c.is_null() { "null" }
-                    else { c.as_str().unwrap_or("<non-string>") }
-                }).unwrap_or("<missing>");
-                let content_len = msg.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0);
-                let content_display = if content_len > 80 { format!("{}chars...", content_len) } else { content_preview.to_string() };
-                let missing_flag = if msg.get("content").is_none() { " [MISSING]" } else { "" };
-                format!("{}(content:{}{}, tc:{}, tcid:{})",
-                    role, content_display, missing_flag,
-                    if has_tc { "Y" } else { "N" },
-                    if has_tcid { "Y" } else { "N" })
-            }).collect())
+            .map(|arr| {
+                arr.iter()
+                    .map(|msg| {
+                        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+                        let has_tc = msg.get("tool_calls").is_some();
+                        let has_tcid = msg.get("tool_call_id").is_some();
+                        let content_preview = msg
+                            .get("content")
+                            .map(|c| {
+                                if c.is_null() {
+                                    "null"
+                                } else {
+                                    c.as_str().unwrap_or("<non-string>")
+                                }
+                            })
+                            .unwrap_or("<missing>");
+                        let content_len = msg
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.len())
+                            .unwrap_or(0);
+                        let content_display = if content_len > 80 {
+                            format!("{}chars...", content_len)
+                        } else {
+                            content_preview.to_string()
+                        };
+                        let missing_flag = if msg.get("content").is_none() {
+                            " [MISSING]"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "{}(content:{}{}, tc:{}, tcid:{})",
+                            role,
+                            content_display,
+                            missing_flag,
+                            if has_tc { "Y" } else { "N" },
+                            if has_tcid { "Y" } else { "N" }
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
-        tracing::info!("OpenAI infer: model={}, messages=[{}]",
+        tracing::info!(
+            "OpenAI infer: model={}, messages=[{}]",
             self.config.model_name.as_deref().unwrap_or("?"),
             messages_summary.join(", ")
         );
 
         // Log the full request body at debug level for complete format inspection
-        tracing::debug!("OpenAI infer request body: {}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+        tracing::debug!(
+            "OpenAI infer request body: {}",
+            serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+        );
 
-        let response = send_with_retry(
-            &self.retry_config,
-            || {
-                let url = url.clone();
-                let body = body.clone();
-                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
-                self.client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .json(&body)
-                    .send()
-            },
-        )
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&body)
+                .send()
+        })
         .await
         .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
             tracing::error!("OpenAI API error {}: {}", status, text);
             // Distinguish rate limit errors from other provider errors
             if is_retryable_status(status) {
@@ -290,21 +356,40 @@ impl LlmProvider for OpenAIProvider {
                     self.retry_config.max_retries, status, text
                 )));
             }
-            return Err(OneAIError::Provider(format!("OpenAI API error {}: {}", status, text)));
+            return Err(OneAIError::Provider(format!(
+                "OpenAI API error {}: {}",
+                status, text
+            )));
         }
 
-        let json: Value = response.json().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         // Parse the response
         let choices = json.get("choices").and_then(|c| c.as_array());
         let first_choice = choices.and_then(|c| c.first());
 
-        let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let model = json
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
 
-        let message_obj = first_choice.and_then(|c| c.get("message")).unwrap_or(&Value::Null);
+        let message_obj = first_choice
+            .and_then(|c| c.get("message"))
+            .unwrap_or(&Value::Null);
 
-        let role_str = message_obj.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
-        let content_str = message_obj.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+        let role_str = message_obj
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("assistant");
+        let content_str = message_obj
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Parse tool calls from the response
         // Only create a Text block if content is non-empty — when the model
@@ -313,35 +398,65 @@ impl LlmProvider for OpenAIProvider {
         // should have content: null, not content: "").
         let mut content_blocks = Vec::new();
         if !content_str.is_empty() {
-            content_blocks.push(ContentBlock::Text { text: content_str.clone() });
+            content_blocks.push(ContentBlock::Text {
+                text: content_str.clone(),
+            });
         }
 
         // Parse reasoning_content (DeepSeek and other models that support thinking)
-        if let Some(reasoning) = message_obj.get("reasoning_content").and_then(|r| r.as_str()) {
+        if let Some(reasoning) = message_obj
+            .get("reasoning_content")
+            .and_then(|r| r.as_str())
+        {
             if !reasoning.is_empty() {
-                content_blocks.insert(0, ContentBlock::Thinking { text: reasoning.to_string() });
+                content_blocks.insert(
+                    0,
+                    ContentBlock::Thinking {
+                        text: reasoning.to_string(),
+                    },
+                );
             }
         }
 
         if let Some(tool_calls) = message_obj.get("tool_calls").and_then(|tc| tc.as_array()) {
             for tc in tool_calls {
-                let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let func = tc.get("function").unwrap_or(&Value::Null);
-                let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+                let name = func
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args = func
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
                 content_blocks.push(ContentBlock::ToolCall { id, name, args });
             }
         }
 
-        let usage = json.get("usage").map(|u| TokenUsage {
-            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()}).unwrap_or(TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            ..Default::default()});
+        let usage = json
+            .get("usage")
+            .map(|u| TokenUsage {
+                prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                completion_tokens: u
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                ..Default::default()
+            })
+            .unwrap_or(TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                ..Default::default()
+            });
 
         Ok(InferenceResponse {
             message: Message {
@@ -364,7 +479,8 @@ impl LlmProvider for OpenAIProvider {
     async fn infer_stream(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         let mut body = self.to_openai_request(&req);
         body["stream"] = Value::Bool(true);
         // Only include stream_options for providers known to support it.
@@ -373,9 +489,16 @@ impl LlmProvider for OpenAIProvider {
         // present. OpenAI and DeepSeek are known to support it.
         // Usage data is still extracted from the final chunk's JSON when
         // available (many providers include usage without stream_options).
-        let model_lower = self.config.model_name.as_deref().unwrap_or("").to_lowercase();
+        let model_lower = self
+            .config
+            .model_name
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase();
         let supports_stream_options = model_lower.contains("gpt")
-            || model_lower.contains("o1") || model_lower.contains("o3") || model_lower.contains("o4")
+            || model_lower.contains("o1")
+            || model_lower.contains("o3")
+            || model_lower.contains("o4")
             || model_lower.contains("deepseek");
         if supports_stream_options {
             body["stream_options"] = serde_json::json!({"include_usage": true});
@@ -384,51 +507,82 @@ impl LlmProvider for OpenAIProvider {
         let url = self.chat_url();
 
         // Log message format summary (same as infer method)
-        let messages_summary: Vec<String> = body.get("messages")
+        let messages_summary: Vec<String> = body
+            .get("messages")
             .and_then(|m| m.as_array())
-            .map(|arr| arr.iter().map(|msg| {
-                let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("?");
-                let has_tc = msg.get("tool_calls").is_some();
-                let has_tcid = msg.get("tool_call_id").is_some();
-                let content_preview = msg.get("content").map(|c| {
-                    if c.is_null() { "null" }
-                    else { c.as_str().unwrap_or("<non-string>") }
-                }).unwrap_or("<missing>");
-                let content_len = msg.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0);
-                let content_display = if content_len > 80 { format!("{}chars...", content_len) } else { content_preview.to_string() };
-                let missing_flag = if msg.get("content").is_none() { " [MISSING]" } else { "" };
-                format!("{}(content:{}{}, tc:{}, tcid:{})",
-                    role, content_display, missing_flag,
-                    if has_tc { "Y" } else { "N" },
-                    if has_tcid { "Y" } else { "N" })
-            }).collect())
+            .map(|arr| {
+                arr.iter()
+                    .map(|msg| {
+                        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+                        let has_tc = msg.get("tool_calls").is_some();
+                        let has_tcid = msg.get("tool_call_id").is_some();
+                        let content_preview = msg
+                            .get("content")
+                            .map(|c| {
+                                if c.is_null() {
+                                    "null"
+                                } else {
+                                    c.as_str().unwrap_or("<non-string>")
+                                }
+                            })
+                            .unwrap_or("<missing>");
+                        let content_len = msg
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.len())
+                            .unwrap_or(0);
+                        let content_display = if content_len > 80 {
+                            format!("{}chars...", content_len)
+                        } else {
+                            content_preview.to_string()
+                        };
+                        let missing_flag = if msg.get("content").is_none() {
+                            " [MISSING]"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "{}(content:{}{}, tc:{}, tcid:{})",
+                            role,
+                            content_display,
+                            missing_flag,
+                            if has_tc { "Y" } else { "N" },
+                            if has_tcid { "Y" } else { "N" }
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
-        tracing::info!("OpenAI infer_stream: model={}, messages=[{}]",
+        tracing::info!(
+            "OpenAI infer_stream: model={}, messages=[{}]",
             self.config.model_name.as_deref().unwrap_or("?"),
             messages_summary.join(", ")
         );
-        tracing::debug!("OpenAI infer_stream request body: {}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
+        tracing::debug!(
+            "OpenAI infer_stream request body: {}",
+            serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+        );
 
-        let response = send_with_retry(
-            &self.retry_config,
-            || {
-                let url = url.clone();
-                let body = body.clone();
-                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
-                self.client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .json(&body)
-                    .send()
-            },
-        )
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&body)
+                .send()
+        })
         .await
         .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
             tracing::error!("OpenAI API stream error {}: {}", status, text);
             // Distinguish rate limit errors from other provider errors
             if is_retryable_status(status) {
@@ -437,14 +591,16 @@ impl LlmProvider for OpenAIProvider {
                     self.retry_config.max_retries, status, text
                 )));
             }
-            return Err(OneAIError::Provider(format!("OpenAI API error {}: {}", status, text)));
+            return Err(OneAIError::Provider(format!(
+                "OpenAI API error {}: {}",
+                status, text
+            )));
         }
 
         // Create an SSE stream from the response
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
-        let stream = response.bytes_stream()
-            .eventsource();
+        let stream = response.bytes_stream().eventsource();
 
         // Spawn a task to process the SSE stream
         let model_name = self.config.model_name.clone();
@@ -473,24 +629,32 @@ impl LlmProvider for OpenAIProvider {
                             tracing::debug!("SSE stream [DONE] received. Stats: events_processed={}, events_skipped_json={}, text_chars={}, thinking_chars={}, tool_calls={}",
                                 total_events_processed, total_events_skipped_json,
                                 total_text_chars, total_thinking_chars, total_tool_calls);
-                            let _ = tx.send(InferenceStreamChunk {
-                                content: vec![],
-                                is_final: true,
-                                usage: None,
-                                model: model_name.clone(),
-                            }).await;
+                            let _ = tx
+                                .send(InferenceStreamChunk {
+                                    content: vec![],
+                                    is_final: true,
+                                    usage: None,
+                                    model: model_name.clone(),
+                                })
+                                .await;
                             break;
                         }
 
                         // Log raw SSE event data at debug level for format diagnostics
                         let data_preview = if event.data.len() > 500 {
                             // Char-boundary-safe truncation for CJK content
-                            let end = event.data.char_indices()
+                            let end = event
+                                .data
+                                .char_indices()
                                 .take_while(|(i, _)| *i < 500)
                                 .last()
                                 .map(|(i, c)| i + c.len_utf8())
                                 .unwrap_or(0);
-                            format!("{}...(truncated, total {} bytes)", &event.data[..end], event.data.len())
+                            format!(
+                                "{}...(truncated, total {} bytes)",
+                                &event.data[..end],
+                                event.data.len()
+                            )
                         } else {
                             event.data.clone()
                         };
@@ -508,8 +672,11 @@ impl LlmProvider for OpenAIProvider {
                                 let choices = json.get("choices").and_then(|c| c.as_array());
                                 let first_choice = choices.and_then(|c| c.first());
 
-                                let delta = first_choice.and_then(|c| c.get("delta")).unwrap_or(&Value::Null);
-                                let content = delta.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                                let delta = first_choice
+                                    .and_then(|c| c.get("delta"))
+                                    .unwrap_or(&Value::Null);
+                                let content =
+                                    delta.get("content").and_then(|c| c.as_str()).unwrap_or("");
 
                                 let is_final = first_choice
                                     .and_then(|c| c.get("finish_reason"))
@@ -522,10 +689,23 @@ impl LlmProvider for OpenAIProvider {
                                 // (some providers include usage without stream_options).
                                 let usage = if is_final || json.get("usage").is_some() {
                                     json.get("usage").map(|u| TokenUsage {
-                                        prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                        completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                        total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()})
+                                        prompt_tokens: u
+                                            .get("prompt_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                        completion_tokens: u
+                                            .get("completion_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                        total_tokens: u
+                                            .get("total_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                        ..Default::default()
+                                    })
                                 } else {
                                     None
                                 };
@@ -533,14 +713,21 @@ impl LlmProvider for OpenAIProvider {
                                 let mut content_blocks = Vec::new();
                                 if !content.is_empty() {
                                     total_text_chars += content.len();
-                                    content_blocks.push(ContentBlock::Text { text: content.to_string() });
+                                    content_blocks.push(ContentBlock::Text {
+                                        text: content.to_string(),
+                                    });
                                 }
 
                                 // Parse reasoning_content in delta (DeepSeek streaming)
-                                let reasoning = delta.get("reasoning_content").and_then(|c| c.as_str()).unwrap_or("");
+                                let reasoning = delta
+                                    .get("reasoning_content")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("");
                                 if !reasoning.is_empty() {
                                     total_thinking_chars += reasoning.len();
-                                    content_blocks.push(ContentBlock::Thinking { text: reasoning.to_string() });
+                                    content_blocks.push(ContentBlock::Thinking {
+                                        text: reasoning.to_string(),
+                                    });
                                 }
 
                                 // Parse tool calls from stream delta. The
@@ -549,10 +736,15 @@ impl LlmProvider for OpenAIProvider {
                                 // separately); this loop just applies it and
                                 // counts new tool calls for the diagnostic
                                 // summary.
-                                if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                if let Some(tool_calls) =
+                                    delta.get("tool_calls").and_then(|tc| tc.as_array())
+                                {
                                     for tc in tool_calls {
-                                        if let Some(block) = translate_tool_call_delta(tc, &mut tool_call_index) {
-                                            if matches!(block, ContentBlock::ToolCall { ref name, .. } if !name.is_empty()) {
+                                        if let Some(block) =
+                                            translate_tool_call_delta(tc, &mut tool_call_index)
+                                        {
+                                            if matches!(block, ContentBlock::ToolCall { ref name, .. } if !name.is_empty())
+                                            {
                                                 total_tool_calls += 1;
                                             }
                                             content_blocks.push(block);
@@ -561,12 +753,14 @@ impl LlmProvider for OpenAIProvider {
                                 }
 
                                 if !content_blocks.is_empty() || is_final {
-                                    let _ = tx.send(InferenceStreamChunk {
-                                        content: content_blocks,
-                                        is_final,
-                                        usage,
-                                        model: model_name.clone(),
-                                    }).await;
+                                    let _ = tx
+                                        .send(InferenceStreamChunk {
+                                            content: content_blocks,
+                                            is_final,
+                                            usage,
+                                            model: model_name.clone(),
+                                        })
+                                        .await;
                                 }
                             }
                             Err(e) => {
@@ -576,7 +770,9 @@ impl LlmProvider for OpenAIProvider {
                                 total_events_skipped_json += 1;
                                 let preview = if event.data.len() > 200 {
                                     // Char-boundary-safe truncation for CJK content
-                                    let end = event.data.char_indices()
+                                    let end = event
+                                        .data
+                                        .char_indices()
                                         .take_while(|(i, _)| *i < 200)
                                         .last()
                                         .map(|(i, c)| i + c.len_utf8())
@@ -587,7 +783,8 @@ impl LlmProvider for OpenAIProvider {
                                 };
                                 tracing::warn!(
                                     "SSE event JSON parse failed: {}, data preview: {}",
-                                    e, preview
+                                    e,
+                                    preview
                                 );
                                 // Don't break — skip this event and continue processing.
                                 // Some providers send occasional non-JSON events (comments,
@@ -691,18 +888,34 @@ fn translate_tool_call_delta(
     index_state: &mut HashMap<u32, (String, String)>,
 ) -> Option<ContentBlock> {
     let index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = tc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let func = tc.get("function").unwrap_or(&Value::Null);
-    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let name = func
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let args = func
+        .get("arguments")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // Remember id/name for this index (first chunk carries them; later
     // chunks omit them).
     let entry = index_state
         .entry(index)
         .or_insert_with(|| (String::new(), String::new()));
-    if !id.is_empty() { entry.0 = id.clone(); }
-    if !name.is_empty() { entry.1 = name.clone(); }
+    if !id.is_empty() {
+        entry.0 = id.clone();
+    }
+    if !name.is_empty() {
+        entry.1 = name.clone();
+    }
     let known_id = entry.0.clone();
     let known_name = entry.1.clone();
 
@@ -760,7 +973,12 @@ fn is_local_endpoint(resolved_url: &str) -> bool {
 /// OpenAI proper omits this; compatible gateways expose it under varying keys:
 /// `context_window`, `context_length`, `max_model_context`, `max_context_length`.
 pub fn parse_openai_context_window(json: &Value) -> Option<u32> {
-    for key in ["context_window", "context_length", "max_model_context", "max_context_length"] {
+    for key in [
+        "context_window",
+        "context_length",
+        "max_model_context",
+        "max_context_length",
+    ] {
         if let Some(n) = json.get(key).and_then(Value::as_u64) {
             if n > 0 {
                 return Some(n.min(u32::MAX as u64) as u32);
@@ -824,7 +1042,9 @@ mod tests {
         conv.add_message(Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text { text: "Let me check the environment first.".to_string() },
+                ContentBlock::Text {
+                    text: "Let me check the environment first.".to_string(),
+                },
                 ContentBlock::ToolCall {
                     id: "call_1".to_string(),
                     name: "environment".to_string(),
@@ -859,10 +1079,13 @@ mod tests {
         let messages = result.get("messages").unwrap().as_array().unwrap();
 
         // Find the assistant message with tool_calls
-        let assistant_msg = messages.iter().find(|m| {
-            m.get("role").unwrap().as_str() == Some("assistant")
-            && m.get("tool_calls").is_some()
-        }).unwrap();
+        let assistant_msg = messages
+            .iter()
+            .find(|m| {
+                m.get("role").unwrap().as_str() == Some("assistant")
+                    && m.get("tool_calls").is_some()
+            })
+            .unwrap();
 
         // Content should be the text string (not null)
         assert_eq!(
@@ -889,13 +1112,11 @@ mod tests {
         // Model produces only tool calls, no text (common for many models)
         conv.add_message(Message {
             role: Role::Assistant,
-            content: vec![
-                ContentBlock::ToolCall {
-                    id: "call_1".to_string(),
-                    name: "environment".to_string(),
-                    args: "{}".to_string(),
-                },
-            ],
+            content: vec![ContentBlock::ToolCall {
+                id: "call_1".to_string(),
+                name: "environment".to_string(),
+                args: "{}".to_string(),
+            }],
             metadata: std::collections::HashMap::new(),
         });
 
@@ -919,10 +1140,13 @@ mod tests {
         let messages = result.get("messages").unwrap().as_array().unwrap();
 
         // Find the assistant message with tool_calls
-        let assistant_msg = messages.iter().find(|m| {
-            m.get("role").unwrap().as_str() == Some("assistant")
-            && m.get("tool_calls").is_some()
-        }).unwrap();
+        let assistant_msg = messages
+            .iter()
+            .find(|m| {
+                m.get("role").unwrap().as_str() == Some("assistant")
+                    && m.get("tool_calls").is_some()
+            })
+            .unwrap();
 
         // Content MUST be null (not absent or empty string)
         // Some providers (智谱GLM, 阿里百炼) require content: null
@@ -942,13 +1166,11 @@ mod tests {
         conv.add_message(Message::user("Create a directory."));
         conv.add_message(Message {
             role: Role::Assistant,
-            content: vec![
-                ContentBlock::ToolCall {
-                    id: "call_env1".to_string(),
-                    name: "environment".to_string(),
-                    args: "{}".to_string(),
-                },
-            ],
+            content: vec![ContentBlock::ToolCall {
+                id: "call_env1".to_string(),
+                name: "environment".to_string(),
+                args: "{}".to_string(),
+            }],
             metadata: std::collections::HashMap::new(),
         });
         conv.add_message(Message::tool_result(
@@ -976,9 +1198,10 @@ mod tests {
         let messages = result.get("messages").unwrap().as_array().unwrap();
 
         // Find the tool result message
-        let tool_msg = messages.iter().find(|m| {
-            m.get("role").unwrap().as_str() == Some("tool")
-        }).unwrap();
+        let tool_msg = messages
+            .iter()
+            .find(|m| m.get("role").unwrap().as_str() == Some("tool"))
+            .unwrap();
 
         // tool_call_id must match the original call
         assert_eq!(
@@ -1070,11 +1293,20 @@ mod tests {
 
         // Tool result messages have raw content (no wrapper)
         let tool_msg1 = &messages[3];
-        assert_eq!(tool_msg1.get("tool_call_id").unwrap().as_str(), Some("call_env1"));
-        assert_eq!(tool_msg1.get("content").unwrap().as_str(), Some("Working Directory: /home/user"));
+        assert_eq!(
+            tool_msg1.get("tool_call_id").unwrap().as_str(),
+            Some("call_env1")
+        );
+        assert_eq!(
+            tool_msg1.get("content").unwrap().as_str(),
+            Some("Working Directory: /home/user")
+        );
 
         let tool_msg2 = &messages[4];
-        assert_eq!(tool_msg2.get("tool_call_id").unwrap().as_str(), Some("call_env2"));
+        assert_eq!(
+            tool_msg2.get("tool_call_id").unwrap().as_str(),
+            Some("call_env2")
+        );
         let content2 = tool_msg2.get("content").unwrap().as_str().unwrap();
         assert!(!content2.starts_with("[Tool Result for"));
     }
@@ -1106,7 +1338,12 @@ mod tests {
 
         let mut body = provider.to_openai_request(&req);
         body["stream"] = Value::Bool(true);
-        let model_lower = provider.config.model_name.as_deref().unwrap_or("").to_lowercase();
+        let model_lower = provider
+            .config
+            .model_name
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase();
         let supports_stream_options = model_lower.contains("gpt");
         if supports_stream_options {
             body["stream_options"] = serde_json::json!({"include_usage": true});
@@ -1140,9 +1377,16 @@ mod tests {
 
         let mut body = provider.to_openai_request(&req);
         body["stream"] = Value::Bool(true);
-        let model_lower = provider.config.model_name.as_deref().unwrap_or("").to_lowercase();
+        let model_lower = provider
+            .config
+            .model_name
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase();
         let supports_stream_options = model_lower.contains("gpt")
-            || model_lower.contains("o1") || model_lower.contains("o3") || model_lower.contains("o4")
+            || model_lower.contains("o1")
+            || model_lower.contains("o3")
+            || model_lower.contains("o4")
             || model_lower.contains("deepseek");
         if supports_stream_options {
             body["stream_options"] = serde_json::json!({"include_usage": true});
@@ -1177,7 +1421,12 @@ mod tests {
 
         let mut body = provider.to_openai_request(&req);
         body["stream"] = Value::Bool(true);
-        let model_lower = provider.config.model_name.as_deref().unwrap_or("").to_lowercase();
+        let model_lower = provider
+            .config
+            .model_name
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase();
         let supports_stream_options = model_lower.contains("deepseek");
         if supports_stream_options {
             body["stream_options"] = serde_json::json!({"include_usage": true});
@@ -1197,9 +1446,15 @@ mod tool_call_stream_tests {
 
     fn tc_delta(index: u64, id: &str, name: &str, args: &str) -> Value {
         let mut v = serde_json::json!({ "index": index, "function": {} });
-        if !id.is_empty() { v["id"] = Value::String(id.to_string()); }
-        if !name.is_empty() { v["function"]["name"] = Value::String(name.to_string()); }
-        if !args.is_empty() { v["function"]["arguments"] = Value::String(args.to_string()); }
+        if !id.is_empty() {
+            v["id"] = Value::String(id.to_string());
+        }
+        if !name.is_empty() {
+            v["function"]["name"] = Value::String(name.to_string());
+        }
+        if !args.is_empty() {
+            v["function"]["arguments"] = Value::String(args.to_string());
+        }
         v
     }
 
@@ -1213,10 +1468,17 @@ mod tool_call_stream_tests {
     #[test]
     fn first_chunk_emits_intent_with_name() {
         let mut state = HashMap::new();
-        let block = translate_tool_call_delta(&tc_delta(0, "call_A", "read_file", ""), &mut state).unwrap();
+        let block =
+            translate_tool_call_delta(&tc_delta(0, "call_A", "read_file", ""), &mut state).unwrap();
         let (id, name, args) = extract(block);
-        assert_eq!((id.as_str(), name.as_str(), args.as_str()), ("call_A", "read_file", ""));
-        assert_eq!(state.get(&0), Some(&("call_A".to_string(), "read_file".to_string())));
+        assert_eq!(
+            (id.as_str(), name.as_str(), args.as_str()),
+            ("call_A", "read_file", "")
+        );
+        assert_eq!(
+            state.get(&0),
+            Some(&("call_A".to_string(), "read_file".to_string()))
+        );
     }
 
     #[test]
@@ -1224,7 +1486,8 @@ mod tool_call_stream_tests {
         let mut state = HashMap::new();
         translate_tool_call_delta(&tc_delta(0, "call_A", "read_file", ""), &mut state);
         // Subsequent fragment: index only, no id, no name, just args.
-        let block = translate_tool_call_delta(&tc_delta(0, "", "", "{\"path\""), &mut state).unwrap();
+        let block =
+            translate_tool_call_delta(&tc_delta(0, "", "", "{\"path\""), &mut state).unwrap();
         let (id, name, args) = extract(block);
         assert_eq!((id.as_str(), name.as_str()), ("call_A", ""));
         assert_eq!(args, "{\"path\"");
@@ -1247,9 +1510,18 @@ mod tool_call_stream_tests {
 
         assert_eq!(extract(a0).0, "A");
         assert_eq!(extract(b0).0, "B");
-        assert_eq!(extract(a1), ("A".to_string(), String::new(), "{\"pat".to_string()));
-        assert_eq!(extract(b1), ("B".to_string(), String::new(), "\"key\"".to_string()));
-        assert_eq!(extract(a2), ("A".to_string(), String::new(), "h\":\"x\"}".to_string()));
+        assert_eq!(
+            extract(a1),
+            ("A".to_string(), String::new(), "{\"pat".to_string())
+        );
+        assert_eq!(
+            extract(b1),
+            ("B".to_string(), String::new(), "\"key\"".to_string())
+        );
+        assert_eq!(
+            extract(a2),
+            ("A".to_string(), String::new(), "h\":\"x\"}".to_string())
+        );
     }
 
     #[test]
@@ -1267,7 +1539,8 @@ mod tool_call_stream_tests {
         // Some non-parallel providers omit `index` entirely — default to 0
         // so a single sequential tool call still routes correctly.
         let mut state = HashMap::new();
-        let v = serde_json::json!({ "id": "call_1", "function": { "name": "env", "arguments": "" } });
+        let v =
+            serde_json::json!({ "id": "call_1", "function": { "name": "env", "arguments": "" } });
         let block = translate_tool_call_delta(&v, &mut state).unwrap();
         assert_eq!(extract(block).0, "call_1");
         assert!(state.contains_key(&0));
@@ -1277,9 +1550,7 @@ mod tool_call_stream_tests {
 #[cfg(test)]
 mod constrained_tests {
     use super::*;
-    use oneai_core::{
-        ConstrainedMode, ConstrainedOutputConfig, Conversation, InferenceRequest,
-    };
+    use oneai_core::{ConstrainedMode, ConstrainedOutputConfig, Conversation, InferenceRequest};
 
     fn provider_with_url(base_url: &str) -> OpenAIProvider {
         OpenAIProvider::new(ModelConfig {
@@ -1322,7 +1593,9 @@ mod constrained_tests {
         // already emit valid JSON reliably.
         assert!(!provider_with_url("https://api.openai.com/v1").prefers_constrained_output());
         assert!(!provider_with_url("https://api.deepseek.com/v1").prefers_constrained_output());
-        assert!(!provider_with_url("https://open.bigmodel.cn/api/paas/v4").prefers_constrained_output());
+        assert!(
+            !provider_with_url("https://open.bigmodel.cn/api/paas/v4").prefers_constrained_output()
+        );
     }
 
     #[test]
@@ -1331,9 +1604,13 @@ mod constrained_tests {
             schema: serde_json::json!({ "type": "object", "required": ["answer"] }),
             mode: ConstrainedMode::JsonSchema,
         };
-        let body = provider_with_url("http://localhost:8000/v1").to_openai_request(&request(Some(cfg)));
+        let body =
+            provider_with_url("http://localhost:8000/v1").to_openai_request(&request(Some(cfg)));
         assert_eq!(body["response_format"]["type"], "json_schema");
-        assert_eq!(body["response_format"]["json_schema"]["name"], "structured_output");
+        assert_eq!(
+            body["response_format"]["json_schema"]["name"],
+            "structured_output"
+        );
         assert_eq!(
             body["response_format"]["json_schema"]["schema"]["required"][0],
             "answer"

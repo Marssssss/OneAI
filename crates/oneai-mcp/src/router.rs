@@ -36,9 +36,7 @@ impl McpRouter {
     /// Returns a JSON-RPC response (for requests) or None (for notifications).
     /// For unknown methods, returns a JSON-RPC error response.
     pub async fn dispatch(&self, message: serde_json::Value) -> serde_json::Value {
-        let method = message.get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
+        let method = message.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
         let id = message.get("id").cloned();
         let params = message.get("params");
@@ -46,9 +44,7 @@ impl McpRouter {
         tracing::debug!("MCP dispatch: method={}, id={:?}", method, id);
 
         match method {
-            "initialize" => {
-                self.handler.handle_initialize(id, params).await
-            }
+            "initialize" => self.handler.handle_initialize(id, params).await,
             "notifications/initialized" => {
                 // Notifications don't need a response, but for Stdio transport
                 // we return an empty marker so the transport knows to skip writing
@@ -56,19 +52,13 @@ impl McpRouter {
                 // Return a "no-response" sentinel — the transport should not write this
                 serde_json::json!({"__mcp_no_response": true})
             }
-            "tools/list" => {
-                self.handler.handle_tools_list(id).await
-            }
+            "tools/list" => self.handler.handle_tools_list(id).await,
             "tools/call" => {
                 let params_val = params.cloned().unwrap_or(serde_json::json!({}));
                 self.handler.handle_tools_call(id, &params_val).await
             }
-            "resources/list" => {
-                self.handler.handle_resources_list(id).await
-            }
-            "ping" => {
-                self.handler.handle_ping(id)
-            }
+            "resources/list" => self.handler.handle_resources_list(id).await,
+            "ping" => self.handler.handle_ping(id),
             "" => {
                 // No method field — invalid request
                 serde_json::json!({
@@ -99,8 +89,8 @@ impl McpRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_tool::ToolRegistry;
     use oneai_tool::CalculatorTool;
+    use oneai_tool::ToolRegistry;
     use std::sync::Arc;
 
     fn create_router() -> Arc<McpRouter> {
@@ -115,7 +105,10 @@ mod tests {
     // Helper: need async context for registering tools
     async fn create_router_with_tools_async() -> Arc<McpRouter> {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
         let handler = Arc::new(McpHandler::new(
             registry,
             crate::server::McpServerInfo::default(),

@@ -12,8 +12,8 @@ use std::time::Duration;
 use std::fmt::Write as _;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 use oneai_core::error::Result;
+use tokio::sync::RwLock;
 
 use crate::context_source::{ContextSource, RefreshPolicy};
 
@@ -44,7 +44,9 @@ impl GitStatusSource {
 
 #[async_trait]
 impl ContextSource for GitStatusSource {
-    fn key(&self) -> &str { "git_status" }
+    fn key(&self) -> &str {
+        "git_status"
+    }
 
     async fn load(&self) -> Result<String> {
         let dir = self.project_dir.to_str().unwrap_or(".");
@@ -59,9 +61,13 @@ impl ContextSource for GitStatusSource {
             Duration::from_secs(5),
             tokio::process::Command::new(shell)
                 .arg(shell_arg)
-                .arg(format!("cd {} && git branch --show-current 2>/dev/null || echo 'not a git repo'", dir))
-                .output()
-        ).await;
+                .arg(format!(
+                    "cd {} && git branch --show-current 2>/dev/null || echo 'not a git repo'",
+                    dir
+                ))
+                .output(),
+        )
+        .await;
 
         let branch = match branch_result {
             Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -78,8 +84,9 @@ impl ContextSource for GitStatusSource {
             tokio::process::Command::new(shell)
                 .arg(shell_arg)
                 .arg(format!("cd {} && git status --short 2>/dev/null", dir))
-                .output()
-        ).await;
+                .output(),
+        )
+        .await;
 
         let mut modified: Vec<String> = Vec::new();
         let mut created: Vec<String> = Vec::new();
@@ -117,9 +124,13 @@ impl ContextSource for GitStatusSource {
             Duration::from_secs(5),
             tokio::process::Command::new(shell)
                 .arg(shell_arg)
-                .arg(format!("cd {} && git log --oneline -5 2>/dev/null || echo 'no commits'", dir))
-                .output()
-        ).await;
+                .arg(format!(
+                    "cd {} && git log --oneline -5 2>/dev/null || echo 'no commits'",
+                    dir
+                ))
+                .output(),
+        )
+        .await;
 
         let recent_commits = match commits_result {
             Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -152,7 +163,9 @@ impl ContextSource for GitStatusSource {
         RefreshPolicy::OnChange
     }
 
-    fn priority(&self) -> u32 { 10 }
+    fn priority(&self) -> u32 {
+        10
+    }
 }
 
 // ─── FileTreeSource ────────────────────────────────────────────────────────────
@@ -180,7 +193,9 @@ impl FileTreeSource {
 
 #[async_trait]
 impl ContextSource for FileTreeSource {
-    fn key(&self) -> &str { "file_tree" }
+    fn key(&self) -> &str {
+        "file_tree"
+    }
 
     async fn load(&self) -> Result<String> {
         let dir = self.project_dir.to_str().unwrap_or(".");
@@ -208,7 +223,8 @@ impl ContextSource for FileTreeSource {
                 // Limit to 2000 chars to prevent context overflow
                 let truncated = if tree.len() > 2000 {
                     // Char-boundary-safe truncation for CJK paths
-                    let end = tree.char_indices()
+                    let end = tree
+                        .char_indices()
                         .take_while(|(i, _)| *i < 2000)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())
@@ -227,7 +243,9 @@ impl ContextSource for FileTreeSource {
         RefreshPolicy::OnceAtStart
     }
 
-    fn priority(&self) -> u32 { 20 }
+    fn priority(&self) -> u32 {
+        20
+    }
 }
 
 // ─── ProjectConfigSource ───────────────────────────────────────────────────────
@@ -256,7 +274,9 @@ impl ProjectConfigSource {
 
 #[async_trait]
 impl ContextSource for ProjectConfigSource {
-    fn key(&self) -> &str { "project_config" }
+    fn key(&self) -> &str {
+        "project_config"
+    }
 
     async fn load(&self) -> Result<String> {
         let dir = &self.project_dir;
@@ -280,9 +300,16 @@ impl ContextSource for ProjectConfigSource {
             if let Ok(text) = content {
                 // Parse and extract name, version, dependencies
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let name = json.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let version = json.get("version").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let deps_count = json.get("dependencies")
+                    let name = json
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let version = json
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let deps_count = json
+                        .get("dependencies")
                         .and_then(|v| v.as_object())
                         .map(|o| o.len())
                         .unwrap_or(0);
@@ -301,7 +328,9 @@ impl ContextSource for ProjectConfigSource {
         RefreshPolicy::OnceAtStart
     }
 
-    fn priority(&self) -> u32 { 30 }
+    fn priority(&self) -> u32 {
+        30
+    }
 }
 
 // ─── DateSource ────────────────────────────────────────────────────────────────
@@ -318,16 +347,22 @@ pub struct DateSource;
 
 impl DateSource {
     /// Create a new DateSource.
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for DateSource {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl ContextSource for DateSource {
-    fn key(&self) -> &str { "date" }
+    fn key(&self) -> &str {
+        "date"
+    }
 
     async fn load(&self) -> Result<String> {
         let now = chrono::Local::now();
@@ -343,7 +378,9 @@ impl ContextSource for DateSource {
         RefreshPolicy::Periodic(Duration::from_secs(3600)) // 1 hour
     }
 
-    fn priority(&self) -> u32 { 5 }
+    fn priority(&self) -> u32 {
+        5
+    }
 }
 
 // ─── EnvironmentInfoSource ─────────────────────────────────────────────────────
@@ -360,16 +397,22 @@ pub struct EnvironmentInfoSource;
 
 impl EnvironmentInfoSource {
     /// Create a new EnvironmentInfoSource.
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for EnvironmentInfoSource {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl ContextSource for EnvironmentInfoSource {
-    fn key(&self) -> &str { "environment" }
+    fn key(&self) -> &str {
+        "environment"
+    }
 
     async fn load(&self) -> Result<String> {
         let cwd = std::env::current_dir()
@@ -377,8 +420,13 @@ impl ContextSource for EnvironmentInfoSource {
             .unwrap_or_else(|_| "unknown".to_string());
         let platform = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
-        let shell = std::env::var("SHELL")
-            .unwrap_or_else(|_| if cfg!(target_os = "windows") { "powershell".to_string() } else { "sh".to_string() });
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| {
+            if cfg!(target_os = "windows") {
+                "powershell".to_string()
+            } else {
+                "sh".to_string()
+            }
+        });
 
         Ok(format!(
             "Working Directory: {}\nPlatform: {}\nArchitecture: {}\nShell: {}",
@@ -390,7 +438,9 @@ impl ContextSource for EnvironmentInfoSource {
         RefreshPolicy::OnceAtStart
     }
 
-    fn priority(&self) -> u32 { 15 }
+    fn priority(&self) -> u32 {
+        15
+    }
 }
 
 // ─── ProjectInstructionsSource ────────────────────────────────────────────────
@@ -431,11 +481,7 @@ impl ProjectInstructionsSource {
     /// Search for instruction files in priority order.
     /// Returns the content of the first file found, or None.
     async fn find_instructions(&self) -> Option<String> {
-        let candidates = [
-            "ONEAI.md",
-            "CLAUDE.md",
-            "AGENTS.md",
-        ];
+        let candidates = ["ONEAI.md", "CLAUDE.md", "AGENTS.md"];
 
         // 1. Check project root directory
         for candidate in &candidates {
@@ -451,9 +497,7 @@ impl ProjectInstructionsSource {
 
         // 2. Check subdirectories (up to 2 levels deep, closest first)
         // Look for instruction files in common subdirectories
-        let subdirs = [
-            "src", "lib", "app", "crates", "packages", "modules",
-        ];
+        let subdirs = ["src", "lib", "app", "crates", "packages", "modules"];
         for subdir in &subdirs {
             for candidate in &candidates {
                 let path = self.project_dir.join(subdir).join(candidate);
@@ -488,7 +532,9 @@ impl ProjectInstructionsSource {
 
 #[async_trait]
 impl ContextSource for ProjectInstructionsSource {
-    fn key(&self) -> &str { "project_instructions" }
+    fn key(&self) -> &str {
+        "project_instructions"
+    }
 
     async fn load(&self) -> Result<String> {
         match self.find_instructions().await {
@@ -508,7 +554,9 @@ impl ContextSource for ProjectInstructionsSource {
         RefreshPolicy::OnceAtStart // Project instructions rarely change during a session
     }
 
-    fn priority(&self) -> u32 { 1 } // Highest priority — project instructions are the primary context
+    fn priority(&self) -> u32 {
+        1
+    } // Highest priority — project instructions are the primary context
 }
 
 // ─── GitReconciliationSource ──────────────────────────────────────────────────
@@ -556,7 +604,9 @@ impl GitReconciliationSource {
 
 #[async_trait]
 impl ContextSource for GitReconciliationSource {
-    fn key(&self) -> &str { "git_reconciliation" }
+    fn key(&self) -> &str {
+        "git_reconciliation"
+    }
 
     async fn load(&self) -> Result<String> {
         // One-shot: if we've already produced a block, yield and clear it.
@@ -603,7 +653,9 @@ impl ContextSource for GitReconciliationSource {
         RefreshPolicy::OnResume
     }
 
-    fn priority(&self) -> u32 { 3 } // Very high — surface staleness before other context
+    fn priority(&self) -> u32 {
+        3
+    } // Very high — surface staleness before other context
 }
 
 /// Result of comparing the working state against git's ground truth.
@@ -713,7 +765,11 @@ pub fn detect_drift(
     if !ws.steps.is_empty() {
         let _ = writeln!(details, "pinned steps: {}", ws.steps.len());
     }
-    ReconciliationReport { drift: true, summary, details }
+    ReconciliationReport {
+        drift: true,
+        summary,
+        details,
+    }
 }
 
 #[cfg(test)]
@@ -766,11 +822,20 @@ mod tests {
         assert_eq!(source.key(), "git_status");
 
         let content = source.load().await.unwrap();
-        assert!(content.contains("Git Branch:"), "missing branch line: {content}");
+        assert!(
+            content.contains("Git Branch:"),
+            "missing branch line: {content}"
+        );
         // The enriched content always surfaces a Changes summary and, when the
         // tree is dirty, the per-file Modified/Created/Deleted lists.
-        assert!(content.contains("Changes:"), "missing changes summary: {content}");
-        assert!(content.contains("Recent Commits:"), "missing recent commits: {content}");
+        assert!(
+            content.contains("Changes:"),
+            "missing changes summary: {content}"
+        );
+        assert!(
+            content.contains("Recent Commits:"),
+            "missing recent commits: {content}"
+        );
     }
 
     #[tokio::test]
@@ -784,16 +849,31 @@ mod tests {
         let content = source.load().await.unwrap();
         // In this project, there's no ONEAI.md/CLAUDE.md/AGENTS.md yet
         // so content will be empty
-        assert!(content.is_empty() || content.len() > 0); // Just verify it doesn't crash
+        assert!(content.is_empty() || !content.is_empty()); // Just verify it doesn't crash
     }
 
     #[test]
     fn test_refresh_policies() {
-        assert_eq!(GitStatusSource::new(".").refresh_policy(), RefreshPolicy::OnChange);
-        assert_eq!(FileTreeSource::new(".").refresh_policy(), RefreshPolicy::OnceAtStart);
-        assert_eq!(ProjectConfigSource::new(".").refresh_policy(), RefreshPolicy::OnceAtStart);
-        assert_eq!(DateSource::new().refresh_policy(), RefreshPolicy::Periodic(Duration::from_secs(3600)));
-        assert_eq!(EnvironmentInfoSource::new().refresh_policy(), RefreshPolicy::OnceAtStart);
+        assert_eq!(
+            GitStatusSource::new(".").refresh_policy(),
+            RefreshPolicy::OnChange
+        );
+        assert_eq!(
+            FileTreeSource::new(".").refresh_policy(),
+            RefreshPolicy::OnceAtStart
+        );
+        assert_eq!(
+            ProjectConfigSource::new(".").refresh_policy(),
+            RefreshPolicy::OnceAtStart
+        );
+        assert_eq!(
+            DateSource::new().refresh_policy(),
+            RefreshPolicy::Periodic(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            EnvironmentInfoSource::new().refresh_policy(),
+            RefreshPolicy::OnceAtStart
+        );
     }
 
     // ─── GitReconciliationSource ───────────────────────────────────────────
@@ -867,8 +947,8 @@ mod tests {
 
     #[tokio::test]
     async fn git_reconciliation_source_skips_when_task_missing() {
-        use oneai_core::traits::WorkingStateStore;
         use oneai_core::error::{OneAIError, Result};
+        use oneai_core::traits::WorkingStateStore;
 
         // Minimal store that always reports "no such task" — exercises the
         // source's skip path without pulling oneai-persistence into the
@@ -876,13 +956,45 @@ mod tests {
         struct NoTaskStore;
         #[async_trait::async_trait]
         impl WorkingStateStore for NoTaskStore {
-            async fn create_task(&self, _: &str, _: &str, _: &str, _: &str, _: &str) -> Result<String> { Ok("t".into()) }
-            async fn get_task(&self, _: &str) -> Result<Option<oneai_core::WorkingState>> { Ok(None) }
-            async fn list_open_tasks(&self, _: &str, _: &str) -> Result<Vec<oneai_core::TaskBrief>> { Ok(Vec::new()) }
-            async fn append_event(&self, _: &str, _: &str, _: Option<&str>, _: oneai_core::TaskEventType, _: oneai_core::TaskEventPayload) -> Result<String> { Ok("e".into()) }
-            async fn derive_state(&self, _: &str) -> Result<oneai_core::WorkingState> { Err(OneAIError::Persistence("none".into())) }
-            async fn compact_if_needed(&self, _: &str) -> Result<()> { Ok(()) }
-            async fn archive_task(&self, _: &str) -> Result<()> { Ok(()) }
+            async fn create_task(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<String> {
+                Ok("t".into())
+            }
+            async fn get_task(&self, _: &str) -> Result<Option<oneai_core::WorkingState>> {
+                Ok(None)
+            }
+            async fn list_open_tasks(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Vec<oneai_core::TaskBrief>> {
+                Ok(Vec::new())
+            }
+            async fn append_event(
+                &self,
+                _: &str,
+                _: &str,
+                _: Option<&str>,
+                _: oneai_core::TaskEventType,
+                _: oneai_core::TaskEventPayload,
+            ) -> Result<String> {
+                Ok("e".into())
+            }
+            async fn derive_state(&self, _: &str) -> Result<oneai_core::WorkingState> {
+                Err(OneAIError::Persistence("none".into()))
+            }
+            async fn compact_if_needed(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn archive_task(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
         }
 
         let store: Arc<dyn WorkingStateStore> = Arc::new(NoTaskStore);

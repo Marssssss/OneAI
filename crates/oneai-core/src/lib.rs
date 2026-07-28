@@ -19,38 +19,37 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
-pub mod types;
-pub mod traits;
-pub mod error;
-pub mod platform;
 pub mod budget;
-pub mod platform_capabilities;
-pub mod usage;
-pub mod rate_limiter;
 pub mod circuit_breaker;
+pub mod context_accounting;
+pub mod context_manager;
+pub mod error;
+pub mod model_context;
+pub mod platform;
+pub mod platform_capabilities;
 pub mod provider_pool;
+pub mod rate_limiter;
 pub mod smart_router;
 pub mod token_counter;
-pub mod context_manager;
-pub mod model_context;
-pub mod context_accounting;
+pub mod traits;
+pub mod types;
+pub mod usage;
 
-pub use types::*;
-pub use traits::*;
-pub use error::*;
-pub use platform::*;
 pub use budget::*;
-pub use platform_capabilities::*;
-pub use usage::*;
-pub use rate_limiter::*;
 pub use circuit_breaker::*;
+pub use context_accounting::*;
+pub use context_manager::*;
+pub use error::*;
+pub use model_context::*;
+pub use platform::*;
+pub use platform_capabilities::*;
 pub use provider_pool::*;
+pub use rate_limiter::*;
 pub use smart_router::*;
 pub use token_counter::*;
-pub use context_manager::*;
-pub use model_context::*;
-pub use context_accounting::*;
+pub use traits::*;
+pub use types::*;
+pub use usage::*;
 
 #[cfg(test)]
 mod tests {
@@ -59,7 +58,9 @@ mod tests {
 
     #[test]
     fn test_content_block_text() {
-        let block = ContentBlock::Text { text: "Hello world".to_string() };
+        let block = ContentBlock::Text {
+            text: "Hello world".to_string(),
+        };
         let serialized = serde_json::to_string(&block).unwrap();
         assert!(serialized.contains("\"type\":\"text\""));
         assert!(serialized.contains("\"text\":\"Hello world\""));
@@ -80,7 +81,9 @@ mod tests {
     #[test]
     fn test_content_block_roundtrip() {
         let blocks = vec![
-            ContentBlock::Text { text: "Hello".to_string() },
+            ContentBlock::Text {
+                text: "Hello".to_string(),
+            },
             ContentBlock::ToolCall {
                 id: "call_1".to_string(),
                 name: "tool_a".to_string(),
@@ -109,7 +112,9 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text { text: "I'll call a tool".to_string() },
+                ContentBlock::Text {
+                    text: "I'll call a tool".to_string(),
+                },
                 ContentBlock::ToolCall {
                     id: "call_1".to_string(),
                     name: "shell".to_string(),
@@ -150,7 +155,10 @@ mod tests {
 
     #[test]
     fn test_model_config_anthropic() {
-        let config = ModelConfig::anthropic("sk-ant-test".to_string(), "claude-sonnet-4-20250514".to_string());
+        let config = ModelConfig::anthropic(
+            "sk-ant-test".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        );
         assert_eq!(config.provider_type, ProviderType::Cloud);
         assert_eq!(config.cloud_kind, Some(CloudProviderKind::Anthropic));
         assert_eq!(config.api_key, Some("sk-ant-test".to_string()));
@@ -167,7 +175,11 @@ mod tests {
 
     #[test]
     fn test_model_config_resolved_url_with_custom_port() {
-        let config = ModelConfig::ollama_custom("http://192.168.1.100".to_string(), 8080, "llama3".to_string());
+        let config = ModelConfig::ollama_custom(
+            "http://192.168.1.100".to_string(),
+            8080,
+            "llama3".to_string(),
+        );
         assert_eq!(config.resolved_url(), "http://192.168.1.100:8080");
     }
 
@@ -207,7 +219,11 @@ mod tests {
             name: "shell_executor".to_string(),
             description: "Execute shell commands".to_string(),
             prompt_template: "You can execute shell commands using the shell tool.".to_string(),
-            trigger_keywords: vec!["shell".to_string(), "command".to_string(), "execute".to_string()],
+            trigger_keywords: vec![
+                "shell".to_string(),
+                "command".to_string(),
+                "execute".to_string(),
+            ],
             embedding: None,
         };
         let json = serde_json::to_string(&skill).unwrap();

@@ -9,13 +9,10 @@
 
 use std::sync::Arc;
 
-use oneai_tool::ToolRegistry;
 use oneai_tool::CalculatorTool;
+use oneai_tool::ToolRegistry;
 
-use oneai_mcp::{
-    McpServerHost, McpPluginRegistry,
-    McpPluginEntry, McpPluginSource,
-};
+use oneai_mcp::{McpPluginEntry, McpPluginRegistry, McpPluginSource, McpServerHost};
 
 /// Run OneAI as an MCP server via Stdio transport.
 ///
@@ -33,7 +30,10 @@ pub fn cmd_mcp_serve(domain: Option<&str>) {
         let registry = Arc::new(ToolRegistry::new());
 
         // Register basic tools
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         // If a domain pack is specified, register its tools
         if let Some(domain_name) = domain {
@@ -41,9 +41,16 @@ pub fn cmd_mcp_serve(domain: Option<&str>) {
                 for tool in &pack.tools {
                     registry.register(tool.clone()).await.unwrap();
                 }
-                tracing::info!("Domain pack '{}' loaded — {} tools registered", domain_name, pack.tools.len());
+                tracing::info!(
+                    "Domain pack '{}' loaded — {} tools registered",
+                    domain_name,
+                    pack.tools.len()
+                );
             } else {
-                eprintln!("Warning: Domain pack '{}' not found, using default tools", domain_name);
+                eprintln!(
+                    "Warning: Domain pack '{}' not found, using default tools",
+                    domain_name
+                );
             }
         }
 
@@ -91,9 +98,7 @@ pub fn cmd_mcp_list() {
             McpPluginSource::StreamableHttp { url, .. } => {
                 format!("streamable_http: {}", url)
             }
-            _ => {
-                format!("unknown")
-            }
+            _ => "unknown".to_string(),
         };
 
         println!("  {} {} — {}", status_icon, entry.name, entry.description);
@@ -119,7 +124,14 @@ pub fn cmd_mcp_list() {
 /// Add an MCP server configuration.
 ///
 /// Creates a new entry in `~/.oneai/mcp_servers.toml`.
-pub fn cmd_mcp_add(name: &str, transport: &str, command: Option<&str>, url: Option<&str>, args: Option<&str>, enabled: bool) {
+pub fn cmd_mcp_add(
+    name: &str,
+    transport: &str,
+    command: Option<&str>,
+    url: Option<&str>,
+    args: Option<&str>,
+    enabled: bool,
+) {
     let mut registry = McpPluginRegistry::from_config_file();
 
     // Build the source based on transport type
@@ -129,7 +141,8 @@ pub fn cmd_mcp_add(name: &str, transport: &str, command: Option<&str>, url: Opti
                 eprintln!("Error: --command required for stdio transport");
                 std::process::exit(1);
             });
-            let args_list = args.map(|a| a.split(',').map(|s| s.trim().to_string()).collect())
+            let args_list = args
+                .map(|a| a.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
             McpPluginSource::Stdio {
                 command: cmd.to_string(),
@@ -158,7 +171,10 @@ pub fn cmd_mcp_add(name: &str, transport: &str, command: Option<&str>, url: Opti
             }
         }
         _ => {
-            eprintln!("Error: Unknown transport type '{}'. Use: stdio, sse, streamable_http", transport);
+            eprintln!(
+                "Error: Unknown transport type '{}'. Use: stdio, sse, streamable_http",
+                transport
+            );
             std::process::exit(1);
         }
     };
@@ -180,7 +196,10 @@ pub fn cmd_mcp_add(name: &str, transport: &str, command: Option<&str>, url: Opti
         return;
     }
 
-    println!("✅ MCP server '{}' added (transport: {}, enabled: {})", name, transport, enabled);
+    println!(
+        "✅ MCP server '{}' added (transport: {}, enabled: {})",
+        name, transport, enabled
+    );
     println!("   Config saved to: ~/.oneai/mcp_servers.toml");
     println!("   Use 'oneai mcp connect {}' to test the connection", name);
 }

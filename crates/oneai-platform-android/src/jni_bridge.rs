@@ -109,7 +109,10 @@ fn parse_response_json(response_json: &str) -> InteractionResponse {
     match decision {
         "approve" => InteractionResponse::Proceed,
         "modify" => {
-            let args = value.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            let args = value
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             InteractionResponse::ProceedWith {
                 modification: oneai_core::InteractionModification::ReplaceToolArgs(args),
             }

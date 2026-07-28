@@ -3,14 +3,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 
-use serde::{Deserialize, Serialize};
-use oneai_core::{ToolOutput, InterruptPoint, ResumeSignal};
-use oneai_agent::{AgentLoopObserver, ParadigmKind, ToolCallRequest, AgentLoopResult, SubAgentKind};
-use oneai_trace::{TraceContext, InMemoryCollector};
+use oneai_agent::{
+    AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind, ToolCallRequest,
+};
+use oneai_core::{InterruptPoint, ResumeSignal, ToolOutput};
 use oneai_persistence::FilePersistence;
 use oneai_tool::ToolRegistry;
+use oneai_trace::{InMemoryCollector, TraceContext};
+use serde::{Deserialize, Serialize};
 
 // ─── StudioRunner ────────────────────────────────────────────────────
 
@@ -89,10 +91,17 @@ pub enum StudioEvent {
     ParadigmSwitch { paradigm: String },
 
     /// Checkpoint saved.
-    CheckpointSaved { iteration: usize, checkpoint_id: String },
+    CheckpointSaved {
+        iteration: usize,
+        checkpoint_id: String,
+    },
 
     /// A trace event occurred (Thought, Action, Observation, etc.).
-    TraceEvent { kind: String, name: String, attributes: serde_json::Value },
+    TraceEvent {
+        kind: String,
+        name: String,
+        attributes: serde_json::Value,
+    },
 
     /// Thinking/reasoning content (extended thinking).
     Thinking { text: String },
@@ -251,7 +260,10 @@ impl StudioState {
 
     /// Register a new session in the Studio.
     pub async fn register_session(&self, session: SessionView) {
-        self.sessions.write().await.insert(session.id.clone(), session);
+        self.sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session);
     }
 
     /// Update a session's state.
@@ -289,16 +301,21 @@ impl AgentLoopObserver for StudioState {
     }
 
     fn on_direct_answer(&self, text: &str) {
-        self.broadcast(StudioEvent::DirectAnswer { text: text.to_string() });
+        self.broadcast(StudioEvent::DirectAnswer {
+            text: text.to_string(),
+        });
     }
 
     fn on_tool_calls(&self, calls: &[ToolCallRequest]) {
         self.broadcast(StudioEvent::ToolCalls {
-            calls: calls.iter().map(|c| ToolCallView {
-                id: c.id.clone(),
-                tool_name: c.name.clone(),
-                args: c.args.clone(),
-            }).collect(),
+            calls: calls
+                .iter()
+                .map(|c| ToolCallView {
+                    id: c.id.clone(),
+                    tool_name: c.name.clone(),
+                    args: c.args.clone(),
+                })
+                .collect(),
         });
     }
 
@@ -346,11 +363,15 @@ impl AgentLoopObserver for StudioState {
     }
 
     fn on_stream_chunk(&self, text: &str) {
-        self.broadcast(StudioEvent::StreamChunk { text: text.to_string() });
+        self.broadcast(StudioEvent::StreamChunk {
+            text: text.to_string(),
+        });
     }
 
     fn on_thinking(&self, text: &str) {
-        self.broadcast(StudioEvent::Thinking { text: text.to_string() });
+        self.broadcast(StudioEvent::Thinking {
+            text: text.to_string(),
+        });
     }
 
     fn on_token_usage(&self, prompt_tokens: u32, completion_tokens: u32) {
@@ -438,7 +459,10 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         match event {
-            StudioEvent::IterationStart { iteration, paradigm } => {
+            StudioEvent::IterationStart {
+                iteration,
+                paradigm,
+            } => {
                 assert_eq!(iteration, 1);
                 assert_eq!(paradigm, "react");
             }
@@ -470,7 +494,9 @@ mod tests {
         let mut rx1 = state.subscribe();
         let mut rx2 = state.subscribe();
 
-        state.broadcast(StudioEvent::ParadigmSwitch { paradigm: "plan".to_string() });
+        state.broadcast(StudioEvent::ParadigmSwitch {
+            paradigm: "plan".to_string(),
+        });
 
         let event1 = rx1.try_recv().unwrap();
         let event2 = rx2.try_recv().unwrap();
@@ -538,7 +564,10 @@ mod tests {
     #[test]
     fn test_truncate() {
         assert_eq!(truncate("short", 10), "short");
-        assert_eq!(truncate("a very long string that exceeds limit", 10), "a very lon...");
+        assert_eq!(
+            truncate("a very long string that exceeds limit", 10),
+            "a very lon..."
+        );
     }
 
     #[test]

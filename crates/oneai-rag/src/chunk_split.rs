@@ -69,7 +69,11 @@ where
     F: Fn(&T) -> usize,
 {
     if max_tokens == 0 {
-        return if chunks.is_empty() { Vec::new() } else { vec![chunks] };
+        return if chunks.is_empty() {
+            Vec::new()
+        } else {
+            vec![chunks]
+        };
     }
     let mut batches: Vec<Vec<T>> = Vec::new();
     let mut cur: Vec<T> = Vec::new();
@@ -129,14 +133,19 @@ mod tests {
     fn split_surrogate_pair_emoji_preserved() {
         // 😀 is 4 UTF-8 bytes (one char); limit 2 must still keep it whole
         let parts = split_to_utf8_byte_limit("a😀b", 2);
-        assert!(parts.iter().all(|p| p.is_char_boundary(p.len()) || p.is_empty()));
+        assert!(parts
+            .iter()
+            .all(|p| p.is_char_boundary(p.len()) || p.is_empty()));
         // re-joining yields the original
         assert_eq!(parts.concat(), "a😀b");
     }
 
     #[test]
     fn split_zero_limit_disables() {
-        assert_eq!(split_to_utf8_byte_limit("hello", 0), vec!["hello".to_string()]);
+        assert_eq!(
+            split_to_utf8_byte_limit("hello", 0),
+            vec!["hello".to_string()]
+        );
     }
 
     #[test]
@@ -160,9 +169,15 @@ mod tests {
     struct NoCapService;
     #[async_trait::async_trait]
     impl oneai_core::traits::EmbeddingService for NoCapService {
-        async fn embed(&self, _t: &str) -> oneai_core::error::Result<Vec<f32>> { Ok(vec![]) }
-        async fn embed_batch(&self, _t: &[String]) -> oneai_core::error::Result<Vec<Vec<f32>>> { Ok(vec![]) }
-        fn model(&self) -> oneai_core::EmbeddingModel { oneai_core::EmbeddingModel::new("none") }
+        async fn embed(&self, _t: &str) -> oneai_core::error::Result<Vec<f32>> {
+            Ok(vec![])
+        }
+        async fn embed_batch(&self, _t: &[String]) -> oneai_core::error::Result<Vec<Vec<f32>>> {
+            Ok(vec![])
+        }
+        fn model(&self) -> oneai_core::EmbeddingModel {
+            oneai_core::EmbeddingModel::new("none")
+        }
     }
 
     #[test]

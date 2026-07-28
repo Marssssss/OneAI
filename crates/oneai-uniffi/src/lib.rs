@@ -24,20 +24,19 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
 // Re-export all OneAI crates
-pub use oneai_core;
-pub use oneai_provider;
 pub use oneai_agent;
-pub use oneai_tool;
-pub use oneai_memory;
-pub use oneai_skill;
-pub use oneai_parser;
-pub use oneai_workflow;
-pub use oneai_scheduler;
-pub use oneai_persistence;
-pub use oneai_rag;
 pub use oneai_app;
+pub use oneai_core;
+pub use oneai_memory;
+pub use oneai_parser;
+pub use oneai_persistence;
+pub use oneai_provider;
+pub use oneai_rag;
+pub use oneai_scheduler;
+pub use oneai_skill;
+pub use oneai_tool;
+pub use oneai_workflow;
 
 // UniFFI view types (derive uniffi::Record/uniffi::Enum)
 pub mod types;
@@ -48,8 +47,8 @@ pub mod callback;
 pub use callback::*;
 
 // UniFFI-exported wrapper objects
-pub mod app_builder;
 pub mod app;
+pub mod app_builder;
 pub mod group_chat;
 
 // Foreign-app debug-logging init (installs a global `tracing` subscriber
@@ -134,6 +133,12 @@ impl ProviderFactory {
 #[derive(uniffi::Object)]
 pub struct MemoryFactory;
 
+impl Default for MemoryFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryFactory {
     #[uniffi::constructor]
     pub fn new() -> Self {
@@ -163,6 +168,12 @@ impl MemoryFactory {
 /// A concrete tool factory for foreign-language bindings.
 #[derive(uniffi::Object)]
 pub struct ToolFactory;
+
+impl Default for ToolFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ToolFactory {
     #[uniffi::constructor]
@@ -212,32 +223,25 @@ mod tests {
     #[test]
     fn test_provider_factory_openai() {
         let factory = ProviderFactory::new();
-        let provider = factory.create_openai(
-            "test_key".to_string(),
-            None,
-            "gpt-4".to_string(),
-        );
+        let provider = factory.create_openai("test_key".to_string(), None, "gpt-4".to_string());
         assert_eq!(provider.config().model_name.clone().unwrap(), "gpt-4");
     }
 
     #[test]
     fn test_provider_factory_anthropic() {
         let factory = ProviderFactory::new();
-        let provider = factory.create_anthropic(
-            "test_key".to_string(),
-            "claude-3-opus".to_string(),
+        let provider =
+            factory.create_anthropic("test_key".to_string(), "claude-3-opus".to_string());
+        assert_eq!(
+            provider.config().model_name.clone().unwrap(),
+            "claude-3-opus"
         );
-        assert_eq!(provider.config().model_name.clone().unwrap(), "claude-3-opus");
     }
 
     #[test]
     fn test_provider_factory_ollama() {
         let factory = ProviderFactory::new();
-        let provider = factory.create_ollama(
-            None,
-            None,
-            "llama3".to_string(),
-        );
+        let provider = factory.create_ollama(None, None, "llama3".to_string());
         assert_eq!(provider.config().model_name.clone().unwrap(), "llama3");
     }
 

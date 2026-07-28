@@ -204,7 +204,10 @@ impl WasmResourceMonitor {
     pub async fn record_execution_start(&self, module_name: &str) {
         let mut metrics = self.metrics.write().await;
         if !metrics.contains_key(module_name) {
-            metrics.insert(module_name.to_string(), WasmExecutionMetrics::new(module_name));
+            metrics.insert(
+                module_name.to_string(),
+                WasmExecutionMetrics::new(module_name),
+            );
         }
     }
 
@@ -332,34 +335,65 @@ impl Default for WasmLogSubscriber {
 impl WasmResourceEventSubscriber for WasmLogSubscriber {
     fn on_event(&self, event: &WasmResourceEvent) {
         match event {
-            WasmResourceEvent::FuelConsumed { module_name, fuel_before, fuel_after } => {
+            WasmResourceEvent::FuelConsumed {
+                module_name,
+                fuel_before,
+                fuel_after,
+            } => {
                 tracing::info!(
                     "WASM module '{}' consumed {} fuel (before: {}, after: {})",
-                    module_name, fuel_before - fuel_after, fuel_before, fuel_after
+                    module_name,
+                    fuel_before - fuel_after,
+                    fuel_before,
+                    fuel_after
                 );
             }
-            WasmResourceEvent::FuelLow { module_name, fuel_remaining, fuel_limit } => {
+            WasmResourceEvent::FuelLow {
+                module_name,
+                fuel_remaining,
+                fuel_limit,
+            } => {
                 tracing::warn!(
                     "WASM module '{}' fuel low: {} remaining (limit: {})",
-                    module_name, fuel_remaining, fuel_limit
+                    module_name,
+                    fuel_remaining,
+                    fuel_limit
                 );
             }
-            WasmResourceEvent::MemoryNearLimit { module_name, pages_used, pages_limit } => {
+            WasmResourceEvent::MemoryNearLimit {
+                module_name,
+                pages_used,
+                pages_limit,
+            } => {
                 tracing::warn!(
                     "WASM module '{}' memory near limit: {} pages used (limit: {})",
-                    module_name, pages_used, pages_limit
+                    module_name,
+                    pages_used,
+                    pages_limit
                 );
             }
-            WasmResourceEvent::TimeoutExceeded { module_name, elapsed_ms, limit_ms } => {
+            WasmResourceEvent::TimeoutExceeded {
+                module_name,
+                elapsed_ms,
+                limit_ms,
+            } => {
                 tracing::error!(
                     "WASM module '{}' timeout exceeded: {}ms elapsed (limit: {}ms)",
-                    module_name, elapsed_ms, limit_ms
+                    module_name,
+                    elapsed_ms,
+                    limit_ms
                 );
             }
-            WasmResourceEvent::ExecutionCompleted { module_name, elapsed_ms, fuel_consumed } => {
+            WasmResourceEvent::ExecutionCompleted {
+                module_name,
+                elapsed_ms,
+                fuel_consumed,
+            } => {
                 tracing::info!(
                     "WASM module '{}' execution completed: {}ms, {} fuel consumed",
-                    module_name, elapsed_ms, fuel_consumed
+                    module_name,
+                    elapsed_ms,
+                    fuel_consumed
                 );
             }
         }
@@ -432,7 +466,9 @@ mod tests {
     async fn test_monitor_record_execution() {
         let monitor = WasmResourceMonitor::new();
         monitor.record_execution_start("calculator").await;
-        monitor.record_execution_end("calculator", 50, 100000, 95000, true).await;
+        monitor
+            .record_execution_end("calculator", 50, 100000, 95000, true)
+            .await;
 
         let metrics = monitor.get_metrics("calculator").await;
         assert!(metrics.is_some());
@@ -447,7 +483,9 @@ mod tests {
         monitor.record_execution_start("a").await;
         monitor.record_execution_end("a", 10, 1000, 500, true).await;
         monitor.record_execution_start("b").await;
-        monitor.record_execution_end("b", 20, 2000, 1000, true).await;
+        monitor
+            .record_execution_end("b", 20, 2000, 1000, true)
+            .await;
 
         let all = monitor.all_metrics().await;
         assert_eq!(all.len(), 2);
@@ -459,7 +497,9 @@ mod tests {
         monitor.record_execution_start("a").await;
         monitor.record_execution_end("a", 10, 1000, 500, true).await;
         monitor.record_execution_start("b").await;
-        monitor.record_execution_end("b", 20, 2000, 1000, true).await;
+        monitor
+            .record_execution_end("b", 20, 2000, 1000, true)
+            .await;
 
         let total = monitor.total_fuel_consumed().await;
         assert_eq!(total, 1500);
@@ -494,7 +534,9 @@ mod tests {
 
         // Record an execution — the log subscriber should emit tracing messages
         monitor.record_execution_start("test").await;
-        monitor.record_execution_end("test", 50, 1000, 500, true).await;
+        monitor
+            .record_execution_end("test", 50, 1000, 500, true)
+            .await;
 
         // Verify metrics still work
         let metrics = monitor.get_metrics("test").await;
@@ -504,11 +546,31 @@ mod tests {
     #[test]
     fn test_wasm_resource_event_variants() {
         let events = [
-            WasmResourceEvent::FuelConsumed { module_name: "a".to_string(), fuel_before: 100, fuel_after: 50 },
-            WasmResourceEvent::FuelLow { module_name: "a".to_string(), fuel_remaining: 10, fuel_limit: 100 },
-            WasmResourceEvent::MemoryNearLimit { module_name: "a".to_string(), pages_used: 15, pages_limit: 16 },
-            WasmResourceEvent::TimeoutExceeded { module_name: "a".to_string(), elapsed_ms: 30000, limit_ms: 30000 },
-            WasmResourceEvent::ExecutionCompleted { module_name: "a".to_string(), elapsed_ms: 50, fuel_consumed: 50 },
+            WasmResourceEvent::FuelConsumed {
+                module_name: "a".to_string(),
+                fuel_before: 100,
+                fuel_after: 50,
+            },
+            WasmResourceEvent::FuelLow {
+                module_name: "a".to_string(),
+                fuel_remaining: 10,
+                fuel_limit: 100,
+            },
+            WasmResourceEvent::MemoryNearLimit {
+                module_name: "a".to_string(),
+                pages_used: 15,
+                pages_limit: 16,
+            },
+            WasmResourceEvent::TimeoutExceeded {
+                module_name: "a".to_string(),
+                elapsed_ms: 30000,
+                limit_ms: 30000,
+            },
+            WasmResourceEvent::ExecutionCompleted {
+                module_name: "a".to_string(),
+                elapsed_ms: 50,
+                fuel_consumed: 50,
+            },
         ];
         assert_eq!(events.len(), 5);
     }

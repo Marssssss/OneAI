@@ -4,9 +4,7 @@
 //! and other async indicators.
 
 /// Spinner frames using Braille patterns.
-pub const SPINNER_FRAMES: &[&str] = &[
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Get the current spinner character based on the frame index.
 pub fn spinner_char(frame: usize) -> &'static str {

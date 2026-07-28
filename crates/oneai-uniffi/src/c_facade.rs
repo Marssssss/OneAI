@@ -19,7 +19,6 @@
 // an unsafe-contract boundary (null/stale pointers are UB, same as any C API).
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::OnceLock;
@@ -80,12 +79,24 @@ fn parse_scenario(json: &str) -> Option<ScenarioSpecView> {
     let mut agents = Vec::with_capacity(members.len());
     for m in members {
         let s = |k: &str| m.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let opt = |k: &str| m.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let opt = |k: &str| {
+            m.get(k)
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        };
         agents.push(AgentSpecView {
             id: s("id"),
             name: s("name"),
             system_prompt: s("system_prompt"),
-            kind: { let k = s("kind"); if k.is_empty() { "openai".to_string() } else { k } },
+            kind: {
+                let k = s("kind");
+                if k.is_empty() {
+                    "openai".to_string()
+                } else {
+                    k
+                }
+            },
             model: s("model"),
             api_key: opt("api_key"),
             base_url: opt("base_url"),
@@ -93,16 +104,27 @@ fn parse_scenario(json: &str) -> Option<ScenarioSpecView> {
             avatar: opt("avatar"),
         });
     }
-    let opt_str = |k: &str| v.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let opt_str = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
     let opt_strs = |k: &str| {
         v.get(k).and_then(|x| x.as_array()).map(|a| {
-            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>()
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
         })
     };
     let review_loop = v.get("review_loop").map(|r| {
         let rs = |k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let max = r.get("max_rounds").and_then(|x| x.as_u64()).unwrap_or(1);
-        ReviewLoopSpecView { reviewer_id: rs("reviewer_id"), approve_marker: rs("approve_marker"), max_rounds: max }
+        ReviewLoopSpecView {
+            reviewer_id: rs("reviewer_id"),
+            approve_marker: rs("approve_marker"),
+            max_rounds: max,
+        }
     });
     Some(ScenarioSpecView {
         members: agents,
@@ -167,37 +189,70 @@ fn event_to_json(e: &ChatEventView) -> String {
     let mut o = String::new();
     match e {
         ChatEventView::StreamChunk { text, speaker } => {
-            o.push_str("{\"type\":\"StreamChunk\",\"text\":"); j_escape(text, &mut o);
-            push_speaker(&mut o, speaker); o.push('}');
+            o.push_str("{\"type\":\"StreamChunk\",\"text\":");
+            j_escape(text, &mut o);
+            push_speaker(&mut o, speaker);
+            o.push('}');
         }
         ChatEventView::Thinking { text, speaker } => {
-            o.push_str("{\"type\":\"Thinking\",\"text\":"); j_escape(text, &mut o);
-            push_speaker(&mut o, speaker); o.push('}');
+            o.push_str("{\"type\":\"Thinking\",\"text\":");
+            j_escape(text, &mut o);
+            push_speaker(&mut o, speaker);
+            o.push('}');
         }
-        ChatEventView::ToolCall { id, name, args_json, speaker } => {
-            o.push_str("{\"type\":\"ToolCall\",\"id\":"); j_escape(id, &mut o);
-            o.push_str(",\"name\":"); j_escape(name, &mut o);
-            o.push_str(",\"args_json\":"); j_escape(args_json, &mut o);
-            push_speaker(&mut o, speaker); o.push('}');
+        ChatEventView::ToolCall {
+            id,
+            name,
+            args_json,
+            speaker,
+        } => {
+            o.push_str("{\"type\":\"ToolCall\",\"id\":");
+            j_escape(id, &mut o);
+            o.push_str(",\"name\":");
+            j_escape(name, &mut o);
+            o.push_str(",\"args_json\":");
+            j_escape(args_json, &mut o);
+            push_speaker(&mut o, speaker);
+            o.push('}');
         }
-        ChatEventView::ToolResult { call_id, tool_name, content, success, speaker } => {
-            o.push_str("{\"type\":\"ToolResult\",\"call_id\":"); j_escape(call_id, &mut o);
-            o.push_str(",\"tool_name\":"); j_escape(tool_name, &mut o);
-            o.push_str(",\"content\":"); j_escape(content, &mut o);
-            o.push_str(",\"success\":"); o.push_str(if *success { "true" } else { "false" });
-            push_speaker(&mut o, speaker); o.push('}');
+        ChatEventView::ToolResult {
+            call_id,
+            tool_name,
+            content,
+            success,
+            speaker,
+        } => {
+            o.push_str("{\"type\":\"ToolResult\",\"call_id\":");
+            j_escape(call_id, &mut o);
+            o.push_str(",\"tool_name\":");
+            j_escape(tool_name, &mut o);
+            o.push_str(",\"content\":");
+            j_escape(content, &mut o);
+            o.push_str(",\"success\":");
+            o.push_str(if *success { "true" } else { "false" });
+            push_speaker(&mut o, speaker);
+            o.push('}');
         }
         ChatEventView::DirectAnswer { text, speaker } => {
-            o.push_str("{\"type\":\"DirectAnswer\",\"text\":"); j_escape(text, &mut o);
-            push_speaker(&mut o, speaker); o.push('}');
+            o.push_str("{\"type\":\"DirectAnswer\",\"text\":");
+            j_escape(text, &mut o);
+            push_speaker(&mut o, speaker);
+            o.push('}');
         }
-        ChatEventView::Complete { final_text, speaker } => {
-            o.push_str("{\"type\":\"Complete\",\"final_text\":"); j_escape(final_text, &mut o);
-            push_speaker(&mut o, speaker); o.push('}');
+        ChatEventView::Complete {
+            final_text,
+            speaker,
+        } => {
+            o.push_str("{\"type\":\"Complete\",\"final_text\":");
+            j_escape(final_text, &mut o);
+            push_speaker(&mut o, speaker);
+            o.push('}');
         }
         ChatEventView::Error { message, speaker } => {
-            o.push_str("{\"type\":\"Error\",\"message\":"); j_escape(message, &mut o);
-            push_speaker(&mut o, speaker); o.push('}');
+            o.push_str("{\"type\":\"Error\",\"message\":");
+            j_escape(message, &mut o);
+            push_speaker(&mut o, speaker);
+            o.push('}');
         }
     }
     o
@@ -227,14 +282,22 @@ fn return_string(s: String) -> *mut c_char {
 
 fn err_msg(e: OneAIErrorView) -> String {
     match e {
-        OneAIErrorView::Provider { message: m } | OneAIErrorView::Parser { message: m }
-        | OneAIErrorView::Tool { message: m } | OneAIErrorView::Memory { message: m }
-        | OneAIErrorView::Workflow { message: m } | OneAIErrorView::Agent { message: m }
-        | OneAIErrorView::Skill { message: m } | OneAIErrorView::Scheduler { message: m }
-        | OneAIErrorView::Persistence { message: m } | OneAIErrorView::Rag { message: m }
-        | OneAIErrorView::Config { message: m } | OneAIErrorView::Serialization { message: m }
-        | OneAIErrorView::Network { message: m } | OneAIErrorView::Timeout { message: m }
-        | OneAIErrorView::Platform { message: m } | OneAIErrorView::Wasm { message: m }
+        OneAIErrorView::Provider { message: m }
+        | OneAIErrorView::Parser { message: m }
+        | OneAIErrorView::Tool { message: m }
+        | OneAIErrorView::Memory { message: m }
+        | OneAIErrorView::Workflow { message: m }
+        | OneAIErrorView::Agent { message: m }
+        | OneAIErrorView::Skill { message: m }
+        | OneAIErrorView::Scheduler { message: m }
+        | OneAIErrorView::Persistence { message: m }
+        | OneAIErrorView::Rag { message: m }
+        | OneAIErrorView::Config { message: m }
+        | OneAIErrorView::Serialization { message: m }
+        | OneAIErrorView::Network { message: m }
+        | OneAIErrorView::Timeout { message: m }
+        | OneAIErrorView::Platform { message: m }
+        | OneAIErrorView::Wasm { message: m }
         | OneAIErrorView::Other { message: m } => m,
     }
 }
@@ -259,7 +322,9 @@ impl ChatEventCallback for CCallback {
 }
 
 fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
-    if p.is_null() { return None; }
+    if p.is_null() {
+        return None;
+    }
     unsafe { CStr::from_ptr(p).to_str().ok() }
 }
 
@@ -277,24 +342,40 @@ pub extern "C" fn oneai_create_app(config_json: *const c_char) -> AppHandle {
     };
     let cfg = match cfg {
         Some(c) => c,
-        None => { set_last_error("invalid config_json".into()); return std::ptr::null_mut(); }
+        None => {
+            set_last_error("invalid config_json".into());
+            return std::ptr::null_mut();
+        }
     };
     let app = runtime().block_on(async move {
         let mut b = std::sync::Arc::new(OneAIAppBuilder::new());
-        if cfg.default_tools { b = b.default_tools(); }
-        if let Some(db) = cfg.db_path.as_ref() { b = b.sqlite_persistence_at(db.clone()); }
+        if cfg.default_tools {
+            b = b.default_tools();
+        }
+        if let Some(db) = cfg.db_path.as_ref() {
+            b = b.sqlite_persistence_at(db.clone());
+        }
         if let Some(emb) = cfg.embedding.as_ref() {
             match b.embedding_config(emb.clone()) {
                 Ok(b2) => b = b2,
-                Err(e) => { set_last_error(err_msg(e)); return None; }
+                Err(e) => {
+                    set_last_error(err_msg(e));
+                    return None;
+                }
             }
         }
         match b.provider_config(cfg.provider) {
             Ok(b2) => match b2.build().await {
                 Ok(a) => Some(a),
-                Err(e) => { set_last_error(err_msg(e)); None }
+                Err(e) => {
+                    set_last_error(err_msg(e));
+                    None
+                }
             },
-            Err(e) => { set_last_error(err_msg(e)); None }
+            Err(e) => {
+                set_last_error(err_msg(e));
+                None
+            }
         }
     });
     match app {
@@ -305,12 +386,18 @@ pub extern "C" fn oneai_create_app(config_json: *const c_char) -> AppHandle {
 
 #[no_mangle]
 pub extern "C" fn oneai_free_app(h: AppHandle) {
-    if !h.is_null() { unsafe { drop(Box::from_raw(h)); } }
+    if !h.is_null() {
+        unsafe {
+            drop(Box::from_raw(h));
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn oneai_has_provider(h: AppHandle) -> bool {
-    if h.is_null() { return false; }
+    if h.is_null() {
+        return false;
+    }
     unsafe { borrow_app(h).has_provider() }
 }
 
@@ -318,7 +405,9 @@ pub extern "C" fn oneai_has_provider(h: AppHandle) -> bool {
 /// otherwise the conversation with that id is resumed (history loaded).
 #[no_mangle]
 pub extern "C" fn oneai_create_session(h: AppHandle, id: *const c_char) -> SessionHandle {
-    if h.is_null() { return std::ptr::null_mut(); }
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
     let app = unsafe { borrow_app(h) };
     let id = cstr(id).map(|s| s.to_string()).unwrap_or_default();
     let sess = if id.is_empty() {
@@ -332,13 +421,19 @@ pub extern "C" fn oneai_create_session(h: AppHandle, id: *const c_char) -> Sessi
 
 #[no_mangle]
 pub extern "C" fn oneai_free_session(h: SessionHandle) {
-    if !h.is_null() { unsafe { drop(Box::from_raw(h)); } }
+    if !h.is_null() {
+        unsafe {
+            drop(Box::from_raw(h));
+        }
+    }
 }
 
 /// Returns the session id (caller frees with `oneai_free_string`).
 #[no_mangle]
 pub extern "C" fn oneai_session_id(h: SessionHandle) -> *mut c_char {
-    if h.is_null() { return std::ptr::null_mut(); }
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
     let s = unsafe { borrow_session(h) };
     return_string(s.session_id())
 }
@@ -346,12 +441,16 @@ pub extern "C" fn oneai_session_id(h: SessionHandle) -> *mut c_char {
 /// List conversations as a JSON array (caller frees).
 #[no_mangle]
 pub extern "C" fn oneai_list_conversations(h: AppHandle) -> *mut c_char {
-    if h.is_null() { return std::ptr::null_mut(); }
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
     let app = unsafe { borrow_app(h) };
     let list = runtime().block_on(async move { app.list_conversations().await });
     let mut out = String::from("[");
     for (i, s) in list.iter().enumerate() {
-        if i > 0 { out.push(','); }
+        if i > 0 {
+            out.push(',');
+        }
         out.push_str(&session_to_json(s));
     }
     out.push(']');
@@ -361,7 +460,9 @@ pub extern "C" fn oneai_list_conversations(h: AppHandle) -> *mut c_char {
 /// Delete a conversation by id (best-effort).
 #[no_mangle]
 pub extern "C" fn oneai_delete_conversation(h: AppHandle, id: *const c_char) {
-    if h.is_null() { return; }
+    if h.is_null() {
+        return;
+    }
     let app = unsafe { borrow_app(h) };
     if let Some(id) = cstr(id).map(|s| s.to_string()) {
         let _ = runtime().block_on(async move { app.delete_conversation(id).await });
@@ -371,12 +472,16 @@ pub extern "C" fn oneai_delete_conversation(h: AppHandle, id: *const c_char) {
 /// Snapshot the conversation messages as a JSON array (caller frees).
 #[no_mangle]
 pub extern "C" fn oneai_session_messages(h: SessionHandle) -> *mut c_char {
-    if h.is_null() { return std::ptr::null_mut(); }
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
     let s = unsafe { borrow_session(h) };
     let msgs = runtime().block_on(async move { s.messages().await });
     let mut out = String::from("[");
     for (i, m) in msgs.iter().enumerate() {
-        if i > 0 { out.push(','); }
+        if i > 0 {
+            out.push(',');
+        }
         out.push_str(&message_to_json(m));
     }
     out.push(']');
@@ -386,7 +491,9 @@ pub extern "C" fn oneai_session_messages(h: SessionHandle) -> *mut c_char {
 /// Persist the current conversation to SQLite immediately.
 #[no_mangle]
 pub extern "C" fn oneai_session_save(h: SessionHandle) -> bool {
-    if h.is_null() { return false; }
+    if h.is_null() {
+        return false;
+    }
     let s = unsafe { borrow_session(h) };
     runtime().block_on(async move { s.save().await.is_ok() })
 }
@@ -401,14 +508,20 @@ pub extern "C" fn oneai_session_run_task(
     cb: Option<EventCb>,
     ctx: *mut c_void,
 ) -> *mut c_char {
-    if h.is_null() { return return_string("null session".into()); }
-    let cb = match cb { Some(f) => f, None => return return_string("no callback".into()) };
+    if h.is_null() {
+        return return_string("null session".into());
+    }
+    let cb = match cb {
+        Some(f) => f,
+        None => return return_string("no callback".into()),
+    };
     let task = match cstr(task).map(|s| s.to_string()) {
         Some(t) => t,
         None => return return_string("invalid task".into()),
     };
     let s = unsafe { borrow_session(h) };
-    let callback: std::sync::Arc<dyn ChatEventCallback> = std::sync::Arc::new(CCallback { cb, ctx });
+    let callback: std::sync::Arc<dyn ChatEventCallback> =
+        std::sync::Arc::new(CCallback { cb, ctx });
     match runtime().block_on(async move { s.run_task(task, callback).await }) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => return_string(err_msg(e)),
@@ -418,7 +531,9 @@ pub extern "C" fn oneai_session_run_task(
 /// Request the running agent loop to interrupt at the next boundary.
 #[no_mangle]
 pub extern "C" fn oneai_session_interrupt(h: SessionHandle) {
-    if h.is_null() { return; }
+    if h.is_null() {
+        return;
+    }
     let s = unsafe { borrow_session(h) };
     runtime().block_on(async move { s.interrupt().await });
 }
@@ -439,22 +554,38 @@ pub extern "C" fn oneai_session_interrupt(h: SessionHandle) {
 /// `parse_scenario` for the shape). Returns an opaque handle, or null on
 /// error (call `oneai_last_error`).
 #[no_mangle]
-pub extern "C" fn oneai_create_group_session(app: AppHandle, scenario_json: *const c_char) -> GroupSessionHandle {
-    if app.is_null() { set_last_error("null app".into()); return std::ptr::null_mut(); }
+pub extern "C" fn oneai_create_group_session(
+    app: AppHandle,
+    scenario_json: *const c_char,
+) -> GroupSessionHandle {
+    if app.is_null() {
+        set_last_error("null app".into());
+        return std::ptr::null_mut();
+    }
     let spec = match cstr(scenario_json).and_then(parse_scenario) {
         Some(s) => s,
-        None => { set_last_error("invalid scenario_json".into()); return std::ptr::null_mut(); }
+        None => {
+            set_last_error("invalid scenario_json".into());
+            return std::ptr::null_mut();
+        }
     };
     let app = unsafe { borrow_app(app) };
     match OneAiGroupChatSession::build(spec, &app.inner) {
         Ok(gs) => Box::into_raw(Box::new(gs)),
-        Err(e) => { set_last_error(err_msg(e)); std::ptr::null_mut() }
+        Err(e) => {
+            set_last_error(err_msg(e));
+            std::ptr::null_mut()
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn oneai_free_group_session(h: GroupSessionHandle) {
-    if !h.is_null() { unsafe { drop(Box::from_raw(h)); } }
+    if !h.is_null() {
+        unsafe {
+            drop(Box::from_raw(h));
+        }
+    }
 }
 
 /// Run the scenario's opener turn (if configured). Call before the first
@@ -466,10 +597,16 @@ pub extern "C" fn oneai_group_start(
     cb: Option<EventCb>,
     ctx: *mut c_void,
 ) -> *mut c_char {
-    if h.is_null() { return return_string("null group session".into()); }
-    let cb = match cb { Some(f) => f, None => return return_string("no callback".into()) };
+    if h.is_null() {
+        return return_string("null group session".into());
+    }
+    let cb = match cb {
+        Some(f) => f,
+        None => return return_string("no callback".into()),
+    };
     let gs = unsafe { borrow_group(h) };
-    let callback: std::sync::Arc<dyn ChatEventCallback> = std::sync::Arc::new(CCallback { cb, ctx });
+    let callback: std::sync::Arc<dyn ChatEventCallback> =
+        std::sync::Arc::new(CCallback { cb, ctx });
     match runtime().block_on(async move { gs.start(callback).await }) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => return_string(err_msg(e)),
@@ -486,14 +623,20 @@ pub extern "C" fn oneai_group_run_task(
     cb: Option<EventCb>,
     ctx: *mut c_void,
 ) -> *mut c_char {
-    if h.is_null() { return return_string("null group session".into()); }
-    let cb = match cb { Some(f) => f, None => return return_string("no callback".into()) };
+    if h.is_null() {
+        return return_string("null group session".into());
+    }
+    let cb = match cb {
+        Some(f) => f,
+        None => return return_string("no callback".into()),
+    };
     let input = match cstr(user_input).map(|s| s.to_string()) {
         Some(t) => t,
         None => return return_string("invalid user_input".into()),
     };
     let gs = unsafe { borrow_group(h) };
-    let callback: std::sync::Arc<dyn ChatEventCallback> = std::sync::Arc::new(CCallback { cb, ctx });
+    let callback: std::sync::Arc<dyn ChatEventCallback> =
+        std::sync::Arc::new(CCallback { cb, ctx });
     match runtime().block_on(async move { gs.run_task(input, callback).await }) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => return_string(err_msg(e)),
@@ -503,7 +646,9 @@ pub extern "C" fn oneai_group_run_task(
 /// Request the running member to interrupt at the next boundary.
 #[no_mangle]
 pub extern "C" fn oneai_group_interrupt(h: GroupSessionHandle) {
-    if h.is_null() { return; }
+    if h.is_null() {
+        return;
+    }
     let gs = unsafe { borrow_group(h) };
     runtime().block_on(async move { gs.interrupt().await });
 }
@@ -513,12 +658,18 @@ pub extern "C" fn oneai_group_interrupt(h: GroupSessionHandle) {
 /// speakers mid-conversation (e.g. interview debrief → coach-only).
 /// Returns null on success, else an error (caller frees).
 #[no_mangle]
-pub extern "C" fn oneai_group_set_scripted_order(h: GroupSessionHandle, order_json: *const c_char) -> *mut c_char {
-    if h.is_null() { return return_string("null group session".into()); }
-    let order: Vec<String> = match cstr(order_json).and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()) {
-        Some(o) => o,
-        None => return return_string("invalid order_json (expected [\"id\",..])".into()),
-    };
+pub extern "C" fn oneai_group_set_scripted_order(
+    h: GroupSessionHandle,
+    order_json: *const c_char,
+) -> *mut c_char {
+    if h.is_null() {
+        return return_string("null group session".into());
+    }
+    let order: Vec<String> =
+        match cstr(order_json).and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()) {
+            Some(o) => o,
+            None => return return_string("invalid order_json (expected [\"id\",..])".into()),
+        };
     let gs = unsafe { borrow_group(h) };
     runtime().block_on(async move { gs.set_scripted_order(order).await });
     std::ptr::null_mut()
@@ -528,12 +679,16 @@ pub extern "C" fn oneai_group_set_scripted_order(h: GroupSessionHandle, order_js
 /// array; caller frees). For replaying a resumed scenario session.
 #[no_mangle]
 pub extern "C" fn oneai_group_messages(h: GroupSessionHandle) -> *mut c_char {
-    if h.is_null() { return std::ptr::null_mut(); }
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
     let gs = unsafe { borrow_group(h) };
     let msgs = runtime().block_on(async move { gs.messages().await });
     let mut out = String::from("[");
     for (i, m) in msgs.iter().enumerate() {
-        if i > 0 { out.push(','); }
+        if i > 0 {
+            out.push(',');
+        }
         out.push_str(&message_to_json(m));
     }
     out.push(']');
@@ -544,14 +699,20 @@ pub extern "C" fn oneai_group_messages(h: GroupSessionHandle) -> *mut c_char {
 /// persistence). `run_task` already auto-saves after each round.
 #[no_mangle]
 pub extern "C" fn oneai_group_save(h: GroupSessionHandle) -> bool {
-    if h.is_null() { return false; }
+    if h.is_null() {
+        return false;
+    }
     let gs = unsafe { borrow_group(h) };
     runtime().block_on(async move { gs.save().await.is_ok() })
 }
 
 #[no_mangle]
 pub extern "C" fn oneai_free_string(p: *mut c_char) {
-    if !p.is_null() { unsafe { drop(CString::from_raw(p)); } }
+    if !p.is_null() {
+        unsafe {
+            drop(CString::from_raw(p));
+        }
+    }
 }
 
 // ─── last-error (thread-local; set on failure, read by the foreign side) ─
@@ -559,12 +720,17 @@ thread_local! {
     static LAST_ERROR: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
 }
 fn set_last_error(msg: String) {
-    if let Ok(c) = CString::new(msg) { LAST_ERROR.with(|e| *e.borrow_mut() = Some(c)); }
+    if let Ok(c) = CString::new(msg) {
+        LAST_ERROR.with(|e| *e.borrow_mut() = Some(c));
+    }
 }
 #[no_mangle]
 pub extern "C" fn oneai_last_error() -> *const c_char {
     LAST_ERROR.with(|e| {
-        e.borrow().as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null())
+        e.borrow()
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null())
     })
 }
 
@@ -579,27 +745,83 @@ struct Cfg {
 fn parse_config(json: &str) -> Option<Cfg> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let kind = v.get("kind").and_then(|x| x.as_str())?.to_string();
-    let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let api_key = v.get("api_key").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let base_url = v.get("base_url").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let host = v.get("host").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let model = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let api_key = v
+        .get("api_key")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let base_url = v
+        .get("base_url")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let host = v
+        .get("host")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     let port = v.get("port").and_then(|x| x.as_u64()).map(|p| p as u16);
-    let db_path = v.get("db_path").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let default_tools = v.get("default_tools").and_then(|x| x.as_bool()).unwrap_or(true);
+    let db_path = v
+        .get("db_path")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let default_tools = v
+        .get("default_tools")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
     let embedding = v.get("embedding").and_then(parse_embedding);
     Some(Cfg {
-        provider: ProviderConfigView { kind, api_key, base_url, model, host, port },
-        db_path, default_tools, embedding,
+        provider: ProviderConfigView {
+            kind,
+            api_key,
+            base_url,
+            model,
+            host,
+            port,
+        },
+        db_path,
+        default_tools,
+        embedding,
     })
 }
 
 fn parse_embedding(v: &serde_json::Value) -> Option<EmbeddingConfigView> {
-    let provider = v.get("provider").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
-    let model = v.get("model").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let api_key = v.get("api_key").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let base_url = v.get("base_url").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-    let fallback = v.get("fallback").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-    Some(EmbeddingConfigView { provider, model, api_key, base_url, fallback })
+    let provider = v
+        .get("provider")
+        .and_then(|x| x.as_str())
+        .unwrap_or("auto")
+        .to_string();
+    let model = v
+        .get("model")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let api_key = v
+        .get("api_key")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let base_url = v
+        .get("base_url")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let fallback = v
+        .get("fallback")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Some(EmbeddingConfigView {
+        provider,
+        model,
+        api_key,
+        base_url,
+        fallback,
+    })
 }
 
 #[cfg(test)]
@@ -609,18 +831,28 @@ mod tests {
 
     fn tmp_db(name: &str) -> String {
         let p = std::env::temp_dir().join(format!(
-            "oneai_cfacade_{}_{}_{}.db", name, std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            "oneai_cfacade_{}_{}_{}.db",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let _ = std::fs::remove_file(&p);
         p.to_string_lossy().into_owned()
     }
 
-    struct Collecting { events: Mutex<Vec<String>> }
+    struct Collecting {
+        events: Mutex<Vec<String>>,
+    }
     extern "C" fn collect(ctx: *mut c_void, json: *const c_char) {
         let c = unsafe { &*(ctx as *const Collecting) };
         if !json.is_null() {
-            let s = unsafe { CStr::from_ptr(json) }.to_str().unwrap().to_string();
+            let s = unsafe { CStr::from_ptr(json) }
+                .to_str()
+                .unwrap()
+                .to_string();
             c.events.lock().unwrap().push(s);
         }
     }
@@ -635,8 +867,13 @@ mod tests {
             db
         );
         let h = oneai_create_app(unsafe { CStr::from_ptr(cfg.as_ptr() as *const c_char) }.as_ptr());
-        assert!(!h.is_null(), "create_app should succeed; err={:?}",
-            unsafe { CStr::from_ptr(oneai_last_error()) }.to_str().unwrap_or(""));
+        assert!(
+            !h.is_null(),
+            "create_app should succeed; err={:?}",
+            unsafe { CStr::from_ptr(oneai_last_error()) }
+                .to_str()
+                .unwrap_or("")
+        );
         assert!(unsafe { borrow_app(h) }.has_provider());
         oneai_free_app(h);
     }
@@ -644,7 +881,10 @@ mod tests {
     #[test]
     fn session_id_and_messages_roundtrip() {
         let db = tmp_db("msg");
-        let cfg = format!("{{\"kind\":\"openai\",\"api_key\":\"sk\",\"model\":\"gpt-4o\",\"db_path\":\"{}\"}}", db);
+        let cfg = format!(
+            "{{\"kind\":\"openai\",\"api_key\":\"sk\",\"model\":\"gpt-4o\",\"db_path\":\"{}\"}}",
+            db
+        );
         let c = CString::new(cfg).unwrap();
         let app = oneai_create_app(c.as_ptr());
         assert!(!app.is_null());
@@ -655,7 +895,10 @@ mod tests {
         oneai_free_string(id_ptr);
         // messages() on a fresh session is empty
         let m_ptr = oneai_session_messages(s);
-        let m = unsafe { CStr::from_ptr(m_ptr) }.to_str().unwrap().to_string();
+        let m = unsafe { CStr::from_ptr(m_ptr) }
+            .to_str()
+            .unwrap()
+            .to_string();
         oneai_free_string(m_ptr);
         assert_eq!(m, "[]");
         oneai_free_session(s);
@@ -664,19 +907,39 @@ mod tests {
 
     #[test]
     fn event_to_json_shape() {
-        let e = ChatEventView::StreamChunk { text: "hi".into(), speaker: None };
-        assert_eq!(event_to_json(&e), "{\"type\":\"StreamChunk\",\"text\":\"hi\",\"speaker\":null}");
-        let e = ChatEventView::ToolResult { call_id: "1".into(), tool_name: "calc".into(), content: "5".into(), success: true, speaker: Some("interviewer".into()) };
+        let e = ChatEventView::StreamChunk {
+            text: "hi".into(),
+            speaker: None,
+        };
+        assert_eq!(
+            event_to_json(&e),
+            "{\"type\":\"StreamChunk\",\"text\":\"hi\",\"speaker\":null}"
+        );
+        let e = ChatEventView::ToolResult {
+            call_id: "1".into(),
+            tool_name: "calc".into(),
+            content: "5".into(),
+            success: true,
+            speaker: Some("interviewer".into()),
+        };
         assert!(event_to_json(&e).contains("\"success\":true"));
         assert!(event_to_json(&e).contains("\"speaker\":\"interviewer\""));
     }
 
     #[test]
     fn callback_adapter_invokes_c_fn() {
-        let c = Box::new(Collecting { events: Mutex::new(vec![]) });
+        let c = Box::new(Collecting {
+            events: Mutex::new(vec![]),
+        });
         let ctx = &*c as *const Collecting as *mut c_void;
         let adapter = CCallback { cb: collect, ctx };
-        ChatEventCallback::on_event(&adapter, ChatEventView::Thinking { text: "x".into(), speaker: None });
+        ChatEventCallback::on_event(
+            &adapter,
+            ChatEventView::Thinking {
+                text: "x".into(),
+                speaker: None,
+            },
+        );
         assert_eq!(c.events.lock().unwrap().len(), 1);
         assert!(c.events.lock().unwrap()[0].contains("Thinking"));
     }
@@ -721,11 +984,19 @@ mod tests {
             {"id":"editor","name":"编辑","system_prompt":"润色","kind":"openai","model":"gpt-4o","api_key":"sk-test"}
         ],"turn_policy":"scripted","script_order":["writer","editor"]}"#;
         let gs = oneai_create_group_session(app, CString::new(sc).unwrap().as_ptr());
-        assert!(!gs.is_null(), "create_group_session should succeed; err={:?}",
-            unsafe { CStr::from_ptr(oneai_last_error()) }.to_str().unwrap_or(""));
+        assert!(
+            !gs.is_null(),
+            "create_group_session should succeed; err={:?}",
+            unsafe { CStr::from_ptr(oneai_last_error()) }
+                .to_str()
+                .unwrap_or("")
+        );
         // Fresh group session has no messages yet.
         let m_ptr = oneai_group_messages(gs);
-        let m = unsafe { CStr::from_ptr(m_ptr) }.to_str().unwrap().to_string();
+        let m = unsafe { CStr::from_ptr(m_ptr) }
+            .to_str()
+            .unwrap()
+            .to_string();
         oneai_free_string(m_ptr);
         assert_eq!(m, "[]");
         oneai_free_group_session(gs);

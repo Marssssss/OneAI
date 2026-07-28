@@ -18,9 +18,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oneai_core::{RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
+use oneai_core::{RiskLevel, ToolOutput};
 
 use crate::runtime::WasmRuntime;
 
@@ -62,7 +62,12 @@ pub enum WasmActionKind {
 impl WasmActionKind {
     /// Get all available action kinds.
     pub fn all() -> Vec<WasmActionKind> {
-        vec![WasmActionKind::Compute, WasmActionKind::Sort, WasmActionKind::Filter, WasmActionKind::Extract]
+        vec![
+            WasmActionKind::Compute,
+            WasmActionKind::Sort,
+            WasmActionKind::Filter,
+            WasmActionKind::Extract,
+        ]
     }
 
     /// Get the template name for this kind.
@@ -88,18 +93,26 @@ impl WasmActionKind {
     /// Get the description for this kind.
     pub fn description(&self) -> &str {
         match self {
-            WasmActionKind::Compute => "Evaluate mathematical expressions in a WASM sandbox. \
+            WasmActionKind::Compute => {
+                "Evaluate mathematical expressions in a WASM sandbox. \
                 Supports arithmetic, trigonometry, logarithms, and comparisons. \
-                Safer than ShellTool for pure computation tasks.",
-            WasmActionKind::Sort => "Sort data in a WASM sandbox. \
+                Safer than ShellTool for pure computation tasks."
+            }
+            WasmActionKind::Sort => {
+                "Sort data in a WASM sandbox. \
                 Supports ascending, descending, and key-based sorting. \
-                Zero I/O access — data is passed as input and returned as output.",
-            WasmActionKind::Filter => "Filter data in a WASM sandbox. \
+                Zero I/O access — data is passed as input and returned as output."
+            }
+            WasmActionKind::Filter => {
+                "Filter data in a WASM sandbox. \
                 Supports conditional, regex, and threshold-based filtering. \
-                All processing happens in sandboxed WASM memory.",
-            WasmActionKind::Extract => "Extract data from JSON structures in a WASM sandbox. \
+                All processing happens in sandboxed WASM memory."
+            }
+            WasmActionKind::Extract => {
+                "Extract data from JSON structures in a WASM sandbox. \
                 Supports path-based and key-based extraction. \
-                No filesystem access — input JSON is passed directly.",
+                No filesystem access — input JSON is passed directly."
+            }
         }
     }
 
@@ -256,11 +269,17 @@ impl WasmActionTemplate {
     }
 
     /// Execute via WASM sandbox (attempt WASM, fallback on failure).
-    fn execute_wasm(&self, _args: serde_json::Value, _runtime: &Arc<WasmRuntime>) -> std::result::Result<ToolOutput, crate::error::WasmError> {
-        let _bytes = self.wasm_bytes()
-            .ok_or_else(|| crate::error::WasmError::ModuleNotFound(format!(
-                "No pre-compiled WASM bytes for template '{}'", self.kind.template_name()
-            )))?;
+    fn execute_wasm(
+        &self,
+        _args: serde_json::Value,
+        _runtime: &Arc<WasmRuntime>,
+    ) -> std::result::Result<ToolOutput, crate::error::WasmError> {
+        let _bytes = self.wasm_bytes().ok_or_else(|| {
+            crate::error::WasmError::ModuleNotFound(format!(
+                "No pre-compiled WASM bytes for template '{}'",
+                self.kind.template_name()
+            ))
+        })?;
 
         // For now, this always returns Err because wasm_bytes() returns None.
         // When pre-compiled bytes are added, this will:
@@ -268,7 +287,8 @@ impl WasmActionTemplate {
         // 2. Instantiate and execute in sandbox
         // 3. Parse the output
         Err(crate::error::WasmError::ModuleNotFound(format!(
-            "Pre-compiled WASM bytes not yet available for '{}'", self.kind.template_name()
+            "Pre-compiled WASM bytes not yet available for '{}'",
+            self.kind.template_name()
         )))
     }
 
@@ -285,7 +305,8 @@ impl WasmActionTemplate {
     // ─── Compute template ────────────────────────────────────────────────
 
     fn execute_compute(&self, args: serde_json::Value) -> ToolOutput {
-        let expression = args.get("expression")
+        let expression = args
+            .get("expression")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
@@ -318,8 +339,7 @@ impl WasmActionTemplate {
     // ─── Sort template ───────────────────────────────────────────────────
 
     fn execute_sort(&self, args: serde_json::Value) -> ToolOutput {
-        let data = args.get("data")
-            .and_then(|v| v.as_array());
+        let data = args.get("data").and_then(|v| v.as_array());
 
         if data.is_none() {
             return ToolOutput {
@@ -330,11 +350,11 @@ impl WasmActionTemplate {
         }
 
         let data = data.unwrap();
-        let order = args.get("order")
+        let order = args
+            .get("order")
             .and_then(|v| v.as_str())
             .unwrap_or("ascending");
-        let key = args.get("key")
-            .and_then(|v| v.as_str());
+        let key = args.get("key").and_then(|v| v.as_str());
 
         // Sort values
         let mut sorted: Vec<serde_json::Value> = data.clone();
@@ -345,18 +365,20 @@ impl WasmActionTemplate {
             sorted.sort_by(|a, b| {
                 let a_val = a.get(&key).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let b_val = b.get(&key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                a_val.partial_cmp(&b_val).unwrap_or(std::cmp::Ordering::Equal)
+                a_val
+                    .partial_cmp(&b_val)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
         } else {
             // Sort primitives by numeric value (if possible) or string
-            sorted.sort_by(|a, b| {
-                match (a.as_f64(), b.as_f64()) {
-                    (Some(a_n), Some(b_n)) => a_n.partial_cmp(&b_n).unwrap_or(std::cmp::Ordering::Equal),
-                    _ => {
-                        let a_str = a.as_str().unwrap_or("");
-                        let b_str = b.as_str().unwrap_or("");
-                        a_str.cmp(b_str)
-                    }
+            sorted.sort_by(|a, b| match (a.as_f64(), b.as_f64()) {
+                (Some(a_n), Some(b_n)) => {
+                    a_n.partial_cmp(&b_n).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                _ => {
+                    let a_str = a.as_str().unwrap_or("");
+                    let b_str = b.as_str().unwrap_or("");
+                    a_str.cmp(b_str)
                 }
             });
         }
@@ -367,7 +389,9 @@ impl WasmActionTemplate {
 
         ToolOutput {
             success: true,
-            content: serde_json::to_string_pretty(&sorted).unwrap_or_else(|_| serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())),
+            content: serde_json::to_string_pretty(&sorted).unwrap_or_else(|_| {
+                serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
+            }),
             error: None,
         }
     }
@@ -375,8 +399,7 @@ impl WasmActionTemplate {
     // ─── Filter template ─────────────────────────────────────────────────
 
     fn execute_filter(&self, args: serde_json::Value) -> ToolOutput {
-        let data = args.get("data")
-            .and_then(|v| v.as_array());
+        let data = args.get("data").and_then(|v| v.as_array());
 
         if data.is_none() {
             return ToolOutput {
@@ -387,18 +410,19 @@ impl WasmActionTemplate {
         }
 
         let data = data.unwrap();
-        let condition = args.get("condition")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let condition = args.get("condition").and_then(|v| v.as_str()).unwrap_or("");
 
-        let filtered: Vec<serde_json::Value> = data.iter()
+        let filtered: Vec<serde_json::Value> = data
+            .iter()
             .filter(|item| matches_condition(item, condition, args.get("threshold")))
             .cloned()
             .collect();
 
         ToolOutput {
             success: true,
-            content: serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string())),
+            content: serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| {
+                serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string())
+            }),
             error: None,
         }
     }
@@ -407,9 +431,7 @@ impl WasmActionTemplate {
 
     fn execute_extract(&self, args: serde_json::Value) -> ToolOutput {
         let data = args.get("data");
-        let path = args.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if data.is_none() {
             return ToolOutput {
@@ -424,7 +446,9 @@ impl WasmActionTemplate {
         match result {
             Some(value) => ToolOutput {
                 success: true,
-                content: serde_json::to_string_pretty(&value).unwrap_or_else(|_| serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())),
+                content: serde_json::to_string_pretty(&value).unwrap_or_else(|_| {
+                    serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
+                }),
                 error: None,
             },
             None => ToolOutput {
@@ -451,58 +475,90 @@ pub struct WasmActionTool {
 impl WasmActionTool {
     /// Create a compute action tool (Native mode).
     pub fn compute() -> Self {
-        Self { kind: WasmActionKind::Compute, mode: WasmActionExecutionMode::Native }
+        Self {
+            kind: WasmActionKind::Compute,
+            mode: WasmActionExecutionMode::Native,
+        }
     }
 
     /// Create a sort action tool (Native mode).
     pub fn sort() -> Self {
-        Self { kind: WasmActionKind::Sort, mode: WasmActionExecutionMode::Native }
+        Self {
+            kind: WasmActionKind::Sort,
+            mode: WasmActionExecutionMode::Native,
+        }
     }
 
     /// Create a filter action tool (Native mode).
     pub fn filter() -> Self {
-        Self { kind: WasmActionKind::Filter, mode: WasmActionExecutionMode::Native }
+        Self {
+            kind: WasmActionKind::Filter,
+            mode: WasmActionExecutionMode::Native,
+        }
     }
 
     /// Create an extract action tool (Native mode).
     pub fn extract() -> Self {
-        Self { kind: WasmActionKind::Extract, mode: WasmActionExecutionMode::Native }
+        Self {
+            kind: WasmActionKind::Extract,
+            mode: WasmActionExecutionMode::Native,
+        }
     }
 
     /// Create a compute action tool (Wasm mode).
     pub fn compute_wasm(runtime: Arc<WasmRuntime>) -> Self {
-        Self { kind: WasmActionKind::Compute, mode: WasmActionExecutionMode::Wasm { runtime } }
+        Self {
+            kind: WasmActionKind::Compute,
+            mode: WasmActionExecutionMode::Wasm { runtime },
+        }
     }
 
     /// Create a sort action tool (Wasm mode).
     pub fn sort_wasm(runtime: Arc<WasmRuntime>) -> Self {
-        Self { kind: WasmActionKind::Sort, mode: WasmActionExecutionMode::Wasm { runtime } }
+        Self {
+            kind: WasmActionKind::Sort,
+            mode: WasmActionExecutionMode::Wasm { runtime },
+        }
     }
 
     /// Create a filter action tool (Wasm mode).
     pub fn filter_wasm(runtime: Arc<WasmRuntime>) -> Self {
-        Self { kind: WasmActionKind::Filter, mode: WasmActionExecutionMode::Wasm { runtime } }
+        Self {
+            kind: WasmActionKind::Filter,
+            mode: WasmActionExecutionMode::Wasm { runtime },
+        }
     }
 
     /// Create an extract action tool (Wasm mode).
     pub fn extract_wasm(runtime: Arc<WasmRuntime>) -> Self {
-        Self { kind: WasmActionKind::Extract, mode: WasmActionExecutionMode::Wasm { runtime } }
+        Self {
+            kind: WasmActionKind::Extract,
+            mode: WasmActionExecutionMode::Wasm { runtime },
+        }
     }
 
     /// Create all WASM action tools (Native mode).
     pub fn all() -> Vec<Self> {
-        WasmActionKind::all().iter().map(|kind| Self {
-            kind: kind.clone(),
-            mode: WasmActionExecutionMode::Native,
-        }).collect()
+        WasmActionKind::all()
+            .iter()
+            .map(|kind| Self {
+                kind: kind.clone(),
+                mode: WasmActionExecutionMode::Native,
+            })
+            .collect()
     }
 
     /// Create all WASM action tools (Wasm mode).
     pub fn all_wasm(runtime: Arc<WasmRuntime>) -> Vec<Self> {
-        WasmActionKind::all().iter().map(|kind| Self {
-            kind: kind.clone(),
-            mode: WasmActionExecutionMode::Wasm { runtime: runtime.clone() },
-        }).collect()
+        WasmActionKind::all()
+            .iter()
+            .map(|kind| Self {
+                kind: kind.clone(),
+                mode: WasmActionExecutionMode::Wasm {
+                    runtime: runtime.clone(),
+                },
+            })
+            .collect()
     }
 
     /// Get the action kind.
@@ -550,7 +606,10 @@ impl Tool for WasmActionTool {
 ///
 /// Supports: +, -, *, /, %, ^ (power), parentheses, and named variables.
 /// No external dependencies — pure Rust implementation.
-fn evaluate_expression(expr: &str, variables: Option<&serde_json::Value>) -> std::result::Result<f64, String> {
+fn evaluate_expression(
+    expr: &str,
+    variables: Option<&serde_json::Value>,
+) -> std::result::Result<f64, String> {
     // Replace variable names with their values
     let mut processed = expr.to_string();
     if let Some(vars) = variables {
@@ -568,7 +627,9 @@ fn evaluate_expression(expr: &str, variables: Option<&serde_json::Value>) -> std
     processed = processed.replace("e", &format!("{}", std::f64::consts::E));
 
     // Handle trigonometric functions
-    for func in ["sin", "cos", "tan", "log", "ln", "sqrt", "abs", "floor", "ceil", "round"] {
+    for func in [
+        "sin", "cos", "tan", "log", "ln", "sqrt", "abs", "floor", "ceil", "round",
+    ] {
         if processed.contains(func) {
             // Extract the argument between parentheses
             let pattern = format!("{}(", func);
@@ -590,7 +651,12 @@ fn evaluate_expression(expr: &str, variables: Option<&serde_json::Value>) -> std
                         "round" => arg_val.round(),
                         _ => return Err(format!("Unknown function: {}", func)),
                     };
-                    processed = format!("{}{}{}", &processed[..start], result, &processed[arg_start + end + 1..]);
+                    processed = format!(
+                        "{}{}{}",
+                        &processed[..start],
+                        result,
+                        &processed[arg_start + end + 1..]
+                    );
                 }
             }
         }
@@ -619,8 +685,14 @@ fn simple_arithmetic_eval(expr: &str) -> std::result::Result<f64, String> {
         let mut result = parse_term(chars, pos)?;
         while *pos < chars.len() {
             match chars[*pos] {
-                '+' => { *pos += 1; result += parse_term(chars, pos)?; }
-                '-' => { *pos += 1; result -= parse_term(chars, pos)?; }
+                '+' => {
+                    *pos += 1;
+                    result += parse_term(chars, pos)?;
+                }
+                '-' => {
+                    *pos += 1;
+                    result -= parse_term(chars, pos)?;
+                }
                 _ => break,
             }
         }
@@ -631,9 +703,26 @@ fn simple_arithmetic_eval(expr: &str) -> std::result::Result<f64, String> {
         let mut result = parse_factor(chars, pos)?;
         while *pos < chars.len() {
             match chars[*pos] {
-                '*' => { *pos += 1; result *= parse_factor(chars, pos)?; }
-                '/' => { *pos += 1; let divisor = parse_factor(chars, pos)?; if divisor == 0.0 { return Err("Division by zero".to_string()); } result /= divisor; }
-                '%' => { *pos += 1; let divisor = parse_factor(chars, pos)?; if divisor == 0.0 { return Err("Modulo by zero".to_string()); } result %= divisor; }
+                '*' => {
+                    *pos += 1;
+                    result *= parse_factor(chars, pos)?;
+                }
+                '/' => {
+                    *pos += 1;
+                    let divisor = parse_factor(chars, pos)?;
+                    if divisor == 0.0 {
+                        return Err("Division by zero".to_string());
+                    }
+                    result /= divisor;
+                }
+                '%' => {
+                    *pos += 1;
+                    let divisor = parse_factor(chars, pos)?;
+                    if divisor == 0.0 {
+                        return Err("Modulo by zero".to_string());
+                    }
+                    result %= divisor;
+                }
                 _ => break,
             }
         }
@@ -672,7 +761,9 @@ fn simple_arithmetic_eval(expr: &str) -> std::result::Result<f64, String> {
                 Err(format!("Expected number at position {}", start))
             } else {
                 let num_str: String = chars[start..*pos].iter().collect();
-                num_str.parse::<f64>().map_err(|e| format!("Invalid number '{}': {}", num_str, e))
+                num_str
+                    .parse::<f64>()
+                    .map_err(|e| format!("Invalid number '{}': {}", num_str, e))
             }
         }
     }
@@ -681,34 +772,50 @@ fn simple_arithmetic_eval(expr: &str) -> std::result::Result<f64, String> {
 }
 
 /// Check if a JSON value matches a filter condition.
-fn matches_condition(item: &serde_json::Value, condition: &str, threshold: Option<&serde_json::Value>) -> bool {
+fn matches_condition(
+    item: &serde_json::Value,
+    condition: &str,
+    threshold: Option<&serde_json::Value>,
+) -> bool {
     // Numeric comparison: >5, <10, >=3, <=7, ==5
     if let Some(num) = item.as_f64() {
         if condition.starts_with('>') && !condition.starts_with(">=") {
-            let threshold_val = condition[1..].parse::<f64>().unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
+            let threshold_val = condition[1..]
+                .parse::<f64>()
+                .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num > threshold_val;
         }
         if condition.starts_with(">=") {
-            let threshold_val = condition[2..].parse::<f64>().unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
+            let threshold_val = condition[2..]
+                .parse::<f64>()
+                .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num >= threshold_val;
         }
-        if condition.starts_with('<') && !condition.starts_with("<=") && !condition.starts_with("<<") {
-            let threshold_val = condition[1..].parse::<f64>().unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
+        if condition.starts_with('<')
+            && !condition.starts_with("<=")
+            && !condition.starts_with("<<")
+        {
+            let threshold_val = condition[1..]
+                .parse::<f64>()
+                .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num < threshold_val;
         }
         if condition.starts_with("<=") {
-            let threshold_val = condition[2..].parse::<f64>().unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
+            let threshold_val = condition[2..]
+                .parse::<f64>()
+                .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num <= threshold_val;
         }
         if condition.starts_with("==") {
-            let threshold_val = condition[2..].parse::<f64>().unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
+            let threshold_val = condition[2..]
+                .parse::<f64>()
+                .unwrap_or(threshold.and_then(|v| v.as_f64()).unwrap_or(0.0));
             return num == threshold_val;
         }
     }
 
     // String contains: contains <substring>
-    if condition.starts_with("contains ") {
-        let substring = &condition[9..];
+    if let Some(substring) = condition.strip_prefix("contains ") {
         if let Some(s) = item.as_str() {
             return s.contains(substring);
         }
@@ -718,8 +825,7 @@ fn matches_condition(item: &serde_json::Value, condition: &str, threshold: Optio
     }
 
     // Regex match: regex <pattern>
-    if condition.starts_with("regex ") {
-        let pattern = &condition[6..];
+    if let Some(pattern) = condition.strip_prefix("regex ") {
         if let Ok(re) = regex::Regex::new(pattern) {
             if let Some(s) = item.as_str() {
                 return re.is_match(s);
@@ -733,7 +839,7 @@ fn matches_condition(item: &serde_json::Value, condition: &str, threshold: Optio
     if let Some(s) = item.as_str() {
         s == condition
     } else {
-        item.to_string() == condition
+        *item == condition
     }
 }
 
@@ -981,7 +1087,10 @@ mod tests {
         assert_eq!(tool.name(), "wasm_compute");
         assert_eq!(tool.risk_level(), RiskLevel::Low);
 
-        let result = tool.execute(serde_json::json!({"expression": "2 + 3"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"expression": "2 + 3"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "5");
     }
@@ -991,10 +1100,13 @@ mod tests {
         let tool = WasmActionTool::sort();
         assert_eq!(tool.name(), "wasm_sort");
 
-        let result = tool.execute(serde_json::json!({
-            "data": [3, 1, 2],
-            "order": "ascending"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "data": [3, 1, 2],
+                "order": "ascending"
+            }))
+            .await
+            .unwrap();
         assert!(result.success);
         let sorted: Vec<i64> = serde_json::from_str(&result.content).unwrap();
         assert_eq!(sorted, vec![1, 2, 3]);
@@ -1005,10 +1117,13 @@ mod tests {
         let tool = WasmActionTool::filter();
         assert_eq!(tool.name(), "wasm_filter");
 
-        let result = tool.execute(serde_json::json!({
-            "data": [1, 5, 10],
-            "condition": ">3"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "data": [1, 5, 10],
+                "condition": ">3"
+            }))
+            .await
+            .unwrap();
         assert!(result.success);
         let filtered: Vec<i64> = serde_json::from_str(&result.content).unwrap();
         assert_eq!(filtered, vec![5, 10]);
@@ -1019,10 +1134,13 @@ mod tests {
         let tool = WasmActionTool::extract();
         assert_eq!(tool.name(), "wasm_extract");
 
-        let result = tool.execute(serde_json::json!({
-            "data": {"a": {"b": "hello"}},
-            "path": "a.b"
-        })).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "data": {"a": {"b": "hello"}},
+                "path": "a.b"
+            }))
+            .await
+            .unwrap();
         assert!(result.success);
     }
 

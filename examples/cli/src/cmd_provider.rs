@@ -1,11 +1,11 @@
 //! CLI provider subcommand — multi-provider fallback pool management and smart routing.
 
+use oneai_core::ModelConfig;
 use oneai_core::ProviderPoolConfig;
-use oneai_core::SmartRouteConfig;
 use oneai_core::RoutingStrategy;
+use oneai_core::SmartRouteConfig;
 use oneai_provider::ModelRouter;
 use oneai_provider::SmartRouter;
-use oneai_core::ModelConfig;
 use std::collections::HashMap;
 
 /// Show provider pool status — active provider, health, circuit states.
@@ -49,7 +49,8 @@ pub fn run_provider_status() -> i32 {
         } else {
             "✗ no key"
         };
-        println!("    • {} — {} (priority {}, cooldown {}s) [{}]",
+        println!(
+            "    • {} — {} (priority {}, cooldown {}s) [{}]",
             entry.name,
             entry.model_name(),
             entry.priority,
@@ -63,7 +64,11 @@ pub fn run_provider_status() -> i32 {
     if config.degrade_on_fallback {
         println!("  Model Degradation Rules:");
         for rule in &config.degradation_rules {
-            println!("    • {} family: {}", rule.provider_family, rule.chain.join(" → "));
+            println!(
+                "    • {} family: {}",
+                rule.provider_family,
+                rule.chain.join(" → ")
+            );
         }
         println!();
     }
@@ -112,9 +117,17 @@ pub fn run_provider_test() -> i32 {
     if let Some(key) = &anthropic_key {
         println!("  • Anthropic (claude-haiku-4-5-20251001):");
         let display_key = if key.len() > 12 {
-            format!("{}...{}", &key[..8], &key[key.len()-4..])
+            format!("{}...{}", &key[..8], &key[key.len() - 4..])
         } else {
-            format!("{}...{}", &key[..4.min(key.len())], if key.len() > 4 { &key[key.len()-4.min(key.len())..] } else { "" })
+            format!(
+                "{}...{}",
+                &key[..4.min(key.len())],
+                if key.len() > 4 {
+                    &key[key.len() - 4.min(key.len())..]
+                } else {
+                    ""
+                }
+            )
         };
         println!("    Key: {}", display_key);
         println!("    Status: Would need real API call — use `oneai run` for live testing");
@@ -128,9 +141,17 @@ pub fn run_provider_test() -> i32 {
     if let Some(key) = &openai_key {
         println!("  • OpenAI (gpt-4o-mini):");
         let display_key = if key.len() > 12 {
-            format!("{}...{}", &key[..8], &key[key.len()-4..])
+            format!("{}...{}", &key[..8], &key[key.len() - 4..])
         } else {
-            format!("{}...{}", &key[..4.min(key.len())], if key.len() > 4 { &key[key.len()-4.min(key.len())..] } else { "" })
+            format!(
+                "{}...{}",
+                &key[..4.min(key.len())],
+                if key.len() > 4 {
+                    &key[key.len() - 4.min(key.len())..]
+                } else {
+                    ""
+                }
+            )
         };
         println!("    Key: {}", display_key);
         println!("    Status: Would need real API call — use `oneai run` for live testing");
@@ -164,11 +185,12 @@ pub fn run_route_dry_run(task: &str, strategy: &str) -> i32 {
         _ => {
             println!("  ⚠ Unknown strategy '{}', using 'balanced'", strategy);
             RoutingStrategy::Balanced
-        },
+        }
     };
 
     println!("  Task: \"{}\"", task);
-    println!("  Strategy: {} (weights: latency={}, quality={})",
+    println!(
+        "  Strategy: {} (weights: latency={}, quality={})",
         routing_strategy.name(),
         routing_strategy.weights().0,
         routing_strategy.weights().1,
@@ -194,7 +216,9 @@ pub fn run_route_dry_run(task: &str, strategy: &str) -> i32 {
     // Run the smart router (no health/rate constraints in dry run)
     let router = SmartRouter::new(
         model_router,
-        smart_config.without_health_awareness().without_rate_awareness(),
+        smart_config
+            .without_health_awareness()
+            .without_rate_awareness(),
     );
 
     // Use tokio runtime for async routing
@@ -203,9 +227,20 @@ pub fn run_route_dry_run(task: &str, strategy: &str) -> i32 {
 
     println!("  Routing Decision:");
     println!("  ─────────────────────────────────────────────────────");
-    println!("  Model:        {} ({})", decision.model, decision.tier.name());
+    println!(
+        "  Model:        {} ({})",
+        decision.model,
+        decision.tier.name()
+    );
     println!("  Provider:     {}", decision.provider);
-    println!("  Source:       {}", if decision.from_regex { "regex rule" } else { "multi-factor scoring" });
+    println!(
+        "  Source:       {}",
+        if decision.from_regex {
+            "regex rule"
+        } else {
+            "multi-factor scoring"
+        }
+    );
     println!("  Quality:      {:.2}", decision.quality_score);
     println!("  Total Score:  {:.2}", decision.total_score);
     if decision.estimated_latency_ms > 0 {

@@ -42,9 +42,7 @@ use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
 use oneai_core::{Conversation, Message, Role};
 use oneai_skill::SkillSelector;
 
-use crate::agent_loop::{
-    AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult,
-};
+use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult};
 use crate::context_assembler::ContextAssembler;
 use crate::streaming::IncrementalStreamParser;
 use crate::sub_agent::SubAgentFactoryNone;
@@ -114,7 +112,10 @@ pub enum TurnPolicy {
     /// the whole sequence from a stale snapshot. Returns a member id or
     /// `"user"` to hand back to the human. Stops at `"user"`, an unknown id,
     /// or after `max_turns` member turns (safety bound).
-    Moderator { moderator_id: String, max_turns: usize },
+    Moderator {
+        moderator_id: String,
+        max_turns: usize,
+    },
 }
 
 /// Optional review-revise loop for a scripted scenario (e.g. writing workshop:
@@ -226,17 +227,16 @@ impl GroupChatSession {
         }
         if let Some(op) = &config.opener_agent_id {
             if !ids.contains(op.as_str()) {
-                return Err(OneAIError::Config(format!(
-                    "opener '{op}' is not a member"
-                )));
+                return Err(OneAIError::Config(format!("opener '{op}' is not a member")));
             }
         }
 
         let mut loops = HashMap::new();
         for m in &config.members {
-            let provider = resources.providers.get(&m.id).cloned().ok_or_else(|| {
-                OneAIError::Config(format!("no provider for member '{}'", m.id))
-            })?;
+            let provider =
+                resources.providers.get(&m.id).cloned().ok_or_else(|| {
+                    OneAIError::Config(format!("no provider for member '{}'", m.id))
+                })?;
             loops.insert(m.id.clone(), build_member_loop(m, &resources, provider));
         }
 
@@ -296,11 +296,7 @@ impl GroupChatSession {
     /// Append the user's message, then run speakers per the turn policy until
     /// it's the user's turn again. Emits speaker-labeled events through
     /// `observer`.
-    pub async fn run_task(
-        &self,
-        user_input: &str,
-        observer: &dyn GroupChatObserver,
-    ) -> Result<()> {
+    pub async fn run_task(&self, user_input: &str, observer: &dyn GroupChatObserver) -> Result<()> {
         if self.interrupt_flag.load(Ordering::Relaxed) {
             self.interrupt_flag.store(false, Ordering::Relaxed);
         }
@@ -309,7 +305,8 @@ impl GroupChatSession {
         {
             let mut conv = self.conversation.lock().await;
             let mut msg = Message::user(user_input.to_string());
-            msg.metadata.insert("speaker".to_string(), "user".to_string());
+            msg.metadata
+                .insert("speaker".to_string(), "user".to_string());
             conv.add_message(msg);
         }
 
@@ -319,7 +316,10 @@ impl GroupChatSession {
         //    RoundRobin use a fixed sequence, optionally review-looped.
         let turn_policy = self.turn_policy.lock().await.clone();
         match turn_policy {
-            TurnPolicy::Moderator { moderator_id, max_turns } => {
+            TurnPolicy::Moderator {
+                moderator_id,
+                max_turns,
+            } => {
                 self.run_moderator_round(&moderator_id, max_turns, observer)
                     .await?;
             }
@@ -448,7 +448,10 @@ impl GroupChatSession {
     async fn reviewer_approved(&self, r: &ReviewLoopConfig) -> bool {
         let conv = self.conversation.lock().await;
         let last = conv.messages.iter().rev().find(|m| {
-            m.metadata.get("speaker").map(|s| s == &r.reviewer_id).unwrap_or(false)
+            m.metadata
+                .get("speaker")
+                .map(|s| s == &r.reviewer_id)
+                .unwrap_or(false)
         });
         match last {
             Some(m) => m.text_content().contains(&r.approve_marker),
@@ -482,9 +485,10 @@ impl GroupChatSession {
         task: String,
         observer: &dyn GroupChatObserver,
     ) -> Result<()> {
-        let member_loop = self.loops.get(member_id).ok_or_else(|| {
-            OneAIError::Config(format!("unknown member '{member_id}'"))
-        })?;
+        let member_loop = self
+            .loops
+            .get(member_id)
+            .ok_or_else(|| OneAIError::Config(format!("unknown member '{member_id}'")))?;
 
         // Tell the observer who is about to speak.
         observer.on_speaker_turn(member_id);
@@ -571,10 +575,15 @@ impl GroupChatSession {
     }
 
     /// Ask the moderator member to choose the next speaker.
-    async fn moderator_pick(&self, moderator_id: &str, transcript: &Conversation) -> Result<String> {
-        let member_loop = self.loops.get(moderator_id).ok_or_else(|| {
-            OneAIError::Config(format!("moderator '{moderator_id}' not found"))
-        })?;
+    async fn moderator_pick(
+        &self,
+        moderator_id: &str,
+        transcript: &Conversation,
+    ) -> Result<String> {
+        let member_loop = self
+            .loops
+            .get(moderator_id)
+            .ok_or_else(|| OneAIError::Config(format!("moderator '{moderator_id}' not found")))?;
         // Build a derived transcript (no system msgs) + a moderator system
         // prompt is already the member's persona. Append a pick instruction as
         // the task.
@@ -712,13 +721,21 @@ mod tests {
         current: Mutex<String>,
     }
     impl RecordingObserver {
-        fn new() -> Self { Self { chunks: Mutex::new(vec![]), current: Mutex::new(String::new()) } }
+        fn new() -> Self {
+            Self {
+                chunks: Mutex::new(vec![]),
+                current: Mutex::new(String::new()),
+            }
+        }
     }
     impl AgentLoopObserver for RecordingObserver {
         fn on_iteration_start(&self, _: usize, _: crate::agent_loop::ParadigmKind) {}
         fn on_stream_chunk(&self, t: &str) {
             let cur = self.current.lock().unwrap().clone();
-            self.chunks.lock().unwrap().push((cur.clone(), t.to_string()));
+            self.chunks
+                .lock()
+                .unwrap()
+                .push((cur.clone(), t.to_string()));
         }
         fn on_direct_answer(&self, _: &str) {}
         fn on_tool_calls(&self, _: &[crate::agent_loop::ToolCallRequest]) {}
@@ -760,10 +777,20 @@ mod tests {
         ]));
         let cfg = GroupChatConfig {
             members: vec![
-                GroupChatMemberSpec { id: "interviewer".into(), name: "面试官".into(), system_prompt: "你是面试官".into() },
-                GroupChatMemberSpec { id: "coach".into(), name: "指导员".into(), system_prompt: "你是指导员".into() },
+                GroupChatMemberSpec {
+                    id: "interviewer".into(),
+                    name: "面试官".into(),
+                    system_prompt: "你是面试官".into(),
+                },
+                GroupChatMemberSpec {
+                    id: "coach".into(),
+                    name: "指导员".into(),
+                    system_prompt: "你是指导员".into(),
+                },
             ],
-            turn_policy: TurnPolicy::Scripted { order: vec!["interviewer".into(), "coach".into()] },
+            turn_policy: TurnPolicy::Scripted {
+                order: vec!["interviewer".into(), "coach".into()],
+            },
             opener_agent_id: None,
             opener_line: None,
             title: None,
@@ -771,14 +798,31 @@ mod tests {
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
-        session.run_task("用户回答", obs.as_ref() as &dyn GroupChatObserver).await.unwrap();
+        session
+            .run_task("用户回答", obs.as_ref() as &dyn GroupChatObserver)
+            .await
+            .unwrap();
 
         let conv = session.conversation().await;
         // user msg + 2 assistant msgs
-        assert_eq!(conv.messages.iter().filter(|m| m.role == Role::User).count(), 1);
-        assert_eq!(conv.messages.iter().filter(|m| m.role == Role::Assistant).count(), 2);
+        assert_eq!(
+            conv.messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .count(),
+            1
+        );
+        assert_eq!(
+            conv.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .count(),
+            2
+        );
         // speakers tagged
-        let speakers: Vec<&str> = conv.messages.iter()
+        let speakers: Vec<&str> = conv
+            .messages
+            .iter()
             .filter_map(|m| m.metadata.get("speaker").map(|s| s.as_str()))
             .collect();
         assert_eq!(speakers, vec!["user", "interviewer", "coach"]);
@@ -795,9 +839,11 @@ mod tests {
             ScriptedResponse::direct_answer("开场白"),
         ]));
         let cfg = GroupChatConfig {
-            members: vec![
-                GroupChatMemberSpec { id: "interviewer".into(), name: "面试官".into(), system_prompt: "你是面试官".into() },
-            ],
+            members: vec![GroupChatMemberSpec {
+                id: "interviewer".into(),
+                name: "面试官".into(),
+                system_prompt: "你是面试官".into(),
+            }],
             turn_policy: TurnPolicy::RoundRobin,
             opener_agent_id: Some("interviewer".into()),
             opener_line: Some("开始面试".into()),
@@ -806,13 +852,25 @@ mod tests {
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
-        session.start(obs.as_ref() as &dyn GroupChatObserver).await.unwrap();
+        session
+            .start(obs.as_ref() as &dyn GroupChatObserver)
+            .await
+            .unwrap();
         let conv = session.conversation().await;
         // opener only — no user message yet
         assert!(conv.messages.iter().all(|m| m.role != Role::User));
-        assert_eq!(conv.messages.iter().filter(|m| m.role == Role::Assistant).count(), 1);
         assert_eq!(
-            conv.messages.iter().filter_map(|m| m.metadata.get("speaker").map(|s| s.as_str())).collect::<Vec<_>>(),
+            conv.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .count(),
+            1
+        );
+        assert_eq!(
+            conv.messages
+                .iter()
+                .filter_map(|m| m.metadata.get("speaker").map(|s| s.as_str()))
+                .collect::<Vec<_>>(),
             vec!["interviewer"]
         );
     }
@@ -823,16 +881,24 @@ mod tests {
         let bad = GroupChatConfig {
             members: vec![],
             turn_policy: TurnPolicy::RoundRobin,
-            opener_agent_id: None, opener_line: None,
+            opener_agent_id: None,
+            opener_line: None,
             title: None,
             review_loop: None,
         };
         assert!(GroupChatSession::new(bad, resources(provider.clone())).is_err());
 
         let bad2 = GroupChatConfig {
-            members: vec![GroupChatMemberSpec { id: "a".into(), name: "A".into(), system_prompt: "x".into() }],
-            turn_policy: TurnPolicy::Scripted { order: vec!["ghost".into()] },
-            opener_agent_id: None, opener_line: None,
+            members: vec![GroupChatMemberSpec {
+                id: "a".into(),
+                name: "A".into(),
+                system_prompt: "x".into(),
+            }],
+            turn_policy: TurnPolicy::Scripted {
+                order: vec!["ghost".into()],
+            },
+            opener_agent_id: None,
+            opener_line: None,
             title: None,
             review_loop: None,
         };
@@ -844,20 +910,30 @@ mod tests {
         // Writing workshop: writer drafts → editor reviews (no marker) →
         // writer revises → editor re-reviews WITH marker → loop stops at 2.
         let provider = Arc::new(MockProvider::from_script(vec![
-            ScriptedResponse::direct_answer("初稿"),                       // writer round 0
-            ScriptedResponse::direct_answer("需修改第一段"),                // editor round 0 (no marker)
-            ScriptedResponse::direct_answer("修改稿"),                      // writer round 1
-            ScriptedResponse::direct_answer("很好，定稿"),                   // editor round 1 (marker)
+            ScriptedResponse::direct_answer("初稿"), // writer round 0
+            ScriptedResponse::direct_answer("需修改第一段"), // editor round 0 (no marker)
+            ScriptedResponse::direct_answer("修改稿"), // writer round 1
+            ScriptedResponse::direct_answer("很好，定稿"), // editor round 1 (marker)
             // Safety: if the loop ignored the marker it would call this 5th
             // response and keep going.
             ScriptedResponse::direct_answer("不该出现的第三轮"),
         ]));
         let cfg = GroupChatConfig {
             members: vec![
-                GroupChatMemberSpec { id: "writer".into(), name: "写手".into(), system_prompt: "你是写手".into() },
-                GroupChatMemberSpec { id: "editor".into(), name: "编辑".into(), system_prompt: "你是编辑".into() },
+                GroupChatMemberSpec {
+                    id: "writer".into(),
+                    name: "写手".into(),
+                    system_prompt: "你是写手".into(),
+                },
+                GroupChatMemberSpec {
+                    id: "editor".into(),
+                    name: "编辑".into(),
+                    system_prompt: "你是编辑".into(),
+                },
             ],
-            turn_policy: TurnPolicy::Scripted { order: vec!["writer".into(), "editor".into()] },
+            turn_policy: TurnPolicy::Scripted {
+                order: vec!["writer".into(), "editor".into()],
+            },
             opener_agent_id: None,
             opener_line: None,
             title: None,
@@ -869,15 +945,30 @@ mod tests {
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
-        session.run_task("写一篇散文", obs.as_ref() as &dyn GroupChatObserver).await.unwrap();
+        session
+            .run_task("写一篇散文", obs.as_ref() as &dyn GroupChatObserver)
+            .await
+            .unwrap();
 
         let conv = session.conversation().await;
         // 4 assistant turns (2 rounds × 2 members), not 6.
-        let assistant = conv.messages.iter().filter(|m| m.role == Role::Assistant).count();
+        let assistant = conv
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .count();
         assert_eq!(assistant, 4, "loop must stop at the approval marker");
         // Last speaker is the editor, whose answer carries the marker.
-        let last = conv.messages.iter().rev().find(|m| m.role == Role::Assistant).unwrap();
-        assert_eq!(last.metadata.get("speaker").map(|s| s.as_str()), Some("editor"));
+        let last = conv
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .unwrap();
+        assert_eq!(
+            last.metadata.get("speaker").map(|s| s.as_str()),
+            Some("editor")
+        );
         assert!(last.text_content().contains("定稿"));
     }
 
@@ -893,10 +984,20 @@ mod tests {
         ]));
         let cfg = GroupChatConfig {
             members: vec![
-                GroupChatMemberSpec { id: "writer".into(), name: "写手".into(), system_prompt: "你是写手".into() },
-                GroupChatMemberSpec { id: "editor".into(), name: "编辑".into(), system_prompt: "你是编辑".into() },
+                GroupChatMemberSpec {
+                    id: "writer".into(),
+                    name: "写手".into(),
+                    system_prompt: "你是写手".into(),
+                },
+                GroupChatMemberSpec {
+                    id: "editor".into(),
+                    name: "编辑".into(),
+                    system_prompt: "你是编辑".into(),
+                },
             ],
-            turn_policy: TurnPolicy::Scripted { order: vec!["writer".into(), "editor".into()] },
+            turn_policy: TurnPolicy::Scripted {
+                order: vec!["writer".into(), "editor".into()],
+            },
             opener_agent_id: None,
             opener_line: None,
             title: None,
@@ -908,12 +1009,18 @@ mod tests {
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
-        session.run_task("写一篇散文", obs.as_ref() as &dyn GroupChatObserver).await.unwrap();
+        session
+            .run_task("写一篇散文", obs.as_ref() as &dyn GroupChatObserver)
+            .await
+            .unwrap();
 
         let conv = session.conversation().await;
         // 2 rounds × 2 members = 4 assistant turns; cap held.
         assert_eq!(
-            conv.messages.iter().filter(|m| m.role == Role::Assistant).count(),
+            conv.messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .count(),
             4,
             "loop must cap at max_rounds without the marker"
         );
@@ -936,10 +1043,7 @@ mod tests {
     impl ReactingModeratorProvider {
         fn new() -> Self {
             Self {
-                config: oneai_core::ModelConfig::openai(
-                    "k".into(),
-                    "reacting-moderator".into(),
-                ),
+                config: oneai_core::ModelConfig::openai("k".into(), "reacting-moderator".into()),
             }
         }
 
@@ -1061,11 +1165,26 @@ mod tests {
         let provider = Arc::new(ReactingModeratorProvider::new());
         let cfg = GroupChatConfig {
             members: vec![
-                GroupChatMemberSpec { id: "host".into(), name: "主持人".into(), system_prompt: "你是主持人".into() },
-                GroupChatMemberSpec { id: "a".into(), name: "A".into(), system_prompt: "你是A".into() },
-                GroupChatMemberSpec { id: "b".into(), name: "B".into(), system_prompt: "你是B".into() },
+                GroupChatMemberSpec {
+                    id: "host".into(),
+                    name: "主持人".into(),
+                    system_prompt: "你是主持人".into(),
+                },
+                GroupChatMemberSpec {
+                    id: "a".into(),
+                    name: "A".into(),
+                    system_prompt: "你是A".into(),
+                },
+                GroupChatMemberSpec {
+                    id: "b".into(),
+                    name: "B".into(),
+                    system_prompt: "你是B".into(),
+                },
             ],
-            turn_policy: TurnPolicy::Moderator { moderator_id: "host".into(), max_turns: 3 },
+            turn_policy: TurnPolicy::Moderator {
+                moderator_id: "host".into(),
+                max_turns: 3,
+            },
             opener_agent_id: None,
             opener_line: None,
             title: None,
@@ -1100,6 +1219,9 @@ mod tests {
             .filter(|m| m.metadata.get("speaker").map(|s| s == "b").unwrap_or(false))
             .count();
         assert_eq!(a_count, 1, "a speaks once, not repeatedly up to max_turns");
-        assert_eq!(b_count, 1, "b speaks once — proof the moderator reacted to a's turn");
+        assert_eq!(
+            b_count, 1,
+            "b speaks once — proof the moderator reacted to a's turn"
+        );
     }
 }

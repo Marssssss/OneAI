@@ -8,17 +8,19 @@ use std::sync::Arc;
 // for `write!` on String in the [Unfinished Work] block
 use std::fmt::Write as _;
 
-use oneai_core::{Conversation, Message, MemoryEntry, ContextManager};
 use oneai_core::error::Result;
+use oneai_core::{ContextManager, Conversation, MemoryEntry, Message};
 
 use oneai_memory::MemoryManager;
-use oneai_tool::ToolExecutor;
-use oneai_rag::{DocumentIndex, assemble_context};
-use oneai_workflow::{WorkflowConfig, WorkflowExecutor, WorkflowResult, StateGraph, GraphExecutionResult, StateGraphExecutor, NoopDelegateFactory, render_dag_ascii, render_state_graph_ascii};
 use oneai_persistence::FilePersistence;
 use oneai_persistence::SqliteSessionStore;
-use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
-
+use oneai_rag::{assemble_context, DocumentIndex};
+use oneai_tool::ToolExecutor;
+use oneai_trace::{EventKind, SpanKind, SpanStatus, TraceContext};
+use oneai_workflow::{
+    render_dag_ascii, render_state_graph_ascii, GraphExecutionResult, NoopDelegateFactory,
+    StateGraph, StateGraphExecutor, WorkflowConfig, WorkflowExecutor, WorkflowResult,
+};
 
 /// Default run-cost token budget — a runaway guardrail that caps total
 /// tokens consumed across a whole run (prompt + completion), in addition
@@ -30,7 +32,6 @@ use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
 /// runs (e.g. SWE-bench ~1-2M) while stopping true runaways. Override via
 /// `AgentLoopConfig::token_budget` directly.
 const DEFAULT_RUN_TOKEN_BUDGET: u32 = 4_000_000;
-
 
 /// A first-turn-only `ContextSource` that surfaces an unfinished task left by
 /// a previous session — the cross-session discovery surface (reference doc §6.2).
@@ -80,9 +81,9 @@ fn render_unfinished_work(open: &[oneai_core::TaskBrief]) -> String {
          你有以下未完成任务，可用 `oneai tasks continue <id>` 继续其中一个，或开始新任务：\n",
     );
     for b in open.iter().take(10) {
-        let _ = write!(
+        let _ = writeln!(
             block,
-            "• [{}] {} (步骤剩余 {}, 状态 {}, 卡点 {}, 最后更新 {})\n",
+            "• [{}] {} (步骤剩余 {}, 状态 {}, 卡点 {}, 最后更新 {})",
             b.task_id,
             b.goal,
             b.open_step_count,
@@ -93,7 +94,6 @@ fn render_unfinished_work(open: &[oneai_core::TaskBrief]) -> String {
     }
     block
 }
-
 
 /// A record of a workflow execution in the session history.
 #[derive(Debug, Clone)]
@@ -136,9 +136,11 @@ pub struct CompactOutcome {
     pub retained: Vec<(String, String)>,
 }
 
-use oneai_agent::{AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult,
-    ParadigmKind, ToolCallRequest, SubAgentKind};
 use oneai_agent::error_recovery::RecoveryManager;
+use oneai_agent::{
+    AgentLoop, AgentLoopConfig, AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind,
+    ToolCallRequest,
+};
 
 /// A running agent session with conversation context and memory.
 ///
@@ -252,7 +254,10 @@ impl AppSession {
     ///
     /// Used by `App::create_session_with_id` to restore a saved conversation's
     /// message history before continuing the chat.
-    pub(crate) fn new_with_conversation(app: &crate::builder::App, conversation: Conversation) -> Self {
+    pub(crate) fn new_with_conversation(
+        app: &crate::builder::App,
+        conversation: Conversation,
+    ) -> Self {
         let session_id = conversation.id.clone();
 
         // Create trace context for this session (if tracing is enabled)
@@ -396,9 +401,10 @@ impl AppSession {
         if !self.app.probe_context_windows {
             return;
         }
-        let (Some(resolver), Some(provider)) =
-            (self.app.model_context_resolver.as_ref(), self.app.provider.as_ref())
-        else {
+        let (Some(resolver), Some(provider)) = (
+            self.app.model_context_resolver.as_ref(),
+            self.app.provider.as_ref(),
+        ) else {
             return;
         };
         let Some(model) = provider.config().model_name.as_deref() else {
@@ -414,12 +420,18 @@ impl AppSession {
 
         // Log Thought event if tracing
         if let Some(ctx) = &self.trace_context {
-            ctx.log_event(EventKind::Thought, "user.message", std::collections::HashMap::from([
-                ("input.message".to_string(), serde_json::json!(content)),
-            ]));
+            ctx.log_event(
+                EventKind::Thought,
+                "user.message",
+                std::collections::HashMap::from([(
+                    "input.message".to_string(),
+                    serde_json::json!(content),
+                )]),
+            );
         }
 
-        self.conversation.add_message(Message::user(content.clone()));
+        self.conversation
+            .add_message(Message::user(content.clone()));
         // Working memory is single-sourced on the Conversation (M1) — no
         // parallel STM write. Long-term memory is the canonical fact_archive,
         // written by FactExtractor on compression, not by every message.
@@ -430,21 +442,30 @@ impl AppSession {
     /// Add an assistant message to the conversation and memory.
     pub async fn add_assistant_message(&mut self, text: impl Into<String>) -> Result<()> {
         let content = text.into();
-        self.conversation.add_message(Message::assistant(content.clone()));
+        self.conversation
+            .add_message(Message::assistant(content.clone()));
         // Working memory single-source (M1): no STM double-write.
 
         Ok(())
     }
 
     /// Execute a tool by name.
-    pub async fn execute_tool(&self, name: &str, args: serde_json::Value) -> Result<oneai_core::ToolOutput> {
+    pub async fn execute_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<oneai_core::ToolOutput> {
         // Start a TOOL span and log Action/Observation events if tracing
         let tool_span_id = if let Some(ctx) = &self.trace_context {
             let span_id = ctx.enter_span(SpanKind::TOOL, &format!("tool.{}", name), None);
-            ctx.log_event(EventKind::Action, "tool.call", std::collections::HashMap::from([
-                ("tool.name".to_string(), serde_json::json!(name)),
-                ("tool.args".to_string(), args.clone()),
-            ]));
+            ctx.log_event(
+                EventKind::Action,
+                "tool.call",
+                std::collections::HashMap::from([
+                    ("tool.name".to_string(), serde_json::json!(name)),
+                    ("tool.args".to_string(), args.clone()),
+                ]),
+            );
             Some(span_id)
         } else {
             None
@@ -455,10 +476,24 @@ impl AppSession {
         // Log Observation event and close the span
         if let Some(ctx) = &self.trace_context {
             if let Some(span_id) = &tool_span_id {
-                ctx.log_event_in_span(span_id, EventKind::Observation, "tool.result", std::collections::HashMap::from([
-                    ("tool.result.success".to_string(), serde_json::json!(result.as_ref().map(|r| r.success).unwrap_or(false))),
-                    ("tool.result.content".to_string(), serde_json::json!(result.as_ref().map(|r| r.content.clone()).unwrap_or_default())),
-                ]));
+                ctx.log_event_in_span(
+                    span_id,
+                    EventKind::Observation,
+                    "tool.result",
+                    std::collections::HashMap::from([
+                        (
+                            "tool.result.success".to_string(),
+                            serde_json::json!(result.as_ref().map(|r| r.success).unwrap_or(false)),
+                        ),
+                        (
+                            "tool.result.content".to_string(),
+                            serde_json::json!(result
+                                .as_ref()
+                                .map(|r| r.content.clone())
+                                .unwrap_or_default()),
+                        ),
+                    ]),
+                );
                 let status = if result.is_ok() && result.as_ref().unwrap().success {
                     SpanStatus::Ok
                 } else {
@@ -480,24 +515,31 @@ impl AppSession {
     pub async fn retrieve_memory(&self, query: &str, top_k: usize) -> Result<Vec<MemoryEntry>> {
         // Log MemoryRetrieve event if tracing
         if let Some(ctx) = &self.trace_context {
-            ctx.log_event(EventKind::MemoryRetrieve, "memory.retrieve", std::collections::HashMap::from([
-                ("memory.query".to_string(), serde_json::json!(query)),
-                ("memory.top_k".to_string(), serde_json::json!(top_k)),
-            ]));
+            ctx.log_event(
+                EventKind::MemoryRetrieve,
+                "memory.retrieve",
+                std::collections::HashMap::from([
+                    ("memory.query".to_string(), serde_json::json!(query)),
+                    ("memory.top_k".to_string(), serde_json::json!(top_k)),
+                ]),
+            );
         }
 
         let facts = self.app.memory_manager.recall_facts(query, top_k).await?;
-        Ok(facts.into_iter().map(|f| MemoryEntry {
-            id: f.id,
-            content: format!("{} {}: {}", f.subject, f.predicate, f.content),
-            timestamp: f.updated_at,
-            embedding: f.embedding,
-            metadata: std::collections::HashMap::from([
-                ("role".to_string(), "memory".to_string()),
-                ("fact_type".to_string(), f.fact_type.as_str().to_string()),
-                ("session_id".to_string(), f.session_id),
-            ]),
-        }).collect())
+        Ok(facts
+            .into_iter()
+            .map(|f| MemoryEntry {
+                id: f.id,
+                content: format!("{} {}: {}", f.subject, f.predicate, f.content),
+                timestamp: f.updated_at,
+                embedding: f.embedding,
+                metadata: std::collections::HashMap::from([
+                    ("role".to_string(), "memory".to_string()),
+                    ("fact_type".to_string(), f.fact_type.as_str().to_string()),
+                    ("session_id".to_string(), f.session_id),
+                ]),
+            })
+            .collect())
     }
 
     /// Retrieve relevant context from RAG (keyword-based).
@@ -517,11 +559,14 @@ impl AppSession {
         let dag = oneai_workflow::compile(config);
         let validation = oneai_workflow::validate(config, &dag);
         if !validation.is_valid {
-            let errors: Vec<String> = validation.errors().iter()
+            let errors: Vec<String> = validation
+                .errors()
+                .iter()
                 .map(|e| e.description.clone())
                 .collect();
             return Err(oneai_core::error::OneAIError::Workflow(format!(
-                "Workflow validation failed: {}", errors.join(", ")
+                "Workflow validation failed: {}",
+                errors.join(", ")
             )));
         }
         let result = self.app.workflow_executor.execute(&dag, config).await?;
@@ -546,28 +591,36 @@ impl AppSession {
 
     /// Get all available predefined workflows from the domain pack.
     pub fn get_available_workflows(&self) -> Vec<WorkflowConfig> {
-        self.app.domain_pack.as_ref()
+        self.app
+            .domain_pack
+            .as_ref()
             .map(|dp| dp.workflows.clone())
             .unwrap_or_default()
     }
 
     /// Get a predefined workflow configuration by name.
     pub fn get_workflow_config(&self, name: &str) -> Option<WorkflowConfig> {
-        self.app.domain_pack.as_ref()
+        self.app
+            .domain_pack
+            .as_ref()
             .and_then(|dp| dp.get_workflow_config(name))
             .cloned()
     }
 
     /// Get a predefined StateGraph by name.
     pub fn get_state_graph(&self, name: &str) -> Option<StateGraph> {
-        self.app.domain_pack.as_ref()
+        self.app
+            .domain_pack
+            .as_ref()
             .and_then(|dp| dp.get_state_graph(name))
             .cloned()
     }
 
     /// Get all available StateGraph names from the domain pack.
     pub fn get_state_graph_names(&self) -> Vec<String> {
-        self.app.domain_pack.as_ref()
+        self.app
+            .domain_pack
+            .as_ref()
             .map(|dp| dp.state_graph_names())
             .unwrap_or_default()
     }
@@ -587,11 +640,17 @@ impl AppSession {
     ///
     /// Requires a configured LLM provider. Returns an error if no provider is available.
     /// Records the execution result in the session's workflow history.
-    pub async fn execute_state_graph(&mut self, graph: &StateGraph) -> Result<GraphExecutionResult> {
-        let provider = self.app.provider.as_ref()
-            .ok_or(oneai_core::error::OneAIError::Provider(
-                "No LLM provider configured. Cannot execute StateGraph.".to_string()
-            ))?;
+    pub async fn execute_state_graph(
+        &mut self,
+        graph: &StateGraph,
+    ) -> Result<GraphExecutionResult> {
+        let provider =
+            self.app
+                .provider
+                .as_ref()
+                .ok_or(oneai_core::error::OneAIError::Provider(
+                    "No LLM provider configured. Cannot execute StateGraph.".to_string(),
+                ))?;
 
         let executor = StateGraphExecutor::with_direct_provider_defaults(
             provider.clone(),
@@ -632,10 +691,13 @@ impl AppSession {
         graph: &StateGraph,
         task: &str,
     ) -> Result<GraphExecutionResult> {
-        let provider = self.app.provider.as_ref()
-            .ok_or(oneai_core::error::OneAIError::Provider(
-                "No LLM provider configured. Cannot execute StateGraph.".to_string()
-            ))?;
+        let provider =
+            self.app
+                .provider
+                .as_ref()
+                .ok_or(oneai_core::error::OneAIError::Provider(
+                    "No LLM provider configured. Cannot execute StateGraph.".to_string(),
+                ))?;
 
         let executor = StateGraphExecutor::with_direct_provider_defaults(
             provider.clone(),
@@ -645,8 +707,12 @@ impl AppSession {
         );
 
         let mut initial_state = oneai_workflow::GraphState::new();
-        initial_state.conversation.add_message(Message::user(task.to_string()));
-        initial_state.variables.insert("task".to_string(), task.to_string());
+        initial_state
+            .conversation
+            .add_message(Message::user(task.to_string()));
+        initial_state
+            .variables
+            .insert("task".to_string(), task.to_string());
         initial_state.active_paradigm = Some("react".to_string());
         initial_state.token_budget_remaining = 100_000;
 
@@ -722,11 +788,15 @@ impl AppSession {
         // ContextBudgetManager actually gates compression on budget.total, so
         // the compressor's own threshold must match it.
         self.warm_model_context().await;
-        let model_ctx_window: u32 = match (&self.app.model_context_resolver, provider.config().model_name.as_deref()) {
+        let model_ctx_window: u32 = match (
+            &self.app.model_context_resolver,
+            provider.config().model_name.as_deref(),
+        ) {
             (Some(resolver), Some(model)) => resolver.resolve_cached(model),
             _ => 100_000, // legacy default when no resolver is configured
         };
-        let budget_total = oneai_core::budget::TokenBudget::from_context_window(model_ctx_window).total as usize;
+        let budget_total =
+            oneai_core::budget::TokenBudget::from_context_window(model_ctx_window).total as usize;
 
         // Snapshot the manually-activated skill (set via `/skill <name>`) for
         // this run — its prompt_template is injected every turn by the loop.
@@ -735,7 +805,10 @@ impl AppSession {
         // Store user message in memory
         // P5: set the per-run session id on the memory manager so fact
         // extraction / self-managed tools namespace facts to this session.
-        self.app.memory_manager.set_session_id(self.session_id.clone()).await;
+        self.app
+            .memory_manager
+            .set_session_id(self.session_id.clone())
+            .await;
         // Load durable facts (cross-session habits + this session's episodic)
         // into the archival tier. Idempotent (upsert-deduped), so safe per turn.
         self.app.memory_manager.load_persisted_facts().await;
@@ -750,16 +823,22 @@ impl AppSession {
         // block also carries the agent's curated core-memory facts. §12.4: the
         // full domain `RecallConfig` (weights, half-life, normalization) is
         // threaded in so three-factor scoring is domain-tunable.
-        let recall_cfg = self.app.domain_pack.as_ref()
+        let recall_cfg = self
+            .app
+            .domain_pack
+            .as_ref()
             .map(|d| d.memory_profile.recall.clone())
-            .unwrap_or_else(oneai_core::RecallConfig::default);
-        let recalled_facts = self.app.memory_manager
-            .recall_facts_with_config(task, &recall_cfg).await?;
+            .unwrap_or_default();
+        let recalled_facts = self
+            .app
+            .memory_manager
+            .recall_facts_with_config(task, &recall_cfg)
+            .await?;
 
         // Build the core memory source and populate its recall for this turn.
-        let core_memory_source = std::sync::Arc::new(
-            oneai_memory::CoreMemorySource::new(self.app.memory_manager.core_memory().clone())
-        );
+        let core_memory_source = std::sync::Arc::new(oneai_memory::CoreMemorySource::new(
+            self.app.memory_manager.core_memory().clone(),
+        ));
         core_memory_source.set_recall(recalled_facts).await;
 
         // Build conversation with history (memory is now injected via the
@@ -774,13 +853,19 @@ impl AppSession {
         // prompt. No-op when no store is configured or a task is already bound.
         let unfinished_work_source: Option<std::sync::Arc<dyn oneai_domain::ContextSource>> =
             if let Some(store) = self.app.working_state_store.clone() {
-                let has_task = self.conversation.metadata.get("task_id")
+                let has_task = self
+                    .conversation
+                    .metadata
+                    .get("task_id")
                     .map(|s| !s.is_empty())
                     .unwrap_or(false);
                 if !has_task && !self.unfinished_work_surfaced {
                     self.unfinished_work_surfaced = true;
                     let user = self.app.memory_manager.user_id().await;
-                    match store.list_open_tasks(&user, &self.app.working_state_project).await {
+                    match store
+                        .list_open_tasks(&user, &self.app.working_state_project)
+                        .await
+                    {
                         Ok(open) if !open.is_empty() => {
                             let block = render_unfinished_work(&open);
                             Some(std::sync::Arc::new(UnfinishedWorkSource::new(block)))
@@ -803,12 +888,20 @@ impl AppSession {
         // the staleness survives compaction / cross-session resume.
         let reconciliation_source: Option<std::sync::Arc<dyn oneai_domain::ContextSource>> =
             if let Some(store) = self.app.working_state_store.clone() {
-                let task_id = self.conversation.metadata.get("task_id")
+                let task_id = self
+                    .conversation
+                    .metadata
+                    .get("task_id")
                     .filter(|s| !s.is_empty())
                     .cloned();
-                let wants_git = self.app.domain_pack.as_ref()
-                    .map(|d| d.memory_profile.working_state.ground_truth_reconciliation
-                        == oneai_domain::memory_profile::GroundTruthReconciliation::Git)
+                let wants_git = self
+                    .app
+                    .domain_pack
+                    .as_ref()
+                    .map(|d| {
+                        d.memory_profile.working_state.ground_truth_reconciliation
+                            == oneai_domain::memory_profile::GroundTruthReconciliation::Git
+                    })
                     .unwrap_or(false);
                 if !self.reconciliation_surfaced && wants_git {
                     if let Some(task_id) = task_id {
@@ -833,7 +926,8 @@ impl AppSession {
 
         // Build context assembler (core source first, then domain sources).
         let context_assembler = if let Some(domain) = &self.app.domain_pack {
-            let mut sources = vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
+            let mut sources =
+                vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
             sources.extend(domain.context_sources.clone());
             if let Some(uw) = unfinished_work_source {
                 sources.push(uw);
@@ -843,7 +937,8 @@ impl AppSession {
             }
             oneai_agent::ContextAssembler::with_context_sources(sources)
         } else {
-            let mut sources = vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
+            let mut sources =
+                vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
             if let Some(uw) = unfinished_work_source {
                 sources.push(uw);
             }
@@ -892,7 +987,9 @@ impl AppSession {
                 #[cfg(feature = "otel")]
                 metrics_provider: self.app.metrics_provider.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
-                token_budget: Some(oneai_core::budget::TokenBudget::new(DEFAULT_RUN_TOKEN_BUDGET)),
+                token_budget: Some(oneai_core::budget::TokenBudget::new(
+                    DEFAULT_RUN_TOKEN_BUDGET,
+                )),
                 ..AgentLoopConfig::default()
             };
             // Apply user-configured generation params (temperature/top_p/
@@ -904,10 +1001,10 @@ impl AppSession {
             // (summarized-away) turns are extracted per the domain's
             // MemoryProfile schema and conflict-resolved into the archival
             // tier, so compressed-out information is not lost.
-            let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> =
-                Arc::new(oneai_memory::ContextCompressor::with_template(
-                    budget_total,  // threshold_tokens — trigger compression at the effective budget (80% of context window)
-                    6,      // keep_recent_turns
+            let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> = Arc::new(
+                oneai_memory::ContextCompressor::with_template(
+                    budget_total, // threshold_tokens — trigger compression at the effective budget (80% of context window)
+                    6,            // keep_recent_turns
                     provider.clone(),
                     domain.compression_template.clone(),
                 )
@@ -916,24 +1013,27 @@ impl AppSession {
                     self.app.memory_manager.clone(),
                     self.app.memory_manager.user_id().await,
                     self.session_id.clone(),
-                ));
+                ),
+            );
             AgentLoop::with_domain_pack(
                 provider.clone(),
                 self.app.tool_executor.tools_map(),
                 self.app.parser.clone(),
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
-                Arc::new(oneai_core::budget::ContextBudgetManager::new(
-                    oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
-                    oneai_core::budget::BudgetAllocation::default(),
-                    compressor,
-                )
-                .with_discarded_sink(
-                    Arc::new(oneai_memory::ArchivalDiscardedSink::new(
-                        self.app.memory_manager.clone(),
-                    )),
-                    self.session_id.clone(),
-                )),
+                Arc::new(
+                    oneai_core::budget::ContextBudgetManager::new(
+                        oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
+                        oneai_core::budget::BudgetAllocation::default(),
+                        compressor,
+                    )
+                    .with_discarded_sink(
+                        Arc::new(oneai_memory::ArchivalDiscardedSink::new(
+                            self.app.memory_manager.clone(),
+                        )),
+                        self.session_id.clone(),
+                    ),
+                ),
                 Arc::new(oneai_agent::DefaultSubAgentFactory::new(
                     provider.clone(),
                     self.app.parser.clone(),
@@ -945,10 +1045,7 @@ impl AppSession {
                 config,
                 domain.clone(),
             )
-            .with_skill_registry(
-                self.app.skill_registry.clone(),
-                active_skill.clone(),
-            )
+            .with_skill_registry(self.app.skill_registry.clone(), active_skill.clone())
             // Attach a default RecoveryManager so transient tool-call failures
             // (timeout/network/rate_limit) are genuinely re-executed with
             // jittered backoff rather than merely announced as a system
@@ -976,7 +1073,9 @@ impl AppSession {
                 #[cfg(feature = "otel")]
                 metrics_provider: self.app.metrics_provider.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
-                token_budget: Some(oneai_core::budget::TokenBudget::new(DEFAULT_RUN_TOKEN_BUDGET)),
+                token_budget: Some(oneai_core::budget::TokenBudget::new(
+                    DEFAULT_RUN_TOKEN_BUDGET,
+                )),
                 ..AgentLoopConfig::default()
             };
             // Apply user-configured generation params on top of the defaults.
@@ -992,10 +1091,10 @@ impl AppSession {
                 oneai_core::FactType::new("decision"),
                 oneai_core::FactType::new("open_task"),
             ];
-            let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> =
-                Arc::new(oneai_memory::ContextCompressor::new(
+            let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> = Arc::new(
+                oneai_memory::ContextCompressor::new(
                     budget_total, // threshold_tokens — effective budget (80% of context window)
-                    6,     // keep_recent_turns
+                    6,            // keep_recent_turns
                     provider.clone(),
                 )
                 .with_fact_extraction(
@@ -1003,24 +1102,27 @@ impl AppSession {
                     self.app.memory_manager.clone(),
                     self.app.memory_manager.user_id().await,
                     self.session_id.clone(),
-                ));
+                ),
+            );
             AgentLoop::new(
                 provider.clone(),
                 self.app.tool_executor.tools_map(),
                 self.app.parser.clone(),
                 self.app.interaction_gate.clone(),
                 self.app.skill_selector.clone(),
-                Arc::new(oneai_core::budget::ContextBudgetManager::new(
-                    oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
-                    oneai_core::budget::BudgetAllocation::default(),
-                    compressor,
-                )
-                .with_discarded_sink(
-                    Arc::new(oneai_memory::ArchivalDiscardedSink::new(
-                        self.app.memory_manager.clone(),
-                    )),
-                    self.session_id.clone(),
-                )),
+                Arc::new(
+                    oneai_core::budget::ContextBudgetManager::new(
+                        oneai_core::budget::TokenBudget::from_context_window(model_ctx_window),
+                        oneai_core::budget::BudgetAllocation::default(),
+                        compressor,
+                    )
+                    .with_discarded_sink(
+                        Arc::new(oneai_memory::ArchivalDiscardedSink::new(
+                            self.app.memory_manager.clone(),
+                        )),
+                        self.session_id.clone(),
+                    ),
+                ),
                 Arc::new(oneai_agent::DefaultSubAgentFactory::new(
                     provider.clone(),
                     self.app.parser.clone(),
@@ -1031,10 +1133,7 @@ impl AppSession {
                 oneai_agent::IncrementalStreamParser::new(),
                 config,
             )
-            .with_skill_registry(
-                self.app.skill_registry.clone(),
-                active_skill.clone(),
-            )
+            .with_skill_registry(self.app.skill_registry.clone(), active_skill.clone())
             .with_recovery_manager(std::sync::Arc::new(RecoveryManager::new()))
         };
 
@@ -1055,7 +1154,11 @@ impl AppSession {
             let user = self.app.memory_manager.user_id().await;
             agent_loop
                 .with_working_state_store(store)
-                .with_working_state_scope(user, self.app.working_state_project.clone(), self.session_id.clone())
+                .with_working_state_scope(
+                    user,
+                    self.app.working_state_project.clone(),
+                    self.session_id.clone(),
+                )
         } else {
             agent_loop
         };
@@ -1064,9 +1167,18 @@ impl AppSession {
         // §12.3: snapshot the archival tier's cumulative importance before the
         // loop so the per-run delta can feed the mid-session reflection
         // threshold (Generative-Agents-style importance-sum gating).
-        let importance_before = self.app.memory_manager.fact_archive().all().await
-            .iter().map(|f| f.importance).sum::<f32>();
-        let result = agent_loop.run_with_conversation(conversation, task, observer).await;
+        let importance_before = self
+            .app
+            .memory_manager
+            .fact_archive()
+            .all()
+            .await
+            .iter()
+            .map(|f| f.importance)
+            .sum::<f32>();
+        let result = agent_loop
+            .run_with_conversation(conversation, task, observer)
+            .await;
 
         // Clear the interrupt slot now that the run is over.
         *interrupt_slot.lock().await = None;
@@ -1079,19 +1191,35 @@ impl AppSession {
         // session-end one. This is the AppSession-level checkpoint — it does
         // NOT inject into the AgentLoop's per-iteration loop, preserving the
         // v0.2.0 boundary.
-        let importance_after = self.app.memory_manager.fact_archive().all().await
-            .iter().map(|f| f.importance).sum::<f32>();
+        let importance_after = self
+            .app
+            .memory_manager
+            .fact_archive()
+            .all()
+            .await
+            .iter()
+            .map(|f| f.importance)
+            .sum::<f32>();
         self.accumulated_importance += (importance_after - importance_before).max(0.0);
         self.turns_since_last_reflection += result.iterations as u32;
         if self.app.memory_manager.reflection().is_some() {
-            match self.app.memory_manager
-                .reflect_if_threshold(&self.session_id, &self.conversation, self.accumulated_importance, self.turns_since_last_reflection)
+            match self
+                .app
+                .memory_manager
+                .reflect_if_threshold(
+                    &self.session_id,
+                    &self.conversation,
+                    self.accumulated_importance,
+                    self.turns_since_last_reflection,
+                )
                 .await
             {
                 Ok(Some(episodic)) => {
                     tracing::info!(
                         "Mid-session reflection fired for session '{}': {} insights, {} decisions",
-                        self.session_id, episodic.key_insights.len(), episodic.decisions.len()
+                        self.session_id,
+                        episodic.key_insights.len(),
+                        episodic.decisions.len()
                     );
                     self.accumulated_importance = 0.0;
                     self.turns_since_last_reflection = 0;
@@ -1112,7 +1240,12 @@ impl AppSession {
         // If SQLite persistence is enabled, save the conversation and STM
         // after each agent run. This enables session resume on restart.
         if let Some(_sqlite) = &self.app.sqlite_store {
-            if let Err(e) = self.app.memory_manager.save_session(&self.session_id, &self.conversation).await {
+            if let Err(e) = self
+                .app
+                .memory_manager
+                .save_session(&self.session_id, &self.conversation)
+                .await
+            {
                 tracing::warn!("Failed to auto-save session '{}': {}", self.session_id, e);
             }
         }
@@ -1127,8 +1260,11 @@ impl AppSession {
             if config.auto_reflect {
                 // Reflect over the live conversation (M1 single source) and
                 // store the episodic as a canonical archival fact + persist.
-                let episodic = self.app.memory_manager
-                    .reflect(&self.session_id, &self.conversation).await?;
+                let episodic = self
+                    .app
+                    .memory_manager
+                    .reflect(&self.session_id, &self.conversation)
+                    .await?;
                 if let Some(episodic) = episodic {
                     tracing::info!(
                         "Memory reflection completed for session {}: {} insights, {} decisions",
@@ -1177,10 +1313,11 @@ impl AppSession {
     /// recent turns for display. `summary` is empty when the conversation was
     /// too short to summarize.
     pub async fn compact(&mut self, keep_recent_turns: usize) -> Result<CompactOutcome> {
-        let provider = self.app.provider.as_ref()
-            .ok_or_else(|| oneai_core::error::OneAIError::Provider(
-                "No LLM provider configured. Cannot /compact.".to_string()
-            ))?;
+        let provider = self.app.provider.as_ref().ok_or_else(|| {
+            oneai_core::error::OneAIError::Provider(
+                "No LLM provider configured. Cannot /compact.".to_string(),
+            )
+        })?;
 
         // Build the compressor mirroring run_agent's wiring, but with a zero
         // threshold so /compact always compresses regardless of budget.
@@ -1199,16 +1336,16 @@ impl AppSession {
             )
         } else {
             oneai_memory::ContextCompressor::new(0, keep_recent_turns, provider.clone())
-            .with_fact_extraction(
-                vec![
-                    oneai_core::FactType::new("user_tooling_pref"),
-                    oneai_core::FactType::new("decision"),
-                    oneai_core::FactType::new("open_task"),
-                ],
-                self.app.memory_manager.clone(),
-                self.app.memory_manager.user_id().await,
-                self.session_id.clone(),
-            )
+                .with_fact_extraction(
+                    vec![
+                        oneai_core::FactType::new("user_tooling_pref"),
+                        oneai_core::FactType::new("decision"),
+                        oneai_core::FactType::new("open_task"),
+                    ],
+                    self.app.memory_manager.clone(),
+                    self.app.memory_manager.user_id().await,
+                    self.session_id.clone(),
+                )
         };
 
         let result = compressor.compress(&self.conversation).await?;
@@ -1219,7 +1356,8 @@ impl AppSession {
         // Archive the discarded raw transcript (C2 "压缩即不丢") before it
         // leaves the live conversation — fact extraction already ran inside
         // the compressor; this persists the raw segment as a snapshot.
-        self.app.memory_manager
+        self.app
+            .memory_manager
             .archive_discarded_snapshot(&self.session_id, result.discarded_messages.clone())
             .await
             .ok(); // non-critical: a failed snapshot must not break /compact
@@ -1232,10 +1370,17 @@ impl AppSession {
 
         // Persist the compacted conversation, mirroring run_agent's auto-save.
         if self.app.sqlite_store.is_some() {
-            if let Err(e) = self.app.memory_manager
-                .save_session(&self.session_id, &self.conversation).await
+            if let Err(e) = self
+                .app
+                .memory_manager
+                .save_session(&self.session_id, &self.conversation)
+                .await
             {
-                tracing::warn!("Failed to persist compacted session '{}': {}", self.session_id, e);
+                tracing::warn!(
+                    "Failed to persist compacted session '{}': {}",
+                    self.session_id,
+                    e
+                );
             }
         }
 
@@ -1244,7 +1389,10 @@ impl AppSession {
         // message — skip it. When the conversation was too short to summarize,
         // the conversation is returned unchanged (no leading summary), so skip
         // nothing.
-        let retained: Vec<(String, String)> = self.conversation.messages.iter()
+        let retained: Vec<(String, String)> = self
+            .conversation
+            .messages
+            .iter()
             .skip(if had_summary { 1 } else { 0 })
             .filter_map(|m| match m.role {
                 oneai_core::Role::User => Some(("user".to_string(), m.text_content())),
@@ -1253,6 +1401,10 @@ impl AppSession {
             })
             .collect();
 
-        Ok(CompactOutcome { summary, removed_count, retained })
+        Ok(CompactOutcome {
+            summary,
+            removed_count,
+            retained,
+        })
     }
 }

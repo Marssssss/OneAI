@@ -88,14 +88,22 @@ impl From<SkillConfig> for SkillDescriptor {
 ///
 /// `inferred_name` is used as a fallback when the file declares no name.
 /// `ext` selects the parser: `yaml`/`yml`, `toml`, or `md` (SKILL.md frontmatter).
-pub fn parse_skill_descriptor(inferred_name: &str, ext: &str, content: &str) -> Result<SkillDescriptor, SkillDiscoveryError> {
+pub fn parse_skill_descriptor(
+    inferred_name: &str,
+    ext: &str,
+    content: &str,
+) -> Result<SkillDescriptor, SkillDiscoveryError> {
     let mut cfg = match ext {
         "yaml" | "yml" => serde_yaml::from_str::<SkillConfig>(content)
             .map_err(|e| SkillDiscoveryError::ParseFailed(format!("YAML parse error: {e}")))?,
         "toml" => toml::from_str::<SkillConfig>(content)
             .map_err(|e| SkillDiscoveryError::ParseFailed(format!("TOML parse error: {e}")))?,
         "md" => parse_skill_md(content)?,
-        other => return Err(SkillDiscoveryError::ParseFailed(format!("unsupported skill file extension: {other}"))),
+        other => {
+            return Err(SkillDiscoveryError::ParseFailed(format!(
+                "unsupported skill file extension: {other}"
+            )))
+        }
     };
     if cfg.name.trim().is_empty() {
         cfg.name = inferred_name.to_string();
@@ -107,12 +115,15 @@ pub fn parse_skill_descriptor(inferred_name: &str, ext: &str, content: &str) -> 
 /// `---`) for metadata, with the body (after frontmatter) used as `prompt_template`.
 fn parse_skill_md(content: &str) -> Result<SkillConfig, SkillDiscoveryError> {
     let trimmed = content.trim_start();
-    let (frontmatter, body) = if trimmed.starts_with("---") {
-        let after = &trimmed[3..];
+    let (frontmatter, body) = if let Some(after) = trimmed.strip_prefix("---") {
         if let Some(end) = after.find("\n---") {
             let fm = &after[..end];
             let body_start = end + 4; // skip "\n---"
-            let body = if body_start < after.len() { &after[body_start..] } else { "" };
+            let body = if body_start < after.len() {
+                &after[body_start..]
+            } else {
+                ""
+            };
             (Some(fm), body.trim_start())
         } else {
             (None, content)
@@ -122,10 +133,16 @@ fn parse_skill_md(content: &str) -> Result<SkillConfig, SkillDiscoveryError> {
     };
 
     let mut cfg: SkillConfig = if let Some(fm) = frontmatter {
-        serde_yaml::from_str(fm)
-            .map_err(|e| SkillDiscoveryError::ParseFailed(format!("SKILL.md frontmatter parse error: {e}")))?
+        serde_yaml::from_str(fm).map_err(|e| {
+            SkillDiscoveryError::ParseFailed(format!("SKILL.md frontmatter parse error: {e}"))
+        })?
     } else {
-        SkillConfig { name: String::new(), description: String::new(), prompt_template: String::new(), trigger_keywords: vec![] }
+        SkillConfig {
+            name: String::new(),
+            description: String::new(),
+            prompt_template: String::new(),
+            trigger_keywords: vec![],
+        }
     };
     if cfg.prompt_template.is_empty() {
         cfg.prompt_template = body.to_string();
@@ -136,11 +153,17 @@ fn parse_skill_md(content: &str) -> Result<SkillConfig, SkillDiscoveryError> {
 /// Extension (without dot) for a skill file name, or `None` if unrecognized.
 fn skill_file_ext(file_name: &str) -> Option<&'static str> {
     let lower = file_name.to_ascii_lowercase();
-    if lower.ends_with(".md") { Some("md") }
-    else if lower.ends_with(".yaml") { Some("yaml") }
-    else if lower.ends_with(".yml") { Some("yml") }
-    else if lower.ends_with(".toml") { Some("toml") }
-    else { None }
+    if lower.ends_with(".md") {
+        Some("md")
+    } else if lower.ends_with(".yaml") {
+        Some("yaml")
+    } else if lower.ends_with(".yml") {
+        Some("yml")
+    } else if lower.ends_with(".toml") {
+        Some("toml")
+    } else {
+        None
+    }
 }
 
 // ─── Directory discovery ────────────────────────────────────────────────────
@@ -242,11 +265,16 @@ fn scan_skills_dir(dir: &Path) -> Vec<SkillDescriptor> {
 /// extension); `inferred_name` is the fallback skill name (dir/file name).
 fn read_parse(path: &Path, cand: &str, inferred_name: &str) -> Option<SkillDescriptor> {
     let ext = skill_file_ext(cand)?;
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        tracing::warn!("failed to read {}: {e}", path.display());
-        e
-    }).ok()?;
-    let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| inferred_name.to_string());
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| {
+            tracing::warn!("failed to read {}: {e}", path.display());
+            e
+        })
+        .ok()?;
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| inferred_name.to_string());
     match parse_skill_descriptor(&name, ext, &content) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -315,7 +343,8 @@ mod tests {
         std::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: my-skill\ndescription: demo\n---\nBody.\n",
-        ).unwrap();
+        )
+        .unwrap();
         let found = scan_skills_dir(&tmp);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "my-skill");
@@ -330,7 +359,8 @@ mod tests {
         std::fs::write(
             tmp.join("standalone.yaml"),
             "name: standalone\ndescription: x\nprompt_template: y\n",
-        ).unwrap();
+        )
+        .unwrap();
         let found = scan_skills_dir(&tmp);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "standalone");
@@ -345,12 +375,24 @@ mod tests {
         let p = tmp.join("proj/.claude/skills/dup");
         std::fs::create_dir_all(&g).unwrap();
         std::fs::create_dir_all(&p).unwrap();
-        std::fs::write(g.join("SKILL.md"), "---\nname: dup\ndescription: GLOBAL\n---\ng\n").unwrap();
-        std::fs::write(p.join("SKILL.md"), "---\nname: dup\ndescription: PROJECT\n---\np\n").unwrap();
+        std::fs::write(
+            g.join("SKILL.md"),
+            "---\nname: dup\ndescription: GLOBAL\n---\ng\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("SKILL.md"),
+            "---\nname: dup\ndescription: PROJECT\n---\np\n",
+        )
+        .unwrap();
         // Build a merged map the same way discover_skills does (sans home/cwd).
         let mut map = HashMap::new();
-        for s in scan_skills_dir(&tmp.join("global/.claude/skills")) { map.insert(s.name.clone(), s); }
-        for s in scan_skills_dir(&tmp.join("proj/.claude/skills")) { map.insert(s.name.clone(), s); }
+        for s in scan_skills_dir(&tmp.join("global/.claude/skills")) {
+            map.insert(s.name.clone(), s);
+        }
+        for s in scan_skills_dir(&tmp.join("proj/.claude/skills")) {
+            map.insert(s.name.clone(), s);
+        }
         assert_eq!(map.get("dup").unwrap().description, "PROJECT");
         std::fs::remove_dir_all(&tmp).ok();
     }

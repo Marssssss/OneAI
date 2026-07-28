@@ -38,7 +38,7 @@ pub fn compile(config: &WorkflowConfig) -> WorkflowDag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{StepConfig, RetryPolicy};
+    use crate::config::{RetryPolicy, StepConfig};
     use std::collections::HashMap;
 
     fn make_step(id: &str, depends_on: Vec<&str>) -> StepConfig {
@@ -58,11 +58,14 @@ mod tests {
 
     #[test]
     fn test_compile_simple_workflow() {
-        let config = WorkflowConfig::new("simple", vec![
-            make_step("step1", vec![]),
-            make_step("step2", vec!["step1"]),
-            make_step("step3", vec!["step2"]),
-        ]);
+        let config = WorkflowConfig::new(
+            "simple",
+            vec![
+                make_step("step1", vec![]),
+                make_step("step2", vec!["step1"]),
+                make_step("step3", vec!["step2"]),
+            ],
+        );
 
         let dag = compile(&config);
 
@@ -75,12 +78,15 @@ mod tests {
 
     #[test]
     fn test_compile_parallel_workflow() {
-        let config = WorkflowConfig::new("parallel", vec![
-            make_step("fetch_data", vec![]),
-            make_step("analyze_data", vec!["fetch_data"]),
-            make_step("generate_report", vec!["fetch_data"]),
-            make_step("publish", vec!["analyze_data", "generate_report"]),
-        ]);
+        let config = WorkflowConfig::new(
+            "parallel",
+            vec![
+                make_step("fetch_data", vec![]),
+                make_step("analyze_data", vec!["fetch_data"]),
+                make_step("generate_report", vec!["fetch_data"]),
+                make_step("publish", vec!["analyze_data", "generate_report"]),
+            ],
+        );
 
         let dag = compile(&config);
 
@@ -106,14 +112,15 @@ mod tests {
             prompt: None,
             requires_approval: false,
             timeout_secs: Some(30),
-            retry_policy: Some(RetryPolicy { max_retries: 5, retry_delay_secs: 10, retry_on_all_errors: false }),
+            retry_policy: Some(RetryPolicy {
+                max_retries: 5,
+                retry_delay_secs: 10,
+                retry_on_all_errors: false,
+            }),
             metadata: HashMap::new(),
         };
 
-        let config = WorkflowConfig::new("test", vec![
-            make_step("fetch", vec![]),
-            step.clone(),
-        ]);
+        let config = WorkflowConfig::new("test", vec![make_step("fetch", vec![]), step.clone()]);
 
         let dag = compile(&config);
         let node = dag.get_node("calc").unwrap();

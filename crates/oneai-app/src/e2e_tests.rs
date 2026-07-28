@@ -10,9 +10,11 @@
 use std::sync::Arc;
 
 use oneai_agent::mock_provider::{MockProvider, ScriptedResponse};
-use oneai_agent::{AgentLoopObserver, AgentLoopResult, ParadigmKind, ToolCallRequest, SubAgentKind};
-use oneai_core::{ToolOutput};
+use oneai_agent::{
+    AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind, ToolCallRequest,
+};
 use oneai_core::traits::LlmProvider;
+use oneai_core::ToolOutput;
 
 use crate::builder::AppBuilder;
 
@@ -48,7 +50,14 @@ async fn e2e_app_session_direct_answer() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("What is the answer?", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
+    let result = session
+        .run_agent(
+            "What is the answer?",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
 
     // Verify the loop completed (the exact answer depends on stream assembly)
     assert!(result.completed);
@@ -70,7 +79,7 @@ async fn e2e_app_session_tool_call_then_answer() {
     // or a more sophisticated MockProvider streaming simulation.
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers(
-        "I would read the file but streaming simulation needs refinement"
+        "I would read the file but streaming simulation needs refinement",
     ));
 
     let app = AppBuilder::new()
@@ -82,7 +91,14 @@ async fn e2e_app_session_tool_call_then_answer() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("Read /test.txt", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
+    let result = session
+        .run_agent(
+            "Read /test.txt",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
 
     // Verify the loop completed through the full session → agent loop path
     assert!(result.completed);
@@ -105,7 +121,14 @@ async fn e2e_app_session_conversation_history() {
     let mut session = app.create_session();
 
     // Send a message and run agent
-    let result = session.run_agent("Describe the project", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
+    let result = session
+        .run_agent(
+            "Describe the project",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
     assert!(result.completed);
 
     // Verify conversation has messages
@@ -115,7 +138,8 @@ async fn e2e_app_session_conversation_history() {
 
 #[tokio::test]
 async fn e2e_app_session_with_domain_pack() {
-    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("I analyzed the code"));
+    let provider: Arc<dyn LlmProvider> =
+        Arc::new(MockProvider::always_answers("I analyzed the code"));
 
     let coding_pack = oneai_domain::coding_pack("/tmp/test-project");
 
@@ -129,7 +153,14 @@ async fn e2e_app_session_with_domain_pack() {
         .expect("Build with domain pack should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("Analyze the code", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
+    let result = session
+        .run_agent(
+            "Analyze the code",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
 
     assert!(result.completed);
 }
@@ -146,7 +177,7 @@ async fn e2e_app_session_with_domain_pack() {
 #[tokio::test]
 async fn e2e_app_session_empty_response_retry() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::from_script(vec![
-        ScriptedResponse::empty_response(),  // First call: 0 content blocks
+        ScriptedResponse::empty_response(), // First call: 0 content blocks
         ScriptedResponse::direct_answer("I'll create the temporary directory for you."), // Retry: real answer
     ]));
 
@@ -159,11 +190,22 @@ async fn e2e_app_session_empty_response_retry() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("帮我创建一个临时目录", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
+    let result = session
+        .run_agent(
+            "帮我创建一个临时目录",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
 
     // The retry mechanism should have kicked in, producing a non-empty answer
     assert!(result.completed);
-    assert!(!result.final_answer.trim().is_empty(), "Final answer should not be empty after retry. Got: '{}'", result.final_answer);
+    assert!(
+        !result.final_answer.trim().is_empty(),
+        "Final answer should not be empty after retry. Got: '{}'",
+        result.final_answer
+    );
 }
 
 /// Test: double empty response — retry also produces empty.
@@ -174,8 +216,8 @@ async fn e2e_app_session_empty_response_retry() {
 #[tokio::test]
 async fn e2e_app_session_double_empty_response() {
     let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::from_script(vec![
-        ScriptedResponse::empty_response(),  // First call: empty
-        ScriptedResponse::empty_response(),  // Retry: also empty
+        ScriptedResponse::empty_response(), // First call: empty
+        ScriptedResponse::empty_response(), // Retry: also empty
     ]));
 
     let app = AppBuilder::new()
@@ -187,7 +229,14 @@ async fn e2e_app_session_double_empty_response() {
         .expect("Build should succeed");
 
     let mut session = app.create_session();
-    let result = session.run_agent("Test empty response", &SessionTestObserver, Arc::new(tokio::sync::Mutex::new(None))).await.unwrap();
+    let result = session
+        .run_agent(
+            "Test empty response",
+            &SessionTestObserver,
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
 
     // The loop should still complete (gracefully), even with empty answer
     assert!(result.completed);
@@ -203,7 +252,8 @@ async fn e2e_app_session_double_empty_response() {
 async fn e2e_app_session_compact_summarizes_and_injects_summary() {
     // The MockProvider answers every infer call with this fixed text — that
     // becomes the LLM summary the ContextCompressor requests.
-    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("mock summary text"));
+    let provider: Arc<dyn LlmProvider> =
+        Arc::new(MockProvider::always_answers("mock summary text"));
 
     let app = AppBuilder::new()
         .provider(provider)
@@ -239,7 +289,10 @@ async fn e2e_app_session_compact_summarizes_and_injects_summary() {
     assert_eq!(outcome.retained.len(), 3);
     assert_eq!(outcome.retained[0], ("user".to_string(), "q1".to_string()));
     assert_eq!(outcome.retained[1], ("user".to_string(), "q3".to_string()));
-    assert_eq!(outcome.retained[2], ("assistant".to_string(), "a3".to_string()));
+    assert_eq!(
+        outcome.retained[2],
+        ("assistant".to_string(), "a3".to_string())
+    );
 
     // The backend conversation now leads with the summary system message
     // (the core fix: the model sees the summary on the next run), followed by
@@ -247,7 +300,9 @@ async fn e2e_app_session_compact_summarizes_and_injects_summary() {
     let msgs = &session.conversation().messages;
     assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[0].role, oneai_core::Role::System);
-    assert!(msgs[0].text_content().contains("[Previous conversation summary]"));
+    assert!(msgs[0]
+        .text_content()
+        .contains("[Previous conversation summary]"));
     assert!(msgs[0].text_content().contains("mock summary text"));
     // Q2: the original task (q1) survives verbatim, not summarized away.
     assert_eq!(msgs[1].role, oneai_core::Role::User);
@@ -278,7 +333,10 @@ async fn e2e_app_session_compact_too_short_is_noop() {
     assert_eq!(outcome.removed_count, 0);
     // Conversation untouched — no leading summary system message was prepended.
     assert_eq!(session.conversation().messages.len(), 1);
-    assert_eq!(session.conversation().messages[0].text_content(), "only message");
+    assert_eq!(
+        session.conversation().messages[0].text_content(),
+        "only message"
+    );
 }
 
 // ─── Cross-session working-state continuation ─────────────────────────────────
@@ -303,8 +361,7 @@ async fn cross_session_unfinished_work_surfaced() {
     // Seed an unfinished task as if a previous session left it — directly in
     // the durable store (the new session never reads that session's
     // conversation; it reads only this store).
-    let seed_store: Arc<dyn WorkingStateStore> =
-        Arc::new(FileWorkingStateStore::new(root.clone()));
+    let seed_store: Arc<dyn WorkingStateStore> = Arc::new(FileWorkingStateStore::new(root.clone()));
     let task_id = seed_store
         .create_task("alice", &project, "ship feature X", "", "old_session")
         .await

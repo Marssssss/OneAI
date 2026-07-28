@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use wasmtime::Linker;
 
-use crate::error::{WasmError, Result};
+use crate::error::{Result, WasmError};
 use crate::runtime::WasmStoreState;
 
 /// Host function types available to WASM guests.
@@ -30,7 +30,11 @@ pub enum WasmHostFunction {
 impl WasmHostFunction {
     /// Get all available host functions.
     pub fn all() -> Vec<WasmHostFunction> {
-        vec![WasmHostFunction::Log, WasmHostFunction::GetEnv, WasmHostFunction::Abort]
+        vec![
+            WasmHostFunction::Log,
+            WasmHostFunction::GetEnv,
+            WasmHostFunction::Abort,
+        ]
     }
 
     /// Get the Wasmtime function name for this host function.
@@ -128,65 +132,89 @@ fn read_string_from_memory(
 /// the standard ptr + len WASM protocol.
 pub fn register_host_functions(linker: &mut Linker<WasmStoreState>) -> Result<()> {
     // ─── host_log(level: u32, msg_ptr: u32, msg_len: u32) → void ────
-    linker.func_wrap(
-        "oneai",
-        "host_log",
-        |mut caller: wasmtime::Caller<'_, WasmStoreState>, level: u32, msg_ptr: u32, msg_len: u32| {
-            let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
-                Some(s) => s,
-                None => return,
-            };
+    linker
+        .func_wrap(
+            "oneai",
+            "host_log",
+            |mut caller: wasmtime::Caller<'_, WasmStoreState>,
+             level: u32,
+             msg_ptr: u32,
+             msg_len: u32| {
+                let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
+                    Some(s) => s,
+                    None => return,
+                };
 
-            match level {
-                0 => tracing::trace!("WASM guest: {}", msg),
-                1 => tracing::info!("WASM guest: {}", msg),
-                2 => tracing::warn!("WASM guest: {}", msg),
-                3 => tracing::error!("WASM guest: {}", msg),
-                _ => tracing::info!("WASM guest (level {}): {}", level, msg),
-            }
-        },
-    ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_log: {}", e)))?;
+                match level {
+                    0 => tracing::trace!("WASM guest: {}", msg),
+                    1 => tracing::info!("WASM guest: {}", msg),
+                    2 => tracing::warn!("WASM guest: {}", msg),
+                    3 => tracing::error!("WASM guest: {}", msg),
+                    _ => tracing::info!("WASM guest (level {}): {}", level, msg),
+                }
+            },
+        )
+        .map_err(|e| {
+            WasmError::InstantiationFailed(format!("Failed to register host_log: {}", e))
+        })?;
 
     // ─── host_get_env(key_ptr: u32, key_len: u32) → (found: u32, val_len: u32) ────
     //
     // Returns (0, 0) if not found/in whitelist.
     // If found, stores value in host state output buffer and returns (1, val_len).
-    linker.func_wrap(
-        "oneai",
-        "host_get_env",
-        |mut caller: wasmtime::Caller<'_, WasmStoreState>, key_ptr: u32, key_len: u32| -> (u32, u32) {
-            let key = match read_string_from_memory(&mut caller, key_ptr, key_len) {
-                Some(s) => s,
-                None => return (0, 0),
-            };
+    linker
+        .func_wrap(
+            "oneai",
+            "host_get_env",
+            |mut caller: wasmtime::Caller<'_, WasmStoreState>,
+             key_ptr: u32,
+             key_len: u32|
+             -> (u32, u32) {
+                let key = match read_string_from_memory(&mut caller, key_ptr, key_len) {
+                    Some(s) => s,
+                    None => return (0, 0),
+                };
 
-            // Look up in the whitelist and clone value before mutation
-            let val = caller.data().host_state().get_env(&key).cloned();
-            match val {
-                Some(val_str) => {
-                    let val_len = val_str.len() as u32;
-                    caller.data_mut().host_state_mut().set_output(val_str.into_bytes());
-                    (1, val_len)
+                // Look up in the whitelist and clone value before mutation
+                let val = caller.data().host_state().get_env(&key).cloned();
+                match val {
+                    Some(val_str) => {
+                        let val_len = val_str.len() as u32;
+                        caller
+                            .data_mut()
+                            .host_state_mut()
+                            .set_output(val_str.into_bytes());
+                        (1, val_len)
+                    }
+                    None => (0, 0),
                 }
-                None => (0, 0),
-            }
-        },
-    ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_get_env: {}", e)))?;
+            },
+        )
+        .map_err(|e| {
+            WasmError::InstantiationFailed(format!("Failed to register host_get_env: {}", e))
+        })?;
 
     // ─── host_abort(msg_ptr: u32, msg_len: u32) → void ────
-    linker.func_wrap(
-        "oneai",
-        "host_abort",
-        |mut caller: wasmtime::Caller<'_, WasmStoreState>, msg_ptr: u32, msg_len: u32| {
-            let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
-                Some(s) => s,
-                None => "unknown abort reason".to_string(),
-            };
+    linker
+        .func_wrap(
+            "oneai",
+            "host_abort",
+            |mut caller: wasmtime::Caller<'_, WasmStoreState>, msg_ptr: u32, msg_len: u32| {
+                let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
+                    Some(s) => s,
+                    None => "unknown abort reason".to_string(),
+                };
 
-            tracing::warn!("WASM guest aborted: {}", msg);
-            caller.data_mut().host_state_mut().set_output(format!("Guest aborted: {}", msg).into_bytes());
-        },
-    ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_abort: {}", e)))?;
+                tracing::warn!("WASM guest aborted: {}", msg);
+                caller
+                    .data_mut()
+                    .host_state_mut()
+                    .set_output(format!("Guest aborted: {}", msg).into_bytes());
+            },
+        )
+        .map_err(|e| {
+            WasmError::InstantiationFailed(format!("Failed to register host_abort: {}", e))
+        })?;
 
     Ok(())
 }
@@ -197,59 +225,83 @@ pub fn register_host_functions_with_api(
     api: &WasmGuestApi,
 ) -> Result<()> {
     // Always register abort — it's the guest's only error mechanism
-    linker.func_wrap(
-        "oneai",
-        "host_abort",
-        |mut caller: wasmtime::Caller<'_, WasmStoreState>, msg_ptr: u32, msg_len: u32| {
-            let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
-                Some(s) => s,
-                None => "unknown abort reason".to_string(),
-            };
-            tracing::warn!("WASM guest aborted: {}", msg);
-            caller.data_mut().host_state_mut().set_output(format!("Guest aborted: {}", msg).into_bytes());
-        },
-    ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_abort: {}", e)))?;
-
-    if api.enabled_functions.contains(&WasmHostFunction::Log) {
-        linker.func_wrap(
+    linker
+        .func_wrap(
             "oneai",
-            "host_log",
-            |mut caller: wasmtime::Caller<'_, WasmStoreState>, level: u32, msg_ptr: u32, msg_len: u32| {
+            "host_abort",
+            |mut caller: wasmtime::Caller<'_, WasmStoreState>, msg_ptr: u32, msg_len: u32| {
                 let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
                     Some(s) => s,
-                    None => return,
+                    None => "unknown abort reason".to_string(),
                 };
-                match level {
-                    0 => tracing::trace!("WASM guest: {}", msg),
-                    1 => tracing::info!("WASM guest: {}", msg),
-                    2 => tracing::warn!("WASM guest: {}", msg),
-                    3 => tracing::error!("WASM guest: {}", msg),
-                    _ => tracing::info!("WASM guest (level {}): {}", level, msg),
-                }
+                tracing::warn!("WASM guest aborted: {}", msg);
+                caller
+                    .data_mut()
+                    .host_state_mut()
+                    .set_output(format!("Guest aborted: {}", msg).into_bytes());
             },
-        ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_log: {}", e)))?;
+        )
+        .map_err(|e| {
+            WasmError::InstantiationFailed(format!("Failed to register host_abort: {}", e))
+        })?;
+
+    if api.enabled_functions.contains(&WasmHostFunction::Log) {
+        linker
+            .func_wrap(
+                "oneai",
+                "host_log",
+                |mut caller: wasmtime::Caller<'_, WasmStoreState>,
+                 level: u32,
+                 msg_ptr: u32,
+                 msg_len: u32| {
+                    let msg = match read_string_from_memory(&mut caller, msg_ptr, msg_len) {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    match level {
+                        0 => tracing::trace!("WASM guest: {}", msg),
+                        1 => tracing::info!("WASM guest: {}", msg),
+                        2 => tracing::warn!("WASM guest: {}", msg),
+                        3 => tracing::error!("WASM guest: {}", msg),
+                        _ => tracing::info!("WASM guest (level {}): {}", level, msg),
+                    }
+                },
+            )
+            .map_err(|e| {
+                WasmError::InstantiationFailed(format!("Failed to register host_log: {}", e))
+            })?;
     }
 
     if api.enabled_functions.contains(&WasmHostFunction::GetEnv) {
-        linker.func_wrap(
-            "oneai",
-            "host_get_env",
-            |mut caller: wasmtime::Caller<'_, WasmStoreState>, key_ptr: u32, key_len: u32| -> (u32, u32) {
-                let key = match read_string_from_memory(&mut caller, key_ptr, key_len) {
-                    Some(s) => s,
-                    None => return (0, 0),
-                };
-                let val = caller.data().host_state().get_env(&key).cloned();
-                match val {
-                    Some(val_str) => {
-                        let val_len = val_str.len() as u32;
-                        caller.data_mut().host_state_mut().set_output(val_str.into_bytes());
-                        (1, val_len)
+        linker
+            .func_wrap(
+                "oneai",
+                "host_get_env",
+                |mut caller: wasmtime::Caller<'_, WasmStoreState>,
+                 key_ptr: u32,
+                 key_len: u32|
+                 -> (u32, u32) {
+                    let key = match read_string_from_memory(&mut caller, key_ptr, key_len) {
+                        Some(s) => s,
+                        None => return (0, 0),
+                    };
+                    let val = caller.data().host_state().get_env(&key).cloned();
+                    match val {
+                        Some(val_str) => {
+                            let val_len = val_str.len() as u32;
+                            caller
+                                .data_mut()
+                                .host_state_mut()
+                                .set_output(val_str.into_bytes());
+                            (1, val_len)
+                        }
+                        None => (0, 0),
                     }
-                    None => (0, 0),
-                }
-            },
-        ).map_err(|e| WasmError::InstantiationFailed(format!("Failed to register host_get_env: {}", e)))?;
+                },
+            )
+            .map_err(|e| {
+                WasmError::InstantiationFailed(format!("Failed to register host_get_env: {}", e))
+            })?;
     }
 
     Ok(())
@@ -258,8 +310,8 @@ pub fn register_host_functions_with_api(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::WasmRuntime;
     use crate::config::WasmRuntimeConfig;
+    use crate::runtime::WasmRuntime;
 
     #[test]
     fn test_guest_api_default_is_full() {
@@ -299,7 +351,10 @@ mod tests {
     #[test]
     fn test_host_function_names() {
         assert_eq!(WasmHostFunction::Log.wasmtime_name(), "oneai_host_log");
-        assert_eq!(WasmHostFunction::GetEnv.wasmtime_name(), "oneai_host_get_env");
+        assert_eq!(
+            WasmHostFunction::GetEnv.wasmtime_name(),
+            "oneai_host_get_env"
+        );
         assert_eq!(WasmHostFunction::Abort.wasmtime_name(), "oneai_host_abort");
     }
 }

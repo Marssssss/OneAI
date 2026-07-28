@@ -7,12 +7,12 @@
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
-use oneai_core::{
-    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk,
-    ModelCapability, ModelConfig, Message, Role, TokenUsage,
-};
 use oneai_core::error::OneAIError;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{
+    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk, Message,
+    ModelCapability, ModelConfig, Role, TokenUsage,
+};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -66,22 +66,27 @@ impl OllamaProvider {
         }
         if let Some(temperature) = req.temperature {
             body["temperature"] = Value::Number(
-                serde_json::Number::from_f64(temperature as f64).unwrap_or(serde_json::Number::from(1))
+                serde_json::Number::from_f64(temperature as f64)
+                    .unwrap_or(serde_json::Number::from(1)),
             );
         }
 
         // Add tool definitions (Ollama supports OpenAI-compatible tools)
         if !req.tools.is_empty() {
-            let tools_json = req.tools.iter().map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters_schema,
-                    }
+            let tools_json = req
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters_schema,
+                        }
+                    })
                 })
-            }).collect::<Vec<Value>>();
+                .collect::<Vec<Value>>();
             body["tools"] = Value::Array(tools_json);
         }
 
@@ -104,11 +109,15 @@ impl OllamaProvider {
 
 #[async_trait]
 impl LlmProvider for OllamaProvider {
-    async fn infer(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+    async fn infer(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
         let body = self.to_ollama_request(&req);
         let url = self.chat_url();
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -118,43 +127,83 @@ impl LlmProvider for OllamaProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
-            return Err(OneAIError::Provider(format!("Ollama API error {}: {}", status, text)));
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
+            return Err(OneAIError::Provider(format!(
+                "Ollama API error {}: {}",
+                status, text
+            )));
         }
 
         // Parse the OpenAI-compatible response
-        let json: Value = response.json().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| OneAIError::Network(e.to_string()))?;
 
-        let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let model = json
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let choices = json.get("choices").and_then(|c| c.as_array());
         let first_choice = choices.and_then(|c| c.first());
 
-        let message_obj = first_choice.and_then(|c| c.get("message")).unwrap_or(&Value::Null);
-        let content_str = message_obj.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let message_obj = first_choice
+            .and_then(|c| c.get("message"))
+            .unwrap_or(&Value::Null);
+        let content_str = message_obj
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
 
-        let mut content_blocks = vec![ContentBlock::Text { text: content_str.to_string() }];
+        let mut content_blocks = vec![ContentBlock::Text {
+            text: content_str.to_string(),
+        }];
 
         // Parse tool calls
         if let Some(tool_calls) = message_obj.get("tool_calls").and_then(|tc| tc.as_array()) {
             for tc in tool_calls {
-                let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let func = tc.get("function").unwrap_or(&Value::Null);
-                let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+                let name = func
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args = func
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
                 content_blocks.push(ContentBlock::ToolCall { id, name, args });
             }
         }
 
-        let usage = json.get("usage").map(|u| TokenUsage {
-            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()}).unwrap_or(TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            ..Default::default()});
+        let usage = json
+            .get("usage")
+            .map(|u| TokenUsage {
+                prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                completion_tokens: u
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                ..Default::default()
+            })
+            .unwrap_or(TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                ..Default::default()
+            });
 
         Ok(InferenceResponse {
             message: Message {
@@ -171,13 +220,15 @@ impl LlmProvider for OllamaProvider {
     async fn infer_stream(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         let mut body = self.to_ollama_request(&req);
         body["stream"] = Value::Bool(true);
 
         let url = self.chat_url();
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -187,8 +238,14 @@ impl LlmProvider for OllamaProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
-            return Err(OneAIError::Provider(format!("Ollama API error {}: {}", status, text)));
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
+            return Err(OneAIError::Provider(format!(
+                "Ollama API error {}: {}",
+                status, text
+            )));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -201,12 +258,14 @@ impl LlmProvider for OllamaProvider {
                 match event {
                     Ok(event) => {
                         if event.data == "[DONE]" {
-                            let _ = tx.send(InferenceStreamChunk {
-                                content: vec![],
-                                is_final: true,
-                                usage: None,
-                                model: model_name.clone(),
-                            }).await;
+                            let _ = tx
+                                .send(InferenceStreamChunk {
+                                    content: vec![],
+                                    is_final: true,
+                                    usage: None,
+                                    model: model_name.clone(),
+                                })
+                                .await;
                             break;
                         }
 
@@ -214,8 +273,11 @@ impl LlmProvider for OllamaProvider {
                             let choices = json.get("choices").and_then(|c| c.as_array());
                             let first_choice = choices.and_then(|c| c.first());
 
-                            let delta = first_choice.and_then(|c| c.get("delta")).unwrap_or(&Value::Null);
-                            let content = delta.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                            let delta = first_choice
+                                .and_then(|c| c.get("delta"))
+                                .unwrap_or(&Value::Null);
+                            let content =
+                                delta.get("content").and_then(|c| c.as_str()).unwrap_or("");
 
                             let is_final = first_choice
                                 .and_then(|c| c.get("finish_reason"))
@@ -225,29 +287,51 @@ impl LlmProvider for OllamaProvider {
 
                             let mut content_blocks = Vec::new();
                             if !content.is_empty() {
-                                content_blocks.push(ContentBlock::Text { text: content.to_string() });
+                                content_blocks.push(ContentBlock::Text {
+                                    text: content.to_string(),
+                                });
                             }
 
                             // Parse tool calls from stream delta
-                            if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                            if let Some(tool_calls) =
+                                delta.get("tool_calls").and_then(|tc| tc.as_array())
+                            {
                                 for tc in tool_calls {
-                                    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let id = tc
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                     let func = tc.get("function").unwrap_or(&Value::Null);
-                                    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let name = func
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let args = func
+                                        .get("arguments")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
                                     if !name.is_empty() || !args.is_empty() {
-                                        content_blocks.push(ContentBlock::ToolCall { id, name, args });
+                                        content_blocks.push(ContentBlock::ToolCall {
+                                            id,
+                                            name,
+                                            args,
+                                        });
                                     }
                                 }
                             }
 
                             if !content_blocks.is_empty() || is_final {
-                                let _ = tx.send(InferenceStreamChunk {
-                                    content: content_blocks,
-                                    is_final,
-                                    usage: None,
-                                    model: model_name.clone(),
-                                }).await;
+                                let _ = tx
+                                    .send(InferenceStreamChunk {
+                                        content: content_blocks,
+                                        is_final,
+                                        usage: None,
+                                        model: model_name.clone(),
+                                    })
+                                    .await;
                             }
                         }
                     }
@@ -415,10 +499,7 @@ mod constrained_tests {
         };
         let body = provider().to_ollama_request(&request(Some(cfg)));
         assert_eq!(body["format"]["type"], "json_schema");
-        assert_eq!(
-            body["format"]["schema"]["required"][0],
-            "answer"
-        );
+        assert_eq!(body["format"]["schema"]["required"][0], "answer");
     }
 
     #[test]
@@ -427,4 +508,3 @@ mod constrained_tests {
         assert!(body.get("format").is_none());
     }
 }
-

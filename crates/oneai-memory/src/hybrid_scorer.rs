@@ -17,7 +17,10 @@ pub struct HybridScorer {
 impl HybridScorer {
     /// Create a new hybrid scorer with default weights.
     pub fn new() -> Self {
-        Self { alpha: 0.7, beta: 0.3 }
+        Self {
+            alpha: 0.7,
+            beta: 0.3,
+        }
     }
 
     /// Create a hybrid scorer with custom weights.

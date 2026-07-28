@@ -32,21 +32,21 @@ mod linux;
 // Common bridge infrastructure (always available)
 mod bridge_common;
 
-use oneai_core::RiskLevel;
 use oneai_core::platform::Platform;
+use oneai_core::RiskLevel;
 
 pub use bridge_common::{DesktopInteractionBridge, DesktopInteractionDecision};
 
 // ─── Platform-specific gate types ──────────────────────────────────────
 
 #[cfg(target_os = "macos")]
-pub use macos::{MacOSInteractionGate, MacOSInteractionBridge};
+pub use macos::{MacOSInteractionBridge, MacOSInteractionGate};
 
 #[cfg(target_os = "windows")]
-pub use windows::{WindowsInteractionGate, WindowsInteractionBridge};
+pub use windows::{WindowsInteractionBridge, WindowsInteractionGate};
 
 #[cfg(target_os = "linux")]
-pub use linux::{LinuxCliInteractionGate, LinuxCliInteractionBridge};
+pub use linux::{LinuxCliInteractionBridge, LinuxCliInteractionGate};
 
 // ─── DesktopInteractionGateFactory ──────────────────────────────────────
 
@@ -63,33 +63,48 @@ impl DesktopInteractionGateFactory {
     /// On Windows: returns WindowsInteractionGate + WindowsInteractionBridge
     /// On Linux: returns LinuxCliInteractionGate + LinuxCliInteractionBridge
     #[cfg(target_os = "macos")]
-    pub fn create(buffer_size: usize, threshold: RiskLevel) -> (MacOSInteractionGate, MacOSInteractionBridge) {
+    pub fn create(
+        buffer_size: usize,
+        threshold: RiskLevel,
+    ) -> (MacOSInteractionGate, MacOSInteractionBridge) {
         MacOSInteractionGate::new(buffer_size, threshold)
     }
 
     #[cfg(target_os = "windows")]
-    pub fn create(buffer_size: usize, threshold: RiskLevel) -> (WindowsInteractionGate, WindowsInteractionBridge) {
+    pub fn create(
+        buffer_size: usize,
+        threshold: RiskLevel,
+    ) -> (WindowsInteractionGate, WindowsInteractionBridge) {
         WindowsInteractionGate::new(buffer_size, threshold)
     }
 
     #[cfg(target_os = "linux")]
-    pub fn create(buffer_size: usize, threshold: RiskLevel) -> (LinuxCliInteractionGate, LinuxCliInteractionBridge) {
+    pub fn create(
+        buffer_size: usize,
+        threshold: RiskLevel,
+    ) -> (LinuxCliInteractionGate, LinuxCliInteractionBridge) {
         LinuxCliInteractionGate::new(buffer_size, threshold)
     }
 
     /// Create a desktop interaction gate where all enabled points go through the channel.
     #[cfg(target_os = "macos")]
-    pub fn create_manual_only(buffer_size: usize) -> (MacOSInteractionGate, MacOSInteractionBridge) {
+    pub fn create_manual_only(
+        buffer_size: usize,
+    ) -> (MacOSInteractionGate, MacOSInteractionBridge) {
         MacOSInteractionGate::new_manual_only(buffer_size)
     }
 
     #[cfg(target_os = "windows")]
-    pub fn create_manual_only(buffer_size: usize) -> (WindowsInteractionGate, WindowsInteractionBridge) {
+    pub fn create_manual_only(
+        buffer_size: usize,
+    ) -> (WindowsInteractionGate, WindowsInteractionBridge) {
         WindowsInteractionGate::new_manual_only(buffer_size)
     }
 
     #[cfg(target_os = "linux")]
-    pub fn create_manual_only(buffer_size: usize) -> (LinuxCliInteractionGate, LinuxCliInteractionBridge) {
+    pub fn create_manual_only(
+        buffer_size: usize,
+    ) -> (LinuxCliInteractionGate, LinuxCliInteractionBridge) {
         LinuxCliInteractionGate::new_manual_only(buffer_size)
     }
 
@@ -109,7 +124,10 @@ mod tests {
     fn test_factory_current_platform() {
         let platform = DesktopInteractionGateFactory::current_platform();
         // On macOS, should detect macOS
-        assert!(matches!(platform, Platform::Macos | Platform::Linux | Platform::Windows));
+        assert!(matches!(
+            platform,
+            Platform::Macos | Platform::Linux | Platform::Windows
+        ));
     }
 
     #[cfg(target_os = "macos")]

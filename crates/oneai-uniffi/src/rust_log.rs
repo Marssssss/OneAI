@@ -26,11 +26,17 @@ struct ArcWriter(Arc<Mutex<LineWriter<File>>>);
 
 impl Write for ArcWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut g = self.0.lock().map_err(|_| std::io::Error::other("rust log mutex poisoned"))?;
+        let mut g = self
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("rust log mutex poisoned"))?;
         g.write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut g = self.0.lock().map_err(|_| std::io::Error::other("rust log mutex poisoned"))?;
+        let mut g = self
+            .0
+            .lock()
+            .map_err(|_| std::io::Error::other("rust log mutex poisoned"))?;
         g.flush()
     }
 }

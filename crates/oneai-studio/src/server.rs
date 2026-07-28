@@ -1,12 +1,12 @@
 //! Studio HTTP server — starts the axum server and binds to a port.
 
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 
-use crate::state::StudioState;
 use crate::routes;
+use crate::state::StudioState;
 
 // ─── Server Configuration ────────────────────────────────────────────
 
@@ -63,10 +63,12 @@ pub async fn serve_with_state(
 
     // Add CORS layer for local development
     let app = if config.cors_enabled {
-        router.layer(CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any))
+        router.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
     } else {
         router
     };

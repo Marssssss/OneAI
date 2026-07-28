@@ -30,7 +30,9 @@ pub struct ExactMatchMetric;
 
 #[async_trait]
 impl EvalMetric for ExactMatchMetric {
-    fn name(&self) -> &str { "exact_match" }
+    fn name(&self) -> &str {
+        "exact_match"
+    }
 
     fn description(&self) -> &str {
         "Checks whether the output exactly matches the expected answer"
@@ -47,27 +49,47 @@ impl EvalMetric for ExactMatchMetric {
                     EvalScore::new(
                         0.0,
                         1.0,
-                        format!("Expected '{}' but got '{}'", expected_trimmed, actual_trimmed),
+                        format!(
+                            "Expected '{}' but got '{}'",
+                            expected_trimmed, actual_trimmed
+                        ),
                         false,
                     )
                 }
             }
             ExpectedOutput::Contains { .. } => {
                 // Not applicable — return skip score
-                EvalScore::new(0.0, 1.0, "ExactMatch not applicable for Contains expected output", false)
+                EvalScore::new(
+                    0.0,
+                    1.0,
+                    "ExactMatch not applicable for Contains expected output",
+                    false,
+                )
             }
-            ExpectedOutput::Regex { .. } => {
-                EvalScore::new(0.0, 1.0, "ExactMatch not applicable for Regex expected output", false)
-            }
-            ExpectedOutput::LlmJudge { .. } => {
-                EvalScore::new(0.0, 1.0, "ExactMatch not applicable for LlmJudge expected output", false)
-            }
-            ExpectedOutput::Trajectory { .. } => {
-                EvalScore::new(0.0, 1.0, "ExactMatch not applicable for Trajectory expected output", false)
-            }
-            ExpectedOutput::Custom { .. } => {
-                EvalScore::new(0.0, 1.0, "ExactMatch not applicable for Custom expected output", false)
-            }
+            ExpectedOutput::Regex { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ExactMatch not applicable for Regex expected output",
+                false,
+            ),
+            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ExactMatch not applicable for LlmJudge expected output",
+                false,
+            ),
+            ExpectedOutput::Trajectory { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ExactMatch not applicable for Trajectory expected output",
+                false,
+            ),
+            ExpectedOutput::Custom { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ExactMatch not applicable for Custom expected output",
+                false,
+            ),
         }
     }
 }
@@ -82,7 +104,9 @@ pub struct ContainsMatchMetric;
 
 #[async_trait]
 impl EvalMetric for ContainsMatchMetric {
-    fn name(&self) -> &str { "contains_match" }
+    fn name(&self) -> &str {
+        "contains_match"
+    }
 
     fn description(&self) -> &str {
         "Checks whether all required substrings appear in the output"
@@ -90,22 +114,32 @@ impl EvalMetric for ContainsMatchMetric {
 
     async fn score(&self, _input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore {
         match expected {
-            ExpectedOutput::Exact { .. } => {
-                EvalScore::new(0.0, 1.0, "ContainsMatch not applicable for Exact expected output", false)
-            }
-            ExpectedOutput::Contains { substrings, case_sensitive } => {
-                let found = substrings.iter().filter(|s| {
-                    if *case_sensitive {
-                        actual.contains(*s)
-                    } else {
-                        actual.to_lowercase().contains(&s.to_lowercase())
-                    }
-                }).count();
+            ExpectedOutput::Exact { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ContainsMatch not applicable for Exact expected output",
+                false,
+            ),
+            ExpectedOutput::Contains {
+                substrings,
+                case_sensitive,
+            } => {
+                let found = substrings
+                    .iter()
+                    .filter(|s| {
+                        if *case_sensitive {
+                            actual.contains(*s)
+                        } else {
+                            actual.to_lowercase().contains(&s.to_lowercase())
+                        }
+                    })
+                    .count();
 
                 if found == substrings.len() {
                     EvalScore::perfect(format!("All {} substrings found", found))
                 } else {
-                    let missing: Vec<&str> = substrings.iter()
+                    let missing: Vec<&str> = substrings
+                        .iter()
                         .filter(|s| {
                             if *case_sensitive {
                                 !actual.contains(*s)
@@ -119,23 +153,40 @@ impl EvalMetric for ContainsMatchMetric {
                     EvalScore::new(
                         found as f64 / substrings.len() as f64,
                         1.0,
-                        format!("Found {} of {} substrings. Missing: {}", found, substrings.len(), missing.join(", ")),
+                        format!(
+                            "Found {} of {} substrings. Missing: {}",
+                            found,
+                            substrings.len(),
+                            missing.join(", ")
+                        ),
                         found == substrings.len(),
                     )
                 }
             }
-            ExpectedOutput::Regex { .. } => {
-                EvalScore::new(0.0, 1.0, "ContainsMatch not applicable for Regex expected output", false)
-            }
-            ExpectedOutput::LlmJudge { .. } => {
-                EvalScore::new(0.0, 1.0, "ContainsMatch not applicable for LlmJudge expected output", false)
-            }
-            ExpectedOutput::Trajectory { .. } => {
-                EvalScore::new(0.0, 1.0, "ContainsMatch not applicable for Trajectory expected output", false)
-            }
-            ExpectedOutput::Custom { .. } => {
-                EvalScore::new(0.0, 1.0, "ContainsMatch not applicable for Custom expected output", false)
-            }
+            ExpectedOutput::Regex { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ContainsMatch not applicable for Regex expected output",
+                false,
+            ),
+            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ContainsMatch not applicable for LlmJudge expected output",
+                false,
+            ),
+            ExpectedOutput::Trajectory { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ContainsMatch not applicable for Trajectory expected output",
+                false,
+            ),
+            ExpectedOutput::Custom { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "ContainsMatch not applicable for Custom expected output",
+                false,
+            ),
         }
     }
 }
@@ -150,7 +201,9 @@ pub struct RegexMatchMetric;
 
 #[async_trait]
 impl EvalMetric for RegexMatchMetric {
-    fn name(&self) -> &str { "regex_match" }
+    fn name(&self) -> &str {
+        "regex_match"
+    }
 
     fn description(&self) -> &str {
         "Checks whether the output matches the expected regex pattern"
@@ -168,26 +221,44 @@ impl EvalMetric for RegexMatchMetric {
                             EvalScore::zero(format!("Pattern '{}' not found in output", pattern))
                         }
                     }
-                    Err(e) => {
-                        EvalScore::new(0.0, 1.0, format!("Invalid regex pattern '{}': {}", pattern, e), false)
-                    }
+                    Err(e) => EvalScore::new(
+                        0.0,
+                        1.0,
+                        format!("Invalid regex pattern '{}': {}", pattern, e),
+                        false,
+                    ),
                 }
             }
-            ExpectedOutput::Exact { .. } => {
-                EvalScore::new(0.0, 1.0, "RegexMatch not applicable for Exact expected output", false)
-            }
-            ExpectedOutput::Contains { .. } => {
-                EvalScore::new(0.0, 1.0, "RegexMatch not applicable for Contains expected output", false)
-            }
-            ExpectedOutput::LlmJudge { .. } => {
-                EvalScore::new(0.0, 1.0, "RegexMatch not applicable for LlmJudge expected output", false)
-            }
-            ExpectedOutput::Trajectory { .. } => {
-                EvalScore::new(0.0, 1.0, "RegexMatch not applicable for Trajectory expected output", false)
-            }
-            ExpectedOutput::Custom { .. } => {
-                EvalScore::new(0.0, 1.0, "RegexMatch not applicable for Custom expected output", false)
-            }
+            ExpectedOutput::Exact { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "RegexMatch not applicable for Exact expected output",
+                false,
+            ),
+            ExpectedOutput::Contains { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "RegexMatch not applicable for Contains expected output",
+                false,
+            ),
+            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "RegexMatch not applicable for LlmJudge expected output",
+                false,
+            ),
+            ExpectedOutput::Trajectory { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "RegexMatch not applicable for Trajectory expected output",
+                false,
+            ),
+            ExpectedOutput::Custom { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "RegexMatch not applicable for Custom expected output",
+                false,
+            ),
         }
     }
 }
@@ -206,7 +277,9 @@ pub struct TrajectoryMetric;
 
 #[async_trait]
 impl EvalMetric for TrajectoryMetric {
-    fn name(&self) -> &str { "trajectory" }
+    fn name(&self) -> &str {
+        "trajectory"
+    }
 
     fn description(&self) -> &str {
         "Checks whether the agent used the expected tools and stayed within iteration bounds"
@@ -214,17 +287,22 @@ impl EvalMetric for TrajectoryMetric {
 
     async fn score(&self, _input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore {
         match expected {
-            ExpectedOutput::Trajectory { expected_tools, max_iterations: _ } => {
+            ExpectedOutput::Trajectory {
+                expected_tools,
+                max_iterations: _,
+            } => {
                 // Text-only fallback (metric-only mode, no trace). Checks tool
                 // names as substrings in the output text — unreliable, but
                 // the best we can do without the span tree. score_with_trace
                 // (below) does the real check when a trace is available.
-                let found: Vec<&str> = expected_tools.iter()
+                let found: Vec<&str> = expected_tools
+                    .iter()
                     .filter(|tool| actual.contains(*tool))
                     .map(|s| s.as_str())
                     .collect();
 
-                let missing: Vec<&str> = expected_tools.iter()
+                let missing: Vec<&str> = expected_tools
+                    .iter()
                     .filter(|tool| !actual.contains(*tool))
                     .map(|s| s.as_str())
                     .collect();
@@ -238,26 +316,46 @@ impl EvalMetric for TrajectoryMetric {
                 let reason = if missing.is_empty() {
                     format!("All {} expected tools called (text heuristic)", found.len())
                 } else {
-                    format!("Found {} of {} expected tools (text heuristic). Missing: {}", found.len(), expected_tools.len(), missing.join(", "))
+                    format!(
+                        "Found {} of {} expected tools (text heuristic). Missing: {}",
+                        found.len(),
+                        expected_tools.len(),
+                        missing.join(", ")
+                    )
                 };
 
                 EvalScore::new(fraction, 1.0, reason, missing.is_empty())
             }
-            ExpectedOutput::Exact { .. } => {
-                EvalScore::new(0.0, 1.0, "Trajectory not applicable for Exact expected output", false)
-            }
-            ExpectedOutput::Contains { .. } => {
-                EvalScore::new(0.0, 1.0, "Trajectory not applicable for Contains expected output", false)
-            }
-            ExpectedOutput::Regex { .. } => {
-                EvalScore::new(0.0, 1.0, "Trajectory not applicable for Regex expected output", false)
-            }
-            ExpectedOutput::LlmJudge { .. } => {
-                EvalScore::new(0.0, 1.0, "Trajectory not applicable for LlmJudge expected output", false)
-            }
-            ExpectedOutput::Custom { .. } => {
-                EvalScore::new(0.0, 1.0, "Trajectory not applicable for Custom expected output", false)
-            }
+            ExpectedOutput::Exact { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "Trajectory not applicable for Exact expected output",
+                false,
+            ),
+            ExpectedOutput::Contains { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "Trajectory not applicable for Contains expected output",
+                false,
+            ),
+            ExpectedOutput::Regex { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "Trajectory not applicable for Regex expected output",
+                false,
+            ),
+            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "Trajectory not applicable for LlmJudge expected output",
+                false,
+            ),
+            ExpectedOutput::Custom { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "Trajectory not applicable for Custom expected output",
+                false,
+            ),
         }
     }
 
@@ -274,21 +372,27 @@ impl EvalMetric for TrajectoryMetric {
         tree: Option<&TraceTree>,
     ) -> EvalScore {
         match expected {
-            ExpectedOutput::Trajectory { expected_tools, max_iterations } => {
+            ExpectedOutput::Trajectory {
+                expected_tools,
+                max_iterations,
+            } => {
                 if let Some(tree) = tree {
                     // Build the set of tools actually called from TOOL spans.
-                    let called: HashSet<String> = tree.root_span
+                    let called: HashSet<String> = tree
+                        .root_span
                         .spans_by_kind(SpanKind::TOOL)
                         .iter()
                         .filter_map(|s| s.attributes.get("tool.name"))
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect();
 
-                    let found: Vec<&str> = expected_tools.iter()
+                    let found: Vec<&str> = expected_tools
+                        .iter()
                         .filter(|t| called.contains(*t))
                         .map(|s| s.as_str())
                         .collect();
-                    let missing: Vec<&str> = expected_tools.iter()
+                    let missing: Vec<&str> = expected_tools
+                        .iter()
                         .filter(|t| !called.contains(*t))
                         .map(|s| s.as_str())
                         .collect();
@@ -304,7 +408,11 @@ impl EvalMetric for TrajectoryMetric {
                     };
                     // Going over the iteration bound halves the score even if
                     // the right tools were called.
-                    let value = if within_bounds { tool_frac } else { tool_frac * 0.5 };
+                    let value = if within_bounds {
+                        tool_frac
+                    } else {
+                        tool_frac * 0.5
+                    };
                     let passed = missing.is_empty() && within_bounds;
 
                     let reason = format!(
@@ -355,7 +463,9 @@ impl LlmJudgeMetric {
 
     /// Create an LlmJudgeMetric with a specific LLM provider.
     pub fn with_provider(provider: Arc<dyn oneai_core::traits::LlmProvider>) -> Self {
-        Self { provider: Some(provider) }
+        Self {
+            provider: Some(provider),
+        }
     }
 
     /// Try to extract a numeric score from raw text.
@@ -366,10 +476,12 @@ impl LlmJudgeMetric {
             let lower = line.to_lowercase();
             if lower.contains("score:") || lower.contains("rating:") {
                 // Extract the number after "score:"
-                let num_part = lower.split("score:").nth(1)
+                let num_part = lower
+                    .split("score:")
+                    .nth(1)
                     .or_else(|| lower.split("rating:").nth(1));
                 if let Some(part) = num_part {
-                    if let Some(num) = part.trim().split_whitespace().next() {
+                    if let Some(num) = part.split_whitespace().next() {
                         if let Ok(score) = num.parse::<f64>() {
                             return score.clamp(0.0, 10.0);
                         }
@@ -394,7 +506,9 @@ impl LlmJudgeMetric {
 
 #[async_trait]
 impl EvalMetric for LlmJudgeMetric {
-    fn name(&self) -> &str { "llm_judge" }
+    fn name(&self) -> &str {
+        "llm_judge"
+    }
 
     fn description(&self) -> &str {
         "Uses an LLM to subjectively evaluate output quality against a rubric"
@@ -438,12 +552,14 @@ impl EvalMetric for LlmJudgeMetric {
                             // Try to extract JSON from the response
                             // The model may wrap the JSON in markdown code blocks
                             let json_text = if text.contains("```json") {
-                                text.split("```json").nth(1)
+                                text.split("```json")
+                                    .nth(1)
                                     .and_then(|s| s.split("```").next())
                                     .unwrap_or(&text)
                                     .trim()
                             } else if text.contains("```") {
-                                text.split("```").nth(1)
+                                text.split("```")
+                                    .nth(1)
                                     .and_then(|s| s.split("```").next())
                                     .unwrap_or(&text)
                                     .trim()
@@ -451,9 +567,14 @@ impl EvalMetric for LlmJudgeMetric {
                                 text.trim()
                             };
 
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_text) {
-                                let score = parsed.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let reason = parsed.get("reason").and_then(|v| v.as_str()).unwrap_or("No reason provided");
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_text)
+                            {
+                                let score =
+                                    parsed.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let reason = parsed
+                                    .get("reason")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("No reason provided");
                                 let normalized = score / 10.0;
                                 let passed = score >= *min_score;
 
@@ -462,33 +583,58 @@ impl EvalMetric for LlmJudgeMetric {
                                 // Try to extract a numeric score from raw text
                                 let score = Self::extract_score_from_text(&text);
                                 let passed = score >= *min_score;
-                                EvalScore::new(score / 10.0, 1.0,
-                                    format!("Extracted score {:.1} from judge response (not JSON)", score), passed)
+                                EvalScore::new(
+                                    score / 10.0,
+                                    1.0,
+                                    format!(
+                                        "Extracted score {:.1} from judge response (not JSON)",
+                                        score
+                                    ),
+                                    passed,
+                                )
                             }
                         }
-                        Err(e) => {
-                            EvalScore::new(0.0, 1.0, format!("Judge inference failed: {}", e), false)
-                        }
+                        Err(e) => EvalScore::new(
+                            0.0,
+                            1.0,
+                            format!("Judge inference failed: {}", e),
+                            false,
+                        ),
                     }
                 } else {
                     EvalScore::new(0.0, 1.0, "No LLM provider configured for judge", false)
                 }
             }
-            ExpectedOutput::Exact { .. } => {
-                EvalScore::new(0.0, 1.0, "LlmJudge not applicable for Exact expected output", false)
-            }
-            ExpectedOutput::Contains { .. } => {
-                EvalScore::new(0.0, 1.0, "LlmJudge not applicable for Contains expected output", false)
-            }
-            ExpectedOutput::Regex { .. } => {
-                EvalScore::new(0.0, 1.0, "LlmJudge not applicable for Regex expected output", false)
-            }
-            ExpectedOutput::Trajectory { .. } => {
-                EvalScore::new(0.0, 1.0, "LlmJudge not applicable for Trajectory expected output", false)
-            }
-            ExpectedOutput::Custom { .. } => {
-                EvalScore::new(0.0, 1.0, "LlmJudge not applicable for Custom expected output", false)
-            }
+            ExpectedOutput::Exact { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "LlmJudge not applicable for Exact expected output",
+                false,
+            ),
+            ExpectedOutput::Contains { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "LlmJudge not applicable for Contains expected output",
+                false,
+            ),
+            ExpectedOutput::Regex { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "LlmJudge not applicable for Regex expected output",
+                false,
+            ),
+            ExpectedOutput::Trajectory { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "LlmJudge not applicable for Trajectory expected output",
+                false,
+            ),
+            ExpectedOutput::Custom { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "LlmJudge not applicable for Custom expected output",
+                false,
+            ),
         }
     }
 }
@@ -511,7 +657,9 @@ pub struct CustomJudgeMetric;
 
 #[async_trait]
 impl EvalMetric for CustomJudgeMetric {
-    fn name(&self) -> &str { "custom_judge" }
+    fn name(&self) -> &str {
+        "custom_judge"
+    }
 
     fn description(&self) -> &str {
         "Delegates scoring to a user-supplied EvalJudge via ExpectedOutput::Custom"
@@ -520,21 +668,36 @@ impl EvalMetric for CustomJudgeMetric {
     async fn score(&self, input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore {
         match expected {
             ExpectedOutput::Custom { judge } => judge.judge(input, actual).await,
-            ExpectedOutput::Exact { .. } => {
-                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Exact expected output", false)
-            }
-            ExpectedOutput::Contains { .. } => {
-                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Contains expected output", false)
-            }
-            ExpectedOutput::Regex { .. } => {
-                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Regex expected output", false)
-            }
-            ExpectedOutput::LlmJudge { .. } => {
-                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for LlmJudge expected output", false)
-            }
-            ExpectedOutput::Trajectory { .. } => {
-                EvalScore::new(0.0, 1.0, "CustomJudge not applicable for Trajectory expected output", false)
-            }
+            ExpectedOutput::Exact { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "CustomJudge not applicable for Exact expected output",
+                false,
+            ),
+            ExpectedOutput::Contains { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "CustomJudge not applicable for Contains expected output",
+                false,
+            ),
+            ExpectedOutput::Regex { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "CustomJudge not applicable for Regex expected output",
+                false,
+            ),
+            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "CustomJudge not applicable for LlmJudge expected output",
+                false,
+            ),
+            ExpectedOutput::Trajectory { .. } => EvalScore::new(
+                0.0,
+                1.0,
+                "CustomJudge not applicable for Trajectory expected output",
+                false,
+            ),
         }
     }
 }
@@ -569,7 +732,11 @@ impl CompositeMetric {
 
     /// Create an equal-weight composite.
     pub fn equal_weight(name: impl Into<String>, metrics: Vec<Arc<dyn EvalMetric>>) -> Self {
-        let weight = if metrics.is_empty() { 0.0 } else { 1.0 / metrics.len() as f64 };
+        let weight = if metrics.is_empty() {
+            0.0
+        } else {
+            1.0 / metrics.len() as f64
+        };
         let sub_metrics = metrics.into_iter().map(|m| (m, weight)).collect();
         Self {
             name: name.into(),
@@ -580,7 +747,9 @@ impl CompositeMetric {
 
 #[async_trait]
 impl EvalMetric for CompositeMetric {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn description(&self) -> &str {
         "Weighted combination of multiple sub-metrics"
@@ -606,14 +775,13 @@ impl EvalMetric for CompositeMetric {
             reasons.push(format!("{}: {}", metric.name(), score.reason));
         }
 
-        let final_score = if total_weight == 0.0 { 0.0 } else { weighted_sum / total_weight };
+        let final_score = if total_weight == 0.0 {
+            0.0
+        } else {
+            weighted_sum / total_weight
+        };
 
-        EvalScore::new(
-            final_score,
-            1.0,
-            reasons.join("; "),
-            all_passed,
-        )
+        EvalScore::new(final_score, 1.0, reasons.join("; "), all_passed)
     }
 }
 
@@ -630,17 +798,12 @@ impl EvalMetric for CompositeMetric {
 ///
 /// Pass/fail thresholds are configurable (`max_tokens`, `max_latency_ms`);
 /// `0` means "no limit on this dimension".
+#[derive(Default)]
 pub struct EfficiencyMetric {
     /// Max tokens for a pass (0 = no limit).
     pub max_tokens: u64,
     /// Max agent latency (ms) for a pass (0 = no limit).
     pub max_latency_ms: u64,
-}
-
-impl Default for EfficiencyMetric {
-    fn default() -> Self {
-        Self { max_tokens: 0, max_latency_ms: 0 }
-    }
 }
 
 impl EfficiencyMetric {
@@ -651,13 +814,18 @@ impl EfficiencyMetric {
 
     /// Create with explicit pass thresholds.
     pub fn with_limits(max_tokens: u64, max_latency_ms: u64) -> Self {
-        Self { max_tokens, max_latency_ms }
+        Self {
+            max_tokens,
+            max_latency_ms,
+        }
     }
 }
 
 #[async_trait]
 impl EvalMetric for EfficiencyMetric {
-    fn name(&self) -> &str { "efficiency" }
+    fn name(&self) -> &str {
+        "efficiency"
+    }
 
     fn description(&self) -> &str {
         "Efficiency axis: token+latency cost from the trace (quality-agnostic); \
@@ -685,7 +853,8 @@ impl EvalMetric for EfficiencyMetric {
             Some(t) => t,
             None => {
                 return EvalScore::new(
-                    0.0, 1.0,
+                    0.0,
+                    1.0,
                     "no trace — efficiency not measurable".to_string(),
                     false,
                 )
@@ -698,10 +867,7 @@ impl EvalMetric for EfficiencyMetric {
         let iters = tm.avg_iterations.round() as usize;
         let tool_calls = tm.tool_call_count;
 
-        let value = 1.0
-            / (1.0
-                + 0.1 * log10_1p(tokens as f64)
-                + 0.1 * log10_1p(latency_ms as f64));
+        let value = 1.0 / (1.0 + 0.1 * log10_1p(tokens as f64) + 0.1 * log10_1p(latency_ms as f64));
 
         let within_tokens = self.max_tokens == 0 || tokens <= self.max_tokens;
         let within_latency = self.max_latency_ms == 0 || latency_ms <= self.max_latency_ms;
@@ -717,7 +883,11 @@ impl EvalMetric for EfficiencyMetric {
 
 /// log10(1+x), floored at 0 so non-positive inputs don't NaN.
 fn log10_1p(x: f64) -> f64 {
-    if x <= 0.0 { 0.0 } else { (1.0 + x).log10() }
+    if x <= 0.0 {
+        0.0
+    } else {
+        (1.0 + x).log10()
+    }
 }
 
 #[cfg(test)]
@@ -744,14 +914,18 @@ mod tests {
     #[tokio::test]
     async fn test_exact_match_whitespace() {
         let metric = ExactMatchMetric;
-        let score = metric.score("2+2?", "  4  ", &ExpectedOutput::exact("4")).await;
+        let score = metric
+            .score("2+2?", "  4  ", &ExpectedOutput::exact("4"))
+            .await;
         assert!(score.passed); // trim comparison
     }
 
     #[tokio::test]
     async fn test_exact_match_not_applicable() {
         let metric = ExactMatchMetric;
-        let score = metric.score("test", "output", &ExpectedOutput::contains(["x"])).await;
+        let score = metric
+            .score("test", "output", &ExpectedOutput::contains(["x"]))
+            .await;
         assert!(!score.passed);
         assert!(score.reason.contains("not applicable"));
     }
@@ -759,11 +933,13 @@ mod tests {
     #[tokio::test]
     async fn test_contains_match_all_found() {
         let metric = ContainsMatchMetric;
-        let score = metric.score(
-            "Explain Rust",
-            "Rust is a memory-safe language",
-            &ExpectedOutput::contains(["memory", "safe"]),
-        ).await;
+        let score = metric
+            .score(
+                "Explain Rust",
+                "Rust is a memory-safe language",
+                &ExpectedOutput::contains(["memory", "safe"]),
+            )
+            .await;
         assert!(score.passed);
         assert_eq!(score.value, 1.0);
     }
@@ -771,11 +947,13 @@ mod tests {
     #[tokio::test]
     async fn test_contains_match_partial() {
         let metric = ContainsMatchMetric;
-        let score = metric.score(
-            "Explain Rust",
-            "Rust is a programming language",
-            &ExpectedOutput::contains(["memory", "safe", "programming"]),
-        ).await;
+        let score = metric
+            .score(
+                "Explain Rust",
+                "Rust is a programming language",
+                &ExpectedOutput::contains(["memory", "safe", "programming"]),
+            )
+            .await;
         assert!(!score.passed);
         assert_eq!(score.value, 1.0 / 3.0); // 1 of 3 found
         assert!(score.reason.contains("memory") || score.reason.contains("safe"));
@@ -784,55 +962,61 @@ mod tests {
     #[tokio::test]
     async fn test_contains_match_case_insensitive() {
         let metric = ContainsMatchMetric;
-        let score = metric.score(
-            "test",
-            "RUST IS MEMORY SAFE",
-            &ExpectedOutput::contains(["rust", "memory"]),
-        ).await;
+        let score = metric
+            .score(
+                "test",
+                "RUST IS MEMORY SAFE",
+                &ExpectedOutput::contains(["rust", "memory"]),
+            )
+            .await;
         assert!(score.passed);
     }
 
     #[tokio::test]
     async fn test_contains_match_case_sensitive() {
         let metric = ContainsMatchMetric;
-        let score = metric.score(
-            "test",
-            "RUST IS MEMORY SAFE",
-            &ExpectedOutput::contains_case_sensitive(["rust", "memory"]),
-        ).await;
+        let score = metric
+            .score(
+                "test",
+                "RUST IS MEMORY SAFE",
+                &ExpectedOutput::contains_case_sensitive(["rust", "memory"]),
+            )
+            .await;
         assert!(!score.passed); // "rust" != "RUST"
     }
 
     #[tokio::test]
     async fn test_regex_match_pass() {
         let metric = RegexMatchMetric;
-        let score = metric.score(
-            "What date?",
-            "Today is 2026-06-18",
-            &ExpectedOutput::regex("\\d{4}-\\d{2}-\\d{2}"),
-        ).await;
+        let score = metric
+            .score(
+                "What date?",
+                "Today is 2026-06-18",
+                &ExpectedOutput::regex("\\d{4}-\\d{2}-\\d{2}"),
+            )
+            .await;
         assert!(score.passed);
     }
 
     #[tokio::test]
     async fn test_regex_match_fail() {
         let metric = RegexMatchMetric;
-        let score = metric.score(
-            "What date?",
-            "Today is June 18th",
-            &ExpectedOutput::regex("\\d{4}-\\d{2}-\\d{2}"),
-        ).await;
+        let score = metric
+            .score(
+                "What date?",
+                "Today is June 18th",
+                &ExpectedOutput::regex("\\d{4}-\\d{2}-\\d{2}"),
+            )
+            .await;
         assert!(!score.passed);
     }
 
     #[tokio::test]
     async fn test_regex_match_invalid_pattern() {
         let metric = RegexMatchMetric;
-        let score = metric.score(
-            "test",
-            "output",
-            &ExpectedOutput::regex("[invalid"),
-        ).await;
+        let score = metric
+            .score("test", "output", &ExpectedOutput::regex("[invalid"))
+            .await;
         assert!(!score.passed);
         assert!(score.reason.contains("Invalid regex"));
     }
@@ -840,22 +1024,26 @@ mod tests {
     #[tokio::test]
     async fn test_trajectory_metric_all_found() {
         let metric = TrajectoryMetric;
-        let score = metric.score(
-            "Calculate 2+2",
-            "Used calculator tool: result is 4",
-            &ExpectedOutput::trajectory(["calculator"], 5),
-        ).await;
+        let score = metric
+            .score(
+                "Calculate 2+2",
+                "Used calculator tool: result is 4",
+                &ExpectedOutput::trajectory(["calculator"], 5),
+            )
+            .await;
         assert!(score.passed);
     }
 
     #[tokio::test]
     async fn test_trajectory_metric_partial() {
         let metric = TrajectoryMetric;
-        let score = metric.score(
-            "Research and analyze",
-            "Used search tool for research",
-            &ExpectedOutput::trajectory(["search", "calculator", "read_file"], 10),
-        ).await;
+        let score = metric
+            .score(
+                "Research and analyze",
+                "Used search tool for research",
+                &ExpectedOutput::trajectory(["search", "calculator", "read_file"], 10),
+            )
+            .await;
         assert!(!score.passed);
         assert_eq!(score.value, 1.0 / 3.0); // 1 of 3 found
     }
@@ -865,8 +1053,8 @@ mod tests {
         // score_with_trace walks TOOL spans for `tool.name` instead of
         // substring-matching the output text. Build a synthetic tree with
         // two tool calls (calculator + grep), neither mentioned in `actual`.
-        use std::collections::HashMap;
         use oneai_trace::{Span, SpanKind, SpanStatus, TraceTree};
+        use std::collections::HashMap;
 
         let mut root = Span::new(SpanKind::SESSION, "session", None);
         root.end(SpanStatus::Ok);
@@ -885,20 +1073,26 @@ mod tests {
 
         let metric = TrajectoryMetric;
         // expected {calculator, shell}: only calculator was called → 1/2, fail.
-        let score = metric.score_with_trace(
-            "in", "no tool names mentioned here",
-            &ExpectedOutput::trajectory(["calculator", "shell"], 10),
-            Some(&tree),
-        ).await;
+        let score = metric
+            .score_with_trace(
+                "in",
+                "no tool names mentioned here",
+                &ExpectedOutput::trajectory(["calculator", "shell"], 10),
+                Some(&tree),
+            )
+            .await;
         assert!(!score.passed);
         assert!(score.reason.contains("1/2"), "reason: {}", score.reason);
 
         // expected {calculator, grep}: both called → pass.
-        let score2 = metric.score_with_trace(
-            "in", "no tool names mentioned here",
-            &ExpectedOutput::trajectory(["calculator", "grep"], 0),
-            Some(&tree),
-        ).await;
+        let score2 = metric
+            .score_with_trace(
+                "in",
+                "no tool names mentioned here",
+                &ExpectedOutput::trajectory(["calculator", "grep"], 0),
+                Some(&tree),
+            )
+            .await;
         assert!(score2.passed, "reason: {}", score2.reason);
     }
 
@@ -906,7 +1100,9 @@ mod tests {
     async fn test_efficiency_metric_requires_trace() {
         let metric = EfficiencyMetric::new();
         // No trace → unmeasurable.
-        let s = metric.score_with_trace("in", "out", &ExpectedOutput::exact("x"), None).await;
+        let s = metric
+            .score_with_trace("in", "out", &ExpectedOutput::exact("x"), None)
+            .await;
         assert!(!s.passed);
         assert_eq!(s.value, 0.0);
 
@@ -918,8 +1114,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_efficiency_metric_with_trace_scores() {
-        use std::collections::HashMap;
         use oneai_trace::{Span, SpanKind, SpanStatus, TraceTree};
+        use std::collections::HashMap;
 
         let mut root = Span::new(SpanKind::SESSION, "session", None);
         // Give the session a measurable duration so latency > 0.
@@ -932,7 +1128,9 @@ mod tests {
         let tree = TraceTree::from_spans(spans, None);
 
         let metric = EfficiencyMetric::new();
-        let s = metric.score_with_trace("in", "out", &ExpectedOutput::exact("x"), Some(&tree)).await;
+        let s = metric
+            .score_with_trace("in", "out", &ExpectedOutput::exact("x"), Some(&tree))
+            .await;
         // With (near-)zero tokens/latency the efficiency score is near 1.0.
         assert!(s.value > 0.0, "value should be positive, got {}", s.value);
         assert!(s.reason.contains("tokens"));
@@ -940,16 +1138,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_composite_equal_weight() {
-        let composite = CompositeMetric::equal_weight("combined", vec![
-            Arc::new(ExactMatchMetric),
-            Arc::new(ContainsMatchMetric),
-        ]);
+        let composite = CompositeMetric::equal_weight(
+            "combined",
+            vec![Arc::new(ExactMatchMetric), Arc::new(ContainsMatchMetric)],
+        );
 
-        let score = composite.score(
-            "What is Rust?",
-            "Rust is a memory-safe programming language",
-            &ExpectedOutput::contains(["memory", "safe"]),
-        ).await;
+        let score = composite
+            .score(
+                "What is Rust?",
+                "Rust is a memory-safe programming language",
+                &ExpectedOutput::contains(["memory", "safe"]),
+            )
+            .await;
 
         // ContainsMatch passes (1.0), ExactMatch is not applicable (0.0)
         // Equal weight: (1.0 * 0.5 + 0.0 * 0.5) = 0.5
@@ -959,11 +1159,13 @@ mod tests {
     #[tokio::test]
     async fn test_llm_judge_no_provider() {
         let metric = LlmJudgeMetric::new();
-        let score = metric.score(
-            "test",
-            "output",
-            &ExpectedOutput::llm_judge("Test rubric", 7.0),
-        ).await;
+        let score = metric
+            .score(
+                "test",
+                "output",
+                &ExpectedOutput::llm_judge("Test rubric", 7.0),
+            )
+            .await;
         assert!(!score.passed);
         assert!(score.reason.contains("No LLM provider"));
     }
@@ -980,7 +1182,9 @@ mod tests {
         }
 
         let metric = CustomJudgeMetric;
-        let expected = ExpectedOutput::Custom { judge: Arc::new(OkJudge) };
+        let expected = ExpectedOutput::Custom {
+            judge: Arc::new(OkJudge),
+        };
 
         let pass = metric.score("in", "looks ok to me", &expected).await;
         assert!(pass.passed);

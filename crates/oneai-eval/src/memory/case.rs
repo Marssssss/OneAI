@@ -47,7 +47,9 @@ pub struct PlantedFact {
     pub importance: f32,
 }
 
-fn default_importance() -> f32 { 0.7 }
+fn default_importance() -> f32 {
+    0.7
+}
 
 impl PlantedFact {
     /// Build a `MemoryFact` namespaced to the given user/session.

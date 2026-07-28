@@ -26,9 +26,9 @@
 
 use std::path::Path;
 
-use crate::config_parser::{DomainPackConfig, parse_yaml, parse_toml, resolve_config};
-use crate::validator::{DomainPackValidator, ValidationResult};
+use crate::config_parser::{parse_toml, parse_yaml, resolve_config, DomainPackConfig};
 use crate::domain_pack::DomainPack;
+use crate::validator::{DomainPackValidator, ValidationResult};
 
 // ─── DomainPackSpecFile ──────────────────────────────────────────────────────────
 
@@ -59,17 +59,18 @@ impl DomainPackSpecFile {
     ///
     /// Returns an error if the file cannot be read or parsed.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let extension = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let config = match extension {
             "yaml" | "yml" => parse_yaml(path)?,
             "toml" => parse_toml(path)?,
-            other => return Err(format!(
-                "Unknown domain spec file extension '{}' — expected .yaml, .yml, or .toml",
-                other
-            ).into()),
+            other => {
+                return Err(format!(
+                    "Unknown domain spec file extension '{}' — expected .yaml, .yml, or .toml",
+                    other
+                )
+                .into())
+            }
         };
 
         Ok(Self {
@@ -276,7 +277,10 @@ preserve_fields = ["key_data"]
 
         let result = DomainPackSpecFile::load(&json_path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown domain spec file extension"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown domain spec file extension"));
     }
 
     #[test]

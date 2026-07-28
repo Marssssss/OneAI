@@ -8,11 +8,11 @@
 //! The sidebar and `/context` command both source their numbers from this
 //! module, ensuring consistency.
 
-use crate::Conversation;
-use crate::ContentBlock;
-use crate::Role;
 use crate::token_counter::HeuristicTokenCounter;
 use crate::token_counter::TokenCounter;
+use crate::ContentBlock;
+use crate::Conversation;
+use crate::Role;
 
 // ─── ContextAccounting ────────────────────────────────────────────────────
 
@@ -79,11 +79,7 @@ impl ContextAccounting {
     ///
     /// The `model_name` determines which tokenizer profile to use. If the model
     /// is unknown, the default (Generic) profile is used.
-    pub fn account(
-        conversation: &Conversation,
-        model_name: &str,
-        tool_defs_count: usize,
-    ) -> Self {
+    pub fn account(conversation: &Conversation, model_name: &str, tool_defs_count: usize) -> Self {
         let counter = HeuristicTokenCounter::new();
         let profile = counter.profile_for_model(model_name);
 
@@ -142,7 +138,8 @@ impl ContextAccounting {
         }
 
         // Tool definitions overhead (each tool def adds overhead tokens)
-        accounting.tool_call_tokens += (tool_defs_count as u32) * profile.tool_definition_overhead_tokens;
+        accounting.tool_call_tokens +=
+            (tool_defs_count as u32) * profile.tool_definition_overhead_tokens;
 
         // Sum all content categories into total
         accounting.total_tokens += accounting.system_prompt_tokens
@@ -155,7 +152,9 @@ impl ContextAccounting {
             + accounting.file_tokens;
 
         // Compute free space and utilization
-        accounting.free_space = accounting.context_window_size.saturating_sub(accounting.total_tokens);
+        accounting.free_space = accounting
+            .context_window_size
+            .saturating_sub(accounting.total_tokens);
         accounting.utilization_pct = if accounting.context_window_size > 0 {
             (accounting.total_tokens as f64 / accounting.context_window_size as f64) * 100.0
         } else {
@@ -225,10 +224,7 @@ impl ContextAccounting {
                 0.0
             };
             let tokens_display = format_token_k(*tokens);
-            lines.push(format!(
-                "  ⛶ {}: {} ({:.1}%)",
-                name, tokens_display, pct
-            ));
+            lines.push(format!("  ⛶ {}: {} ({:.1}%)", name, tokens_display, pct));
         }
 
         // Free space
@@ -237,10 +233,7 @@ impl ContextAccounting {
         } else {
             0.0
         };
-        lines.push(format!(
-            "  ⛶ Free space: {} ({:.1}%)",
-            free_k, free_pct
-        ));
+        lines.push(format!("  ⛶ Free space: {} ({:.1}%)", free_k, free_pct));
 
         lines.join("\n")
     }
@@ -285,7 +278,9 @@ mod tests {
         let mut conv = Conversation::new();
         conv.add_message(Message::system("You are a helpful assistant.".to_string()));
         conv.add_message(Message::user("What is Rust?".to_string()));
-        conv.add_message(Message::assistant("Rust is a programming language.".to_string()));
+        conv.add_message(Message::assistant(
+            "Rust is a programming language.".to_string(),
+        ));
 
         let accounting = ContextAccounting::account(&conv, "gpt-4o", 3);
 
@@ -307,7 +302,9 @@ mod tests {
         conv.add_message(Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text { text: "I'll list the files.".to_string() },
+                ContentBlock::Text {
+                    text: "I'll list the files.".to_string(),
+                },
                 ContentBlock::ToolCall {
                     id: "call_1".to_string(),
                     name: "shell".to_string(),
@@ -316,7 +313,10 @@ mod tests {
             ],
             metadata: std::collections::HashMap::new(),
         });
-        conv.add_message(Message::tool_result("call_1".to_string(), "file1.txt\nfile2.txt".to_string()));
+        conv.add_message(Message::tool_result(
+            "call_1".to_string(),
+            "file1.txt\nfile2.txt".to_string(),
+        ));
 
         let accounting = ContextAccounting::account(&conv, "gpt-4o", 1);
 
@@ -351,7 +351,8 @@ mod tests {
 
         // CJK text should use different chars-per-token ratio
         let accounting_openai = ContextAccounting::account(&conv, "gpt-4o", 0);
-        let accounting_anthropic = ContextAccounting::account(&conv, "claude-sonnet-4-6-20250514", 0);
+        let accounting_anthropic =
+            ContextAccounting::account(&conv, "claude-sonnet-4-6-20250514", 0);
 
         // Both should count tokens, but with different ratios
         assert!(accounting_openai.user_messages_tokens > 0);
@@ -365,8 +366,12 @@ mod tests {
         conv.add_message(Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Thinking { text: "Let me reason about this step by step...".to_string() },
-                ContentBlock::Text { text: "Here is my answer.".to_string() },
+                ContentBlock::Thinking {
+                    text: "Let me reason about this step by step...".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "Here is my answer.".to_string(),
+                },
             ],
             metadata: std::collections::HashMap::new(),
         });

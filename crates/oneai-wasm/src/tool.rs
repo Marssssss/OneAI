@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oneai_core::{RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
+use oneai_core::{RiskLevel, ToolOutput};
 
 use crate::error::WasmError;
 use crate::runtime::WasmRuntime;
@@ -72,17 +72,24 @@ impl WasmTool {
     /// Parse the WASM tool's output string into a ToolOutput.
     fn parse_tool_output(output_str: &str) -> std::result::Result<ToolOutput, WasmError> {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output_str) {
-            let success = parsed.get("success")
+            let success = parsed
+                .get("success")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let content = parsed.get("content")
+            let content = parsed
+                .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or(output_str)
                 .to_string();
-            let error = parsed.get("error")
+            let error = parsed
+                .get("error")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            Ok(ToolOutput { success, content, error })
+            Ok(ToolOutput {
+                success,
+                content,
+                error,
+            })
         } else {
             Ok(ToolOutput {
                 success: true,
@@ -126,11 +133,16 @@ impl Tool for WasmTool {
                 let cache = &runtime.module_cache;
                 let guard = cache.try_read();
                 match guard {
-                    Ok(g) => g.get(&module_name).cloned()
+                    Ok(g) => g
+                        .get(&module_name)
+                        .cloned()
                         .ok_or_else(|| WasmError::ModuleNotFound(module_name.clone()))?,
-                    Err(_) => return Err(WasmError::ModuleNotFound(format!(
-                        "{} (cache lock contested)", module_name
-                    ))),
+                    Err(_) => {
+                        return Err(WasmError::ModuleNotFound(format!(
+                            "{} (cache lock contested)",
+                            module_name
+                        )))
+                    }
                 }
             };
 
@@ -141,16 +153,20 @@ impl Tool for WasmTool {
             let linker = runtime.create_linker()?;
 
             // Instantiate
-            let instance = linker.instantiate(&mut store, &module)
-                .map_err(|e| WasmError::InstantiationFailed(format!(
-                    "Failed to instantiate '{}': {}", module_name, e
-                )))?;
+            let instance = linker.instantiate(&mut store, &module).map_err(|e| {
+                WasmError::InstantiationFailed(format!(
+                    "Failed to instantiate '{}': {}",
+                    module_name, e
+                ))
+            })?;
 
             // Get memory and execute function exports
-            let memory = instance.get_memory(&mut store, "memory")
+            let memory = instance
+                .get_memory(&mut store, "memory")
                 .ok_or_else(|| WasmError::ExportNotFound("memory".to_string()))?;
 
-            let execute_func = instance.get_typed_func::<(u32, u32), (u32, u32)>(&mut store, "execute")
+            let execute_func = instance
+                .get_typed_func::<(u32, u32), (u32, u32)>(&mut store, "execute")
                 .map_err(|e| WasmError::ExportNotFound(format!("execute: {}", e)))?;
 
             // Serialize args
@@ -162,8 +178,9 @@ impl Tool for WasmTool {
             let current_size = memory.data(&store).len();
             if current_size < input_bytes.len() + 16 {
                 let extra_pages: u64 = ((input_bytes.len() + 16) as u64) / (64 * 1024) + 1;
-                memory.grow(&mut store, extra_pages)
-                    .map_err(|_| WasmError::MemoryExceeded(extra_pages as u32, runtime.config().max_memory_pages))?;
+                memory.grow(&mut store, extra_pages).map_err(|_| {
+                    WasmError::MemoryExceeded(extra_pages as u32, runtime.config().max_memory_pages)
+                })?;
             }
 
             // Write input at a fixed offset (8 bytes from start)
@@ -183,11 +200,12 @@ impl Tool for WasmTool {
             }
 
             // Call execute
-            let (output_ptr, output_len) = execute_func.call(&mut store, (input_offset, input_bytes.len() as u32))
+            let (output_ptr, output_len) = execute_func
+                .call(&mut store, (input_offset, input_bytes.len() as u32))
                 .map_err(|e| {
                     // Check if fuel was exhausted
                     let fuel = store.get_fuel().ok();
-                    if fuel.map_or(false, |f| f == 0) {
+                    if fuel == Some(0) {
                         WasmError::FuelExceeded(fuel_limit.unwrap_or(0))
                     } else {
                         WasmError::CallFailed(format!("execute failed: {}", e))
@@ -200,18 +218,23 @@ impl Tool for WasmTool {
             let end = start + output_len as usize;
             if end > output_data.len() {
                 return Err(WasmError::InvalidMetadata(format!(
-                    "Invalid output range ({}, {})", output_ptr, output_len
+                    "Invalid output range ({}, {})",
+                    output_ptr, output_len
                 )));
             }
             let output_bytes = output_data[start..end].to_vec();
             let output_str = String::from_utf8_lossy(&output_bytes).into_owned();
 
             Self::parse_tool_output(&output_str)
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(inner) => inner.map_err(|e| oneai_core::error::OneAIError::Wasm(e.to_string())),
-            Err(e) => Err(oneai_core::error::OneAIError::Wasm(format!("spawn_blocking failed: {}", e))),
+            Err(e) => Err(oneai_core::error::OneAIError::Wasm(format!(
+                "spawn_blocking failed: {}",
+                e
+            ))),
         }
     }
 }
@@ -248,7 +271,8 @@ mod tests {
 
     #[test]
     fn test_parse_tool_output_json() {
-        let output = WasmTool::parse_tool_output("{\"success\":true,\"content\":\"5\",\"error\":null}");
+        let output =
+            WasmTool::parse_tool_output("{\"success\":true,\"content\":\"5\",\"error\":null}");
         assert!(output.is_ok());
         let result = output.unwrap();
         assert!(result.success);
@@ -267,7 +291,9 @@ mod tests {
 
     #[test]
     fn test_parse_tool_output_error() {
-        let output = WasmTool::parse_tool_output("{\"success\":false,\"content\":\"\",\"error\":\"division by zero\"}");
+        let output = WasmTool::parse_tool_output(
+            "{\"success\":false,\"content\":\"\",\"error\":\"division by zero\"}",
+        );
         assert!(output.is_ok());
         let result = output.unwrap();
         assert!(!result.success);

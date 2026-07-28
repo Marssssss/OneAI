@@ -28,8 +28,8 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::traits::LlmProvider;
 use crate::token_counter::infer_context_window_for_tokenizer;
+use crate::traits::LlmProvider;
 // ─── ModelContextEntry + BUILTIN_MODEL_CONTEXT ───────────────────────────────
 
 /// A single entry in the built-in static model library.
@@ -60,36 +60,156 @@ pub struct ModelContextEntry {
 /// the L2 provider probe (or L1 user override) takes precedence.
 pub static BUILTIN_MODEL_CONTEXT: &[ModelContextEntry] = &[
     // ── Anthropic ───────────────────────────────────────────────────────────
-    ModelContextEntry { provider: "anthropic", model_id: "claude-opus",      context_window: 200_000, max_output_tokens: 32_000 },
-    ModelContextEntry { provider: "anthropic", model_id: "claude-sonnet",    context_window: 200_000, max_output_tokens: 16_000 },
-    ModelContextEntry { provider: "anthropic", model_id: "claude-haiku",     context_window: 200_000, max_output_tokens: 8_192 },
+    ModelContextEntry {
+        provider: "anthropic",
+        model_id: "claude-opus",
+        context_window: 200_000,
+        max_output_tokens: 32_000,
+    },
+    ModelContextEntry {
+        provider: "anthropic",
+        model_id: "claude-sonnet",
+        context_window: 200_000,
+        max_output_tokens: 16_000,
+    },
+    ModelContextEntry {
+        provider: "anthropic",
+        model_id: "claude-haiku",
+        context_window: 200_000,
+        max_output_tokens: 8_192,
+    },
     // ── OpenAI ──────────────────────────────────────────────────────────────
-    ModelContextEntry { provider: "openai", model_id: "gpt-4.1-nano",   context_window: 1_000_000, max_output_tokens: 32_000 },
-    ModelContextEntry { provider: "openai", model_id: "gpt-4.1-mini",   context_window: 1_000_000, max_output_tokens: 32_000 },
-    ModelContextEntry { provider: "openai", model_id: "gpt-4.1",        context_window: 1_000_000, max_output_tokens: 32_000 },
-    ModelContextEntry { provider: "openai", model_id: "gpt-4o-mini",    context_window: 128_000,   max_output_tokens: 16_384 },
-    ModelContextEntry { provider: "openai", model_id: "gpt-4o",         context_window: 128_000,   max_output_tokens: 16_384 },
-    ModelContextEntry { provider: "openai", model_id: "o4-mini",        context_window: 200_000,   max_output_tokens: 100_000 },
-    ModelContextEntry { provider: "openai", model_id: "o3-pro",         context_window: 200_000,   max_output_tokens: 100_000 },
-    ModelContextEntry { provider: "openai", model_id: "o3-mini",        context_window: 200_000,   max_output_tokens: 100_000 },
-    ModelContextEntry { provider: "openai", model_id: "o3",             context_window: 200_000,   max_output_tokens: 100_000 },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "gpt-4.1-nano",
+        context_window: 1_000_000,
+        max_output_tokens: 32_000,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "gpt-4.1-mini",
+        context_window: 1_000_000,
+        max_output_tokens: 32_000,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "gpt-4.1",
+        context_window: 1_000_000,
+        max_output_tokens: 32_000,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "gpt-4o-mini",
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "gpt-4o",
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "o4-mini",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "o3-pro",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "o3-mini",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextEntry {
+        provider: "openai",
+        model_id: "o3",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
     // ── Google Gemini ───────────────────────────────────────────────────────
-    ModelContextEntry { provider: "gemini", model_id: "gemini-2.5-pro",    context_window: 2_000_000, max_output_tokens: 8_192 },
-    ModelContextEntry { provider: "gemini", model_id: "gemini-2.5-flash",  context_window: 1_000_000, max_output_tokens: 8_192 },
-    ModelContextEntry { provider: "gemini", model_id: "gemini-2.0-flash",  context_window: 1_000_000, max_output_tokens: 8_192 },
+    ModelContextEntry {
+        provider: "gemini",
+        model_id: "gemini-2.5-pro",
+        context_window: 2_000_000,
+        max_output_tokens: 8_192,
+    },
+    ModelContextEntry {
+        provider: "gemini",
+        model_id: "gemini-2.5-flash",
+        context_window: 1_000_000,
+        max_output_tokens: 8_192,
+    },
+    ModelContextEntry {
+        provider: "gemini",
+        model_id: "gemini-2.0-flash",
+        context_window: 1_000_000,
+        max_output_tokens: 8_192,
+    },
     // ── GLM (智谱) ──────────────────────────────────────────────────────────
-    ModelContextEntry { provider: "glm", model_id: "glm-5",  context_window: 203_000, max_output_tokens: 16_384 },
-    ModelContextEntry { provider: "glm", model_id: "glm-4",  context_window: 128_000, max_output_tokens: 4_096 },
+    ModelContextEntry {
+        provider: "glm",
+        model_id: "glm-5",
+        context_window: 203_000,
+        max_output_tokens: 16_384,
+    },
+    ModelContextEntry {
+        provider: "glm",
+        model_id: "glm-4",
+        context_window: 128_000,
+        max_output_tokens: 4_096,
+    },
     // ── DeepSeek ────────────────────────────────────────────────────────────
-    ModelContextEntry { provider: "deepseek", model_id: "deepseek-reasoner", context_window: 64_000, max_output_tokens: 32_000 },
-    ModelContextEntry { provider: "deepseek", model_id: "deepseek-chat",     context_window: 128_000, max_output_tokens: 8_192 },
+    ModelContextEntry {
+        provider: "deepseek",
+        model_id: "deepseek-reasoner",
+        context_window: 64_000,
+        max_output_tokens: 32_000,
+    },
+    ModelContextEntry {
+        provider: "deepseek",
+        model_id: "deepseek-chat",
+        context_window: 128_000,
+        max_output_tokens: 8_192,
+    },
     // ── Qwen ────────────────────────────────────────────────────────────────
-    ModelContextEntry { provider: "qwen", model_id: "qwen3",   context_window: 128_000, max_output_tokens: 8_192 },
-    ModelContextEntry { provider: "qwen", model_id: "qwen2.5", context_window: 128_000, max_output_tokens: 8_192 },
+    ModelContextEntry {
+        provider: "qwen",
+        model_id: "qwen3",
+        context_window: 128_000,
+        max_output_tokens: 8_192,
+    },
+    ModelContextEntry {
+        provider: "qwen",
+        model_id: "qwen2.5",
+        context_window: 128_000,
+        max_output_tokens: 8_192,
+    },
     // ── Llama (via Ollama) ──────────────────────────────────────────────────
-    ModelContextEntry { provider: "llama", model_id: "llama3.3", context_window: 128_000, max_output_tokens: 4_096 },
-    ModelContextEntry { provider: "llama", model_id: "llama3.1", context_window: 128_000, max_output_tokens: 4_096 },
-    ModelContextEntry { provider: "llama", model_id: "llama3",   context_window: 8_192,   max_output_tokens: 4_096 },
+    ModelContextEntry {
+        provider: "llama",
+        model_id: "llama3.3",
+        context_window: 128_000,
+        max_output_tokens: 4_096,
+    },
+    ModelContextEntry {
+        provider: "llama",
+        model_id: "llama3.1",
+        context_window: 128_000,
+        max_output_tokens: 4_096,
+    },
+    ModelContextEntry {
+        provider: "llama",
+        model_id: "llama3",
+        context_window: 8_192,
+        max_output_tokens: 4_096,
+    },
 ];
 
 /// Look up a model in the built-in static library by case-insensitive substring match.
@@ -170,10 +290,7 @@ pub struct ModelContextResolver {
 
 impl ModelContextResolver {
     /// Create a new resolver with the given L1 user-profile maps.
-    pub fn new(
-        user_profiles: HashMap<String, u32>,
-        provider_extras: HashMap<String, u32>,
-    ) -> Self {
+    pub fn new(user_profiles: HashMap<String, u32>, provider_extras: HashMap<String, u32>) -> Self {
         Self {
             user_profiles,
             provider_extras: RwLock::new(provider_extras),
@@ -268,7 +385,9 @@ impl ModelContextResolver {
     /// cache so subsequent sync `resolve_cached` calls see it without re-probing.
     /// If the probe returns `None`, falls back to L3.
     pub async fn resolve_with_provider(&self, model: &str, provider: &Arc<dyn LlmProvider>) -> u32 {
-        self.resolve_with_source_with_provider(model, provider).await.0
+        self.resolve_with_source_with_provider(model, provider)
+            .await
+            .0
     }
 
     /// Async resolve, also reporting the source layer (for CLI display).

@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oneai_wasm::{WasmRuntime, WasmModuleRegistry, WasmResourceMonitor, WasmModuleSource};
+use oneai_wasm::{WasmModuleRegistry, WasmModuleSource, WasmResourceMonitor, WasmRuntime};
 
 /// List all loaded WASM modules.
 pub fn cmd_wasm_list() {
@@ -27,7 +27,10 @@ pub fn cmd_wasm_list() {
         }
 
         println!("Loaded WASM modules:");
-        println!("{:<20} {:<15} {:<12} {:<20}", "Name", "Source", "Health", "Version");
+        println!(
+            "{:<20} {:<15} {:<12} {:<20}",
+            "Name", "Source", "Health", "Version"
+        );
         println!("{}", "-".repeat(67));
         for entry in modules {
             let source = match entry.source() {
@@ -39,16 +42,28 @@ pub fn cmd_wasm_list() {
             };
             let health = match entry.health() {
                 oneai_wasm::WasmModuleHealth::Healthy => "Healthy".to_string(),
-                oneai_wasm::WasmModuleHealth::Degraded { reason } => format!("Degraded: {}", reason),
-                oneai_wasm::WasmModuleHealth::Unhealthy { reason } => format!("Unhealthy: {}", reason),
+                oneai_wasm::WasmModuleHealth::Degraded { reason } => {
+                    format!("Degraded: {}", reason)
+                }
+                oneai_wasm::WasmModuleHealth::Unhealthy { reason } => {
+                    format!("Unhealthy: {}", reason)
+                }
                 oneai_wasm::WasmModuleHealth::Unknown => "Unknown".to_string(),
                 _ => "Other".to_string(),
             };
-            let version = entry.version().as_ref()
+            let version = entry
+                .version()
+                .as_ref()
                 .map(|v| v.version().to_string())
                 .unwrap_or_else(|| "-".to_string());
 
-            println!("{:<20} {:<15} {:<12} {:<20}", entry.name(), source, health, version);
+            println!(
+                "{:<20} {:<15} {:<12} {:<20}",
+                entry.name(),
+                source,
+                health,
+                version
+            );
         }
     });
 }
@@ -84,13 +99,11 @@ pub fn cmd_wasm_run(name: &str, input: Option<&str>, input_file: Option<&str>) {
         (Some(json), None) => serde_json::from_str(json)
             .unwrap_or_else(|_| serde_json::Value::String(json.to_string())),
         (None, Some(path)) => {
-            let content = std::fs::read_to_string(path)
-                .unwrap_or_else(|e| {
-                    println!("Error reading input file '{}': {}", path, e);
-                    std::process::exit(1);
-                });
-            serde_json::from_str(&content)
-                .unwrap_or_else(|_| serde_json::Value::String(content))
+            let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                println!("Error reading input file '{}': {}", path, e);
+                std::process::exit(1);
+            });
+            serde_json::from_str(&content).unwrap_or(serde_json::Value::String(content))
         }
         (None, None) => serde_json::json!({}),
         (Some(_), Some(_)) => {
@@ -120,8 +133,12 @@ pub fn cmd_wasm_health(name: Option<&str>) {
             let health = registry.check_health(name).await;
             let health_str = match &health {
                 oneai_wasm::WasmModuleHealth::Healthy => "✅ Healthy".to_string(),
-                oneai_wasm::WasmModuleHealth::Degraded { reason } => format!("⚠️ Degraded: {}", reason),
-                oneai_wasm::WasmModuleHealth::Unhealthy { reason } => format!("❌ Unhealthy: {}", reason),
+                oneai_wasm::WasmModuleHealth::Degraded { reason } => {
+                    format!("⚠️ Degraded: {}", reason)
+                }
+                oneai_wasm::WasmModuleHealth::Unhealthy { reason } => {
+                    format!("❌ Unhealthy: {}", reason)
+                }
                 oneai_wasm::WasmModuleHealth::Unknown => "❓ Unknown".to_string(),
                 _ => "❓ Other".to_string(),
             };
@@ -137,8 +154,12 @@ pub fn cmd_wasm_health(name: Option<&str>) {
             for entry in modules {
                 let health_str = match entry.health() {
                     oneai_wasm::WasmModuleHealth::Healthy => "✅ Healthy".to_string(),
-                    oneai_wasm::WasmModuleHealth::Degraded { reason } => format!("⚠️ Degraded: {}", reason),
-                    oneai_wasm::WasmModuleHealth::Unhealthy { reason } => format!("❌ Unhealthy: {}", reason),
+                    oneai_wasm::WasmModuleHealth::Degraded { reason } => {
+                        format!("⚠️ Degraded: {}", reason)
+                    }
+                    oneai_wasm::WasmModuleHealth::Unhealthy { reason } => {
+                        format!("❌ Unhealthy: {}", reason)
+                    }
                     oneai_wasm::WasmModuleHealth::Unknown => "❓ Unknown".to_string(),
                     _ => "❓ Other".to_string(),
                 };
@@ -186,12 +207,20 @@ pub fn cmd_wasm_stats() {
         }
 
         println!("Per-module metrics:");
-        println!("{:<20} {:>10} {:>15} {:>15} {:>10}", "Module", "Calls", "Fuel Used", "Avg Time (ms)", "Errors");
+        println!(
+            "{:<20} {:>10} {:>15} {:>15} {:>10}",
+            "Module", "Calls", "Fuel Used", "Avg Time (ms)", "Errors"
+        );
         println!("{}", "-".repeat(70));
         for m in metrics {
-            println!("{:<20} {:>10} {:>15} {:>15.1} {:>10}",
-                m.module_name(), m.total_calls(), m.total_fuel_consumed(),
-                m.avg_execution_time_ms(), m.total_errors());
+            println!(
+                "{:<20} {:>10} {:>15} {:>15.1} {:>10}",
+                m.module_name(),
+                m.total_calls(),
+                m.total_fuel_consumed(),
+                m.avg_execution_time_ms(),
+                m.total_errors()
+            );
         }
     });
 }

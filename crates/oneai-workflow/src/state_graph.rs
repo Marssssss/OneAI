@@ -23,7 +23,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-
 // ─── NodeAction ─────────────────────────────────────────────────────────────
 
 /// The action performed by a graph node.
@@ -163,19 +162,13 @@ pub enum EdgeCondition {
     ErrorOccurred,
 
     /// Route if a specific state variable has a certain value.
-    StateEquals {
-        variable: String,
-        value: String,
-    },
+    StateEquals { variable: String, value: String },
 
     /// Always route (no condition — unconditional edge).
     Always,
 
     /// Custom condition — evaluated by a user-provided function.
-    Custom {
-        name: String,
-        description: String,
-    },
+    Custom { name: String, description: String },
 
     /// Route if the active paradigm matches the specified paradigm.
     /// Evaluates `state.active_paradigm == paradigm`.
@@ -296,10 +289,7 @@ impl StateGraph {
 
     /// Add an edge to the graph.
     pub fn add_edge(&mut self, edge: GraphEdge) {
-        self.edges
-            .entry(edge.from.clone())
-            .or_default()
-            .push(edge);
+        self.edges.entry(edge.from.clone()).or_default().push(edge);
     }
 
     /// Add a terminal node (execution ends here).
@@ -314,7 +304,8 @@ impl StateGraph {
 
     /// Get outgoing edges from a node.
     pub fn get_edges_from(&self, node_id: &str) -> Vec<&GraphEdge> {
-        self.edges.get(node_id)
+        self.edges
+            .get(node_id)
             .map(|edges| edges.iter().collect())
             .unwrap_or_default()
     }
@@ -362,10 +353,9 @@ impl StateGraph {
         }
 
         for node_id in self.nodes.keys() {
-            if !visited.contains(node_id) {
-                if dfs(node_id, self, &mut visited, &mut recursion_stack) {
-                    return true;
-                }
+            if !visited.contains(node_id) && dfs(node_id, self, &mut visited, &mut recursion_stack)
+            {
+                return true;
             }
         }
         false
@@ -407,7 +397,6 @@ pub struct GraphState {
     pub metadata: HashMap<String, String>,
 
     // ─── P2-2: AgentLoop integration fields ──────────────────────────────────
-
     /// The parsed decision from the most recent LLM inference.
     ///
     /// After each LlmInfer node, the `GraphActionExecutor` parses the LLM

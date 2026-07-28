@@ -198,7 +198,12 @@ impl Span {
 
     /// Count all events (including in children) in this tree.
     pub fn count_events(&self) -> usize {
-        self.events.len() + self.children.iter().map(|c| c.count_events()).sum::<usize>()
+        self.events.len()
+            + self
+                .children
+                .iter()
+                .map(|c| c.count_events())
+                .sum::<usize>()
     }
 
     /// Collect all spans of a given kind (including children).

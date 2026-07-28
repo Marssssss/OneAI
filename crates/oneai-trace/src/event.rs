@@ -156,22 +156,41 @@ impl TraceEvent {
 
     /// Convenience: create a Thought event (agent reasoning step).
     pub fn thought(message: &str) -> Self {
-        Self::with_attr(EventKind::Thought, "agent.thought", "input.message", serde_json::json!(message))
+        Self::with_attr(
+            EventKind::Thought,
+            "agent.thought",
+            "input.message",
+            serde_json::json!(message),
+        )
     }
 
     /// Convenience: create an Action event (tool call decision).
     pub fn action(tool_name: &str, args: &serde_json::Value) -> Self {
-        Self::with_attrs(EventKind::Action, "tool.call", [
-            ("tool.name".to_string(), serde_json::json!(tool_name)),
-            ("tool.args".to_string(), args.clone()),
-        ])
+        Self::with_attrs(
+            EventKind::Action,
+            "tool.call",
+            [
+                ("tool.name".to_string(), serde_json::json!(tool_name)),
+                ("tool.args".to_string(), args.clone()),
+            ],
+        )
     }
 
     /// Convenience: create an Observation event (tool result).
     pub fn observation(success: bool, content: &str) -> Self {
-        Self::with_attrs(EventKind::Observation, "tool.result", [
-            ("tool.result.success".to_string(), serde_json::json!(success)),
-            ("tool.result.content".to_string(), serde_json::json!(content)),
-        ])
+        Self::with_attrs(
+            EventKind::Observation,
+            "tool.result",
+            [
+                (
+                    "tool.result.success".to_string(),
+                    serde_json::json!(success),
+                ),
+                (
+                    "tool.result.content".to_string(),
+                    serde_json::json!(content),
+                ),
+            ],
+        )
     }
 }

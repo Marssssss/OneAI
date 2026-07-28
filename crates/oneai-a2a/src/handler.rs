@@ -9,8 +9,10 @@
 
 use std::sync::Arc;
 
-use crate::types::{AgentCard, TaskState, Message, SendTaskParams, GetTaskParams, CancelTaskParams};
 use crate::task_store::TaskStore;
+use crate::types::{
+    AgentCard, CancelTaskParams, GetTaskParams, Message, SendTaskParams, TaskState,
+};
 
 /// A2A JSON-RPC request handler.
 ///
@@ -26,13 +28,17 @@ pub struct A2AHandler {
 impl A2AHandler {
     /// Create a new handler with an AgentCard and TaskStore.
     pub fn new(agent_card: AgentCard, task_store: Arc<TaskStore>) -> Self {
-        Self { agent_card, task_store }
+        Self {
+            agent_card,
+            task_store,
+        }
     }
 
     /// Handle `agent/getCard` request — return the cached AgentCard.
     pub async fn handle_get_card(&self, id: Option<serde_json::Value>) -> serde_json::Value {
-        let card_json = serde_json::to_value(&self.agent_card)
-            .unwrap_or_else(|e| serde_json::json!({"error": format!("Serialization error: {}", e)}));
+        let card_json = serde_json::to_value(&self.agent_card).unwrap_or_else(
+            |e| serde_json::json!({"error": format!("Serialization error: {}", e)}),
+        );
 
         serde_json::json!({
             "jsonrpc": "2.0",
@@ -47,7 +53,11 @@ impl A2AHandler {
     /// then attempts to process the message. For P4-1, the processing
     /// is simplified: we transition to Working then immediately complete
     /// with a placeholder response. Full AgentLoop integration comes later.
-    pub async fn handle_send_task(&self, id: Option<serde_json::Value>, params: &serde_json::Value) -> serde_json::Value {
+    pub async fn handle_send_task(
+        &self,
+        id: Option<serde_json::Value>,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
         // Parse the SendTaskParams
         let send_params: SendTaskParams = match serde_json::from_value(params.clone()) {
             Ok(p) => p,
@@ -64,7 +74,11 @@ impl A2AHandler {
         };
 
         // Create the task
-        let _task = match self.task_store.create_task(&send_params.id, send_params.message.clone()).await {
+        let _task = match self
+            .task_store
+            .create_task(&send_params.id, send_params.message.clone())
+            .await
+        {
             Ok(t) => t,
             Err(e) => {
                 return serde_json::json!({
@@ -79,7 +93,11 @@ impl A2AHandler {
         };
 
         // Transition to Working state
-        let _task = match self.task_store.transition_task(&send_params.id, TaskState::Working).await {
+        let _task = match self
+            .task_store
+            .transition_task(&send_params.id, TaskState::Working)
+            .await
+        {
             Ok(t) => t,
             Err(e) => {
                 return serde_json::json!({
@@ -95,21 +113,35 @@ impl A2AHandler {
 
         // For P4-1: simplified processing — complete with placeholder response
         // Full processing with ToolRegistry/AgentLoop integration comes later
-        let agent_response = Message::agent_text(format!("Task '{}' received and processed. Agent capabilities: {} skills available.", send_params.id, self.agent_card.skills.len()));
+        let agent_response = Message::agent_text(format!(
+            "Task '{}' received and processed. Agent capabilities: {} skills available.",
+            send_params.id,
+            self.agent_card.skills.len()
+        ));
 
-        let artifact = crate::types::Artifact::text("response", &agent_response.parts.iter()
-            .filter_map(|p| match p {
-                crate::types::Part::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"));
+        let artifact = crate::types::Artifact::text(
+            "response",
+            agent_response
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::types::Part::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
 
         // Complete the task
-        match self.task_store.complete_task(&send_params.id, Some(artifact)).await {
+        match self
+            .task_store
+            .complete_task(&send_params.id, Some(artifact))
+            .await
+        {
             Ok(completed_task) => {
-                let task_json = serde_json::to_value(&completed_task)
-                    .unwrap_or_else(|e| serde_json::json!({"error": format!("Serialization error: {}", e)}));
+                let task_json = serde_json::to_value(&completed_task).unwrap_or_else(
+                    |e| serde_json::json!({"error": format!("Serialization error: {}", e)}),
+                );
 
                 serde_json::json!({
                     "jsonrpc": "2.0",
@@ -131,7 +163,11 @@ impl A2AHandler {
     }
 
     /// Handle `tasks/get` request — retrieve an existing task.
-    pub async fn handle_get_task(&self, id: Option<serde_json::Value>, params: &serde_json::Value) -> serde_json::Value {
+    pub async fn handle_get_task(
+        &self,
+        id: Option<serde_json::Value>,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
         let get_params: GetTaskParams = match serde_json::from_value(params.clone()) {
             Ok(p) => p,
             Err(e) => {
@@ -148,8 +184,9 @@ impl A2AHandler {
 
         match self.task_store.get_task(&get_params.id).await {
             Ok(task) => {
-                let task_json = serde_json::to_value(&task)
-                    .unwrap_or_else(|e| serde_json::json!({"error": format!("Serialization error: {}", e)}));
+                let task_json = serde_json::to_value(&task).unwrap_or_else(
+                    |e| serde_json::json!({"error": format!("Serialization error: {}", e)}),
+                );
 
                 serde_json::json!({
                     "jsonrpc": "2.0",
@@ -171,7 +208,11 @@ impl A2AHandler {
     }
 
     /// Handle `tasks/cancel` request — cancel an existing task.
-    pub async fn handle_cancel_task(&self, id: Option<serde_json::Value>, params: &serde_json::Value) -> serde_json::Value {
+    pub async fn handle_cancel_task(
+        &self,
+        id: Option<serde_json::Value>,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
         let cancel_params: CancelTaskParams = match serde_json::from_value(params.clone()) {
             Ok(p) => p,
             Err(e) => {
@@ -189,8 +230,9 @@ impl A2AHandler {
         // Task must be in Submitted or Working state to cancel
         match self.task_store.cancel_task(&cancel_params.id).await {
             Ok(task) => {
-                let task_json = serde_json::to_value(&task)
-                    .unwrap_or_else(|e| serde_json::json!({"error": format!("Serialization error: {}", e)}));
+                let task_json = serde_json::to_value(&task).unwrap_or_else(
+                    |e| serde_json::json!({"error": format!("Serialization error: {}", e)}),
+                );
 
                 serde_json::json!({
                     "jsonrpc": "2.0",
@@ -216,7 +258,11 @@ impl A2AHandler {
     /// For P4-1, this returns the same result as `tasks/send` but wrapped
     /// in a stream-compatible format. Full SSE streaming will be implemented
     /// when the axum HTTP server is added.
-    pub async fn handle_send_subscribe(&self, id: Option<serde_json::Value>, params: &serde_json::Value) -> serde_json::Value {
+    pub async fn handle_send_subscribe(
+        &self,
+        id: Option<serde_json::Value>,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
         // For now, delegate to handle_send_task — SSE streaming is a future enhancement
         self.handle_send_task(id, params).await
     }
@@ -241,7 +287,10 @@ mod tests {
 
         assert_eq!(response.get("id").and_then(|v| v.as_u64()), Some(1));
         let result = response.get("result").unwrap();
-        assert_eq!(result.get("name").and_then(|n| n.as_str()), Some("test-agent"));
+        assert_eq!(
+            result.get("name").and_then(|n| n.as_str()),
+            Some("test-agent")
+        );
     }
 
     #[tokio::test]
@@ -255,14 +304,22 @@ mod tests {
             }
         });
 
-        let response = handler.handle_send_task(Some(serde_json::json!(2)), &params).await;
+        let response = handler
+            .handle_send_task(Some(serde_json::json!(2)), &params)
+            .await;
         assert_eq!(response.get("id").and_then(|v| v.as_u64()), Some(2));
 
         let result = response.get("result").unwrap();
-        assert_eq!(result.get("id").and_then(|v| v.as_str()), Some("task-test-1"));
+        assert_eq!(
+            result.get("id").and_then(|v| v.as_str()),
+            Some("task-test-1")
+        );
         // Task should be Completed
         let status = result.get("status").unwrap();
-        assert_eq!(status.get("state").and_then(|s| s.as_str()), Some("completed"));
+        assert_eq!(
+            status.get("state").and_then(|s| s.as_str()),
+            Some("completed")
+        );
     }
 
     #[tokio::test]
@@ -276,17 +333,24 @@ mod tests {
                 "parts": [{"type": "text", "text": "Find info"}]
             }
         });
-        handler.handle_send_task(Some(serde_json::json!(1)), &send_params).await;
+        handler
+            .handle_send_task(Some(serde_json::json!(1)), &send_params)
+            .await;
 
         // Then get the task
         let get_params = serde_json::json!({
             "id": "task-test-2"
         });
-        let response = handler.handle_get_task(Some(serde_json::json!(2)), &get_params).await;
+        let response = handler
+            .handle_get_task(Some(serde_json::json!(2)), &get_params)
+            .await;
         assert_eq!(response.get("id").and_then(|v| v.as_u64()), Some(2));
 
         let result = response.get("result").unwrap();
-        assert_eq!(result.get("id").and_then(|v| v.as_str()), Some("task-test-2"));
+        assert_eq!(
+            result.get("id").and_then(|v| v.as_str()),
+            Some("task-test-2")
+        );
     }
 
     #[tokio::test]
@@ -295,7 +359,9 @@ mod tests {
         let get_params = serde_json::json!({
             "id": "nonexistent"
         });
-        let response = handler.handle_get_task(Some(serde_json::json!(3)), &get_params).await;
+        let response = handler
+            .handle_get_task(Some(serde_json::json!(3)), &get_params)
+            .await;
 
         let error = response.get("error").unwrap();
         assert_eq!(error.get("code").and_then(|c| c.as_i64()), Some(-32001));
@@ -312,7 +378,9 @@ mod tests {
                 "parts": [{"type": "text", "text": "Cancel this"}]
             }
         });
-        handler.handle_send_task(Some(serde_json::json!(1)), &send_params).await;
+        handler
+            .handle_send_task(Some(serde_json::json!(1)), &send_params)
+            .await;
 
         // Cancel the task (note: already completed, so this will fail —
         // let's create a task that stays in Working state instead)
@@ -321,17 +389,28 @@ mod tests {
         let handler = A2AHandler::new(card, store.clone());
 
         // Manually create a task in Working state
-        store.create_task("task-cancel", Message::user_text("Working task")).await.unwrap();
-        store.transition_task("task-cancel", TaskState::Working).await.unwrap();
+        store
+            .create_task("task-cancel", Message::user_text("Working task"))
+            .await
+            .unwrap();
+        store
+            .transition_task("task-cancel", TaskState::Working)
+            .await
+            .unwrap();
 
         let cancel_params = serde_json::json!({
             "id": "task-cancel"
         });
-        let response = handler.handle_cancel_task(Some(serde_json::json!(2)), &cancel_params).await;
+        let response = handler
+            .handle_cancel_task(Some(serde_json::json!(2)), &cancel_params)
+            .await;
 
         let result = response.get("result").unwrap();
         let status = result.get("status").unwrap();
-        assert_eq!(status.get("state").and_then(|s| s.as_str()), Some("canceled"));
+        assert_eq!(
+            status.get("state").and_then(|s| s.as_str()),
+            Some("canceled")
+        );
     }
 
     #[tokio::test]
@@ -339,7 +418,9 @@ mod tests {
         let handler = create_handler();
         let params = serde_json::json!({"invalid": true});
 
-        let response = handler.handle_send_task(Some(serde_json::json!(4)), &params).await;
+        let response = handler
+            .handle_send_task(Some(serde_json::json!(4)), &params)
+            .await;
         let error = response.get("error").unwrap();
         assert_eq!(error.get("code").and_then(|c| c.as_i64()), Some(-32602));
     }
@@ -355,7 +436,9 @@ mod tests {
             }
         });
 
-        let response = handler.handle_send_subscribe(Some(serde_json::json!(5)), &params).await;
+        let response = handler
+            .handle_send_subscribe(Some(serde_json::json!(5)), &params)
+            .await;
         // Should produce the same result as handle_send_task
         assert!(response.get("result").is_some());
     }

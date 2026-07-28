@@ -36,8 +36,8 @@ use crate::eval_result::{EvalReport, EvalResult};
 
 mod case;
 mod metrics;
-mod suite;
 mod runner;
+mod suite;
 
 #[cfg(test)]
 mod runner_tests;
@@ -75,8 +75,13 @@ impl CaseOutcome {
     pub fn into_eval_result(self) -> EvalResult {
         let input = format!("[{:?}] {}", self.ability, self.question);
         let mut r = EvalResult::new(self.case_id, &input, &self.answer);
-        r.scores = self.metrics.into_iter()
-            .map(|m| MetricScore { metric_name: m.metric_name, score: m.score })
+        r.scores = self
+            .metrics
+            .into_iter()
+            .map(|m| MetricScore {
+                metric_name: m.metric_name,
+                score: m.score,
+            })
             .collect();
         r.duration_ms = self.duration_ms;
         r

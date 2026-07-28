@@ -132,14 +132,19 @@ impl UsearchBackend {
     }
 
     /// Load with explicit HNSW parameters.
-    pub fn open_with_config(path: &str, dim: usize, cfg: UsearchBackendConfig) -> oneai_core::Result<Self> {
+    pub fn open_with_config(
+        path: &str,
+        dim: usize,
+        cfg: UsearchBackendConfig,
+    ) -> oneai_core::Result<Self> {
         let index = build_index(dim, cfg)?;
         index
             .load(path)
             .map_err(|e| oneai_core::OneAIError::Rag(format!("usearch load {path}: {e}")))?;
         let sidecar_path = sidecar_path(path);
-        let sidecar_str = std::fs::read_to_string(&sidecar_path)
-            .map_err(|e| oneai_core::OneAIError::Rag(format!("read sidecar {}: {e}", sidecar_path)))?;
+        let sidecar_str = std::fs::read_to_string(&sidecar_path).map_err(|e| {
+            oneai_core::OneAIError::Rag(format!("read sidecar {}: {e}", sidecar_path))
+        })?;
         let sidecar: Sidecar = serde_json::from_str(&sidecar_str)
             .map_err(|e| oneai_core::OneAIError::Rag(format!("parse sidecar: {e}")))?;
         Ok(Self {
@@ -191,7 +196,12 @@ fn sidecar_path(path: &str) -> String {
 
 #[async_trait]
 impl VectorBackend for UsearchBackend {
-    async fn upsert(&self, id: &str, embedding: &[f32], metadata: Metadata) -> oneai_core::Result<()> {
+    async fn upsert(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        metadata: Metadata,
+    ) -> oneai_core::Result<()> {
         if embedding.len() != self.dim {
             return Err(oneai_core::OneAIError::Rag(format!(
                 "UsearchBackend: dim mismatch (got {}, expected {})",
@@ -216,9 +226,9 @@ impl VectorBackend for UsearchBackend {
         // "Reserve capacity ahead of insertions!" otherwise).
         if (key as usize) > *reserved {
             let new_cap = (*reserved * 2).max(key as usize + INITIAL_CAPACITY);
-            index
-                .reserve(new_cap)
-                .map_err(|e| oneai_core::OneAIError::Rag(format!("usearch reserve {new_cap}: {e}")))?;
+            index.reserve(new_cap).map_err(|e| {
+                oneai_core::OneAIError::Rag(format!("usearch reserve {new_cap}: {e}"))
+            })?;
             *reserved = new_cap;
         }
         index
@@ -261,9 +271,9 @@ impl VectorBackend for UsearchBackend {
             // HNSW traversal (spike-verified `filtered_search`).
             index
                 .filtered_search(query, fetch_k, |key: u64| -> bool {
-                    key_to_id.get(&key).is_some_and(|id| {
-                        meta.get(id).is_some_and(|m| f.matches(m))
-                    })
+                    key_to_id
+                        .get(&key)
+                        .is_some_and(|id| meta.get(id).is_some_and(|m| f.matches(m)))
                 })
                 .map_err(|e| oneai_core::OneAIError::Rag(format!("usearch filtered_search: {e}")))?
         } else {
@@ -289,7 +299,11 @@ impl VectorBackend for UsearchBackend {
                 break;
             }
         }
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(top_k);
         Ok(hits)
     }
@@ -327,15 +341,27 @@ mod tests {
     #[tokio::test]
     async fn hnsw_upsert_search_filter_delete() {
         let be = UsearchBackend::new(4).unwrap();
-        be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::from([("k".into(), "x".into())]))
-            .await
-            .unwrap();
-        be.upsert("b", &[0.11, 0.21, 0.31, 0.41], Metadata::from([("k".into(), "y".into())]))
-            .await
-            .unwrap();
-        be.upsert("c", &[0.9, 0.8, 0.7, 0.6], Metadata::from([("k".into(), "x".into())]))
-            .await
-            .unwrap();
+        be.upsert(
+            "a",
+            &[0.1, 0.2, 0.3, 0.4],
+            Metadata::from([("k".into(), "x".into())]),
+        )
+        .await
+        .unwrap();
+        be.upsert(
+            "b",
+            &[0.11, 0.21, 0.31, 0.41],
+            Metadata::from([("k".into(), "y".into())]),
+        )
+        .await
+        .unwrap();
+        be.upsert(
+            "c",
+            &[0.9, 0.8, 0.7, 0.6],
+            Metadata::from([("k".into(), "x".into())]),
+        )
+        .await
+        .unwrap();
 
         let hits = be.search(&[0.1, 0.2, 0.3, 0.4], 3, None).await.unwrap();
         assert_eq!(hits[0].id, "a");
@@ -351,8 +377,12 @@ mod tests {
     #[tokio::test]
     async fn upsert_replaces_and_stale_skipped() {
         let be = UsearchBackend::new(4).unwrap();
-        be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::new()).await.unwrap();
-        be.upsert("a", &[0.9, 0.8, 0.7, 0.6], Metadata::new()).await.unwrap();
+        be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::new())
+            .await
+            .unwrap();
+        be.upsert("a", &[0.9, 0.8, 0.7, 0.6], Metadata::new())
+            .await
+            .unwrap();
         let hits = be.search(&[0.9, 0.8, 0.7, 0.6], 10, None).await.unwrap();
         // Only one 'a' despite the stale graph vector.
         assert_eq!(hits.iter().filter(|h| h.id == "a").count(), 1);
@@ -369,12 +399,20 @@ mod tests {
 
         {
             let be = UsearchBackend::new(4).unwrap();
-            be.upsert("a", &[0.1, 0.2, 0.3, 0.4], Metadata::from([("k".into(), "x".into())]))
-                .await
-                .unwrap();
-            be.upsert("c", &[0.9, 0.8, 0.7, 0.6], Metadata::from([("k".into(), "x".into())]))
-                .await
-                .unwrap();
+            be.upsert(
+                "a",
+                &[0.1, 0.2, 0.3, 0.4],
+                Metadata::from([("k".into(), "x".into())]),
+            )
+            .await
+            .unwrap();
+            be.upsert(
+                "c",
+                &[0.9, 0.8, 0.7, 0.6],
+                Metadata::from([("k".into(), "x".into())]),
+            )
+            .await
+            .unwrap();
             be.save(&path_str).await.unwrap();
         }
 

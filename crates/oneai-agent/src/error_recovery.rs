@@ -168,8 +168,7 @@ impl RetryPolicy {
         let base_secs = match &self.backoff {
             BackoffStrategy::Fixed => self.initial_delay_secs as f64,
             BackoffStrategy::Linear { increment_secs } => {
-                self.initial_delay_secs as f64
-                    + *increment_secs as f64 * attempt as f64
+                self.initial_delay_secs as f64 + *increment_secs as f64 * attempt as f64
             }
             BackoffStrategy::Exponential { factor } => {
                 self.initial_delay_secs as f64 * factor.powi(attempt as i32)
@@ -302,12 +301,14 @@ impl RecoveryManager {
 
     /// Register an external validator.
     pub fn register_validator(&mut self, validator: Arc<dyn ExternalValidator>) {
-        self.validators.insert(validator.name().to_string(), validator);
+        self.validators
+            .insert(validator.name().to_string(), validator);
     }
 
     /// Register an assertion function.
     pub fn register_assertion(&mut self, assertion: Arc<dyn AssertionFn>) {
-        self.assertions.insert(assertion.name().to_string(), assertion);
+        self.assertions
+            .insert(assertion.name().to_string(), assertion);
     }
 
     /// Apply a recovery strategy.
@@ -316,20 +317,25 @@ impl RecoveryManager {
     /// are not recursively applied here. Instead, they are returned as part of the
     /// outcome, and the caller (e.g., AgentLoop or StateGraph executor) applies them
     /// in a subsequent iteration. This avoids async recursion lifetime issues.
-    pub async fn apply(&self, strategy: &RecoveryStrategy, context: &ValidationContext) -> Result<RecoveryOutcome> {
+    pub async fn apply(
+        &self,
+        strategy: &RecoveryStrategy,
+        context: &ValidationContext,
+    ) -> Result<RecoveryOutcome> {
         match strategy {
-            RecoveryStrategy::Retry { policy } => {
-                Ok(RecoveryOutcome::RetryScheduled { max_retries: policy.max_retries })
-            }
-            RecoveryStrategy::ConditionalFallback { error_node, fix_node } => {
-                Ok(RecoveryOutcome::FallbackRoute {
-                    from: error_node.clone(),
-                    to: fix_node.clone(),
-                })
-            }
-            RecoveryStrategy::Rollback { checkpoint_id } => {
-                Ok(RecoveryOutcome::RollbackTo { checkpoint_id: checkpoint_id.clone() })
-            }
+            RecoveryStrategy::Retry { policy } => Ok(RecoveryOutcome::RetryScheduled {
+                max_retries: policy.max_retries,
+            }),
+            RecoveryStrategy::ConditionalFallback {
+                error_node,
+                fix_node,
+            } => Ok(RecoveryOutcome::FallbackRoute {
+                from: error_node.clone(),
+                to: fix_node.clone(),
+            }),
+            RecoveryStrategy::Rollback { checkpoint_id } => Ok(RecoveryOutcome::RollbackTo {
+                checkpoint_id: checkpoint_id.clone(),
+            }),
             RecoveryStrategy::Assertion { check, on_fail: _ } => {
                 if let Some(assertion) = self.assertions.get(check) {
                     let result = assertion.check(context).await?;
@@ -339,34 +345,48 @@ impl RecoveryManager {
                         // Return descriptive info about the nested on_fail strategy
                         // The caller (AgentLoop or StateGraph executor) applies it in a subsequent iteration
                         Ok(RecoveryOutcome::AssertionFailed {
-                            on_fail_strategy_description: format!("Apply on_fail strategy after assertion '{}' failed", check),
+                            on_fail_strategy_description: format!(
+                                "Apply on_fail strategy after assertion '{}' failed",
+                                check
+                            ),
                         })
                     }
                 } else {
-                    Ok(RecoveryOutcome::AssertionNotFound { name: check.clone() })
+                    Ok(RecoveryOutcome::AssertionNotFound {
+                        name: check.clone(),
+                    })
                 }
             }
-            RecoveryStrategy::ExternalFeedback { validator, on_validation_fail: _ } => {
+            RecoveryStrategy::ExternalFeedback {
+                validator,
+                on_validation_fail: _,
+            } => {
                 if let Some(v) = self.validators.get(validator) {
                     let result = v.validate(context).await?;
                     if result.passed {
                         Ok(RecoveryOutcome::ValidationPassed)
                     } else {
-                        Ok(RecoveryOutcome::ValidationFailed { feedback: result.feedback })
+                        Ok(RecoveryOutcome::ValidationFailed {
+                            feedback: result.feedback,
+                        })
                     }
                 } else {
-                    Ok(RecoveryOutcome::ValidatorNotFound { name: validator.clone() })
+                    Ok(RecoveryOutcome::ValidatorNotFound {
+                        name: validator.clone(),
+                    })
                 }
             }
-            RecoveryStrategy::Escalate { error_summary } => {
-                Ok(RecoveryOutcome::Escalated { summary: error_summary.clone() })
-            }
+            RecoveryStrategy::Escalate { error_summary } => Ok(RecoveryOutcome::Escalated {
+                summary: error_summary.clone(),
+            }),
         }
     }
 }
 
 impl Default for RecoveryManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── RecoveryOutcome ──────────────────────────────────────────────────
@@ -384,7 +404,9 @@ pub enum RecoveryOutcome {
     AssertionPassed,
     /// Assertion check failed — the on_fail strategy is referenced by name.
     /// The caller can look up and apply the referenced strategy in a subsequent iteration.
-    AssertionFailed { on_fail_strategy_description: String },
+    AssertionFailed {
+        on_fail_strategy_description: String,
+    },
     /// Assertion check failed (name not found).
     AssertionNotFound { name: String },
     /// External validation passed.

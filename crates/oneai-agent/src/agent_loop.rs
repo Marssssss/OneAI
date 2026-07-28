@@ -15,30 +15,28 @@
 //! - Checkpoints are saved automatically per iteration
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use oneai_core::{
-    ContentBlock, Conversation, InferenceRequest, InferenceResponse,
-    Message, Role, ToolDefinition, ToolOutput,
-    HookPoint, HookContext, InterruptPoint, InterruptReason,
-    ResumeSignal, ResumeAction, StructuredOutputConfig,
-    ConstrainedOutputConfig, ConstrainedMode, ConstrainedOutputPolicy,
-    InteractionModification, InteractionPoint, InteractionRequest, InteractionResponse,
-};
 use oneai_core::error::Result;
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
+use oneai_core::{
+    ConstrainedMode, ConstrainedOutputConfig, ConstrainedOutputPolicy, ContentBlock, Conversation,
+    HookContext, HookPoint, InferenceRequest, InferenceResponse, InteractionModification,
+    InteractionPoint, InteractionRequest, InteractionResponse, InterruptPoint, InterruptReason,
+    Message, ResumeAction, ResumeSignal, Role, StructuredOutputConfig, ToolDefinition, ToolOutput,
+};
 
 use oneai_domain::{MergedDomainPack, PermissionAction};
 
-use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
 use crate::context_assembler::ContextAssembler;
-use crate::streaming::IncrementalStreamParser;
 use crate::hooks::{HookRegistry, ResolvedHookAction};
-use crate::structured_output::{validate_json_schema, build_retry_prompt};
-use oneai_trace::{TraceContext, SpanKind, SpanStatus, EventKind};
+use crate::streaming::IncrementalStreamParser;
+use crate::structured_output::{build_retry_prompt, validate_json_schema};
+use crate::sub_agent::{SubAgentFactory, SubAgentKind, SubAgentSummary};
+use oneai_trace::{EventKind, SpanKind, SpanStatus, TraceContext};
 // OtelMetricsProvider is only exported by oneai-trace when its `otel` feature
 // is on (oneai-agent's `otel` feature forwards it). The metrics wiring below is
 // cfg-gated so the non-otel build stays zero-cost.
@@ -158,9 +156,7 @@ pub enum AgentDecision {
     /// sub-agents. All `delegate` calls in the turn are collected here as a
     /// batch; the scheduler runs independent tasks in parallel and honors
     /// `depends_on` ordering (see [`DelegateTask`]).
-    Delegate {
-        tasks: Vec<DelegateTask>,
-    },
+    Delegate { tasks: Vec<DelegateTask> },
 
     /// The model wants to switch to a different paradigm.
     SwitchParadigm { paradigm: ParadigmKind },
@@ -298,7 +294,8 @@ impl ParadigmConfig {
 
     /// Get the ParadigmConfig for a specific paradigm kind from the defaults.
     pub fn for_paradigm(kind: ParadigmKind) -> ParadigmConfig {
-        Self::defaults().into_iter()
+        Self::defaults()
+            .into_iter()
             .find(|c| c.paradigm == kind)
             .unwrap_or_else(|| ParadigmConfig {
                 paradigm: kind,
@@ -382,7 +379,9 @@ impl LoopState {
         // Mirror the original task into conversation metadata so every
         // compressor (which copies metadata verbatim) preserves the task
         // anchor even if the first user message itself gets summarized away.
-        conversation.metadata.insert("task_anchor".to_string(), task.to_string());
+        conversation
+            .metadata
+            .insert("task_anchor".to_string(), task.to_string());
         conversation.add_message(Message::user(task.to_string()));
         Self {
             original_task: task.to_string(),
@@ -412,11 +411,14 @@ impl LoopState {
     /// while appending the new user input as the latest message.
     pub fn from_conversation(conversation: Conversation, task: &str) -> Self {
         let mut conv = conversation;
-        conv.metadata.insert("task_anchor".to_string(), task.to_string());
+        conv.metadata
+            .insert("task_anchor".to_string(), task.to_string());
         conv.add_message(Message::user(task.to_string()));
         // Q3 reseed: restore the live plan list from metadata so a reloaded /
         // compacted session continues the in-flight task instead of losing it.
-        let plan_state = conv.metadata.get("plan_state")
+        let plan_state = conv
+            .metadata
+            .get("plan_state")
             .and_then(|s| crate::plan_state::PlanState::from_metadata_string(s));
         // The durable working state is NOT rehydrated from metadata here — it
         // lives in the cross-session event log (WorkingStateStore), read on
@@ -425,7 +427,11 @@ impl LoopState {
         // from the store using it. `original_task` keeps the new user message
         // for the durable log; the pinned `[Task Anchor]` prefers the working
         // state's `goal` when available (the canonical original goal).
-        let task_id = conv.metadata.get("task_id").cloned().filter(|s| !s.is_empty());
+        let task_id = conv
+            .metadata
+            .get("task_id")
+            .cloned()
+            .filter(|s| !s.is_empty());
         Self {
             original_task: task.to_string(),
             conversation: conv,
@@ -453,8 +459,12 @@ impl LoopState {
         self.is_complete = true;
     }
 
-    pub fn mark_complete(&mut self) { self.is_complete = true; }
-    pub fn is_complete(&self) -> bool { self.is_complete }
+    pub fn mark_complete(&mut self) {
+        self.is_complete = true;
+    }
+    pub fn is_complete(&self) -> bool {
+        self.is_complete
+    }
 
     pub fn feed_tool_results(&mut self, results: Vec<ToolCallResult>) {
         for result in results {
@@ -467,11 +477,13 @@ impl LoopState {
                     result.output.content.clone()
                 }
             } else {
-                format!("Error: {}", result.output.error.as_deref().unwrap_or("Unknown error"))
+                format!(
+                    "Error: {}",
+                    result.output.error.as_deref().unwrap_or("Unknown error")
+                )
             };
-            self.conversation.add_message(Message::tool_result(
-                result.call_id.clone(), content,
-            ));
+            self.conversation
+                .add_message(Message::tool_result(result.call_id.clone(), content));
         }
     }
 
@@ -480,14 +492,19 @@ impl LoopState {
         self.conversation.add_message(Message::assistant(format!(
             "[Sub-agent result]: {} {}",
             summary.summary,
-            if summary.key_findings.is_empty() { String::new() }
-            else { format!("\nKey findings: {}", summary.key_findings.join("; ")) }
+            if summary.key_findings.is_empty() {
+                String::new()
+            } else {
+                format!("\nKey findings: {}", summary.key_findings.join("; "))
+            }
         )));
     }
 
     pub fn feed_paradigm_result(&mut self, paradigm: ParadigmKind, result_text: String) {
         self.conversation.add_message(Message::assistant(format!(
-            "[{} paradigm result]: {}", paradigm_name(&paradigm), result_text
+            "[{} paradigm result]: {}",
+            paradigm_name(&paradigm),
+            result_text
         )));
     }
 
@@ -523,7 +540,8 @@ fn safe_fallback_response(reason: &str) -> InferenceResponse {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
-            ..Default::default()},
+            ..Default::default()
+        },
         model: String::new(),
         metadata: HashMap::new(),
     }
@@ -646,11 +664,29 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("hard_max_iterations", &self.hard_max_iterations)
             .field("token_budget", &self.token_budget)
             .field("inject_skills", &self.inject_skills)
-            .field("usage_tracker", &self.usage_tracker.as_ref().map(|_| "Arc<dyn UsageTracker>"))
-            .field("rate_limiter", &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"))
-            .field("circuit_breaker", &self.circuit_breaker.as_ref().map(|_| "Arc<dyn CircuitBreaker>"))
-            .field("token_counter", &self.token_counter.as_ref().map(|_| "Arc<dyn TokenCounter>"))
-            .field("context_manager", &self.context_manager.as_ref().map(|_| "Arc<ContextManager>"))
+            .field(
+                "usage_tracker",
+                &self.usage_tracker.as_ref().map(|_| "Arc<dyn UsageTracker>"),
+            )
+            .field(
+                "rate_limiter",
+                &self.rate_limiter.as_ref().map(|_| "Arc<dyn RateLimiter>"),
+            )
+            .field(
+                "circuit_breaker",
+                &self
+                    .circuit_breaker
+                    .as_ref()
+                    .map(|_| "Arc<dyn CircuitBreaker>"),
+            )
+            .field(
+                "token_counter",
+                &self.token_counter.as_ref().map(|_| "Arc<dyn TokenCounter>"),
+            )
+            .field(
+                "context_manager",
+                &self.context_manager.as_ref().map(|_| "Arc<ContextManager>"),
+            )
             .field("structured_output", &self.structured_output)
             .field("trace_context", &self.trace_context)
             // metrics_provider (otel) holds atomics and is not Debug-rendered;
@@ -873,10 +909,22 @@ impl AgentLoop {
         stream_parser: IncrementalStreamParser,
         config: AgentLoopConfig,
     ) -> Self {
-        Self { provider, tools, parser, interaction_gate, skill_selector, context_budget,
-            sub_agent_factory, async_task_runner: None,
+        Self {
+            provider,
+            tools,
+            parser,
+            interaction_gate,
+            skill_selector,
+            context_budget,
+            sub_agent_factory,
+            async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), working_state_store: None, ws_user_id: String::new(), ws_project: String::new(), ws_session_id: String::new(), recovery_manager: None,
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)),
+            working_state_store: None,
+            ws_user_id: String::new(),
+            ws_project: String::new(),
+            ws_session_id: String::new(),
+            recovery_manager: None,
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
@@ -884,7 +932,9 @@ impl AgentLoop {
             plan_mode_active: Arc::new(AtomicBool::new(config.plan_mode)),
             skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
             active_skill: None,
-            config, domain_pack: None }
+            config,
+            domain_pack: None,
+        }
     }
 
     /// Create a new AgentLoop with a domain pack and recovery manager.
@@ -901,10 +951,22 @@ impl AgentLoop {
         config: AgentLoopConfig,
         domain_pack: Arc<MergedDomainPack>,
     ) -> Self {
-        Self { provider, tools, parser, interaction_gate, skill_selector, context_budget,
-            sub_agent_factory, async_task_runner: None,
+        Self {
+            provider,
+            tools,
+            parser,
+            interaction_gate,
+            skill_selector,
+            context_budget,
+            sub_agent_factory,
+            async_task_runner: None,
             context_assembler: Arc::new(tokio::sync::RwLock::new(context_assembler)),
-            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)), working_state_store: None, ws_user_id: String::new(), ws_project: String::new(), ws_session_id: String::new(), recovery_manager: None,
+            stream_parser: Arc::new(tokio::sync::RwLock::new(stream_parser)),
+            working_state_store: None,
+            ws_user_id: String::new(),
+            ws_project: String::new(),
+            ws_session_id: String::new(),
+            recovery_manager: None,
             hook_registry: Arc::new(tokio::sync::RwLock::new(HookRegistry::new())),
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             interrupt_reason: Arc::new(tokio::sync::Mutex::new(None)),
@@ -913,7 +975,8 @@ impl AgentLoop {
             skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
             active_skill: None,
             config,
-            domain_pack: Some(domain_pack) }
+            domain_pack: Some(domain_pack),
+        }
     }
 
     /// Attach the shared skill registry (for the always-on skill menu) and an
@@ -1027,7 +1090,10 @@ impl AgentLoop {
     /// Enable parallel sub-agent delegation with a custom budget.
     ///
     /// The custom budget applies to all background sub-agent tasks.
-    pub fn with_parallel_delegation_and_budget(self, budget: oneai_core::budget::TokenBudget) -> Self {
+    pub fn with_parallel_delegation_and_budget(
+        self,
+        budget: oneai_core::budget::TokenBudget,
+    ) -> Self {
         let runner = Arc::new(crate::async_task_runner::AsyncTaskRunner::with_budget(
             self.sub_agent_factory.clone(),
             budget,
@@ -1043,7 +1109,10 @@ impl AgentLoop {
     /// When set, failed tool calls trigger recovery strategy evaluation.
     /// The RecoveryManager can apply Retry, ConditionalFallback, Rollback,
     /// ExternalFeedback, or Escalate strategies based on the error type.
-    pub fn with_recovery_manager(mut self, manager: Arc<crate::error_recovery::RecoveryManager>) -> Self {
+    pub fn with_recovery_manager(
+        mut self,
+        manager: Arc<crate::error_recovery::RecoveryManager>,
+    ) -> Self {
         self.recovery_manager = Some(manager);
         self
     }
@@ -1060,7 +1129,12 @@ impl AgentLoop {
         let mut state = LoopState::new(task);
         self.hydrate_working_state(&mut state).await;
 
-        if !state.conversation.messages.iter().any(|m| m.role == Role::System) {
+        if !state
+            .conversation
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System)
+        {
             // Append the runtime context block (current date/time + a nudge to use
             // web_search for time-sensitive questions) so the model always knows
             // "today" and reaches for search tools rather than stale memory.
@@ -1073,7 +1147,9 @@ impl AgentLoop {
                 self.build_system_prompt().await,
                 crate::context_assembler::runtime_context_block(),
             );
-            state.conversation.add_message(Message::system(system_prompt));
+            state
+                .conversation
+                .add_message(Message::system(system_prompt));
         }
 
         self.run_loop(state, observer).await
@@ -1093,7 +1169,12 @@ impl AgentLoop {
         let mut state = LoopState::from_conversation(conversation, task);
         self.hydrate_working_state(&mut state).await;
 
-        if !state.conversation.messages.iter().any(|m| m.role == Role::System) {
+        if !state
+            .conversation
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System)
+        {
             // See run_with_observer: append current date/time + search guidance,
             // and resolve the `{{TOOL_PREFERENCE_RULES}}` marker against the
             // actual tool registry.
@@ -1102,7 +1183,9 @@ impl AgentLoop {
                 self.build_system_prompt().await,
                 crate::context_assembler::runtime_context_block(),
             );
-            state.conversation.add_message(Message::system(system_prompt));
+            state
+                .conversation
+                .add_message(Message::system(system_prompt));
         }
 
         self.run_loop(state, observer).await
@@ -1114,7 +1197,6 @@ impl AgentLoop {
         mut state: LoopState,
         observer: &dyn AgentLoopObserver,
     ) -> Result<AgentLoopResult> {
-
         // Track structured output retry count (separate from iteration count)
         let mut structured_retry_count: usize = 0;
         // Track consecutive rate limit errors — after too many, terminate the loop
@@ -1126,7 +1208,10 @@ impl AgentLoop {
         let loop_span_id = if let Some(ctx) = &self.config.trace_context {
             let span_id = ctx.enter_span(SpanKind::AGENT, "agent_loop", None);
             ctx.set_attribute("agent.task", serde_json::json!(state.original_task));
-            ctx.set_attribute("agent.paradigm", serde_json::json!(paradigm_name(&state.active_paradigm)));
+            ctx.set_attribute(
+                "agent.paradigm",
+                serde_json::json!(paradigm_name(&state.active_paradigm)),
+            );
             span_id
         } else {
             String::new()
@@ -1176,10 +1261,16 @@ impl AgentLoop {
             // ─── Rate limiter check (wait if rate limit exceeded) ────────────
             if let Some(rate_limiter) = &self.config.rate_limiter {
                 let provider_name = self.provider_name();
-                let wait_time = rate_limiter.wait_if_needed(&provider_name).await.unwrap_or(std::time::Duration::ZERO);
+                let wait_time = rate_limiter
+                    .wait_if_needed(&provider_name)
+                    .await
+                    .unwrap_or(std::time::Duration::ZERO);
                 if wait_time > std::time::Duration::ZERO {
-                    tracing::warn!("Rate limit exceeded for provider {}, waiting {}ms",
-                        provider_name, wait_time.as_millis());
+                    tracing::warn!(
+                        "Rate limit exceeded for provider {}, waiting {}ms",
+                        provider_name,
+                        wait_time.as_millis()
+                    );
                     tokio::time::sleep(wait_time).await;
                 }
                 let _ = rate_limiter.record_call(&provider_name).await;
@@ -1190,8 +1281,10 @@ impl AgentLoop {
                 let provider_name = self.provider_name();
                 let circuit_state = circuit_breaker.check(&provider_name);
                 if circuit_state.is_failing() {
-                    tracing::warn!("Circuit breaker is OPEN for provider {}, skipping call",
-                        provider_name);
+                    tracing::warn!(
+                        "Circuit breaker is OPEN for provider {}, skipping call",
+                        provider_name
+                    );
                     // Skip this iteration — the loop will continue and may exit
                     // on hard_max_iterations if all calls are blocked
                     continue;
@@ -1202,10 +1295,20 @@ impl AgentLoop {
 
             // ─── Trace: log iteration event ──────────────────────────
             if let Some(ctx) = &self.config.trace_context {
-                ctx.log_event(EventKind::WorkflowStepStart, "agent.iteration", HashMap::from([
-                    ("agent.iteration".to_string(), serde_json::json!(state.iterations)),
-                    ("agent.paradigm".to_string(), serde_json::json!(paradigm_name(&state.active_paradigm))),
-                ]));
+                ctx.log_event(
+                    EventKind::WorkflowStepStart,
+                    "agent.iteration",
+                    HashMap::from([
+                        (
+                            "agent.iteration".to_string(),
+                            serde_json::json!(state.iterations),
+                        ),
+                        (
+                            "agent.paradigm".to_string(),
+                            serde_json::json!(paradigm_name(&state.active_paradigm)),
+                        ),
+                    ]),
+                );
             }
 
             // 1. Refresh domain context sources, then decide on compression.
@@ -1238,12 +1341,17 @@ impl AgentLoop {
             // real transcript and the durable log stays bounded) and re-build
             // the request on top of the compressed durable.
             let mut conv_for_inference = self.context_assembler.write().await.assemble(&state)?;
-            self.inject_pinned_blocks(&mut conv_for_inference, &state).await;
+            self.inject_pinned_blocks(&mut conv_for_inference, &state)
+                .await;
 
             if self.context_budget.needs_compression(&conv_for_inference) {
-                state.conversation = self.context_budget.compress(state.conversation.clone()).await?;
+                state.conversation = self
+                    .context_budget
+                    .compress(state.conversation.clone())
+                    .await?;
                 conv_for_inference = self.context_assembler.write().await.assemble(&state)?;
-                self.inject_pinned_blocks(&mut conv_for_inference, &state).await;
+                self.inject_pinned_blocks(&mut conv_for_inference, &state)
+                    .await;
             }
 
             // Model-aware context-fit guard (gap-analysis #3). The durable
@@ -1263,7 +1371,12 @@ impl AgentLoop {
             // for persistence / replay; only this request is shrunk to fit.
             if let Some(cm) = &self.config.context_manager {
                 if cm.auto_trim() {
-                    let model = self.provider.config().model_name.clone().unwrap_or_default();
+                    let model = self
+                        .provider
+                        .config()
+                        .model_name
+                        .clone()
+                        .unwrap_or_default();
                     let fit = cm.fits_context_window(&conv_for_inference, &model);
                     if !fit.fits {
                         tracing::debug!(
@@ -1275,7 +1388,9 @@ impl AgentLoop {
                         );
                         match cm.trim_for_model(&conv_for_inference, &model).await {
                             Ok(trimmed) => conv_for_inference = trimmed,
-                            Err(e) => tracing::warn!(error = %e, "context-manager trim failed; sending untrimmed"),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "context-manager trim failed; sending untrimmed")
+                            }
                         }
                     }
                 }
@@ -1286,7 +1401,10 @@ impl AgentLoop {
             // and session reload — Q3 reseed. from_conversation restores it.
             if let Some(plan) = &state.plan_state {
                 if let Some(serialized) = plan.to_metadata_string() {
-                    state.conversation.metadata.insert("plan_state".to_string(), serialized);
+                    state
+                        .conversation
+                        .metadata
+                        .insert("plan_state".to_string(), serialized);
                 } else {
                     state.conversation.metadata.remove("plan_state");
                 }
@@ -1302,9 +1420,9 @@ impl AgentLoop {
             // and max_tokens/top_p defer to the provider (it knows its own model
             // ceiling — a fixed agent-side cap can exceed a model's max and error).
             // thinking_budget is opt-in (None here unless the user enabled it).
-            let tool_defs = self.build_tool_definitions_for_paradigm(
-                state.active_paradigm_config.as_ref()
-            ).await;
+            let tool_defs = self
+                .build_tool_definitions_for_paradigm(state.active_paradigm_config.as_ref())
+                .await;
             let mut request = InferenceRequest {
                 conversation: conv_for_inference,
                 tools: tool_defs,
@@ -1318,8 +1436,10 @@ impl AgentLoop {
                     // Pass the prompt-cache policy to the provider via
                     // metadata (providers don't depend on oneai-agent, so
                     // they read this string key instead of the typed config).
-                    ("prompt_cache_policy".to_string(),
-                     self.config.prompt_cache_policy.as_str().to_string()),
+                    (
+                        "prompt_cache_policy".to_string(),
+                        self.config.prompt_cache_policy.as_str().to_string(),
+                    ),
                 ]),
             };
 
@@ -1372,13 +1492,16 @@ impl AgentLoop {
                         // User feedback is a durable user turn (persists + next
                         // iteration's assemble includes it) AND must appear in
                         // this iteration's request so the model sees it now.
-                        state.conversation.add_message(Message::user(feedback.clone()));
+                        state
+                            .conversation
+                            .add_message(Message::user(feedback.clone()));
                         request.conversation.add_message(Message::user(feedback));
                     }
                     InteractionResponse::Abort { reason } => {
-                        state.conversation.add_message(Message::system(
-                            format!("Inference aborted by PreInfer gate: {}", reason),
-                        ));
+                        state.conversation.add_message(Message::system(format!(
+                            "Inference aborted by PreInfer gate: {}",
+                            reason
+                        )));
                         continue;
                     }
                     _ => {}
@@ -1394,12 +1517,15 @@ impl AgentLoop {
             // - Context window size (glm-5.1 → 203K, gpt-4o → 200K, etc.)
             // - Tokenizer profile (chars-per-token ratios, overhead values)
             // - Provider-specific estimation parameters
-            let model_name_for_accounting = self.provider.config().model_name
+            let model_name_for_accounting = self
+                .provider
+                .config()
+                .model_name
                 .as_deref()
                 .unwrap_or("default");
             let accounting = oneai_core::ContextAccounting::account(
                 &request.conversation,
-                &model_name_for_accounting,
+                model_name_for_accounting,
                 request.tools.len(),
             );
             observer.on_context_accounting(&accounting);
@@ -1408,9 +1534,14 @@ impl AgentLoop {
             // ─── Trace: start LLM span for inference ──────────────────
             let infer_span_id = if let Some(ctx) = &self.config.trace_context {
                 let span_id = ctx.enter_span(SpanKind::LLM, "inference", None);
-                ctx.log_event(EventKind::InferenceStart, "llm.inference.start", HashMap::from([
-                    ("agent.iteration".to_string(), serde_json::json!(state.iterations)),
-                ]));
+                ctx.log_event(
+                    EventKind::InferenceStart,
+                    "llm.inference.start",
+                    HashMap::from([(
+                        "agent.iteration".to_string(),
+                        serde_json::json!(state.iterations),
+                    )]),
+                );
                 span_id
             } else {
                 String::new()
@@ -1450,10 +1581,18 @@ impl AgentLoop {
                     // ─── Trace: record rate limit error ──────────────
                     if let Some(ctx) = &self.config.trace_context {
                         if !infer_span_id.is_empty() {
-                            ctx.log_event_in_span(&infer_span_id, EventKind::Error, "llm.rate_limit", HashMap::from([
-                                ("error.message".to_string(), serde_json::json!(msg)),
-                                ("error.consecutive_count".to_string(), serde_json::json!(consecutive_rate_limit_errors)),
-                            ]));
+                            ctx.log_event_in_span(
+                                &infer_span_id,
+                                EventKind::Error,
+                                "llm.rate_limit",
+                                HashMap::from([
+                                    ("error.message".to_string(), serde_json::json!(msg)),
+                                    (
+                                        "error.consecutive_count".to_string(),
+                                        serde_json::json!(consecutive_rate_limit_errors),
+                                    ),
+                                ]),
+                            );
                             ctx.exit_span(&infer_span_id, SpanStatus::Error);
                         }
                     }
@@ -1467,14 +1606,18 @@ impl AgentLoop {
                             id: uuid::Uuid::new_v4().to_string(),
                             iteration: state.iterations,
                             reason: InterruptReason::Custom {
-                                reason: format!("Rate limit exceeded after {} consecutive failures: {}", consecutive_rate_limit_errors, msg),
+                                reason: format!(
+                                    "Rate limit exceeded after {} consecutive failures: {}",
+                                    consecutive_rate_limit_errors, msg
+                                ),
                             },
                             checkpoint_id: None,
                         });
                         // Return partial result with error info
-                        state.conversation.add_message(Message::assistant(
-                            format!("[Rate limit exceeded]: {}", msg)
-                        ));
+                        state.conversation.add_message(Message::assistant(format!(
+                            "[Rate limit exceeded]: {}",
+                            msg
+                        )));
                         let result = state.into_result();
                         observer.on_complete(&result);
                         return Ok(result);
@@ -1500,9 +1643,15 @@ impl AgentLoop {
                     // ─── Trace: record non-rate-limit error ──────────────
                     if let Some(ctx) = &self.config.trace_context {
                         if !infer_span_id.is_empty() {
-                            ctx.log_event_in_span(&infer_span_id, EventKind::Error, "llm.error", HashMap::from([
-                                ("error.message".to_string(), serde_json::json!(other_err.to_string())),
-                            ]));
+                            ctx.log_event_in_span(
+                                &infer_span_id,
+                                EventKind::Error,
+                                "llm.error",
+                                HashMap::from([(
+                                    "error.message".to_string(),
+                                    serde_json::json!(other_err.to_string()),
+                                )]),
+                            );
                             ctx.exit_span(&infer_span_id, SpanStatus::Error);
                         }
                     }
@@ -1521,16 +1670,38 @@ impl AgentLoop {
             // ─── Trace: end LLM span and log token usage ────────────
             if let Some(ctx) = &self.config.trace_context {
                 if !infer_span_id.is_empty() {
-                    ctx.log_event_in_span(&infer_span_id, EventKind::InferenceEnd, "llm.inference.end", HashMap::from([
-                        ("llm.prompt_tokens".to_string(), serde_json::json!(response.usage.prompt_tokens)),
-                        ("llm.completion_tokens".to_string(), serde_json::json!(response.usage.completion_tokens)),
-                        ("llm.total_tokens".to_string(), serde_json::json!(response.usage.prompt_tokens + response.usage.completion_tokens)),
-                        // Prompt-caching usage — summed by EfficiencyProfile::from_tree
-                        // into cache_read_tokens / cache_creation_tokens for the cache
-                        // hit ratio on the efficiency axis.
-                        ("llm.cache_read_tokens".to_string(), serde_json::json!(response.usage.cache_read_tokens)),
-                        ("llm.cache_creation_tokens".to_string(), serde_json::json!(response.usage.cache_creation_tokens)),
-                    ]));
+                    ctx.log_event_in_span(
+                        &infer_span_id,
+                        EventKind::InferenceEnd,
+                        "llm.inference.end",
+                        HashMap::from([
+                            (
+                                "llm.prompt_tokens".to_string(),
+                                serde_json::json!(response.usage.prompt_tokens),
+                            ),
+                            (
+                                "llm.completion_tokens".to_string(),
+                                serde_json::json!(response.usage.completion_tokens),
+                            ),
+                            (
+                                "llm.total_tokens".to_string(),
+                                serde_json::json!(
+                                    response.usage.prompt_tokens + response.usage.completion_tokens
+                                ),
+                            ),
+                            // Prompt-caching usage — summed by EfficiencyProfile::from_tree
+                            // into cache_read_tokens / cache_creation_tokens for the cache
+                            // hit ratio on the efficiency axis.
+                            (
+                                "llm.cache_read_tokens".to_string(),
+                                serde_json::json!(response.usage.cache_read_tokens),
+                            ),
+                            (
+                                "llm.cache_creation_tokens".to_string(),
+                                serde_json::json!(response.usage.cache_creation_tokens),
+                            ),
+                        ]),
+                    );
                     ctx.exit_span(&infer_span_id, SpanStatus::Ok);
                 }
             }
@@ -1541,7 +1712,10 @@ impl AgentLoop {
             #[cfg(feature = "otel")]
             if let Some(metrics) = &self.config.metrics_provider {
                 metrics.record_inference_request();
-                metrics.record_tokens(response.usage.prompt_tokens, response.usage.completion_tokens);
+                metrics.record_tokens(
+                    response.usage.prompt_tokens,
+                    response.usage.completion_tokens,
+                );
             }
 
             // 4c. PostInfer interaction gate — the application layer can validate
@@ -1576,12 +1750,11 @@ impl AgentLoop {
                     .await?;
                 match resp {
                     InteractionResponse::Proceed => {}
-                    InteractionResponse::ProceedWith { modification } => match modification {
-                        InteractionModification::ReplaceResponse(r) => {
+                    InteractionResponse::ProceedWith { modification } => {
+                        if let InteractionModification::ReplaceResponse(r) = modification {
                             response = r;
                         }
-                        _ => {}
-                    },
+                    }
                     InteractionResponse::Revise { feedback } => {
                         state.conversation.add_message(response.message.clone());
                         state.conversation.add_message(Message::user(feedback));
@@ -1596,7 +1769,10 @@ impl AgentLoop {
             }
 
             // 4b. Notify observer of token usage and cost
-            observer.on_token_usage(response.usage.prompt_tokens, response.usage.completion_tokens);
+            observer.on_token_usage(
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+            );
 
             // Resolve the token counts to record. Providers usually report usage
             // in their response (Anthropic streaming via message_delta, OpenAI with
@@ -1605,8 +1781,8 @@ impl AgentLoop {
             // fall back to counting tokens client-side with the TokenCounter so the
             // 成本 axis (tokens/cost) isn't silently zero (litellm/aider pattern).
             let provider_usage = response.usage.clone();
-            let usage_is_missing = provider_usage.prompt_tokens == 0
-                && provider_usage.completion_tokens == 0;
+            let usage_is_missing =
+                provider_usage.prompt_tokens == 0 && provider_usage.completion_tokens == 0;
             let (prompt_tokens, completion_tokens, is_estimated) = if usage_is_missing {
                 if let Some(tc) = &self.config.token_counter {
                     let p = tc.count_conversation_tokens(&state.conversation, &response.model);
@@ -1625,7 +1801,11 @@ impl AgentLoop {
                     (0, 0, false)
                 }
             } else {
-                (provider_usage.prompt_tokens, provider_usage.completion_tokens, false)
+                (
+                    provider_usage.prompt_tokens,
+                    provider_usage.completion_tokens,
+                    false,
+                )
             };
 
             // 4c. Record usage in usage tracker (if configured)
@@ -1706,18 +1886,19 @@ impl AgentLoop {
                 // for a response. This preserves OpenAI API format validity.
                 state.conversation.add_message(Message {
                     role: Role::Assistant,
-                    content: vec![],  // Empty assistant response
+                    content: vec![], // Empty assistant response
                     metadata: HashMap::new(),
                 });
                 state.conversation.add_message(Message::user(
                     "You did not respond in the previous turn. Please provide a response now — \
-                    either call a tool to accomplish the task, or give a direct answer.".to_string()
+                    either call a tool to accomplish the task, or give a direct answer."
+                        .to_string(),
                 ));
 
                 // Re-build inference request with updated conversation
-                let retry_tool_defs = self.build_tool_definitions_for_paradigm(
-                    state.active_paradigm_config.as_ref()
-                ).await;
+                let retry_tool_defs = self
+                    .build_tool_definitions_for_paradigm(state.active_paradigm_config.as_ref())
+                    .await;
                 let retry_request = InferenceRequest {
                     conversation: state.conversation.clone(),
                     tools: retry_tool_defs,
@@ -1732,13 +1913,17 @@ impl AgentLoop {
 
                 // Re-run inference with the follow-up prompt
                 let retry_response = if self.config.use_streaming {
-                    self.run_streaming_iteration_async(&retry_request, observer).await?
+                    self.run_streaming_iteration_async(&retry_request, observer)
+                        .await?
                 } else {
                     self.provider.infer(retry_request).await?
                 };
 
                 // Notify observer of retry token usage
-                observer.on_token_usage(retry_response.usage.prompt_tokens, retry_response.usage.completion_tokens);
+                observer.on_token_usage(
+                    retry_response.usage.prompt_tokens,
+                    retry_response.usage.completion_tokens,
+                );
 
                 // Record retry usage in usage tracker (if configured)
                 if let Some(usage_tracker) = &self.config.usage_tracker {
@@ -1790,9 +1975,14 @@ impl AgentLoop {
 
                     // ─── Trace: log DirectAnswer event ──────────────
                     if let Some(ctx) = &self.config.trace_context {
-                        ctx.log_event(EventKind::Thought, "agent.direct_answer", HashMap::from([
-                            ("agent.answer_length".to_string(), serde_json::json!(text.len())),
-                        ]));
+                        ctx.log_event(
+                            EventKind::Thought,
+                            "agent.direct_answer",
+                            HashMap::from([(
+                                "agent.answer_length".to_string(),
+                                serde_json::json!(text.len()),
+                            )]),
+                        );
                     }
 
                     // ─── Structured output validation ──────────────────────────
@@ -1806,7 +1996,9 @@ impl AgentLoop {
                     if let Some(config) = &self.config.structured_output {
                         let validation = validate_json_schema(&text, &config.schema);
                         if !validation.passed {
-                            if config.re_prompt_on_failure && structured_retry_count < config.max_retries {
+                            if config.re_prompt_on_failure
+                                && structured_retry_count < config.max_retries
+                            {
                                 structured_retry_count += 1;
                                 let retry = oneai_core::ModelRetry {
                                     error_message: validation.error_summary(),
@@ -1817,11 +2009,14 @@ impl AgentLoop {
                                 let retry_prompt = build_retry_prompt(config, &retry);
                                 tracing::info!(
                                     "StructuredOutput validation failed (retry {}/{}): {}",
-                                    structured_retry_count, config.max_retries,
+                                    structured_retry_count,
+                                    config.max_retries,
                                     validation.error_summary()
                                 );
                                 // Inject the validation error as a system message
-                                state.conversation.add_message(Message::system(retry_prompt));
+                                state
+                                    .conversation
+                                    .add_message(Message::system(retry_prompt));
                                 // Don't finalize the answer — continue the loop for re-generation
                                 // Note: we don NOT increment iterations for retries
                                 continue;
@@ -1868,10 +2063,14 @@ impl AgentLoop {
                     // ─── Trace: log tool calls ──────────────────────────
                     if let Some(ctx) = &self.config.trace_context {
                         for call in &calls {
-                            ctx.log_event(EventKind::Action, "tool.call", HashMap::from([
-                                ("tool.name".to_string(), serde_json::json!(call.name)),
-                                ("tool.call_id".to_string(), serde_json::json!(call.id)),
-                            ]));
+                            ctx.log_event(
+                                EventKind::Action,
+                                "tool.call",
+                                HashMap::from([
+                                    ("tool.name".to_string(), serde_json::json!(call.name)),
+                                    ("tool.call_id".to_string(), serde_json::json!(call.id)),
+                                ]),
+                            );
                         }
                     }
 
@@ -1894,8 +2093,12 @@ impl AgentLoop {
                                     iteration: state.iterations,
                                     paradigm: paradigm_name(&state.active_paradigm).to_string(),
                                 };
-                                let results = registry.run_hooks(HookPoint::PreToolUse, hook_context).await;
-                                let resolved = HookRegistry::resolve_pre_tool_use_results(&results, &call.args);
+                                let results = registry
+                                    .run_hooks(HookPoint::PreToolUse, hook_context)
+                                    .await;
+                                let resolved = HookRegistry::resolve_pre_tool_use_results(
+                                    &results, &call.args,
+                                );
                                 match resolved {
                                     ResolvedHookAction::Allow { args: _ } => {
                                         // Original args — proceed as-is
@@ -1903,7 +2106,11 @@ impl AgentLoop {
                                     }
                                     ResolvedHookAction::Deny { reason } => {
                                         // Hook denied this tool call — inject denial message
-                                        tracing::info!("PreToolUse hook denied tool '{}' ({})", call.name, reason);
+                                        tracing::info!(
+                                            "PreToolUse hook denied tool '{}' ({})",
+                                            call.name,
+                                            reason
+                                        );
                                         state.conversation.add_message(Message::tool_result(
                                             call.id.clone(),
                                             format!("Denied by lifecycle hook: {}", reason),
@@ -1911,7 +2118,10 @@ impl AgentLoop {
                                     }
                                     ResolvedHookAction::Modify { modified_args } => {
                                         // Hook modified args — use modified args
-                                        tracing::info!("PreToolUse hook modified args for tool '{}'", call.name);
+                                        tracing::info!(
+                                            "PreToolUse hook modified args for tool '{}'",
+                                            call.name
+                                        );
                                         filtered_calls.push(ToolCallRequest {
                                             id: call.id.clone(),
                                             name: call.name.clone(),
@@ -1975,7 +2185,12 @@ impl AgentLoop {
                         // Compute the control-tool output FIRST (the exit_plan_mode
                         // gate may block awaiting the user's plan review).
                         let output = if call.name == crate::plan_state::TOOL_EXIT_PLAN_MODE {
-                            let plan_text = call.args.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let plan_text = call
+                                .args
+                                .get("plan")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let steps = crate::plan_state::extract_steps(&call.args);
                             // Populate the tracked plan state from the submitted
                             // steps so the panel shows them.
@@ -1986,37 +2201,47 @@ impl AgentLoop {
                             }
                             observer.on_plan_update(state.plan_state.as_ref());
                             // PlanReview via the interaction gate (single plan).
-                            let resp = if self.interaction_gate.enabled(InteractionPoint::PlanReview) {
-                                self.interaction_gate
-                                    .request(InteractionRequest::PlanReview {
-                                        plan: plan_text.clone(),
-                                        steps: steps.clone(),
-                                    })
-                                    .await?
-                            } else {
-                                InteractionResponse::Proceed
-                            };
+                            let resp =
+                                if self.interaction_gate.enabled(InteractionPoint::PlanReview) {
+                                    self.interaction_gate
+                                        .request(InteractionRequest::PlanReview {
+                                            plan: plan_text.clone(),
+                                            steps: steps.clone(),
+                                        })
+                                        .await?
+                                } else {
+                                    InteractionResponse::Proceed
+                                };
                             match resp {
                                 InteractionResponse::Proceed => {
                                     self.set_plan_mode(false);
-                                    self.ensure_working_state_task(&mut state, &steps, &plan_text).await;
+                                    self.ensure_working_state_task(&mut state, &steps, &plan_text)
+                                        .await;
                                     oneai_core::ToolOutput {
                                         success: true,
                                         content: "Plan approved — proceeding with execution. \
                                             Use task_update to mark steps in_progress/completed as \
-                                            you work.".to_string(),
+                                            you work."
+                                            .to_string(),
                                         error: None,
                                     }
                                 }
                                 InteractionResponse::ProceedWith { modification } => {
-                                    if let InteractionModification::ReplacePlan { plan: new_plan, steps: new_steps } = modification {
+                                    if let InteractionModification::ReplacePlan {
+                                        plan: new_plan,
+                                        steps: new_steps,
+                                    } = modification
+                                    {
                                         // Apply the user's edits to the tracked plan.
                                         let mut ps = state.plan_state.take().unwrap_or_default();
                                         ps.set_steps(new_steps.clone());
                                         state.plan_state = Some(ps);
                                         observer.on_plan_update(state.plan_state.as_ref());
                                         self.set_plan_mode(false);
-                                        self.ensure_working_state_task(&mut state, &new_steps, &new_plan).await;
+                                        self.ensure_working_state_task(
+                                            &mut state, &new_steps, &new_plan,
+                                        )
+                                        .await;
                                         oneai_core::ToolOutput {
                                             success: true,
                                             content: format!(
@@ -2027,10 +2252,14 @@ impl AgentLoop {
                                         }
                                     } else {
                                         self.set_plan_mode(false);
-                                        self.ensure_working_state_task(&mut state, &steps, &plan_text).await;
+                                        self.ensure_working_state_task(
+                                            &mut state, &steps, &plan_text,
+                                        )
+                                        .await;
                                         oneai_core::ToolOutput {
                                             success: true,
-                                            content: "Plan approved — proceeding with execution.".to_string(),
+                                            content: "Plan approved — proceeding with execution."
+                                                .to_string(),
                                             error: None,
                                         }
                                     }
@@ -2040,40 +2269,78 @@ impl AgentLoop {
                                         success: true,
                                         content: format!(
                                             "Plan rejected with feedback: {}. \
-                                            Revise the plan and call exit_plan_mode again.", feedback),
+                                            Revise the plan and call exit_plan_mode again.",
+                                            feedback
+                                        ),
                                         error: None,
                                     }
                                 }
-                                InteractionResponse::Abort { reason } => {
-                                    oneai_core::ToolOutput {
-                                        success: true,
-                                        content: format!("Plan aborted: {}. Stay in plan mode or revise.", reason),
-                                        error: None,
-                                    }
-                                }
+                                InteractionResponse::Abort { reason } => oneai_core::ToolOutput {
+                                    success: true,
+                                    content: format!(
+                                        "Plan aborted: {}. Stay in plan mode or revise.",
+                                        reason
+                                    ),
+                                    error: None,
+                                },
                                 _ => oneai_core::ToolOutput {
                                     success: true,
-                                    content: "Plan review returned no action; staying in plan mode.".to_string(),
+                                    content:
+                                        "Plan review returned no action; staying in plan mode."
+                                            .to_string(),
                                     error: None,
                                 },
                             }
                         } else if call.name == crate::plan_state::TOOL_REQUEST_PLAN_DECISION {
                             // PlanDecision: the model hit a tradeoff and asks the
                             // user to choose. The reply is fed back as tool_result.
-                            let decision_id = call.args.get("decision_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let question = call.args.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let context = call.args.get("context").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let options = call.args.get("options").and_then(|v| v.as_array()).map(|arr| {
-                                arr.iter().filter_map(|o| {
-                                    Some(oneai_core::DecisionOption {
-                                        id: o.get("id")?.as_str()?.to_string(),
-                                        label: o.get("label")?.as_str()?.to_string(),
-                                        description: o.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                        tradeoffs: o.get("tradeoffs").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    })
-                                }).collect::<Vec<_>>()
-                            }).unwrap_or_default();
-                            let resp = if self.interaction_gate.enabled(InteractionPoint::PlanDecision) {
+                            let decision_id = call
+                                .args
+                                .get("decision_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let question = call
+                                .args
+                                .get("question")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let context = call
+                                .args
+                                .get("context")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let options = call
+                                .args
+                                .get("options")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|o| {
+                                            Some(oneai_core::DecisionOption {
+                                                id: o.get("id")?.as_str()?.to_string(),
+                                                label: o.get("label")?.as_str()?.to_string(),
+                                                description: o
+                                                    .get("description")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                tradeoffs: o
+                                                    .get("tradeoffs")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                            })
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            let resp = if self
+                                .interaction_gate
+                                .enabled(InteractionPoint::PlanDecision)
+                            {
                                 self.interaction_gate
                                     .request(InteractionRequest::PlanDecision {
                                         decision_id: decision_id.clone(),
@@ -2183,40 +2450,47 @@ impl AgentLoop {
                     // tool call with backoff (RecoveryManager::Retry strategy).
                     // Plan-mode synthetic results never fail, so the snapshot
                     // only matters for the real-execution branch.
-                    let recovery_args_by_call_id: std::collections::HashMap<String, serde_json::Value> =
-                        filtered_calls.iter()
-                            .map(|c| (c.id.clone(), c.args.clone()))
-                            .collect();
+                    let recovery_args_by_call_id: std::collections::HashMap<
+                        String,
+                        serde_json::Value,
+                    > = filtered_calls
+                        .iter()
+                        .map(|c| (c.id.clone(), c.args.clone()))
+                        .collect();
 
                     // Plan mode — block tool execution entirely. Instead of running
                     // the tools, inject a synthetic result telling the model it must
                     // produce a plan, not execute. The model then stops calling tools
                     // and emits its plan as the final answer.
-                    let mut results: Vec<ToolCallResult> = if self.plan_mode() && !filtered_calls.is_empty() {
-                        let plan_note = "Plan mode is active — tool execution is disabled. \
+                    let mut results: Vec<ToolCallResult> =
+                        if self.plan_mode() && !filtered_calls.is_empty() {
+                            let plan_note = "Plan mode is active — tool execution is disabled. \
                             Do not call other tools; call `exit_plan_mode` with your plan, \
                             or present a step-by-step plan in your final answer.";
-                        filtered_calls.iter().map(|call| {
-                            state.conversation.add_message(Message::tool_result(
-                                call.id.clone(),
-                                plan_note.to_string(),
-                            ));
-                            ToolCallResult {
-                                call_id: call.id.clone(),
-                                tool_name: call.name.clone(),
-                                output: oneai_core::ToolOutput {
-                                    success: true,
-                                    content: plan_note.to_string(),
-                                    error: None,
-                                },
-                            }
-                        }).collect()
-                    } else if !filtered_calls.is_empty() {
-                        self.execute_tool_calls(filtered_calls).await?
-                    } else {
-                        // All calls were denied by hooks — no results to feed
-                        Vec::new()
-                    };
+                            filtered_calls
+                                .iter()
+                                .map(|call| {
+                                    state.conversation.add_message(Message::tool_result(
+                                        call.id.clone(),
+                                        plan_note.to_string(),
+                                    ));
+                                    ToolCallResult {
+                                        call_id: call.id.clone(),
+                                        tool_name: call.name.clone(),
+                                        output: oneai_core::ToolOutput {
+                                            success: true,
+                                            content: plan_note.to_string(),
+                                            error: None,
+                                        },
+                                    }
+                                })
+                                .collect()
+                        } else if !filtered_calls.is_empty() {
+                            self.execute_tool_calls(filtered_calls).await?
+                        } else {
+                            // All calls were denied by hooks — no results to feed
+                            Vec::new()
+                        };
                     // Merge control-tool results (already handled above) with
                     // the regular tool results, preserving order roughly.
                     control_results.extend(results);
@@ -2240,7 +2514,9 @@ impl AgentLoop {
                                     iteration: state.iterations,
                                     paradigm: paradigm_name(&state.active_paradigm).to_string(),
                                 };
-                                let _results = registry.run_hooks(HookPoint::PostToolUse, hook_context).await;
+                                let _results = registry
+                                    .run_hooks(HookPoint::PostToolUse, hook_context)
+                                    .await;
                                 // PostToolUse hooks are informational (audit/log) —
                                 // their results don't change the tool output for now.
                                 // In a future version, Modify could transform the output.
@@ -2257,19 +2533,28 @@ impl AgentLoop {
                     // injections since they require model-level decisions.
                     let failed_count = results.iter().filter(|r| !r.output.success).count();
                     if failed_count > 0 {
-                        tracing::warn!("{} tool calls failed in iteration {}",
-                            failed_count, state.iterations);
+                        tracing::warn!(
+                            "{} tool calls failed in iteration {}",
+                            failed_count,
+                            state.iterations
+                        );
 
                         if let Some(rm) = self.recovery_manager.clone() {
                             // Snapshot the tool registry so we can re-execute by
                             // name; dropped before any await to avoid holding the
                             // read guard across tool.execute().
-                            let tool_by_name: std::collections::HashMap<String, std::sync::Arc<dyn oneai_core::traits::Tool>> = {
+                            let tool_by_name: std::collections::HashMap<
+                                String,
+                                std::sync::Arc<dyn oneai_core::traits::Tool>,
+                            > = {
                                 let tools_map = self.tools.read().await;
-                                results.iter()
+                                results
+                                    .iter()
                                     .filter(|r| !r.output.success)
                                     .filter_map(|r| {
-                                        tools_map.get(&r.tool_name).map(|t| (r.tool_name.clone(), t.clone()))
+                                        tools_map
+                                            .get(&r.tool_name)
+                                            .map(|t| (r.tool_name.clone(), t.clone()))
                                     })
                                     .collect()
                             };
@@ -2278,7 +2563,12 @@ impl AgentLoop {
                                 let strategy = self.select_recovery_strategy(r);
                                 let context = crate::error_recovery::ValidationContext {
                                     task: state.original_task.clone(),
-                                    result: r.output.error.as_deref().unwrap_or("Unknown error").to_string(),
+                                    result: r
+                                        .output
+                                        .error
+                                        .as_deref()
+                                        .unwrap_or("Unknown error")
+                                        .to_string(),
                                     variables: std::collections::HashMap::from([
                                         ("tool_name".to_string(), r.tool_name.clone()),
                                         ("iteration".to_string(), state.iterations.to_string()),
@@ -2287,7 +2577,9 @@ impl AgentLoop {
 
                                 let outcome = rm.apply(&strategy, &context).await?;
                                 match outcome {
-                                    crate::error_recovery::RecoveryOutcome::RetryScheduled { max_retries } => {
+                                    crate::error_recovery::RecoveryOutcome::RetryScheduled {
+                                        max_retries,
+                                    } => {
                                         // Actually re-execute the tool with jittered
                                         // backoff — gated by the policy's
                                         // should_retry so non-transient errors
@@ -2296,12 +2588,16 @@ impl AgentLoop {
                                             max_retries,
                                             ..crate::error_recovery::RetryPolicy::default()
                                         };
-                                        let Some(args) = recovery_args_by_call_id.get(&r.call_id) else {
+                                        let Some(args) = recovery_args_by_call_id.get(&r.call_id)
+                                        else {
                                             // No args snapshot (e.g. plan-mode
                                             // synthetic or control tool) — can't
                                             // re-execute; surface honestly.
                                             state.conversation.add_message(Message::system(
-                                                format!("Recovery: cannot retry '{}' (no args snapshot)", r.tool_name)
+                                                format!(
+                                                "Recovery: cannot retry '{}' (no args snapshot)",
+                                                r.tool_name
+                                            ),
                                             ));
                                             continue;
                                         };
@@ -2326,14 +2622,18 @@ impl AgentLoop {
                                             continue;
                                         }
 
-                                        let mut last_error = r.output.error.clone().unwrap_or_default();
+                                        let mut last_error =
+                                            r.output.error.clone().unwrap_or_default();
                                         for attempt in 0..max_retries {
                                             if !policy.should_retry(&last_error) {
                                                 break;
                                             }
                                             tracing::info!(
                                                 "Recovery retry {} for '{}' (attempt {}/{})",
-                                                r.tool_name, r.tool_name, attempt + 1, max_retries
+                                                r.tool_name,
+                                                r.tool_name,
+                                                attempt + 1,
+                                                max_retries
                                             );
                                             tokio::time::sleep(policy.compute_delay(attempt)).await;
                                             match tool.execute(args.clone()).await {
@@ -2346,7 +2646,8 @@ impl AgentLoop {
                                                         );
                                                         break;
                                                     }
-                                                    last_error = out.error.clone().unwrap_or_default();
+                                                    last_error =
+                                                        out.error.clone().unwrap_or_default();
                                                     r.output = out;
                                                 }
                                                 Err(e) => {
@@ -2361,13 +2662,18 @@ impl AgentLoop {
                                         }
                                         if !r.output.success {
                                             state.conversation.add_message(Message::system(
-                                                format!("Recovery: '{}' failed after {} retries: {}",
-                                                    r.tool_name, max_retries,
-                                                    r.output.error.as_deref().unwrap_or("unknown"))
+                                                format!(
+                                                    "Recovery: '{}' failed after {} retries: {}",
+                                                    r.tool_name,
+                                                    max_retries,
+                                                    r.output.error.as_deref().unwrap_or("unknown")
+                                                ),
                                             ));
                                         }
                                     }
-                                    crate::error_recovery::RecoveryOutcome::RollbackTo { checkpoint_id } => {
+                                    crate::error_recovery::RecoveryOutcome::RollbackTo {
+                                        checkpoint_id,
+                                    } => {
                                         // The checkpoint system was removed in favor
                                         // of the append-only working-state event log
                                         // (see docs/working-state-mechanism.md).
@@ -2382,15 +2688,21 @@ impl AgentLoop {
                                             format!("Recovery: rollback to checkpoint '{}' unavailable (checkpoint system removed); re-derive state from the task event log instead.", checkpoint_id)
                                         ));
                                     }
-                                    crate::error_recovery::RecoveryOutcome::ValidationFailed { feedback } => {
-                                        state.conversation.add_message(Message::system(
-                                            format!("Recovery feedback: {}", feedback)
-                                        ));
+                                    crate::error_recovery::RecoveryOutcome::ValidationFailed {
+                                        feedback,
+                                    } => {
+                                        state.conversation.add_message(Message::system(format!(
+                                            "Recovery feedback: {}",
+                                            feedback
+                                        )));
                                     }
-                                    crate::error_recovery::RecoveryOutcome::Escalated { summary } => {
-                                        state.conversation.add_message(Message::system(
-                                            format!("Error escalated: {}", summary)
-                                        ));
+                                    crate::error_recovery::RecoveryOutcome::Escalated {
+                                        summary,
+                                    } => {
+                                        state.conversation.add_message(Message::system(format!(
+                                            "Error escalated: {}",
+                                            summary
+                                        )));
                                     }
                                     _ => {
                                         // Other outcomes are informational — just log
@@ -2403,9 +2715,13 @@ impl AgentLoop {
 
                     // Check if any tool call was denied by the approval gate.
                     // If so, stop the agent loop to prevent repeated permission requests.
-                    let has_denied = results.iter().any(|r|
-                        !r.output.success && r.output.error.as_deref().map_or(false, |e| e.starts_with("Denied"))
-                    );
+                    let has_denied = results.iter().any(|r| {
+                        !r.output.success
+                            && r.output
+                                .error
+                                .as_deref()
+                                .is_some_and(|e| e.starts_with("Denied"))
+                    });
 
                     // ─── OTEL metrics: record tool-call success/failure ──
                     // Real counters per executed tool (gap-analysis #4). Borrows
@@ -2418,7 +2734,10 @@ impl AgentLoop {
                     }
 
                     if has_denied {
-                        state.set_final_answer("Task stopped: a required tool call was denied by the user.".to_string());
+                        state.set_final_answer(
+                            "Task stopped: a required tool call was denied by the user."
+                                .to_string(),
+                        );
                         // Still feed results so the model sees the denial
                         state.feed_tool_results(results);
                     } else {
@@ -2444,17 +2763,28 @@ impl AgentLoop {
 
                     // ─── Trace: log delegation batch event ──────────────
                     if let Some(ctx) = &self.config.trace_context {
-                        ctx.log_event(EventKind::WorkflowStepStart, "agent.delegate", HashMap::from([
-                            ("agent.delegate_count".to_string(), serde_json::json!(tasks.len())),
-                            ("agent.delegate_tasks".to_string(), serde_json::json!(
-                                tasks.iter().map(|t| serde_json::json!({
-                                    "id": t.id,
-                                    "task": t.task,
-                                    "agent_type": format!("{:?}", t.agent_type),
-                                    "depends_on": t.depends_on,
-                                })).collect::<Vec<_>>()
-                            )),
-                        ]));
+                        ctx.log_event(
+                            EventKind::WorkflowStepStart,
+                            "agent.delegate",
+                            HashMap::from([
+                                (
+                                    "agent.delegate_count".to_string(),
+                                    serde_json::json!(tasks.len()),
+                                ),
+                                (
+                                    "agent.delegate_tasks".to_string(),
+                                    serde_json::json!(tasks
+                                        .iter()
+                                        .map(|t| serde_json::json!({
+                                            "id": t.id,
+                                            "task": t.task,
+                                            "agent_type": format!("{:?}", t.agent_type),
+                                            "depends_on": t.depends_on,
+                                        }))
+                                        .collect::<Vec<_>>()),
+                                ),
+                            ]),
+                        );
                     }
                     // For delegate/switch_paradigm, these are internal meta-commands,
                     // not real tools. Convert the response to a plain text assistant
@@ -2462,7 +2792,9 @@ impl AgentLoop {
                     // orphaned tool calls with no matching tool results.
                     let text_content = response.message.text_content();
                     if !text_content.is_empty() {
-                        state.conversation.add_message(Message::assistant(&text_content));
+                        state
+                            .conversation
+                            .add_message(Message::assistant(&text_content));
                     }
                     // Schedule the batch: independent tasks run concurrently,
                     // dependent tasks run after their deps and receive the deps'
@@ -2478,18 +2810,32 @@ impl AgentLoop {
 
                     // ─── Trace: log paradigm switch event ──────────────────
                     if let Some(ctx) = &self.config.trace_context {
-                        ctx.log_event(EventKind::WorkflowStepStart, "agent.paradigm_switch", HashMap::from([
-                            ("agent.new_paradigm".to_string(), serde_json::json!(paradigm_name(&paradigm))),
-                            ("agent.old_paradigm".to_string(), serde_json::json!(paradigm_name(&state.active_paradigm))),
-                        ]));
+                        ctx.log_event(
+                            EventKind::WorkflowStepStart,
+                            "agent.paradigm_switch",
+                            HashMap::from([
+                                (
+                                    "agent.new_paradigm".to_string(),
+                                    serde_json::json!(paradigm_name(&paradigm)),
+                                ),
+                                (
+                                    "agent.old_paradigm".to_string(),
+                                    serde_json::json!(paradigm_name(&state.active_paradigm)),
+                                ),
+                            ]),
+                        );
                     }
                     let text_content = response.message.text_content();
                     if !text_content.is_empty() {
-                        state.conversation.add_message(Message::assistant(&text_content));
+                        state
+                            .conversation
+                            .add_message(Message::assistant(&text_content));
                     }
                     // Try to execute a predefined StateGraph for this paradigm,
                     // fall back to semantic paradigm switch if no graph is available.
-                    let result = self.apply_paradigm_switch_with_graph(paradigm, &mut state).await?;
+                    let result = self
+                        .apply_paradigm_switch_with_graph(paradigm, &mut state)
+                        .await?;
                     state.feed_paradigm_result(paradigm, result);
                 }
             }
@@ -2544,9 +2890,24 @@ impl AgentLoop {
         // ─── Trace: end AGENT span for the loop ──────────────────
         if let Some(ctx) = &self.config.trace_context {
             if !loop_span_id.is_empty() {
-                ctx.set_attribute_on_span(&loop_span_id, "agent.iterations", serde_json::json!(result.iterations));
-                ctx.set_attribute_on_span(&loop_span_id, "agent.completed", serde_json::json!(result.completed));
-                ctx.exit_span(&loop_span_id, if result.completed { SpanStatus::Ok } else { SpanStatus::Error });
+                ctx.set_attribute_on_span(
+                    &loop_span_id,
+                    "agent.iterations",
+                    serde_json::json!(result.iterations),
+                );
+                ctx.set_attribute_on_span(
+                    &loop_span_id,
+                    "agent.completed",
+                    serde_json::json!(result.completed),
+                );
+                ctx.exit_span(
+                    &loop_span_id,
+                    if result.completed {
+                        SpanStatus::Ok
+                    } else {
+                        SpanStatus::Error
+                    },
+                );
             }
         }
 
@@ -2597,7 +2958,9 @@ impl AgentLoop {
         observer: &dyn AgentLoopObserver,
     ) -> Result<AgentLoopResult> {
         // 1. Look up the StateGraph from DomainPack
-        let graph = self.domain_pack.as_ref()
+        let graph = self
+            .domain_pack
+            .as_ref()
             .and_then(|dp| dp.get_state_graph(graph_key))
             .cloned();
 
@@ -2613,7 +2976,8 @@ impl AgentLoop {
         let graph = graph.unwrap();
         tracing::info!(
             "Found StateGraph '{}' with {} nodes. Starting StateGraph-driven execution.",
-            graph.name, graph.node_count()
+            graph.name,
+            graph.node_count()
         );
 
         // 2. Build GraphActionExecutor bridge
@@ -2630,18 +2994,28 @@ impl AgentLoop {
             });
 
         // 3. Build DelegateFactory bridge
-        let delegate_factory: Arc<dyn oneai_workflow::DelegateFactory> =
-            Arc::new(crate::sub_agent::SubAgentDelegateFactory::new(
-                self.sub_agent_factory.clone(),
-            ));
+        let delegate_factory: Arc<dyn oneai_workflow::DelegateFactory> = Arc::new(
+            crate::sub_agent::SubAgentDelegateFactory::new(self.sub_agent_factory.clone()),
+        );
 
         // 4. Build initial GraphState from task
         let mut initial_state = oneai_workflow::GraphState::new();
-        initial_state.conversation.add_message(Message::user(task.to_string()));
-        if !initial_state.conversation.messages.iter().any(|m| m.role == Role::System) {
-            initial_state.conversation.add_message(Message::system(self.config.system_prompt.clone()));
+        initial_state
+            .conversation
+            .add_message(Message::user(task.to_string()));
+        if !initial_state
+            .conversation
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System)
+        {
+            initial_state
+                .conversation
+                .add_message(Message::system(self.config.system_prompt.clone()));
         }
-        initial_state.variables.insert("task".to_string(), task.to_string());
+        initial_state
+            .variables
+            .insert("task".to_string(), task.to_string());
         initial_state.active_paradigm = Some("react".to_string()); // Default paradigm for StateGraph
 
         // Set budget if available
@@ -2663,7 +3037,11 @@ impl AgentLoop {
         // 7. Convert GraphExecutionResult → AgentLoopResult
         let result = AgentLoopResult {
             conversation: graph_result.final_state.conversation,
-            final_answer: graph_result.final_state.last_result.clone().unwrap_or_default(),
+            final_answer: graph_result
+                .final_state
+                .last_result
+                .clone()
+                .unwrap_or_default(),
             global_state: oneai_core::GlobalState::new(),
             iterations: graph_result.iterations,
             completed: graph_result.completed,
@@ -2739,10 +3117,7 @@ impl AgentLoop {
         // Create a new LoopState from the interrupt context
         // The conversation should already contain prior messages
         // (we start fresh with a new task that includes the feedback)
-        let feedback_task = format!(
-            "[Human feedback]: {}",
-            signal.feedback
-        );
+        let feedback_task = format!("[Human feedback]: {}", signal.feedback);
 
         match signal.action {
             ResumeAction::Continue => {
@@ -2754,11 +3129,13 @@ impl AgentLoop {
                 let modify_msg = if let Some(args) = modified_args {
                     format!(
                         "[Human feedback]: {}. Modified approach: {}",
-                        signal.feedback,
-                        args
+                        signal.feedback, args
                     )
                 } else {
-                    format!("[Human feedback]: {}. Please adjust your approach.", signal.feedback)
+                    format!(
+                        "[Human feedback]: {}. Please adjust your approach.",
+                        signal.feedback
+                    )
                 };
                 self.run_with_observer(&modify_msg, observer).await
             }
@@ -2805,9 +3182,8 @@ impl AgentLoop {
                     // fall back to empty `{}` here; the `ToolCalls` branch
                     // re-derives the raw string and feeds a clear error back
                     // to the model (Reflexion) rather than silently dispatching.
-                    let args_value: serde_json::Value = self
-                        .parse_tool_args(args)
-                        .unwrap_or_else(|err| {
+                    let args_value: serde_json::Value =
+                        self.parse_tool_args(args).unwrap_or_else(|err| {
                             tracing::warn!(
                                 tool = %name,
                                 call_id = %id,
@@ -2818,13 +3194,18 @@ impl AgentLoop {
                         });
                     if name == "delegate" {
                         if let Some(task) = args_value.get("task").and_then(|v| v.as_str()) {
-                            let agent_type_str = args_value.get("agent_type")
-                                .and_then(|v| v.as_str()).unwrap_or("Code");
-                            let budget_tokens = args_value.get("budget_tokens")
-                                .and_then(|v| v.as_u64()).unwrap_or(5000);
+                            let agent_type_str = args_value
+                                .get("agent_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Code");
+                            let budget_tokens = args_value
+                                .get("budget_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(5000);
                             // Prefer the model-supplied id; fall back to the
                             // tool-call id so every delegation has a stable key.
-                            let task_id = args_value.get("id")
+                            let task_id = args_value
+                                .get("id")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| id.clone());
@@ -2863,10 +3244,14 @@ impl AgentLoop {
                         }
                     }
                     tool_calls.push(ToolCallRequest {
-                        id: id.clone(), name: name.clone(), args: args_value,
+                        id: id.clone(),
+                        name: name.clone(),
+                        args: args_value,
                     });
                 }
-                ContentBlock::Text { text } => { text_parts.push(text.clone()); }
+                ContentBlock::Text { text } => {
+                    text_parts.push(text.clone());
+                }
                 _ => {}
             }
         }
@@ -2885,7 +3270,8 @@ impl AgentLoop {
                     if !known {
                         tracing::warn!(
                             "Delegate '{}' depends_on unknown id '{}' — dropping dependency",
-                            task.id, dep
+                            task.id,
+                            dep
                         );
                     }
                     known
@@ -2893,16 +3279,22 @@ impl AgentLoop {
                 if task.depends_on.len() != before {
                     tracing::info!(
                         "Delegate '{}' depends_on trimmed from {} to {} valid references",
-                        task.id, before, task.depends_on.len()
+                        task.id,
+                        before,
+                        task.depends_on.len()
                     );
                 }
             }
-            return Ok(AgentDecision::Delegate { tasks: delegate_tasks });
+            return Ok(AgentDecision::Delegate {
+                tasks: delegate_tasks,
+            });
         }
         if !tool_calls.is_empty() {
             return Ok(AgentDecision::ToolCalls { calls: tool_calls });
         }
-        Ok(AgentDecision::DirectAnswer { text: text_parts.join("\n") })
+        Ok(AgentDecision::DirectAnswer {
+            text: text_parts.join("\n"),
+        })
     }
 
     /// Parse a tool-call's raw args string into a JSON value. Returns the
@@ -2992,134 +3384,220 @@ impl AgentLoop {
         // Pattern: "shell grep pattern file" → redirect to grep
         // Pattern: "shell find . -name '*.rs'" → redirect to glob
         // Pattern: "shell mkdir dir" → redirect to shell (no mkdir tool, keep)
-        let routed_calls: Vec<ToolCallRequest> = calls.into_iter().map(|call| {
-            if call.name == "shell" {
-                Self::route_shell_to_specialized(call)
-            } else {
-                call
-            }
-        }).collect();
+        let routed_calls: Vec<ToolCallRequest> = calls
+            .into_iter()
+            .map(|call| {
+                if call.name == "shell" {
+                    Self::route_shell_to_specialized(call)
+                } else {
+                    call
+                }
+            })
+            .collect();
 
         let tools_map = self.tools.read().await;
         let mut results = Vec::new();
 
         // Pre-check domain PermissionProfile for each call
-        let domain_permission_checks: Vec<Option<PermissionAction>> = routed_calls.iter().map(|call| {
-            self.domain_pack.as_ref().map(|dp| dp.resolve_permission(&call.name, &call.args))
-        }).collect();
+        let domain_permission_checks: Vec<Option<PermissionAction>> = routed_calls
+            .iter()
+            .map(|call| {
+                self.domain_pack
+                    .as_ref()
+                    .map(|dp| dp.resolve_permission(&call.name, &call.args))
+            })
+            .collect();
 
-        let futures: Vec<_> = routed_calls.into_iter().enumerate().map(|(idx, call)| {
-            let tool_name = call.name.clone();
-            let call_id = call.id.clone();
-            let args = call.args.clone();
-            let tool_opt = tools_map.get(&tool_name).cloned();
-            let interaction_gate = self.interaction_gate.clone();
-            let perm_check = domain_permission_checks[idx].clone();
-            async move {
-                // Step 1: Check domain PermissionProfile (highest priority)
-                match perm_check {
-                    Some(PermissionAction::Deny { reason }) => {
-                        Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
-                            success: false, content: String::new(),
-                            error: Some(format!("Denied by domain policy: {}", reason)),
-                        }})
-                    }
-                    Some(PermissionAction::AutoApprove) => {
-                        // Domain says auto-approve — skip approval gate
-                        match tool_opt {
-                            Some(tool) => {
-                                let output = tool.execute(args).await?;
-                                Ok::<ToolCallResult, oneai_core::error::OneAIError>(ToolCallResult { call_id, tool_name, output })
-                            }
-                            None => {
-                                let err_msg = format!("Tool '{}' not found", tool_name);
-                                Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
-                                    success: false, content: String::new(),
-                                    error: Some(err_msg),
-                                }})
-                            }
-                        }
-                    }
-                    Some(PermissionAction::RequireConfirmation) => {
-                        // Domain says always require confirmation
-                        match tool_opt {
-                            Some(tool) => {
-                                let request = oneai_core::ApprovalRequest {
-                                    tool_name: tool_name.clone(),
-                                    args: args.clone(),
-                                    risk_level: oneai_core::RiskLevel::High,
-                                    permission_level: Some(oneai_core::PermissionLevel::Full),
-                                    justification: format!("Domain policy requires confirmation for '{}'", tool_name),
-                                };
-                                Self::handle_approval(interaction_gate, request, tool, args, call_id, tool_name).await
-                            }
-                            None => {
-                                let err_msg = format!("Tool '{}' not found", tool_name);
-                                Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
-                                    success: false, content: String::new(),
-                                    error: Some(err_msg),
-                                }})
+        let futures: Vec<_> = routed_calls
+            .into_iter()
+            .enumerate()
+            .map(|(idx, call)| {
+                let tool_name = call.name.clone();
+                let call_id = call.id.clone();
+                let args = call.args.clone();
+                let tool_opt = tools_map.get(&tool_name).cloned();
+                let interaction_gate = self.interaction_gate.clone();
+                let perm_check = domain_permission_checks[idx].clone();
+                async move {
+                    // Step 1: Check domain PermissionProfile (highest priority)
+                    match perm_check {
+                        Some(PermissionAction::Deny { reason }) => Ok(ToolCallResult {
+                            call_id,
+                            tool_name,
+                            output: ToolOutput {
+                                success: false,
+                                content: String::new(),
+                                error: Some(format!("Denied by domain policy: {}", reason)),
+                            },
+                        }),
+                        Some(PermissionAction::AutoApprove) => {
+                            // Domain says auto-approve — skip approval gate
+                            match tool_opt {
+                                Some(tool) => {
+                                    let output = tool.execute(args).await?;
+                                    Ok::<ToolCallResult, oneai_core::error::OneAIError>(
+                                        ToolCallResult {
+                                            call_id,
+                                            tool_name,
+                                            output,
+                                        },
+                                    )
+                                }
+                                None => {
+                                    let err_msg = format!("Tool '{}' not found", tool_name);
+                                    Ok(ToolCallResult {
+                                        call_id,
+                                        tool_name,
+                                        output: ToolOutput {
+                                            success: false,
+                                            content: String::new(),
+                                            error: Some(err_msg),
+                                        },
+                                    })
+                                }
                             }
                         }
-                    }
-                    Some(PermissionAction::UseDefaultPermission { level }) => {
-                        // Domain provides a specific level — use it
-                        match tool_opt {
-                            Some(tool) => {
-                                if level == oneai_core::PermissionLevel::Full {
+                        Some(PermissionAction::RequireConfirmation) => {
+                            // Domain says always require confirmation
+                            match tool_opt {
+                                Some(tool) => {
                                     let request = oneai_core::ApprovalRequest {
                                         tool_name: tool_name.clone(),
                                         args: args.clone(),
-                                        risk_level: tool.risk_level(),
-                                        permission_level: Some(level),
-                                        justification: format!("Full-permission tool '{}' requires approval", tool_name),
+                                        risk_level: oneai_core::RiskLevel::High,
+                                        permission_level: Some(oneai_core::PermissionLevel::Full),
+                                        justification: format!(
+                                            "Domain policy requires confirmation for '{}'",
+                                            tool_name
+                                        ),
                                     };
-                                    Self::handle_approval(interaction_gate, request, tool, args, call_id, tool_name).await
-                                } else {
-                                    let output = tool.execute(args).await?;
-                                    Ok::<ToolCallResult, oneai_core::error::OneAIError>(ToolCallResult { call_id, tool_name, output })
+                                    Self::handle_approval(
+                                        interaction_gate,
+                                        request,
+                                        tool,
+                                        args,
+                                        call_id,
+                                        tool_name,
+                                    )
+                                    .await
                                 }
-                            }
-                            None => {
-                                let err_msg = format!("Tool '{}' not found", tool_name);
-                                Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
-                                    success: false, content: String::new(),
-                                    error: Some(err_msg),
-                                }})
+                                None => {
+                                    let err_msg = format!("Tool '{}' not found", tool_name);
+                                    Ok(ToolCallResult {
+                                        call_id,
+                                        tool_name,
+                                        output: ToolOutput {
+                                            success: false,
+                                            content: String::new(),
+                                            error: Some(err_msg),
+                                        },
+                                    })
+                                }
                             }
                         }
-                    }
-                    None => {
-                        // No domain rule — fall back to tool's risk_level()
-                        match tool_opt {
-                            Some(tool) => {
-                                let perm_level = oneai_core::PermissionLevel::from_risk_level(tool.risk_level());
-                                if perm_level == oneai_core::PermissionLevel::Full {
-                                    let request = oneai_core::ApprovalRequest {
-                                        tool_name: tool_name.clone(),
-                                        args: args.clone(),
-                                        risk_level: tool.risk_level(),
-                                        permission_level: Some(perm_level),
-                                        justification: format!("Full-permission tool '{}' requires approval", tool_name),
-                                    };
-                                    Self::handle_approval(interaction_gate, request, tool, args, call_id, tool_name).await
-                                } else {
-                                    let output = tool.execute(args).await?;
-                                    Ok(ToolCallResult { call_id, tool_name, output })
+                        Some(PermissionAction::UseDefaultPermission { level }) => {
+                            // Domain provides a specific level — use it
+                            match tool_opt {
+                                Some(tool) => {
+                                    if level == oneai_core::PermissionLevel::Full {
+                                        let request = oneai_core::ApprovalRequest {
+                                            tool_name: tool_name.clone(),
+                                            args: args.clone(),
+                                            risk_level: tool.risk_level(),
+                                            permission_level: Some(level),
+                                            justification: format!(
+                                                "Full-permission tool '{}' requires approval",
+                                                tool_name
+                                            ),
+                                        };
+                                        Self::handle_approval(
+                                            interaction_gate,
+                                            request,
+                                            tool,
+                                            args,
+                                            call_id,
+                                            tool_name,
+                                        )
+                                        .await
+                                    } else {
+                                        let output = tool.execute(args).await?;
+                                        Ok::<ToolCallResult, oneai_core::error::OneAIError>(
+                                            ToolCallResult {
+                                                call_id,
+                                                tool_name,
+                                                output,
+                                            },
+                                        )
+                                    }
+                                }
+                                None => {
+                                    let err_msg = format!("Tool '{}' not found", tool_name);
+                                    Ok(ToolCallResult {
+                                        call_id,
+                                        tool_name,
+                                        output: ToolOutput {
+                                            success: false,
+                                            content: String::new(),
+                                            error: Some(err_msg),
+                                        },
+                                    })
                                 }
                             }
-                            None => {
-                                let err_msg = format!("Tool '{}' not found", tool_name);
-                                Ok(ToolCallResult { call_id, tool_name, output: ToolOutput {
-                                    success: false, content: String::new(),
-                                    error: Some(err_msg),
-                                }})
+                        }
+                        None => {
+                            // No domain rule — fall back to tool's risk_level()
+                            match tool_opt {
+                                Some(tool) => {
+                                    let perm_level = oneai_core::PermissionLevel::from_risk_level(
+                                        tool.risk_level(),
+                                    );
+                                    if perm_level == oneai_core::PermissionLevel::Full {
+                                        let request = oneai_core::ApprovalRequest {
+                                            tool_name: tool_name.clone(),
+                                            args: args.clone(),
+                                            risk_level: tool.risk_level(),
+                                            permission_level: Some(perm_level),
+                                            justification: format!(
+                                                "Full-permission tool '{}' requires approval",
+                                                tool_name
+                                            ),
+                                        };
+                                        Self::handle_approval(
+                                            interaction_gate,
+                                            request,
+                                            tool,
+                                            args,
+                                            call_id,
+                                            tool_name,
+                                        )
+                                        .await
+                                    } else {
+                                        let output = tool.execute(args).await?;
+                                        Ok(ToolCallResult {
+                                            call_id,
+                                            tool_name,
+                                            output,
+                                        })
+                                    }
+                                }
+                                None => {
+                                    let err_msg = format!("Tool '{}' not found", tool_name);
+                                    Ok(ToolCallResult {
+                                        call_id,
+                                        tool_name,
+                                        output: ToolOutput {
+                                            success: false,
+                                            content: String::new(),
+                                            error: Some(err_msg),
+                                        },
+                                    })
+                                }
                             }
                         }
                     }
                 }
-            }
-        }).collect();
+            })
+            .collect();
         let outcomes = futures::future::join_all(futures).await;
         for outcome in outcomes {
             match outcome {
@@ -3128,7 +3606,8 @@ impl AgentLoop {
                     call_id: String::new(),
                     tool_name: String::new(),
                     output: ToolOutput {
-                        success: false, content: String::new(),
+                        success: false,
+                        content: String::new(),
                         error: Some(format!("Tool execution error: {}", e)),
                     },
                 }),
@@ -3158,7 +3637,9 @@ impl AgentLoop {
         }
 
         // Extract the command string from args
-        let command = call.args.get("command")
+        let command = call
+            .args
+            .get("command")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
@@ -3204,7 +3685,10 @@ impl AgentLoop {
 
             // ls → list_directory
             "ls" | "dir" => {
-                let dir_path = cmd_args.iter().find(|a| !a.starts_with('-')).unwrap_or(&".");
+                let dir_path = cmd_args
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .unwrap_or(&".");
                 return ToolCallRequest {
                     id: call.id,
                     name: "list_directory".to_string(),
@@ -3217,9 +3701,10 @@ impl AgentLoop {
             // grep (shell grep) → grep tool
             "grep" | "rg" | "ag" | "ack" => {
                 // Parse: grep [options] pattern [path]
-                let non_option_args: Vec<&str> = cmd_args.iter()
+                let non_option_args: Vec<&str> = cmd_args
+                    .iter()
                     .filter(|a| !a.starts_with('-'))
-                    .map(|a| *a)
+                    .copied()
                     .collect();
                 if !non_option_args.is_empty() {
                     let pattern = non_option_args[0];
@@ -3237,8 +3722,13 @@ impl AgentLoop {
 
             // find → glob
             "find" | "locate" => {
-                let path = cmd_args.iter().find(|a| !a.starts_with('-')).unwrap_or(&".");
-                let name_idx = cmd_args.iter().position(|a| *a == "-name" || *a == "-iname");
+                let path = cmd_args
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .unwrap_or(&".");
+                let name_idx = cmd_args
+                    .iter()
+                    .position(|a| *a == "-name" || *a == "-iname");
                 if let Some(idx) = name_idx {
                     if idx + 1 < cmd_args.len() {
                         let pattern = cmd_args[idx + 1].replace("\"", "");
@@ -3281,7 +3771,10 @@ impl AgentLoop {
 
             // tree → list_directory
             "tree" => {
-                let dir_path = cmd_args.iter().find(|a| !a.starts_with('-')).unwrap_or(&".");
+                let dir_path = cmd_args
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .unwrap_or(&".");
                 return ToolCallRequest {
                     id: call.id,
                     name: "list_directory".to_string(),
@@ -3307,10 +3800,14 @@ impl AgentLoop {
 
             // curl/wget → web_fetch (for simple URL fetches only)
             "curl" | "wget" => {
-                let url_arg = cmd_args.iter().find(|a| a.starts_with("http://") || a.starts_with("https://"));
+                let url_arg = cmd_args
+                    .iter()
+                    .find(|a| a.starts_with("http://") || a.starts_with("https://"));
                 if let Some(url) = url_arg {
                     // Only redirect simple URL fetches (not POST/PUT/etc.)
-                    if !cmd_args.iter().any(|a| *a == "-X" || *a == "-d" || *a == "--data" || *a == "-F" || *a == "-T") {
+                    if !cmd_args.iter().any(|a| {
+                        *a == "-X" || *a == "-d" || *a == "--data" || *a == "-F" || *a == "-T"
+                    }) {
                         return ToolCallRequest {
                             id: call.id,
                             name: "web_fetch".to_string(),
@@ -3360,7 +3857,10 @@ impl AgentLoop {
     /// Returns summaries in **input order** (the order tasks appeared in the
     /// turn), regardless of completion order — this keeps the fed-back results
     /// deterministic and matches the model's mental model of the batch.
-    async fn spawn_sub_agents_batch(&self, tasks: Vec<DelegateTask>) -> Result<Vec<SubAgentSummary>> {
+    async fn spawn_sub_agents_batch(
+        &self,
+        tasks: Vec<DelegateTask>,
+    ) -> Result<Vec<SubAgentSummary>> {
         use std::collections::HashMap;
         use tokio::task::JoinSet;
 
@@ -3493,14 +3993,20 @@ impl AgentLoop {
 
         // Step 1: Replace system prompt in conversation
         // Remove existing system messages and add the paradigm-specific one
-        state.conversation.messages.retain(|m| m.role != Role::System);
-        state.conversation.add_message(Message::system(&config.system_prompt));
+        state
+            .conversation
+            .messages
+            .retain(|m| m.role != Role::System);
+        state
+            .conversation
+            .add_message(Message::system(&config.system_prompt));
 
         // Step 2: Inject decision hint as additional context
         if !config.decision_hint.is_empty() {
-            state.conversation.add_message(Message::system(
-                format!("[Paradigm switch]: {}", config.decision_hint)
-            ));
+            state.conversation.add_message(Message::system(format!(
+                "[Paradigm switch]: {}",
+                config.decision_hint
+            )));
         }
 
         // Step 3: Store ParadigmConfig for tool filtering
@@ -3541,22 +4047,24 @@ impl AgentLoop {
             ParadigmKind::Explore => "explore-workflow",
         };
 
-        let graph = self.domain_pack.as_ref()
+        let graph = self
+            .domain_pack
+            .as_ref()
             .and_then(|dp| dp.get_state_graph(graph_key))
             .cloned();
 
         if let Some(graph) = graph {
             tracing::info!(
                 "Found predefined StateGraph '{}' for paradigm {}. Attempting execution.",
-                graph.name, paradigm_name(&paradigm)
+                graph.name,
+                paradigm_name(&paradigm)
             );
 
             // Build a StateGraphExecutor from the AgentLoop's dependencies
             // Use the AgentLoop's SubAgentFactory as the DelegateFactory bridge
-            let delegate_factory: Arc<dyn oneai_workflow::DelegateFactory> =
-                Arc::new(crate::sub_agent::SubAgentDelegateFactory::new(
-                    self.sub_agent_factory.clone(),
-                ));
+            let delegate_factory: Arc<dyn oneai_workflow::DelegateFactory> = Arc::new(
+                crate::sub_agent::SubAgentDelegateFactory::new(self.sub_agent_factory.clone()),
+            );
 
             // Use the FULL bridge (AgentLoopGraphActionExecutor) — the same one
             // `run_with_state_graph` uses — so an inline paradigm switch runs
@@ -3588,7 +4096,9 @@ impl AgentLoop {
             let mut initial_state = oneai_workflow::GraphState::new();
             initial_state.conversation = state.conversation.clone();
             // Copy relevant variables from LoopState into graph state
-            initial_state.variables.insert("task".to_string(), state.original_task.clone());
+            initial_state
+                .variables
+                .insert("task".to_string(), state.original_task.clone());
 
             let graph_result = executor.execute(&graph, initial_state).await;
 
@@ -3602,14 +4112,19 @@ impl AgentLoop {
                         );
                         // Inject the StateGraph's final output into the loop conversation
                         if let Some(output) = &result.final_state.last_result {
-                            state.conversation.add_message(Message::assistant(
-                                format!("[StateGraph {} result]: {}", result.name, output)
-                            ));
+                            state.conversation.add_message(Message::assistant(format!(
+                                "[StateGraph {} result]: {}",
+                                result.name, output
+                            )));
                         }
                         // Merge any new variables from the graph state back
                         for (key, value) in &result.final_state.variables {
-                            if !key.starts_with("_") { // Skip internal variables
-                                state.global_state.context.insert(key.clone(), value.clone());
+                            if !key.starts_with("_") {
+                                // Skip internal variables
+                                state
+                                    .global_state
+                                    .context
+                                    .insert(key.clone(), value.clone());
                             }
                         }
                         return Ok(format!(
@@ -3622,13 +4137,15 @@ impl AgentLoop {
                     } else {
                         tracing::warn!(
                             "StateGraph '{}' did not reach a terminal node after {} iterations.",
-                            result.name, result.iterations
+                            result.name,
+                            result.iterations
                         );
                         // Still useful — inject partial results
                         if let Some(output) = &result.final_state.last_result {
-                            state.conversation.add_message(Message::assistant(
-                                format!("[StateGraph {} partial]: {}", result.name, output)
-                            ));
+                            state.conversation.add_message(Message::assistant(format!(
+                                "[StateGraph {} partial]: {}",
+                                result.name, output
+                            )));
                         }
                         return Ok(format!(
                             "{} paradigm + StateGraph '{}' incomplete ({} iterations). {}",
@@ -3706,7 +4223,12 @@ impl AgentLoop {
 
         // Use the IncrementalStreamParser for proper incremental parsing
         let mut parser = IncrementalStreamParser::new();
-        let mut usage = oneai_core::TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()};
+        let mut usage = oneai_core::TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            ..Default::default()
+        };
         let mut model = String::new();
 
         loop {
@@ -3773,7 +4295,11 @@ impl AgentLoop {
                         // hint was a TUI-only nicety; dropping it keeps the
                         // answer text clean on every port.
                     }
-                    crate::streaming::StreamEvent::ToolCallComplete { call_id, tool_name, args } => {
+                    crate::streaming::StreamEvent::ToolCallComplete {
+                        call_id,
+                        tool_name,
+                        args,
+                    } => {
                         // Tool call is fully assembled — notify observer with complete args
                         observer.on_tool_calls(&[ToolCallRequest {
                             id: call_id,
@@ -3924,12 +4450,7 @@ impl AgentLoop {
         let known: std::collections::HashMap<String, oneai_core::StepStatus> = state
             .working_state
             .as_ref()
-            .map(|ws| {
-                ws.steps
-                    .iter()
-                    .map(|s| (s.id.clone(), s.status))
-                    .collect()
-            })
+            .map(|ws| ws.steps.iter().map(|s| (s.id.clone(), s.status)).collect())
             .unwrap_or_default();
         for s in &plan.steps {
             let new_status: oneai_core::StepStatus = s.status.into();
@@ -4044,43 +4565,53 @@ impl AgentLoop {
 
         // Apply domain pack tool decorators if present
         if let Some(domain) = &self.domain_pack {
-            tools_map.values().map(|tool| {
-                // Check if there's a decorator for this tool
-                let decorator = domain.find_decorator(tool.name());
-                match decorator {
-                    Some(dec) => {
-                        // Use decorator overrides
-                        let description = dec.description_override.as_deref()
-                            .unwrap_or_else(|| tool.description());
-                        // Merge parameters schema with extra_params
-                        let schema = if dec.extra_params.is_null() || dec.extra_params == serde_json::json!({}) {
-                            tool.parameters_schema()
-                        } else {
-                            oneai_domain::merge_tool_schemas(
-                                tool.parameters_schema(),
-                                dec.extra_params.clone(),
-                            )
-                        };
-                        ToolDefinition {
-                            name: tool.name().to_string(),
-                            description: description.to_string(),
-                            parameters_schema: schema,
+            tools_map
+                .values()
+                .map(|tool| {
+                    // Check if there's a decorator for this tool
+                    let decorator = domain.find_decorator(tool.name());
+                    match decorator {
+                        Some(dec) => {
+                            // Use decorator overrides
+                            let description = dec
+                                .description_override
+                                .as_deref()
+                                .unwrap_or_else(|| tool.description());
+                            // Merge parameters schema with extra_params
+                            let schema = if dec.extra_params.is_null()
+                                || dec.extra_params == serde_json::json!({})
+                            {
+                                tool.parameters_schema()
+                            } else {
+                                oneai_domain::merge_tool_schemas(
+                                    tool.parameters_schema(),
+                                    dec.extra_params.clone(),
+                                )
+                            };
+                            ToolDefinition {
+                                name: tool.name().to_string(),
+                                description: description.to_string(),
+                                parameters_schema: schema,
+                            }
                         }
+                        None => ToolDefinition {
+                            name: tool.name().to_string(),
+                            description: tool.description().to_string(),
+                            parameters_schema: tool.parameters_schema(),
+                        },
                     }
-                    None => ToolDefinition {
-                        name: tool.name().to_string(),
-                        description: tool.description().to_string(),
-                        parameters_schema: tool.parameters_schema(),
-                    },
-                }
-            }).collect()
+                })
+                .collect()
         } else {
             // No domain pack — use raw tool definitions
-            tools_map.values().map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters_schema: tool.parameters_schema(),
-            }).collect()
+            tools_map
+                .values()
+                .map(|tool| ToolDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters_schema: tool.parameters_schema(),
+                })
+                .collect()
         }
     }
 
@@ -4091,7 +4622,10 @@ impl AgentLoop {
     /// filtering is the key behavioral change that makes paradigm
     /// switching meaningful — Plan mode shouldn't see edit tools,
     /// Explore mode shouldn't see execution tools.
-    async fn build_tool_definitions_for_paradigm(&self, paradigm_config: Option<&ParadigmConfig>) -> Vec<ToolDefinition> {
+    async fn build_tool_definitions_for_paradigm(
+        &self,
+        paradigm_config: Option<&ParadigmConfig>,
+    ) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
 
         // If a paradigm config is active, filter tools by its tool_filter list.
@@ -4162,43 +4696,53 @@ impl AgentLoop {
 
         // Apply domain pack tool decorators if present
         let mut defs: Vec<ToolDefinition> = if let Some(domain) = &self.domain_pack {
-            sorted_tools.iter().map(|tool| {
-                // Check if there's a decorator for this tool
-                let decorator = domain.find_decorator(tool.name());
-                match decorator {
-                    Some(dec) => {
-                        // Use decorator overrides
-                        let description = dec.description_override.as_deref()
-                            .unwrap_or_else(|| tool.description());
-                        // Merge parameters schema with extra_params
-                        let schema = if dec.extra_params.is_null() || dec.extra_params == serde_json::json!({}) {
-                            tool.parameters_schema()
-                        } else {
-                            oneai_domain::merge_tool_schemas(
-                                tool.parameters_schema(),
-                                dec.extra_params.clone(),
-                            )
-                        };
-                        ToolDefinition {
-                            name: tool.name().to_string(),
-                            description: description.to_string(),
-                            parameters_schema: schema,
+            sorted_tools
+                .iter()
+                .map(|tool| {
+                    // Check if there's a decorator for this tool
+                    let decorator = domain.find_decorator(tool.name());
+                    match decorator {
+                        Some(dec) => {
+                            // Use decorator overrides
+                            let description = dec
+                                .description_override
+                                .as_deref()
+                                .unwrap_or_else(|| tool.description());
+                            // Merge parameters schema with extra_params
+                            let schema = if dec.extra_params.is_null()
+                                || dec.extra_params == serde_json::json!({})
+                            {
+                                tool.parameters_schema()
+                            } else {
+                                oneai_domain::merge_tool_schemas(
+                                    tool.parameters_schema(),
+                                    dec.extra_params.clone(),
+                                )
+                            };
+                            ToolDefinition {
+                                name: tool.name().to_string(),
+                                description: description.to_string(),
+                                parameters_schema: schema,
+                            }
                         }
+                        None => ToolDefinition {
+                            name: tool.name().to_string(),
+                            description: tool.description().to_string(),
+                            parameters_schema: tool.parameters_schema(),
+                        },
                     }
-                    None => ToolDefinition {
-                        name: tool.name().to_string(),
-                        description: tool.description().to_string(),
-                        parameters_schema: tool.parameters_schema(),
-                    },
-                }
-            }).collect()
+                })
+                .collect()
         } else {
             // No domain pack — use raw tool definitions (still sorted)
-            sorted_tools.iter().map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters_schema: tool.parameters_schema(),
-            }).collect()
+            sorted_tools
+                .iter()
+                .map(|tool| ToolDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters_schema: tool.parameters_schema(),
+                })
+                .collect()
         };
 
         // Prepend the plan/task control tools (task_create/task_update/task_list/
@@ -4293,15 +4837,16 @@ impl AgentLoop {
             }
         } else {
             // Legacy path — no WorkingStateStore configured (or no task bound).
-            conv.add_message(Message::system(crate::context_assembler::task_anchor_block(
-                &state.original_task,
-                &state.conversation.metadata,
-            )));
-            if let Some(plan) = &state.plan_state {
-                conv.add_message(Message::system(crate::context_assembler::plan_progress_block(
+            conv.add_message(Message::system(
+                crate::context_assembler::task_anchor_block(
                     &state.original_task,
-                    plan,
-                )));
+                    &state.conversation.metadata,
+                ),
+            ));
+            if let Some(plan) = &state.plan_state {
+                conv.add_message(Message::system(
+                    crate::context_assembler::plan_progress_block(&state.original_task, plan),
+                ));
             }
         }
         if self.config.inject_skills {
@@ -4332,11 +4877,17 @@ impl AgentLoop {
     ///
     /// This is a basic mapping — more sophisticated strategy selection
     /// can be added based on DomainPack recovery configurations.
-    fn select_recovery_strategy(&self, failed: &ToolCallResult) -> crate::error_recovery::RecoveryStrategy {
+    fn select_recovery_strategy(
+        &self,
+        failed: &ToolCallResult,
+    ) -> crate::error_recovery::RecoveryStrategy {
         let error_msg = failed.output.error.as_deref().unwrap_or("");
 
-        if error_msg.contains("timeout") || error_msg.contains("timed out")
-            || error_msg.contains("network") || error_msg.contains("rate_limit") {
+        if error_msg.contains("timeout")
+            || error_msg.contains("timed out")
+            || error_msg.contains("network")
+            || error_msg.contains("rate_limit")
+        {
             // Transient errors → Retry with exponential backoff
             crate::error_recovery::RecoveryStrategy::Retry {
                 policy: crate::error_recovery::RetryPolicy::default(),
@@ -4381,40 +4932,48 @@ impl AgentLoop {
         match resp {
             Ok(InteractionResponse::Proceed) => {
                 let output = tool.execute(args).await?;
-                Ok(ToolCallResult { call_id, tool_name, output })
+                Ok(ToolCallResult {
+                    call_id,
+                    tool_name,
+                    output,
+                })
             }
             Ok(InteractionResponse::ProceedWith { modification }) => match modification {
                 InteractionModification::ReplaceToolArgs(new_args) => {
                     let output = tool.execute(new_args).await?;
-                    Ok(ToolCallResult { call_id, tool_name, output })
+                    Ok(ToolCallResult {
+                        call_id,
+                        tool_name,
+                        output,
+                    })
                 }
                 _ => {
                     let output = tool.execute(args).await?;
-                    Ok(ToolCallResult { call_id, tool_name, output })
+                    Ok(ToolCallResult {
+                        call_id,
+                        tool_name,
+                        output,
+                    })
                 }
             },
-            Ok(InteractionResponse::Revise { feedback }) => {
-                Ok(ToolCallResult {
-                    call_id,
-                    tool_name,
-                    output: ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(format!("User rejected: {}", feedback)),
-                    },
-                })
-            }
-            Ok(InteractionResponse::Abort { reason }) => {
-                Ok(ToolCallResult {
-                    call_id,
-                    tool_name,
-                    output: ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(format!("Denied: {}", reason)),
-                    },
-                })
-            }
+            Ok(InteractionResponse::Revise { feedback }) => Ok(ToolCallResult {
+                call_id,
+                tool_name,
+                output: ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(format!("User rejected: {}", feedback)),
+                },
+            }),
+            Ok(InteractionResponse::Abort { reason }) => Ok(ToolCallResult {
+                call_id,
+                tool_name,
+                output: ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(format!("Denied: {}", reason)),
+                },
+            }),
             Ok(_) => Ok(ToolCallResult {
                 call_id,
                 tool_name,
@@ -4495,11 +5054,22 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
         state: &mut oneai_workflow::GraphState,
     ) -> Result<oneai_workflow::ActionResult> {
         // Extract LlmInfer fields
-        let (system_prompt_override, include_tool_definitions,
-             tool_filter_override, thinking_budget, temperature, max_tokens) = match action {
+        let (
+            system_prompt_override,
+            include_tool_definitions,
+            tool_filter_override,
+            thinking_budget,
+            temperature,
+            max_tokens,
+        ) = match action {
             oneai_workflow::NodeAction::LlmInfer {
-                system_prompt_override, include_tool_definitions,
-                tool_filter_override, thinking_budget, temperature, max_tokens, ..
+                system_prompt_override,
+                include_tool_definitions,
+                tool_filter_override,
+                thinking_budget,
+                temperature,
+                max_tokens,
+                ..
             } => (
                 system_prompt_override.clone(),
                 *include_tool_definitions,
@@ -4508,7 +5078,11 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                 *temperature,
                 *max_tokens,
             ),
-            _ => return Err(oneai_core::error::OneAIError::Workflow("Expected LlmInfer action".to_string())),
+            _ => {
+                return Err(oneai_core::error::OneAIError::Workflow(
+                    "Expected LlmInfer action".to_string(),
+                ))
+            }
         };
 
         // Build system prompt — use override or default from config. When the
@@ -4516,8 +5090,8 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
         // `{{TOOL_PREFERENCE_RULES}}` marker against the actual tool registry so
         // the StateGraph path, like the main loop, never promises tools the
         // model cannot call and never leaks the marker verbatim.
-        let base_prompt = system_prompt_override
-            .unwrap_or_else(|| self.config.system_prompt.clone());
+        let base_prompt =
+            system_prompt_override.unwrap_or_else(|| self.config.system_prompt.clone());
         let system_prompt = if base_prompt.contains("{{TOOL_PREFERENCE_RULES}}") {
             let tools = self.tools.read().await;
             resolve_tool_preference_marker(&base_prompt, &tools)
@@ -4533,7 +5107,8 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
 
         // Build tool definitions if requested
         let tool_defs = if include_tool_definitions {
-            self.build_tool_definitions_for_state(&tool_filter_override, &state.active_paradigm).await
+            self.build_tool_definitions_for_state(&tool_filter_override, &state.active_paradigm)
+                .await
         } else {
             vec![]
         };
@@ -4581,10 +5156,12 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
     ) -> Result<oneai_workflow::ActionResult> {
         // Find the tool
         let tools_map = self.tools.read().await;
-        let tool = tools_map.get(tool_name)
-            .ok_or_else(|| oneai_core::error::OneAIError::Workflow(
-                format!("Tool '{}' not found for ToolCall node", tool_name)
-            ))?;
+        let tool = tools_map.get(tool_name).ok_or_else(|| {
+            oneai_core::error::OneAIError::Workflow(format!(
+                "Tool '{}' not found for ToolCall node",
+                tool_name
+            ))
+        })?;
 
         // Check domain permission profile (if domain_pack is available)
         if let Some(domain) = &self.domain_pack {
@@ -4615,7 +5192,10 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                         args: args.clone(),
                         risk_level: oneai_core::RiskLevel::High,
                         permission_level: Some(oneai_core::PermissionLevel::Full),
-                        justification: format!("Domain policy requires confirmation for '{}'", tool_name),
+                        justification: format!(
+                            "Domain policy requires confirmation for '{}'",
+                            tool_name
+                        ),
                     };
                     return self
                         .graph_tool_approval(request, tool.clone(), args.clone(), tool_name, state)
@@ -4628,10 +5208,19 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                             args: args.clone(),
                             risk_level: tool.risk_level(),
                             permission_level: Some(level),
-                            justification: format!("Full-permission tool '{}' requires approval", tool_name),
+                            justification: format!(
+                                "Full-permission tool '{}' requires approval",
+                                tool_name
+                            ),
                         };
                         return self
-                            .graph_tool_approval(request, tool.clone(), args.clone(), tool_name, state)
+                            .graph_tool_approval(
+                                request,
+                                tool.clone(),
+                                args.clone(),
+                                tool_name,
+                                state,
+                            )
                             .await;
                     }
                     // Standard or Read permission — execute directly
@@ -4695,13 +5284,19 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
         });
 
         // Replace system prompt in conversation
-        state.conversation.messages.retain(|m| m.role != Role::System);
-        state.conversation.add_message(Message::system(&paradigm_config.system_prompt));
+        state
+            .conversation
+            .messages
+            .retain(|m| m.role != Role::System);
+        state
+            .conversation
+            .add_message(Message::system(&paradigm_config.system_prompt));
 
         if !paradigm_config.decision_hint.is_empty() {
-            state.conversation.add_message(Message::system(
-                format!("[Paradigm switch]: {}", paradigm_config.decision_hint)
-            ));
+            state.conversation.add_message(Message::system(format!(
+                "[Paradigm switch]: {}",
+                paradigm_config.decision_hint
+            )));
         }
 
         Ok(oneai_workflow::ActionResult {
@@ -4734,24 +5329,30 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
                 ContentBlock::ToolCall { id: _, name, args } => {
                     // Check for special internal tools
                     if name == "delegate" {
-                        let args_value: serde_json::Value = serde_json::from_str(args)
-                            .unwrap_or_else(|_| serde_json::json!({}));
-                        let agent_kind = args_value.get("agent_type")
-                            .and_then(|v| v.as_str()).unwrap_or("Explore").to_string();
-                        let task = args_value.get("task")
-                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let decision = oneai_core::GraphDecision::Delegate {
-                            agent_kind,
-                            task,
-                        };
+                        let args_value: serde_json::Value =
+                            serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
+                        let agent_kind = args_value
+                            .get("agent_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Explore")
+                            .to_string();
+                        let task = args_value
+                            .get("task")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let decision = oneai_core::GraphDecision::Delegate { agent_kind, task };
                         state.parsed_decision = Some(decision.clone());
                         return Ok(decision);
                     }
                     if name == "switch_paradigm" {
-                        let args_value: serde_json::Value = serde_json::from_str(args)
-                            .unwrap_or_else(|_| serde_json::json!({}));
-                        let paradigm = args_value.get("paradigm")
-                            .and_then(|v| v.as_str()).unwrap_or("react").to_string();
+                        let args_value: serde_json::Value =
+                            serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
+                        let paradigm = args_value
+                            .get("paradigm")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("react")
+                            .to_string();
                         let decision = oneai_core::GraphDecision::SwitchParadigm { paradigm };
                         state.parsed_decision = Some(decision.clone());
                         return Ok(decision);
@@ -4898,39 +5499,49 @@ impl AgentLoopGraphActionExecutor {
 
         // Apply domain pack tool decorators
         let mut defs: Vec<ToolDefinition> = if let Some(domain) = &self.domain_pack {
-            filtered_tools.iter().map(|tool| {
-                let decorator = domain.find_decorator(tool.name());
-                match decorator {
-                    Some(dec) => {
-                        let description = dec.description_override.as_deref()
-                            .unwrap_or_else(|| tool.description());
-                        let schema = if dec.extra_params.is_null() || dec.extra_params == serde_json::json!({}) {
-                            tool.parameters_schema()
-                        } else {
-                            oneai_domain::merge_tool_schemas(
-                                tool.parameters_schema(),
-                                dec.extra_params.clone(),
-                            )
-                        };
-                        ToolDefinition {
-                            name: tool.name().to_string(),
-                            description: description.to_string(),
-                            parameters_schema: schema,
+            filtered_tools
+                .iter()
+                .map(|tool| {
+                    let decorator = domain.find_decorator(tool.name());
+                    match decorator {
+                        Some(dec) => {
+                            let description = dec
+                                .description_override
+                                .as_deref()
+                                .unwrap_or_else(|| tool.description());
+                            let schema = if dec.extra_params.is_null()
+                                || dec.extra_params == serde_json::json!({})
+                            {
+                                tool.parameters_schema()
+                            } else {
+                                oneai_domain::merge_tool_schemas(
+                                    tool.parameters_schema(),
+                                    dec.extra_params.clone(),
+                                )
+                            };
+                            ToolDefinition {
+                                name: tool.name().to_string(),
+                                description: description.to_string(),
+                                parameters_schema: schema,
+                            }
                         }
+                        None => ToolDefinition {
+                            name: tool.name().to_string(),
+                            description: tool.description().to_string(),
+                            parameters_schema: tool.parameters_schema(),
+                        },
                     }
-                    None => ToolDefinition {
-                        name: tool.name().to_string(),
-                        description: tool.description().to_string(),
-                        parameters_schema: tool.parameters_schema(),
-                    },
-                }
-            }).collect()
+                })
+                .collect()
         } else {
-            filtered_tools.iter().map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters_schema: tool.parameters_schema(),
-            }).collect()
+            filtered_tools
+                .iter()
+                .map(|tool| ToolDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters_schema: tool.parameters_schema(),
+                })
+                .collect()
         };
 
         // Inject the model-driven meta-tools (delegate / switch_paradigm) so
@@ -4947,12 +5558,14 @@ impl AgentLoopGraphActionExecutor {
 
 /// Convert a string paradigm name to ParadigmConfig.
 fn active_paradigm_to_config(paradigm: &Option<String>) -> Option<ParadigmConfig> {
-    paradigm.as_ref().map(|p| ParadigmConfig::for_paradigm(match p.as_str() {
-        "plan" => ParadigmKind::Plan,
-        "reflect" => ParadigmKind::Reflect,
-        "explore" => ParadigmKind::Explore,
-        _ => ParadigmKind::ReAct,
-    }))
+    paradigm.as_ref().map(|p| {
+        ParadigmConfig::for_paradigm(match p.as_str() {
+            "plan" => ParadigmKind::Plan,
+            "reflect" => ParadigmKind::Reflect,
+            "explore" => ParadigmKind::Explore,
+            _ => ParadigmKind::ReAct,
+        })
+    })
 }
 
 /// Build the tool-preference rules block from a tool registry, emitting a rule
@@ -5192,21 +5805,24 @@ mod dynamic_tool_prompt_tests {
     //! hardcoded preferred names are absent from the registry (the no-DomainPack
     //! case).
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use oneai_core::budget::{TokenBudget, BudgetAllocation, ContextBudgetManager};
+    use crate::context_assembler::ContextAssembler;
+    use crate::mock_provider::MockProvider;
+    use crate::mock_tool::MockTool;
+    use crate::streaming::IncrementalStreamParser;
+    use crate::sub_agent::SubAgentFactoryNone;
+    use oneai_core::budget::{BudgetAllocation, ContextBudgetManager, TokenBudget};
     use oneai_parser::ThreeLayerParser;
     use oneai_skill::SkillSelector;
-    use crate::mock_tool::MockTool;
-    use crate::mock_provider::MockProvider;
-    use crate::sub_agent::SubAgentFactoryNone;
-    use crate::context_assembler::ContextAssembler;
-    use crate::streaming::IncrementalStreamParser;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn build_loop_with(tool_names: &[&str], config: AgentLoopConfig) -> AgentLoop {
         let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         for n in tool_names {
-            map.insert(n.to_string(), Arc::new(MockTool::success_tool(*n, "ok")) as Arc<dyn Tool>);
+            map.insert(
+                n.to_string(),
+                Arc::new(MockTool::success_tool(*n, "ok")) as Arc<dyn Tool>,
+            );
         }
         let tools_map = Arc::new(tokio::sync::RwLock::new(map));
         AgentLoop::new(
@@ -5321,10 +5937,14 @@ mod dynamic_tool_prompt_tests {
 
         // Auto + local backend (Ollama prefers true) → Some(JsonSchema, schema).
         let ollama_loop = build_loop_with_provider(
-            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama("llama3".to_string()))),
+            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama(
+                "llama3".to_string(),
+            ))),
             cfg_with_so(ConstrainedOutputPolicy::Auto),
         );
-        let co = ollama_loop.build_constrained_output().expect("Auto+local → Some");
+        let co = ollama_loop
+            .build_constrained_output()
+            .expect("Auto+local → Some");
         assert_eq!(co.mode, ConstrainedMode::JsonSchema);
         assert_eq!(co.schema, schema);
 
@@ -5344,14 +5964,18 @@ mod dynamic_tool_prompt_tests {
 
         // Never forces it off even for Ollama.
         let never_loop = build_loop_with_provider(
-            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama("llama3".to_string()))),
+            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama(
+                "llama3".to_string(),
+            ))),
             cfg_with_so(ConstrainedOutputPolicy::Never),
         );
         assert!(never_loop.build_constrained_output().is_none());
 
         // No structured_output → None regardless of policy/provider.
         let no_so_loop = build_loop_with_provider(
-            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama("llama3".to_string()))),
+            Arc::new(OllamaProvider::new(oneai_core::ModelConfig::ollama(
+                "llama3".to_string(),
+            ))),
             AgentLoopConfig {
                 structured_output: None,
                 constrained_output_policy: ConstrainedOutputPolicy::Always,
@@ -5369,7 +5993,11 @@ mod dynamic_tool_prompt_tests {
         let cfg = ParadigmConfig::for_paradigm(ParadigmKind::Plan);
         let defs = loop_.build_tool_definitions_for_paradigm(Some(&cfg)).await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"shell"), "shell should be exposed via fallback, got {:?}", names);
+        assert!(
+            names.contains(&"shell"),
+            "shell should be exposed via fallback, got {:?}",
+            names
+        );
         assert!(!names.contains(&"read_file"));
     }
 
@@ -5394,17 +6022,12 @@ mod dynamic_tool_prompt_tests {
         // through untouched.
         let loop_with_coding = build_loop(&["read_file", "shell"]);
         let tools = loop_with_coding.tools.read().await;
-        let resolved = resolve_tool_preference_marker(
-            &loop_with_coding.config.system_prompt,
-            &tools,
-        );
+        let resolved =
+            resolve_tool_preference_marker(&loop_with_coding.config.system_prompt, &tools);
         assert!(!resolved.contains("{{TOOL_PREFERENCE_RULES}}"));
         assert!(resolved.contains("read_file"));
 
         let custom = "You are a research agent.".to_string();
-        assert_eq!(
-            resolve_tool_preference_marker(&custom, &tools),
-            custom,
-        );
+        assert_eq!(resolve_tool_preference_marker(&custom, &tools), custom,);
     }
 }

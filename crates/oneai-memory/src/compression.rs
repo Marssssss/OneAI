@@ -11,10 +11,10 @@
 
 use std::sync::Arc;
 
-use oneai_core::{Conversation, InferenceRequest, Message, MemoryEntry, Role};
+use oneai_core::budget::{CompressedResult as CoreCompressedResult, ContextCompressorTrait};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
-use oneai_core::budget::{ContextCompressorTrait, CompressedResult as CoreCompressedResult};
+use oneai_core::{Conversation, InferenceRequest, MemoryEntry, Message, Role};
 
 /// Context compressor that uses an LLM to summarize older conversation turns.
 ///
@@ -47,7 +47,11 @@ pub struct ContextCompressor {
 
 impl ContextCompressor {
     /// Create a new compressor with the given settings and LLM provider.
-    pub fn new(threshold_tokens: usize, keep_recent_turns: usize, summarizer: Arc<dyn LlmProvider>) -> Self {
+    pub fn new(
+        threshold_tokens: usize,
+        keep_recent_turns: usize,
+        summarizer: Arc<dyn LlmProvider>,
+    ) -> Self {
         Self {
             threshold_tokens,
             keep_recent_turns,
@@ -117,19 +121,30 @@ impl ContextCompressor {
     /// Uses a rough heuristic: ~1 token per 4 characters of English text,
     /// plus overhead per message.
     pub fn estimate_tokens(conversation: &Conversation) -> usize {
-        conversation.messages.iter().map(|msg| {
-            msg.content.iter().map(|block| {
-                match block {
-                    oneai_core::ContentBlock::Text { text } => text.len() / 4 + 20,
-                    oneai_core::ContentBlock::Image { .. } => 100, // Image tokens depend on size
-                    oneai_core::ContentBlock::File { .. } => 50,
-                    oneai_core::ContentBlock::ToolCall { name, args, .. } => name.len() / 4 + args.len() / 4 + 30,
-                    oneai_core::ContentBlock::ToolResult { content, .. } => content.len() / 4 + 20,
-                    oneai_core::ContentBlock::Thinking { text } => text.len() / 4 + 20,
-                    _ => 50, // #[non_exhaustive] catch-all
-                }
-            }).sum::<usize>()
-        }).sum()
+        conversation
+            .messages
+            .iter()
+            .map(|msg| {
+                msg.content
+                    .iter()
+                    .map(|block| {
+                        match block {
+                            oneai_core::ContentBlock::Text { text } => text.len() / 4 + 20,
+                            oneai_core::ContentBlock::Image { .. } => 100, // Image tokens depend on size
+                            oneai_core::ContentBlock::File { .. } => 50,
+                            oneai_core::ContentBlock::ToolCall { name, args, .. } => {
+                                name.len() / 4 + args.len() / 4 + 30
+                            }
+                            oneai_core::ContentBlock::ToolResult { content, .. } => {
+                                content.len() / 4 + 20
+                            }
+                            oneai_core::ContentBlock::Thinking { text } => text.len() / 4 + 20,
+                            _ => 50, // #[non_exhaustive] catch-all
+                        }
+                    })
+                    .sum::<usize>()
+            })
+            .sum()
     }
 
     /// Check if a conversation needs compression.
@@ -160,7 +175,9 @@ impl ContextCompressor {
         // away. It is pulled out of `older_messages` and re-added to the
         // compressed conversation intact, between the summary and the recent tail.
         let recent_start = total_messages - self.keep_recent_turns;
-        let first_user_idx = conversation.messages.iter()
+        let first_user_idx = conversation
+            .messages
+            .iter()
             .position(|m| m.role == Role::User);
 
         // The first user message is pinned only when it would otherwise be
@@ -177,7 +194,8 @@ impl ContextCompressor {
         let older_indices: Vec<usize> = (0..recent_start)
             .filter(|&i| !(pin_first_user && Some(i) == first_user_idx))
             .collect();
-        let older_messages: Vec<Message> = older_indices.iter()
+        let older_messages: Vec<Message> = older_indices
+            .iter()
             .map(|&i| conversation.messages[i].clone())
             .collect();
         let recent_messages = &conversation.messages[recent_start..];
@@ -189,7 +207,8 @@ impl ContextCompressor {
         // get summarized away wholesale. The capped view keeps a head + pointer
         // to `memory_search` for the full output —无损截断 before summary.
         const MAX_OLDER_MSG_CHARS: usize = 2000;
-        let older_text = older_messages.iter()
+        let older_text = older_messages
+            .iter()
             .map(|msg| {
                 let role = match msg.role {
                     Role::System => "System",
@@ -201,7 +220,10 @@ impl ContextCompressor {
                 let text = msg.text_content();
                 let body = if text.chars().count() > MAX_OLDER_MSG_CHARS {
                     let head: String = text.chars().take(MAX_OLDER_MSG_CHARS).collect();
-                    format!("{}\n[...content truncated — use memory_search for the full output]", head)
+                    format!(
+                        "{}\n[...content truncated — use memory_search for the full output]",
+                        head
+                    )
                 } else {
                     text
                 };
@@ -211,7 +233,9 @@ impl ContextCompressor {
             .join("\n");
 
         // Determine summarization prompt — use domain template if present
-        let task_desc = conversation.messages.iter()
+        let task_desc = conversation
+            .messages
+            .iter()
             .find(|m| m.role == Role::User)
             .map(|m| m.text_content())
             .unwrap_or_else(|| "unknown task".to_string());
@@ -222,14 +246,16 @@ impl ContextCompressor {
             "You are a conversation summarizer. Summarize the conversation below \
             into a concise paragraph that captures the key facts, decisions, and \
             context needed to continue the conversation. Focus on information that \
-            would be needed for follow-up questions. Be concise but complete.".to_string()
+            would be needed for follow-up questions. Be concise but complete."
+                .to_string()
         };
 
         // Request summarization from the LLM
         let mut summary_conv = Conversation::new();
         summary_conv.add_message(Message::system(summarization_prompt));
         summary_conv.add_message(Message::user(format!(
-            "Summarize this conversation:\n\n{}", older_text
+            "Summarize this conversation:\n\n{}",
+            older_text
         )));
 
         let request = InferenceRequest {
@@ -253,7 +279,7 @@ impl ContextCompressor {
 
         // Add the summary as a system context message
         compressed.add_message(Message::system(
-            "[Previous conversation summary]: ".to_string() + &summary_text
+            "[Previous conversation summary]: ".to_string() + &summary_text,
         ));
 
         // Pin the original task (first user message) verbatim — Q2/Q3 hard
@@ -270,7 +296,8 @@ impl ContextCompressor {
         }
 
         // Collect removed entries for potential long-term memory storage
-        let removed_entries: Vec<MemoryEntry> = older_messages.iter()
+        let removed_entries: Vec<MemoryEntry> = older_messages
+            .iter()
             .enumerate()
             .map(|(i, msg)| {
                 MemoryEntry {
@@ -279,13 +306,16 @@ impl ContextCompressor {
                     timestamp: chrono::Utc::now(),
                     embedding: None,
                     metadata: std::collections::HashMap::from([
-                        ("role".to_string(), match msg.role {
-                            Role::System => "system".to_string(),
-                            Role::User => "user".to_string(),
-                            Role::Assistant => "assistant".to_string(),
-                            Role::Tool => "tool".to_string(),
-                            _ => "user".to_string(), // #[non_exhaustive] catch-all
-                        }),
+                        (
+                            "role".to_string(),
+                            match msg.role {
+                                Role::System => "system".to_string(),
+                                Role::User => "user".to_string(),
+                                Role::Assistant => "assistant".to_string(),
+                                Role::Tool => "tool".to_string(),
+                                _ => "user".to_string(), // #[non_exhaustive] catch-all
+                            },
+                        ),
                         ("compressed".to_string(), "true".to_string()),
                     ]),
                 }
@@ -315,7 +345,10 @@ impl ContextCompressor {
             (Some(ext), Some(sink)) => (ext.clone(), sink.clone()),
             _ => return, // extraction not configured
         };
-        match extractor.extract(discarded, &self.user_id, &self.session_id).await {
+        match extractor
+            .extract(discarded, &self.user_id, &self.session_id)
+            .await
+        {
             Ok(facts) => {
                 if !facts.is_empty() {
                     tracing::debug!(
@@ -332,7 +365,10 @@ impl ContextCompressor {
                 }
             }
             Err(e) => {
-                tracing::warn!("fact extraction failed (compression proceeds, facts not archived): {}", e);
+                tracing::warn!(
+                    "fact extraction failed (compression proceeds, facts not archived): {}",
+                    e
+                );
             }
         }
     }
@@ -351,12 +387,15 @@ impl ContextCompressorTrait for ContextCompressor {
     }
 
     fn estimate_tokens_of_message(&self, msg: &Message) -> usize {
-        msg.content.iter()
+        msg.content
+            .iter()
             .filter_map(|block| match block {
                 oneai_core::ContentBlock::Text { text } => Some(text.len()),
                 _ => Some(50),
             })
-            .sum::<usize>() / 4 + 20  // overhead per message
+            .sum::<usize>()
+            / 4
+            + 20 // overhead per message
     }
 
     async fn compress(&self, conversation: &Conversation) -> Result<CoreCompressedResult> {
@@ -390,7 +429,10 @@ pub struct CompressedResult {
 #[cfg(test)]
 mod closure_tests {
     use super::*;
-    use oneai_core::{FactType, InferenceRequest, InferenceResponse, Message, ModelCapability, ModelConfig, ProviderType, Role, TokenUsage};
+    use oneai_core::{
+        FactType, InferenceRequest, InferenceResponse, Message, ModelCapability, ModelConfig,
+        ProviderType, Role, TokenUsage,
+    };
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -400,10 +442,14 @@ mod closure_tests {
     #[async_trait::async_trait]
     impl LlmProvider for DualMockProvider {
         async fn infer(&self, req: InferenceRequest) -> Result<InferenceResponse> {
-            let user_text = req.conversation.messages.iter()
+            let user_text = req
+                .conversation
+                .messages
+                .iter()
                 .filter(|m| m.role == Role::System)
                 .map(|m| m.text_content())
-                .collect::<Vec<_>>().join(" ");
+                .collect::<Vec<_>>()
+                .join(" ");
             let body = if user_text.contains("memory extractor") {
                 r#"[{"fact_type":"user_tooling_pref","subject":"user.package_manager","predicate":"prefers","content":"pnpm"}]"#.to_string()
             } else {
@@ -411,22 +457,45 @@ mod closure_tests {
             };
             Ok(InferenceResponse {
                 message: Message::assistant(body),
-                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, ..Default::default()},
+                usage: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    ..Default::default()
+                },
                 model: "dual-mock".to_string(),
                 metadata: HashMap::new(),
             })
         }
         async fn infer_stream(
-            &self, _req: InferenceRequest,
-        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>> {
+            &self,
+            _req: InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
+        > {
             Err(oneai_core::error::OneAIError::Provider("no stream".into()))
         }
         fn capabilities(&self) -> ModelCapability {
-            ModelCapability { supports_multimodal: false, supports_streaming: false, supports_tools: false, context_window_size: 4096, max_output_tokens: 512 }
+            ModelCapability {
+                supports_multimodal: false,
+                supports_streaming: false,
+                supports_tools: false,
+                context_window_size: 4096,
+                max_output_tokens: 512,
+            }
         }
         fn config(&self) -> &ModelConfig {
             static CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
-            CONFIG.get_or_init(|| ModelConfig { provider_type: ProviderType::Local, cloud_kind: None, api_key: None, base_url: None, port: None, model_name: Some("dual-mock".into()), model_path: None, ..Default::default() })
+            CONFIG.get_or_init(|| ModelConfig {
+                provider_type: ProviderType::Local,
+                cloud_kind: None,
+                api_key: None,
+                base_url: None,
+                port: None,
+                model_name: Some("dual-mock".into()),
+                model_path: None,
+                ..Default::default()
+            })
         }
     }
 
@@ -482,22 +551,34 @@ mod closure_tests {
         // (task_anchor / plan_state) is also copied through.
         let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider));
         let mut conv = long_conversation();
-        conv.metadata.insert("task_anchor".to_string(), "I use pnpm".to_string());
+        conv.metadata
+            .insert("task_anchor".to_string(), "I use pnpm".to_string());
         let result = compressor.compress(&conv).await.unwrap();
 
         // The first user message text appears verbatim in the compressed conv.
-        let compressed_text: String = result.compressed_conversation.messages.iter()
-            .map(|m| m.text_content()).collect::<Vec<_>>().join("\n");
-        assert!(compressed_text.contains("I use pnpm for package management."),
-            "first user message must be pinned verbatim, got: {compressed_text}");
+        let compressed_text: String = result
+            .compressed_conversation
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            compressed_text.contains("I use pnpm for package management."),
+            "first user message must be pinned verbatim, got: {compressed_text}"
+        );
         // Metadata carried through.
         assert_eq!(
             result.compressed_conversation.metadata.get("task_anchor"),
             Some(&"I use pnpm".to_string()),
         );
         // The pinned first user message is NOT in the discarded segment.
-        assert!(!result.discarded_messages.iter().any(|m| m.role == Role::User
-            && m.text_content().contains("I use pnpm for package management.")));
+        assert!(!result
+            .discarded_messages
+            .iter()
+            .any(|m| m.role == Role::User
+                && m.text_content()
+                    .contains("I use pnpm for package management.")));
     }
 
     /// Deterministic 4-d embedder for the routing regression below.
@@ -509,13 +590,17 @@ mod closure_tests {
         }
         async fn embed_batch(&self, texts: &[String]) -> oneai_core::error::Result<Vec<Vec<f32>>> {
             let mut out = Vec::with_capacity(texts.len());
-            for t in texts { out.push(self.embed(t).await?); }
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
             Ok(out)
         }
         fn model(&self) -> oneai_core::traits::EmbeddingModel {
             oneai_core::traits::EmbeddingModel::new("stub-4d")
         }
-        fn dimension(&self) -> usize { 4 }
+        fn dimension(&self) -> usize {
+            4
+        }
     }
 
     #[tokio::test]
@@ -539,8 +624,10 @@ mod closure_tests {
         let _ = compressor.compress(&long_conversation()).await.unwrap();
         let facts = mm.fact_archive().all().await;
         assert_eq!(facts.len(), 1);
-        assert!(facts[0].embedding.is_some(),
-            "extracted fact must be embedded via FactSink → archive_facts, not raw-upserted");
+        assert!(
+            facts[0].embedding.is_some(),
+            "extracted fact must be embedded via FactSink → archive_facts, not raw-upserted"
+        );
         assert_eq!(facts[0].user_id, "alice");
     }
 }

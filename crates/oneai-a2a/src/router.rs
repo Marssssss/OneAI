@@ -34,31 +34,22 @@ impl A2ARouter {
     /// Extracts the "method" field and routes accordingly.
     /// Returns a JSON-RPC response for requests, or an error for unknown methods.
     pub async fn dispatch(&self, message: serde_json::Value) -> serde_json::Value {
-        let method = message.get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
+        let method = message.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
         let id = message.get("id").cloned();
-        let params = message.get("params").cloned().unwrap_or(serde_json::json!({}));
+        let params = message
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
 
         tracing::debug!("A2A dispatch: method={}, id={:?}", method, id);
 
         match method {
-            "agent/getCard" => {
-                self.handler.handle_get_card(id).await
-            }
-            "tasks/send" => {
-                self.handler.handle_send_task(id, &params).await
-            }
-            "tasks/get" => {
-                self.handler.handle_get_task(id, &params).await
-            }
-            "tasks/cancel" => {
-                self.handler.handle_cancel_task(id, &params).await
-            }
-            "tasks/sendSubscribe" => {
-                self.handler.handle_send_subscribe(id, &params).await
-            }
+            "agent/getCard" => self.handler.handle_get_card(id).await,
+            "tasks/send" => self.handler.handle_send_task(id, &params).await,
+            "tasks/get" => self.handler.handle_get_task(id, &params).await,
+            "tasks/cancel" => self.handler.handle_cancel_task(id, &params).await,
+            "tasks/sendSubscribe" => self.handler.handle_send_subscribe(id, &params).await,
             "" => {
                 // No method field — invalid request
                 serde_json::json!({
@@ -91,8 +82,8 @@ impl A2ARouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AgentCard;
     use crate::task_store::TaskStore;
+    use crate::types::AgentCard;
 
     fn create_router() -> Arc<A2ARouter> {
         let card = AgentCard::new("test-agent", "A test agent", "https://test.example.com");
@@ -115,7 +106,10 @@ mod tests {
         assert_eq!(response.get("id").and_then(|v| v.as_u64()), Some(1));
         assert!(response.get("result").is_some());
         let result = response.get("result").unwrap();
-        assert_eq!(result.get("name").and_then(|n| n.as_str()), Some("test-agent"));
+        assert_eq!(
+            result.get("name").and_then(|n| n.as_str()),
+            Some("test-agent")
+        );
     }
 
     #[tokio::test]
@@ -143,18 +137,20 @@ mod tests {
         let router = create_router();
 
         // First create a task
-        router.dispatch(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tasks/send",
-            "params": {
-                "id": "task-2",
-                "message": {
-                    "role": "user",
-                    "parts": [{"type": "text", "text": "Find"}]
+        router
+            .dispatch(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tasks/send",
+                "params": {
+                    "id": "task-2",
+                    "message": {
+                        "role": "user",
+                        "parts": [{"type": "text", "text": "Find"}]
+                    }
                 }
-            }
-        })).await;
+            }))
+            .await;
 
         // Then get it
         let message = serde_json::json!({
@@ -178,8 +174,14 @@ mod tests {
         let router = Arc::new(A2ARouter::new(handler));
 
         // Create task in Working state
-        store.create_task("task-3", crate::types::Message::user_text("Working")).await.unwrap();
-        store.transition_task("task-3", crate::types::TaskState::Working).await.unwrap();
+        store
+            .create_task("task-3", crate::types::Message::user_text("Working"))
+            .await
+            .unwrap();
+        store
+            .transition_task("task-3", crate::types::TaskState::Working)
+            .await
+            .unwrap();
 
         let message = serde_json::json!({
             "jsonrpc": "2.0",
@@ -193,7 +195,10 @@ mod tests {
         let response = router.dispatch(message).await;
         let result = response.get("result").unwrap();
         let status = result.get("status").unwrap();
-        assert_eq!(status.get("state").and_then(|s| s.as_str()), Some("canceled"));
+        assert_eq!(
+            status.get("state").and_then(|s| s.as_str()),
+            Some("canceled")
+        );
     }
 
     #[tokio::test]

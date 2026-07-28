@@ -1,7 +1,7 @@
 //! Trace DTO — converts TraceTree/Span/Event data into JSON for the Studio frontend.
 
+use oneai_trace::{Span, TraceEvent, TraceTree};
 use serde::{Deserialize, Serialize};
-use oneai_trace::{TraceTree, Span, TraceEvent};
 
 // ─── TraceTreeView ───────────────────────────────────────────────────
 
@@ -164,9 +164,11 @@ fn event_to_view(event: &TraceEvent) -> EventView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use oneai_trace::{
+        EventKind, InMemoryCollector, Span, SpanKind, SpanStatus, TraceContext, TraceMetrics,
+    };
     use std::collections::HashMap;
-    use oneai_trace::{TraceContext, InMemoryCollector, SpanKind, SpanStatus, EventKind, Span, TraceMetrics};
+    use std::sync::Arc;
 
     #[test]
     fn test_trace_tree_view_conversion() {
@@ -174,9 +176,11 @@ mod tests {
 
         let session = ctx.enter_span(SpanKind::SESSION, "session", None);
         ctx.set_attribute("session.id", serde_json::json!("test_123"));
-        ctx.log_event(EventKind::Thought, "agent.thought", HashMap::from([
-            ("input.message".to_string(), serde_json::json!("Hello")),
-        ]));
+        ctx.log_event(
+            EventKind::Thought,
+            "agent.thought",
+            HashMap::from([("input.message".to_string(), serde_json::json!("Hello"))]),
+        );
         ctx.exit_span(&session, SpanStatus::Ok);
 
         let tree = ctx.build_tree();

@@ -140,16 +140,16 @@ mod tests {
         assert_eq!(schema["properties"]["budget_tokens"]["default"], 5000);
         // New dependency fields allow multi-delegate fan-out per turn.
         assert_eq!(schema["properties"]["id"]["type"], "string");
-        assert_eq!(
-            schema["properties"]["depends_on"]["type"],
-            "array"
-        );
+        assert_eq!(schema["properties"]["depends_on"]["type"], "array");
         assert_eq!(
             schema["properties"]["depends_on"]["items"]["type"],
             "string"
         );
 
-        let switch = defs.iter().find(|d| d.name == TOOL_SWITCH_PARADIGM).unwrap();
+        let switch = defs
+            .iter()
+            .find(|d| d.name == TOOL_SWITCH_PARADIGM)
+            .unwrap();
         let schema = &switch.parameters_schema;
         assert_eq!(schema["type"], "object");
         assert_eq!(

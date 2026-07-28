@@ -73,12 +73,12 @@ pub struct WasmRuntimeConfig {
 impl Default for WasmRuntimeConfig {
     fn default() -> Self {
         Self {
-            max_memory_pages: 16,                    // 16 * 64KB = 1MB
-            fuel_limit: Some(100_000),               // ~10s of computation
-            epoch_interruption: true,                 // enable async timeout
+            max_memory_pages: 16,                        // 16 * 64KB = 1MB
+            fuel_limit: Some(100_000),                   // ~10s of computation
+            epoch_interruption: true,                    // enable async timeout
             max_execution_time: Duration::from_secs(30), // 30s max
-            wasi_config: WasiConfig::disabled(),     // pure computation
-            max_instances: 10,                        // 10 concurrent
+            wasi_config: WasiConfig::disabled(),         // pure computation
+            max_instances: 10,                           // 10 concurrent
         }
     }
 }
@@ -113,8 +113,8 @@ impl WasmRuntimeConfig {
     /// Only use for trusted WASM modules.
     pub fn permissive_with_wasi(allowed_dirs: Vec<WasiDirConfig>) -> Self {
         Self {
-            max_memory_pages: 256,                    // 256 * 64KB = 16MB
-            fuel_limit: Some(1_000_000),              // ~100s of computation
+            max_memory_pages: 256,       // 256 * 64KB = 16MB
+            fuel_limit: Some(1_000_000), // ~100s of computation
             epoch_interruption: true,
             max_execution_time: Duration::from_secs(120),
             wasi_config: WasiConfig::restricted(allowed_dirs),

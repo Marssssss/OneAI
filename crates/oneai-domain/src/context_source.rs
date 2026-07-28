@@ -27,9 +27,11 @@ use oneai_core::error::Result;
 /// - Device registry is stable → OnceAtStart
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum RefreshPolicy {
     /// Always refresh on each loop iteration.
     /// Use for frequently-changing data like git status.
+    #[default]
     EveryIteration,
 
     /// Refresh only when a diff is detected compared to the previous snapshot.
@@ -52,12 +54,6 @@ pub enum RefreshPolicy {
     /// Refresh at a fixed time interval.
     /// Use for data that changes on a known schedule, like date/time.
     Periodic(Duration),
-}
-
-impl Default for RefreshPolicy {
-    fn default() -> Self {
-        Self::EveryIteration
-    }
 }
 
 // ─── ContextSource Trait ───────────────────────────────────────────────────────

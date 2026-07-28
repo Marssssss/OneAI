@@ -78,7 +78,11 @@ pub struct EvalResult {
 
 impl EvalResult {
     /// Create a new eval result.
-    pub fn new(case_id: impl Into<String>, input: impl Into<String>, actual_output: impl Into<String>) -> Self {
+    pub fn new(
+        case_id: impl Into<String>,
+        input: impl Into<String>,
+        actual_output: impl Into<String>,
+    ) -> Self {
         Self {
             case_id: case_id.into(),
             input: input.into(),
@@ -111,7 +115,11 @@ impl EvalResult {
         if self.scores.is_empty() {
             return 0.0;
         }
-        self.scores.iter().map(|ms| ms.score.normalized()).sum::<f64>() / self.scores.len() as f64
+        self.scores
+            .iter()
+            .map(|ms| ms.score.normalized())
+            .sum::<f64>()
+            / self.scores.len() as f64
     }
 
     /// Add a metric score.
@@ -129,7 +137,8 @@ impl EvalResult {
 
     /// Whether a named metric passed (false if no such metric exists).
     pub fn metric_passed(&self, metric_name: &str) -> bool {
-        self.scores.iter()
+        self.scores
+            .iter()
             .any(|ms| ms.metric_name == metric_name && ms.score.passed)
     }
 }
@@ -172,8 +181,16 @@ impl MetricSummary {
             name: name.to_string(),
             case_count,
             pass_count,
-            pass_rate: if case_count > 0 { pass_count as f64 / case_count as f64 } else { 0.0 },
-            avg_score: if normalized.is_empty() { 0.0 } else { normalized.iter().sum::<f64>() / normalized.len() as f64 },
+            pass_rate: if case_count > 0 {
+                pass_count as f64 / case_count as f64
+            } else {
+                0.0
+            },
+            avg_score: if normalized.is_empty() {
+                0.0
+            } else {
+                normalized.iter().sum::<f64>() / normalized.len() as f64
+            },
             min_score: normalized.iter().copied().fold(f64::INFINITY, f64::min),
             max_score: normalized.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         }
@@ -216,11 +233,23 @@ impl EvalSummary {
     pub fn compute(results: &[EvalResult]) -> Self {
         let total_cases = results.len();
         let passed_cases = results.iter().filter(|r| r.passed()).count();
-        let pass_rate = if total_cases > 0 { passed_cases as f64 / total_cases as f64 } else { 0.0 };
-        let avg_score = if total_cases > 0 { results.iter().map(|r| r.avg_score()).sum::<f64>() / total_cases as f64 } else { 0.0 };
+        let pass_rate = if total_cases > 0 {
+            passed_cases as f64 / total_cases as f64
+        } else {
+            0.0
+        };
+        let avg_score = if total_cases > 0 {
+            results.iter().map(|r| r.avg_score()).sum::<f64>() / total_cases as f64
+        } else {
+            0.0
+        };
 
         let total_duration: u64 = results.iter().map(|r| r.duration_ms).sum();
-        let avg_duration_ms = if total_cases > 0 { total_duration / total_cases as u64 } else { 0 };
+        let avg_duration_ms = if total_cases > 0 {
+            total_duration / total_cases as u64
+        } else {
+            0
+        };
 
         let total_tokens: u64 = results.iter().map(|r| r.trace_metrics.total_tokens).sum();
 
@@ -230,13 +259,15 @@ impl EvalSummary {
         let mut metric_scores: HashMap<String, Vec<EvalScore>> = HashMap::new();
         for result in results {
             for ms in &result.scores {
-                metric_scores.entry(ms.metric_name.clone())
+                metric_scores
+                    .entry(ms.metric_name.clone())
                     .or_default()
                     .push(ms.score.clone());
             }
         }
 
-        let metric_summaries = metric_scores.into_iter()
+        let metric_summaries = metric_scores
+            .into_iter()
             .map(|(name, scores)| (name.clone(), MetricSummary::compute(&name, &scores)))
             .collect();
 

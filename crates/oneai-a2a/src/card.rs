@@ -51,7 +51,9 @@ pub fn agent_card_from_domain_pack(domain: &oneai_domain::DomainPack, url: &str)
         let skill_name = format!("Strategy: {}", strategy.description);
         let skill_description = format!(
             "Applies {} paradigm sequence for tasks matching '{}'. {}",
-            strategy.paradigm_sequence.iter()
+            strategy
+                .paradigm_sequence
+                .iter()
                 .map(|p| {
                     match p {
                         oneai_domain::DomainParadigmKind::Plan => "Plan",
@@ -67,7 +69,9 @@ pub fn agent_card_from_domain_pack(domain: &oneai_domain::DomainPack, url: &str)
             strategy.description,
         );
 
-        let examples = strategy.trigger_pattern.split('|')
+        let examples = strategy
+            .trigger_pattern
+            .split('|')
             .map(|s| format!("{} the {}", s.trim(), domain.name))
             .collect();
 
@@ -88,7 +92,11 @@ pub fn agent_card_from_domain_pack(domain: &oneai_domain::DomainPack, url: &str)
             id: format!("sub-agent-{}", sub_agent.name),
             name: format!("Sub-Agent: {}", sub_agent.name),
             description: sub_agent.description.clone(),
-            tags: vec![domain.name.clone(), "sub-agent".to_string(), sub_agent.name.clone()],
+            tags: vec![
+                domain.name.clone(),
+                "sub-agent".to_string(),
+                sub_agent.name.clone(),
+            ],
             examples: Vec::new(),
             input_modes: vec!["text/plain".to_string()],
             output_modes: vec!["text/plain".to_string(), "application/json".to_string()],
@@ -194,14 +202,20 @@ mod tests {
         assert_eq!(card.skills.len(), 2); // 1 strategy + 1 sub-agent
 
         // Check strategy skill
-        let strategy_skill = card.skills.iter()
+        let strategy_skill = card
+            .skills
+            .iter()
             .find(|s| s.id.starts_with("strategy-"))
             .unwrap();
-        assert!(strategy_skill.description.contains("Plan → ReAct → Reflect"));
-        assert!(strategy_skill.examples.len() > 0);
+        assert!(strategy_skill
+            .description
+            .contains("Plan → ReAct → Reflect"));
+        assert!(!strategy_skill.examples.is_empty());
 
         // Check sub-agent skill
-        let sub_agent_skill = card.skills.iter()
+        let sub_agent_skill = card
+            .skills
+            .iter()
             .find(|s| s.id == "sub-agent-code")
             .unwrap();
         assert_eq!(sub_agent_skill.name, "Sub-Agent: code");
@@ -296,8 +310,14 @@ mod tests {
 
         // Verify it's valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.get("name").and_then(|v| v.as_str()), Some("test-domain"));
-        assert_eq!(parsed.get("url").and_then(|v| v.as_str()), Some("https://test.example.com"));
+        assert_eq!(
+            parsed.get("name").and_then(|v| v.as_str()),
+            Some("test-domain")
+        );
+        assert_eq!(
+            parsed.get("url").and_then(|v| v.as_str()),
+            Some("https://test.example.com")
+        );
     }
 
     #[test]
@@ -312,13 +332,19 @@ mod tests {
             .description("Full coding agent")
             .paradigm_strategy(oneai_domain::ParadigmStrategy {
                 trigger_pattern: "refactor|rewrite".to_string(),
-                paradigm_sequence: vec![oneai_domain::DomainParadigmKind::Plan, oneai_domain::DomainParadigmKind::ReAct],
+                paradigm_sequence: vec![
+                    oneai_domain::DomainParadigmKind::Plan,
+                    oneai_domain::DomainParadigmKind::ReAct,
+                ],
                 sub_agent_types: Vec::new(),
                 description: "Refactoring".to_string(),
             })
             .paradigm_strategy(oneai_domain::ParadigmStrategy {
                 trigger_pattern: "debug|fix|repair".to_string(),
-                paradigm_sequence: vec![oneai_domain::DomainParadigmKind::Explore, oneai_domain::DomainParadigmKind::ReAct],
+                paradigm_sequence: vec![
+                    oneai_domain::DomainParadigmKind::Explore,
+                    oneai_domain::DomainParadigmKind::ReAct,
+                ],
                 sub_agent_types: Vec::new(),
                 description: "Debugging".to_string(),
             })

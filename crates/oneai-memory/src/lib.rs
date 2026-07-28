@@ -14,39 +14,38 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
-pub mod short_term;
-pub mod long_term;
 pub mod compression;
-pub mod hybrid_scorer;
-pub mod vector_store;
-pub mod manager;
-pub mod reflection;
-pub mod fact_store;
 pub mod core_memory;
-pub mod fact_extraction;
 pub mod core_memory_source;
+pub mod fact_extraction;
+pub mod fact_store;
+pub mod hybrid_scorer;
+pub mod long_term;
+pub mod manager;
 pub mod memory_tools;
+pub mod reflection;
+pub mod short_term;
+pub mod vector_store;
 
-pub use short_term::*;
-pub use long_term::*;
 pub use compression::*;
-pub use hybrid_scorer::*;
-pub use vector_store::*;
-pub use manager::*;
-pub use reflection::{MemoryReflection, MemoryReflectionConfig, EpisodicMemory};
-pub use fact_store::{MemoryFactStore, UpsertOutcome};
 pub use core_memory::CoreMemory;
-pub use fact_extraction::FactExtractor;
 pub use core_memory_source::CoreMemorySource;
-pub use memory_tools::{MemorySearchTool, CoreMemoryEditTool, ArchivalInsertTool};
+pub use fact_extraction::FactExtractor;
+pub use fact_store::{MemoryFactStore, UpsertOutcome};
+pub use hybrid_scorer::*;
+pub use long_term::*;
+pub use manager::*;
+pub use memory_tools::{ArchivalInsertTool, CoreMemoryEditTool, MemorySearchTool};
+pub use reflection::{EpisodicMemory, MemoryReflection, MemoryReflectionConfig};
+pub use short_term::*;
+pub use vector_store::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use oneai_core::{MemoryEntry, MemoryQuery};
     use oneai_core::traits::MemoryStore;
+    use oneai_core::{MemoryEntry, MemoryQuery};
+    use std::collections::HashMap;
 
     #[test]
     fn test_short_term_memory_push() {
@@ -171,7 +170,8 @@ mod tests {
             timestamp: chrono::Utc::now(),
             embedding: None,
             metadata: HashMap::new(),
-        }).await;
+        })
+        .await;
 
         let entries = stm.entries().await;
         assert_eq!(entries.len(), 1);
@@ -195,13 +195,14 @@ mod tests {
                 timestamp: chrono::Utc::now(),
                 embedding: None,
                 metadata: HashMap::new(),
-            }).await;
+            })
+            .await;
         }
 
         // Compress with a very low threshold — should evict some entries
         let evicted = stm.compress(100).await.unwrap();
         // Some entries should have been evicted
-        assert!(evicted.len() > 0);
+        assert!(!evicted.is_empty());
     }
 
     #[tokio::test]
@@ -209,26 +210,35 @@ mod tests {
         let store = ThreadSafeEmbeddedVectorStore::new();
 
         // Upsert some vectors
-        store.upsert_entry(
-            "doc1",
-            vec![0.1, 0.2, 0.3],
-            HashMap::from([("content".to_string(), "Rust programming".to_string())]),
-            chrono::Utc::now(),
-        ).await.unwrap();
+        store
+            .upsert_entry(
+                "doc1",
+                vec![0.1, 0.2, 0.3],
+                HashMap::from([("content".to_string(), "Rust programming".to_string())]),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
 
-        store.upsert_entry(
-            "doc2",
-            vec![0.4, 0.5, 0.6],
-            HashMap::from([("content".to_string(), "Python programming".to_string())]),
-            chrono::Utc::now() - chrono::Duration::hours(1),
-        ).await.unwrap();
+        store
+            .upsert_entry(
+                "doc2",
+                vec![0.4, 0.5, 0.6],
+                HashMap::from([("content".to_string(), "Python programming".to_string())]),
+                chrono::Utc::now() - chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
 
-        store.upsert_entry(
-            "doc3",
-            vec![0.1, 0.2, 0.4],
-            HashMap::from([("content".to_string(), "Rust tutorial".to_string())]),
-            chrono::Utc::now(),
-        ).await.unwrap();
+        store
+            .upsert_entry(
+                "doc3",
+                vec![0.1, 0.2, 0.4],
+                HashMap::from([("content".to_string(), "Rust tutorial".to_string())]),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(store.len().await, 3);
 
@@ -243,26 +253,41 @@ mod tests {
     async fn test_vector_store_keyword_search() {
         let store = ThreadSafeEmbeddedVectorStore::new();
 
-        store.upsert_entry(
-            "doc1",
-            vec![0.1, 0.2, 0.3],
-            HashMap::from([("content".to_string(), "Rust programming language".to_string())]),
-            chrono::Utc::now(),
-        ).await.unwrap();
+        store
+            .upsert_entry(
+                "doc1",
+                vec![0.1, 0.2, 0.3],
+                HashMap::from([(
+                    "content".to_string(),
+                    "Rust programming language".to_string(),
+                )]),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
 
-        store.upsert_entry(
-            "doc2",
-            vec![0.4, 0.5, 0.6],
-            HashMap::from([("content".to_string(), "Python programming language".to_string())]),
-            chrono::Utc::now(),
-        ).await.unwrap();
+        store
+            .upsert_entry(
+                "doc2",
+                vec![0.4, 0.5, 0.6],
+                HashMap::from([(
+                    "content".to_string(),
+                    "Python programming language".to_string(),
+                )]),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
 
-        store.upsert_entry(
-            "doc3",
-            vec![0.7, 0.8, 0.9],
-            HashMap::from([("content".to_string(), "The weather is sunny".to_string())]),
-            chrono::Utc::now(),
-        ).await.unwrap();
+        store
+            .upsert_entry(
+                "doc3",
+                vec![0.7, 0.8, 0.9],
+                HashMap::from([("content".to_string(), "The weather is sunny".to_string())]),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
 
         // Keyword search
         let results = store.search_by_keyword("programming", 10).await.unwrap();
@@ -276,12 +301,15 @@ mod tests {
     async fn test_embedded_vector_store_delete() {
         let store = ThreadSafeEmbeddedVectorStore::new();
 
-        store.upsert_entry(
-            "doc1",
-            vec![1.0, 0.0, 0.0],
-            HashMap::new(),
-            chrono::Utc::now(),
-        ).await.unwrap();
+        store
+            .upsert_entry(
+                "doc1",
+                vec![1.0, 0.0, 0.0],
+                HashMap::new(),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(store.len().await, 1);
 
@@ -309,29 +337,35 @@ mod tests {
         let store = ThreadSafeContentStore::new();
 
         // Insert entries
-        store.insert(MemoryEntry {
-            id: "1".to_string(),
-            content: "Rust programming language".to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: HashMap::from([("role".to_string(), "user".to_string())]),
-        }).await;
+        store
+            .insert(MemoryEntry {
+                id: "1".to_string(),
+                content: "Rust programming language".to_string(),
+                timestamp: chrono::Utc::now(),
+                embedding: None,
+                metadata: HashMap::from([("role".to_string(), "user".to_string())]),
+            })
+            .await;
 
-        store.insert(MemoryEntry {
-            id: "2".to_string(),
-            content: "Python programming language".to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: HashMap::from([("role".to_string(), "assistant".to_string())]),
-        }).await;
+        store
+            .insert(MemoryEntry {
+                id: "2".to_string(),
+                content: "Python programming language".to_string(),
+                timestamp: chrono::Utc::now(),
+                embedding: None,
+                metadata: HashMap::from([("role".to_string(), "assistant".to_string())]),
+            })
+            .await;
 
-        store.insert(MemoryEntry {
-            id: "3".to_string(),
-            content: "The weather is sunny".to_string(),
-            timestamp: chrono::Utc::now(),
-            embedding: None,
-            metadata: HashMap::from([("role".to_string(), "user".to_string())]),
-        }).await;
+        store
+            .insert(MemoryEntry {
+                id: "3".to_string(),
+                content: "The weather is sunny".to_string(),
+                timestamp: chrono::Utc::now(),
+                embedding: None,
+                metadata: HashMap::from([("role".to_string(), "user".to_string())]),
+            })
+            .await;
 
         assert_eq!(store.len().await, 3);
 
@@ -343,10 +377,12 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Keyword search with metadata filter
-        let results = store.search_by_keyword_with_filter(
-            "programming",
-            &HashMap::from([("role".to_string(), "user".to_string())]),
-        ).await;
+        let results = store
+            .search_by_keyword_with_filter(
+                "programming",
+                &HashMap::from([("role".to_string(), "user".to_string())]),
+            )
+            .await;
         assert_eq!(results.len(), 1);
 
         // Get by ID
@@ -408,7 +444,9 @@ mod tests {
             timestamp: chrono::Utc::now(),
             embedding: None,
             metadata: HashMap::from([("role".to_string(), "user".to_string())]),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         ltm.store(MemoryEntry {
             id: "2".to_string(),
@@ -416,7 +454,9 @@ mod tests {
             timestamp: chrono::Utc::now(),
             embedding: None,
             metadata: HashMap::from([("role".to_string(), "assistant".to_string())]),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         ltm.store(MemoryEntry {
             id: "3".to_string(),
@@ -424,7 +464,9 @@ mod tests {
             timestamp: chrono::Utc::now(),
             embedding: None,
             metadata: HashMap::new(),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Keyword search (no embedding)
         let query = MemoryQuery {

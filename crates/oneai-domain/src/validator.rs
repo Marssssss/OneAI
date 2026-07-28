@@ -82,7 +82,11 @@ impl ValidationIssue {
     }
 
     /// Create an Error-level issue with a specific location.
-    pub fn error_at(layer: impl Into<String>, message: impl Into<String>, location: impl Into<String>) -> Self {
+    pub fn error_at(
+        layer: impl Into<String>,
+        message: impl Into<String>,
+        location: impl Into<String>,
+    ) -> Self {
         Self {
             severity: ValidationSeverity::Error,
             layer: layer.into(),
@@ -127,14 +131,19 @@ pub struct ValidationResult {
 impl ValidationResult {
     /// Create a valid result with no issues.
     pub fn valid() -> Self {
-        Self { is_valid: true, issues: Vec::new() }
+        Self {
+            is_valid: true,
+            issues: Vec::new(),
+        }
     }
 
     /// Create a result from a list of issues.
     ///
     /// `is_valid` is computed from the presence of Error-level issues.
     pub fn from_issues(issues: Vec<ValidationIssue>) -> Self {
-        let is_valid = !issues.iter().any(|i| i.severity == ValidationSeverity::Error);
+        let is_valid = !issues
+            .iter()
+            .any(|i| i.severity == ValidationSeverity::Error);
         Self { is_valid, issues }
     }
 
@@ -150,17 +159,26 @@ impl ValidationResult {
 
     /// Get only Error-level issues.
     pub fn errors(&self) -> Vec<&ValidationIssue> {
-        self.issues.iter().filter(|i| i.severity == ValidationSeverity::Error).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == ValidationSeverity::Error)
+            .collect()
     }
 
     /// Get only Warning-level issues.
     pub fn warnings(&self) -> Vec<&ValidationIssue> {
-        self.issues.iter().filter(|i| i.severity == ValidationSeverity::Warning).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == ValidationSeverity::Warning)
+            .collect()
     }
 
     /// Get only Info-level issues.
     pub fn infos(&self) -> Vec<&ValidationIssue> {
-        self.issues.iter().filter(|i| i.severity == ValidationSeverity::Info).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == ValidationSeverity::Info)
+            .collect()
     }
 }
 
@@ -199,9 +217,21 @@ impl DomainPackValidator {
     fn validate_structural(config: &DomainPackConfig, issues: &mut Vec<ValidationIssue>) {
         // Name must be non-empty and match the pattern
         if config.name.is_empty() {
-            issues.push(ValidationIssue::error("spec", "DomainPack name must not be empty"));
-        } else if !config.name.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) {
-            issues.push(ValidationIssue::error("spec", "DomainPack name must start with a lowercase letter"));
+            issues.push(ValidationIssue::error(
+                "spec",
+                "DomainPack name must not be empty",
+            ));
+        } else if !config
+            .name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_lowercase())
+            .unwrap_or(false)
+        {
+            issues.push(ValidationIssue::error(
+                "spec",
+                "DomainPack name must start with a lowercase letter",
+            ));
         }
 
         // Name must match pattern [a-z][a-z0-9_-]*
@@ -217,7 +247,10 @@ impl DomainPackValidator {
 
         // Tools must be an array (can be empty, but that's a warning)
         if config.tools.is_empty() {
-            issues.push(ValidationIssue::warning("tools", "DomainPack has no tools — agent will have no capabilities"));
+            issues.push(ValidationIssue::warning(
+                "tools",
+                "DomainPack has no tools — agent will have no capabilities",
+            ));
         }
 
         // Tool names must be non-empty strings
@@ -234,7 +267,10 @@ impl DomainPackValidator {
         // Duplicate tool names
         let tool_set: HashSet<&str> = config.tools.iter().map(|s| s.as_str()).collect();
         if tool_set.len() != config.tools.len() {
-            issues.push(ValidationIssue::error("tools", "Duplicate tool names in tools list"));
+            issues.push(ValidationIssue::error(
+                "tools",
+                "Duplicate tool names in tools list",
+            ));
         }
 
         // Permission profile must have at least one rule
@@ -242,7 +278,10 @@ impl DomainPackValidator {
             && config.permission_profile.require_confirmation.is_empty()
             && config.permission_profile.deny_by_default.is_empty()
         {
-            issues.push(ValidationIssue::warning("permissions", "Permission profile has no rules — all tools will require confirmation by default"));
+            issues.push(ValidationIssue::warning(
+                "permissions",
+                "Permission profile has no rules — all tools will require confirmation by default",
+            ));
         }
 
         // Paradigm strategies: trigger and sequence must be non-empty
@@ -291,14 +330,19 @@ impl DomainPackValidator {
                     issues.push(ValidationIssue::warning_at(
                         "strategies",
                         format!("Sub-agent '{}' has no available tools", sub_agent.name),
-                        format!("paradigm_strategies[{}].sub_agents[{}].available_tools", i, j),
+                        format!(
+                            "paradigm_strategies[{}].sub_agents[{}].available_tools",
+                            i, j
+                        ),
                     ));
                 }
             }
         }
 
         // Compression template: preserve_fields should not be empty if specified
-        if !config.compression_template.name.is_empty() && config.compression_template.preserve_fields.is_empty() {
+        if !config.compression_template.name.is_empty()
+            && config.compression_template.preserve_fields.is_empty()
+        {
             issues.push(ValidationIssue::warning("compression", "Compression template has name but no preserve_fields — no fields will be prioritized during compression"));
         }
     }
@@ -344,7 +388,12 @@ impl DomainPackValidator {
             }
         }
 
-        for (i, tool_name) in config.permission_profile.require_confirmation.iter().enumerate() {
+        for (i, tool_name) in config
+            .permission_profile
+            .require_confirmation
+            .iter()
+            .enumerate()
+        {
             if !declared_tools.contains(tool_name.as_str()) {
                 issues.push(ValidationIssue::warning_at(
                     "permissions",
@@ -356,7 +405,10 @@ impl DomainPackValidator {
 
         for (i, deny) in config.permission_profile.deny_by_default.iter().enumerate() {
             // Deny patterns can be regex, so we check only exact matches
-            if !deny.tool.contains('*') && !deny.tool.contains('.') && !declared_tools.contains(deny.tool.as_str()) {
+            if !deny.tool.contains('*')
+                && !deny.tool.contains('.')
+                && !declared_tools.contains(deny.tool.as_str())
+            {
                 issues.push(ValidationIssue::info_at(
                     "permissions",
                     format!("Deny pattern tool '{}' is not in declared tools — pattern may match future tools", deny.tool),
@@ -370,7 +422,10 @@ impl DomainPackValidator {
             if let Err(e) = regex::Regex::new(&strategy.trigger) {
                 issues.push(ValidationIssue::error_at(
                     "strategies",
-                    format!("Invalid trigger pattern regex '{}': {}", strategy.trigger, e),
+                    format!(
+                        "Invalid trigger pattern regex '{}': {}",
+                        strategy.trigger, e
+                    ),
                     format!("paradigm_strategies[{}].trigger", i),
                 ));
             }
@@ -380,7 +435,9 @@ impl DomainPackValidator {
         for (i, strategy) in config.paradigm_strategies.iter().enumerate() {
             for (j, sub_agent) in strategy.sub_agents.iter().enumerate() {
                 for tool_name in &sub_agent.available_tools {
-                    if !declared_tools.contains(tool_name.as_str()) && !known_tools_set.contains(tool_name.as_str()) {
+                    if !declared_tools.contains(tool_name.as_str())
+                        && !known_tools_set.contains(tool_name.as_str())
+                    {
                         issues.push(ValidationIssue::warning_at(
                             "strategies",
                             format!("Sub-agent '{}' available tool '{}' is not in declared tools — it will be skipped", sub_agent.name, tool_name),
@@ -405,7 +462,10 @@ impl DomainPackValidator {
             if triggers.contains(&strategy.trigger) {
                 issues.push(ValidationIssue::warning_at(
                     "strategies",
-                    format!("Duplicate trigger pattern '{}' — first match will win", strategy.trigger),
+                    format!(
+                        "Duplicate trigger pattern '{}' — first match will win",
+                        strategy.trigger
+                    ),
                     "paradigm_strategies",
                 ));
             }
@@ -413,8 +473,10 @@ impl DomainPackValidator {
         }
 
         // Check: tool_decorators reference existing tools
-        for (tool_name, _description) in &config.tool_decorators {
-            if !declared_tools.contains(tool_name.as_str()) && !known_tools_set.contains(tool_name.as_str()) {
+        for tool_name in config.tool_decorators.keys() {
+            if !declared_tools.contains(tool_name.as_str())
+                && !known_tools_set.contains(tool_name.as_str())
+            {
                 issues.push(ValidationIssue::warning_at(
                     "tools",
                     format!("Tool decorator for '{}' references a tool not in the tools list — decorator will have no effect", tool_name),
@@ -429,7 +491,11 @@ impl DomainPackValidator {
 
 impl ValidationIssue {
     /// Create a Warning-level issue with a specific location.
-    fn warning_at(layer: impl Into<String>, message: impl Into<String>, location: impl Into<String>) -> Self {
+    fn warning_at(
+        layer: impl Into<String>,
+        message: impl Into<String>,
+        location: impl Into<String>,
+    ) -> Self {
         Self {
             severity: ValidationSeverity::Warning,
             layer: layer.into(),
@@ -439,7 +505,11 @@ impl ValidationIssue {
     }
 
     /// Create an Info-level issue with a specific location.
-    fn info_at(layer: impl Into<String>, message: impl Into<String>, location: impl Into<String>) -> Self {
+    fn info_at(
+        layer: impl Into<String>,
+        message: impl Into<String>,
+        location: impl Into<String>,
+    ) -> Self {
         Self {
             severity: ValidationSeverity::Info,
             layer: layer.into(),
@@ -505,7 +575,10 @@ mod tests {
         config.name = String::new();
         let result = DomainPackValidator::validate(&config);
         assert!(!result.is_valid());
-        assert!(result.errors().iter().any(|e| e.message.contains("name must not be empty")));
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("name must not be empty")));
     }
 
     #[test]
@@ -514,7 +587,10 @@ mod tests {
         config.name = "123coding".to_string();
         let result = DomainPackValidator::validate(&config);
         assert!(!result.is_valid());
-        assert!(result.errors().iter().any(|e| e.message.contains("lowercase letter")));
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("lowercase letter")));
     }
 
     #[test]
@@ -523,7 +599,10 @@ mod tests {
         config.name = "My Coding Pack".to_string(); // uppercase + spaces
         let result = DomainPackValidator::validate(&config);
         assert!(!result.is_valid());
-        assert!(result.errors().iter().any(|e| e.message.contains("invalid character")));
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("invalid character")));
     }
 
     #[test]
@@ -532,7 +611,10 @@ mod tests {
         config.tools = Vec::new();
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("no tools")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("no tools")));
     }
 
     #[test]
@@ -541,7 +623,10 @@ mod tests {
         config.tools.push("nonexistent_tool".to_string());
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("not in the known tool registry")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("not in the known tool registry")));
     }
 
     #[test]
@@ -550,16 +635,25 @@ mod tests {
         config.tools.push("read_file".to_string()); // duplicate
         let result = DomainPackValidator::validate(&config);
         assert!(!result.is_valid());
-        assert!(result.errors().iter().any(|e| e.message.contains("Duplicate tool")));
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("Duplicate tool")));
     }
 
     #[test]
     fn test_permission_references_unknown_tool_is_warning() {
         let mut config = make_valid_config();
-        config.permission_profile.auto_approve.push("unknown_tool".to_string());
+        config
+            .permission_profile
+            .auto_approve
+            .push("unknown_tool".to_string());
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("not declared in tools")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("not declared in tools")));
     }
 
     #[test]
@@ -568,16 +662,24 @@ mod tests {
         config.paradigm_strategies[0].trigger = "[invalid".to_string(); // invalid regex
         let result = DomainPackValidator::validate(&config);
         assert!(!result.is_valid());
-        assert!(result.errors().iter().any(|e| e.message.contains("Invalid trigger pattern")));
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("Invalid trigger pattern")));
     }
 
     #[test]
     fn test_invalid_paradigm_name_is_error() {
         let mut config = make_valid_config();
-        config.paradigm_strategies[0].sequence.push("UnknownParadigm".to_string());
+        config.paradigm_strategies[0]
+            .sequence
+            .push("UnknownParadigm".to_string());
         let result = DomainPackValidator::validate(&config);
         assert!(!result.is_valid());
-        assert!(result.errors().iter().any(|e| e.message.contains("Invalid paradigm name")));
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("Invalid paradigm name")));
     }
 
     #[test]
@@ -586,7 +688,10 @@ mod tests {
         config.system_prompt = String::new();
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("System prompt is empty")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("System prompt is empty")));
     }
 
     #[test]
@@ -595,7 +700,10 @@ mod tests {
         config.context_sources.push("unknown_source".to_string());
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("not in the known source")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("not in the known source")));
     }
 
     #[test]
@@ -604,16 +712,24 @@ mod tests {
         config.compression_template.preserve_fields = Vec::new();
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("no preserve_fields")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("no preserve_fields")));
     }
 
     #[test]
     fn test_sub_agent_unknown_tool_is_warning() {
         let mut config = make_valid_config();
-        config.paradigm_strategies[0].sub_agents[0].available_tools.push("unknown_tool".to_string());
+        config.paradigm_strategies[0].sub_agents[0]
+            .available_tools
+            .push("unknown_tool".to_string());
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("not in declared tools")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("not in declared tools")));
     }
 
     #[test]
@@ -622,7 +738,10 @@ mod tests {
         config.permission_profile.auto_approve = Vec::new();
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("no rules")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("no rules")));
     }
 
     #[test]
@@ -636,7 +755,10 @@ mod tests {
         });
         let result = DomainPackValidator::validate(&config);
         assert!(result.is_valid()); // Warning doesn't block
-        assert!(result.warnings().iter().any(|w| w.message.contains("Duplicate trigger")));
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("Duplicate trigger")));
     }
 
     #[test]

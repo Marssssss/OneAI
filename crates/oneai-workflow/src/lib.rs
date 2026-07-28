@@ -23,21 +23,20 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
+pub mod compiler;
 pub mod config;
 pub mod dag;
-pub mod compiler;
-pub mod validator;
 pub mod executor;
-pub mod state_graph;
-pub mod state_executor;
 pub mod render;
+pub mod state_executor;
+pub mod state_graph;
+pub mod validator;
 
+pub use compiler::*;
 pub use config::*;
 pub use dag::*;
-pub use compiler::*;
-pub use validator::*;
 pub use executor::*;
-pub use state_graph::*;
-pub use state_executor::*;
 pub use render::*;
+pub use state_executor::*;
+pub use state_graph::*;
+pub use validator::*;

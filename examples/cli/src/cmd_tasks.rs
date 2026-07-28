@@ -21,8 +21,8 @@ use oneai_core::traits::WorkingStateStore;
 use oneai_persistence::FileWorkingStateStore;
 use oneai_tool::CalculatorTool;
 
-use crate::config::OneaiConfig;
 use crate::cmd_pack::get_builtin_pack;
+use crate::config::OneaiConfig;
 
 /// Default working-state root — in-repo so it's git-trackable.
 const DEFAULT_ROOT: &str = "./.oneai";
@@ -53,10 +53,18 @@ pub fn cmd_tasks_list(user: Option<&str>, root: Option<&str>) {
             std::process::exit(1);
         });
     if briefs.is_empty() {
-        println!("No unfinished tasks for user '{}/project '{}'.", user.unwrap_or(""), project);
+        println!(
+            "No unfinished tasks for user '{}/project '{}'.",
+            user.unwrap_or(""),
+            project
+        );
         return;
     }
-    println!("Unfinished tasks (user '{}', project '{}'):", user.unwrap_or(""), project);
+    println!(
+        "Unfinished tasks (user '{}', project '{}'):",
+        user.unwrap_or(""),
+        project
+    );
     for b in &briefs {
         println!(
             "  • [{}] {} (步骤剩余 {}, 卡点 {}, 状态 {}, 更新 {})",
@@ -117,7 +125,11 @@ pub fn cmd_tasks_show(id: &str, root: Option<&str>) {
             }
         }
     }
-    let open: Vec<_> = ws.blockers.iter().filter(|b| b.status == oneai_core::BlockerStatus::Open).collect();
+    let open: Vec<_> = ws
+        .blockers
+        .iter()
+        .filter(|b| b.status == oneai_core::BlockerStatus::Open)
+        .collect();
     if !open.is_empty() {
         println!("\nOpen blockers:");
         for b in &open {
@@ -184,10 +196,14 @@ pub fn cmd_tasks_continue(
         for tool in &pack.tools {
             app.register_tool(tool.clone()).await.unwrap();
         }
-        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(app.skill_registry.clone())))
+        app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
+        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
+            app.skill_registry.clone(),
+        )))
+        .await
+        .unwrap();
 
         // Create a brand-new session (new session id, does NOT read the old
         // session's conversation) and bind it to the existing durable task.
@@ -199,7 +215,9 @@ pub fn cmd_tasks_continue(
         // into the pinned projection; ask the model to continue from the first
         // non-completed step.
         session
-            .run_agent_silent("继续上次未完成的任务，从第一个未完成步骤开始，不要重复已完成的工作。")
+            .run_agent_silent(
+                "继续上次未完成的任务，从第一个未完成步骤开始，不要重复已完成的工作。",
+            )
             .await
     });
 

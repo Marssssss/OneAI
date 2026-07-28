@@ -5,7 +5,7 @@
 //! These are used by the `/wf show` and `/wf graph` CLI commands.
 
 use crate::dag::WorkflowDag;
-use crate::state_graph::{StateGraph, NodeAction, EdgeCondition};
+use crate::state_graph::{EdgeCondition, NodeAction, StateGraph};
 
 /// Render a WorkflowDag as ASCII text showing parallel levels and step details.
 ///
@@ -80,8 +80,16 @@ pub fn render_state_graph_ascii(graph: &StateGraph) -> String {
     for node_id in &node_ids {
         let node = graph.nodes.get(node_id).unwrap();
         let action_str = match &node.action {
-            NodeAction::LlmInfer { system_prompt_override, include_tool_definitions, .. } => {
-                let tools_str = if *include_tool_definitions { " +tools" } else { "" };
+            NodeAction::LlmInfer {
+                system_prompt_override,
+                include_tool_definitions,
+                ..
+            } => {
+                let tools_str = if *include_tool_definitions {
+                    " +tools"
+                } else {
+                    ""
+                };
                 if system_prompt_override.is_some() {
                     format!("🧠 LLM (custom prompt){}", tools_str)
                 } else {
@@ -105,11 +113,14 @@ pub fn render_state_graph_ascii(graph: &StateGraph) -> String {
                     Some(EdgeCondition::IsFinalAnswer) => " [IsFinalAnswer]".to_string(),
                     Some(EdgeCondition::RequestsDelegation) => " [RequestsDelegation]".to_string(),
                     Some(EdgeCondition::ErrorOccurred) => " [ErrorOccurred]".to_string(),
-                    Some(EdgeCondition::StateEquals { variable, value }) =>
-                        format!(" [{}={}]", variable, value),
+                    Some(EdgeCondition::StateEquals { variable, value }) => {
+                        format!(" [{}={}]", variable, value)
+                    }
                     Some(EdgeCondition::Always) => String::new(),
                     Some(EdgeCondition::Custom { name, .. }) => format!(" [Custom:{}]", name),
-                    Some(EdgeCondition::ParadigmEquals { paradigm }) => format!(" [Paradigm={}]", paradigm),
+                    Some(EdgeCondition::ParadigmEquals { paradigm }) => {
+                        format!(" [Paradigm={}]", paradigm)
+                    }
                     Some(EdgeCondition::IterationExceeds { count }) => format!(" [Iter>{}]", count),
                     None => String::new(),
                 };

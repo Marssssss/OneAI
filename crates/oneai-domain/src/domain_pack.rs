@@ -23,13 +23,13 @@ use std::sync::Arc;
 
 use oneai_core::traits::Tool;
 
-use crate::context_source::ContextSource;
-use crate::permission_profile::PermissionProfile;
-use crate::paradigm_strategy::ParadigmStrategy;
 use crate::compression_template::CompressionTemplate;
-use crate::tool_decorator::ToolDecorator;
-use crate::paradigm_strategy::SubAgentTypeDefinition;
+use crate::context_source::ContextSource;
 use crate::memory_profile::MemoryProfile;
+use crate::paradigm_strategy::ParadigmStrategy;
+use crate::paradigm_strategy::SubAgentTypeDefinition;
+use crate::permission_profile::PermissionProfile;
+use crate::tool_decorator::ToolDecorator;
 
 // ─── DomainPack ────────────────────────────────────────────────────────────────
 
@@ -111,7 +111,6 @@ pub struct DomainPack {
     pub system_prompt_template: String,
 
     // ─── Layer 6: Predefined workflows ──────────────────────────────────────
-
     /// Domain-specific predefined WorkflowDag configurations.
     ///
     /// These are declared in the DomainPack and can be executed via
@@ -161,7 +160,8 @@ impl DomainPack {
     /// configuration (system_prompt, available_tools, etc.). If not,
     /// it falls back to the SubAgentKind's default configuration.
     pub fn get_sub_agent_definition(&self, kind: &str) -> Option<&SubAgentTypeDefinition> {
-        self.sub_agent_definitions.iter()
+        self.sub_agent_definitions
+            .iter()
             .find(|d| d.name.eq_ignore_ascii_case(kind))
     }
 }
@@ -182,7 +182,10 @@ impl std::fmt::Debug for DomainPack {
             .field("system_prompt_template", &self.system_prompt_template)
             .field("workflows_count", &self.workflows.len())
             .field("state_graphs_count", &self.state_graphs.len())
-            .field("sub_agent_definitions_count", &self.sub_agent_definitions.len())
+            .field(
+                "sub_agent_definitions_count",
+                &self.sub_agent_definitions.len(),
+            )
             .finish()
     }
 }
@@ -370,10 +373,10 @@ impl DomainPackBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneai_tool::CalculatorTool;
-    use crate::permission_profile::PermissionProfile;
     use crate::compression_template::CompressionTemplate;
     use crate::paradigm_strategy::SubAgentMergeStrategy;
+    use crate::permission_profile::PermissionProfile;
+    use oneai_tool::CalculatorTool;
 
     #[test]
     fn test_domain_pack_builder() {
@@ -469,6 +472,9 @@ mod tests {
     fn test_sub_agent_merge_strategy_equality() {
         assert_eq!(SubAgentMergeStrategy::Merge, SubAgentMergeStrategy::Merge);
         assert_ne!(SubAgentMergeStrategy::Merge, SubAgentMergeStrategy::Rebase);
-        assert_ne!(SubAgentMergeStrategy::Merge, SubAgentMergeStrategy::PreserveOnly);
+        assert_ne!(
+            SubAgentMergeStrategy::Merge,
+            SubAgentMergeStrategy::PreserveOnly
+        );
     }
 }

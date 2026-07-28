@@ -17,9 +17,8 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
 pub mod scheduler;
 
-pub use scheduler::*;
 pub use oneai_core::ScheduledTask;
 pub use oneai_core::TaskHandle;
+pub use scheduler::*;

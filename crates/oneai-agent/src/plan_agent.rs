@@ -16,11 +16,9 @@ use std::sync::Arc;
 // access.
 pub use oneai_core::{PlanStep, PlanStepStatus};
 
-use oneai_core::{
-    Conversation, InferenceRequest, Message, Role,
-};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{Conversation, InferenceRequest, Message, Role};
 
 /// A single step in a plan.
 ///
@@ -236,13 +234,18 @@ impl PlanAgent {
     }
 
     /// Decompose a task within an existing conversation context.
-    pub async fn plan_in_context(&self, conversation: &Conversation, task: &str) -> Result<PlanResult> {
+    pub async fn plan_in_context(
+        &self,
+        conversation: &Conversation,
+        task: &str,
+    ) -> Result<PlanResult> {
         let mut conv = conversation.clone();
         if !conv.messages.iter().any(|m| m.role == Role::System) {
             conv.add_message(Message::system(self.config.system_prompt.clone()));
         }
         conv.add_message(Message::user(format!(
-            "Please decompose this task into steps:\n\n{}", task
+            "Please decompose this task into steps:\n\n{}",
+            task
         )));
 
         let request = InferenceRequest {

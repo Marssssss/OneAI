@@ -20,8 +20,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use syntect::parsing::SyntaxSet;
 use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
 
 use super::super::theme::*;
 
@@ -33,11 +33,11 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 fn get_syntax_set() -> &'static SyntaxSet {
-    SYNTAX_SET.get_or_init(|| SyntaxSet::load_defaults_newlines())
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 fn get_theme_set() -> &'static ThemeSet {
-    THEME_SET.get_or_init(|| ThemeSet::load_defaults())
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
 // ─── Table State ──────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ pub fn render_markdown(content: &str, max_width: usize) -> Vec<Line<'static>> {
     options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
     options.insert(pulldown_cmark::Options::ENABLE_SMART_PUNCTUATION);
 
-    let mut parser = pulldown_cmark::Parser::new_ext(content, options);
+    let parser = pulldown_cmark::Parser::new_ext(content, options);
 
     let mut in_code_block = false;
     let mut code_lang = String::new();
@@ -91,7 +91,7 @@ pub fn render_markdown(content: &str, max_width: usize) -> Vec<Line<'static>> {
     // Table state — set when we encounter Tag::Table
     let mut table_state: Option<TableState> = None;
 
-    while let Some(event) = parser.next() {
+    for event in parser {
         match event {
             // ── Code block ──────────────────────────────────────────────────
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(kind)) => {
@@ -116,7 +116,10 @@ pub fn render_markdown(content: &str, max_width: usize) -> Vec<Line<'static>> {
                 if table_state.is_none() {
                     flush_spans(&mut current_spans, &mut lines);
                     // Add a visual separator line before the heading for H1 and H2
-                    if matches!(level, pulldown_cmark::HeadingLevel::H1 | pulldown_cmark::HeadingLevel::H2) {
+                    if matches!(
+                        level,
+                        pulldown_cmark::HeadingLevel::H1 | pulldown_cmark::HeadingLevel::H2
+                    ) {
                         lines.push(Line::from(Span::styled(
                             "─".repeat(max_width.min(60)),
                             Style::default().fg(HEADLINE_COLOR),
@@ -132,7 +135,9 @@ pub fn render_markdown(content: &str, max_width: usize) -> Vec<Line<'static>> {
                     };
                     current_spans.push(Span::styled(
                         prefix.to_string(),
-                        Style::default().fg(HEADLINE_COLOR).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(HEADLINE_COLOR)
+                            .add_modifier(Modifier::BOLD),
                     ));
                 }
             }
@@ -202,11 +207,13 @@ pub fn render_markdown(content: &str, max_width: usize) -> Vec<Line<'static>> {
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { .. }) => {
                 if let Some(ts) = &mut table_state {
                     // Inside a table cell — just accumulate a link indicator
-                    ts.current_cell.push_str("🔗");
+                    ts.current_cell.push('🔗');
                 } else {
                     current_spans.push(Span::styled(
                         "🔗".to_string(),
-                        Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::UNDERLINED),
                     ));
                 }
             }
@@ -322,11 +329,17 @@ pub fn render_markdown(content: &str, max_width: usize) -> Vec<Line<'static>> {
                     ts.current_cell.push_str(&text_str);
                 } else {
                     let style = if in_bold && in_italic {
-                        Style::default().fg(ASSISTANT_COLOR).add_modifier(Modifier::BOLD | Modifier::ITALIC)
+                        Style::default()
+                            .fg(ASSISTANT_COLOR)
+                            .add_modifier(Modifier::BOLD | Modifier::ITALIC)
                     } else if in_bold {
-                        Style::default().fg(ASSISTANT_COLOR).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(ASSISTANT_COLOR)
+                            .add_modifier(Modifier::BOLD)
                     } else if in_italic {
-                        Style::default().fg(ASSISTANT_COLOR).add_modifier(Modifier::ITALIC)
+                        Style::default()
+                            .fg(ASSISTANT_COLOR)
+                            .add_modifier(Modifier::ITALIC)
                     } else {
                         Style::default().fg(ASSISTANT_COLOR)
                     };
@@ -348,7 +361,10 @@ pub fn render_markdown(content: &str, max_width: usize) -> Vec<Line<'static>> {
     flush_spans(&mut current_spans, &mut lines);
 
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled("(empty)", Style::default().fg(ASSISTANT_COLOR))));
+        lines.push(Line::from(Span::styled(
+            "(empty)",
+            Style::default().fg(ASSISTANT_COLOR),
+        )));
     }
 
     lines
@@ -368,7 +384,11 @@ fn flush_spans(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
 /// which would push the right border │ off-screen and cause rendering artifacts.
 fn truncate_span_to_width(content: &str, max_visual_width: usize) -> String {
     if max_visual_width <= 1 {
-        return if max_visual_width == 1 { "…".to_string() } else { String::new() };
+        return if max_visual_width == 1 {
+            "…".to_string()
+        } else {
+            String::new()
+        };
     }
     if content.width() <= max_visual_width {
         return content.to_string();
@@ -403,7 +423,12 @@ fn render_code_block(lang: &str, content: &str, max_width: usize) -> Vec<Line<'s
     let lang_visual_width = lang_display.width();
     let fill_len = inner_width.saturating_sub(lang_visual_width + 1);
     lines.push(Line::from(vec![
-        Span::styled(format!("┌─ {} ", lang_display), Style::default().fg(CODE_BLOCK_BORDER).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("┌─ {} ", lang_display),
+            Style::default()
+                .fg(CODE_BLOCK_BORDER)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("─".repeat(fill_len), Style::default().fg(CODE_BLOCK_BORDER)),
         Span::styled("┐", Style::default().fg(CODE_BLOCK_BORDER)),
     ]));
@@ -413,9 +438,7 @@ fn render_code_block(lang: &str, content: &str, max_width: usize) -> Vec<Line<'s
     // Content lines: "│ " (2) + content + padding + " │" (2) = inner_width + 4
     // Truncate spans that would exceed inner_width to prevent │ from being pushed off-screen.
     for styled_line in highlighted_lines {
-        let mut line_spans = vec![
-            Span::styled("│ ", Style::default().fg(CODE_BLOCK_BORDER)),
-        ];
+        let mut line_spans = vec![Span::styled("│ ", Style::default().fg(CODE_BLOCK_BORDER))];
         let mut content_width = 0;
         for span in styled_line {
             let span_width = span.content.as_ref().width();
@@ -435,7 +458,10 @@ fn render_code_block(lang: &str, content: &str, max_width: usize) -> Vec<Line<'s
             }
         }
         let padding = inner_width.saturating_sub(content_width);
-        line_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)));
+        line_spans.push(Span::styled(
+            " ".repeat(padding),
+            Style::default().fg(ratatui::style::Color::Reset),
+        ));
         line_spans.push(Span::styled(" │", Style::default().fg(CODE_BLOCK_BORDER)));
         lines.push(Line::from(line_spans));
     }
@@ -443,7 +469,10 @@ fn render_code_block(lang: &str, content: &str, max_width: usize) -> Vec<Line<'s
     // Bottom border: └──────────┘  (1 + inner_width+2 + 1 = inner_width+4)
     lines.push(Line::from(vec![
         Span::styled("└", Style::default().fg(CODE_BLOCK_BORDER)),
-        Span::styled("─".repeat(inner_width + 2), Style::default().fg(CODE_BLOCK_BORDER)),
+        Span::styled(
+            "─".repeat(inner_width + 2),
+            Style::default().fg(CODE_BLOCK_BORDER),
+        ),
         Span::styled("┘", Style::default().fg(CODE_BLOCK_BORDER)),
     ]));
 
@@ -458,7 +487,8 @@ fn syntect_highlight(lang: &str, content: &str) -> Vec<Vec<Span<'static>>> {
     let ts = get_theme_set();
     let theme = &ts.themes["base16-mocha.dark"];
 
-    let syntax = ss.find_syntax_by_token(lang)
+    let syntax = ss
+        .find_syntax_by_token(lang)
         .or_else(|| ss.find_syntax_by_extension(lang))
         .or_else(|| ss.find_syntax_by_first_line(content))
         .cloned()
@@ -468,22 +498,37 @@ fn syntect_highlight(lang: &str, content: &str) -> Vec<Vec<Span<'static>>> {
     let mut result = Vec::new();
 
     for line in syntect::util::LinesWithEndings::from(content) {
-        let ranges = highlighter.highlight_line(line, &ss).unwrap_or_default();
-        let spans: Vec<Span<'static>> = ranges.iter().map(|(style, text)| {
-            let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-            let mut modifiers = Modifier::empty();
-            if style.font_style.contains(syntect::highlighting::FontStyle::BOLD) {
-                modifiers |= Modifier::BOLD;
-            }
-            if style.font_style.contains(syntect::highlighting::FontStyle::ITALIC) {
-                modifiers |= Modifier::ITALIC;
-            }
-            if style.font_style.contains(syntect::highlighting::FontStyle::UNDERLINE) {
-                modifiers |= Modifier::UNDERLINED;
-            }
-            let trimmed = text.trim_end_matches('\n').trim_end_matches('\r');
-            Span::styled(trimmed.to_string(), Style::default().fg(fg).add_modifier(modifiers))
-        }).collect();
+        let ranges = highlighter.highlight_line(line, ss).unwrap_or_default();
+        let spans: Vec<Span<'static>> = ranges
+            .iter()
+            .map(|(style, text)| {
+                let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+                let mut modifiers = Modifier::empty();
+                if style
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::BOLD)
+                {
+                    modifiers |= Modifier::BOLD;
+                }
+                if style
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::ITALIC)
+                {
+                    modifiers |= Modifier::ITALIC;
+                }
+                if style
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::UNDERLINE)
+                {
+                    modifiers |= Modifier::UNDERLINED;
+                }
+                let trimmed = text.trim_end_matches('\n').trim_end_matches('\r');
+                Span::styled(
+                    trimmed.to_string(),
+                    Style::default().fg(fg).add_modifier(modifiers),
+                )
+            })
+            .collect();
         result.push(spans);
     }
 
@@ -496,31 +541,40 @@ fn syntect_highlight(lang: &str, content: &str) -> Vec<Vec<Span<'static>>> {
 /// based on the maximum column width (including header).
 fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> Vec<Line<'static>> {
     if headers.is_empty() {
-        return vec![Line::from(Span::styled("(empty table)", Style::default().fg(ASSISTANT_COLOR)))];
+        return vec![Line::from(Span::styled(
+            "(empty table)",
+            Style::default().fg(ASSISTANT_COLOR),
+        ))];
     }
 
     let num_cols = headers.len();
 
     // Calculate column widths: max of header width and all row cell widths
-    let col_widths: Vec<usize> = (0..num_cols).map(|col_idx| {
-        let header_w = headers.get(col_idx).map(|h| h.width()).unwrap_or(0);
-        let max_row_w = rows.iter()
-            .map(|row| row.get(col_idx).map(|c| c.width()).unwrap_or(0))
-            .max()
-            .unwrap_or(0);
-        header_w.max(max_row_w)
-    }).collect();
+    let col_widths: Vec<usize> = (0..num_cols)
+        .map(|col_idx| {
+            let header_w = headers.get(col_idx).map(|h| h.width()).unwrap_or(0);
+            let max_row_w = rows
+                .iter()
+                .map(|row| row.get(col_idx).map(|c| c.width()).unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            header_w.max(max_row_w)
+        })
+        .collect();
 
     // Calculate total table width: borders + separators + content
     // │ col1 │ col2 │ col3 │ = total_border + total_content + col_separators
     let total_content_width = col_widths.iter().sum::<usize>();
     let total_table_width = total_content_width + num_cols + 1 + 2 * num_cols; // borders + separators + padding
-    // If table is too wide, shrink columns proportionally
+                                                                               // If table is too wide, shrink columns proportionally
     let available = max_width.saturating_sub(2); // subtract "│ " left border
     let col_widths = if total_table_width > max_width && available > 0 {
         // Distribute available width across columns proportionally
         let ratio = available as f64 / (total_content_width + num_cols + 1 + 2 * num_cols) as f64;
-        col_widths.iter().map(|w| ((*w as f64 * ratio) as usize).max(3)).collect::<Vec<usize>>()
+        col_widths
+            .iter()
+            .map(|w| ((*w as f64 * ratio) as usize).max(3))
+            .collect::<Vec<usize>>()
     } else {
         col_widths
     };
@@ -528,11 +582,12 @@ fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> V
     let mut lines = Vec::new();
 
     // Header separator line: ╔══════╦══════╗
-    let mut top_line_spans = vec![
-        Span::styled("╔", Style::default().fg(HEADLINE_COLOR)),
-    ];
+    let mut top_line_spans = vec![Span::styled("╔", Style::default().fg(HEADLINE_COLOR))];
     for (i, w) in col_widths.iter().enumerate() {
-        top_line_spans.push(Span::styled("═".repeat(*w + 2), Style::default().fg(HEADLINE_COLOR)));
+        top_line_spans.push(Span::styled(
+            "═".repeat(*w + 2),
+            Style::default().fg(HEADLINE_COLOR),
+        ));
         if i < num_cols - 1 {
             top_line_spans.push(Span::styled("╦", Style::default().fg(HEADLINE_COLOR)));
         }
@@ -541,13 +596,19 @@ fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> V
     lines.push(Line::from(top_line_spans));
 
     // Header row: │ col1 │ col2 │
-    let mut header_spans = vec![
-        Span::styled("║ ", Style::default().fg(HEADLINE_COLOR)),
-    ];
+    let mut header_spans = vec![Span::styled("║ ", Style::default().fg(HEADLINE_COLOR))];
     for (i, (header, w)) in headers.iter().zip(col_widths.iter()).enumerate() {
         let padding = w.saturating_sub(header.width());
-        header_spans.push(Span::styled(header.clone(), Style::default().fg(HEADLINE_COLOR).add_modifier(Modifier::BOLD)));
-        header_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(HEADLINE_COLOR)));
+        header_spans.push(Span::styled(
+            header.clone(),
+            Style::default()
+                .fg(HEADLINE_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ));
+        header_spans.push(Span::styled(
+            " ".repeat(padding),
+            Style::default().fg(HEADLINE_COLOR),
+        ));
         if i < num_cols - 1 {
             header_spans.push(Span::styled(" ║ ", Style::default().fg(HEADLINE_COLOR)));
         }
@@ -556,11 +617,12 @@ fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> V
     lines.push(Line::from(header_spans));
 
     // Header-data separator: ╠══════╬══════╣
-    let mut sep_spans = vec![
-        Span::styled("╠", Style::default().fg(HEADLINE_COLOR)),
-    ];
+    let mut sep_spans = vec![Span::styled("╠", Style::default().fg(HEADLINE_COLOR))];
     for (i, w) in col_widths.iter().enumerate() {
-        sep_spans.push(Span::styled("═".repeat(*w + 2), Style::default().fg(HEADLINE_COLOR)));
+        sep_spans.push(Span::styled(
+            "═".repeat(*w + 2),
+            Style::default().fg(HEADLINE_COLOR),
+        ));
         if i < num_cols - 1 {
             sep_spans.push(Span::styled("╬", Style::default().fg(HEADLINE_COLOR)));
         }
@@ -570,14 +632,18 @@ fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> V
 
     // Data rows: │ val │ val │
     for row in rows {
-        let mut row_spans = vec![
-            Span::styled("║ ", Style::default().fg(ASSISTANT_COLOR)),
-        ];
+        let mut row_spans = vec![Span::styled("║ ", Style::default().fg(ASSISTANT_COLOR))];
         for (i, w) in col_widths.iter().enumerate() {
             let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
             let padding = w.saturating_sub(cell.width());
-            row_spans.push(Span::styled(cell.to_string(), Style::default().fg(ASSISTANT_COLOR)));
-            row_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)));
+            row_spans.push(Span::styled(
+                cell.to_string(),
+                Style::default().fg(ASSISTANT_COLOR),
+            ));
+            row_spans.push(Span::styled(
+                " ".repeat(padding),
+                Style::default().fg(ratatui::style::Color::Reset),
+            ));
             if i < num_cols - 1 {
                 row_spans.push(Span::styled(" ║ ", Style::default().fg(CODE_BLOCK_BORDER)));
             }
@@ -587,11 +653,12 @@ fn render_table(headers: &[String], rows: &[Vec<String>], max_width: usize) -> V
     }
 
     // Bottom border: ╚══════╩══════╝
-    let mut bottom_spans = vec![
-        Span::styled("╚", Style::default().fg(HEADLINE_COLOR)),
-    ];
+    let mut bottom_spans = vec![Span::styled("╚", Style::default().fg(HEADLINE_COLOR))];
     for (i, w) in col_widths.iter().enumerate() {
-        bottom_spans.push(Span::styled("═".repeat(*w + 2), Style::default().fg(HEADLINE_COLOR)));
+        bottom_spans.push(Span::styled(
+            "═".repeat(*w + 2),
+            Style::default().fg(HEADLINE_COLOR),
+        ));
         if i < num_cols - 1 {
             bottom_spans.push(Span::styled("╩", Style::default().fg(HEADLINE_COLOR)));
         }

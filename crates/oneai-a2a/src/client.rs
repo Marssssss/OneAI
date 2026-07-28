@@ -41,8 +41,8 @@ use serde_json::Value;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{A2AError, Result};
-use crate::types::*;
 use crate::transport::*;
+use crate::types::*;
 
 // ─── A2AClient ──────────────────────────────────────────────────────────────────
 
@@ -123,7 +123,8 @@ impl A2AClient {
     /// Returns the AgentCard describing the agent's name, skills, capabilities,
     /// and authentication requirements.
     pub async fn discover(&mut self) -> Result<AgentCard> {
-        let request = JsonRpcRequest::new(self.next_id, METHOD_AGENT_GET_CARD, serde_json::json!({}));
+        let request =
+            JsonRpcRequest::new(self.next_id, METHOD_AGENT_GET_CARD, serde_json::json!({}));
         self.next_id += 1;
 
         let response = self.send_jsonrpc(&request).await?;
@@ -135,14 +136,21 @@ impl A2AClient {
         } else if let Some(card) = result.get("card") {
             card.clone()
         } else {
-            return Err(A2AError::Discovery("AgentCard not found in response".to_string()));
+            return Err(A2AError::Discovery(
+                "AgentCard not found in response".to_string(),
+            ));
         };
 
         let card: AgentCard = serde_json::from_value(card_json)
             .map_err(|e| A2AError::Serialization(format!("AgentCard parse error: {}", e)))?;
 
-        tracing::info!("A2A discovered agent '{}' at '{}' — {} skills, streaming={}",
-            card.name, card.url, card.skills.len(), card.capabilities.streaming);
+        tracing::info!(
+            "A2A discovered agent '{}' at '{}' — {} skills, streaming={}",
+            card.name,
+            card.url,
+            card.skills.len(),
+            card.capabilities.streaming
+        );
 
         self.agent_card = Some(card.clone());
         Ok(card)
@@ -176,8 +184,7 @@ impl A2AClient {
         let request = JsonRpcRequest::new(
             self.next_id,
             METHOD_TASKS_SEND,
-            serde_json::to_value(&params)
-                .map_err(|e| A2AError::Serialization(e.to_string()))?,
+            serde_json::to_value(&params).map_err(|e| A2AError::Serialization(e.to_string()))?,
         );
         self.next_id += 1;
 
@@ -200,8 +207,7 @@ impl A2AClient {
         let request = JsonRpcRequest::new(
             self.next_id, // Note: immutable borrow, can't increment — acceptable for read ops
             METHOD_TASKS_GET,
-            serde_json::to_value(&params)
-                .map_err(|e| A2AError::Serialization(e.to_string()))?,
+            serde_json::to_value(&params).map_err(|e| A2AError::Serialization(e.to_string()))?,
         );
 
         let response = self.send_jsonrpc(&request).await?;
@@ -223,8 +229,7 @@ impl A2AClient {
         let request = JsonRpcRequest::new(
             self.next_id,
             METHOD_TASKS_CANCEL,
-            serde_json::to_value(&params)
-                .map_err(|e| A2AError::Serialization(e.to_string()))?,
+            serde_json::to_value(&params).map_err(|e| A2AError::Serialization(e.to_string()))?,
         );
         self.next_id += 1;
 
@@ -263,27 +268,33 @@ impl A2AClient {
         let request = JsonRpcRequest::new(
             self.next_id,
             METHOD_TASKS_SEND_SUBSCRIBE,
-            serde_json::to_value(&params)
-                .map_err(|e| A2AError::Serialization(e.to_string()))?,
+            serde_json::to_value(&params).map_err(|e| A2AError::Serialization(e.to_string()))?,
         );
         self.next_id += 1;
 
         // SSE streaming requires a different HTTP approach — POST and read SSE response
         let request_json = request.to_json()?;
 
-        let http_request = self.http_client
+        let http_request = self
+            .http_client
             .post(&self.agent_url)
             .header("Content-Type", "application/json")
             .body(request_json)
             .timeout(std::time::Duration::from_secs(self.timeout_secs * 10)); // Longer timeout for streaming
 
-        let response = http_request.send().await
+        let response = http_request
+            .send()
+            .await
             .map_err(|e| A2AError::Network(format!("SSE HTTP POST error: {}", e)))?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(A2AError::Network(format!("SSE HTTP POST returned status {}: {}", status.as_u16(), &body[..body.len().min(200)])));
+            return Err(A2AError::Network(format!(
+                "SSE HTTP POST returned status {}: {}",
+                status.as_u16(),
+                &body[..body.len().min(200)]
+            )));
         }
 
         // Create a channel for streaming events
@@ -324,7 +335,9 @@ impl A2AClient {
             }
         });
 
-        Ok(TaskStream { inner: ReceiverStream::new(rx) })
+        Ok(TaskStream {
+            inner: ReceiverStream::new(rx),
+        })
     }
 
     // ─── HTTP Transport ─────────────────────────────────────────────────────────
@@ -335,7 +348,8 @@ impl A2AClient {
         let request_value: Value = serde_json::from_str(&request_json)
             .map_err(|e| A2AError::Serialization(e.to_string()))?;
 
-        let mut http_request = self.http_client
+        let mut http_request = self
+            .http_client
             .post(&self.agent_url)
             .json(&request_value)
             .timeout(std::time::Duration::from_secs(self.timeout_secs));
@@ -348,25 +362,38 @@ impl A2AClient {
             }
         }
 
-        tracing::debug!("A2A JSON-RPC request: method={}, id={}", request.method, request.id);
+        tracing::debug!(
+            "A2A JSON-RPC request: method={}, id={}",
+            request.method,
+            request.id
+        );
 
-        let response = http_request.send().await
-            .map_err(|e| A2AError::Network(format!("HTTP POST error to {}: {}", self.agent_url, e)))?;
+        let response = http_request.send().await.map_err(|e| {
+            A2AError::Network(format!("HTTP POST error to {}: {}", self.agent_url, e))
+        })?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(A2AError::Network(format!("HTTP POST returned status {} from {}: {}", status.as_u16(), self.agent_url, &body[..body.len().min(200)])));
+            return Err(A2AError::Network(format!(
+                "HTTP POST returned status {} from {}: {}",
+                status.as_u16(),
+                self.agent_url,
+                &body[..body.len().min(200)]
+            )));
         }
 
-        let body = response.text().await
+        let body = response
+            .text()
+            .await
             .map_err(|e| A2AError::Network(format!("HTTP response read error: {}", e)))?;
 
         // The response might be plain JSON or SSE format
         // Try plain JSON first (most common for non-streaming requests)
         if let Ok(json) = serde_json::from_str::<Value>(&body) {
-            let rpc_response: JsonRpcResponse = serde_json::from_value(json)
-                .map_err(|e| A2AError::Serialization(format!("JSON-RPC response parse error: {}", e)))?;
+            let rpc_response: JsonRpcResponse = serde_json::from_value(json).map_err(|e| {
+                A2AError::Serialization(format!("JSON-RPC response parse error: {}", e))
+            })?;
             return Ok(rpc_response);
         }
 
@@ -375,14 +402,20 @@ impl A2AClient {
             if line.starts_with("data: ") {
                 let data = line.trim_start_matches("data: ").trim();
                 if let Ok(json) = serde_json::from_str::<Value>(data) {
-                    let rpc_response: JsonRpcResponse = serde_json::from_value(json)
-                        .map_err(|e| A2AError::Serialization(format!("SSE JSON-RPC parse error: {}", e)))?;
+                    let rpc_response: JsonRpcResponse =
+                        serde_json::from_value(json).map_err(|e| {
+                            A2AError::Serialization(format!("SSE JSON-RPC parse error: {}", e))
+                        })?;
                     return Ok(rpc_response);
                 }
             }
         }
 
-        Err(A2AError::Protocol(format!("Could not parse response from {}: {}", self.agent_url, &body[..body.len().min(200)])))
+        Err(A2AError::Protocol(format!(
+            "Could not parse response from {}: {}",
+            self.agent_url,
+            &body[..body.len().min(200)]
+        )))
     }
 }
 
@@ -401,7 +434,10 @@ pub struct TaskStream {
 impl Stream for TaskStream {
     type Item = TaskStreamEvent;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
         Pin::new(&mut self.inner).poll_next(cx)
     }
 }
@@ -421,11 +457,12 @@ mod tests {
 
     #[test]
     fn test_client_with_headers() {
-        let headers = HashMap::from([
-            ("Authorization".to_string(), "Bearer token123".to_string()),
-        ]);
+        let headers = HashMap::from([("Authorization".to_string(), "Bearer token123".to_string())]);
         let client = A2AClient::with_headers("https://agent.example.com", headers);
-        assert_eq!(client.headers.get("Authorization").unwrap(), "Bearer token123");
+        assert_eq!(
+            client.headers.get("Authorization").unwrap(),
+            "Bearer token123"
+        );
     }
 
     #[test]
@@ -447,7 +484,10 @@ mod tests {
 
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(value.get("id").and_then(|v| v.as_str()), Some("task-001"));
-        assert_eq!(value.get("sessionId").and_then(|v| v.as_str()), Some("session-abc"));
+        assert_eq!(
+            value.get("sessionId").and_then(|v| v.as_str()),
+            Some("session-abc")
+        );
         assert_eq!(value.get("historyLength").and_then(|v| v.as_u64()), Some(5));
     }
 
@@ -459,7 +499,10 @@ mod tests {
         };
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(value.get("id").and_then(|v| v.as_str()), Some("task-002"));
-        assert_eq!(value.get("historyLength").and_then(|v| v.as_u64()), Some(10));
+        assert_eq!(
+            value.get("historyLength").and_then(|v| v.as_u64()),
+            Some(10)
+        );
     }
 
     #[test]

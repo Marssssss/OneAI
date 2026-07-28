@@ -19,31 +19,42 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::super::app::{ChatMessage, ChatRole};
-use super::spinner::spinner_char;
 use super::super::theme::*;
-use super::markdown::render_markdown;
-use super::diff::render_diff_lines;
 use super::approval::render_approval_card_inline;
+use super::diff::render_diff_lines;
+use super::markdown::render_markdown;
+use super::spinner::spinner_char;
 
 /// Render a single message as a list of Lines for the chat area.
 ///
 /// Returns the rendered lines for this message, respecting the collapsed state,
 /// available width, spinner frame, and approval selection index.
-pub fn render_message_lines(msg: &ChatMessage, is_collapsed: bool, max_width: usize, spinner_frame: usize, approval_selected_index: usize) -> Vec<Line<'static>> {
+pub fn render_message_lines(
+    msg: &ChatMessage,
+    is_collapsed: bool,
+    max_width: usize,
+    spinner_frame: usize,
+    approval_selected_index: usize,
+) -> Vec<Line<'static>> {
     let role = &msg.role;
     let content = &msg.content;
 
     match role {
         ChatRole::User => render_user_message(content, max_width),
         ChatRole::Assistant => render_assistant_message(content, max_width),
-        ChatRole::ToolInvocation { tool_name, args, result, .. } => {
-            render_tool_invocation(tool_name, args, result, content, is_collapsed, max_width)
-        }
+        ChatRole::ToolInvocation {
+            tool_name,
+            args,
+            result,
+            ..
+        } => render_tool_invocation(tool_name, args, result, content, is_collapsed, max_width),
         ChatRole::System => render_system_message(content),
         ChatRole::Iteration => render_iteration_message(content),
         ChatRole::Error => render_error_message(content),
         ChatRole::Approval => render_approval_message(content, max_width, approval_selected_index),
-        ChatRole::Thinking => render_thinking_message(content, is_collapsed, max_width, spinner_frame),
+        ChatRole::Thinking => {
+            render_thinking_message(content, is_collapsed, max_width, spinner_frame)
+        }
     }
 }
 
@@ -52,9 +63,9 @@ fn render_user_message(content: &str, max_width: usize) -> Vec<Line<'static>> {
     // Calculate bubble width: min(actual content visual width + padding, max_width * 0.8)
     let content_lines = wrap_content(content, max_width.saturating_sub(4));
     let max_content_line_width = content_lines.iter().map(|l| l.width()).max().unwrap_or(0);
-    let bubble_width = (max_content_line_width + 14)  // title + padding
+    let bubble_width = (max_content_line_width + 14) // title + padding
         .min((max_width as f64 * 0.8) as usize)
-        .max(20)  // minimum bubble width
+        .max(20) // minimum bubble width
         .min(max_width.saturating_sub(2));
 
     let inner_width = bubble_width.saturating_sub(4);
@@ -73,7 +84,10 @@ fn render_user_message(content: &str, max_width: usize) -> Vec<Line<'static>> {
     let fill_len = inner_width.saturating_sub(title_visual_width);
     lines.push(Line::from(vec![
         Span::styled("┌─ ", Style::default().fg(USER_BORDER)),
-        Span::styled(title_str, Style::default().fg(USER_COLOR).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title_str,
+            Style::default().fg(USER_COLOR).add_modifier(Modifier::BOLD),
+        ),
         Span::styled("─".repeat(fill_len), Style::default().fg(USER_BORDER)),
         Span::styled("┐", Style::default().fg(USER_BORDER)),
     ]));
@@ -87,7 +101,10 @@ fn render_user_message(content: &str, max_width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(USER_BORDER)),
             Span::styled(line_text, Style::default().fg(USER_COLOR)),
-            Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)),
+            Span::styled(
+                " ".repeat(padding),
+                Style::default().fg(ratatui::style::Color::Reset),
+            ),
             Span::styled(" │", Style::default().fg(USER_BORDER)),
         ]));
     }
@@ -95,7 +112,10 @@ fn render_user_message(content: &str, max_width: usize) -> Vec<Line<'static>> {
     // Bottom border: └──────────────┘  (total = 1 + inner_width+2 + 1 = inner_width+4)
     lines.push(Line::from(vec![
         Span::styled("└", Style::default().fg(USER_BORDER)),
-        Span::styled("─".repeat(inner_width + 2), Style::default().fg(USER_BORDER)),
+        Span::styled(
+            "─".repeat(inner_width + 2),
+            Style::default().fg(USER_BORDER),
+        ),
         Span::styled("┘", Style::default().fg(USER_BORDER)),
     ]));
 
@@ -125,7 +145,12 @@ fn render_assistant_message(content: &str, max_width: usize) -> Vec<Line<'static
     lines.push(Line::from(vec![
         Span::styled("┌─ ", Style::default().fg(ASSISTANT_BORDER)),
         Span::styled(emoji_str, Style::default().fg(ASSISTANT_COLOR)),
-        Span::styled(name_str, Style::default().fg(ASSISTANT_COLOR).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            name_str,
+            Style::default()
+                .fg(ASSISTANT_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("─".repeat(fill_len), Style::default().fg(ASSISTANT_BORDER)),
         Span::styled("┐", Style::default().fg(ASSISTANT_BORDER)),
     ]));
@@ -137,9 +162,7 @@ fn render_assistant_message(content: &str, max_width: usize) -> Vec<Line<'static
     for content_line in content_lines {
         let wrapped_line_groups = wrap_line_spans(content_line.spans, inner_width);
         for wrapped_spans in wrapped_line_groups {
-            let mut line_spans = vec![
-                Span::styled("│ ", Style::default().fg(ASSISTANT_BORDER)),
-            ];
+            let mut line_spans = vec![Span::styled("│ ", Style::default().fg(ASSISTANT_BORDER))];
             let mut content_width = 0;
             for span in wrapped_spans {
                 let span_width = span.content.as_ref().width();
@@ -149,7 +172,10 @@ fn render_assistant_message(content: &str, max_width: usize) -> Vec<Line<'static
             // Pad content to fill inner_width so the right border │ aligns
             let padding = inner_width.saturating_sub(content_width);
             if padding > 0 {
-                line_spans.push(Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)));
+                line_spans.push(Span::styled(
+                    " ".repeat(padding),
+                    Style::default().fg(ratatui::style::Color::Reset),
+                ));
             }
             line_spans.push(Span::styled(" │", Style::default().fg(ASSISTANT_BORDER)));
             lines.push(Line::from(line_spans));
@@ -159,7 +185,10 @@ fn render_assistant_message(content: &str, max_width: usize) -> Vec<Line<'static
     // Bottom border: └──────────────┘  (1 + inner_width+2 + 1 = inner_width+4)
     lines.push(Line::from(vec![
         Span::styled("└", Style::default().fg(ASSISTANT_BORDER)),
-        Span::styled("─".repeat(inner_width + 2), Style::default().fg(ASSISTANT_BORDER)),
+        Span::styled(
+            "─".repeat(inner_width + 2),
+            Style::default().fg(ASSISTANT_BORDER),
+        ),
         Span::styled("┘", Style::default().fg(ASSISTANT_BORDER)),
     ]));
 
@@ -182,14 +211,26 @@ fn render_assistant_message(content: &str, max_width: usize) -> Vec<Line<'static
 ///   - Expanded: all lines + "▲ collapse" button.
 ///
 /// Pending (no result yet): compact single-line `🔧 tool · args ⏳` indicator.
-fn render_tool_invocation(tool_name: &str, args: &str, result: &Option<(bool, String)>, _content: &str, is_collapsed: bool, max_width: usize) -> Vec<Line<'static>> {
+fn render_tool_invocation(
+    tool_name: &str,
+    args: &str,
+    result: &Option<(bool, String)>,
+    _content: &str,
+    is_collapsed: bool,
+    max_width: usize,
+) -> Vec<Line<'static>> {
     // ── Pending: compact single-line indicator ──────────────────────────────
     if result.is_none() {
         let args_preview = extract_tool_call_preview(tool_name, args);
         return vec![
             Line::from(vec![
                 Span::styled("  🔧 ", Style::default().fg(TOOL_CALL_COLOR)),
-                Span::styled(format!("{} ", tool_name), Style::default().fg(TOOL_CALL_COLOR).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} ", tool_name),
+                    Style::default()
+                        .fg(TOOL_CALL_COLOR)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(args_preview, Style::default().fg(MUTED)),
                 Span::styled(" ⏳", Style::default().fg(TOOL_CALL_COLOR)),
             ]),
@@ -214,7 +255,12 @@ fn render_tool_invocation(tool_name: &str, args: &str, result: &Option<(bool, St
     let fill_len = inner_width.saturating_sub(title_visual_width);
     lines.push(Line::from(vec![
         Span::styled("── ", Style::default().fg(border_color)),
-        Span::styled(title_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title_text,
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("─".repeat(fill_len), Style::default().fg(border_color)),
     ]));
 
@@ -232,7 +278,10 @@ fn render_tool_invocation(tool_name: &str, args: &str, result: &Option<(bool, St
                     Span::styled(val_part.to_string(), Style::default().fg(TEXT)),
                 ]));
             } else {
-                lines.push(Line::from(Span::styled(arg_line, Style::default().fg(MUTED))));
+                lines.push(Line::from(Span::styled(
+                    arg_line,
+                    Style::default().fg(MUTED),
+                )));
             }
         }
     }
@@ -241,9 +290,10 @@ fn render_tool_invocation(tool_name: &str, args: &str, result: &Option<(bool, St
     let result_lines = render_result_lines(result_content, *success, inner_width);
 
     // Result separator: ──── Result ───
-    lines.push(Line::from(vec![
-        Span::styled("─── Result ───", Style::default().fg(LABEL_DIM)),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "─── Result ───",
+        Style::default().fg(LABEL_DIM),
+    )]));
 
     let collapsible = result_lines.len() > COLLAPSE_THRESHOLD;
 
@@ -283,34 +333,62 @@ fn render_tool_invocation(tool_name: &str, args: &str, result: &Option<(bool, St
 /// - Empty / placeholder results → a single "(completed successfully)" line.
 /// - Diff content → coloured diff lines.
 /// - Everything else → wrapped plain text.
-fn render_result_lines(result_content: &str, success: bool, inner_width: usize) -> Vec<Line<'static>> {
+fn render_result_lines(
+    result_content: &str,
+    success: bool,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
     if result_content.is_empty() || result_content == "(completed successfully)" {
-        let msg = if success { "(completed successfully)" } else { "(failed — no output)" };
+        let msg = if success {
+            "(completed successfully)"
+        } else {
+            "(failed — no output)"
+        };
         return vec![Line::from(vec![
             Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
-            Span::styled(msg, Style::default().fg(if success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR })),
+            Span::styled(
+                msg,
+                Style::default().fg(if success {
+                    TOOL_RESULT_SUCCESS_COLOR
+                } else {
+                    TOOL_RESULT_FAILURE_COLOR
+                }),
+            ),
         ])];
     }
 
     // Diff content — coloured.
     if detect_diff_content(result_content) {
         let diff_lines = render_diff_lines(result_content, inner_width.saturating_sub(2));
-        return diff_lines.into_iter().map(|diff_line| {
-            let mut line_spans = vec![Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset))];
-            line_spans.extend(diff_line.spans);
-            Line::from(line_spans)
-        }).collect();
+        return diff_lines
+            .into_iter()
+            .map(|diff_line| {
+                let mut line_spans = vec![Span::styled(
+                    "  ",
+                    Style::default().fg(ratatui::style::Color::Reset),
+                )];
+                line_spans.extend(diff_line.spans);
+                Line::from(line_spans)
+            })
+            .collect();
     }
 
     // Regular output — wrap and display with the status color.
-    let status_color = if success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR };
+    let status_color = if success {
+        TOOL_RESULT_SUCCESS_COLOR
+    } else {
+        TOOL_RESULT_FAILURE_COLOR
+    };
     let wrapped = wrap_content(result_content, inner_width.saturating_sub(2));
-    wrapped.into_iter().map(|wrapped_line| {
-        Line::from(vec![
-            Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
-            Span::styled(wrapped_line, Style::default().fg(status_color)),
-        ])
-    }).collect()
+    wrapped
+        .into_iter()
+        .map(|wrapped_line| {
+            Line::from(vec![
+                Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
+                Span::styled(wrapped_line, Style::default().fg(status_color)),
+            ])
+        })
+        .collect()
 }
 
 /// Whether a message's collapsible content exceeds `COLLAPSE_THRESHOLD` lines at
@@ -322,18 +400,16 @@ fn render_result_lines(result_content: &str, success: bool, inner_width: usize) 
 /// and ignore clicks.
 pub fn message_is_collapsible(msg: &ChatMessage, width: usize) -> bool {
     match &msg.role {
-        ChatRole::ToolInvocation { result, .. } => {
-            match result {
-                None => false,
-                Some((_, content)) => {
-                    if content.is_empty() || content == "(completed successfully)" {
-                        return false;
-                    }
-                    let inner = width.saturating_sub(6);
-                    wrap_content(content, inner).len() > COLLAPSE_THRESHOLD
+        ChatRole::ToolInvocation { result, .. } => match result {
+            None => false,
+            Some((_, content)) => {
+                if content.is_empty() || content == "(completed successfully)" {
+                    return false;
                 }
+                let inner = width.saturating_sub(6);
+                wrap_content(content, inner).len() > COLLAPSE_THRESHOLD
             }
-        }
+        },
         ChatRole::Thinking => {
             if msg.content.trim().is_empty() || msg.content == "Processing your request..." {
                 return false;
@@ -415,7 +491,11 @@ fn format_tool_args(tool_name: &str, args: &str, max_width: usize) -> Vec<String
         for field in priority_fields {
             if let Some(val) = json.get(field) {
                 let val_str = value_to_display_string(val);
-                let line = format!("  {} = {}", field, truncate_str(&val_str, max_width.saturating_sub(field.len() + 6)));
+                let line = format!(
+                    "  {} = {}",
+                    field,
+                    truncate_str(&val_str, max_width.saturating_sub(field.len() + 6))
+                );
                 display_lines.push(line);
             }
         }
@@ -425,7 +505,11 @@ fn format_tool_args(tool_name: &str, args: &str, max_width: usize) -> Vec<String
             for (key, val) in map {
                 if !priority_fields.contains(&key.as_str()) {
                     let val_str = value_to_display_string(val);
-                    let line = format!("  {} = {}", key, truncate_str(&val_str, max_width.saturating_sub(key.len() + 6)));
+                    let line = format!(
+                        "  {} = {}",
+                        key,
+                        truncate_str(&val_str, max_width.saturating_sub(key.len() + 6))
+                    );
                     display_lines.push(line);
                 }
             }
@@ -433,8 +517,7 @@ fn format_tool_args(tool_name: &str, args: &str, max_width: usize) -> Vec<String
 
         if display_lines.is_empty() {
             // Fallback: show pretty-printed JSON
-            let pretty = serde_json::to_string_pretty(&json)
-                .unwrap_or_else(|_| args.to_string());
+            let pretty = serde_json::to_string_pretty(&json).unwrap_or_else(|_| args.to_string());
             return wrap_content(&pretty, max_width);
         }
 
@@ -458,15 +541,12 @@ fn value_to_display_string(val: &serde_json::Value) -> String {
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Array(arr) => {
             // Show array as comma-separated list (truncated)
-            let items: Vec<String> = arr.iter()
-                .map(|v| value_to_display_string(v))
-                .collect();
+            let items: Vec<String> = arr.iter().map(value_to_display_string).collect();
             truncate_str(&items.join(", "), 200)
         }
         serde_json::Value::Object(_) => {
             // For nested objects, show as compact JSON
-            let compact = serde_json::to_string(val)
-                .unwrap_or_default();
+            let compact = serde_json::to_string(val).unwrap_or_default();
             truncate_str(&compact, 200)
         }
     }
@@ -486,11 +566,14 @@ fn collapse_multiline(s: &str) -> String {
 
 /// Render a System message (gray, no bubble).
 fn render_system_message(content: &str) -> Vec<Line<'static>> {
-    content.lines()
-        .map(|line| Line::from(Span::styled(
-            format!("  ⚡ {}", line),
-            Style::default().fg(SYSTEM_COLOR),
-        )))
+    content
+        .lines()
+        .map(|line| {
+            Line::from(Span::styled(
+                format!("  ⚡ {}", line),
+                Style::default().fg(SYSTEM_COLOR),
+            ))
+        })
         .chain(std::iter::once(Line::from(Span::raw(""))))
         .collect()
 }
@@ -508,17 +591,26 @@ fn render_iteration_message(content: &str) -> Vec<Line<'static>> {
 
 /// Render an Error message.
 fn render_error_message(content: &str) -> Vec<Line<'static>> {
-    content.lines()
-        .map(|line| Line::from(Span::styled(
-            format!("  ✗ {}", line),
-            Style::default().fg(ERROR_COLOR).add_modifier(Modifier::BOLD),
-        )))
+    content
+        .lines()
+        .map(|line| {
+            Line::from(Span::styled(
+                format!("  ✗ {}", line),
+                Style::default()
+                    .fg(ERROR_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        })
         .chain(std::iter::once(Line::from(Span::raw(""))))
         .collect()
 }
 
 /// Render an Approval message (yellow warning card with adaptive width).
-fn render_approval_message(content: &str, max_width: usize, approval_selected_index: usize) -> Vec<Line<'static>> {
+fn render_approval_message(
+    content: &str,
+    max_width: usize,
+    approval_selected_index: usize,
+) -> Vec<Line<'static>> {
     render_approval_card_inline(content, max_width, approval_selected_index)
 }
 
@@ -529,7 +621,12 @@ fn render_approval_message(content: &str, max_width: usize, approval_selected_in
 /// - Content > `COLLAPSE_THRESHOLD` lines:
 ///   - Collapsed: first `COLLAPSE_THRESHOLD` lines + "▼ expand" button.
 ///   - Expanded: all lines + "▲ collapse" button.
-fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, spinner_frame: usize) -> Vec<Line<'static>> {
+fn render_thinking_message(
+    content: &str,
+    is_collapsed: bool,
+    max_width: usize,
+    spinner_frame: usize,
+) -> Vec<Line<'static>> {
     // Placeholder or empty — just the spinner, nothing to collapse.
     let is_placeholder = content.trim().is_empty() || content == "Processing your request...";
     if is_placeholder {
@@ -556,7 +653,12 @@ fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, 
     lines.push(Line::from(vec![
         Span::styled("┌─ ", Style::default().fg(THINKING_COLOR)),
         Span::styled(emoji_str, Style::default().fg(THINKING_COLOR)),
-        Span::styled(name_str, Style::default().fg(THINKING_COLOR).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            name_str,
+            Style::default()
+                .fg(THINKING_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("─".repeat(fill_len), Style::default().fg(THINKING_COLOR)),
         Span::styled("┐", Style::default().fg(THINKING_COLOR)),
     ]));
@@ -576,7 +678,10 @@ fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, 
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(THINKING_COLOR)),
             Span::styled(line_text.clone(), Style::default().fg(THINKING_COLOR)),
-            Span::styled(" ".repeat(padding), Style::default().fg(ratatui::style::Color::Reset)),
+            Span::styled(
+                " ".repeat(padding),
+                Style::default().fg(ratatui::style::Color::Reset),
+            ),
             Span::styled(" │", Style::default().fg(THINKING_COLOR)),
         ]));
     }
@@ -584,7 +689,10 @@ fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, 
     // Toggle button — only when the content is long enough to collapse.
     if collapsible {
         let hint = if is_collapsed {
-            format!("▼ expand ({} more lines)", content_lines.len() - COLLAPSE_THRESHOLD)
+            format!(
+                "▼ expand ({} more lines)",
+                content_lines.len() - COLLAPSE_THRESHOLD
+            )
         } else {
             "▲ collapse".to_string()
         };
@@ -593,7 +701,10 @@ fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, 
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(THINKING_COLOR)),
             Span::styled(hint, Style::default().fg(LABEL_DIM)),
-            Span::styled(" ".repeat(hint_padding), Style::default().fg(ratatui::style::Color::Reset)),
+            Span::styled(
+                " ".repeat(hint_padding),
+                Style::default().fg(ratatui::style::Color::Reset),
+            ),
             Span::styled(" │", Style::default().fg(THINKING_COLOR)),
         ]));
     }
@@ -601,7 +712,10 @@ fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, 
     // Bottom border: └─────────────────────┘
     lines.push(Line::from(vec![
         Span::styled("└", Style::default().fg(THINKING_COLOR)),
-        Span::styled("─".repeat(inner_width + 2), Style::default().fg(THINKING_COLOR)),
+        Span::styled(
+            "─".repeat(inner_width + 2),
+            Style::default().fg(THINKING_COLOR),
+        ),
         Span::styled("┘", Style::default().fg(THINKING_COLOR)),
     ]));
 
@@ -618,7 +732,11 @@ fn render_thinking_message(content: &str, is_collapsed: bool, max_width: usize, 
 #[allow(dead_code)]
 fn truncate_span_to_width(content: &str, max_visual_width: usize) -> String {
     if max_visual_width <= 1 {
-        return if max_visual_width == 1 { "…".to_string() } else { String::new() };
+        return if max_visual_width == 1 {
+            "…".to_string()
+        } else {
+            String::new()
+        };
     }
     if content.width() <= max_visual_width {
         return content.to_string();
@@ -647,7 +765,8 @@ fn wrap_content(content: &str, max_width: usize) -> Vec<String> {
         return vec![content.to_string()];
     }
 
-    content.lines()
+    content
+        .lines()
         .flat_map(|line| {
             let visual_width = line.width();
             if visual_width <= max_width {
@@ -725,7 +844,10 @@ fn detect_diff_content(content: &str) -> bool {
     let lines = content.lines().collect::<Vec<_>>();
 
     // Check for unified diff headers
-    if lines.iter().any(|l| l.starts_with("+++ ") || l.starts_with("--- ")) {
+    if lines
+        .iter()
+        .any(|l| l.starts_with("+++ ") || l.starts_with("--- "))
+    {
         return true;
     }
     if lines.iter().any(|l| l.starts_with("@@")) {
@@ -738,8 +860,11 @@ fn detect_diff_content(content: &str) -> bool {
     }
 
     // Check for multiple consecutive +/- lines (at least 3)
-    let diff_line_count = lines.iter()
-        .filter(|l| l.starts_with('+') && !l.starts_with("++") || l.starts_with('-') && !l.starts_with("--"))
+    let diff_line_count = lines
+        .iter()
+        .filter(|l| {
+            l.starts_with('+') && !l.starts_with("++") || l.starts_with('-') && !l.starts_with("--")
+        })
         .count();
     diff_line_count >= 3
 }
@@ -804,7 +929,13 @@ fn wrap_line_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<
 
             // Process the overflow part — it may itself need to be split across multiple groups
             if let Some(overflow) = overflow_part {
-                process_overflow_span(overflow, max_width, &mut groups, &mut current_group, &mut current_width);
+                process_overflow_span(
+                    overflow,
+                    max_width,
+                    &mut groups,
+                    &mut current_group,
+                    &mut current_width,
+                );
             }
         } else {
             // No remaining space — finalize current group (even if empty) and start fresh
@@ -815,7 +946,13 @@ fn wrap_line_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Vec<Span<
             }
 
             // Process this entire span as overflow
-            process_overflow_span(span, max_width, &mut groups, &mut current_group, &mut current_width);
+            process_overflow_span(
+                span,
+                max_width,
+                &mut groups,
+                &mut current_group,
+                &mut current_width,
+            );
         }
     }
 
@@ -891,7 +1028,10 @@ fn process_overflow_span(
 ///
 /// Tries to break at a space character within the span for word-wrap.
 /// If no suitable space is found, performs a hard character-boundary break.
-fn split_span_at_width(span: &Span<'static>, max_visual_width: usize) -> (Option<Span<'static>>, Option<Span<'static>>) {
+fn split_span_at_width(
+    span: &Span<'static>,
+    max_visual_width: usize,
+) -> (Option<Span<'static>>, Option<Span<'static>>) {
     if max_visual_width == 0 {
         return (None, Some(span.clone()));
     }
@@ -975,18 +1115,27 @@ fn format_tool_output(content: &str, max_width: usize) -> Vec<Line<'static>> {
 
     // Try to parse as JSON for pretty-printing
     if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(content) {
-        let pretty = serde_json::to_string_pretty(&json_value)
-            .unwrap_or_else(|_| content.to_string());
+        let pretty =
+            serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| content.to_string());
         return wrap_content(&pretty, max_width)
             .into_iter()
-            .map(|t| Line::from(Span::styled(t, Style::default().fg(ratatui::style::Color::Rgb(184, 180, 160))))
-            )
+            .map(|t| {
+                Line::from(Span::styled(
+                    t,
+                    Style::default().fg(ratatui::style::Color::Rgb(184, 180, 160)),
+                ))
+            })
             .collect();
     }
 
     // Plain text — wrap with appropriate styling
     wrap_content(content, max_width)
         .into_iter()
-        .map(|t| Line::from(Span::styled(t, Style::default().fg(ratatui::style::Color::Green))))
+        .map(|t| {
+            Line::from(Span::styled(
+                t,
+                Style::default().fg(ratatui::style::Color::Green),
+            ))
+        })
         .collect()
 }

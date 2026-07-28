@@ -33,7 +33,9 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
     // ── Context area (top) ──────────────────────────────────────────────
     items.push(ListItem::new(Line::from(Span::styled(
         format!(" {}", app.provider_info),
-        Style::default().fg(CONTEXT_PROVIDER_COLOR).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(CONTEXT_PROVIDER_COLOR)
+            .add_modifier(Modifier::BOLD),
     ))));
 
     items.push(ListItem::new(Line::from(Span::styled(
@@ -63,8 +65,16 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
     // Context occupancy line — the only token display in the sidebar
     let ctx_used = app.context_tokens;
     let ctx_max = app.context_window_size;
-    let ctx_prefix = if app.context_tokens_is_estimated { "~" } else { "" };
-    let ctx_ratio = if ctx_max > 0 { ctx_used as f64 / ctx_max as f64 } else { 0.0 };
+    let ctx_prefix = if app.context_tokens_is_estimated {
+        "~"
+    } else {
+        ""
+    };
+    let ctx_ratio = if ctx_max > 0 {
+        ctx_used as f64 / ctx_max as f64
+    } else {
+        0.0
+    };
     let ctx_pct = (ctx_ratio * 100.0).round() as u32;
     items.push(ListItem::new(Line::from(vec![
         Span::styled(
@@ -78,14 +88,26 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
             }),
         ),
         Span::styled(
-            format!(" {}/{}", format_token_count(ctx_used), format_token_count_u32(ctx_max)),
+            format!(
+                " {}/{}",
+                format_token_count(ctx_used),
+                format_token_count_u32(ctx_max)
+            ),
             Style::default().fg(ratatui::style::Color::Gray),
         ),
     ])));
 
-    let tok_prefix = if app.token_usage.is_estimated { "~" } else { "" };
+    let tok_prefix = if app.token_usage.is_estimated {
+        "~"
+    } else {
+        ""
+    };
     items.push(ListItem::new(Line::from(Span::styled(
-        format!(" 🪙 {}{} tokens", tok_prefix, format_token_count(app.token_usage.total)),
+        format!(
+            " 🪙 {}{} tokens",
+            tok_prefix,
+            format_token_count(app.token_usage.total)
+        ),
         Style::default().fg(CONTEXT_COST_COLOR),
     ))));
 
@@ -98,13 +120,17 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
     // ── Sessions section ─────────────────────────────────────────────────
     items.push(ListItem::new(Line::from(Span::styled(
         " 💬 Sessions",
-        Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(SIDEBAR_TITLE_COLOR)
+            .add_modifier(Modifier::BOLD),
     ))));
 
     for session in &app.sessions {
         let indicator = if session.is_active { "●" } else { "○" };
         let style = if session.is_active {
-            Style::default().fg(CONTEXT_SESSION_COLOR).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(CONTEXT_SESSION_COLOR)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(INACTIVE_SESSION_COLOR)
         };
@@ -116,10 +142,7 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         };
 
         items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                format!(" {} {}", indicator, session.short_id),
-                style,
-            ),
+            Span::styled(format!(" {} {}", indicator, session.short_id), style),
             Span::styled(
                 preview,
                 Style::default().fg(ratatui::style::Color::DarkGray),
@@ -137,83 +160,100 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
     // bar already surface. Toggled with `v`. Body kept at base indent for a
     // minimal diff — Rust does not require indentation inside `if`.
     if app.verbose_sidebar {
-    // ── Separator ────────────────────────────────────────────────────────
-    items.push(ListItem::new(Line::from(Span::styled(
-        " ──────────",
-        Style::default().fg(SIDEBAR_BORDER),
-    ))));
-
-    // ── Tools section ────────────────────────────────────────────────────
-    items.push(ListItem::new(Line::from(Span::styled(
-        " 🛠 Tools",
-        Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
-    ))));
-
-    // Find which tool(s) are currently being called (by checking ToolInvocation messages with pending result)
-    let active_tools: Vec<String> = app.messages.iter()
-        .rev()
-        .take_while(|m| matches!(m.role, ChatRole::ToolInvocation { result: None, .. } | ChatRole::Thinking))
-        .filter_map(|m| {
-            if let ChatRole::ToolInvocation { tool_name, result: None, .. } = &m.role {
-                Some(tool_name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for name in &app.tool_names {
-        let perm_label = permission_label(name);
-        let is_active = active_tools.contains(name);
-        let prefix = if is_active { "⚡" } else { " •" };
-        let name_style = if is_active {
-            Style::default().fg(ACTIVE_TOOL_COLOR).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(INACTIVE_TOOL_COLOR)
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("{} {} ", prefix, name),
-                name_style,
-            ),
-            Span::styled(
-                perm_label.to_string(),
-                Style::default().fg(ratatui::style::Color::DarkGray),
-            ),
-        ])));
-    }
-
-    // ── Paradigm section ─────────────────────────────────────────────────
-    items.push(ListItem::new(Line::from(Span::styled(
-        " ──────────",
-        Style::default().fg(SIDEBAR_BORDER),
-    ))));
-
-    items.push(ListItem::new(Line::from(Span::styled(
-        " 🔄 Paradigm",
-        Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
-    ))));
-
-    let paradigms = [
-        (ParadigmKind::ReAct, "ReAct"),
-        (ParadigmKind::Plan, "Plan"),
-        (ParadigmKind::Reflect, "Reflect"),
-        (ParadigmKind::Explore, "Explore"),
-    ];
-
-    for (kind, name) in paradigms {
-        let is_active = kind == app.active_paradigm;
-        let indicator = if is_active { "▸" } else { " " };
-        let style = if is_active {
-            Style::default().fg(ACTIVE_PARADIGM_COLOR).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(INACTIVE_PARADIGM_COLOR)
-        };
+        // ── Separator ────────────────────────────────────────────────────────
         items.push(ListItem::new(Line::from(Span::styled(
-            format!(" {} {}", indicator, name),
-            style,
+            " ──────────",
+            Style::default().fg(SIDEBAR_BORDER),
         ))));
-    }
+
+        // ── Tools section ────────────────────────────────────────────────────
+        items.push(ListItem::new(Line::from(Span::styled(
+            " 🛠 Tools",
+            Style::default()
+                .fg(SIDEBAR_TITLE_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ))));
+
+        // Find which tool(s) are currently being called (by checking ToolInvocation messages with pending result)
+        let active_tools: Vec<String> = app
+            .messages
+            .iter()
+            .rev()
+            .take_while(|m| {
+                matches!(
+                    m.role,
+                    ChatRole::ToolInvocation { result: None, .. } | ChatRole::Thinking
+                )
+            })
+            .filter_map(|m| {
+                if let ChatRole::ToolInvocation {
+                    tool_name,
+                    result: None,
+                    ..
+                } = &m.role
+                {
+                    Some(tool_name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for name in &app.tool_names {
+            let perm_label = permission_label(name);
+            let is_active = active_tools.contains(name);
+            let prefix = if is_active { "⚡" } else { " •" };
+            let name_style = if is_active {
+                Style::default()
+                    .fg(ACTIVE_TOOL_COLOR)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(INACTIVE_TOOL_COLOR)
+            };
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("{} {} ", prefix, name), name_style),
+                Span::styled(
+                    perm_label.to_string(),
+                    Style::default().fg(ratatui::style::Color::DarkGray),
+                ),
+            ])));
+        }
+
+        // ── Paradigm section ─────────────────────────────────────────────────
+        items.push(ListItem::new(Line::from(Span::styled(
+            " ──────────",
+            Style::default().fg(SIDEBAR_BORDER),
+        ))));
+
+        items.push(ListItem::new(Line::from(Span::styled(
+            " 🔄 Paradigm",
+            Style::default()
+                .fg(SIDEBAR_TITLE_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ))));
+
+        let paradigms = [
+            (ParadigmKind::ReAct, "ReAct"),
+            (ParadigmKind::Plan, "Plan"),
+            (ParadigmKind::Reflect, "Reflect"),
+            (ParadigmKind::Explore, "Explore"),
+        ];
+
+        for (kind, name) in paradigms {
+            let is_active = kind == app.active_paradigm;
+            let indicator = if is_active { "▸" } else { " " };
+            let style = if is_active {
+                Style::default()
+                    .fg(ACTIVE_PARADIGM_COLOR)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(INACTIVE_PARADIGM_COLOR)
+            };
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!(" {} {}", indicator, name),
+                style,
+            ))));
+        }
     } // end verbose_sidebar guard
 
     // ── Skills section ───────────────────────────────────────────────────
@@ -226,7 +266,9 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
     items.push(ListItem::new(Line::from(vec![
         Span::styled(
             " 🎯 Skills",
-            Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(SIDEBAR_TITLE_COLOR)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" ({})", skill_count),
@@ -242,7 +284,9 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         let icon = skill_icon(name);
         let indicator = if is_active { "▸" } else { "•" };
         let style = if is_active {
-            Style::default().fg(CONTEXT_PARADIGM_COLOR).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(CONTEXT_PARADIGM_COLOR)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(INACTIVE_TOOL_COLOR)
         };
@@ -260,26 +304,53 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
 
     items.push(ListItem::new(Line::from(Span::styled(
         " 🪙 Usage",
-        Style::default().fg(SIDEBAR_TITLE_COLOR).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(SIDEBAR_TITLE_COLOR)
+            .add_modifier(Modifier::BOLD),
     ))));
 
-    let tok_prefix = if app.token_usage.is_estimated { "~" } else { "" };
+    let tok_prefix = if app.token_usage.is_estimated {
+        "~"
+    } else {
+        ""
+    };
     items.push(ListItem::new(Line::from(Span::styled(
-        format!("  {}{} tokens", tok_prefix, format_token_count(app.token_usage.total)),
+        format!(
+            "  {}{} tokens",
+            tok_prefix,
+            format_token_count(app.token_usage.total)
+        ),
         Style::default().fg(CONTEXT_COST_COLOR),
     ))));
     items.push(ListItem::new(Line::from(Span::styled(
-        format!("  ↳ {} prompt + {} completion", app.token_usage.prompt, app.token_usage.completion),
+        format!(
+            "  ↳ {} prompt + {} completion",
+            app.token_usage.prompt, app.token_usage.completion
+        ),
         Style::default().fg(ratatui::style::Color::DarkGray),
     ))));
 
     // Context usage progress bar — visual representation of ctx occupancy
     let ctx_used = app.context_tokens;
     let ctx_max = app.context_window_size;
-    let ctx_prefix = if app.context_tokens_is_estimated { "~" } else { "" };
-    let ctx_ratio = if ctx_max > 0 { ctx_used as f64 / ctx_max as f64 } else { 0.0 };
+    let ctx_prefix = if app.context_tokens_is_estimated {
+        "~"
+    } else {
+        ""
+    };
+    let ctx_ratio = if ctx_max > 0 {
+        ctx_used as f64 / ctx_max as f64
+    } else {
+        0.0
+    };
     let ctx_pct = (ctx_ratio * 100.0).round() as u32;
-    let ctx_warning = if ctx_pct > 80 { "⚠️" } else if ctx_pct > 50 { "⚡" } else { "" };
+    let ctx_warning = if ctx_pct > 80 {
+        "⚠️"
+    } else if ctx_pct > 50 {
+        "⚡"
+    } else {
+        ""
+    };
     let budget_bar = render_context_bar(ctx_ratio, 20);
     items.push(ListItem::new(Line::from(budget_bar)));
     items.push(ListItem::new(Line::from(vec![
@@ -294,7 +365,11 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
             }),
         ),
         Span::styled(
-            format!(" {}/{}", format_token_count(ctx_used), format_token_count_u32(ctx_max)),
+            format!(
+                " {}/{}",
+                format_token_count(ctx_used),
+                format_token_count_u32(ctx_max)
+            ),
             Style::default().fg(ratatui::style::Color::Gray),
         ),
         Span::styled(
@@ -303,10 +378,11 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
         ),
     ])));
 
-    let sidebar = List::new(items)
-        .block(Block::default()
+    let sidebar = List::new(items).block(
+        Block::default()
             .borders(Borders::RIGHT)
-            .border_style(Style::default().fg(SIDEBAR_BORDER)));
+            .border_style(Style::default().fg(SIDEBAR_BORDER)),
+    );
 
     f.render_widget(sidebar, rect);
 }

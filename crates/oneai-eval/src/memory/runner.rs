@@ -46,11 +46,17 @@ impl Default for MemoryEvalConfig {
 impl MemoryEvalConfig {
     /// Keyword-only baseline (no embedding service) — the §12.1 control.
     pub fn no_embedding() -> Self {
-        Self { embedding_service: None, ..Self::default() }
+        Self {
+            embedding_service: None,
+            ..Self::default()
+        }
     }
     /// Semantic recall enabled (with an embedding service).
     pub fn with_embedding(svc: Arc<dyn EmbeddingService>) -> Self {
-        Self { embedding_service: Some(svc), ..Self::default() }
+        Self {
+            embedding_service: Some(svc),
+            ..Self::default()
+        }
     }
     /// Semantic recall via the bundled deterministic embedding service
     /// (offline, no API key) — a stand-in for a real embedding model that
@@ -78,12 +84,16 @@ impl EmbeddingService for DeterministicEmbeddingService {
             v[((b as usize).wrapping_add(i)) % 32] += 0.5;
         }
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-        for x in v.iter_mut() { *x /= norm; }
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
         Ok(v)
     }
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(texts.len());
-        for t in texts { out.push(self.embed(t).await?); }
+        for t in texts {
+            out.push(self.embed(t).await?);
+        }
         Ok(out)
     }
     fn model(&self) -> oneai_core::traits::EmbeddingModel {
@@ -121,14 +131,17 @@ impl MemoryEvalRunner {
         // the OLD value is soft-failed and recall returns the new one.
         for (sidx, session) in case.sessions.iter().enumerate() {
             mm.set_session_id(session.id.clone()).await;
-            let facts: Vec<_> = session.facts.iter()
+            let facts: Vec<_> = session
+                .facts
+                .iter()
                 .map(|pf| pf.to_memory_fact("eval_user", &session.id))
                 .collect();
             mm.archive_facts(facts).await;
             for (s, fidx) in &case.invalidate_after {
                 if *s == sidx {
                     if let Some(pf) = session.facts.get(*fidx) {
-                        mm.invalidate_fact("eval_user", &pf.subject, &pf.predicate).await;
+                        mm.invalidate_fact("eval_user", &pf.subject, &pf.predicate)
+                            .await;
                     }
                 }
             }
@@ -139,7 +152,8 @@ impl MemoryEvalRunner {
         cfg.top_k = self.config.k;
         let retrieved = mm.recall_facts_with_config(&case.question, &cfg).await?;
 
-        let retrieved_keys: Vec<(String, String)> = retrieved.iter()
+        let retrieved_keys: Vec<(String, String)> = retrieved
+            .iter()
             .map(|f| (f.subject.clone(), f.predicate.clone()))
             .collect();
 
@@ -150,10 +164,16 @@ impl MemoryEvalRunner {
 
         // Score retrieval (no LLM).
         let mut metrics = vec![
-            score01("recall_at_k", recall_at_k(&retrieved_keys, &case.evidence_keys, self.config.k),
-                format!("recall@{} of gold evidence keys", self.config.k)),
-            score01("ndcg_at_k", ndcg_at_k(&retrieved_keys, &case.evidence_keys, self.config.k),
-                format!("ndcg@{} vs gold evidence", self.config.k)),
+            score01(
+                "recall_at_k",
+                recall_at_k(&retrieved_keys, &case.evidence_keys, self.config.k),
+                format!("recall@{} of gold evidence keys", self.config.k),
+            ),
+            score01(
+                "ndcg_at_k",
+                ndcg_at_k(&retrieved_keys, &case.evidence_keys, self.config.k),
+                format!("ndcg@{} vs gold evidence", self.config.k),
+            ),
         ];
 
         // Score answer quality (lexical).
@@ -165,14 +185,30 @@ impl MemoryEvalRunner {
             // tokenized keyword matcher will weakly match subjects like
             // `user.*` via the word "user" in many questions, which is NOT a
             // substantive hit and must not count as a hallucinated recall.
-            let abstained = retrieved.iter().all(|f| {
-                !oneai_core::keyword_matches_any_token(&f.content, &case.question)
-            });
-            let reason = if abstained { "correctly abstained (no substantive content recall)".to_string() } else { "hallucinated content recall".to_string() };
-            metrics.push(score01("abstention", if abstained { 1.0 } else { 0.0 }, reason));
+            let abstained = retrieved
+                .iter()
+                .all(|f| !oneai_core::keyword_matches_any_token(&f.content, &case.question));
+            let reason = if abstained {
+                "correctly abstained (no substantive content recall)".to_string()
+            } else {
+                "hallucinated content recall".to_string()
+            };
+            metrics.push(score01(
+                "abstention",
+                if abstained { 1.0 } else { 0.0 },
+                reason,
+            ));
         } else {
-            metrics.push(score01("f1", f1_partial(&answer, &case.gold_answer), "token-level F1 vs gold"));
-            metrics.push(score01("bleu1", bleu1(&answer, &case.gold_answer), "unigram precision vs gold"));
+            metrics.push(score01(
+                "f1",
+                f1_partial(&answer, &case.gold_answer),
+                "token-level F1 vs gold",
+            ));
+            metrics.push(score01(
+                "bleu1",
+                bleu1(&answer, &case.gold_answer),
+                "unigram precision vs gold",
+            ));
         }
 
         // Optional LLM-judge.
@@ -205,7 +241,8 @@ fn synthesize_answer(case: &MemoryEvalCase, retrieved: &[oneai_core::MemoryFact]
             return "I don't know".to_string();
         }
         // Retrieved something for an abstention case → treat as hallucination.
-        return retrieved.iter()
+        return retrieved
+            .iter()
             .map(|f| f.content.clone())
             .collect::<Vec<_>>()
             .join(", ");
@@ -213,7 +250,8 @@ fn synthesize_answer(case: &MemoryEvalCase, retrieved: &[oneai_core::MemoryFact]
     if retrieved.is_empty() {
         return String::new();
     }
-    retrieved.iter()
+    retrieved
+        .iter()
         .map(|f| f.content.clone())
         .collect::<Vec<_>>()
         .join(", ")
@@ -248,7 +286,8 @@ async fn llm_judge(
     let resp = provider.infer(req).await?;
     let text = resp.message.text_content();
     // Parse the first f64 in the response.
-    Ok(text.split_whitespace()
+    Ok(text
+        .split_whitespace()
         .find_map(|t| t.trim_end_matches(',').parse::<f64>().ok())
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(0.0))

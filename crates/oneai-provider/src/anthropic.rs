@@ -8,19 +8,19 @@
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use oneai_core::{
-    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk,
-    ModelCapability, ModelConfig, Message, Role, TokenUsage,
-};
 use oneai_core::error::OneAIError;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{
+    ContentBlock, InferenceRequest, InferenceResponse, InferenceStreamChunk, Message,
+    ModelCapability, ModelConfig, Role, TokenUsage,
+};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::retry::{ProviderRetryConfig, is_retryable_status, send_with_retry};
+use crate::retry::{is_retryable_status, send_with_retry, ProviderRetryConfig};
 
 /// API mode selection for Anthropic provider.
 #[derive(Debug, Clone, PartialEq)]
@@ -180,7 +180,11 @@ impl AnthropicProvider {
         // Anthropic's prompt caching requires the system field to be an array of content blocks.
         // `Off` policy (set via InferenceRequest.metadata["prompt_cache_policy"]) strips the
         // breakpoints — used by the replay harness to measure the no-cache baseline.
-        let cache_on = req.metadata.get("prompt_cache_policy").map(|v| v != "off").unwrap_or(true);
+        let cache_on = req
+            .metadata
+            .get("prompt_cache_policy")
+            .map(|v| v != "off")
+            .unwrap_or(true);
         let cache_control = || serde_json::json!({ "type": "ephemeral" });
         if !system_text.is_empty() {
             let mut sys_block = serde_json::json!({
@@ -204,17 +208,21 @@ impl AnthropicProvider {
 
         if let Some(temperature) = req.temperature {
             body["temperature"] = Value::Number(
-                serde_json::Number::from_f64(temperature as f64).unwrap_or(serde_json::Number::from(1))
+                serde_json::Number::from_f64(temperature as f64)
+                    .unwrap_or(serde_json::Number::from(1)),
             );
         }
         if let Some(top_p) = req.top_p {
             body["top_p"] = Value::Number(
-                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1))
+                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1)),
             );
         }
         if !req.stop_sequences.is_empty() {
             body["stop_sequences"] = Value::Array(
-                req.stop_sequences.iter().map(|s| Value::String(s.clone())).collect()
+                req.stop_sequences
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
             );
         }
 
@@ -241,13 +249,17 @@ impl AnthropicProvider {
         // Anthropic recommends placing cache breakpoints at the end of the tools array
         // so that the entire tool definitions block is cached as a single prefix.
         if !req.tools.is_empty() {
-            let mut tools_json: Vec<Value> = req.tools.iter().map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.parameters_schema,
+            let mut tools_json: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters_schema,
+                    })
                 })
-            }).collect();
+                .collect();
 
             // Add cache_control to the last tool definition — this creates a
             // cache breakpoint that covers the entire system + tools prefix.
@@ -257,10 +269,7 @@ impl AnthropicProvider {
             if cache_on {
                 if let Some(last_tool) = tools_json.last_mut() {
                     if let Some(obj) = last_tool.as_object_mut() {
-                        obj.insert(
-                            "cache_control".to_string(),
-                            cache_control()
-                        );
+                        obj.insert("cache_control".to_string(), cache_control());
                     }
                 }
             }
@@ -384,7 +393,10 @@ impl AnthropicProvider {
         }
 
         // Collect system text for the `instructions` field
-        let instructions = req.conversation.messages.iter()
+        let instructions = req
+            .conversation
+            .messages
+            .iter()
             .filter(|m| m.role == Role::System)
             .map(|m| m.text_content())
             .collect::<Vec<_>>()
@@ -407,12 +419,13 @@ impl AnthropicProvider {
 
         if let Some(temperature) = req.temperature {
             body["temperature"] = Value::Number(
-                serde_json::Number::from_f64(temperature as f64).unwrap_or(serde_json::Number::from(1))
+                serde_json::Number::from_f64(temperature as f64)
+                    .unwrap_or(serde_json::Number::from(1)),
             );
         }
         if let Some(top_p) = req.top_p {
             body["top_p"] = Value::Number(
-                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1))
+                serde_json::Number::from_f64(top_p as f64).unwrap_or(serde_json::Number::from(1)),
             );
         }
 
@@ -433,14 +446,18 @@ impl AnthropicProvider {
 
         // Add tool definitions (Responses API format)
         if !req.tools.is_empty() {
-            let tools_json: Vec<Value> = req.tools.iter().map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters_schema,
+            let tools_json: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters_schema,
+                    })
                 })
-            }).collect();
+                .collect();
 
             body["tools"] = Value::Array(tools_json);
         }
@@ -454,7 +471,10 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    async fn infer(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+    async fn infer(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
         match self.api_mode() {
             ApiMode::Messages => self.infer_messages(req).await,
             ApiMode::Responses => self.infer_responses(req).await,
@@ -464,7 +484,8 @@ impl LlmProvider for AnthropicProvider {
     async fn infer_stream(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         match self.api_mode() {
             ApiMode::Messages => self.infer_stream_messages(req).await,
             ApiMode::Responses => self.infer_stream_responses(req).await,
@@ -508,44 +529,57 @@ impl LlmProvider for AnthropicProvider {
 
 impl AnthropicProvider {
     /// Messages API: non-streaming inference.
-    async fn infer_messages(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+    async fn infer_messages(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
         let body = self.to_anthropic_request(&req);
         let url = self.messages_url();
 
-        let response = send_with_retry(
-            &self.retry_config,
-            || {
-                let url = url.clone();
-                let body = body.clone();
-                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
-                self.client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send()
-            },
-        )
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+        })
         .await
         .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
             if is_retryable_status(status) {
                 return Err(OneAIError::RateLimit(format!(
                     "Anthropic API rate limit error after {} retries: {} — {}",
                     self.retry_config.max_retries, status, text
                 )));
             }
-            return Err(OneAIError::Provider(format!("Anthropic API error {}: {}", status, text)));
+            return Err(OneAIError::Provider(format!(
+                "Anthropic API error {}: {}",
+                status, text
+            )));
         }
 
-        let json: Value = response.json().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         // Parse Anthropic response format
-        let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let model = json
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let content_array = json.get("content").and_then(|c| c.as_array());
 
@@ -556,41 +590,71 @@ impl AnthropicProvider {
                 match block_type {
                     "text" => {
                         let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                        content_blocks.push(ContentBlock::Text { text: text.to_string() });
+                        content_blocks.push(ContentBlock::Text {
+                            text: text.to_string(),
+                        });
                     }
                     "tool_use" => {
-                        let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let input = block.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                        let id = block
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let input = block
+                            .get("input")
+                            .cloned()
+                            .unwrap_or(Value::Object(serde_json::Map::new()));
                         let args = input.to_string();
                         content_blocks.push(ContentBlock::ToolCall { id, name, args });
                     }
                     "thinking" => {
                         let text = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
-                        content_blocks.push(ContentBlock::Thinking { text: text.to_string() });
+                        content_blocks.push(ContentBlock::Thinking {
+                            text: text.to_string(),
+                        });
                     }
                     _ => {}
                 }
             }
         }
 
-        let usage = json.get("usage").map(|u| TokenUsage {
-            prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
-                + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            // Anthropic prompt-caching usage — populates the efficiency axis
-            // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
-            // runs. 0 when caching isn't used or the field is absent.
-            cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            cache_creation_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()}).unwrap_or(TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            ..Default::default()});
+        let usage = json
+            .get("usage")
+            .map(|u| TokenUsage {
+                prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                    as u32,
+                total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
+                    + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                // Anthropic prompt-caching usage — populates the efficiency axis
+                // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
+                // runs. 0 when caching isn't used or the field is absent.
+                cache_read_tokens: u
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                cache_creation_tokens: u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                ..Default::default()
+            })
+            .unwrap_or(TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                ..Default::default()
+            });
 
-        let stop_reason = json.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("end_turn");
+        let stop_reason = json
+            .get("stop_reason")
+            .and_then(|s| s.as_str())
+            .unwrap_or("end_turn");
 
         Ok(InferenceResponse {
             message: Message {
@@ -608,40 +672,44 @@ impl AnthropicProvider {
     async fn infer_stream_messages(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         let mut body = self.to_anthropic_request(&req);
         body["stream"] = Value::Bool(true);
 
         let url = self.messages_url();
 
-        let response = send_with_retry(
-            &self.retry_config,
-            || {
-                let url = url.clone();
-                let body = body.clone();
-                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
-                self.client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send()
-            },
-        )
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+        })
         .await
         .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
             if is_retryable_status(status) {
                 return Err(OneAIError::RateLimit(format!(
                     "Anthropic API rate limit error after {} retries: {} — {}",
                     self.retry_config.max_retries, status, text
                 )));
             }
-            return Err(OneAIError::Provider(format!("Anthropic API error {}: {}", status, text)));
+            return Err(OneAIError::Provider(format!(
+                "Anthropic API error {}: {}",
+                status, text
+            )));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -667,85 +735,125 @@ impl AnthropicProvider {
                         let event_type = event.event.clone();
 
                         if event_type == "message_stop" {
-                            let _ = tx.send(InferenceStreamChunk {
-                                content: vec![],
-                                is_final: true,
-                                usage: None,
-                                model: model_name.clone(),
-                            }).await;
+                            let _ = tx
+                                .send(InferenceStreamChunk {
+                                    content: vec![],
+                                    is_final: true,
+                                    usage: None,
+                                    model: model_name.clone(),
+                                })
+                                .await;
                             break;
                         }
 
                         if let Ok(json) = serde_json::from_str::<Value>(&event.data) {
-                            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            let event_type =
+                                json.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                             match event_type {
                                 "message_start" => {
                                     // Capture input_tokens from the message_start event
                                     let msg = json.get("message").unwrap_or(&Value::Null);
                                     let usage_obj = msg.get("usage").unwrap_or(&Value::Null);
-                                    prompt_tokens_from_start = usage_obj.get("input_tokens")
+                                    prompt_tokens_from_start = usage_obj
+                                        .get("input_tokens")
                                         .and_then(|v| v.as_u64())
-                                        .unwrap_or(0) as u32;
+                                        .unwrap_or(0)
+                                        as u32;
                                 }
                                 "content_block_start" => {
-                                    let content_block = json.get("content_block").unwrap_or(&Value::Null);
-                                    let cb_type = content_block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    let content_block =
+                                        json.get("content_block").unwrap_or(&Value::Null);
+                                    let cb_type = content_block
+                                        .get("type")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
 
                                     if cb_type == "tool_use" {
-                                        let id = content_block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let name = content_block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let id = content_block
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let name = content_block
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
                                         // Initialize args buffer for this tool call
-                                        tool_call_state.insert(id.clone(), (name.clone(), String::new()));
+                                        tool_call_state
+                                            .insert(id.clone(), (name.clone(), String::new()));
                                         current_tool_call_id = Some(id.clone());
 
                                         // Emit ToolCall with id and name, empty args (intent detected)
-                                        let _ = tx.send(InferenceStreamChunk {
-                                            content: vec![ContentBlock::ToolCall {
-                                                id: id.clone(),
-                                                name,
-                                                args: String::new(), // Args will be filled on content_block_stop
-                                            }],
-                                            is_final: false,
-                                            usage: None,
-                                            model: model_name.clone(),
-                                        }).await;
+                                        let _ = tx
+                                            .send(InferenceStreamChunk {
+                                                content: vec![ContentBlock::ToolCall {
+                                                    id: id.clone(),
+                                                    name,
+                                                    args: String::new(), // Args will be filled on content_block_stop
+                                                }],
+                                                is_final: false,
+                                                usage: None,
+                                                model: model_name.clone(),
+                                            })
+                                            .await;
                                     }
                                 }
                                 "content_block_delta" => {
                                     let delta = json.get("delta").unwrap_or(&Value::Null);
-                                    let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    let delta_type =
+                                        delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                                     match delta_type {
                                         "text_delta" => {
-                                            let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                            let text = delta
+                                                .get("text")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("");
                                             if !text.is_empty() {
-                                                let _ = tx.send(InferenceStreamChunk {
-                                                    content: vec![ContentBlock::Text { text: text.to_string() }],
-                                                    is_final: false,
-                                                    usage: None,
-                                                    model: model_name.clone(),
-                                                }).await;
+                                                let _ = tx
+                                                    .send(InferenceStreamChunk {
+                                                        content: vec![ContentBlock::Text {
+                                                            text: text.to_string(),
+                                                        }],
+                                                        is_final: false,
+                                                        usage: None,
+                                                        model: model_name.clone(),
+                                                    })
+                                                    .await;
                                             }
                                         }
                                         "input_json_delta" => {
                                             // Accumulate partial JSON into the current tool call's args buffer
-                                            let partial_json = delta.get("partial_json").and_then(|p| p.as_str()).unwrap_or("");
+                                            let partial_json = delta
+                                                .get("partial_json")
+                                                .and_then(|p| p.as_str())
+                                                .unwrap_or("");
                                             if let Some(tc_id) = &current_tool_call_id {
-                                                if let Some((_name, args_buffer)) = tool_call_state.get_mut(tc_id) {
+                                                if let Some((_name, args_buffer)) =
+                                                    tool_call_state.get_mut(tc_id)
+                                                {
                                                     args_buffer.push_str(partial_json);
                                                 }
                                             }
                                         }
                                         "thinking_delta" => {
-                                            let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                                            let text = delta
+                                                .get("thinking")
+                                                .and_then(|t| t.as_str())
+                                                .unwrap_or("");
                                             if !text.is_empty() {
-                                                let _ = tx.send(InferenceStreamChunk {
-                                                    content: vec![ContentBlock::Thinking { text: text.to_string() }],
-                                                    is_final: false,
-                                                    usage: None,
-                                                    model: model_name.clone(),
-                                                }).await;
+                                                let _ = tx
+                                                    .send(InferenceStreamChunk {
+                                                        content: vec![ContentBlock::Thinking {
+                                                            text: text.to_string(),
+                                                        }],
+                                                        is_final: false,
+                                                        usage: None,
+                                                        model: model_name.clone(),
+                                                    })
+                                                    .await;
                                             }
                                         }
                                         _ => {}
@@ -754,14 +862,18 @@ impl AnthropicProvider {
                                 "content_block_stop" => {
                                     // If we were accumulating a tool call, finalize it with complete args
                                     if let Some(tc_id) = current_tool_call_id.take() {
-                                        if let Some((name, args_buffer)) = tool_call_state.remove(&tc_id) {
+                                        if let Some((name, args_buffer)) =
+                                            tool_call_state.remove(&tc_id)
+                                        {
                                             // The args_buffer contains all accumulated partial_json fragments
                                             // Validate it's proper JSON; if not, wrap it as-is
                                             let args = if args_buffer.is_empty() {
                                                 "{}".to_string()
                                             } else {
                                                 // Try to parse as JSON to validate
-                                                if serde_json::from_str::<Value>(&args_buffer).is_ok() {
+                                                if serde_json::from_str::<Value>(&args_buffer)
+                                                    .is_ok()
+                                                {
                                                     args_buffer
                                                 } else {
                                                     // If invalid JSON, still pass it (provider may send incomplete)
@@ -769,39 +881,59 @@ impl AnthropicProvider {
                                                 }
                                             };
 
-                                            let _ = tx.send(InferenceStreamChunk {
-                                                content: vec![ContentBlock::ToolCall {
-                                                    id: tc_id.clone(),
-                                                    name: name.clone(),
-                                                    args,
-                                                }],
-                                                is_final: false,
-                                                usage: None,
-                                                model: model_name.clone(),
-                                            }).await;
+                                            let _ = tx
+                                                .send(InferenceStreamChunk {
+                                                    content: vec![ContentBlock::ToolCall {
+                                                        id: tc_id.clone(),
+                                                        name: name.clone(),
+                                                        args,
+                                                    }],
+                                                    is_final: false,
+                                                    usage: None,
+                                                    model: model_name.clone(),
+                                                })
+                                                .await;
                                         }
                                     }
                                 }
                                 "message_delta" => {
                                     let delta = json.get("delta").unwrap_or(&Value::Null);
-                                    let stop_reason = delta.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
+                                    let stop_reason = delta
+                                        .get("stop_reason")
+                                        .and_then(|s| s.as_str())
+                                        .unwrap_or("");
 
                                     let usage_obj = json.get("usage").unwrap_or(&Value::Null);
-                                    let output_tokens = usage_obj.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    let output_tokens = usage_obj
+                                        .get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                        as u32;
                                     let usage = TokenUsage {
                                         prompt_tokens: prompt_tokens_from_start,
                                         completion_tokens: output_tokens,
                                         total_tokens: prompt_tokens_from_start + output_tokens,
-                                        cache_read_tokens: usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                        cache_creation_tokens: usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()};
+                                        cache_read_tokens: usage_obj
+                                            .get("cache_read_input_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                        cache_creation_tokens: usage_obj
+                                            .get("cache_creation_input_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                        ..Default::default()
+                                    };
 
-                                    let _ = tx.send(InferenceStreamChunk {
-                                        content: vec![],
-                                        is_final: stop_reason != "",
-                                        usage: Some(usage),
-                                        model: model_name.clone(),
-                                    }).await;
+                                    let _ = tx
+                                        .send(InferenceStreamChunk {
+                                            content: vec![],
+                                            is_final: !stop_reason.is_empty(),
+                                            usage: Some(usage),
+                                            model: model_name.clone(),
+                                        })
+                                        .await;
                                 }
                                 _ => {}
                             }
@@ -819,47 +951,60 @@ impl AnthropicProvider {
     }
 
     /// Responses API: non-streaming inference.
-    async fn infer_responses(&self, req: InferenceRequest) -> std::result::Result<InferenceResponse, OneAIError> {
+    async fn infer_responses(
+        &self,
+        req: InferenceRequest,
+    ) -> std::result::Result<InferenceResponse, OneAIError> {
         let body = self.to_responses_request(&req);
         let url = self.responses_url();
 
-        let response = send_with_retry(
-            &self.retry_config,
-            || {
-                let url = url.clone();
-                let body = body.clone();
-                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
-                self.client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send()
-            },
-        )
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+        })
         .await
         .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
             if is_retryable_status(status) {
                 return Err(OneAIError::RateLimit(format!(
                     "Anthropic API rate limit error after {} retries: {} — {}",
                     self.retry_config.max_retries, status, text
                 )));
             }
-            return Err(OneAIError::Provider(format!("Anthropic Responses API error {}: {}", status, text)));
+            return Err(OneAIError::Provider(format!(
+                "Anthropic Responses API error {}: {}",
+                status, text
+            )));
         }
 
-        let json: Value = response.json().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         // Parse Anthropic Responses API format
         // The response has a different structure from Messages API:
         // - `output` array contains items (message, function_call, function_call_output)
         // - `usage` is in the top-level object
-        let model = json.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let model = json
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let output_items = json.get("output").and_then(|o| o.as_array());
 
@@ -873,15 +1018,26 @@ impl AnthropicProvider {
                         let content = item.get("content").and_then(|c| c.as_array());
                         if let Some(content) = content {
                             for block in content {
-                                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                let block_type =
+                                    block.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                 match block_type {
                                     "output_text" | "text" => {
-                                        let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                        content_blocks.push(ContentBlock::Text { text: text.to_string() });
+                                        let text = block
+                                            .get("text")
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("");
+                                        content_blocks.push(ContentBlock::Text {
+                                            text: text.to_string(),
+                                        });
                                     }
                                     "thinking" => {
-                                        let text = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
-                                        content_blocks.push(ContentBlock::Thinking { text: text.to_string() });
+                                        let text = block
+                                            .get("thinking")
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("");
+                                        content_blocks.push(ContentBlock::Thinking {
+                                            text: text.to_string(),
+                                        });
                                     }
                                     _ => {}
                                 }
@@ -889,41 +1045,78 @@ impl AnthropicProvider {
                         }
                     }
                     "function_call" => {
-                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let input = item.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                        let id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let input = item
+                            .get("input")
+                            .cloned()
+                            .unwrap_or(Value::Object(serde_json::Map::new()));
                         let args = input.to_string();
                         content_blocks.push(ContentBlock::ToolCall { id, name, args });
                     }
                     "function_call_output" => {
                         // Tool results — these are returned in the output but
                         // they're part of the conversation history, not the current response
-                        let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let output = item.get("output").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        content_blocks.push(ContentBlock::ToolResult { call_id, content: output });
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let output = item
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        content_blocks.push(ContentBlock::ToolResult {
+                            call_id,
+                            content: output,
+                        });
                     }
                     _ => {}
                 }
             }
         }
 
-        let usage = json.get("usage").map(|u| TokenUsage {
-            prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
-                + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            // Anthropic prompt-caching usage — populates the efficiency axis
-            // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
-            // runs. 0 when caching isn't used or the field is absent.
-            cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            cache_creation_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()}).unwrap_or(TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            ..Default::default()});
+        let usage = json
+            .get("usage")
+            .map(|u| TokenUsage {
+                prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                    as u32,
+                total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
+                    + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                // Anthropic prompt-caching usage — populates the efficiency axis
+                // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
+                // runs. 0 when caching isn't used or the field is absent.
+                cache_read_tokens: u
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                cache_creation_tokens: u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                ..Default::default()
+            })
+            .unwrap_or(TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                ..Default::default()
+            });
 
-        let stop_reason = json.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
+        let stop_reason = json
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("completed");
 
         Ok(InferenceResponse {
             message: Message {
@@ -941,40 +1134,44 @@ impl AnthropicProvider {
     async fn infer_stream_responses(
         &self,
         req: InferenceRequest,
-    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError> {
+    ) -> std::result::Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>, OneAIError>
+    {
         let mut body = self.to_responses_request(&req);
         body["stream"] = Value::Bool(true);
 
         let url = self.responses_url();
 
-        let response = send_with_retry(
-            &self.retry_config,
-            || {
-                let url = url.clone();
-                let body = body.clone();
-                let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
-                self.client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send()
-            },
-        )
+        let response = send_with_retry(&self.retry_config, || {
+            let url = url.clone();
+            let body = body.clone();
+            let api_key = self.config.api_key.as_deref().unwrap_or("").to_string();
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+        })
         .await
         .map_err(|e| OneAIError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.map_err(|e| OneAIError::Network(e.to_string()))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|e| OneAIError::Network(e.to_string()))?;
             if is_retryable_status(status) {
                 return Err(OneAIError::RateLimit(format!(
                     "Anthropic API rate limit error after {} retries: {} — {}",
                     self.retry_config.max_retries, status, text
                 )));
             }
-            return Err(OneAIError::Provider(format!("Anthropic Responses API error {}: {}", status, text)));
+            return Err(OneAIError::Provider(format!(
+                "Anthropic Responses API error {}: {}",
+                status, text
+            )));
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -995,108 +1192,156 @@ impl AnthropicProvider {
                 match event {
                     Ok(event) => {
                         if let Ok(json) = serde_json::from_str::<Value>(&event.data) {
-                            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            let event_type =
+                                json.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                             match event_type {
                                 "response.start" => {
-                                    let usage_obj = json.get("response")
+                                    let usage_obj = json
+                                        .get("response")
                                         .and_then(|r| r.get("usage"))
                                         .unwrap_or(&Value::Null);
-                                    prompt_tokens_from_start = usage_obj.get("input_tokens")
+                                    prompt_tokens_from_start = usage_obj
+                                        .get("input_tokens")
                                         .and_then(|v| v.as_u64())
-                                        .unwrap_or(0) as u32;
+                                        .unwrap_or(0)
+                                        as u32;
                                 }
                                 "response.output_item.start" => {
                                     let item = json.get("item").unwrap_or(&Value::Null);
-                                    let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    let item_type =
+                                        item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                     if item_type == "function_call" {
-                                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        function_call_state.insert(id.clone(), (name.clone(), String::new()));
+                                        let id = item
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let name = item
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        function_call_state
+                                            .insert(id.clone(), (name.clone(), String::new()));
                                         current_function_call_id = Some(id.clone());
 
-                                        let _ = tx.send(InferenceStreamChunk {
-                                            content: vec![ContentBlock::ToolCall {
-                                                id: id.clone(),
-                                                name,
-                                                args: String::new(),
-                                            }],
-                                            is_final: false,
-                                            usage: None,
-                                            model: model_name.clone(),
-                                        }).await;
+                                        let _ = tx
+                                            .send(InferenceStreamChunk {
+                                                content: vec![ContentBlock::ToolCall {
+                                                    id: id.clone(),
+                                                    name,
+                                                    args: String::new(),
+                                                }],
+                                                is_final: false,
+                                                usage: None,
+                                                model: model_name.clone(),
+                                            })
+                                            .await;
                                     }
                                 }
                                 "response.output_text.delta" => {
-                                    let text = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                                    let text =
+                                        json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
                                     if !text.is_empty() {
-                                        let _ = tx.send(InferenceStreamChunk {
-                                            content: vec![ContentBlock::Text { text: text.to_string() }],
-                                            is_final: false,
-                                            usage: None,
-                                            model: model_name.clone(),
-                                        }).await;
+                                        let _ = tx
+                                            .send(InferenceStreamChunk {
+                                                content: vec![ContentBlock::Text {
+                                                    text: text.to_string(),
+                                                }],
+                                                is_final: false,
+                                                usage: None,
+                                                model: model_name.clone(),
+                                            })
+                                            .await;
                                     }
                                 }
                                 "response.function_call_arguments.delta" => {
-                                    let partial = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                                    let partial =
+                                        json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
                                     if let Some(fc_id) = &current_function_call_id {
-                                        if let Some((_name, args_buffer)) = function_call_state.get_mut(fc_id) {
+                                        if let Some((_name, args_buffer)) =
+                                            function_call_state.get_mut(fc_id)
+                                        {
                                             args_buffer.push_str(partial);
                                         }
                                     }
                                 }
                                 "response.output_item.done" => {
                                     if let Some(fc_id) = current_function_call_id.take() {
-                                        if let Some((name, args_buffer)) = function_call_state.remove(&fc_id) {
+                                        if let Some((name, args_buffer)) =
+                                            function_call_state.remove(&fc_id)
+                                        {
                                             let args = if args_buffer.is_empty() {
                                                 "{}".to_string()
                                             } else {
                                                 args_buffer
                                             };
-                                            let _ = tx.send(InferenceStreamChunk {
-                                                content: vec![ContentBlock::ToolCall {
-                                                    id: fc_id.clone(),
-                                                    name: name.clone(),
-                                                    args,
-                                                }],
-                                                is_final: false,
-                                                usage: None,
-                                                model: model_name.clone(),
-                                            }).await;
+                                            let _ = tx
+                                                .send(InferenceStreamChunk {
+                                                    content: vec![ContentBlock::ToolCall {
+                                                        id: fc_id.clone(),
+                                                        name: name.clone(),
+                                                        args,
+                                                    }],
+                                                    is_final: false,
+                                                    usage: None,
+                                                    model: model_name.clone(),
+                                                })
+                                                .await;
                                         }
                                     }
                                 }
                                 "response.thinking.delta" => {
-                                    let text = json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                                    let text =
+                                        json.get("delta").and_then(|d| d.as_str()).unwrap_or("");
                                     if !text.is_empty() {
-                                        let _ = tx.send(InferenceStreamChunk {
-                                            content: vec![ContentBlock::Thinking { text: text.to_string() }],
-                                            is_final: false,
-                                            usage: None,
-                                            model: model_name.clone(),
-                                        }).await;
+                                        let _ = tx
+                                            .send(InferenceStreamChunk {
+                                                content: vec![ContentBlock::Thinking {
+                                                    text: text.to_string(),
+                                                }],
+                                                is_final: false,
+                                                usage: None,
+                                                model: model_name.clone(),
+                                            })
+                                            .await;
                                     }
                                 }
                                 "response.done" => {
-                                    let usage_obj = json.get("response")
+                                    let usage_obj = json
+                                        .get("response")
                                         .and_then(|r| r.get("usage"))
                                         .unwrap_or(&Value::Null);
-                                    let output_tokens = usage_obj.get("output_tokens")
-                                        .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                    let output_tokens = usage_obj
+                                        .get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                        as u32;
                                     let usage = TokenUsage {
                                         prompt_tokens: prompt_tokens_from_start,
                                         completion_tokens: output_tokens,
                                         total_tokens: prompt_tokens_from_start + output_tokens,
-                                        cache_read_tokens: usage_obj.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                        cache_creation_tokens: usage_obj.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            ..Default::default()};
-                                    let _ = tx.send(InferenceStreamChunk {
-                                        content: vec![],
-                                        is_final: true,
-                                        usage: Some(usage),
-                                        model: model_name.clone(),
-                                    }).await;
+                                        cache_read_tokens: usage_obj
+                                            .get("cache_read_input_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                        cache_creation_tokens: usage_obj
+                                            .get("cache_creation_input_tokens")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as u32,
+                                        ..Default::default()
+                                    };
+                                    let _ = tx
+                                        .send(InferenceStreamChunk {
+                                            content: vec![],
+                                            is_final: true,
+                                            usage: Some(usage),
+                                            model: model_name.clone(),
+                                        })
+                                        .await;
                                     break;
                                 }
                                 _ => {}
@@ -1186,17 +1431,37 @@ mod probe_tests {
         // Default (Auto) — cache_control present on system + last tool.
         let on = provider.to_anthropic_request(&build_req(None));
         let sys = on["system"].as_array().unwrap()[0].as_object().unwrap();
-        assert!(sys.contains_key("cache_control"), "system block should be cached by default");
+        assert!(
+            sys.contains_key("cache_control"),
+            "system block should be cached by default"
+        );
         let tools = on["tools"].as_array().unwrap();
-        assert!(tools.last().unwrap().as_object().unwrap().contains_key("cache_control"),
-            "last tool should be cached by default");
+        assert!(
+            tools
+                .last()
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("cache_control"),
+            "last tool should be cached by default"
+        );
 
         // Off — no cache_control anywhere.
         let off = provider.to_anthropic_request(&build_req(Some("off")));
         let sys_off = off["system"].as_array().unwrap()[0].as_object().unwrap();
-        assert!(!sys_off.contains_key("cache_control"), "system block must NOT be cached when policy=off");
+        assert!(
+            !sys_off.contains_key("cache_control"),
+            "system block must NOT be cached when policy=off"
+        );
         let tools_off = off["tools"].as_array().unwrap();
-        assert!(!tools_off.last().unwrap().as_object().unwrap().contains_key("cache_control"),
-            "last tool must NOT be cached when policy=off");
+        assert!(
+            !tools_off
+                .last()
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("cache_control"),
+            "last tool must NOT be cached when policy=off"
+        );
     }
 }

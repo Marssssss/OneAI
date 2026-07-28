@@ -2,8 +2,8 @@
 //!
 //! Subcommands for discovering, connecting to, and serving as A2A agents.
 
+use oneai_a2a::{A2AClient, A2AServerHost, AgentCard, TaskStore};
 use std::sync::Arc;
-use oneai_a2a::{A2AClient, A2AServerHost, TaskStore, AgentCard};
 
 /// Start the A2A server (serve OneAI agent capabilities).
 ///
@@ -25,9 +25,11 @@ pub fn cmd_a2a_serve(domain: Option<&str>) {
                     let pack = oneai_domain::research_pack(".");
                     oneai_a2a::agent_card_from_domain_pack(&pack, "http://localhost:8080")
                 }
-                _ => {
-                    AgentCard::new(domain_name, format!("{} agent", domain_name), "http://localhost:8080")
-                }
+                _ => AgentCard::new(
+                    domain_name,
+                    format!("{} agent", domain_name),
+                    "http://localhost:8080",
+                ),
             }
         } else {
             AgentCard::new("oneai-agent", "OneAI Agent", "http://localhost:8080")
@@ -37,9 +39,14 @@ pub fn cmd_a2a_serve(domain: Option<&str>) {
         let host = A2AServerHost::new(agent_card, task_store);
 
         println!("🤖 A2A Server starting...");
-        println!("   Agent: {} ({})", host.agent_card().name, host.agent_card().url);
+        println!(
+            "   Agent: {} ({})",
+            host.agent_card().name,
+            host.agent_card().url
+        );
         println!("   Skills: {}", host.agent_card().skills.len());
-        println!("   Capabilities: streaming={}, push_notifications={}, state_history={}",
+        println!(
+            "   Capabilities: streaming={}, push_notifications={}, state_history={}",
             host.agent_card().capabilities.streaming,
             host.agent_card().capabilities.push_notifications,
             host.agent_card().capabilities.state_transition_history,
@@ -55,7 +62,9 @@ pub fn cmd_a2a_serve(domain: Option<&str>) {
 
         // Simple event loop — for now, just keep running
         // Full HTTP server with axum will be added in a future phase
-        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for ctrl+c");
         println!("Server stopped.");
     });
 }
@@ -79,20 +88,36 @@ pub fn cmd_a2a_discover(url: &str) {
                 println!("   URL: {}", card.url);
                 println!("   Version: {}", card.version.unwrap_or_default());
                 if let Some(provider) = &card.provider {
-                    println!("   Provider: {} ({})", provider.organization, provider.url.as_deref().unwrap_or(""));
+                    println!(
+                        "   Provider: {} ({})",
+                        provider.organization,
+                        provider.url.as_deref().unwrap_or("")
+                    );
                 }
                 println!("   Skills:");
                 for skill in &card.skills {
-                    println!("     • {} [{}]: {}", skill.name, skill.id, skill.description);
+                    println!(
+                        "     • {} [{}]: {}",
+                        skill.name, skill.id, skill.description
+                    );
                     if !skill.examples.is_empty() {
                         println!("       Examples: {}", skill.examples.join(", "));
                     }
                 }
                 println!("   Capabilities:");
                 println!("     Streaming: {}", card.capabilities.streaming);
-                println!("     Push notifications: {}", card.capabilities.push_notifications);
-                println!("     State history: {}", card.capabilities.state_transition_history);
-                println!("   Authentication: {} schemes", card.authentication.schemes.len());
+                println!(
+                    "     Push notifications: {}",
+                    card.capabilities.push_notifications
+                );
+                println!(
+                    "     State history: {}",
+                    card.capabilities.state_transition_history
+                );
+                println!(
+                    "   Authentication: {} schemes",
+                    card.authentication.schemes.len()
+                );
                 for scheme in &card.authentication.schemes {
                     println!("     • {}", scheme);
                 }
@@ -128,11 +153,10 @@ pub fn cmd_a2a_send(url: &str, message: &str) {
         println!("   Message: {}", message);
         println!("   Task ID: {}", task_id);
 
-        match client.send_task(
-            &task_id,
-            oneai_a2a::Message::user_text(message),
-            None,
-        ).await {
+        match client
+            .send_task(&task_id, oneai_a2a::Message::user_text(message), None)
+            .await
+        {
             Ok(task) => {
                 println!("✅ Task created!");
                 println!("   ID: {}", task.id);

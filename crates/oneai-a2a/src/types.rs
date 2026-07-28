@@ -63,17 +63,35 @@ impl std::fmt::Display for TaskState {
 impl TaskState {
     /// Check whether this state is terminal (no further transitions possible).
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskState::Completed | TaskState::Failed | TaskState::Canceled | TaskState::Rejected)
+        matches!(
+            self,
+            TaskState::Completed | TaskState::Failed | TaskState::Canceled | TaskState::Rejected
+        )
     }
 
     /// Validate that a transition from `from` to `to` is allowed by the A2A spec.
     pub fn validate_transition(from: &TaskState, to: &TaskState) -> bool {
         match from {
-            TaskState::Submitted => matches!(to, TaskState::Working | TaskState::Rejected | TaskState::Canceled),
-            TaskState::Working => matches!(to, TaskState::Completed | TaskState::Failed | TaskState::InputRequired | TaskState::Canceled),
-            TaskState::InputRequired => matches!(to, TaskState::Working | TaskState::Canceled | TaskState::Failed),
+            TaskState::Submitted => matches!(
+                to,
+                TaskState::Working | TaskState::Rejected | TaskState::Canceled
+            ),
+            TaskState::Working => matches!(
+                to,
+                TaskState::Completed
+                    | TaskState::Failed
+                    | TaskState::InputRequired
+                    | TaskState::Canceled
+            ),
+            TaskState::InputRequired => matches!(
+                to,
+                TaskState::Working | TaskState::Canceled | TaskState::Failed
+            ),
             // Terminal states — no further transitions allowed
-            TaskState::Completed | TaskState::Failed | TaskState::Canceled | TaskState::Rejected => false,
+            TaskState::Completed
+            | TaskState::Failed
+            | TaskState::Canceled
+            | TaskState::Rejected => false,
         }
     }
 }
@@ -132,12 +150,20 @@ pub struct FileContent {
 impl FileContent {
     /// Create a FileContent with a URI reference.
     pub fn from_uri(uri: String, mime_type: Option<String>) -> Self {
-        Self { uri: Some(uri), bytes: None, mime_type }
+        Self {
+            uri: Some(uri),
+            bytes: None,
+            mime_type,
+        }
     }
 
     /// Create a FileContent with inline base64 bytes.
     pub fn from_bytes(bytes: String, mime_type: Option<String>) -> Self {
-        Self { uri: None, bytes: Some(bytes), mime_type }
+        Self {
+            uri: None,
+            bytes: Some(bytes),
+            mime_type,
+        }
     }
 }
 
@@ -207,12 +233,20 @@ pub struct TaskStatus {
 impl TaskStatus {
     /// Create a new TaskStatus with just a state.
     pub fn new(state: TaskState) -> Self {
-        Self { state, message: None, timestamp: None }
+        Self {
+            state,
+            message: None,
+            timestamp: None,
+        }
     }
 
     /// Create a TaskStatus with state and context message.
     pub fn with_message(state: TaskState, message: Message) -> Self {
-        Self { state, message: Some(message), timestamp: None }
+        Self {
+            state,
+            message: Some(message),
+            timestamp: None,
+        }
     }
 }
 
@@ -263,7 +297,10 @@ impl Task {
     }
 
     /// Attempt a state transition. Returns Ok(new_state) if valid, Err if invalid.
-    pub fn transition_to(&mut self, new_state: TaskState) -> Result<TaskState, crate::error::A2AError> {
+    pub fn transition_to(
+        &mut self,
+        new_state: TaskState,
+    ) -> Result<TaskState, crate::error::A2AError> {
         if !TaskState::validate_transition(&self.status.state, &new_state) {
             return Err(crate::error::A2AError::InvalidStateTransition {
                 from: self.status.state.clone(),
@@ -379,7 +416,11 @@ pub struct AgentSkill {
 
 impl AgentSkill {
     /// Create a simple skill with ID, name, and description.
-    pub fn new(id: impl Into<String>, name: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -482,7 +523,11 @@ pub struct AgentProvider {
 
 impl AgentCard {
     /// Create a minimal AgentCard with name, description, and URL.
-    pub fn new(name: impl Into<String>, description: impl Into<String>, url: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
@@ -505,12 +550,14 @@ impl AgentCard {
 
     /// Serialize this AgentCard to a JSON string.
     pub fn to_json(&self) -> Result<String, crate::error::A2AError> {
-        serde_json::to_string(self).map_err(|e| crate::error::A2AError::Serialization(e.to_string()))
+        serde_json::to_string(self)
+            .map_err(|e| crate::error::A2AError::Serialization(e.to_string()))
     }
 
     /// Serialize this AgentCard to a pretty-printed JSON string.
     pub fn to_json_pretty(&self) -> Result<String, crate::error::A2AError> {
-        serde_json::to_string_pretty(self).map_err(|e| crate::error::A2AError::Serialization(e.to_string()))
+        serde_json::to_string_pretty(self)
+            .map_err(|e| crate::error::A2AError::Serialization(e.to_string()))
     }
 }
 
@@ -588,31 +635,85 @@ mod tests {
 
     #[test]
     fn test_valid_transitions() {
-        assert!(TaskState::validate_transition(&TaskState::Submitted, &TaskState::Working));
-        assert!(TaskState::validate_transition(&TaskState::Submitted, &TaskState::Rejected));
-        assert!(TaskState::validate_transition(&TaskState::Submitted, &TaskState::Canceled));
-        assert!(TaskState::validate_transition(&TaskState::Working, &TaskState::Completed));
-        assert!(TaskState::validate_transition(&TaskState::Working, &TaskState::Failed));
-        assert!(TaskState::validate_transition(&TaskState::Working, &TaskState::InputRequired));
-        assert!(TaskState::validate_transition(&TaskState::Working, &TaskState::Canceled));
-        assert!(TaskState::validate_transition(&TaskState::InputRequired, &TaskState::Working));
-        assert!(TaskState::validate_transition(&TaskState::InputRequired, &TaskState::Canceled));
-        assert!(TaskState::validate_transition(&TaskState::InputRequired, &TaskState::Failed));
+        assert!(TaskState::validate_transition(
+            &TaskState::Submitted,
+            &TaskState::Working
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::Submitted,
+            &TaskState::Rejected
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::Submitted,
+            &TaskState::Canceled
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::Working,
+            &TaskState::Completed
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::Working,
+            &TaskState::Failed
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::Working,
+            &TaskState::InputRequired
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::Working,
+            &TaskState::Canceled
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::InputRequired,
+            &TaskState::Working
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::InputRequired,
+            &TaskState::Canceled
+        ));
+        assert!(TaskState::validate_transition(
+            &TaskState::InputRequired,
+            &TaskState::Failed
+        ));
     }
 
     #[test]
     fn test_invalid_transitions() {
         // Can't go from submitted directly to terminal states (except rejected/canceled)
-        assert!(!TaskState::validate_transition(&TaskState::Submitted, &TaskState::Completed));
-        assert!(!TaskState::validate_transition(&TaskState::Submitted, &TaskState::Failed));
-        assert!(!TaskState::validate_transition(&TaskState::Submitted, &TaskState::InputRequired));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Submitted,
+            &TaskState::Completed
+        ));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Submitted,
+            &TaskState::Failed
+        ));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Submitted,
+            &TaskState::InputRequired
+        ));
         // Can't go from terminal states to any other state
-        assert!(!TaskState::validate_transition(&TaskState::Completed, &TaskState::Working));
-        assert!(!TaskState::validate_transition(&TaskState::Failed, &TaskState::Working));
-        assert!(!TaskState::validate_transition(&TaskState::Canceled, &TaskState::Working));
-        assert!(!TaskState::validate_transition(&TaskState::Rejected, &TaskState::Working));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Completed,
+            &TaskState::Working
+        ));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Failed,
+            &TaskState::Working
+        ));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Canceled,
+            &TaskState::Working
+        ));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Rejected,
+            &TaskState::Working
+        ));
         // Can't go from working back to submitted
-        assert!(!TaskState::validate_transition(&TaskState::Working, &TaskState::Submitted));
+        assert!(!TaskState::validate_transition(
+            &TaskState::Working,
+            &TaskState::Submitted
+        ));
     }
 
     #[test]
@@ -630,7 +731,9 @@ mod tests {
 
     #[test]
     fn test_text_part_serialization() {
-        let part = Part::Text { text: "Hello, world!".to_string() };
+        let part = Part::Text {
+            text: "Hello, world!".to_string(),
+        };
         let json = serde_json::to_string(&part).unwrap();
         assert!(json.contains("\"type\":\"text\""));
         assert!(json.contains("\"text\":\"Hello, world!\""));
@@ -642,7 +745,10 @@ mod tests {
     #[test]
     fn test_file_part_serialization() {
         let part = Part::File {
-            file: FileContent::from_uri("https://example.com/file.pdf".to_string(), Some("application/pdf".to_string())),
+            file: FileContent::from_uri(
+                "https://example.com/file.pdf".to_string(),
+                Some("application/pdf".to_string()),
+            ),
         };
         let json = serde_json::to_string(&part).unwrap();
         assert!(json.contains("\"type\":\"file\""));
@@ -704,8 +810,12 @@ mod tests {
         let msg = Message {
             role: MessageRole::User,
             parts: vec![
-                Part::Text { text: "Hello".to_string() },
-                Part::Data { data: serde_json::json!({"query": "search"}) },
+                Part::Text {
+                    text: "Hello".to_string(),
+                },
+                Part::Data {
+                    data: serde_json::json!({"query": "search"}),
+                },
             ],
             metadata: Some(serde_json::json!({"source": "test"})),
         };
@@ -781,7 +891,8 @@ mod tests {
     fn test_task_serialization_roundtrip() {
         let mut task = Task::new("task-round");
         task.session_id = Some("session-1".to_string());
-        task.status = TaskStatus::with_message(TaskState::Working, Message::agent_text("Processing"));
+        task.status =
+            TaskStatus::with_message(TaskState::Working, Message::agent_text("Processing"));
         task.add_message(Message::user_text("Go"));
         task.add_artifact(Artifact::text("result", "Done"));
 
@@ -802,7 +913,14 @@ mod tests {
 
     #[test]
     fn test_artifact_streaming_chunk() {
-        let art = Artifact::streaming_chunk(0, vec![Part::Text { text: "chunk 1".to_string() }], false, false);
+        let art = Artifact::streaming_chunk(
+            0,
+            vec![Part::Text {
+                text: "chunk 1".to_string(),
+            }],
+            false,
+            false,
+        );
         assert_eq!(art.index, Some(0));
         assert_eq!(art.append, Some(false));
         assert_eq!(art.last_chunk, Some(false));
@@ -820,7 +938,11 @@ mod tests {
 
     #[test]
     fn test_agent_skill_new() {
-        let skill = AgentSkill::new("code-review", "Code Review", "Review code for bugs and improvements");
+        let skill = AgentSkill::new(
+            "code-review",
+            "Code Review",
+            "Review code for bugs and improvements",
+        );
         assert_eq!(skill.id, "code-review");
         assert_eq!(skill.name, "Code Review");
         assert!(!skill.input_modes.is_empty());
@@ -847,7 +969,11 @@ mod tests {
 
     #[test]
     fn test_agent_card_new() {
-        let card = AgentCard::new("OneAI Agent", "A versatile AI agent", "https://agent.example.com");
+        let card = AgentCard::new(
+            "OneAI Agent",
+            "A versatile AI agent",
+            "https://agent.example.com",
+        );
         assert_eq!(card.name, "OneAI Agent");
         assert_eq!(card.url, "https://agent.example.com");
         assert!(card.skills.is_empty());

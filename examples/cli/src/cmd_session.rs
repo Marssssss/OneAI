@@ -3,17 +3,15 @@
 //! These commands operate on the SQLite session store to manage
 //! saved conversations and enable session resume.
 
-use oneai_persistence::SqliteSessionStore;
 use oneai_core::traits::MemoryPersistence;
+use oneai_persistence::SqliteSessionStore;
 
 /// List all saved sessions.
 pub fn cmd_session_list() {
     let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    let sessions = rt.block_on(async {
-        store.list_conversations().await
-    });
+    let sessions = rt.block_on(async { store.list_conversations().await });
 
     match sessions {
         Ok(sessions) => {
@@ -25,7 +23,7 @@ pub fn cmd_session_list() {
             }
             let total = sessions.len();
             println!("Saved sessions:");
-            println!("{:<40} {:<20} {:<8} {}", "ID", "Updated", "Msgs", "Created");
+            println!("{:<40} {:<20} {:<8} Created", "ID", "Updated", "Msgs");
             println!("{}", "-".repeat(90));
             for session in &sessions {
                 println!(
@@ -50,9 +48,7 @@ pub fn cmd_session_resume(session_id: &str) {
     let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    let conversation = rt.block_on(async {
-        store.load_conversation(session_id).await
-    });
+    let conversation = rt.block_on(async { store.load_conversation(session_id).await });
 
     match conversation {
         Ok(Some(conv)) => {
@@ -98,9 +94,7 @@ pub fn cmd_session_delete(session_id: &str) {
     let store = SqliteSessionStore::with_defaults();
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
-    let result = rt.block_on(async {
-        store.delete_conversation(session_id).await
-    });
+    let result = rt.block_on(async { store.delete_conversation(session_id).await });
 
     match result {
         Ok(()) => {
@@ -118,9 +112,7 @@ pub fn cmd_session_info(session_id: &str) {
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
     // Load conversation
-    let conversation = rt.block_on(async {
-        store.load_conversation(session_id).await
-    });
+    let conversation = rt.block_on(async { store.load_conversation(session_id).await });
 
     match conversation {
         Ok(Some(conv)) => {
@@ -128,9 +120,7 @@ pub fn cmd_session_info(session_id: &str) {
             println!("Messages: {}", conv.messages.len());
 
             // Load STM entries
-            let stm_entries = rt.block_on(async {
-                store.load_stm(session_id).await
-            });
+            let stm_entries = rt.block_on(async { store.load_stm(session_id).await });
 
             match stm_entries {
                 Ok(entries) => {

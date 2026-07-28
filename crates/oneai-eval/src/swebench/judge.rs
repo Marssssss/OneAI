@@ -42,13 +42,15 @@ pub struct SwebenchVerdict {
 pub fn parse_instance_results(results: &str, instance_id: &str) -> Result<SwebenchVerdict, String> {
     let trimmed = results.trim();
     if trimmed.is_empty() {
-        return Err(format!("harness result is empty for instance {}", instance_id));
+        return Err(format!(
+            "harness result is empty for instance {}",
+            instance_id
+        ));
     }
 
     // Try as a JSON array first, then fall back to JSONL line-by-line.
     let entries: Vec<serde_json::Value> = if trimmed.starts_with('[') {
-        serde_json::from_str(trimmed)
-            .map_err(|e| format!("invalid harness result array: {}", e))?
+        serde_json::from_str(trimmed).map_err(|e| format!("invalid harness result array: {}", e))?
     } else {
         trimmed
             .lines()
@@ -58,15 +60,30 @@ pub fn parse_instance_results(results: &str, instance_id: &str) -> Result<Sweben
     };
 
     for entry in &entries {
-        let id = entry.get("instance_id").and_then(|v| v.as_str()).unwrap_or("");
+        let id = entry
+            .get("instance_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if id == instance_id {
-            let resolved = entry.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
-            let tests_status = entry.get("tests_status").cloned().unwrap_or(serde_json::Value::Null);
-            return Ok(SwebenchVerdict { resolved, tests_status });
+            let resolved = entry
+                .get("resolved")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let tests_status = entry
+                .get("tests_status")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            return Ok(SwebenchVerdict {
+                resolved,
+                tests_status,
+            });
         }
     }
 
-    Err(format!("instance '{}' not found in harness results", instance_id))
+    Err(format!(
+        "instance '{}' not found in harness results",
+        instance_id
+    ))
 }
 
 /// Parse a per-instance `report.json` as written by the SWE-bench harness under
@@ -76,17 +93,32 @@ pub fn parse_instance_results(results: &str, instance_id: &str) -> Result<Sweben
 /// `{ "<instance_id>": { "resolved": true, "tests_status": {...}, ... } }`.
 /// (Non-modal / older harnesses write the `instance_results.jsonl` array form
 /// handled by `parse_instance_results` instead.)
-pub fn parse_instance_report(report_json: &str, instance_id: &str) -> Result<SwebenchVerdict, String> {
+pub fn parse_instance_report(
+    report_json: &str,
+    instance_id: &str,
+) -> Result<SwebenchVerdict, String> {
     let value: serde_json::Value = serde_json::from_str(report_json)
         .map_err(|e| format!("invalid harness report.json: {}", e))?;
 
     let entry = value.get(instance_id).ok_or_else(|| {
-        format!("instance '{}' not found in harness report.json", instance_id)
+        format!(
+            "instance '{}' not found in harness report.json",
+            instance_id
+        )
     })?;
 
-    let resolved = entry.get("resolved").and_then(|v| v.as_bool()).unwrap_or(false);
-    let tests_status = entry.get("tests_status").cloned().unwrap_or(serde_json::Value::Null);
-    Ok(SwebenchVerdict { resolved, tests_status })
+    let resolved = entry
+        .get("resolved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let tests_status = entry
+        .get("tests_status")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(SwebenchVerdict {
+        resolved,
+        tests_status,
+    })
 }
 
 /// An `EvalJudge` backed by the external SWE-bench harness.
@@ -132,8 +164,13 @@ impl SwebenchJudge {
         workspace_dir: PathBuf,
     ) -> Self {
         Self::with_model_name(
-            instance_id, python_path, use_modal, run_id, dataset_name,
-            "oneai".to_string(), workspace_dir,
+            instance_id,
+            python_path,
+            use_modal,
+            run_id,
+            dataset_name,
+            "oneai".to_string(),
+            workspace_dir,
         )
     }
 
@@ -173,8 +210,7 @@ impl SwebenchJudge {
     /// Per-run `instance_results.jsonl` written by the harness in non-modal mode:
     /// `evaluation_results/<run_id>/instance_results.jsonl`.
     fn instance_results_path(&self) -> PathBuf {
-        PathBuf::from(format!("evaluation_results/{}", self.run_id))
-            .join("instance_results.jsonl")
+        PathBuf::from(format!("evaluation_results/{}", self.run_id)).join("instance_results.jsonl")
     }
 
     /// Write a one-line prediction JSONL and return its path.
@@ -187,7 +223,9 @@ impl SwebenchJudge {
             "model_patch": patch,
         });
         let line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
-        let path = self.workspace_dir.join(format!("{}.prediction.jsonl", self.instance_id));
+        let path = self
+            .workspace_dir
+            .join(format!("{}.prediction.jsonl", self.instance_id));
         std::fs::write(&path, format!("{}\n", line))
             .map_err(|e| format!("cannot write prediction file: {}", e))?;
         Ok(path)
@@ -209,11 +247,16 @@ impl EvalJudge for SwebenchJudge {
 
         // Invoke the external harness.
         let mut args: Vec<String> = vec![
-            "-m".into(), "swebench.harness.run_evaluation".into(),
-            "--dataset_name".into(), self.dataset_name.clone(),
-            "--predictions_path".into(), prediction_path.to_string_lossy().into(),
-            "--max_workers".into(), "1".into(),
-            "--run_id".into(), self.run_id.clone(),
+            "-m".into(),
+            "swebench.harness.run_evaluation".into(),
+            "--dataset_name".into(),
+            self.dataset_name.clone(),
+            "--predictions_path".into(),
+            prediction_path.to_string_lossy().into(),
+            "--max_workers".into(),
+            "1".into(),
+            "--run_id".into(),
+            self.run_id.clone(),
         ];
         if self.use_modal {
             args.push("--modal".into());
@@ -263,7 +306,10 @@ impl EvalJudge for SwebenchJudge {
                 let reason = if verdict.resolved {
                     format!("resolved: {}", summary_tests_status(&verdict.tests_status))
                 } else {
-                    format!("unresolved: {}", summary_tests_status(&verdict.tests_status))
+                    format!(
+                        "unresolved: {}",
+                        summary_tests_status(&verdict.tests_status)
+                    )
                 };
                 EvalScore::from_bool(verdict.resolved, reason)
             }
@@ -279,8 +325,16 @@ fn summary_tests_status(status: &serde_json::Value) -> String {
     let mut parts = Vec::new();
     for key in ["FAIL_TO_PASS", "PASS_TO_PASS"] {
         if let Some(group) = status.get(key) {
-            let success = group.get("success").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-            let failure = group.get("failure").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let success = group
+                .get("success")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let failure = group
+                .get("failure")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             parts.push(format!("{}={}/{} pass", key, success, success + failure));
         }
     }
@@ -372,8 +426,12 @@ mod tests {
     async fn test_judge_empty_patch_short_circuits() {
         // No python, no venv — must NOT spawn anything, just return unresolved.
         let judge = SwebenchJudge::new(
-            "x__y-1", "/nonexistent/python", true, "run-x",
-            "princeton-nlp/SWE-bench_Lite", std::env::temp_dir(),
+            "x__y-1",
+            "/nonexistent/python",
+            true,
+            "run-x",
+            "princeton-nlp/SWE-bench_Lite",
+            std::env::temp_dir(),
         );
         let score = judge.judge("issue text", "   ").await;
         assert!(!score.passed);

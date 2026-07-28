@@ -1,7 +1,7 @@
 //! WebSocket handler — real-time event streaming to Studio frontend.
 
 use axum::{
-    extract::ws::{WebSocket, WebSocketUpgrade, Message},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
     response::IntoResponse,
 };
@@ -71,7 +71,7 @@ async fn handle_socket(socket: WebSocket, state: std::sync::Arc<StudioState>) {
     });
 
     // Wait for either task to finish (client disconnect or broadcast end)
-    let _ = tokio::select! {
+    tokio::select! {
         _ = send_task => {},
         _ = recv_task => {},
     };
@@ -87,20 +87,54 @@ mod tests {
     fn test_studio_event_serialization_all_types() {
         // Verify all StudioEvent variants serialize correctly
         let events = vec![
-            StudioEvent::IterationStart { iteration: 1, paradigm: "react".to_string() },
-            StudioEvent::DirectAnswer { text: "hello".to_string() },
-            StudioEvent::ToolCalls { calls: vec![crate::state::ToolCallView {
-                id: "c1".to_string(), tool_name: "shell".to_string(), args: serde_json::json!({"cmd": "ls"}),
-            }] },
-            StudioEvent::ToolResult { call_id: "c1".to_string(), tool_name: "shell".to_string(), success: true, output_summary: "OK".to_string() },
-            StudioEvent::Delegate { task: "implement".to_string(), agent_type: "coder".to_string() },
-            StudioEvent::ParadigmSwitch { paradigm: "plan".to_string() },
-            StudioEvent::CheckpointSaved { iteration: 3, checkpoint_id: "cp_3".to_string() },
-            StudioEvent::TraceEvent { kind: "Thought".to_string(), name: "agent.thought".to_string(), attributes: serde_json::json!({"msg": "thinking"}) },
-            StudioEvent::Thinking { text: "reasoning...".to_string() },
-            StudioEvent::StreamChunk { text: "chunk".to_string() },
-            StudioEvent::LoopComplete { result_summary: "Success".to_string() },
-            StudioEvent::Error { message: "oops".to_string() },
+            StudioEvent::IterationStart {
+                iteration: 1,
+                paradigm: "react".to_string(),
+            },
+            StudioEvent::DirectAnswer {
+                text: "hello".to_string(),
+            },
+            StudioEvent::ToolCalls {
+                calls: vec![crate::state::ToolCallView {
+                    id: "c1".to_string(),
+                    tool_name: "shell".to_string(),
+                    args: serde_json::json!({"cmd": "ls"}),
+                }],
+            },
+            StudioEvent::ToolResult {
+                call_id: "c1".to_string(),
+                tool_name: "shell".to_string(),
+                success: true,
+                output_summary: "OK".to_string(),
+            },
+            StudioEvent::Delegate {
+                task: "implement".to_string(),
+                agent_type: "coder".to_string(),
+            },
+            StudioEvent::ParadigmSwitch {
+                paradigm: "plan".to_string(),
+            },
+            StudioEvent::CheckpointSaved {
+                iteration: 3,
+                checkpoint_id: "cp_3".to_string(),
+            },
+            StudioEvent::TraceEvent {
+                kind: "Thought".to_string(),
+                name: "agent.thought".to_string(),
+                attributes: serde_json::json!({"msg": "thinking"}),
+            },
+            StudioEvent::Thinking {
+                text: "reasoning...".to_string(),
+            },
+            StudioEvent::StreamChunk {
+                text: "chunk".to_string(),
+            },
+            StudioEvent::LoopComplete {
+                result_summary: "Success".to_string(),
+            },
+            StudioEvent::Error {
+                message: "oops".to_string(),
+            },
         ];
 
         for event in &events {

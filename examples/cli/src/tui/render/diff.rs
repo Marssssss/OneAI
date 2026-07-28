@@ -67,7 +67,12 @@ pub fn render_diff_lines(content: &str, max_width: usize) -> Vec<Line<'static>> 
         // Context line — gray with line numbers
         old_line_no += 1;
         new_line_no += 1;
-        lines.push(render_context_line(raw_line, old_line_no, new_line_no, max_width));
+        lines.push(render_context_line(
+            raw_line,
+            old_line_no,
+            new_line_no,
+            max_width,
+        ));
     }
 
     lines
@@ -83,7 +88,10 @@ pub fn render_diff_summary(content: &str) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("📊 ", Style::default().fg(TOOL_RESULT_SUCCESS_COLOR)),
             Span::styled(
-                format!("diff: +{} additions, -{} deletions ({})", stats.additions, stats.deletions, stats.total_lines),
+                format!(
+                    "diff: +{} additions, -{} deletions ({})",
+                    stats.additions, stats.deletions, stats.total_lines
+                ),
                 Style::default().fg(TOOL_RESULT_SUCCESS_COLOR),
             ),
         ]),
@@ -97,7 +105,11 @@ pub fn render_diff_summary(content: &str) -> Vec<Line<'static>> {
 /// Returns a new Span with content truncated and "…" appended if it exceeds max_width.
 fn truncate_span_content(content: &str, max_visual_width: usize) -> String {
     if max_visual_width <= 1 {
-        return if max_visual_width == 1 { "…".to_string() } else { String::new() };
+        return if max_visual_width == 1 {
+            "…".to_string()
+        } else {
+            String::new()
+        };
     }
     if content.width() <= max_visual_width {
         return content.to_string();
@@ -121,7 +133,9 @@ fn render_hunk_header(line: &str, max_width: usize) -> Line<'static> {
     let truncated = truncate_span_content(line, max_width);
     Line::from(Span::styled(
         truncated,
-        Style::default().fg(ratatui::style::Color::Magenta).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(ratatui::style::Color::Magenta)
+            .add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -141,9 +155,22 @@ fn render_added_line(line: &str, line_no: usize, max_width: usize) -> Line<'stat
     let truncated_content = truncate_span_content(content, content_max_width);
     let line_no_str = format!("{:>4} ", line_no);
     Line::from(vec![
-        Span::styled(line_no_str, Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled("+", Style::default().fg(ratatui::style::Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(truncated_content, Style::default().fg(ratatui::style::Color::Green).bg(DIFF_ADDED_BG)),
+        Span::styled(
+            line_no_str,
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        ),
+        Span::styled(
+            "+",
+            Style::default()
+                .fg(ratatui::style::Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncated_content,
+            Style::default()
+                .fg(ratatui::style::Color::Green)
+                .bg(DIFF_ADDED_BG),
+        ),
     ])
 }
 
@@ -155,22 +182,46 @@ fn render_deleted_line(line: &str, line_no: usize, max_width: usize) -> Line<'st
     let truncated_content = truncate_span_content(content, content_max_width);
     let line_no_str = format!("{:>4} ", line_no);
     Line::from(vec![
-        Span::styled(line_no_str, Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled("-", Style::default().fg(ratatui::style::Color::Red).add_modifier(Modifier::BOLD)),
-        Span::styled(truncated_content, Style::default().fg(ratatui::style::Color::Red).bg(DIFF_DELETED_BG)),
+        Span::styled(
+            line_no_str,
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        ),
+        Span::styled(
+            "-",
+            Style::default()
+                .fg(ratatui::style::Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncated_content,
+            Style::default()
+                .fg(ratatui::style::Color::Red)
+                .bg(DIFF_DELETED_BG),
+        ),
     ])
 }
 
-fn render_context_line(line: &str, old_no: usize, new_no: usize, max_width: usize) -> Line<'static> {
+fn render_context_line(
+    line: &str,
+    old_no: usize,
+    new_no: usize,
+    max_width: usize,
+) -> Line<'static> {
     let line_no_width = format!("{:>4}/{:>4} ", old_no, new_no).width();
     let prefix_width = 1; // space character
     let content_max_width = max_width.saturating_sub(line_no_width + prefix_width);
     let line_no_str = format!("{:>4}/{:>4} ", old_no, new_no);
     let truncated_content = truncate_span_content(line, content_max_width);
     Line::from(vec![
-        Span::styled(line_no_str, Style::default().fg(ratatui::style::Color::DarkGray)),
+        Span::styled(
+            line_no_str,
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        ),
         Span::styled(" ", Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled(truncated_content, Style::default().fg(ratatui::style::Color::DarkGray)),
+        Span::styled(
+            truncated_content,
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        ),
     ])
 }
 
@@ -209,7 +260,10 @@ fn parse_hunk_header(line: &str) -> Option<HunkNumbers> {
         .and_then(|s| s.split(',').next())
         .and_then(|s| s.parse::<usize>().ok())?;
 
-    Some(HunkNumbers { old_start, new_start })
+    Some(HunkNumbers {
+        old_start,
+        new_start,
+    })
 }
 
 /// Diff statistics (additions, deletions, total lines).
@@ -232,5 +286,9 @@ fn compute_diff_stats(content: &str) -> DiffStats {
         }
     }
 
-    DiffStats { additions, deletions, total_lines }
+    DiffStats {
+        additions,
+        deletions,
+        total_lines,
+    }
 }

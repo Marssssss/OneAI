@@ -17,13 +17,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use oneai_core::{
-    ContentBlock, Conversation, InferenceRequest, InferenceStreamChunk,
-    InteractionModification, InteractionRequest, InteractionResponse,
-    Message, Role, ToolDefinition, ToolOutput,
-};
 use oneai_core::error::Result;
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
+use oneai_core::{
+    ContentBlock, Conversation, InferenceRequest, InferenceStreamChunk, InteractionModification,
+    InteractionRequest, InteractionResponse, Message, Role, ToolDefinition, ToolOutput,
+};
 
 /// Configuration for a ReAct agent execution.
 #[derive(Debug, Clone)]
@@ -49,9 +48,11 @@ impl Default for ReActConfig {
         Self {
             max_iterations: 10,
             use_streaming: false,
-            system_prompt: "You are a helpful AI assistant that can use tools to accomplish tasks. \
+            system_prompt:
+                "You are a helpful AI assistant that can use tools to accomplish tasks. \
                 When you need to use a tool, output a tool call. When you have the final answer, \
-                respond with just text without any tool calls.".to_string(),
+                respond with just text without any tool calls."
+                    .to_string(),
             temperature: None,
             max_tokens: None,
         }
@@ -121,7 +122,13 @@ impl ReActAgent {
         parser: Arc<dyn OutputParser>,
         interaction_gate: Arc<dyn InteractionGate>,
     ) -> Self {
-        Self::new(provider, tools, parser, interaction_gate, ReActConfig::default())
+        Self::new(
+            provider,
+            tools,
+            parser,
+            interaction_gate,
+            ReActConfig::default(),
+        )
     }
 
     /// Run the ReAct loop on a conversation.
@@ -149,7 +156,11 @@ impl ReActAgent {
 
         while iterations < self.config.max_iterations {
             iterations += 1;
-            tracing::info!("ReAct iteration {}/{}", iterations, self.config.max_iterations);
+            tracing::info!(
+                "ReAct iteration {}/{}",
+                iterations,
+                self.config.max_iterations
+            );
 
             // Build inference request. Temperature falls back to 0.3 when unset
             // (provider API default of 1.0 is too random for tool-use).
@@ -172,7 +183,10 @@ impl ReActAgent {
             conv.add_message(response.message.clone());
 
             // Check if the response contains tool calls
-            let tool_calls: Vec<&ContentBlock> = response.message.content.iter()
+            let tool_calls: Vec<&ContentBlock> = response
+                .message
+                .content
+                .iter()
                 .filter_map(|block| match block {
                     ContentBlock::ToolCall { .. } => Some(block),
                     _ => None,
@@ -182,7 +196,10 @@ impl ReActAgent {
             if tool_calls.is_empty() {
                 // No tool calls — the agent has produced a final answer
                 completed = true;
-                tracing::info!("ReAct completed after {} iterations (final answer)", iterations);
+                tracing::info!(
+                    "ReAct completed after {} iterations (final answer)",
+                    iterations
+                );
                 break;
             }
 
@@ -233,7 +250,9 @@ impl ReActAgent {
                                 }
                                 InteractionResponse::ProceedWith { modification } => {
                                     let final_args = match modification {
-                                        InteractionModification::ReplaceToolArgs(new_args) => new_args,
+                                        InteractionModification::ReplaceToolArgs(new_args) => {
+                                            new_args
+                                        }
                                         _ => args_value,
                                     };
                                     let output = tool.execute(final_args).await?;
@@ -273,8 +292,11 @@ impl ReActAgent {
                         // Tool not found — report error to the model
                         conv.add_message(Message::tool_result(
                             id.clone(),
-                            format!("Error: Tool '{}' not found. Available tools: {}",
-                                name, self.available_tool_names()),
+                            format!(
+                                "Error: Tool '{}' not found. Available tools: {}",
+                                name,
+                                self.available_tool_names()
+                            ),
                         ));
                     }
                 }
@@ -282,11 +304,16 @@ impl ReActAgent {
         }
 
         if !completed {
-            tracing::warn!("ReAct reached max iterations ({}) without final answer", self.config.max_iterations);
+            tracing::warn!(
+                "ReAct reached max iterations ({}) without final answer",
+                self.config.max_iterations
+            );
         }
 
         // Get the last assistant message as the final result
-        let final_message = conv.messages.iter()
+        let final_message = conv
+            .messages
+            .iter()
             .rev()
             .find(|m| m.role == Role::Assistant)
             .cloned()
@@ -410,7 +437,9 @@ impl ReActAgent {
             conv.add_message(assistant_message.clone());
 
             // Check for tool calls
-            let tool_calls: Vec<&ContentBlock> = assistant_message.content.iter()
+            let tool_calls: Vec<&ContentBlock> = assistant_message
+                .content
+                .iter()
                 .filter_map(|block| match block {
                     ContentBlock::ToolCall { .. } => Some(block),
                     _ => None,
@@ -450,39 +479,63 @@ impl ReActAgent {
                             match interaction_response {
                                 InteractionResponse::Proceed => {
                                     let output = tool.execute(args_value).await?;
-                                    conv.add_message(Message::tool_result(id.clone(), format_result(&output)));
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        format_result(&output),
+                                    ));
                                 }
                                 InteractionResponse::ProceedWith { modification } => {
                                     let final_args = match modification {
-                                        InteractionModification::ReplaceToolArgs(new_args) => new_args,
+                                        InteractionModification::ReplaceToolArgs(new_args) => {
+                                            new_args
+                                        }
                                         _ => args_value,
                                     };
                                     let output = tool.execute(final_args).await?;
-                                    conv.add_message(Message::tool_result(id.clone(), format_result(&output)));
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        format_result(&output),
+                                    ));
                                 }
                                 InteractionResponse::Revise { feedback } => {
-                                    conv.add_message(Message::tool_result(id.clone(), format!("Rejected: {}", feedback)));
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        format!("Rejected: {}", feedback),
+                                    ));
                                 }
                                 InteractionResponse::Abort { reason } => {
-                                    conv.add_message(Message::tool_result(id.clone(), format!("Denied: {}", reason)));
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        format!("Denied: {}", reason),
+                                    ));
                                 }
                                 _ => {
-                                    conv.add_message(Message::tool_result(id.clone(), "Unsupported approval response".to_string()));
+                                    conv.add_message(Message::tool_result(
+                                        id.clone(),
+                                        "Unsupported approval response".to_string(),
+                                    ));
                                 }
                             }
                         } else {
                             let output = tool.execute(args_value).await?;
-                            conv.add_message(Message::tool_result(id.clone(), format_result(&output)));
+                            conv.add_message(Message::tool_result(
+                                id.clone(),
+                                format_result(&output),
+                            ));
                         }
                     } else {
-                        conv.add_message(Message::tool_result(id.clone(),
-                            format!("Error: Tool '{}' not found", name)));
+                        conv.add_message(Message::tool_result(
+                            id.clone(),
+                            format!("Error: Tool '{}' not found", name),
+                        ));
                     }
                 }
             }
         }
 
-        let final_message = conv.messages.iter()
+        let final_message = conv
+            .messages
+            .iter()
             .rev()
             .find(|m| m.role == Role::Assistant)
             .cloned()
@@ -499,13 +552,14 @@ impl ReActAgent {
     /// Build tool definitions from the registered tools.
     async fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
-        tools_map.values().map(|tool| {
-            ToolDefinition {
+        tools_map
+            .values()
+            .map(|tool| ToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
                 parameters_schema: tool.parameters_schema(),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Get the names of all available tools.
@@ -521,6 +575,9 @@ fn format_result(output: &ToolOutput) -> String {
     if output.success {
         output.content.clone()
     } else {
-        format!("Error: {}", output.error.as_deref().unwrap_or("Unknown error"))
+        format!(
+            "Error: {}",
+            output.error.as_deref().unwrap_or("Unknown error")
+        )
     }
 }

@@ -67,9 +67,10 @@ impl FuzzyJsonRepair {
             return Ok(val);
         }
 
-        Err(OneAIError::Parser(ParserError::FuzzyRepairFailed(
-            format!("Could not repair JSON from: {}", &raw[..raw.len().min(200)]),
-        )))
+        Err(OneAIError::Parser(ParserError::FuzzyRepairFailed(format!(
+            "Could not repair JSON from: {}",
+            &raw[..raw.len().min(200)]
+        ))))
     }
 
     /// Close unclosed brackets and braces in a JSON string.

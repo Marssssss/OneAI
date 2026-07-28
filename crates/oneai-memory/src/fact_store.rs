@@ -154,7 +154,9 @@ impl MemoryFactStore {
                 // carry fresh provenance), then append the captured history
                 // entry so the supersede chain survives the update.
                 for (k, v) in fact.metadata.drain() {
-                    if k == SUPERSEDED_HISTORY_KEY { continue; } // never clobber history
+                    if k == SUPERSEDED_HISTORY_KEY {
+                        continue;
+                    } // never clobber history
                     prev.metadata.insert(k, v);
                 }
                 append_history(prev, history_entry);
@@ -205,14 +207,17 @@ impl MemoryFactStore {
         }
     }
 
-
     /// Soft-invalidate the current fact for a conflict key (Zep-style
     /// soft-fail). The fact is NOT removed: it is marked `superseded=true`
     /// with a timestamp, excluded from default recall, but remains auditable
     /// via the include-superseded search variants and the history log.
     /// Returns true if a live (non-superseded) fact was invalidated.
     pub async fn invalidate(&self, user_id: &str, subject: &str, predicate: &str) -> bool {
-        let key = (user_id.to_string(), subject.to_string(), predicate.to_string());
+        let key = (
+            user_id.to_string(),
+            subject.to_string(),
+            predicate.to_string(),
+        );
         let Some(id) = self.key_index.read().await.get(&key).cloned() else {
             return false;
         };
@@ -252,7 +257,11 @@ impl MemoryFactStore {
 
     /// Remove a fact by its conflict key. Returns true if a fact was removed.
     pub async fn remove(&self, user_id: &str, subject: &str, predicate: &str) -> bool {
-        let key = (user_id.to_string(), subject.to_string(), predicate.to_string());
+        let key = (
+            user_id.to_string(),
+            subject.to_string(),
+            predicate.to_string(),
+        );
         let id = self.key_index.write().await.remove(&key);
         if let Some(id) = id {
             let removed = self.facts.write().await.remove(&id).is_some();
@@ -275,7 +284,11 @@ impl MemoryFactStore {
 
     /// Get a fact by its conflict key.
     pub async fn get(&self, user_id: &str, subject: &str, predicate: &str) -> Option<MemoryFact> {
-        let key = (user_id.to_string(), subject.to_string(), predicate.to_string());
+        let key = (
+            user_id.to_string(),
+            subject.to_string(),
+            predicate.to_string(),
+        );
         let id = self.key_index.read().await.get(&key).cloned()?;
         self.facts.read().await.get(&id).cloned()
     }
@@ -290,7 +303,11 @@ impl MemoryFactStore {
         predicate: &str,
         pinned: bool,
     ) -> bool {
-        let key = (user_id.to_string(), subject.to_string(), predicate.to_string());
+        let key = (
+            user_id.to_string(),
+            subject.to_string(),
+            predicate.to_string(),
+        );
         let id = match self.key_index.read().await.get(&key).cloned() {
             Some(id) => id,
             None => return false,
@@ -306,7 +323,8 @@ impl MemoryFactStore {
     /// Semantic search (cosine similarity over embeddings), top_k results.
     /// Superseded facts are excluded by default.
     pub async fn search_semantic(&self, query_embedding: &[f32], top_k: usize) -> Vec<MemoryFact> {
-        self.search_semantic_with(query_embedding, top_k, false).await
+        self.search_semantic_with(query_embedding, top_k, false)
+            .await
     }
 
     async fn search_semantic_with(
@@ -326,8 +344,12 @@ impl MemoryFactStore {
             let hits = match b.search(query_embedding, fetch_k, None).await {
                 Ok(h) => h,
                 Err(e) => {
-                    tracing::warn!("vector_backend search failed, falling back to brute-force: {e}");
-                    return self.search_semantic_bruteforce(query_embedding, top_k, include_superseded).await;
+                    tracing::warn!(
+                        "vector_backend search failed, falling back to brute-force: {e}"
+                    );
+                    return self
+                        .search_semantic_bruteforce(query_embedding, top_k, include_superseded)
+                        .await;
                 }
             };
             let facts = self.facts.read().await;
@@ -339,7 +361,8 @@ impl MemoryFactStore {
             out.truncate(top_k);
             return out;
         }
-        self.search_semantic_bruteforce(query_embedding, top_k, include_superseded).await
+        self.search_semantic_bruteforce(query_embedding, top_k, include_superseded)
+            .await
     }
 
     /// Brute-force cosine fallback (no vector backend). Computes cosine over
@@ -354,7 +377,11 @@ impl MemoryFactStore {
         let mut scored: Vec<(f32, MemoryFact)> = facts
             .values()
             .filter(|f| include_superseded || !f.superseded)
-            .filter_map(|f| f.embedding.as_ref().map(|emb| (cosine(query_embedding, emb), f.clone())))
+            .filter_map(|f| {
+                f.embedding
+                    .as_ref()
+                    .map(|emb| (cosine(query_embedding, emb), f.clone()))
+            })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().map(|(_, f)| f).take(top_k).collect()
@@ -526,14 +553,17 @@ impl MemoryFactStore {
 
         // Pass 3: weighted sum, rank, top_k.
         for (r, c, i, _) in candidates.iter_mut() {
-            let score = cfg.relevance_weight * *r
-                + cfg.recency_weight * *c
-                + cfg.importance_weight * *i;
+            let score =
+                cfg.relevance_weight * *r + cfg.recency_weight * *c + cfg.importance_weight * *i;
             // Stash the final score in `relevance` (already consumed).
             *r = score;
         }
         candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        candidates.into_iter().map(|(_, _, _, f)| f).take(cfg.top_k).collect()
+        candidates
+            .into_iter()
+            .map(|(_, _, _, f)| f)
+            .take(cfg.top_k)
+            .collect()
     }
 }
 
@@ -543,10 +573,14 @@ impl MemoryFactStore {
 /// default `InMemoryVectorBackend` honors `Filter::metadata_eq`).
 fn fact_index_metadata(f: &MemoryFact) -> HashMap<String, String> {
     let mut m = f.metadata.clone();
-    m.entry("content".to_string()).or_insert_with(|| f.content.clone());
-    m.entry("subject".to_string()).or_insert_with(|| f.subject.clone());
-    m.entry("predicate".to_string()).or_insert_with(|| f.predicate.clone());
-    m.entry("user_id".to_string()).or_insert_with(|| f.user_id.clone());
+    m.entry("content".to_string())
+        .or_insert_with(|| f.content.clone());
+    m.entry("subject".to_string())
+        .or_insert_with(|| f.subject.clone());
+    m.entry("predicate".to_string())
+        .or_insert_with(|| f.predicate.clone());
+    m.entry("user_id".to_string())
+        .or_insert_with(|| f.user_id.clone());
     m
 }
 
@@ -557,7 +591,11 @@ fn fact_index_metadata(f: &MemoryFact) -> HashMap<String, String> {
 /// single live row (the Mem0 invariant). Best-effort: malformed history is
 /// reset to a fresh array containing just the new entry.
 fn append_history(fact: &mut MemoryFact, entry: serde_json::Value) {
-    let existing = fact.metadata.get(SUPERSEDED_HISTORY_KEY).cloned().unwrap_or_default();
+    let existing = fact
+        .metadata
+        .get(SUPERSEDED_HISTORY_KEY)
+        .cloned()
+        .unwrap_or_default();
     let mut arr: serde_json::Value = if existing.is_empty() {
         serde_json::Value::Array(Vec::new())
     } else {
@@ -569,25 +607,38 @@ fn append_history(fact: &mut MemoryFact, entry: serde_json::Value) {
         // Corrupt non-array value → reset to a fresh array.
         arr = serde_json::Value::Array(vec![entry]);
     }
-    fact.metadata.insert(SUPERSEDED_HISTORY_KEY.to_string(), arr.to_string());
+    fact.metadata
+        .insert(SUPERSEDED_HISTORY_KEY.to_string(), arr.to_string());
 }
 
 /// Min and max of an iterator of f32 (empty → (0,0)).
 fn minmax(it: impl Iterator<Item = f32>) -> (f32, f32) {
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
     for v in it {
-        if v < lo { lo = v; }
-        if v > hi { hi = v; }
+        if v < lo {
+            lo = v;
+        }
+        if v > hi {
+            hi = v;
+        }
     }
-    if !lo.is_finite() { lo = 0.0; }
-    if !hi.is_finite() { hi = 0.0; }
+    if !lo.is_finite() {
+        lo = 0.0;
+    }
+    if !hi.is_finite() {
+        hi = 0.0;
+    }
     (lo, hi)
 }
 
 /// Rescale `v` from [min,max] to [0,1]; degenerate range (min==max) → 1.0
 /// (a single candidate or constant factor shouldn't be zeroed out).
 fn rescale(v: f32, min: f32, max: f32) -> f32 {
-    if (max - min).abs() < 1e-9 { 1.0 } else { (v - min) / (max - min) }
+    if (max - min).abs() < 1e-9 {
+        1.0
+    } else {
+        (v - min) / (max - min)
+    }
 }
 
 /// Exponential recency decay over a fact's `updated_at`, in `[0.0, 1.0]`.
@@ -665,7 +716,9 @@ mod tests {
     #[tokio::test]
     async fn upsert_inserts_new_fact() {
         let store = MemoryFactStore::new();
-        let out = store.upsert(make_fact("alice", "user.package_manager", "prefers", "npm")).await;
+        let out = store
+            .upsert(make_fact("alice", "user.package_manager", "prefers", "npm"))
+            .await;
         assert_eq!(out, UpsertOutcome::Inserted);
         assert_eq!(store.len().await, 1);
     }
@@ -674,14 +727,31 @@ mod tests {
     async fn upsert_updates_on_conflict_not_append() {
         // The Mem0 invariant: a contradicting fact updates rather than duplicates.
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "user.package_manager", "prefers", "npm")).await;
-        let out = store.upsert(make_fact("alice", "user.package_manager", "prefers", "pnpm")).await;
-        assert_eq!(out, UpsertOutcome::Updated { previous_version: 1 });
+        store
+            .upsert(make_fact("alice", "user.package_manager", "prefers", "npm"))
+            .await;
+        let out = store
+            .upsert(make_fact(
+                "alice",
+                "user.package_manager",
+                "prefers",
+                "pnpm",
+            ))
+            .await;
+        assert_eq!(
+            out,
+            UpsertOutcome::Updated {
+                previous_version: 1
+            }
+        );
 
         // Still one fact — not two.
         assert_eq!(store.len().await, 1);
         // And its content is the new value, version bumped.
-        let f = store.get("alice", "user.package_manager", "prefers").await.unwrap();
+        let f = store
+            .get("alice", "user.package_manager", "prefers")
+            .await
+            .unwrap();
         assert_eq!(f.content, "pnpm");
         assert_eq!(f.version, 2);
     }
@@ -689,33 +759,75 @@ mod tests {
     #[tokio::test]
     async fn different_subjects_are_distinct_facts() {
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "user.package_manager", "prefers", "pnpm")).await;
-        store.upsert(make_fact("alice", "user.test_runner", "prefers", "vitest")).await;
+        store
+            .upsert(make_fact(
+                "alice",
+                "user.package_manager",
+                "prefers",
+                "pnpm",
+            ))
+            .await;
+        store
+            .upsert(make_fact("alice", "user.test_runner", "prefers", "vitest"))
+            .await;
         assert_eq!(store.len().await, 2);
     }
 
     #[tokio::test]
     async fn different_users_are_distinct() {
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "user.package_manager", "prefers", "pnpm")).await;
-        store.upsert(make_fact("bob", "user.package_manager", "prefers", "npm")).await;
+        store
+            .upsert(make_fact(
+                "alice",
+                "user.package_manager",
+                "prefers",
+                "pnpm",
+            ))
+            .await;
+        store
+            .upsert(make_fact("bob", "user.package_manager", "prefers", "npm"))
+            .await;
         assert_eq!(store.len().await, 2);
     }
 
     #[tokio::test]
     async fn remove_by_conflict_key() {
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "user.package_manager", "prefers", "pnpm")).await;
-        assert!(store.remove("alice", "user.package_manager", "prefers").await);
+        store
+            .upsert(make_fact(
+                "alice",
+                "user.package_manager",
+                "prefers",
+                "pnpm",
+            ))
+            .await;
+        assert!(
+            store
+                .remove("alice", "user.package_manager", "prefers")
+                .await
+        );
         assert_eq!(store.len().await, 0);
-        assert!(!store.remove("alice", "user.package_manager", "prefers").await);
+        assert!(
+            !store
+                .remove("alice", "user.package_manager", "prefers")
+                .await
+        );
     }
 
     #[tokio::test]
     async fn keyword_search_matches_content() {
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "user.package_manager", "prefers", "pnpm")).await;
-        store.upsert(make_fact("alice", "user.test_runner", "prefers", "vitest")).await;
+        store
+            .upsert(make_fact(
+                "alice",
+                "user.package_manager",
+                "prefers",
+                "pnpm",
+            ))
+            .await;
+        store
+            .upsert(make_fact("alice", "user.test_runner", "prefers", "vitest"))
+            .await;
         let results = store.search_keyword("pnpm", 5).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "pnpm");
@@ -724,8 +836,17 @@ mod tests {
     #[tokio::test]
     async fn search_hybrid_keyword_matches() {
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "user.package_manager", "prefers", "pnpm")).await;
-        store.upsert(make_fact("alice", "user.test_runner", "prefers", "vitest")).await;
+        store
+            .upsert(make_fact(
+                "alice",
+                "user.package_manager",
+                "prefers",
+                "pnpm",
+            ))
+            .await;
+        store
+            .upsert(make_fact("alice", "user.test_runner", "prefers", "vitest"))
+            .await;
         // No query embedding → keyword relevance path.
         let results = store.search_hybrid(None, "pnpm", 5, true).await;
         assert_eq!(results.len(), 1);
@@ -758,13 +879,23 @@ mod tests {
         // A contradicting update must preserve the prior revision in the
         // _superseded_history metadata (auditable decision evolution).
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "JWT")).await;
-        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "session")).await;
+        store
+            .upsert(make_fact("alice", "auth.scheme", "decided_to", "JWT"))
+            .await;
+        store
+            .upsert(make_fact("alice", "auth.scheme", "decided_to", "session"))
+            .await;
 
-        let f = store.get("alice", "auth.scheme", "decided_to").await.unwrap();
+        let f = store
+            .get("alice", "auth.scheme", "decided_to")
+            .await
+            .unwrap();
         assert_eq!(f.content, "session"); // current truth = new value
         assert_eq!(f.version, 2);
-        let history = f.metadata.get(super::SUPERSEDED_HISTORY_KEY).expect("history recorded");
+        let history = f
+            .metadata
+            .get(super::SUPERSEDED_HISTORY_KEY)
+            .expect("history recorded");
         let arr: serde_json::Value = serde_json::from_str(history).unwrap();
         let arr = arr.as_array().unwrap();
         assert_eq!(arr.len(), 1);
@@ -776,10 +907,15 @@ mod tests {
     async fn invalidate_soft_fails_and_excludes_from_recall() {
         // Soft-invalidate marks superseded=true; default search excludes it.
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "JWT")).await;
+        store
+            .upsert(make_fact("alice", "auth.scheme", "decided_to", "JWT"))
+            .await;
         assert!(store.invalidate("alice", "auth.scheme", "decided_to").await);
 
-        let f = store.get("alice", "auth.scheme", "decided_to").await.unwrap();
+        let f = store
+            .get("alice", "auth.scheme", "decided_to")
+            .await
+            .unwrap();
         assert!(f.superseded);
         assert!(f.superseded_at.is_some());
 
@@ -788,8 +924,13 @@ mod tests {
         assert!(store.search_keyword("jwt", 5).await.is_empty());
 
         // But a re-upsert with a new value re-establishes the current truth.
-        store.upsert(make_fact("alice", "auth.scheme", "decided_to", "OAuth")).await;
-        let f = store.get("alice", "auth.scheme", "decided_to").await.unwrap();
+        store
+            .upsert(make_fact("alice", "auth.scheme", "decided_to", "OAuth"))
+            .await;
+        let f = store
+            .get("alice", "auth.scheme", "decided_to")
+            .await
+            .unwrap();
         assert!(!f.superseded);
         assert_eq!(f.content, "OAuth");
         assert_eq!(f.version, 3); // insert(1) → invalidate(2) → update(3)
@@ -823,7 +964,13 @@ mod tests {
             normalize_factors: true,
         };
         let results = store
-            .search_hybrid_with_config(None, "jwt", &cfg, chrono::Utc::now() + chrono::Duration::seconds(120), false)
+            .search_hybrid_with_config(
+                None,
+                "jwt",
+                &cfg,
+                chrono::Utc::now() + chrono::Duration::seconds(120),
+                false,
+            )
             .await;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].subject, "b.mod"); // more recent wins
@@ -834,7 +981,9 @@ mod tests {
         // A single candidate factor range is degenerate → rescaled to 1.0
         // (not zeroed out), so it still surfaces.
         let store = MemoryFactStore::new();
-        store.upsert(make_fact("alice", "x.mod", "decided_to", "jwt")).await;
+        store
+            .upsert(make_fact("alice", "x.mod", "decided_to", "jwt"))
+            .await;
         let cfg = oneai_core::RecallConfig::default();
         let results = store
             .search_hybrid_with_config(None, "jwt", &cfg, chrono::Utc::now(), false)
@@ -864,8 +1013,17 @@ mod tests {
         // search_semantic returns facts even when the HashMap scan is bypassed.
         let backend = Arc::new(oneai_vector::InMemoryVectorBackend::new(4));
         let store = MemoryFactStore::with_vector_backend(backend.clone());
-        store.upsert(make_fact_emb("alice", "user.package_manager", "prefers", "pnpm")).await;
-        store.upsert(make_fact_emb("bob", "user.editor", "prefers", "vim editor")).await;
+        store
+            .upsert(make_fact_emb(
+                "alice",
+                "user.package_manager",
+                "prefers",
+                "pnpm",
+            ))
+            .await;
+        store
+            .upsert(make_fact_emb("bob", "user.editor", "prefers", "vim editor"))
+            .await;
 
         // Query with the alice embedding → alice surfaces first.
         let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
@@ -877,7 +1035,9 @@ mod tests {
     async fn vector_backend_falls_back_to_bruteforce_when_detached() {
         // No backend → brute-force cosine over the HashMap still works.
         let store = MemoryFactStore::new();
-        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
+        store
+            .upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm"))
+            .await;
         let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
         let results = store.search_semantic(&q, 5).await;
         assert!(results.iter().any(|f| f.user_id == "alice"));
@@ -889,8 +1049,17 @@ mod tests {
         // three-factor scorer still ranks (recency/importance unchanged).
         let backend = Arc::new(oneai_vector::InMemoryVectorBackend::new(4));
         let store = MemoryFactStore::with_vector_backend(backend);
-        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
-        store.upsert(make_fact_emb("bob", "u.editor", "prefers", "vim editor far")).await;
+        store
+            .upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm"))
+            .await;
+        store
+            .upsert(make_fact_emb(
+                "bob",
+                "u.editor",
+                "prefers",
+                "vim editor far",
+            ))
+            .await;
 
         let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
         let cfg = oneai_core::RecallConfig::default();
@@ -907,7 +1076,9 @@ mod tests {
         // it) while the HashMap row stays for audit.
         let backend = Arc::new(oneai_vector::InMemoryVectorBackend::new(4));
         let store = MemoryFactStore::with_vector_backend(backend.clone());
-        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
+        store
+            .upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm"))
+            .await;
         assert!(store.has_vector_backend().await);
 
         // Before invalidation: semantic recall finds the fact.
@@ -925,13 +1096,17 @@ mod tests {
     async fn set_vector_backend_reindexes_existing_facts() {
         // Attaching a backend after facts are already stored re-indexes them.
         let store = MemoryFactStore::new();
-        store.upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm")).await;
+        store
+            .upsert(make_fact_emb("alice", "u.pm", "prefers", "pnpm"))
+            .await;
         // No backend yet → brute-force works.
         let q = make_fact_emb("alice", "u", "p", "pnpm").embedding.unwrap();
         assert!(!store.search_semantic(&q, 5).await.is_empty());
 
         // Attach a backend → existing facts are re-indexed into it.
-        store.set_vector_backend(Some(Arc::new(oneai_vector::InMemoryVectorBackend::new(4)))).await;
+        store
+            .set_vector_backend(Some(Arc::new(oneai_vector::InMemoryVectorBackend::new(4))))
+            .await;
         let results = store.search_semantic(&q, 5).await;
         assert!(results.iter().any(|f| f.user_id == "alice"));
     }

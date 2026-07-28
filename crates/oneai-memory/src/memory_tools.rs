@@ -16,14 +16,21 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use oneai_core::error::Result;
 use oneai_core::{FactType, MemoryFact, RiskLevel, Tool, ToolOutput};
-use chrono::Utc;
 
 use crate::manager::MemoryManager;
 
 /// Helper: build a `MemoryFact` from tool args, namespaced by the manager.
-async fn build_fact(mm: &MemoryManager, fact_type: String, subject: String, predicate: String, content: String, importance: f32) -> MemoryFact {
+async fn build_fact(
+    mm: &MemoryManager,
+    fact_type: String,
+    subject: String,
+    predicate: String,
+    content: String,
+    importance: f32,
+) -> MemoryFact {
     MemoryFact {
         id: format!("fact_{}", uuid::Uuid::new_v4()),
         user_id: mm.user_id().await,
@@ -77,21 +84,31 @@ pub struct MemorySearchTool {
 impl MemorySearchTool {
     /// Create with the manager and a default recall config.
     pub fn new(mm: Arc<MemoryManager>) -> Self {
-        Self { mm, recall: Arc::new(oneai_core::RecallConfig::default()) }
+        Self {
+            mm,
+            recall: Arc::new(oneai_core::RecallConfig::default()),
+        }
     }
 
     /// Create with an explicit domain recall config.
     pub fn with_recall_config(mm: Arc<MemoryManager>, recall: oneai_core::RecallConfig) -> Self {
-        Self { mm, recall: Arc::new(recall) }
+        Self {
+            mm,
+            recall: Arc::new(recall),
+        }
     }
 
     /// The recall config in use (for inspection / builder wiring).
-    pub fn recall_config(&self) -> &oneai_core::RecallConfig { &self.recall }
+    pub fn recall_config(&self) -> &oneai_core::RecallConfig {
+        &self.recall
+    }
 }
 
 #[async_trait::async_trait]
 impl Tool for MemorySearchTool {
-    fn name(&self) -> &str { "memory_search" }
+    fn name(&self) -> &str {
+        "memory_search"
+    }
 
     fn description(&self) -> &str {
         "Search your long-term/archival memory for facts relevant to a query. \
@@ -110,13 +127,19 @@ impl Tool for MemorySearchTool {
         })
     }
 
-    fn risk_level(&self) -> RiskLevel { RiskLevel::Low }
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
         if query.is_empty() {
-            return Ok(ToolOutput { success: false, content: String::new(), error: Some("query is required".into()) });
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("query is required".into()),
+            });
         }
 
         // Canonical path: three-factor search over the archival fact tier,
@@ -139,7 +162,9 @@ impl Tool for MemorySearchTool {
         } else {
             None
         };
-        let facts = self.mm.fact_archive()
+        let facts = self
+            .mm
+            .fact_archive()
             .search_hybrid_with_config(
                 query_embedding.as_deref(),
                 query,
@@ -150,11 +175,21 @@ impl Tool for MemorySearchTool {
             .await;
 
         if !facts.is_empty() {
-            let content = facts.iter()
-                .map(|f| format!("- [{}] {} {}: {}", f.fact_type, f.subject, f.predicate, f.content))
+            let content = facts
+                .iter()
+                .map(|f| {
+                    format!(
+                        "- [{}] {} {}: {}",
+                        f.fact_type, f.subject, f.predicate, f.content
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
-            return Ok(ToolOutput { success: true, content, error: None });
+            return Ok(ToolOutput {
+                success: true,
+                content,
+                error: None,
+            });
         }
 
         // Fallback (R2): raw-transcript回溯. When no fact matches, search the
@@ -169,7 +204,11 @@ impl Tool for MemorySearchTool {
             out.push_str(&snapshot_hits.join("\n"));
             out
         };
-        Ok(ToolOutput { success: true, content, error: None })
+        Ok(ToolOutput {
+            success: true,
+            content,
+            error: None,
+        })
     }
 }
 
@@ -179,14 +218,19 @@ impl MemorySearchTool {
     /// Returns matching message excerpts (role + text). Empty when there is no
     /// persistence backend or no saved conversation for this session.
     async fn search_conversation_snapshot(&self, query: &str, top_k: usize) -> Vec<String> {
-        let Some(p) = self.mm.persistence() else { return Vec::new() };
+        let Some(p) = self.mm.persistence() else {
+            return Vec::new();
+        };
         let session_id = self.mm.session_id().await;
-        if session_id.is_empty() { return Vec::new(); }
+        if session_id.is_empty() {
+            return Vec::new();
+        }
         let conv = match p.load_conversation(&session_id).await {
             Ok(Some(c)) => c,
             _ => return Vec::new(),
         };
-        conv.messages.iter()
+        conv.messages
+            .iter()
             .filter_map(|m| {
                 let text = m.text_content();
                 // Token-level match (no-embedding recall upgrade): a natural-
@@ -227,7 +271,9 @@ impl CoreMemoryEditTool {
 
 #[async_trait::async_trait]
 impl Tool for CoreMemoryEditTool {
-    fn name(&self) -> &str { "core_memory_edit" }
+    fn name(&self) -> &str {
+        "core_memory_edit"
+    }
 
     fn description(&self) -> &str {
         "Add or update a fact in your always-on core memory (the facts you see \
@@ -255,19 +301,31 @@ impl Tool for CoreMemoryEditTool {
         })
     }
 
-    fn risk_level(&self) -> RiskLevel { RiskLevel::Medium }
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Medium
+    }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let get = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let get = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         let fact_type = get("fact_type");
         let subject = get("subject");
         let predicate = get("predicate");
         let content = get("content");
         if subject.is_empty() || predicate.is_empty() || content.is_empty() {
-            return Ok(ToolOutput { success: false, content: String::new(), error: Some("subject, predicate, and content are required".into()) });
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("subject, predicate, and content are required".into()),
+            });
         }
         let importance = read_importance(&args, &fact_type);
-        let mut fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
+        let mut fact =
+            build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
         // §12.1: embed the fact at the write path so core-tier facts are
         // semantically searchable and carry an embedding when evicted to
         // archival. (build_fact is sync and can't await — embed here.)
@@ -279,10 +337,22 @@ impl Tool for CoreMemoryEditTool {
             self.mm.archive_facts(evicted).await;
         }
         let msg = match outcome {
-            crate::fact_store::UpsertOutcome::Inserted => format!("Inserted core fact: {} {}.", args.get("subject").and_then(|v| v.as_str()).unwrap_or(""), args.get("predicate").and_then(|v| v.as_str()).unwrap_or("")),
-            crate::fact_store::UpsertOutcome::Updated { previous_version } => format!("Updated core fact (v{}→v{}).", previous_version, previous_version + 1),
+            crate::fact_store::UpsertOutcome::Inserted => format!(
+                "Inserted core fact: {} {}.",
+                args.get("subject").and_then(|v| v.as_str()).unwrap_or(""),
+                args.get("predicate").and_then(|v| v.as_str()).unwrap_or("")
+            ),
+            crate::fact_store::UpsertOutcome::Updated { previous_version } => format!(
+                "Updated core fact (v{}→v{}).",
+                previous_version,
+                previous_version + 1
+            ),
         };
-        Ok(ToolOutput { success: true, content: msg, error: None })
+        Ok(ToolOutput {
+            success: true,
+            content: msg,
+            error: None,
+        })
     }
 }
 
@@ -299,7 +369,9 @@ impl ArchivalInsertTool {
 
 #[async_trait::async_trait]
 impl Tool for ArchivalInsertTool {
-    fn name(&self) -> &str { "archival_memory_insert" }
+    fn name(&self) -> &str {
+        "archival_memory_insert"
+    }
 
     fn description(&self) -> &str {
         "Store a fact in archival memory for later recall via memory_search. \
@@ -321,25 +393,41 @@ impl Tool for ArchivalInsertTool {
         })
     }
 
-    fn risk_level(&self) -> RiskLevel { RiskLevel::Medium }
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Medium
+    }
 
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
-        let get = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let get = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         let fact_type = get("fact_type");
         let subject = get("subject");
         let predicate = get("predicate");
         let content = get("content");
         if subject.is_empty() || predicate.is_empty() || content.is_empty() {
-            return Ok(ToolOutput { success: false, content: String::new(), error: Some("subject, predicate, and content are required".into()) });
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("subject, predicate, and content are required".into()),
+            });
         }
         let importance = read_importance(&args, &fact_type);
-        let mut fact = build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
+        let mut fact =
+            build_fact(&self.mm, fact_type, subject, predicate, content, importance).await;
         // §12.1: archival insert goes through archive_facts, which embeds —
         // but embed here too so the fact carries an embedding even if a future
         // code path bypasses archive_facts.
         self.mm.embed_fact(&mut fact).await;
         self.mm.archive_facts(vec![fact]).await;
-        Ok(ToolOutput { success: true, content: "Fact archived.".to_string(), error: None })
+        Ok(ToolOutput {
+            success: true,
+            content: "Fact archived.".to_string(),
+            error: None,
+        })
     }
 }
 
@@ -400,7 +488,10 @@ mod tests {
         let mm = mm();
         mm.set_session_id("s1").await;
         let search = MemorySearchTool::new(mm);
-        let r = search.execute(args(r#"{"query":"anything"}"#)).await.unwrap();
+        let r = search
+            .execute(args(r#"{"query":"anything"}"#))
+            .await
+            .unwrap();
         assert!(r.success);
         assert!(r.content.contains("No matching"));
     }

@@ -1,27 +1,25 @@
 //! REST API handlers — implement each endpoint for the Studio server.
 
-use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
-    Json,
     response::{Html, IntoResponse, Response},
+    Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::state::StudioState;
+use crate::checkpoint_dto::{CheckpointDetailView, CheckpointListView};
 use crate::graph_dto::GraphVisualization;
+use crate::state::StudioState;
 use crate::trace_dto::TraceTreeView;
-use crate::checkpoint_dto::{CheckpointListView, CheckpointDetailView};
 
 // ─── Session Handlers ────────────────────────────────────────────────
 
 /// List all tracked sessions.
-pub async fn list_sessions(
-    State(state): State<Arc<StudioState>>,
-) -> Json<Value> {
+pub async fn list_sessions(State(state): State<Arc<StudioState>>) -> Json<Value> {
     let sessions = state.list_sessions().await;
     Json(json!({
         "total": sessions.len(),
@@ -65,7 +63,9 @@ pub async fn get_session_metrics(
 
 /// Built-in demo StateGraphs for visualization.
 fn demo_graphs() -> HashMap<String, GraphVisualization> {
-    use oneai_workflow::state_graph::{StateGraph, GraphNode, GraphEdge, NodeAction, EdgeCondition};
+    use oneai_workflow::state_graph::{
+        EdgeCondition, GraphEdge, GraphNode, NodeAction, StateGraph,
+    };
 
     let mut graphs: HashMap<String, GraphVisualization> = HashMap::new();
 
@@ -154,7 +154,10 @@ fn demo_graphs() -> HashMap<String, GraphVisualization> {
     });
     react.add_terminal("end".to_string());
 
-    graphs.insert("react-loop".to_string(), GraphVisualization::from_state_graph(&react));
+    graphs.insert(
+        "react-loop".to_string(),
+        GraphVisualization::from_state_graph(&react),
+    );
 
     // Plan-then-Execute graph
     let mut plan_exec = StateGraph::new("plan-execute", "plan");
@@ -174,7 +177,9 @@ fn demo_graphs() -> HashMap<String, GraphVisualization> {
     });
     plan_exec.add_node(GraphNode {
         id: "switch_to_react".to_string(),
-        action: NodeAction::SwitchParadigm { paradigm: "react".to_string() },
+        action: NodeAction::SwitchParadigm {
+            paradigm: "react".to_string(),
+        },
         interrupt: false,
         metadata: HashMap::new(),
     });
@@ -252,7 +257,10 @@ fn demo_graphs() -> HashMap<String, GraphVisualization> {
     });
     plan_exec.add_terminal("end".to_string());
 
-    graphs.insert("plan-execute".to_string(), GraphVisualization::from_state_graph(&plan_exec));
+    graphs.insert(
+        "plan-execute".to_string(),
+        GraphVisualization::from_state_graph(&plan_exec),
+    );
 
     graphs
 }
@@ -268,9 +276,7 @@ pub async fn list_graphs() -> Json<Value> {
 }
 
 /// Get a specific StateGraph visualization.
-pub async fn get_graph(
-    Path(name): Path<String>,
-) -> Result<Json<GraphVisualization>, StatusCode> {
+pub async fn get_graph(Path(name): Path<String>) -> Result<Json<GraphVisualization>, StatusCode> {
     let graphs = demo_graphs();
     match graphs.get(&name) {
         Some(viz) => Ok(Json(viz.clone())),
@@ -281,13 +287,10 @@ pub async fn get_graph(
 // ─── Checkpoint Handlers ─────────────────────────────────────────────
 
 /// List all available checkpoints.
-pub async fn list_checkpoints(
-    State(state): State<Arc<StudioState>>,
-) -> Json<Value> {
+pub async fn list_checkpoints(State(state): State<Arc<StudioState>>) -> Json<Value> {
     use oneai_core::traits::StatePersistence;
     let persistence = state.persistence();
-    let infos = persistence.list_checkpoints().await
-        .unwrap_or_default();
+    let infos = persistence.list_checkpoints().await.unwrap_or_default();
     let view = CheckpointListView::from_checkpoint_infos(&infos);
     Json(json!(view))
 }
@@ -374,24 +377,28 @@ pub async fn list_domain_packs() -> Json<Value> {
 }
 
 /// Get details of a specific DomainPack.
-pub async fn get_domain_pack(
-    Path(name): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
+pub async fn get_domain_pack(Path(name): Path<String>) -> Result<Json<Value>, StatusCode> {
     let packs = vec![
-        ("coding", json!({
-            "name": "coding",
-            "description": "Coding agent — file editing, code review, test execution",
-            "tools": ["read_file", "write_file", "shell", "grep", "glob", "apply_patch"],
-            "paradigms": ["react", "plan", "reflect"],
-            "permissions": "standard",
-        })),
-        ("research", json!({
-            "name": "research",
-            "description": "Research agent — web search, document retrieval, summarization",
-            "tools": ["web_search", "web_fetch", "read_file", "summarize"],
-            "paradigms": ["react", "explore"],
-            "permissions": "read",
-        })),
+        (
+            "coding",
+            json!({
+                "name": "coding",
+                "description": "Coding agent — file editing, code review, test execution",
+                "tools": ["read_file", "write_file", "shell", "grep", "glob", "apply_patch"],
+                "paradigms": ["react", "plan", "reflect"],
+                "permissions": "standard",
+            }),
+        ),
+        (
+            "research",
+            json!({
+                "name": "research",
+                "description": "Research agent — web search, document retrieval, summarization",
+                "tools": ["web_search", "web_fetch", "read_file", "summarize"],
+                "paradigms": ["react", "explore"],
+                "permissions": "read",
+            }),
+        ),
     ];
 
     for (pack_name, pack_json) in packs {
@@ -405,9 +412,7 @@ pub async fn get_domain_pack(
 // ─── Tools Handler ───────────────────────────────────────────────────
 
 /// List all registered tools.
-pub async fn list_tools(
-    State(state): State<Arc<StudioState>>,
-) -> Json<Value> {
+pub async fn list_tools(State(state): State<Arc<StudioState>>) -> Json<Value> {
     let tool_names = state.tool_registry().list_names().await;
     Json(json!({
         "total": tool_names.len(),
@@ -445,10 +450,7 @@ pub async fn serve_static(Path(file): Path<String>) -> Response {
             "application/javascript; charset=utf-8",
             STUDIO_JS.as_bytes(),
         ),
-        "graph-render.js" => (
-            "application/javascript; charset=utf-8",
-            GRAPH_JS.as_bytes(),
-        ),
+        "graph-render.js" => ("application/javascript; charset=utf-8", GRAPH_JS.as_bytes()),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, ctype)], bytes).into_response()
@@ -618,7 +620,9 @@ mod tests {
         let state = Arc::new(StudioState::new_default());
         let (code, Json(v)) = run_task(
             State(state),
-            Json(RunRequest { prompt: "   ".to_string() }),
+            Json(RunRequest {
+                prompt: "   ".to_string(),
+            }),
         )
         .await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -632,7 +636,9 @@ mod tests {
         let state = Arc::new(StudioState::new_default());
         let (code, Json(v)) = run_task(
             State(state),
-            Json(RunRequest { prompt: "hello".to_string() }),
+            Json(RunRequest {
+                prompt: "hello".to_string(),
+            }),
         )
         .await;
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);

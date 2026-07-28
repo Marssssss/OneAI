@@ -16,8 +16,8 @@ use oneai_core::ApprovalRequest;
 
 use oneai_skill::SkillRegistry;
 
-use super::input_mode::{InputMode, VimMode};
 use super::history::MessageHistory;
+use super::input_mode::{InputMode, VimMode};
 
 // ─── Interaction Mode ──────────────────────────────────────────────────────
 
@@ -26,17 +26,12 @@ use super::history::MessageHistory;
 /// - Normal: high-risk tools require explicit approval.
 /// - AutoAccept: every tool call is approved silently (no per-call message).
 /// - Plan: tool execution is blocked entirely — the agent only produces a plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InteractionMode {
+    #[default]
     Normal,
     AutoAccept,
     Plan,
-}
-
-impl Default for InteractionMode {
-    fn default() -> Self {
-        InteractionMode::Normal
-    }
 }
 
 impl InteractionMode {
@@ -94,25 +89,34 @@ impl WorkTimer {
 
 /// Supported slash commands for autocomplete.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/help",    "Show help and available commands"),
-    ("/h",       "Shortcut for /help"),
-    ("/tools",   "List registered tools"),
-    ("/t",       "Shortcut for /tools"),
-    ("/skills",  "List all available skills"),
-    ("/skill",   "Activate, add, remove, or search skills (use /skill <name>)"),
-    ("/clear",   "Clear conversation and create new session"),
-    ("/usage",   "Show session token usage and context"),
+    ("/help", "Show help and available commands"),
+    ("/h", "Shortcut for /help"),
+    ("/tools", "List registered tools"),
+    ("/t", "Shortcut for /tools"),
+    ("/skills", "List all available skills"),
+    (
+        "/skill",
+        "Activate, add, remove, or search skills (use /skill <name>)",
+    ),
+    ("/clear", "Clear conversation and create new session"),
+    ("/usage", "Show session token usage and context"),
     ("/context", "Show detailed context window usage breakdown"),
     ("/session", "Show session details"),
-    ("/paradigm", "Switch agent paradigm (ReAct/Plan/Reflect/Explore)"),
-    ("/domain",  "Switch domain pack (coding/general)"),
+    (
+        "/paradigm",
+        "Switch agent paradigm (ReAct/Plan/Reflect/Explore)",
+    ),
+    ("/domain", "Switch domain pack (coding/general)"),
     ("/compact", "Compact conversation context"),
-    ("/wf",      "Workflow commands: list, run, define, show, graph"),
-    ("/new",     "Create a new session"),
-    ("/init",    "Generate project-instruction file (ONEAI.md/AGENTS.md/CLAUDE.md)"),
-    ("/tool",    "Directly call a tool with JSON args"),
-    ("/quit",    "Exit the TUI"),
-    ("/q",       "Shortcut for /quit"),
+    ("/wf", "Workflow commands: list, run, define, show, graph"),
+    ("/new", "Create a new session"),
+    (
+        "/init",
+        "Generate project-instruction file (ONEAI.md/AGENTS.md/CLAUDE.md)",
+    ),
+    ("/tool", "Directly call a tool with JSON args"),
+    ("/quit", "Exit the TUI"),
+    ("/q", "Shortcut for /quit"),
 ];
 
 impl App {
@@ -122,7 +126,8 @@ impl App {
             return Vec::new();
         }
         let prefix = &self.input;
-        SLASH_COMMANDS.iter()
+        SLASH_COMMANDS
+            .iter()
             .filter(|(cmd, _)| cmd.starts_with(prefix))
             .map(|&(cmd, desc)| (cmd, desc))
             .collect()
@@ -145,14 +150,21 @@ impl App {
 /// Check if a tool name is a file operation tool that should display content.
 #[allow(dead_code)]
 pub fn is_file_operation_tool(tool_name: &str) -> bool {
-    matches!(tool_name,
-        "read_file" | "file_read" | "read" |
-        "edit_file" | "file_edit" | "edit" |
-        "file_write" | "write" |
-        "notebook_edit" |
-        "list_directory" | "ls"
+    matches!(
+        tool_name,
+        "read_file"
+            | "file_read"
+            | "read"
+            | "edit_file"
+            | "file_edit"
+            | "edit"
+            | "file_write"
+            | "write"
+            | "notebook_edit"
+            | "list_directory"
+            | "ls"
     )
-}// ─── Token Usage ──────────────────────────────────────────────────────────
+} // ─── Token Usage ──────────────────────────────────────────────────────────
 
 /// Token usage tracking for the session.
 #[derive(Debug, Clone, Default)]
@@ -302,14 +314,16 @@ impl ChatRole {
             ChatRole::User => USER_COLOR,
             ChatRole::Assistant => ASSISTANT_COLOR,
             ChatRole::System => SYSTEM_COLOR,
-            ChatRole::ToolInvocation { result, .. } => {
-                match result {
-                    Some((success, _)) => {
-                        if *success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR }
+            ChatRole::ToolInvocation { result, .. } => match result {
+                Some((success, _)) => {
+                    if *success {
+                        TOOL_RESULT_SUCCESS_COLOR
+                    } else {
+                        TOOL_RESULT_FAILURE_COLOR
                     }
-                    None => TOOL_CALL_COLOR,
                 }
-            }
+                None => TOOL_CALL_COLOR,
+            },
             ChatRole::Iteration => ratatui::style::Color::DarkGray,
             ChatRole::Error => ERROR_COLOR,
             ChatRole::Approval => APPROVAL_COLOR,
@@ -325,14 +339,16 @@ impl ChatRole {
             ChatRole::User => USER_BORDER,
             ChatRole::Assistant => ASSISTANT_BORDER,
             ChatRole::System => ratatui::style::Color::DarkGray,
-            ChatRole::ToolInvocation { result, .. } => {
-                match result {
-                    Some((success, _)) => {
-                        if *success { TOOL_RESULT_SUCCESS_COLOR } else { TOOL_RESULT_FAILURE_COLOR }
+            ChatRole::ToolInvocation { result, .. } => match result {
+                Some((success, _)) => {
+                    if *success {
+                        TOOL_RESULT_SUCCESS_COLOR
+                    } else {
+                        TOOL_RESULT_FAILURE_COLOR
                     }
-                    None => TOOL_CALL_BORDER,
                 }
-            }
+                None => TOOL_CALL_BORDER,
+            },
             ChatRole::Iteration => ratatui::style::Color::DarkGray,
             ChatRole::Error => ERROR_COLOR,
             ChatRole::Approval => APPROVAL_BORDER,
@@ -347,26 +363,30 @@ impl ChatRole {
             ChatRole::User => "💬",
             ChatRole::Assistant => "🤖",
             ChatRole::System => "⚡",
-            ChatRole::ToolInvocation { tool_name, result, .. } => {
+            ChatRole::ToolInvocation {
+                tool_name, result, ..
+            } => {
                 // When result is pending, show tool-specific call icon
                 // When result arrived, show success/failure icon
                 match result {
                     Some((success, _)) => {
-                        if *success { "✅" } else { "❌" }
-                    }
-                    None => {
-                        match tool_name.as_str() {
-                            "calculator" => "🧮",
-                            "grep" | "search" => "🔍",
-                            "edit_file" | "file_edit" => "✏️",
-                            "read_file" | "file_read" => "📄",
-                            "glob" | "file_glob" => "📂",
-                            "shell" => "🖥️",
-                            "list_directory" => "📂",
-                            "web_fetch" => "🌐",
-                            _ => "🔧",
+                        if *success {
+                            "✅"
+                        } else {
+                            "❌"
                         }
                     }
+                    None => match tool_name.as_str() {
+                        "calculator" => "🧮",
+                        "grep" | "search" => "🔍",
+                        "edit_file" | "file_edit" => "✏️",
+                        "read_file" | "file_read" => "📄",
+                        "glob" | "file_glob" => "📂",
+                        "shell" => "🖥️",
+                        "list_directory" => "📂",
+                        "web_fetch" => "🌐",
+                        _ => "🔧",
+                    },
                 }
             }
             ChatRole::Iteration => "──",
@@ -571,7 +591,6 @@ pub struct App {
     pub work_timer: WorkTimer,
 
     // ─── Enhanced fields ──────────────────────────────────────────────────
-
     /// Current input mode (single-line or multi-line vim).
     pub input_mode: InputMode,
 
@@ -667,7 +686,6 @@ pub struct App {
     pub search_result_index: usize,
 
     // ─── Stream throttle ──────────────────────────────────────────────────
-
     /// Buffered stream text not yet applied to the last assistant message.
     /// During streaming, chunks are buffered and flushed at ~10fps for smoother rendering.
     pub stream_buffer: String,
@@ -676,7 +694,6 @@ pub struct App {
     pub last_stream_flush: std::time::Instant,
 
     // ─── Render cache ─────────────────────────────────────────────────────
-
     /// Cached rendered lines per message (avoids re-parsing markdown every frame).
     pub render_cache: MessageRenderCache,
 
@@ -696,7 +713,11 @@ pub struct App {
     /// A plan submitted via `exit_plan_mode`, awaiting the user's
     /// accept/reject decision. While set, the TUI shows an accept/reject UI.
     /// The oneshot sender returns the decision to the (blocked) AgentLoop.
-    pub pending_plan: Option<(String, Vec<oneai_agent::PlanStep>, Option<tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>>)>,
+    pub pending_plan: Option<(
+        String,
+        Vec<oneai_agent::PlanStep>,
+        Option<tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>>,
+    )>,
     /// Pending plan-decision request (a tradeoff the user must resolve during
     /// planning). Set when an `InteractionRequest::PlanDecision` arrives.
     pub plan_decision_pending: Option<PlanDecisionState>,
@@ -720,7 +741,8 @@ impl App {
         skill_registry: Arc<SkillRegistry>,
     ) -> Self {
         // Compute context window from model name before it's moved into the struct
-        let context_window_size = oneai_core::token_counter::infer_context_window_for_tokenizer(model_name.as_str());
+        let context_window_size =
+            oneai_core::token_counter::infer_context_window_for_tokenizer(model_name.as_str());
         let short_id = session_id[..8.min(session_id.len())].to_string();
         let initial_session = SessionInfo {
             short_id,
@@ -795,9 +817,7 @@ impl App {
     /// Estimate token count from conversation content when provider returns 0.
     /// Approximate: ~4 characters = 1 token (for English/mixed text).
     pub fn estimate_tokens_from_messages(&self) -> u32 {
-        let total_chars: usize = self.messages.iter()
-            .map(|m| m.content.len())
-            .sum();
+        let total_chars: usize = self.messages.iter().map(|m| m.content.len()).sum();
         (total_chars / 4) as u32
     }
 
@@ -893,7 +913,9 @@ impl App {
     /// Update current session info (message count, preview) from current state.
     pub fn update_session_info(&mut self) {
         let msg_count = self.messages.len();
-        let preview = self.messages.iter()
+        let preview = self
+            .messages
+            .iter()
             .find(|m| m.role == ChatRole::User)
             .map(|m| {
                 let content = &m.content;
@@ -981,7 +1003,10 @@ impl App {
                 self.input.insert_str(self.input_cursor_pos, text);
                 self.input_cursor_pos += text.len();
             }
-            InputMode::MultiLineVim { cursor_position, mode } => {
+            InputMode::MultiLineVim {
+                cursor_position,
+                mode,
+            } => {
                 self.input.insert_str(cursor_position, text);
                 self.input_mode = InputMode::MultiLineVim {
                     cursor_position: cursor_position + text.len(),
@@ -1013,9 +1038,10 @@ impl App {
         // Dispatch based on current input mode
         let result = match self.input_mode {
             InputMode::SingleLine => self.handle_singleline_key(key),
-            InputMode::MultiLineVim { cursor_position, mode } => {
-                self.handle_vim_key(key, cursor_position, mode)
-            }
+            InputMode::MultiLineVim {
+                cursor_position,
+                mode,
+            } => self.handle_vim_key(key, cursor_position, mode),
         };
 
         // Any key press that wasn't filtered out likely changed some state
@@ -1068,7 +1094,8 @@ impl App {
                 None
             }
             // Backspace: delete char before cursor, close autocomplete if input no longer starts with /
-            (KeyModifiers::NONE, KeyCode::Backspace) | (KeyModifiers::SHIFT, KeyCode::Backspace) => {
+            (KeyModifiers::NONE, KeyCode::Backspace)
+            | (KeyModifiers::SHIFT, KeyCode::Backspace) => {
                 if self.input_cursor_pos > 0 {
                     let prev = prev_char_boundary(&self.input, self.input_cursor_pos);
                     self.input.replace_range(prev..self.input_cursor_pos, "");
@@ -1154,7 +1181,8 @@ impl App {
             }
 
             // Backspace: delete char before cursor (save undo) — UTF-8 safe
-            (KeyModifiers::NONE, KeyCode::Backspace) | (KeyModifiers::SHIFT, KeyCode::Backspace) => {
+            (KeyModifiers::NONE, KeyCode::Backspace)
+            | (KeyModifiers::SHIFT, KeyCode::Backspace) => {
                 self.save_undo_state();
                 if self.input_cursor_pos > 0 {
                     let prev = prev_char_boundary(&self.input, self.input_cursor_pos);
@@ -1255,8 +1283,10 @@ impl App {
             (KeyModifiers::NONE, KeyCode::Char('v')) if self.input.is_empty() => {
                 self.verbose_sidebar = !self.verbose_sidebar;
                 if self.verbose_sidebar {
-                    self.add_message(ChatRole::System,
-                        "🔬 Verbose sidebar: showing Tools & Paradigm (press v to hide)");
+                    self.add_message(
+                        ChatRole::System,
+                        "🔬 Verbose sidebar: showing Tools & Paradigm (press v to hide)",
+                    );
                 } else {
                     self.add_message(ChatRole::System,
                         "Sidebar: user mode — Tools & Paradigm hidden (press v for developer panel)");
@@ -1271,7 +1301,9 @@ impl App {
                 self.input.insert(self.input_cursor_pos, c);
                 self.input_cursor_pos += c.len_utf8();
                 // Trigger command autocomplete when user types /
-                if c == '/' || (self.input.starts_with('/') && self.get_command_suggestions().len() > 0) {
+                if c == '/'
+                    || (self.input.starts_with('/') && !self.get_command_suggestions().is_empty())
+                {
                     self.command_autocomplete = true;
                     self.command_autocomplete_index = 0;
                 }
@@ -1283,7 +1315,12 @@ impl App {
     }
 
     /// Handle keys in multi-line vim mode.
-    fn handle_vim_key(&mut self, key: KeyEvent, cursor_position: usize, mode: VimMode) -> Option<String> {
+    fn handle_vim_key(
+        &mut self,
+        key: KeyEvent,
+        cursor_position: usize,
+        mode: VimMode,
+    ) -> Option<String> {
         match mode {
             VimMode::Normal => self.handle_vim_normal_key(key, cursor_position),
             VimMode::Insert => self.handle_vim_insert_key(key, cursor_position),
@@ -1303,7 +1340,9 @@ impl App {
                     let line_end = find_line_end(&self.input, cursor_position);
                     // Remove the line content from line_start to line_end
                     // Also remove the newline character if it exists
-                    let delete_end = if line_end < self.input.len() && self.input.as_bytes()[line_end] == b'\n' {
+                    let delete_end = if line_end < self.input.len()
+                        && self.input.as_bytes()[line_end] == b'\n'
+                    {
                         line_end + 1
                     } else if line_start > 0 && self.input.as_bytes()[line_start - 1] == b'\n' {
                         line_start - 1
@@ -1417,7 +1456,9 @@ impl App {
 
             // x: delete character at cursor — UTF-8 safe
             (KeyModifiers::NONE, KeyCode::Char('x')) => {
-                if cursor_position < self.input.len() && self.input.is_char_boundary(cursor_position) {
+                if cursor_position < self.input.len()
+                    && self.input.is_char_boundary(cursor_position)
+                {
                     let next = next_char_boundary(&self.input, cursor_position);
                     self.input.replace_range(cursor_position..next, "");
                 }
@@ -1509,7 +1550,6 @@ impl App {
             _ => None,
         }
     }
-
 }
 
 // ─── UTF-8 Cursor Helpers ──────────────────────────────────────────────────
@@ -1545,10 +1585,7 @@ fn find_line_start(input: &str, pos: usize) -> usize {
     if pos == 0 {
         return 0;
     }
-    input[..pos]
-        .rfind('\n')
-        .map(|idx| idx + 1)
-        .unwrap_or(0)
+    input[..pos].rfind('\n').map(|idx| idx + 1).unwrap_or(0)
 }
 
 /// Find the end of the line containing the given position.

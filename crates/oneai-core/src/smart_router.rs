@@ -39,10 +39,8 @@
 //! - `ModelQualityProfile`: Per-model quality/latency characteristics
 //! - `SmartRoutingLog`: Audit trail for routing decisions (like FallbackLog)
 
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
 
 // ─── RoutingStrategy ──────────────────────────────────────────────────────────
 
@@ -60,6 +58,7 @@ use serde::{Deserialize, Serialize};
 /// | Custom | user-defined | user-defined |
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum RoutingStrategy {
     /// Minimize latency — prefer faster models (Haiku, Gemini Flash, gpt-4o-mini).
     /// Weight: Latency=0.80, Quality=0.20
@@ -71,6 +70,7 @@ pub enum RoutingStrategy {
 
     /// Balance both dimensions — moderate latency and quality.
     /// Weight: Latency=0.40, Quality=0.60
+    #[default]
     Balanced,
 
     /// Custom weights — user-defined weight ratios.
@@ -90,8 +90,10 @@ impl RoutingStrategy {
             Self::LatencyOptimized => (0.80, 0.20),
             Self::QualityOptimized => (0.20, 0.80),
             Self::Balanced => (0.40, 0.60),
-            Self::Custom { latency_weight, quality_weight } =>
-                (*latency_weight, *quality_weight),
+            Self::Custom {
+                latency_weight,
+                quality_weight,
+            } => (*latency_weight, *quality_weight),
         }
     }
 
@@ -110,15 +112,15 @@ impl RoutingStrategy {
     /// Weights must be in [0.0, 1.0] and must sum to approximately 1.0.
     pub fn custom(latency_weight: f64, quality_weight: f64) -> Self {
         let total = latency_weight + quality_weight;
-        assert!(total > 0.99 && total < 1.01,
-            "Custom strategy weights must sum to 1.0 (got {})", total);
-        Self::Custom { latency_weight, quality_weight }
-    }
-}
-
-impl Default for RoutingStrategy {
-    fn default() -> Self {
-        Self::Balanced
+        assert!(
+            total > 0.99 && total < 1.01,
+            "Custom strategy weights must sum to 1.0 (got {})",
+            total
+        );
+        Self::Custom {
+            latency_weight,
+            quality_weight,
+        }
     }
 }
 
@@ -185,9 +187,15 @@ pub struct SmartRouteConfig {
     pub context_overflow_threshold: f64,
 }
 
-fn default_true() -> bool { true }
-fn default_max_latency_ms() -> u64 { 30000 }
-fn default_context_threshold() -> f64 { 0.8 }
+fn default_true() -> bool {
+    true
+}
+fn default_max_latency_ms() -> u64 {
+    30000
+}
+fn default_context_threshold() -> f64 {
+    0.8
+}
 
 impl Default for SmartRouteConfig {
     fn default() -> Self {
@@ -337,9 +345,17 @@ impl RoutingTier {
     /// - "opus", "o3-pro", "2.5-pro" → Powerful
     pub fn from_model_name(model: &str) -> Self {
         let lower = model.to_lowercase();
-        if lower.contains("haiku") || lower.contains("mini") || lower.contains("0.5b") || lower.contains("nano") {
+        if lower.contains("haiku")
+            || lower.contains("mini")
+            || lower.contains("0.5b")
+            || lower.contains("nano")
+        {
             Self::Cheap
-        } else if lower.contains("opus") || lower.contains("o3-pro") || lower.contains("2.5-pro") || lower.contains("deepseek-r1:14b") {
+        } else if lower.contains("opus")
+            || lower.contains("o3-pro")
+            || lower.contains("2.5-pro")
+            || lower.contains("deepseek-r1:14b")
+        {
             Self::Powerful
         } else {
             // Default to balanced for sonnet, 4o, 7b, etc.
@@ -369,10 +385,7 @@ impl RoutingTier {
 pub enum SmartRouteFactor {
     /// Circuit breaker state influenced the decision.
     /// Includes the provider name and whether the circuit was open.
-    CircuitOpen {
-        provider: String,
-        was_open: bool,
-    },
+    CircuitOpen { provider: String, was_open: bool },
 
     /// Rate limiter status influenced the decision.
     /// Includes the provider name and whether the rate was exceeded.
@@ -429,25 +442,87 @@ impl SmartRouteFactor {
     /// Human-readable description of this factor.
     pub fn description(&self) -> String {
         match self {
-            Self::CircuitOpen { provider, was_open } =>
-                format!("Circuit {}: {}", provider, if *was_open { "OPEN — skip" } else { "closed — OK" }),
-            Self::RateLimited { provider, was_exceeded } =>
-                format!("Rate {}: {}", provider, if *was_exceeded { "EXCEEDED — skip" } else { "OK" }),
-            Self::ContextOverflow { conversation_tokens, model_context_window, would_overflow } =>
-                format!("Context: {}K/{}K tokens ({})", conversation_tokens / 1000, model_context_window / 1000,
-                    if *would_overflow { "OVERFLOW — skip" } else { "OK" }),
-            Self::QualityRequirement { required_tier, actual_tier } =>
-                format!("Quality: required={}, actual={}", required_tier.name(), actual_tier.name()),
-            Self::LatencyRequirement { max_latency_ms, estimated_latency_ms, within_tolerance } =>
-                format!("Latency: est {}ms / max {}ms ({})", estimated_latency_ms, max_latency_ms,
-                    if *within_tolerance { "OK" } else { "OVER LIMIT" }),
-            Self::UserOverride { requested_provider, requested_model } =>
-                format!("User override: {} / {}", requested_provider, requested_model),
-            Self::RegexMatch { rule_description, matched } =>
-                format!("Regex rule: {} ({})", rule_description, if *matched { "matched" } else { "no match" }),
-            Self::ScoringResult { provider, total_score, latency_score, quality_score } =>
-                format!("Score: {} = {:.2} (latency={:.2}, quality={:.2})",
-                    provider, total_score, latency_score, quality_score),
+            Self::CircuitOpen { provider, was_open } => format!(
+                "Circuit {}: {}",
+                provider,
+                if *was_open {
+                    "OPEN — skip"
+                } else {
+                    "closed — OK"
+                }
+            ),
+            Self::RateLimited {
+                provider,
+                was_exceeded,
+            } => format!(
+                "Rate {}: {}",
+                provider,
+                if *was_exceeded {
+                    "EXCEEDED — skip"
+                } else {
+                    "OK"
+                }
+            ),
+            Self::ContextOverflow {
+                conversation_tokens,
+                model_context_window,
+                would_overflow,
+            } => format!(
+                "Context: {}K/{}K tokens ({})",
+                conversation_tokens / 1000,
+                model_context_window / 1000,
+                if *would_overflow {
+                    "OVERFLOW — skip"
+                } else {
+                    "OK"
+                }
+            ),
+            Self::QualityRequirement {
+                required_tier,
+                actual_tier,
+            } => format!(
+                "Quality: required={}, actual={}",
+                required_tier.name(),
+                actual_tier.name()
+            ),
+            Self::LatencyRequirement {
+                max_latency_ms,
+                estimated_latency_ms,
+                within_tolerance,
+            } => format!(
+                "Latency: est {}ms / max {}ms ({})",
+                estimated_latency_ms,
+                max_latency_ms,
+                if *within_tolerance {
+                    "OK"
+                } else {
+                    "OVER LIMIT"
+                }
+            ),
+            Self::UserOverride {
+                requested_provider,
+                requested_model,
+            } => format!(
+                "User override: {} / {}",
+                requested_provider, requested_model
+            ),
+            Self::RegexMatch {
+                rule_description,
+                matched,
+            } => format!(
+                "Regex rule: {} ({})",
+                rule_description,
+                if *matched { "matched" } else { "no match" }
+            ),
+            Self::ScoringResult {
+                provider,
+                total_score,
+                latency_score,
+                quality_score,
+            } => format!(
+                "Score: {} = {:.2} (latency={:.2}, quality={:.2})",
+                provider, total_score, latency_score, quality_score
+            ),
         }
     }
 }
@@ -536,10 +611,20 @@ impl ProviderScore {
     /// Human-readable summary of this score.
     pub fn summary(&self) -> String {
         if !self.is_available {
-            format!("{} — SKIPPED: {}", self.provider_name, self.skip_reason.as_deref().unwrap_or("unknown"))
+            format!(
+                "{} — SKIPPED: {}",
+                self.provider_name,
+                self.skip_reason.as_deref().unwrap_or("unknown")
+            )
         } else {
-            format!("{} ({}) — total={:.2} [latency={:.2}, quality={:.2}]",
-                self.provider_name, self.tier.name(), self.total_score, self.latency_score, self.quality_score)
+            format!(
+                "{} ({}) — total={:.2} [latency={:.2}, quality={:.2}]",
+                self.provider_name,
+                self.tier.name(),
+                self.total_score,
+                self.latency_score,
+                self.quality_score
+            )
         }
     }
 }
@@ -599,8 +684,8 @@ impl ModelQualityProfile {
 
         // Default latency estimates based on tier
         let estimated_latency_ms = match tier {
-            RoutingTier::Cheap => 1500,   // ~1.5s average
-            RoutingTier::Balanced => 3500, // ~3.5s average
+            RoutingTier::Cheap => 1500,     // ~1.5s average
+            RoutingTier::Balanced => 3500,  // ~3.5s average
             RoutingTier::Powerful => 15000, // ~15s average
         };
 
@@ -622,7 +707,11 @@ impl ModelQualityProfile {
     /// Infer context window size from model name.
     fn infer_context_window(model: &str) -> u64 {
         let lower = model.to_lowercase();
-        if lower.contains("opus") || lower.contains("sonnet") || lower.contains("gpt-4") || lower.contains("o3") {
+        if lower.contains("opus")
+            || lower.contains("sonnet")
+            || lower.contains("gpt-4")
+            || lower.contains("o3")
+        {
             200_000
         } else if lower.contains("haiku") || lower.contains("mini") || lower.contains("nano") {
             128_000
@@ -655,7 +744,11 @@ impl ModelQualityProfile {
         vec![
             // Anthropic family
             Self::new("claude-haiku-4-5-20251001", "anthropic", RoutingTier::Cheap),
-            Self::new("claude-sonnet-4-6-20250514", "anthropic", RoutingTier::Balanced),
+            Self::new(
+                "claude-sonnet-4-6-20250514",
+                "anthropic",
+                RoutingTier::Balanced,
+            ),
             Self::new("claude-opus-4-8", "anthropic", RoutingTier::Powerful),
             // OpenAI family
             Self::new("gpt-4o-mini", "openai", RoutingTier::Cheap),
@@ -796,8 +889,10 @@ impl SmartRouteDecision {
             quality_score: best_score.quality_score,
             total_score: best_score.total_score,
             factors,
-            reason: format!("Multi-factor scoring: {} (score={:.2})",
-                best_score.provider_name, best_score.total_score),
+            reason: format!(
+                "Multi-factor scoring: {} (score={:.2})",
+                best_score.provider_name, best_score.total_score
+            ),
             from_regex: false,
             all_scores,
             timestamp: Utc::now(),
@@ -839,7 +934,8 @@ impl SmartRouteDecision {
 
     /// Detailed factor analysis.
     pub fn factor_analysis(&self) -> String {
-        self.factors.iter()
+        self.factors
+            .iter()
             .map(|f| f.description())
             .collect::<Vec<_>>()
             .join("\n  ")
@@ -946,10 +1042,23 @@ mod tests {
 
     #[test]
     fn test_routing_strategy_names() {
-        assert_eq!(RoutingStrategy::LatencyOptimized.name(), "Latency Optimized");
-        assert_eq!(RoutingStrategy::QualityOptimized.name(), "Quality Optimized");
+        assert_eq!(
+            RoutingStrategy::LatencyOptimized.name(),
+            "Latency Optimized"
+        );
+        assert_eq!(
+            RoutingStrategy::QualityOptimized.name(),
+            "Quality Optimized"
+        );
         assert_eq!(RoutingStrategy::Balanced.name(), "Balanced");
-        assert_eq!(RoutingStrategy::Custom { latency_weight: 0.5, quality_weight: 0.5 }.name(), "Custom");
+        assert_eq!(
+            RoutingStrategy::Custom {
+                latency_weight: 0.5,
+                quality_weight: 0.5
+            }
+            .name(),
+            "Custom"
+        );
     }
 
     #[test]
@@ -968,14 +1077,38 @@ mod tests {
 
     #[test]
     fn test_routing_tier_from_model_name() {
-        assert_eq!(RoutingTier::from_model_name("claude-haiku-4-5-20251001"), RoutingTier::Cheap);
-        assert_eq!(RoutingTier::from_model_name("gpt-4o-mini"), RoutingTier::Cheap);
-        assert_eq!(RoutingTier::from_model_name("gemini-2.0-flash"), RoutingTier::Cheap);
-        assert_eq!(RoutingTier::from_model_name("claude-sonnet-4-6-20250514"), RoutingTier::Balanced);
-        assert_eq!(RoutingTier::from_model_name("gpt-4o"), RoutingTier::Balanced);
-        assert_eq!(RoutingTier::from_model_name("claude-opus-4-8"), RoutingTier::Powerful);
-        assert_eq!(RoutingTier::from_model_name("o3-pro"), RoutingTier::Powerful);
-        assert_eq!(RoutingTier::from_model_name("qwen2.5:7b"), RoutingTier::Balanced);
+        assert_eq!(
+            RoutingTier::from_model_name("claude-haiku-4-5-20251001"),
+            RoutingTier::Cheap
+        );
+        assert_eq!(
+            RoutingTier::from_model_name("gpt-4o-mini"),
+            RoutingTier::Cheap
+        );
+        assert_eq!(
+            RoutingTier::from_model_name("gemini-2.0-flash"),
+            RoutingTier::Cheap
+        );
+        assert_eq!(
+            RoutingTier::from_model_name("claude-sonnet-4-6-20250514"),
+            RoutingTier::Balanced
+        );
+        assert_eq!(
+            RoutingTier::from_model_name("gpt-4o"),
+            RoutingTier::Balanced
+        );
+        assert_eq!(
+            RoutingTier::from_model_name("claude-opus-4-8"),
+            RoutingTier::Powerful
+        );
+        assert_eq!(
+            RoutingTier::from_model_name("o3-pro"),
+            RoutingTier::Powerful
+        );
+        assert_eq!(
+            RoutingTier::from_model_name("qwen2.5:7b"),
+            RoutingTier::Balanced
+        );
     }
 
     // ─── SmartRouteConfig tests ────────────────────────────────────────────
@@ -1021,7 +1154,10 @@ mod tests {
 
     #[test]
     fn test_smart_route_factor_descriptions() {
-        let circuit = SmartRouteFactor::CircuitOpen { provider: "anthropic".to_string(), was_open: true };
+        let circuit = SmartRouteFactor::CircuitOpen {
+            provider: "anthropic".to_string(),
+            was_open: true,
+        };
         assert!(circuit.description().contains("OPEN"));
 
         let scoring = SmartRouteFactor::ScoringResult {
@@ -1038,9 +1174,11 @@ mod tests {
     #[test]
     fn test_provider_score_creation() {
         let score = ProviderScore::new(
-            "anthropic", "claude-sonnet-4-6-20250514",
+            "anthropic",
+            "claude-sonnet-4-6-20250514",
             RoutingTier::Balanced,
-            0.6, 0.7,
+            0.6,
+            0.7,
             &RoutingStrategy::Balanced,
         );
         // Total = 0.6*0.4 + 0.7*0.6 = 0.24 + 0.42 = 0.66
@@ -1062,7 +1200,8 @@ mod tests {
     #[test]
     fn test_model_quality_profile_creation() {
         let profile = ModelQualityProfile::new(
-            "claude-sonnet-4-6-20250514", "anthropic",
+            "claude-sonnet-4-6-20250514",
+            "anthropic",
             RoutingTier::Balanced,
         );
         assert_eq!(profile.model_name, "claude-sonnet-4-6-20250514");
@@ -1092,8 +1231,10 @@ mod tests {
     #[test]
     fn test_smart_route_decision_new() {
         let decision = SmartRouteDecision::new(
-            "claude-sonnet-4-6-20250514", "anthropic",
-            RoutingTier::Balanced, RoutingStrategy::Balanced,
+            "claude-sonnet-4-6-20250514",
+            "anthropic",
+            RoutingTier::Balanced,
+            RoutingStrategy::Balanced,
             "Multi-factor scoring",
         );
         assert_eq!(decision.model, "claude-sonnet-4-6-20250514");
@@ -1106,25 +1247,34 @@ mod tests {
     #[test]
     fn test_smart_route_decision_from_regex() {
         let decision = SmartRouteDecision::from_regex_match(
-            "claude-haiku-4-5-20251001", "anthropic",
-            RoutingTier::Cheap, "Simple task → cheap model",
+            "claude-haiku-4-5-20251001",
+            "anthropic",
+            RoutingTier::Cheap,
+            "Simple task → cheap model",
         );
         assert!(decision.from_regex);
         assert_eq!(decision.tier, RoutingTier::Cheap);
-        assert!(decision.factors.iter().any(|f| matches!(f, SmartRouteFactor::RegexMatch { matched: true, .. })));
+        assert!(decision
+            .factors
+            .iter()
+            .any(|f| matches!(f, SmartRouteFactor::RegexMatch { matched: true, .. })));
     }
 
     #[test]
     fn test_smart_route_decision_from_scoring() {
         let best = ProviderScore::new(
-            "anthropic", "claude-sonnet-4-6-20250514",
-            RoutingTier::Balanced, 0.6, 0.7,
+            "anthropic",
+            "claude-sonnet-4-6-20250514",
+            RoutingTier::Balanced,
+            0.6,
+            0.7,
             &RoutingStrategy::Balanced,
         );
         let all_scores = vec![best.clone()];
 
         let decision = SmartRouteDecision::from_scoring(
-            &best, RoutingStrategy::Balanced,
+            &best,
+            RoutingStrategy::Balanced,
             vec![SmartRouteFactor::ScoringResult {
                 provider: "anthropic".to_string(),
                 total_score: best.total_score,
@@ -1141,13 +1291,18 @@ mod tests {
     #[test]
     fn test_smart_route_decision_modifiers() {
         let decision = SmartRouteDecision::new(
-            "gpt-4o", "openai",
-            RoutingTier::Balanced, RoutingStrategy::LatencyOptimized,
+            "gpt-4o",
+            "openai",
+            RoutingTier::Balanced,
+            RoutingStrategy::LatencyOptimized,
             "Latency routing",
         )
-            .with_estimated_latency(3500)
-            .with_max_tokens(4096)
-            .with_factor(SmartRouteFactor::CircuitOpen { provider: "openai".to_string(), was_open: false });
+        .with_estimated_latency(3500)
+        .with_max_tokens(4096)
+        .with_factor(SmartRouteFactor::CircuitOpen {
+            provider: "openai".to_string(),
+            was_open: false,
+        });
 
         assert_eq!(decision.estimated_latency_ms, 3500);
         assert_eq!(decision.max_tokens, Some(4096));
@@ -1160,8 +1315,20 @@ mod tests {
     fn test_in_memory_smart_routing_log() {
         let log = InMemorySmartRoutingLog::new();
 
-        let d1 = SmartRouteDecision::new("gpt-4o", "openai", RoutingTier::Balanced, RoutingStrategy::Balanced, "test1");
-        let d2 = SmartRouteDecision::new("claude-opus-4-8", "anthropic", RoutingTier::Powerful, RoutingStrategy::QualityOptimized, "test2");
+        let d1 = SmartRouteDecision::new(
+            "gpt-4o",
+            "openai",
+            RoutingTier::Balanced,
+            RoutingStrategy::Balanced,
+            "test1",
+        );
+        let d2 = SmartRouteDecision::new(
+            "claude-opus-4-8",
+            "anthropic",
+            RoutingTier::Powerful,
+            RoutingStrategy::QualityOptimized,
+            "test2",
+        );
 
         log.log_decision(d1);
         log.log_decision(d2);
@@ -1177,7 +1344,13 @@ mod tests {
     #[test]
     fn test_in_memory_smart_routing_log_clear() {
         let log = InMemorySmartRoutingLog::new();
-        log.log_decision(SmartRouteDecision::new("gpt-4o", "openai", RoutingTier::Balanced, RoutingStrategy::Balanced, "test"));
+        log.log_decision(SmartRouteDecision::new(
+            "gpt-4o",
+            "openai",
+            RoutingTier::Balanced,
+            RoutingStrategy::Balanced,
+            "test",
+        ));
         assert_eq!(log.total_count(), 1);
         log.clear();
         assert_eq!(log.total_count(), 0);
@@ -1188,8 +1361,10 @@ mod tests {
         let log = InMemorySmartRoutingLog::new();
         for i in 0..1100 {
             log.log_decision(SmartRouteDecision::new(
-                format!("model{}", i), "provider",
-                RoutingTier::Balanced, RoutingStrategy::Balanced,
+                format!("model{}", i),
+                "provider",
+                RoutingTier::Balanced,
+                RoutingStrategy::Balanced,
                 format!("decision {}", i),
             ));
         }

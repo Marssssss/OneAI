@@ -17,15 +17,14 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
 pub mod checkpoint;
-pub mod state;
 pub mod sqlite_store;
+pub mod state;
 pub mod usage_tracker;
 pub mod working_state_store;
 
 pub use checkpoint::*;
-pub use state::*;
 pub use sqlite_store::*;
+pub use state::*;
 pub use usage_tracker::*;
 pub use working_state_store::*;

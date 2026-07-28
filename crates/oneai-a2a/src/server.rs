@@ -24,10 +24,10 @@
 
 use std::sync::Arc;
 
-use crate::types::AgentCard;
-use crate::task_store::TaskStore;
-use crate::router::A2ARouter;
 use crate::handler::A2AHandler;
+use crate::router::A2ARouter;
+use crate::task_store::TaskStore;
+use crate::types::AgentCard;
 
 /// A2A server host — serves an OneAI agent's capabilities via the A2A protocol.
 ///
@@ -133,15 +133,20 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let host = A2AServerHost::new(card, store);
 
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "agent/getCard",
-            "params": {}
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "agent/getCard",
+                "params": {}
+            }))
+            .await;
 
         let result = response.get("result").unwrap();
-        assert_eq!(result.get("name").and_then(|n| n.as_str()), Some("my-agent"));
+        assert_eq!(
+            result.get("name").and_then(|n| n.as_str()),
+            Some("my-agent")
+        );
     }
 
     #[tokio::test]
@@ -150,24 +155,29 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let host = A2AServerHost::new(card, store);
 
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tasks/send",
-            "params": {
-                "id": "task-001",
-                "message": {
-                    "role": "user",
-                    "parts": [{"type": "text", "text": "Analyze code"}]
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tasks/send",
+                "params": {
+                    "id": "task-001",
+                    "message": {
+                        "role": "user",
+                        "parts": [{"type": "text", "text": "Analyze code"}]
+                    }
                 }
-            }
-        })).await;
+            }))
+            .await;
 
         let result = response.get("result").unwrap();
         assert_eq!(result.get("id").and_then(|v| v.as_str()), Some("task-001"));
         // Should be Completed
         let status = result.get("status").unwrap();
-        assert_eq!(status.get("state").and_then(|s| s.as_str()), Some("completed"));
+        assert_eq!(
+            status.get("state").and_then(|s| s.as_str()),
+            Some("completed")
+        );
     }
 
     #[tokio::test]
@@ -177,21 +187,36 @@ mod tests {
         let host = A2AServerHost::new(card, store.clone());
 
         // Create a task manually
-        store.create_task("task-002", Message::user_text("Manual task")).await.unwrap();
-        store.transition_task("task-002", TaskState::Working).await.unwrap();
+        store
+            .create_task("task-002", Message::user_text("Manual task"))
+            .await
+            .unwrap();
+        store
+            .transition_task("task-002", TaskState::Working)
+            .await
+            .unwrap();
 
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tasks/get",
-            "params": {
-                "id": "task-002"
-            }
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tasks/get",
+                "params": {
+                    "id": "task-002"
+                }
+            }))
+            .await;
 
         let result = response.get("result").unwrap();
         assert_eq!(result.get("id").and_then(|v| v.as_str()), Some("task-002"));
-        assert_eq!(result.get("status").unwrap().get("state").and_then(|s| s.as_str()), Some("working"));
+        assert_eq!(
+            result
+                .get("status")
+                .unwrap()
+                .get("state")
+                .and_then(|s| s.as_str()),
+            Some("working")
+        );
     }
 
     #[tokio::test]
@@ -201,21 +226,32 @@ mod tests {
         let host = A2AServerHost::new(card, store.clone());
 
         // Create a task in Working state
-        store.create_task("task-003", Message::user_text("Cancel me")).await.unwrap();
-        store.transition_task("task-003", TaskState::Working).await.unwrap();
+        store
+            .create_task("task-003", Message::user_text("Cancel me"))
+            .await
+            .unwrap();
+        store
+            .transition_task("task-003", TaskState::Working)
+            .await
+            .unwrap();
 
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tasks/cancel",
-            "params": {
-                "id": "task-003"
-            }
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tasks/cancel",
+                "params": {
+                    "id": "task-003"
+                }
+            }))
+            .await;
 
         let result = response.get("result").unwrap();
         let status = result.get("status").unwrap();
-        assert_eq!(status.get("state").and_then(|s| s.as_str()), Some("canceled"));
+        assert_eq!(
+            status.get("state").and_then(|s| s.as_str()),
+            Some("canceled")
+        );
     }
 
     #[tokio::test]
@@ -224,12 +260,14 @@ mod tests {
         let store = Arc::new(TaskStore::new());
         let host = A2AServerHost::new(card, store);
 
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "unknown/method",
-            "params": {}
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "unknown/method",
+                "params": {}
+            }))
+            .await;
 
         let error = response.get("error").unwrap();
         assert_eq!(error.get("code").and_then(|c| c.as_i64()), Some(-32601));
@@ -237,51 +275,77 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_host_full_protocol_flow() {
-        let card = AgentCard::new("full-agent", "Full protocol test", "https://full.example.com");
+        let card = AgentCard::new(
+            "full-agent",
+            "Full protocol test",
+            "https://full.example.com",
+        );
         let store = Arc::new(TaskStore::new());
         let host = A2AServerHost::new(card, store);
 
         // Step 1: Discover agent
-        let card_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "agent/getCard",
-            "params": {}
-        })).await;
+        let card_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "agent/getCard",
+                "params": {}
+            }))
+            .await;
 
         let card_result = card_response.get("result").unwrap();
-        assert_eq!(card_result.get("name").and_then(|n| n.as_str()), Some("full-agent"));
+        assert_eq!(
+            card_result.get("name").and_then(|n| n.as_str()),
+            Some("full-agent")
+        );
 
         // Step 2: Send a task
-        let send_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tasks/send",
-            "params": {
-                "id": "task-flow",
-                "message": {
-                    "role": "user",
-                    "parts": [{"type": "text", "text": "Execute this"}]
+        let send_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tasks/send",
+                "params": {
+                    "id": "task-flow",
+                    "message": {
+                        "role": "user",
+                        "parts": [{"type": "text", "text": "Execute this"}]
+                    }
                 }
-            }
-        })).await;
+            }))
+            .await;
 
         let task_result = send_response.get("result").unwrap();
-        assert_eq!(task_result.get("id").and_then(|v| v.as_str()), Some("task-flow"));
+        assert_eq!(
+            task_result.get("id").and_then(|v| v.as_str()),
+            Some("task-flow")
+        );
 
         // Step 3: Get the task status
-        let get_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tasks/get",
-            "params": {
-                "id": "task-flow"
-            }
-        })).await;
+        let get_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tasks/get",
+                "params": {
+                    "id": "task-flow"
+                }
+            }))
+            .await;
 
         let get_result = get_response.get("result").unwrap();
-        assert_eq!(get_result.get("id").and_then(|v| v.as_str()), Some("task-flow"));
-        assert_eq!(get_result.get("status").unwrap().get("state").and_then(|s| s.as_str()), Some("completed"));
+        assert_eq!(
+            get_result.get("id").and_then(|v| v.as_str()),
+            Some("task-flow")
+        );
+        assert_eq!(
+            get_result
+                .get("status")
+                .unwrap()
+                .get("state")
+                .and_then(|s| s.as_str()),
+            Some("completed")
+        );
     }
 
     #[test]
@@ -292,6 +356,9 @@ mod tests {
 
         let json = host.well_known_card_json().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.get("name").and_then(|n| n.as_str()), Some("json-agent"));
+        assert_eq!(
+            parsed.get("name").and_then(|n| n.as_str()),
+            Some("json-agent")
+        );
     }
 }

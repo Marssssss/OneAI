@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::eval_metric::EvalJudge;
 
-
 // ─── EvalCase ────────────────────────────────────────────────────────────
 
 /// A single evaluation test case — input + expected output + metadata.
@@ -60,7 +59,11 @@ impl EvalCase {
     }
 
     /// Create a new eval case with a specific ID.
-    pub fn with_id(id: impl Into<String>, input: impl Into<String>, expected: ExpectedOutput) -> Self {
+    pub fn with_id(
+        id: impl Into<String>,
+        input: impl Into<String>,
+        expected: ExpectedOutput,
+    ) -> Self {
         Self {
             id: id.into(),
             input: input.into(),
@@ -77,7 +80,8 @@ impl EvalCase {
 
     /// Set the difficulty level (1-5 scale).
     pub fn difficulty(mut self, level: u8) -> Self {
-        self.metadata.insert("difficulty".to_string(), level.to_string());
+        self.metadata
+            .insert("difficulty".to_string(), level.to_string());
         self
     }
 
@@ -168,7 +172,9 @@ pub enum ExpectedOutput {
 impl ExpectedOutput {
     /// Create an Exact expected output from any string-like value.
     pub fn exact(answer: impl Into<String>) -> Self {
-        Self::Exact { answer: answer.into() }
+        Self::Exact {
+            answer: answer.into(),
+        }
     }
 
     /// Create a Contains expected output with case-insensitive matching.
@@ -180,7 +186,9 @@ impl ExpectedOutput {
     }
 
     /// Create a Contains expected output with case-sensitive matching.
-    pub fn contains_case_sensitive(substrings: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn contains_case_sensitive(
+        substrings: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self::Contains {
             substrings: substrings.into_iter().map(Into::into).collect(),
             case_sensitive: true,
@@ -189,16 +197,24 @@ impl ExpectedOutput {
 
     /// Create a Regex expected output from any string-like value.
     pub fn regex(pattern: impl Into<String>) -> Self {
-        Self::Regex { pattern: pattern.into() }
+        Self::Regex {
+            pattern: pattern.into(),
+        }
     }
 
     /// Create a LlmJudge expected output.
     pub fn llm_judge(rubric: impl Into<String>, min_score: f64) -> Self {
-        Self::LlmJudge { rubric: rubric.into(), min_score }
+        Self::LlmJudge {
+            rubric: rubric.into(),
+            min_score,
+        }
     }
 
     /// Create a Trajectory expected output.
-    pub fn trajectory(expected_tools: impl IntoIterator<Item = impl Into<String>>, max_iterations: usize) -> Self {
+    pub fn trajectory(
+        expected_tools: impl IntoIterator<Item = impl Into<String>>,
+        max_iterations: usize,
+    ) -> Self {
         Self::Trajectory {
             expected_tools: expected_tools.into_iter().map(Into::into).collect(),
             max_iterations,
@@ -215,19 +231,29 @@ impl ExpectedOutput {
 impl std::fmt::Debug for ExpectedOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExpectedOutput::Exact { answer } => f.debug_struct("Exact").field("answer", answer).finish(),
-            ExpectedOutput::Contains { substrings, case_sensitive } => f
+            ExpectedOutput::Exact { answer } => {
+                f.debug_struct("Exact").field("answer", answer).finish()
+            }
+            ExpectedOutput::Contains {
+                substrings,
+                case_sensitive,
+            } => f
                 .debug_struct("Contains")
                 .field("substrings", substrings)
                 .field("case_sensitive", case_sensitive)
                 .finish(),
-            ExpectedOutput::Regex { pattern } => f.debug_struct("Regex").field("pattern", pattern).finish(),
+            ExpectedOutput::Regex { pattern } => {
+                f.debug_struct("Regex").field("pattern", pattern).finish()
+            }
             ExpectedOutput::LlmJudge { rubric, min_score } => f
                 .debug_struct("LlmJudge")
                 .field("rubric", rubric)
                 .field("min_score", min_score)
                 .finish(),
-            ExpectedOutput::Trajectory { expected_tools, max_iterations } => f
+            ExpectedOutput::Trajectory {
+                expected_tools,
+                max_iterations,
+            } => f
                 .debug_struct("Trajectory")
                 .field("expected_tools", expected_tools)
                 .field("max_iterations", max_iterations)
@@ -262,7 +288,10 @@ mod expected_output_serde {
                 s.serialize_field("answer", answer)?;
                 s.end()
             }
-            ExpectedOutput::Contains { substrings, case_sensitive } => {
+            ExpectedOutput::Contains {
+                substrings,
+                case_sensitive,
+            } => {
                 use serde::ser::SerializeStruct;
                 let mut s = serializer.serialize_struct("ExpectedOutput", 3)?;
                 s.serialize_field("type", "contains")?;
@@ -285,7 +314,10 @@ mod expected_output_serde {
                 s.serialize_field("min_score", min_score)?;
                 s.end()
             }
-            ExpectedOutput::Trajectory { expected_tools, max_iterations } => {
+            ExpectedOutput::Trajectory {
+                expected_tools,
+                max_iterations,
+            } => {
                 use serde::ser::SerializeStruct;
                 let mut s = serializer.serialize_struct("ExpectedOutput", 3)?;
                 s.serialize_field("type", "trajectory")?;
@@ -310,43 +342,88 @@ mod expected_output_serde {
     {
         use serde_json::Value;
         let value = Value::deserialize(deserializer)?;
-        let type_str = value.get("type").and_then(|v| v.as_str()).unwrap_or("exact");
+        let type_str = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("exact");
 
         match type_str {
             "exact" => {
-                let answer = value.get("answer").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let answer = value
+                    .get("answer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Ok(ExpectedOutput::Exact { answer })
             }
             "contains" => {
-                let substrings = value.get("substrings")
+                let substrings = value
+                    .get("substrings")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let case_sensitive = value.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(false);
-                Ok(ExpectedOutput::Contains { substrings, case_sensitive })
+                let case_sensitive = value
+                    .get("case_sensitive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Ok(ExpectedOutput::Contains {
+                    substrings,
+                    case_sensitive,
+                })
             }
             "regex" => {
-                let pattern = value.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let pattern = value
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Ok(ExpectedOutput::Regex { pattern })
             }
             "llm_judge" => {
-                let rubric = value.get("rubric").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let min_score = value.get("min_score").and_then(|v| v.as_f64()).unwrap_or(7.0);
+                let rubric = value
+                    .get("rubric")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let min_score = value
+                    .get("min_score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(7.0);
                 Ok(ExpectedOutput::LlmJudge { rubric, min_score })
             }
             "trajectory" => {
-                let expected_tools = value.get("expected_tools")
+                let expected_tools = value
+                    .get("expected_tools")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let max_iterations = value.get("max_iterations").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-                Ok(ExpectedOutput::Trajectory { expected_tools, max_iterations })
+                let max_iterations = value
+                    .get("max_iterations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+                Ok(ExpectedOutput::Trajectory {
+                    expected_tools,
+                    max_iterations,
+                })
             }
             "custom_placeholder" | "custom" => {
                 // Deserialized custom placeholder becomes Exact with empty answer
-                Ok(ExpectedOutput::Exact { answer: String::new() })
+                Ok(ExpectedOutput::Exact {
+                    answer: String::new(),
+                })
             }
-            _ => Err(serde::de::Error::custom(format!("Unknown ExpectedOutput type: {}", type_str))),
+            _ => Err(serde::de::Error::custom(format!(
+                "Unknown ExpectedOutput type: {}",
+                type_str
+            ))),
         }
     }
 }
@@ -392,10 +469,7 @@ mod tests {
 
     #[test]
     fn test_eval_case_contains() {
-        let case = EvalCase::new(
-            "Explain Rust",
-            ExpectedOutput::contains(["memory", "safe"]),
-        );
+        let case = EvalCase::new("Explain Rust", ExpectedOutput::contains(["memory", "safe"]));
         assert!(matches!(case.expected, ExpectedOutput::Contains { .. }));
     }
 
@@ -423,7 +497,11 @@ mod tests {
         assert!(matches!(exact, ExpectedOutput::Exact { answer: _ }));
 
         let contains = ExpectedOutput::contains(["a", "b"]);
-        if let ExpectedOutput::Contains { substrings, case_sensitive } = contains {
+        if let ExpectedOutput::Contains {
+            substrings,
+            case_sensitive,
+        } = contains
+        {
             assert_eq!(substrings, vec!["a", "b"]);
             assert!(!case_sensitive);
         } else {
@@ -431,7 +509,11 @@ mod tests {
         }
 
         let contains_cs = ExpectedOutput::contains_case_sensitive(["A", "B"]);
-        if let ExpectedOutput::Contains { substrings: _, case_sensitive } = contains_cs {
+        if let ExpectedOutput::Contains {
+            substrings: _,
+            case_sensitive,
+        } = contains_cs
+        {
             assert!(case_sensitive);
         } else {
             panic!("Expected Contains");
@@ -460,7 +542,11 @@ mod tests {
         let expected = ExpectedOutput::contains_case_sensitive(["hello", "world"]);
         let json = serde_json::to_string(&expected).unwrap();
         let deserialized: ExpectedOutput = serde_json::from_str(&json).unwrap();
-        if let ExpectedOutput::Contains { substrings, case_sensitive } = deserialized {
+        if let ExpectedOutput::Contains {
+            substrings,
+            case_sensitive,
+        } = deserialized
+        {
             assert_eq!(substrings, vec!["hello", "world"]);
             assert!(case_sensitive);
         } else {
@@ -473,7 +559,11 @@ mod tests {
         let expected = ExpectedOutput::trajectory(["calculator", "read_file"], 10);
         let json = serde_json::to_string(&expected).unwrap();
         let deserialized: ExpectedOutput = serde_json::from_str(&json).unwrap();
-        if let ExpectedOutput::Trajectory { expected_tools, max_iterations } = deserialized {
+        if let ExpectedOutput::Trajectory {
+            expected_tools,
+            max_iterations,
+        } = deserialized
+        {
             assert_eq!(expected_tools, vec!["calculator", "read_file"]);
             assert_eq!(max_iterations, 10);
         } else {
@@ -483,8 +573,8 @@ mod tests {
 
     #[test]
     fn test_eval_case_json_roundtrip() {
-        let case = EvalCase::with_id("test_1", "What is 2+2?", ExpectedOutput::exact("4"))
-            .difficulty(1);
+        let case =
+            EvalCase::with_id("test_1", "What is 2+2?", ExpectedOutput::exact("4")).difficulty(1);
         let json = serde_json::to_string(&case).unwrap();
         let deserialized: EvalCase = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, "test_1");

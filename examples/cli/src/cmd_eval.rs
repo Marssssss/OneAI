@@ -8,8 +8,6 @@
 use std::sync::Arc;
 
 use oneai_eval::{
-    EvalRunner, ScoreOnlyRunner,
-    SuiteRegistry,
     builtin_suites,
     memory::{builtin_suite, load_suite_jsonl, run_memory_eval, MemoryEvalConfig},
     replay::replay_trajectory,
@@ -17,6 +15,7 @@ use oneai_eval::{
         load_instances_filtered, render_swebench_leaderboard, write_prediction_jsonl,
         SwebenchRunner, SwebenchRunnerConfig,
     },
+    EvalRunner, ScoreOnlyRunner, SuiteRegistry,
 };
 
 use crate::config::OneaiConfig;
@@ -29,10 +28,12 @@ pub fn cmd_eval_list() {
     for (name, desc) in registry.list() {
         let suite = registry.get(name).unwrap();
         println!("  {} — {}", name, desc);
-        println!("    Cases: {} | Metrics: {} | Domain: {}",
+        println!(
+            "    Cases: {} | Metrics: {} | Domain: {}",
             suite.case_count(),
             suite.metric_count(),
-            suite.domain.as_deref().unwrap_or("none"));
+            suite.domain.as_deref().unwrap_or("none")
+        );
         println!();
     }
 }
@@ -41,16 +42,27 @@ pub fn cmd_eval_list() {
 ///
 /// This requires an LLM provider to be configured (ONEAI_API_KEY env var).
 /// Without a provider, cases will be marked as errors.
-pub async fn cmd_eval_run(suite_name: &str, output_format: &str, profile: bool, record: Option<String>) {
+pub async fn cmd_eval_run(
+    suite_name: &str,
+    output_format: &str,
+    profile: bool,
+    record: Option<String>,
+) {
     // Get the suite
-    let suite = builtin_suites::get_builtin_suite(suite_name)
-        .unwrap_or_else(|| {
-            eprintln!("Suite '{}' not found. Available: coding_basics, tool_use, general", suite_name);
-            std::process::exit(1);
-        });
+    let suite = builtin_suites::get_builtin_suite(suite_name).unwrap_or_else(|| {
+        eprintln!(
+            "Suite '{}' not found. Available: coding_basics, tool_use, general",
+            suite_name
+        );
+        std::process::exit(1);
+    });
 
     println!("Running eval suite: {}", suite_name);
-    println!("Cases: {} | Metrics: {}", suite.case_count(), suite.metric_count());
+    println!(
+        "Cases: {} | Metrics: {}",
+        suite.case_count(),
+        suite.metric_count()
+    );
     println!();
 
     // Build the app
@@ -68,9 +80,9 @@ pub async fn cmd_eval_run(suite_name: &str, output_format: &str, profile: bool, 
     // into a trajectory for later `eval replay`. Otherwise use the provider
     // directly. We keep an `Arc<dyn LlmProvider>` handle either way.
     let (provider_handle, recorder) = if let Some(_path) = &record {
-        let rec = std::sync::Arc::new(oneai_eval::RecordingProvider::new(
-            std::sync::Arc::from(real_provider),
-        ));
+        let rec = std::sync::Arc::new(oneai_eval::RecordingProvider::new(std::sync::Arc::from(
+            real_provider,
+        )));
         let handle: std::sync::Arc<dyn oneai_core::traits::LlmProvider> = rec.clone();
         (handle, Some(rec))
     } else {
@@ -110,7 +122,9 @@ pub async fn cmd_eval_run(suite_name: &str, output_format: &str, profile: bool, 
         .expect("App build should succeed");
 
     let runner = EvalRunner::from_app(app);
-    let report = runner.run(run_suite).await
+    let report = runner
+        .run(run_suite)
+        .await
         .expect("Eval run should succeed");
 
     // Output the report
@@ -138,9 +152,15 @@ pub async fn cmd_eval_run(suite_name: &str, output_format: &str, profile: bool, 
         } else {
             (Vec::new(), 0)
         };
-        let traj = rec.trajectory(&suite.cases[0].input, tool_calls, iters).await;
+        let traj = rec
+            .trajectory(&suite.cases[0].input, tool_calls, iters)
+            .await;
         match traj.save(std::path::Path::new(&path)) {
-            Ok(_) => println!("\nRecorded trajectory ({} responses) → {}", traj.responses.len(), path),
+            Ok(_) => println!(
+                "\nRecorded trajectory ({} responses) → {}",
+                traj.responses.len(),
+                path
+            ),
             Err(e) => eprintln!("Warning: could not write trajectory: {}", e),
         }
     }
@@ -167,8 +187,17 @@ fn print_efficiency_profile(report: &oneai_eval::EvalReport) {
         let p = match r.efficiency.as_ref() {
             Some(p) => p,
             None => {
-                println!("{:<24} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-                    truncate(&r.case_id, 24), "-", "-", "-", "-", "-", "-", "n/a");
+                println!(
+                    "{:<24} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+                    truncate(&r.case_id, 24),
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "n/a"
+                );
                 continue;
             }
         };
@@ -204,7 +233,9 @@ fn print_efficiency_profile(report: &oneai_eval::EvalReport) {
             tot_overhead,
             "",
             tot_tokens,
-            if tot_tokens + tot_cache_read == 0 { 0.0 } else {
+            if tot_tokens + tot_cache_read == 0 {
+                0.0
+            } else {
                 tot_cache_read as f64 / (tot_tokens + tot_cache_read) as f64 * 100.0
             },
             three_axis_sum / n as f64,
@@ -232,20 +263,26 @@ pub async fn cmd_eval_replay(path: &str) {
         Ok(r) => {
             println!("\n── Replay Result (ghost replay / loop test) ────────");
             println!("deterministic: {}", r.deterministic);
-            println!("tool calls match: {} (replayed {} vs recorded {})",
+            println!(
+                "tool calls match: {} (replayed {} vs recorded {})",
                 r.tool_calls_match(),
                 r.replayed_tool_calls.len(),
-                r.recorded_tool_calls.len());
+                r.recorded_tool_calls.len()
+            );
             if r.replayed_tool_calls != r.recorded_tool_calls {
                 println!("  replayed:  {:?}", r.replayed_tool_calls);
                 println!("  recorded:  {:?}", r.recorded_tool_calls);
             }
-            println!("iterations: replayed {} vs recorded {}",
-                r.replayed_iterations, r.recorded_iterations);
+            println!(
+                "iterations: replayed {} vs recorded {}",
+                r.replayed_iterations, r.recorded_iterations
+            );
             if let Some(eff) = &r.efficiency {
                 println!("\nreplay efficiency (frozen — wall-clock not meaningful):");
-                println!("  inference_calls: {}, tool_calls: {}, iterations: {}, tokens: {}",
-                    eff.inference_calls, eff.tool_calls, eff.iterations, eff.total_tokens);
+                println!(
+                    "  inference_calls: {}, tool_calls: {}, iterations: {}, tokens: {}",
+                    eff.inference_calls, eff.tool_calls, eff.iterations, eff.total_tokens
+                );
             }
             if !r.deterministic {
                 std::process::exit(1);
@@ -263,25 +300,33 @@ pub async fn cmd_eval_replay(path: &str) {
 /// This is useful for testing metrics, re-scoring outputs, or CI integration
 /// where agent execution was done separately.
 pub async fn cmd_eval_score(suite_name: &str) {
-    let suite = builtin_suites::get_builtin_suite(suite_name)
-        .unwrap_or_else(|| {
-            eprintln!("Suite '{}' not found. Available: coding_basics, tool_use, general", suite_name);
-            std::process::exit(1);
-        });
+    let suite = builtin_suites::get_builtin_suite(suite_name).unwrap_or_else(|| {
+        eprintln!(
+            "Suite '{}' not found. Available: coding_basics, tool_use, general",
+            suite_name
+        );
+        std::process::exit(1);
+    });
 
     println!("Running metrics-only eval: {}", suite_name);
 
     // Build cases for score-only evaluation
     // For demo purposes, we use the expected answers as actual outputs
     // (simulating a perfect agent)
-    let cases: Vec<(String, String, oneai_eval::ExpectedOutput)> = suite.cases.iter()
+    let cases: Vec<(String, String, oneai_eval::ExpectedOutput)> = suite
+        .cases
+        .iter()
         .map(|case| {
             let actual = match &case.expected {
                 oneai_eval::ExpectedOutput::Exact { answer } => answer.clone(),
                 oneai_eval::ExpectedOutput::Contains { substrings, .. } => substrings.join(" "),
                 oneai_eval::ExpectedOutput::Regex { pattern } => format!("matches {}", pattern),
-                oneai_eval::ExpectedOutput::LlmJudge { rubric, .. } => format!("judged on: {}", rubric),
-                oneai_eval::ExpectedOutput::Trajectory { expected_tools, .. } => expected_tools.join(" "),
+                oneai_eval::ExpectedOutput::LlmJudge { rubric, .. } => {
+                    format!("judged on: {}", rubric)
+                }
+                oneai_eval::ExpectedOutput::Trajectory { expected_tools, .. } => {
+                    expected_tools.join(" ")
+                }
                 _ => String::new(),
             };
             (case.input.clone(), actual, case.expected.clone())
@@ -315,7 +360,12 @@ pub async fn cmd_eval_swebench(
 ) {
     // Load instances (optionally filtered by id list).
     let ids: Vec<String> = instances
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let dataset_path = std::path::Path::new(dataset);
     let all_instances = load_instances_filtered(dataset_path, &ids);
@@ -367,12 +417,10 @@ pub async fn cmd_eval_swebench(
         .await
         .expect("App build should succeed");
 
-    let python_path = python
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            format!("{}/.venvs/swebench/bin/python", home)
-        });
+    let python_path = python.map(|s| s.to_string()).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}/.venvs/swebench/bin/python", home)
+    });
 
     let runner_config = SwebenchRunnerConfig {
         workspace_dir: std::path::PathBuf::from(workspace),
@@ -453,7 +501,10 @@ pub async fn cmd_eval_memory(
             load_suite_jsonl(std::path::Path::new(path))
         }
         other => {
-            eprintln!("Unknown memory suite '{}'. Use --suite builtin|jsonl.", other);
+            eprintln!(
+                "Unknown memory suite '{}'. Use --suite builtin|jsonl.",
+                other
+            );
             std::process::exit(1);
         }
     };
@@ -470,8 +521,18 @@ pub async fn cmd_eval_memory(
     cfg.k = k;
     cfg.judge = metrics.split(',').any(|m| m.trim() == "judge");
 
-    let mode = if no_embedding { "keyword (no embedding)" } else { "semantic (deterministic embedding)" };
-    eprintln!("Running memory eval: suite={}, {} cases, k={}, mode={}", suite, cases.len(), k, mode);
+    let mode = if no_embedding {
+        "keyword (no embedding)"
+    } else {
+        "semantic (deterministic embedding)"
+    };
+    eprintln!(
+        "Running memory eval: suite={}, {} cases, k={}, mode={}",
+        suite,
+        cases.len(),
+        k,
+        mode
+    );
 
     let report = match run_memory_eval(&format!("memory_{}", suite), &cases, &cfg).await {
         Ok(r) => r,
@@ -486,10 +547,18 @@ pub async fn cmd_eval_memory(
     // anti-example should jump from recall=0.00 to recall>0).
     eprintln!("\n== Recall@{} by case ==", k);
     for r in &report.results {
-        let recall = r.scores.iter().find(|s| s.metric_name == "recall_at_k")
-            .map(|s| s.score.value).unwrap_or(0.0);
-        let f1 = r.scores.iter().find(|s| s.metric_name == "f1")
-            .map(|s| s.score.value).unwrap_or(0.0);
+        let recall = r
+            .scores
+            .iter()
+            .find(|s| s.metric_name == "recall_at_k")
+            .map(|s| s.score.value)
+            .unwrap_or(0.0);
+        let f1 = r
+            .scores
+            .iter()
+            .find(|s| s.metric_name == "f1")
+            .map(|s| s.score.value)
+            .unwrap_or(0.0);
         eprintln!("  {:<28} recall={:.2} f1={:.2}", r.case_id, recall, f1);
     }
 

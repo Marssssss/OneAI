@@ -7,8 +7,8 @@
 //! - Empty step detection: steps must have either a tool or a prompt
 //! - Duplicate ID detection: no two steps can share an ID
 
-use crate::dag::WorkflowDag;
 use crate::config::WorkflowConfig;
+use crate::dag::WorkflowDag;
 
 /// A validation issue found in the workflow.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,7 +75,9 @@ impl ValidationResult {
 
     /// Create an invalid result with issues.
     pub fn with_issues(issues: Vec<ValidationIssue>) -> Self {
-        let has_errors = issues.iter().any(|i| i.severity == ValidationSeverity::Error);
+        let has_errors = issues
+            .iter()
+            .any(|i| i.severity == ValidationSeverity::Error);
         Self {
             is_valid: !has_errors,
             issues,
@@ -84,12 +86,18 @@ impl ValidationResult {
 
     /// Get only error-level issues.
     pub fn errors(&self) -> Vec<&ValidationIssue> {
-        self.issues.iter().filter(|i| i.severity == ValidationSeverity::Error).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == ValidationSeverity::Error)
+            .collect()
     }
 
     /// Get only warning-level issues.
     pub fn warnings(&self) -> Vec<&ValidationIssue> {
-        self.issues.iter().filter(|i| i.severity == ValidationSeverity::Warning).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == ValidationSeverity::Warning)
+            .collect()
     }
 }
 
@@ -117,9 +125,8 @@ pub fn validate_config(config: &WorkflowConfig) -> ValidationResult {
         seen_ids.insert(step.id.clone());
     }
 
-    let step_ids: std::collections::HashSet<String> = config.steps.iter()
-        .map(|s| s.id.clone())
-        .collect();
+    let step_ids: std::collections::HashSet<String> =
+        config.steps.iter().map(|s| s.id.clone()).collect();
 
     // Check for undefined dependencies
     for step in &config.steps {
@@ -189,7 +196,9 @@ pub fn validate_dag(dag: &WorkflowDag) -> ValidationResult {
     // Check for orphan nodes (not reachable from any root)
     if !dag.roots.is_empty() {
         // All nodes reachable from roots
-        let reachable: std::collections::HashSet<String> = dag.roots.iter()
+        let reachable: std::collections::HashSet<String> = dag
+            .roots
+            .iter()
             .flat_map(|root_id| {
                 let mut visited = std::collections::HashSet::new();
                 let mut queue = std::collections::VecDeque::new();
@@ -217,7 +226,7 @@ pub fn validate_dag(dag: &WorkflowDag) -> ValidationResult {
             })
             .collect();
 
-        for (id, _) in &dag.nodes {
+        for id in dag.nodes.keys() {
             if !reachable.contains(id) {
                 issues.push(ValidationIssue {
                     severity: ValidationSeverity::Warning,
@@ -266,7 +275,9 @@ pub fn validate(config: &WorkflowConfig, dag: &WorkflowDag) -> ValidationResult 
     let config_result = validate_config(config);
     let dag_result = validate_dag(dag);
 
-    let all_issues: Vec<ValidationIssue> = config_result.issues.iter()
+    let all_issues: Vec<ValidationIssue> = config_result
+        .issues
+        .iter()
         .chain(dag_result.issues.iter())
         .cloned()
         .collect();
@@ -277,9 +288,9 @@ pub fn validate(config: &WorkflowConfig, dag: &WorkflowDag) -> ValidationResult 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::compile;
     use crate::config::{StepConfig, WorkflowConfig};
     use crate::dag::{DagNode, WorkflowDag};
-    use crate::compiler::compile;
     use std::collections::HashMap;
 
     fn make_step(id: &str, depends_on: Vec<&str>) -> StepConfig {
@@ -299,10 +310,13 @@ mod tests {
 
     #[test]
     fn test_validate_valid_config() {
-        let config = WorkflowConfig::new("valid", vec![
-            make_step("step1", vec![]),
-            make_step("step2", vec!["step1"]),
-        ]);
+        let config = WorkflowConfig::new(
+            "valid",
+            vec![
+                make_step("step1", vec![]),
+                make_step("step2", vec!["step1"]),
+            ],
+        );
 
         let result = validate_config(&config);
         assert!(result.is_valid);
@@ -311,31 +325,36 @@ mod tests {
 
     #[test]
     fn test_validate_duplicate_ids() {
-        let config = WorkflowConfig::new("invalid", vec![
-            make_step("step1", vec![]),
-            make_step("step1", vec![]),
-        ]);
+        let config = WorkflowConfig::new(
+            "invalid",
+            vec![make_step("step1", vec![]), make_step("step1", vec![])],
+        );
 
         let result = validate_config(&config);
         assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.code == ValidationCode::DuplicateStepId));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == ValidationCode::DuplicateStepId));
     }
 
     #[test]
     fn test_validate_undefined_dependency() {
-        let config = WorkflowConfig::new("invalid", vec![
-            make_step("step1", vec!["nonexistent"]),
-        ]);
+        let config = WorkflowConfig::new("invalid", vec![make_step("step1", vec!["nonexistent"])]);
 
         let result = validate_config(&config);
         assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.code == ValidationCode::UndefinedDependency));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == ValidationCode::UndefinedDependency));
     }
 
     #[test]
     fn test_validate_self_dependency() {
-        let config = WorkflowConfig::new("invalid", vec![
-            StepConfig {
+        let config = WorkflowConfig::new(
+            "invalid",
+            vec![StepConfig {
                 id: "loop".to_string(),
                 description: "Self-loop".to_string(),
                 depends_on: vec!["loop".to_string()],
@@ -346,18 +365,22 @@ mod tests {
                 timeout_secs: None,
                 retry_policy: None,
                 metadata: HashMap::new(),
-            },
-        ]);
+            }],
+        );
 
         let result = validate_config(&config);
         assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.code == ValidationCode::SelfDependency));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == ValidationCode::SelfDependency));
     }
 
     #[test]
     fn test_validate_empty_step_warning() {
-        let config = WorkflowConfig::new("warn", vec![
-            StepConfig {
+        let config = WorkflowConfig::new(
+            "warn",
+            vec![StepConfig {
                 id: "empty".to_string(),
                 description: "Empty step".to_string(),
                 depends_on: vec![],
@@ -368,13 +391,16 @@ mod tests {
                 timeout_secs: None,
                 retry_policy: None,
                 metadata: HashMap::new(),
-            },
-        ]);
+            }],
+        );
 
         let result = validate_config(&config);
         // Empty step is a warning, not an error
         assert!(result.is_valid); // Warnings don't make it invalid
-        assert!(result.issues.iter().any(|i| i.code == ValidationCode::EmptyStep));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == ValidationCode::EmptyStep));
     }
 
     #[test]
@@ -398,15 +424,21 @@ mod tests {
 
         let result = validate_dag(&dag);
         assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.code == ValidationCode::CycleDetected));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.code == ValidationCode::CycleDetected));
     }
 
     #[test]
     fn test_validate_dag_no_cycle() {
-        let config = WorkflowConfig::new("valid", vec![
-            make_step("step1", vec![]),
-            make_step("step2", vec!["step1"]),
-        ]);
+        let config = WorkflowConfig::new(
+            "valid",
+            vec![
+                make_step("step1", vec![]),
+                make_step("step2", vec!["step1"]),
+            ],
+        );
         let dag = compile(&config);
 
         let result = validate_dag(&dag);
@@ -415,11 +447,14 @@ mod tests {
 
     #[test]
     fn test_full_validation_valid() {
-        let config = WorkflowConfig::new("full_valid", vec![
-            make_step("step1", vec![]),
-            make_step("step2", vec!["step1"]),
-            make_step("step3", vec!["step2"]),
-        ]);
+        let config = WorkflowConfig::new(
+            "full_valid",
+            vec![
+                make_step("step1", vec![]),
+                make_step("step2", vec!["step1"]),
+                make_step("step3", vec!["step2"]),
+            ],
+        );
         let dag = compile(&config);
 
         let result = validate(&config, &dag);
@@ -428,9 +463,10 @@ mod tests {
 
     #[test]
     fn test_full_validation_invalid() {
-        let config = WorkflowConfig::new("full_invalid", vec![
-            make_step("step1", vec!["nonexistent"]),
-        ]);
+        let config = WorkflowConfig::new(
+            "full_invalid",
+            vec![make_step("step1", vec!["nonexistent"])],
+        );
         let dag = compile(&config);
 
         let result = validate(&config, &dag);

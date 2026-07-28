@@ -21,8 +21,8 @@ use std::sync::Arc;
 use oneai_app::AppBuilder;
 use oneai_tool::CalculatorTool;
 
-use crate::config::OneaiConfig;
 use crate::cmd_pack::get_builtin_pack;
+use crate::config::OneaiConfig;
 
 // ─── shared app build ─────────────────────────────────────────────────────
 
@@ -80,10 +80,14 @@ fn build_app_with_domain(
         // domain tools (parity with cmd_run).
         let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
         app.skill_registry.register_builtin(skills).await.unwrap();
-        app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(app.skill_registry.clone())))
+        app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
+        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
+            app.skill_registry.clone(),
+        )))
+        .await
+        .unwrap();
 
         app
     })
@@ -150,7 +154,10 @@ pub fn cmd_workflow_show(name: &str, config: &OneaiConfig, domain_override: Opti
                 "Workflow '{}' not found in domain pack '{}'. Available: {:?}",
                 name,
                 domain_name,
-                pack.workflows.iter().map(|w| w.name.as_str()).collect::<Vec<_>>()
+                pack.workflows
+                    .iter()
+                    .map(|w| w.name.as_str())
+                    .collect::<Vec<_>>()
             )
         })
         .clone();
@@ -167,7 +174,10 @@ pub fn cmd_workflow_show(name: &str, config: &OneaiConfig, domain_override: Opti
         } else {
             "?".to_string()
         };
-        println!("  • {} ({}) — depends_on: {:?}", step.id, kind, step.depends_on);
+        println!(
+            "  • {} ({}) — depends_on: {:?}",
+            step.id, kind, step.depends_on
+        );
     }
     println!("\nDAG:\n{}", ascii);
 }
@@ -186,14 +196,12 @@ pub fn cmd_workflow_run(
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let result = rt.block_on(async move {
         let mut session = app.create_session();
-        let wf = session
-            .get_workflow_config(name)
-            .ok_or_else(|| {
-                oneai_core::error::OneAIError::Workflow(format!(
-                    "Workflow '{}' not found in domain pack",
-                    name
-                ))
-            })?;
+        let wf = session.get_workflow_config(name).ok_or_else(|| {
+            oneai_core::error::OneAIError::Workflow(format!(
+                "Workflow '{}' not found in domain pack",
+                name
+            ))
+        })?;
         println!("▶ Running workflow: {} — {}\n", wf.name, wf.description);
         if let Some(t) = task {
             println!("   task input: \"{}\"\n", t);
@@ -210,11 +218,13 @@ pub fn cmd_workflow_run(
     match result {
         Ok(wf_result) => {
             println!("\n── Workflow Result ──────────────────────────────");
-            println!("success: {}, steps: {}, completed levels: {}, total_time: {}ms",
+            println!(
+                "success: {}, steps: {}, completed levels: {}, total_time: {}ms",
                 wf_result.success,
                 wf_result.step_results.len(),
                 wf_result.completed_levels,
-                wf_result.total_time_ms);
+                wf_result.total_time_ms
+            );
 
             // Print steps in declaration order of the original config if
             // available; otherwise iterate the result map.
@@ -227,9 +237,10 @@ pub fn cmd_workflow_run(
                     oneai_workflow::StepStatus::Pending => "· pending",
                     _ => "? unknown",
                 };
-                println!("\n  [{}] {} ({} retries, {:?})",
-                    id, status, step.retries_used,
-                    step.execution_time_ms);
+                println!(
+                    "\n  [{}] {} ({} retries, {:?})",
+                    id, status, step.retries_used, step.execution_time_ms
+                );
                 if let Some(out) = &step.output {
                     // Truncate very long step outputs for terminal readability.
                     let trimmed = if out.len() > 800 {
@@ -270,8 +281,13 @@ pub fn cmd_graph_list(config: &OneaiConfig, domain_override: Option<&str>) {
         return;
     }
     for sg in &pack.state_graphs {
-        println!("  • {} — entry '{}', {} nodes, terminal: {:?}",
-            sg.name, sg.entry_point, sg.nodes.len(), sg.terminal_nodes);
+        println!(
+            "  • {} — entry '{}', {} nodes, terminal: {:?}",
+            sg.name,
+            sg.entry_point,
+            sg.nodes.len(),
+            sg.terminal_nodes
+        );
     }
     println!("\nUsage: oneai graph run <key> <task>");
 }
@@ -291,7 +307,10 @@ pub fn cmd_graph_show(key: &str, config: &OneaiConfig, domain_override: Option<&
             panic!(
                 "State graph '{}' not found. Available: {:?}",
                 key,
-                pack.state_graphs.iter().map(|g| g.name.as_str()).collect::<Vec<_>>()
+                pack.state_graphs
+                    .iter()
+                    .map(|g| g.name.as_str())
+                    .collect::<Vec<_>>()
             )
         })
         .clone();
@@ -313,14 +332,12 @@ pub fn cmd_graph_run(
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let result = rt.block_on(async move {
         let mut session = app.create_session();
-        let sg = session
-            .get_state_graph(key)
-            .ok_or_else(|| {
-                oneai_core::error::OneAIError::Workflow(format!(
-                    "State graph '{}' not found in domain pack",
-                    key
-                ))
-            })?;
+        let sg = session.get_state_graph(key).ok_or_else(|| {
+            oneai_core::error::OneAIError::Workflow(format!(
+                "State graph '{}' not found in domain pack",
+                key
+            ))
+        })?;
         println!("▶ Running state graph: {} — task: \"{}\"\n", sg.name, task);
         session.execute_state_graph_with_task(&sg, task).await
     });
@@ -328,11 +345,17 @@ pub fn cmd_graph_run(
     match result {
         Ok(g) => {
             println!("\n── State Graph Result ───────────────────────────");
-            println!("completed: {}, iterations: {}, terminal: {:?}",
-                g.completed, g.iterations, g.terminal_node);
+            println!(
+                "completed: {}, iterations: {}, terminal: {:?}",
+                g.completed, g.iterations, g.terminal_node
+            );
             if let Some(last) = &g.final_state.last_result {
                 let trimmed = if last.len() > 1200 {
-                    format!("{}…\n[…truncated, {} chars total]", &last[..1200], last.len())
+                    format!(
+                        "{}…\n[…truncated, {} chars total]",
+                        &last[..1200],
+                        last.len()
+                    )
                 } else {
                     last.clone()
                 };

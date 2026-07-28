@@ -20,9 +20,9 @@ use ratatui::{
     Frame,
 };
 
-use super::super::app::{App, ChatMessage, ChatRole, content_hash};
-use super::message::render_message_lines;
+use super::super::app::{content_hash, App, ChatMessage, ChatRole};
 use super::super::theme::*;
+use super::message::render_message_lines;
 
 /// Draw the chat area.
 pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
@@ -31,8 +31,8 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // search bar
-                Constraint::Min(0),     // chat area
+                Constraint::Length(1), // search bar
+                Constraint::Min(0),    // chat area
             ])
             .split(rect);
         (layout[1], layout[0])
@@ -61,9 +61,8 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
 
     for (i, msg) in app.messages.iter().enumerate() {
         let is_collapsed = app.collapsed_ids.contains(&msg.id);
-        let is_streaming = app.is_thinking
-            && i == app.messages.len() - 1
-            && msg.role == ChatRole::Assistant;
+        let is_streaming =
+            app.is_thinking && i == app.messages.len() - 1 && msg.role == ChatRole::Assistant;
         let hash = content_hash(&msg.content);
 
         let cached = app.render_cache.entries.get(&msg.id);
@@ -132,8 +131,7 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
     let visible_start = computed_scroll_y;
     let visible_end = (computed_scroll_y + viewport_height).min(content_height_usize);
 
-    let mut lines: Vec<Line> =
-        Vec::with_capacity(visible_end.saturating_sub(visible_start) + 2);
+    let mut lines: Vec<Line> = Vec::with_capacity(visible_end.saturating_sub(visible_start) + 2);
 
     if visible_end > visible_start {
         for (i, msg) in app.messages.iter().enumerate() {
@@ -161,8 +159,10 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
             let is_search_match = app.search_mode && app.search_results.contains(&i);
             if is_search_match {
                 for line in visible_slice {
-                    let mut new_spans =
-                        vec![Span::styled("🔍 ", Style::default().fg(ratatui::style::Color::Yellow))];
+                    let mut new_spans = vec![Span::styled(
+                        "🔍 ",
+                        Style::default().fg(ratatui::style::Color::Yellow),
+                    )];
                     new_spans.extend(line.spans.iter().cloned());
                     lines.push(Line::from(new_spans));
                 }
@@ -201,7 +201,7 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
     f.render_widget(paragraph, chat_rect);
 
     // Update scrollbar state
-    let mut scrollbar_state = app.scrollbar_state.clone();
+    let mut scrollbar_state = app.scrollbar_state;
     scrollbar_state = scrollbar_state
         .content_length(content_height_usize)
         .viewport_content_length(viewport_height)
@@ -240,20 +240,35 @@ fn draw_search_bar(f: &mut Frame, rect: Rect, app: &App) {
     };
 
     let search_line = Line::from(vec![
-        Span::styled("🔍 ", Style::default().fg(INPUT_PROMPT_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(app.search_query.clone(), Style::default().fg(INPUT_TEXT_COLOR)),
-        Span::styled(format!(" {}", current), Style::default().fg(INPUT_HINT_COLOR)),
+        Span::styled(
+            "🔍 ",
+            Style::default()
+                .fg(INPUT_PROMPT_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.search_query.clone(),
+            Style::default().fg(INPUT_TEXT_COLOR),
+        ),
+        Span::styled(
+            format!(" {}", current),
+            Style::default().fg(INPUT_HINT_COLOR),
+        ),
     ]);
 
-    let paragraph = Paragraph::new(search_line)
-        .style(Style::default().bg(BRAND_BG));
+    let paragraph = Paragraph::new(search_line).style(Style::default().bg(BRAND_BG));
 
     f.render_widget(paragraph, rect);
 }
 
 /// Estimate the line count for a message given the viewport width.
 #[allow(dead_code)]
-fn message_line_count(msg: &ChatMessage, is_collapsed: bool, max_width: usize, spinner_frame: usize) -> usize {
+fn message_line_count(
+    msg: &ChatMessage,
+    is_collapsed: bool,
+    max_width: usize,
+    spinner_frame: usize,
+) -> usize {
     let lines = render_message_lines(msg, is_collapsed, max_width, spinner_frame, 0);
     lines.len().max(1)
 }

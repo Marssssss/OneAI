@@ -15,19 +15,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use oneai_core::error::Result;
+use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, StateReducer, Tool};
 use oneai_core::{
     Conversation, GlobalState, InteractionPoint, InteractionRequest, InteractionResponse, Message,
     Role,
 };
-use oneai_core::error::Result;
-use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool, StateReducer};
 
-use crate::plan_agent::{
-    PlanAgent, PlanConfig, PlanDecisionResolution, PlanResult, PlanStep,
-};
+use crate::parallel_executor::{ParallelExecutor, ParallelResult, ParallelStepResult};
+use crate::plan_agent::{PlanAgent, PlanConfig, PlanDecisionResolution, PlanResult, PlanStep};
 use crate::react_agent::{ReActAgent, ReActConfig, ReActResult};
 use crate::reflection_agent::{ReflectionAgent, ReflectionConfig, ReflectionResult};
-use crate::parallel_executor::{ParallelExecutor, ParallelResult, ParallelStepResult};
 
 /// Configuration for the AgentRunner.
 #[derive(Debug, Clone)]
@@ -63,7 +61,9 @@ impl Default for AgentRunnerConfig {
             plan_config: PlanConfig::default(),
             react_config: ReActConfig::default(),
             reflection_config: ReflectionConfig::default(),
-            system_prompt: "You are an intelligent AI agent that can plan, execute, and reflect on tasks.".to_string(),
+            system_prompt:
+                "You are an intelligent AI agent that can plan, execute, and reflect on tasks."
+                    .to_string(),
         }
     }
 }
@@ -215,20 +215,20 @@ impl AgentRunner {
                     })
                     .await?;
                 match resp {
-                    InteractionResponse::Choose { option_id } => resolutions.push(
-                        PlanDecisionResolution {
+                    InteractionResponse::Choose { option_id } => {
+                        resolutions.push(PlanDecisionResolution {
                             decision_id: d.decision_id,
                             chosen: option_id,
                             custom: None,
-                        },
-                    ),
-                    InteractionResponse::Revise { feedback } => resolutions.push(
-                        PlanDecisionResolution {
+                        })
+                    }
+                    InteractionResponse::Revise { feedback } => {
+                        resolutions.push(PlanDecisionResolution {
                             decision_id: d.decision_id,
                             chosen: String::new(),
                             custom: Some(feedback),
-                        },
-                    ),
+                        })
+                    }
                     InteractionResponse::Abort { reason } => {
                         tracing::warn!("AgentRunner: planning aborted by user: {}", reason);
                         return Ok(AgentRunnerResult {
@@ -249,22 +249,24 @@ impl AgentRunner {
 
             // Stage 2: produce the single final plan with the resolutions baked in.
             let plan = plan_agent.plan_with_resolutions(task, &resolutions).await?;
-            tracing::info!("AgentRunner: Plan generated with {} steps", plan.steps.len());
+            tracing::info!(
+                "AgentRunner: Plan generated with {} steps",
+                plan.steps.len()
+            );
             plan_result = Some(plan.clone());
 
             // Step 2: Separate coupled vs non-coupled steps
-            let non_coupled_steps: Vec<PlanStep> = plan.steps.iter()
-                .filter(|s| !s.coupled)
-                .cloned()
-                .collect();
-            let coupled_steps: Vec<PlanStep> = plan.steps.iter()
-                .filter(|s| s.coupled)
-                .cloned()
-                .collect();
+            let non_coupled_steps: Vec<PlanStep> =
+                plan.steps.iter().filter(|s| !s.coupled).cloned().collect();
+            let coupled_steps: Vec<PlanStep> =
+                plan.steps.iter().filter(|s| s.coupled).cloned().collect();
 
             // Step 3: Execute non-coupled steps in parallel
             if self.config.use_parallel && !non_coupled_steps.is_empty() {
-                tracing::info!("AgentRunner: Executing {} parallel steps", non_coupled_steps.len());
+                tracing::info!(
+                    "AgentRunner: Executing {} parallel steps",
+                    non_coupled_steps.len()
+                );
                 let parallel_exec = ParallelExecutor::new(self.reducer.clone());
 
                 // Create a simple executor using the LLM provider
@@ -274,10 +276,8 @@ impl AgentRunner {
                 let parser = self.parser.clone();
                 let interaction_gate = self.interaction_gate.clone();
 
-                let par_result = parallel_exec.execute_parallel(
-                    &non_coupled_steps,
-                    &global_state,
-                    move |step, _scope| {
+                let par_result = parallel_exec
+                    .execute_parallel(&non_coupled_steps, &global_state, move |step, _scope| {
                         let provider = provider.clone();
                         let tools = tools.clone();
                         let parser = parser.clone();
@@ -285,13 +285,8 @@ impl AgentRunner {
                         let config = config.clone();
                         async move {
                             // Create a ReAct agent for each parallel step
-                            let react = ReActAgent::new(
-                                provider,
-                                tools,
-                                parser,
-                                interaction_gate,
-                                config,
-                            );
+                            let react =
+                                ReActAgent::new(provider, tools, parser, interaction_gate, config);
 
                             // Create a conversation for this step
                             let mut step_conv = Conversation::new();
@@ -314,12 +309,10 @@ impl AgentRunner {
                                 reductions: vec![reduction],
                             })
                         }
-                    },
-                ).await?;
+                    })
+                    .await?;
 
-                total_iterations += par_result.step_results.iter()
-                    .map(|_| 1)
-                    .sum::<usize>();
+                total_iterations += par_result.step_results.iter().map(|_| 1).sum::<usize>();
 
                 // Merge parallel results into global state
                 global_state = par_result.global_state.clone();
@@ -328,7 +321,10 @@ impl AgentRunner {
 
             // Step 4: Execute coupled steps via ReAct pipeline
             if !coupled_steps.is_empty() {
-                tracing::info!("AgentRunner: Executing {} coupled steps via ReAct", coupled_steps.len());
+                tracing::info!(
+                    "AgentRunner: Executing {} coupled steps via ReAct",
+                    coupled_steps.len()
+                );
 
                 let react_agent = ReActAgent::new(
                     self.provider.clone(),
@@ -339,7 +335,8 @@ impl AgentRunner {
                 );
 
                 // Build the task description from coupled steps
-                let coupled_task = coupled_steps.iter()
+                let coupled_task = coupled_steps
+                    .iter()
                     .map(|s| format!("{}. {}", s.id, s.description))
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -349,12 +346,14 @@ impl AgentRunner {
                 if let Some(par) = &parallel_result {
                     for step_result in &par.step_results {
                         react_conv.add_message(Message::assistant(format!(
-                            "Parallel step {} result: {}", step_result.step_id, step_result.result
+                            "Parallel step {} result: {}",
+                            step_result.step_id, step_result.result
                         )));
                     }
                 }
                 react_conv.add_message(Message::user(format!(
-                    "Execute these sequential steps:\n{}", coupled_task
+                    "Execute these sequential steps:\n{}",
+                    coupled_task
                 )));
 
                 let result = react_agent.run(react_conv).await?;
@@ -363,7 +362,9 @@ impl AgentRunner {
                 react_result = Some(result);
             } else if let Some(par) = &parallel_result {
                 // No coupled steps — just use parallel results
-                let combined_result = par.step_results.iter()
+                let combined_result = par
+                    .step_results
+                    .iter()
                     .map(|r| format!("{}: {}", r.step_id, r.result))
                     .collect::<Vec<_>>()
                     .join("\n\n");
@@ -388,31 +389,33 @@ impl AgentRunner {
         // Step 5: Reflect on the final result
         if self.config.use_reflection {
             tracing::info!("AgentRunner: Starting reflection phase");
-            let reflection_agent = ReflectionAgent::new(
-                self.provider.clone(),
-                self.config.reflection_config.clone(),
-            );
+            let reflection_agent =
+                ReflectionAgent::new(self.provider.clone(), self.config.reflection_config.clone());
 
-            let final_text = conv.messages.iter()
+            let final_text = conv
+                .messages
+                .iter()
                 .rev()
                 .find(|m| m.role == Role::Assistant)
                 .map(|m| m.text_content())
                 .unwrap_or_default();
 
-            let reflection = reflection_agent.reflect(task, &final_text, Some(&conv)).await?;
+            let reflection = reflection_agent
+                .reflect(task, &final_text, Some(&conv))
+                .await?;
             reflection_result = Some(reflection);
         }
 
         // Get the final answer
-        let final_answer = conv.messages.iter()
+        let final_answer = conv
+            .messages
+            .iter()
             .rev()
             .find(|m| m.role == Role::Assistant)
             .map(|m| m.text_content())
             .unwrap_or_default();
 
-        let success = reflection_result.as_ref()
-            .map(|r| r.passed)
-            .unwrap_or(true); // If no reflection, assume success
+        let success = reflection_result.as_ref().map(|r| r.passed).unwrap_or(true); // If no reflection, assume success
 
         Ok(AgentRunnerResult {
             conversation: conv,

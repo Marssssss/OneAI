@@ -7,11 +7,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use oneai_core::{
-    Conversation, InferenceRequest, Message,
-};
 use oneai_core::error::Result;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{Conversation, InferenceRequest, Message};
 
 /// Result of a Reflection agent evaluation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -184,7 +182,8 @@ impl ReflectionAgent {
             retries += 1;
             tracing::warn!(
                 "Reflection failed (attempt {}): issues = {:?}",
-                retries, reflection.issues
+                retries,
+                reflection.issues
             );
 
             // If we have suggestions, incorporate them into a retry prompt
@@ -254,13 +253,17 @@ fn parse_reflection_result(raw: &str) -> ParsedReflection {
     let passed = raw.to_lowercase().contains("passed")
         || raw.to_lowercase().contains("accurate")
         || raw.to_lowercase().contains("correct")
-        && !raw.to_lowercase().contains("not accurate")
-        && !raw.to_lowercase().contains("incorrect");
+            && !raw.to_lowercase().contains("not accurate")
+            && !raw.to_lowercase().contains("incorrect");
 
     ParsedReflection {
         passed,
         confidence: if passed { 0.6 } else { 0.3 },
-        issues: if passed { vec![] } else { vec!["Could not parse reflection result".to_string()] },
+        issues: if passed {
+            vec![]
+        } else {
+            vec!["Could not parse reflection result".to_string()]
+        },
         suggestions: vec!["Review the result manually".to_string()],
     }
 }

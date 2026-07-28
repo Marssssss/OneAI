@@ -146,7 +146,10 @@ impl WasiConfig {
     /// WASI is enabled with whitelisted directories plus specific
     /// environment variables provided to the guest. Host environment
     /// variables are NOT inherited.
-    pub fn restricted_with_env(dirs: Vec<WasiDirConfig>, env_vars: HashMap<String, String>) -> Self {
+    pub fn restricted_with_env(
+        dirs: Vec<WasiDirConfig>,
+        env_vars: HashMap<String, String>,
+    ) -> Self {
         Self {
             enabled: true,
             allowed_dirs: dirs,
@@ -221,7 +224,10 @@ pub fn build_wasi_p1_ctx(config: &WasiConfig) -> Option<wasmtime_wasi::p1::WasiP
         };
 
         // Preopen the directory
-        if builder.preopened_dir(host_path, guest_path, dir_perms, file_perms).is_err() {
+        if builder
+            .preopened_dir(host_path, guest_path, dir_perms, file_perms)
+            .is_err()
+        {
             // Skip if cannot open — WASI will not provide it to guest
             continue;
         }
@@ -270,9 +276,7 @@ mod tests {
 
     #[test]
     fn test_wasi_config_restricted() {
-        let dirs = vec![
-            WasiDirConfig::readonly(PathBuf::from("/tmp/data"), "/data"),
-        ];
+        let dirs = vec![WasiDirConfig::readonly(PathBuf::from("/tmp/data"), "/data")];
         let config = WasiConfig::restricted(dirs);
         assert!(config.enabled());
         assert_eq!(config.allowed_dirs().len(), 1);
@@ -282,12 +286,11 @@ mod tests {
 
     #[test]
     fn test_wasi_config_restricted_with_env() {
-        let dirs = vec![
-            WasiDirConfig::readwrite(PathBuf::from("/tmp/output"), "/output"),
-        ];
-        let env_vars = HashMap::from([
-            ("ONEAI_MODE".to_string(), "production".to_string()),
-        ]);
+        let dirs = vec![WasiDirConfig::readwrite(
+            PathBuf::from("/tmp/output"),
+            "/output",
+        )];
+        let env_vars = HashMap::from([("ONEAI_MODE".to_string(), "production".to_string())]);
         let config = WasiConfig::restricted_with_env(dirs, env_vars);
         assert!(config.enabled());
         assert_eq!(config.allowed_dirs().len(), 1);

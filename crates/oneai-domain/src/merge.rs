@@ -18,14 +18,14 @@ use std::sync::Arc;
 
 use oneai_core::traits::Tool;
 
-use crate::domain_pack::DomainPack;
-use crate::paradigm_strategy::SubAgentTypeDefinition;
-use crate::context_source::ContextSource;
-use crate::permission_profile::PermissionProfile;
-use crate::paradigm_strategy::ParadigmStrategy;
 use crate::compression_template::CompressionTemplate;
-use crate::tool_decorator::ToolDecorator;
+use crate::context_source::ContextSource;
+use crate::domain_pack::DomainPack;
 use crate::memory_profile::MemoryProfile;
+use crate::paradigm_strategy::ParadigmStrategy;
+use crate::paradigm_strategy::SubAgentTypeDefinition;
+use crate::permission_profile::PermissionProfile;
+use crate::tool_decorator::ToolDecorator;
 
 // ─── MergedDomainPack ──────────────────────────────────────────────────────────
 
@@ -124,10 +124,15 @@ impl MergedDomainPack {
         // Multiple packs — apply merge logic
 
         // Name: concatenate pack names with "+"
-        let name = packs.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join("+");
+        let name = packs
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join("+");
 
         // Description: concatenate descriptions
-        let description = packs.iter()
+        let description = packs
+            .iter()
             .map(|p| format!("{}: {}", p.name, p.description))
             .collect::<Vec<_>>()
             .join("; ");
@@ -146,7 +151,8 @@ impl MergedDomainPack {
         }
 
         // ToolDecorators: union, later pack overrides earlier for same tool_name
-        let mut decorator_map: std::collections::HashMap<String, ToolDecorator> = std::collections::HashMap::new();
+        let mut decorator_map: std::collections::HashMap<String, ToolDecorator> =
+            std::collections::HashMap::new();
         for pack in &packs {
             for decorator in &pack.tool_decorators {
                 decorator_map.insert(decorator.tool_name.clone(), decorator.clone());
@@ -167,14 +173,16 @@ impl MergedDomainPack {
         }
 
         // PermissionProfile: strictest wins (iteratively merge)
-        let permission_profile = packs.iter()
+        let permission_profile = packs
+            .iter()
             .skip(1)
             .fold(packs[0].permission_profile.clone(), |acc, pack| {
                 PermissionProfile::merge_strictest(&acc, &pack.permission_profile)
             });
 
         // ParadigmStrategies: union, deduplicated by trigger_pattern
-        let mut strategy_map: std::collections::HashMap<String, ParadigmStrategy> = std::collections::HashMap::new();
+        let mut strategy_map: std::collections::HashMap<String, ParadigmStrategy> =
+            std::collections::HashMap::new();
         for pack in &packs {
             for strategy in &pack.paradigm_strategies {
                 if !strategy_map.contains_key(&strategy.trigger_pattern) {
@@ -189,7 +197,8 @@ impl MergedDomainPack {
 
         // MemoryProfile: merge across packs (union schema/habits, primary
         // recall, min core budget, OR tools) — folds like permission_profile.
-        let memory_profile = packs.iter()
+        let memory_profile = packs
+            .iter()
             .skip(1)
             .fold(packs[0].memory_profile.clone(), |acc, pack| {
                 MemoryProfile::merge(&acc, &pack.memory_profile)
@@ -199,14 +208,16 @@ impl MergedDomainPack {
         let system_prompt_template = if packs.len() == 1 {
             packs[0].system_prompt_template.clone()
         } else {
-            packs.iter()
+            packs
+                .iter()
                 .map(|p| format!("## {} Domain\n{}", p.name, p.system_prompt_template))
                 .collect::<Vec<_>>()
                 .join("\n\n")
         };
 
         // Workflows: union, deduplicated by name
-        let mut workflow_map: std::collections::HashMap<String, oneai_workflow::WorkflowConfig> = std::collections::HashMap::new();
+        let mut workflow_map: std::collections::HashMap<String, oneai_workflow::WorkflowConfig> =
+            std::collections::HashMap::new();
         for pack in &packs {
             for workflow in &pack.workflows {
                 if !workflow_map.contains_key(&workflow.name) {
@@ -217,7 +228,8 @@ impl MergedDomainPack {
         let workflows = workflow_map.values().cloned().collect();
 
         // StateGraphs: union, deduplicated by name
-        let mut graph_map: std::collections::HashMap<String, oneai_workflow::StateGraph> = std::collections::HashMap::new();
+        let mut graph_map: std::collections::HashMap<String, oneai_workflow::StateGraph> =
+            std::collections::HashMap::new();
         for pack in &packs {
             for graph in &pack.state_graphs {
                 if !graph_map.contains_key(&graph.name) {
@@ -228,7 +240,8 @@ impl MergedDomainPack {
         let state_graphs = graph_map.values().cloned().collect();
 
         // SubAgentDefinitions: union, later pack overrides earlier for same kind
-        let mut sub_agent_map: std::collections::HashMap<String, SubAgentTypeDefinition> = std::collections::HashMap::new();
+        let mut sub_agent_map: std::collections::HashMap<String, SubAgentTypeDefinition> =
+            std::collections::HashMap::new();
         for pack in &packs {
             for definition in &pack.sub_agent_definitions {
                 // Later pack's definition overrides earlier for same kind
@@ -278,7 +291,9 @@ impl MergedDomainPack {
 
     /// Find a tool decorator for a specific tool name.
     pub fn find_decorator(&self, tool_name: &str) -> Option<&ToolDecorator> {
-        self.tool_decorators.iter().find(|d| d.tool_name == tool_name)
+        self.tool_decorators
+            .iter()
+            .find(|d| d.tool_name == tool_name)
     }
 
     /// Find the paradigm strategy that matches a given task.
@@ -330,13 +345,17 @@ impl MergedDomainPack {
     /// Returns the first definition whose `kind` matches the given name
     /// (case-insensitive). Returns None if no definition is found.
     pub fn get_sub_agent_definition(&self, kind: &str) -> Option<&SubAgentTypeDefinition> {
-        self.sub_agent_definitions.iter()
+        self.sub_agent_definitions
+            .iter()
             .find(|d| d.name.eq_ignore_ascii_case(kind))
     }
 
     /// Get all available sub-agent kind names.
     pub fn sub_agent_kind_names(&self) -> Vec<String> {
-        self.sub_agent_definitions.iter().map(|d| d.name.clone()).collect()
+        self.sub_agent_definitions
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
     }
 
     /// Convert this MergedDomainPack back into a DomainPack.
@@ -365,10 +384,10 @@ impl MergedDomainPack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compression_template::CompressionTemplate;
+    use crate::permission_profile::PermissionProfile;
     use oneai_core::PermissionLevel;
     use oneai_tool::CalculatorTool;
-    use crate::permission_profile::PermissionProfile;
-    use crate::compression_template::CompressionTemplate;
 
     fn make_test_pack(name: &str) -> DomainPack {
         DomainPack {
@@ -430,7 +449,10 @@ mod tests {
             context_sources: Vec::new(),
             permission_profile: PermissionProfile {
                 name: "research".to_string(),
-                auto_approve: std::collections::HashSet::from(["calculator".to_string(), "web_search".to_string()]),
+                auto_approve: std::collections::HashSet::from([
+                    "calculator".to_string(),
+                    "web_search".to_string(),
+                ]),
                 require_confirmation: std::collections::HashSet::from(["web_fetch".to_string()]),
                 deny_by_default: Vec::new(),
                 permission_overrides: std::collections::HashMap::new(),
@@ -455,15 +477,30 @@ mod tests {
 
         // Permission: strictest wins
         // auto_approve: intersection → only "calculator" (in both)
-        assert!(merged.permission_profile.auto_approve.contains("calculator"));
-        assert!(!merged.permission_profile.auto_approve.contains("web_search"));
+        assert!(merged
+            .permission_profile
+            .auto_approve
+            .contains("calculator"));
+        assert!(!merged
+            .permission_profile
+            .auto_approve
+            .contains("web_search"));
 
         // require_confirmation: union → shell + web_fetch
-        assert!(merged.permission_profile.require_confirmation.contains("shell"));
-        assert!(merged.permission_profile.require_confirmation.contains("web_fetch"));
+        assert!(merged
+            .permission_profile
+            .require_confirmation
+            .contains("shell"));
+        assert!(merged
+            .permission_profile
+            .require_confirmation
+            .contains("web_fetch"));
 
         // default_threshold: stricter of Standard and Read → Standard
-        assert_eq!(merged.permission_profile.default_threshold, PermissionLevel::Standard);
+        assert_eq!(
+            merged.permission_profile.default_threshold,
+            PermissionLevel::Standard
+        );
 
         // CompressionTemplate: primary pack (coding)
         assert_eq!(merged.compression_template.name, "coding");

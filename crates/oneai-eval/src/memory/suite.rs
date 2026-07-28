@@ -21,7 +21,10 @@ fn sess(id: &str, at: &str, facts: Vec<PlantedFact>, msgs: Vec<(&str, &str)>) ->
         id: id.to_string(),
         at: at.to_string(),
         facts,
-        messages: msgs.into_iter().map(|(r, t)| (r.to_string(), t.to_string())).collect(),
+        messages: msgs
+            .into_iter()
+            .map(|(r, t)| (r.to_string(), t.to_string()))
+            .collect(),
     }
 }
 
@@ -38,9 +41,17 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             question: "which package manager does the user prefer?".into(),
             gold_answer: "pnpm".into(),
             evidence_keys: vec![("user.package_manager".into(), "prefers".into())],
-            sessions: vec![sess("s1", "2026-07-01T10:00:00Z", vec![f("user_tooling_pref", "user.package_manager", "prefers", "pnpm")], vec![
-                ("user", "I prefer pnpm as my package manager."),
-            ])],
+            sessions: vec![sess(
+                "s1",
+                "2026-07-01T10:00:00Z",
+                vec![f(
+                    "user_tooling_pref",
+                    "user.package_manager",
+                    "prefers",
+                    "pnpm",
+                )],
+                vec![("user", "I prefer pnpm as my package manager.")],
+            )],
             requires_abstention: false,
             synonym_anti_example: false,
             invalidate_after: vec![],
@@ -55,9 +66,17 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             question: "what package manager does the user use to manage dependencies?".into(),
             gold_answer: "pnpm".into(),
             evidence_keys: vec![("用户.包管理器".into(), "偏好".into())],
-            sessions: vec![sess("s1", "2026-07-01T10:00:00Z", vec![f("user_tooling_pref", "用户.包管理器", "偏好", "使用 pnpm 管理依赖")], vec![
-                ("user", "我喜欢用 pnpm 管理依赖。"),
-            ])],
+            sessions: vec![sess(
+                "s1",
+                "2026-07-01T10:00:00Z",
+                vec![f(
+                    "user_tooling_pref",
+                    "用户.包管理器",
+                    "偏好",
+                    "使用 pnpm 管理依赖",
+                )],
+                vec![("user", "我喜欢用 pnpm 管理依赖。")],
+            )],
             requires_abstention: false,
             synonym_anti_example: true,
             invalidate_after: vec![],
@@ -74,8 +93,18 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
                 ("project.owner".into(), "is".into()),
             ],
             sessions: vec![
-                sess("s1", "2026-07-01T10:00:00Z", vec![f("decision", "project.name", "is", "Project Atlas")], vec![("user", "We started a project called Project Atlas.")]),
-                sess("s2", "2026-07-03T10:00:00Z", vec![f("decision", "project.owner", "is", "Bob")], vec![("user", "Bob owns the project.")]),
+                sess(
+                    "s1",
+                    "2026-07-01T10:00:00Z",
+                    vec![f("decision", "project.name", "is", "Project Atlas")],
+                    vec![("user", "We started a project called Project Atlas.")],
+                ),
+                sess(
+                    "s2",
+                    "2026-07-03T10:00:00Z",
+                    vec![f("decision", "project.owner", "is", "Bob")],
+                    vec![("user", "Bob owns the project.")],
+                ),
             ],
             requires_abstention: false,
             synonym_anti_example: false,
@@ -90,8 +119,18 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             gold_answer: "Docker".into(),
             evidence_keys: vec![("deploy.tool".into(), "decided_to".into())],
             sessions: vec![
-                sess("s1", "2026-07-01T10:00:00Z", vec![f("decision", "deploy.tool", "decided_to", "Docker")], vec![("user", "Week 1: decided Docker for deployment.")]),
-                sess("s2", "2026-07-08T10:00:00Z", vec![f("decision", "deploy.tool", "decided_to", "Kubernetes")], vec![("user", "Week 2: switched to Kubernetes.")]),
+                sess(
+                    "s1",
+                    "2026-07-01T10:00:00Z",
+                    vec![f("decision", "deploy.tool", "decided_to", "Docker")],
+                    vec![("user", "Week 1: decided Docker for deployment.")],
+                ),
+                sess(
+                    "s2",
+                    "2026-07-08T10:00:00Z",
+                    vec![f("decision", "deploy.tool", "decided_to", "Kubernetes")],
+                    vec![("user", "Week 2: switched to Kubernetes.")],
+                ),
             ],
             requires_abstention: false,
             synonym_anti_example: false,
@@ -108,8 +147,18 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             gold_answer: "session".into(),
             evidence_keys: vec![("auth.scheme".into(), "decided_to".into())],
             sessions: vec![
-                sess("s1", "2026-07-01T10:00:00Z", vec![f("decision", "auth.scheme", "decided_to", "JWT")], vec![("user", "Let's use JWT for auth.")]),
-                sess("s2", "2026-07-05T10:00:00Z", vec![f("decision", "auth.scheme", "decided_to", "session")], vec![("user", "We dropped JWT and switched to session-based auth.")]),
+                sess(
+                    "s1",
+                    "2026-07-01T10:00:00Z",
+                    vec![f("decision", "auth.scheme", "decided_to", "JWT")],
+                    vec![("user", "Let's use JWT for auth.")],
+                ),
+                sess(
+                    "s2",
+                    "2026-07-05T10:00:00Z",
+                    vec![f("decision", "auth.scheme", "decided_to", "session")],
+                    vec![("user", "We dropped JWT and switched to session-based auth.")],
+                ),
             ],
             requires_abstention: false,
             synonym_anti_example: false,
@@ -126,8 +175,18 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             gold_answer: "$30".into(),
             evidence_keys: vec![("plan.premium".into(), "price".into())],
             sessions: vec![
-                sess("s1", "2026-07-01T10:00:00Z", vec![f("decision", "plan.premium", "price", "$20")], vec![("user", "Premium is $20 right now.")]),
-                sess("s2", "2026-07-10T10:00:00Z", vec![f("decision", "plan.premium", "price", "$30")], vec![("user", "Premium went up to $30.")]),
+                sess(
+                    "s1",
+                    "2026-07-01T10:00:00Z",
+                    vec![f("decision", "plan.premium", "price", "$20")],
+                    vec![("user", "Premium is $20 right now.")],
+                ),
+                sess(
+                    "s2",
+                    "2026-07-10T10:00:00Z",
+                    vec![f("decision", "plan.premium", "price", "$30")],
+                    vec![("user", "Premium went up to $30.")],
+                ),
             ],
             requires_abstention: false,
             synonym_anti_example: false,
@@ -141,9 +200,17 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             question: "what is the user's phone number?".into(),
             gold_answer: "I don't know".into(),
             evidence_keys: vec![],
-            sessions: vec![
-                sess("s1", "2026-07-01T10:00:00Z", vec![f("user_tooling_pref", "user.package_manager", "prefers", "pnpm")], vec![("user", "I use pnpm.")]),
-            ],
+            sessions: vec![sess(
+                "s1",
+                "2026-07-01T10:00:00Z",
+                vec![f(
+                    "user_tooling_pref",
+                    "user.package_manager",
+                    "prefers",
+                    "pnpm",
+                )],
+                vec![("user", "I use pnpm.")],
+            )],
             requires_abstention: true,
             synonym_anti_example: false,
             invalidate_after: vec![],
@@ -156,9 +223,12 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             question: "what is the user's home address?".into(),
             gold_answer: "I don't know".into(),
             evidence_keys: vec![],
-            sessions: vec![
-                sess("s1", "2026-07-01T10:00:00Z", vec![f("decision", "auth.scheme", "decided_to", "JWT")], vec![("user", "We use JWT.")]),
-            ],
+            sessions: vec![sess(
+                "s1",
+                "2026-07-01T10:00:00Z",
+                vec![f("decision", "auth.scheme", "decided_to", "JWT")],
+                vec![("user", "We use JWT.")],
+            )],
             requires_abstention: true,
             synonym_anti_example: false,
             invalidate_after: vec![],
@@ -171,7 +241,17 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
             question: "which test runner is preferred for running tests?".into(),
             gold_answer: "vitest".into(),
             evidence_keys: vec![("user.test_runner".into(), "prefers".into())],
-            sessions: vec![sess("s1", "2026-07-01T10:00:00Z", vec![f("user_tooling_pref", "user.test_runner", "prefers", "vitest")], vec![("user", "I prefer vitest.")])],
+            sessions: vec![sess(
+                "s1",
+                "2026-07-01T10:00:00Z",
+                vec![f(
+                    "user_tooling_pref",
+                    "user.test_runner",
+                    "prefers",
+                    "vitest",
+                )],
+                vec![("user", "I prefer vitest.")],
+            )],
             requires_abstention: false,
             synonym_anti_example: false,
             invalidate_after: vec![],
@@ -188,8 +268,23 @@ pub fn builtin_suite() -> Vec<MemoryEvalCase> {
                 ("auth.scheme".into(), "decided_to".into()),
             ],
             sessions: vec![
-                sess("s1", "2026-07-01T10:00:00Z", vec![f("user_tooling_pref", "user.package_manager", "prefers", "pnpm")], vec![("user", "pnpm please.")]),
-                sess("s2", "2026-07-02T10:00:00Z", vec![f("decision", "auth.scheme", "decided_to", "JWT")], vec![("user", "Auth: JWT.")]),
+                sess(
+                    "s1",
+                    "2026-07-01T10:00:00Z",
+                    vec![f(
+                        "user_tooling_pref",
+                        "user.package_manager",
+                        "prefers",
+                        "pnpm",
+                    )],
+                    vec![("user", "pnpm please.")],
+                ),
+                sess(
+                    "s2",
+                    "2026-07-02T10:00:00Z",
+                    vec![f("decision", "auth.scheme", "decided_to", "JWT")],
+                    vec![("user", "Auth: JWT.")],
+                ),
             ],
             requires_abstention: false,
             synonym_anti_example: false,

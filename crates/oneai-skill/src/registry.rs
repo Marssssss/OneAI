@@ -1,9 +1,9 @@
 //! Skill registry — management of registered skills.
 
+use oneai_core::error::Result;
+use oneai_core::SkillDescriptor;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use oneai_core::SkillDescriptor;
-use oneai_core::error::Result;
 
 use crate::discovery::discover_skills;
 

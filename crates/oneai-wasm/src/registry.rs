@@ -15,7 +15,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
-use crate::error::{WasmError, Result};
+use crate::error::{Result, WasmError};
 use crate::runtime::WasmRuntime;
 use crate::tool::{WasmTool, WasmToolMetadata};
 
@@ -219,7 +219,8 @@ impl WasmModuleRegistry {
             let entries = self.entries.read().await;
             if entries.contains_key(name) {
                 return Err(WasmError::RegistryError(format!(
-                    "Module '{}' already registered — use reload() to replace it", name
+                    "Module '{}' already registered — use reload() to replace it",
+                    name
                 )));
             }
         }
@@ -242,12 +243,24 @@ impl WasmModuleRegistry {
 
     /// Register a module from file (convenience).
     pub async fn register_file(&self, name: &str, path: &Path) -> Result<Arc<WasmTool>> {
-        self.register(name, WasmModuleSource::File { path: path.to_path_buf() }).await
+        self.register(
+            name,
+            WasmModuleSource::File {
+                path: path.to_path_buf(),
+            },
+        )
+        .await
     }
 
     /// Register a module from bytes (convenience).
     pub async fn register_bytes(&self, name: &str, bytes: &[u8]) -> Result<Arc<WasmTool>> {
-        self.register(name, WasmModuleSource::Bytes { bytes: bytes.to_vec() }).await
+        self.register(
+            name,
+            WasmModuleSource::Bytes {
+                bytes: bytes.to_vec(),
+            },
+        )
+        .await
     }
 
     /// Get a module entry by name.
@@ -375,24 +388,23 @@ impl WasmModuleRegistry {
     /// Resolve WASM bytes from a module source.
     async fn resolve_source_bytes(&self, source: &WasmModuleSource) -> Result<Vec<u8>> {
         match source {
-            WasmModuleSource::File { path } => {
-                std::fs::read(path)
-                    .map_err(|e| WasmError::FileReadError(format!("Failed to read {}: {}", path.display(), e)))
-            }
-            WasmModuleSource::Bytes { bytes } => {
-                Ok(bytes.clone())
-            }
+            WasmModuleSource::File { path } => std::fs::read(path).map_err(|e| {
+                WasmError::FileReadError(format!("Failed to read {}: {}", path.display(), e))
+            }),
+            WasmModuleSource::Bytes { bytes } => Ok(bytes.clone()),
             WasmModuleSource::Url { url } => {
                 // URL loading is async and uses reqwest
                 // For now, return an error — URL loading requires network infrastructure
                 Err(WasmError::UrlFetchFailed(format!(
-                    "URL loading not yet implemented for: {}", url
+                    "URL loading not yet implemented for: {}",
+                    url
                 )))
             }
             WasmModuleSource::Builtin { name } => {
                 // Built-in modules — placeholder for future pre-compiled templates
                 Err(WasmError::RegistryError(format!(
-                    "Built-in module '{}' not yet available", name
+                    "Built-in module '{}' not yet available",
+                    name
                 )))
             }
         }
@@ -407,15 +419,18 @@ impl WasmModuleRegistry {
         let mut store = self.runtime.create_store();
         let linker = self.runtime.create_linker()?;
 
-        let instance = linker.instantiate(&mut store, &module)
-            .map_err(|e| WasmError::InstantiationFailed(format!(
-                "Failed to instantiate '{}' for metadata: {}", name, e
-            )))?;
+        let instance = linker.instantiate(&mut store, &module).map_err(|e| {
+            WasmError::InstantiationFailed(format!(
+                "Failed to instantiate '{}' for metadata: {}",
+                name, e
+            ))
+        })?;
 
         // Extract metadata fields
         let tool_name = self.read_string_export(&mut store, &instance, "tool_name")?;
         let description = self.read_string_export(&mut store, &instance, "tool_description")?;
-        let schema_str = self.read_string_export(&mut store, &instance, "tool_parameters_schema")?;
+        let schema_str =
+            self.read_string_export(&mut store, &instance, "tool_parameters_schema")?;
         let risk_str = self.read_string_export(&mut store, &instance, "tool_risk_level")?;
 
         let parameters_schema: serde_json::Value = serde_json::from_str(&schema_str)
@@ -435,7 +450,11 @@ impl WasmModuleRegistry {
             risk_level,
         };
 
-        Ok(Arc::new(WasmTool::new(name, metadata, self.runtime.clone())))
+        Ok(Arc::new(WasmTool::new(
+            name,
+            metadata,
+            self.runtime.clone(),
+        )))
     }
 
     /// Read a string from a WASM export function.
@@ -445,13 +464,18 @@ impl WasmModuleRegistry {
         instance: &wasmtime::Instance,
         export_name: &str,
     ) -> Result<String> {
-        let func = instance.get_typed_func::<(), (u32, u32)>(&mut *store, export_name)
-            .map_err(|e| WasmError::ExportNotFound(format!("Export '{}' not found: {}", export_name, e)))?;
+        let func = instance
+            .get_typed_func::<(), (u32, u32)>(&mut *store, export_name)
+            .map_err(|e| {
+                WasmError::ExportNotFound(format!("Export '{}' not found: {}", export_name, e))
+            })?;
 
-        let (ptr, len) = func.call(&mut *store, ())
-            .map_err(|e| WasmError::CallFailed(format!("Failed to call '{}': {}", export_name, e)))?;
+        let (ptr, len) = func.call(&mut *store, ()).map_err(|e| {
+            WasmError::CallFailed(format!("Failed to call '{}': {}", export_name, e))
+        })?;
 
-        let memory = instance.get_memory(&mut *store, "memory")
+        let memory = instance
+            .get_memory(&mut *store, "memory")
             .ok_or_else(|| WasmError::ExportNotFound("memory".to_string()))?;
 
         let data = memory.data(&*store);
@@ -460,7 +484,8 @@ impl WasmModuleRegistry {
 
         if end > data.len() {
             return Err(WasmError::InvalidMetadata(format!(
-                "Invalid memory range ({}, {})", ptr, len
+                "Invalid memory range ({}, {})",
+                ptr, len
             )));
         }
 
@@ -476,25 +501,33 @@ mod tests {
 
     #[test]
     fn test_wasm_module_source_file() {
-        let source = WasmModuleSource::File { path: PathBuf::from("test.wasm") };
+        let source = WasmModuleSource::File {
+            path: PathBuf::from("test.wasm"),
+        };
         assert!(matches!(source, WasmModuleSource::File { .. }));
     }
 
     #[test]
     fn test_wasm_module_source_bytes() {
-        let source = WasmModuleSource::Bytes { bytes: vec![0, 97, 115, 109] };
+        let source = WasmModuleSource::Bytes {
+            bytes: vec![0, 97, 115, 109],
+        };
         assert!(matches!(source, WasmModuleSource::Bytes { .. }));
     }
 
     #[test]
     fn test_wasm_module_source_url() {
-        let source = WasmModuleSource::Url { url: "https://example.com/module.wasm".to_string() };
+        let source = WasmModuleSource::Url {
+            url: "https://example.com/module.wasm".to_string(),
+        };
         assert!(matches!(source, WasmModuleSource::Url { .. }));
     }
 
     #[test]
     fn test_wasm_module_source_builtin() {
-        let source = WasmModuleSource::Builtin { name: "compute".to_string() };
+        let source = WasmModuleSource::Builtin {
+            name: "compute".to_string(),
+        };
         assert!(matches!(source, WasmModuleSource::Builtin { .. }));
     }
 
@@ -536,7 +569,12 @@ mod tests {
 
     #[test]
     fn test_wasm_module_entry_fields() {
-        let entry = WasmModuleEntry::new("calculator", WasmModuleSource::File { path: PathBuf::from("calc.wasm") });
+        let entry = WasmModuleEntry::new(
+            "calculator",
+            WasmModuleSource::File {
+                path: PathBuf::from("calc.wasm"),
+            },
+        );
         assert_eq!(entry.name(), "calculator");
         assert!(matches!(entry.source(), WasmModuleSource::File { .. }));
         assert!(entry.version().is_none());
@@ -589,12 +627,21 @@ mod tests {
         // Manually insert an entry to simulate a registered module
         {
             let mut entries = registry.entries.write().await;
-            entries.insert("test".to_string(), WasmModuleEntry::new("test",
-                WasmModuleSource::Bytes { bytes: vec![0, 97, 115, 109] }));
+            entries.insert(
+                "test".to_string(),
+                WasmModuleEntry::new(
+                    "test",
+                    WasmModuleSource::Bytes {
+                        bytes: vec![0, 97, 115, 109],
+                    },
+                ),
+            );
         }
 
         // Now try to register again — should fail with RegistryError
-        let result = registry.register("test", WasmModuleSource::Bytes { bytes: vec![] }).await;
+        let result = registry
+            .register("test", WasmModuleSource::Bytes { bytes: vec![] })
+            .await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("already registered"));
@@ -608,8 +655,10 @@ mod tests {
         // Manually insert an entry
         {
             let mut entries = registry.entries.write().await;
-            entries.insert("test".to_string(), WasmModuleEntry::new("test",
-                WasmModuleSource::Bytes { bytes: vec![] }));
+            entries.insert(
+                "test".to_string(),
+                WasmModuleEntry::new("test", WasmModuleSource::Bytes { bytes: vec![] }),
+            );
         }
 
         // Unload it
@@ -623,8 +672,12 @@ mod tests {
     #[test]
     fn test_wasm_module_health_variants() {
         let healthy = WasmModuleHealth::Healthy;
-        let degraded = WasmModuleHealth::Degraded { reason: "test".to_string() };
-        let unhealthy = WasmModuleHealth::Unhealthy { reason: "test".to_string() };
+        let degraded = WasmModuleHealth::Degraded {
+            reason: "test".to_string(),
+        };
+        let unhealthy = WasmModuleHealth::Unhealthy {
+            reason: "test".to_string(),
+        };
         let unknown = WasmModuleHealth::Unknown;
 
         assert_ne!(healthy, unknown);

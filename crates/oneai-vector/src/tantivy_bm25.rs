@@ -24,7 +24,9 @@ use async_trait::async_trait;
 use oneai_core::traits::{Filter, KeywordBackend, Metadata, VectorHit};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value};
+use tantivy::schema::{
+    IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
+};
 use tantivy::Term;
 use tantivy::{doc, Index, IndexReader, IndexWriter, TantivyDocument};
 use tokio::sync::Mutex;
@@ -67,10 +69,15 @@ impl TantivyBm25Backend {
     /// Open or create a persisted index at `dir` (MMap directory).
     pub fn open_dir(dir: &str) -> oneai_core::Result<Self> {
         let path = std::path::Path::new(dir);
-        let exists = path.exists() && path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false);
+        let exists = path.exists()
+            && path
+                .read_dir()
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
         let (schema, fields) = build_schema();
         let index = if exists {
-            Index::open_in_dir(path).map_err(|e| oneai_core::OneAIError::Rag(format!("tantivy open {dir}: {e}")))?
+            Index::open_in_dir(path)
+                .map_err(|e| oneai_core::OneAIError::Rag(format!("tantivy open {dir}: {e}")))?
         } else {
             std::fs::create_dir_all(path)
                 .map_err(|e| oneai_core::OneAIError::Rag(format!("mkdir {dir}: {e}")))?;
@@ -129,7 +136,15 @@ fn build_schema() -> (Schema, SchemaFields) {
     let rowid = builder.add_i64_field("rowid_i64", NumericOptions::default().set_indexed());
     let meta = builder.add_text_field("meta", TextOptions::default().set_stored());
     let schema = builder.build();
-    (schema, SchemaFields { content, id_str, rowid, meta })
+    (
+        schema,
+        SchemaFields {
+            content,
+            id_str,
+            rowid,
+            meta,
+        },
+    )
 }
 
 #[async_trait]
@@ -184,7 +199,9 @@ impl KeywordBackend for TantivyBm25Backend {
         };
         // Over-fetch when filtering so post-filtering still yields top_k.
         let fetch = match filter {
-            Some(f) if !f.metadata_eq.is_empty() || !f.metadata_in.is_empty() => (top_k * 4).max(top_k),
+            Some(f) if !f.metadata_eq.is_empty() || !f.metadata_in.is_empty() => {
+                (top_k * 4).max(top_k)
+            }
             _ => top_k,
         };
         let top = searcher
@@ -211,7 +228,11 @@ impl KeywordBackend for TantivyBm25Backend {
                     continue;
                 }
             }
-            hits.push(VectorHit { id, score, metadata });
+            hits.push(VectorHit {
+                id,
+                score,
+                metadata,
+            });
             if hits.len() >= top_k {
                 break;
             }
@@ -250,7 +271,14 @@ mod tests {
         let be = TantivyBm25Backend::in_memory().unwrap();
         for (id, text) in docs() {
             let mut m = Metadata::new();
-            m.insert("tag".into(), if *id == "d4" { "ai".into() } else { "weather".into() });
+            m.insert(
+                "tag".into(),
+                if *id == "d4" {
+                    "ai".into()
+                } else {
+                    "weather".into()
+                },
+            );
             be.upsert_doc(id, text, m).await.unwrap();
         }
         be
@@ -263,7 +291,11 @@ mod tests {
         let hits = be.search("人工智能", 5, None).await.unwrap();
         assert!(!hits.is_empty(), "expected BM25 hits for 人工智能");
         assert_eq!(hits[0].id, "d4");
-        assert!(hits[0].score > 1.0, "rare-term IDF should boost score: {}", hits[0].score);
+        assert!(
+            hits[0].score > 1.0,
+            "rare-term IDF should boost score: {}",
+            hits[0].score
+        );
 
         // "天气" matches d1/d3 (the spike pattern).
         let hits = be.search("天气", 5, None).await.unwrap();
@@ -284,11 +316,18 @@ mod tests {
     #[tokio::test]
     async fn upsert_replaces_and_delete_removes() {
         let be = TantivyBm25Backend::in_memory().unwrap();
-        be.upsert_doc("x", "alpha beta", Metadata::new()).await.unwrap();
-        be.upsert_doc("x", "gamma delta", Metadata::new()).await.unwrap();
+        be.upsert_doc("x", "alpha beta", Metadata::new())
+            .await
+            .unwrap();
+        be.upsert_doc("x", "gamma delta", Metadata::new())
+            .await
+            .unwrap();
         // Old content "alpha" must no longer match 'x' after replacement.
         let hits = be.search("alpha", 10, None).await.unwrap();
-        assert!(!hits.iter().any(|h| h.id == "x"), "stale content leaked after upsert");
+        assert!(
+            !hits.iter().any(|h| h.id == "x"),
+            "stale content leaked after upsert"
+        );
         let hits = be.search("gamma", 10, None).await.unwrap();
         assert!(hits.iter().any(|h| h.id == "x"));
 

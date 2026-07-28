@@ -25,8 +25,8 @@ use std::sync::Arc;
 // for `writeln!` on String below
 use std::fmt::Write as _;
 
-use oneai_core::Conversation;
 use oneai_core::error::Result;
+use oneai_core::Conversation;
 
 use oneai_domain::context_source::ContextSource;
 
@@ -142,7 +142,8 @@ impl ContextAssembler {
     pub async fn refresh_sources(&mut self) -> Result<()> {
         for source in &self.context_sources {
             let content = source.load().await?;
-            self.cached_context.insert(source.key().to_string(), content);
+            self.cached_context
+                .insert(source.key().to_string(), content);
         }
         Ok(())
     }
@@ -163,12 +164,24 @@ impl Default for ContextAssembler {
 /// verbatim), the task survives compression regardless of the trimming
 /// strategy. The `metadata` may carry a distilled intent / handoff under
 /// `task_intent` if one was captured earlier.
-pub fn task_anchor_block(task: &str, metadata: &std::collections::HashMap<String, String>) -> String {
-    let intent = metadata.get("task_intent").map(|s| s.as_str()).filter(|s| !s.is_empty());
+pub fn task_anchor_block(
+    task: &str,
+    metadata: &std::collections::HashMap<String, String>,
+) -> String {
+    let intent = metadata
+        .get("task_intent")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty());
     if let Some(intent) = intent {
-        format!("[Task Anchor] (do not compress — original task)\n原始任务: {}\n意图: {}", task, intent)
+        format!(
+            "[Task Anchor] (do not compress — original task)\n原始任务: {}\n意图: {}",
+            task, intent
+        )
     } else {
-        format!("[Task Anchor] (do not compress — original task)\n原始任务: {}", task)
+        format!(
+            "[Task Anchor] (do not compress — original task)\n原始任务: {}",
+            task
+        )
     }
 }
 
@@ -254,8 +267,11 @@ pub fn decisions_block(ws: &oneai_core::WorkingState) -> String {
 /// block (no open blockers) returns empty string.
 pub fn blockers_block(ws: &oneai_core::WorkingState) -> String {
     use oneai_core::BlockerStatus;
-    let open: Vec<&oneai_core::Blocker> =
-        ws.blockers.iter().filter(|b| b.status == BlockerStatus::Open).collect();
+    let open: Vec<&oneai_core::Blocker> = ws
+        .blockers
+        .iter()
+        .filter(|b| b.status == BlockerStatus::Open)
+        .collect();
     if open.is_empty() {
         return String::new();
     }
@@ -308,8 +324,12 @@ mod tests {
 
     #[async_trait]
     impl ContextSource for StubSource {
-        fn key(&self) -> &str { self.key }
-        async fn load(&self) -> Result<String> { Ok(self.content.to_string()) }
+        fn key(&self) -> &str {
+            self.key
+        }
+        async fn load(&self) -> Result<String> {
+            Ok(self.content.to_string())
+        }
         fn refresh_policy(&self) -> oneai_domain::context_source::RefreshPolicy {
             // OnceAtStart is the policy most affected by the first-epoch bug —
             // before the fix it was never injected at all.
@@ -326,7 +346,9 @@ mod tests {
 
     #[async_trait]
     impl ContextSource for MutableStubSource {
-        fn key(&self) -> &str { self.key }
+        fn key(&self) -> &str {
+            self.key
+        }
         async fn load(&self) -> Result<String> {
             Ok(self.content.lock().unwrap().clone())
         }
@@ -336,7 +358,8 @@ mod tests {
     }
 
     fn text_of(conv: &Conversation) -> String {
-        conv.messages.iter()
+        conv.messages
+            .iter()
             .map(|m| m.text_content())
             .collect::<Vec<_>>()
             .join("\n")
@@ -349,9 +372,10 @@ mod tests {
     /// injections accumulated into the durable log).
     #[tokio::test]
     async fn every_source_reinjected_every_turn_regardless_of_policy() {
-        let sources: Vec<Arc<dyn ContextSource>> = vec![
-            Arc::new(StubSource { key: "stub", content: "STUB-BASELINE-CONTENT" }),
-        ];
+        let sources: Vec<Arc<dyn ContextSource>> = vec![Arc::new(StubSource {
+            key: "stub",
+            content: "STUB-BASELINE-CONTENT",
+        })];
         let mut ca = ContextAssembler::with_context_sources(sources);
 
         // First epoch: refresh caches content, assemble injects it.
@@ -359,8 +383,14 @@ mod tests {
         let state = LoopState::new("do something");
         let conv = ca.assemble(&state).unwrap();
         let text = text_of(&conv);
-        assert!(text.contains("[Context: stub]"), "context source missing on first epoch: {text}");
-        assert!(text.contains("STUB-BASELINE-CONTENT"), "baseline content missing: {text}");
+        assert!(
+            text.contains("[Context: stub]"),
+            "context source missing on first epoch: {text}"
+        );
+        assert!(
+            text.contains("STUB-BASELINE-CONTENT"),
+            "baseline content missing: {text}"
+        );
 
         // Second epoch: even though the source is OnceAtStart (policy would
         // have skipped re-injection under the old incremental model), it is
@@ -370,8 +400,10 @@ mod tests {
         let state2 = LoopState::new("next turn");
         let conv2 = ca.assemble(&state2).unwrap();
         let text2 = text_of(&conv2);
-        assert!(text2.contains("STUB-BASELINE-CONTENT"),
-            "OnceAtStart source must be re-injected every turn (ephemeral model): {text2}");
+        assert!(
+            text2.contains("STUB-BASELINE-CONTENT"),
+            "OnceAtStart source must be re-injected every turn (ephemeral model): {text2}"
+        );
     }
 
     /// An OnChange source is re-injected every turn (its content is always
@@ -381,28 +413,39 @@ mod tests {
     #[tokio::test]
     async fn on_change_source_reinjected_every_turn_with_current_content() {
         let content = Arc::new(Mutex::new("STUB-A".to_string()));
-        let sources: Vec<Arc<dyn ContextSource>> = vec![
-            Arc::new(MutableStubSource { key: "stub", content: content.clone() }),
-        ];
+        let sources: Vec<Arc<dyn ContextSource>> = vec![Arc::new(MutableStubSource {
+            key: "stub",
+            content: content.clone(),
+        })];
         let mut ca = ContextAssembler::with_context_sources(sources);
 
         // First epoch: baseline A is injected.
         ca.refresh_sources().await.unwrap();
         let conv = ca.assemble(&LoopState::new("t1")).unwrap();
-        assert!(text_of(&conv).contains("STUB-A"), "baseline missing: {}", text_of(&conv));
+        assert!(
+            text_of(&conv).contains("STUB-A"),
+            "baseline missing: {}",
+            text_of(&conv)
+        );
 
         // Second epoch, no change: source is still re-injected (same content).
         ca.refresh_sources().await.unwrap();
         let conv2 = ca.assemble(&LoopState::new("t2")).unwrap();
-        assert!(text_of(&conv2).contains("STUB-A"),
-            "unchanged OnChange source must still be present (ephemeral): {}", text_of(&conv2));
+        assert!(
+            text_of(&conv2).contains("STUB-A"),
+            "unchanged OnChange source must still be present (ephemeral): {}",
+            text_of(&conv2)
+        );
 
         // Third epoch, content changes: new content is injected.
         *content.lock().unwrap() = "STUB-B".to_string();
         ca.refresh_sources().await.unwrap();
         let conv3 = ca.assemble(&LoopState::new("t3")).unwrap();
-        assert!(text_of(&conv3).contains("STUB-B"),
-            "changed content not re-injected: {}", text_of(&conv3));
+        assert!(
+            text_of(&conv3).contains("STUB-B"),
+            "changed content not re-injected: {}",
+            text_of(&conv3)
+        );
     }
 
     #[test]
@@ -423,6 +466,9 @@ mod tests {
     fn runtime_context_block_has_date_and_search_guidance() {
         let block = runtime_context_block();
         assert!(block.contains("Current date and time"), "block: {block}");
-        assert!(block.contains("web_search"), "block should nudge web_search: {block}");
+        assert!(
+            block.contains("web_search"),
+            "block should nudge web_search: {block}"
+        );
     }
 }

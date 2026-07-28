@@ -20,8 +20,8 @@ use oneai_core::traits::Tool;
 use oneai_tool::ToolRegistry;
 
 use crate::handler::McpHandler;
-use crate::transport::McpStdioTransport;
 use crate::router::McpRouter;
+use crate::transport::McpStdioTransport;
 
 /// MCP server host — serves OneAI tools via the MCP protocol.
 ///
@@ -182,7 +182,10 @@ mod tests {
 
         let content = McpServerHost::tool_output_to_mcp_content(&output);
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0].get("type").and_then(|t| t.as_str()), Some("text"));
+        assert_eq!(
+            content[0].get("type").and_then(|t| t.as_str()),
+            Some("text")
+        );
         assert_eq!(content[0].get("text").and_then(|t| t.as_str()), Some("42"));
     }
 
@@ -196,14 +199,25 @@ mod tests {
 
         let content = McpServerHost::tool_output_to_mcp_content(&output);
         assert_eq!(content.len(), 2);
-        assert_eq!(content[0].get("type").and_then(|t| t.as_str()), Some("text"));
-        assert!(content[0].get("text").unwrap().as_str().unwrap().contains("Error"));
+        assert_eq!(
+            content[0].get("type").and_then(|t| t.as_str()),
+            Some("text")
+        );
+        assert!(content[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("Error"));
     }
 
     #[tokio::test]
     async fn test_server_host_creation() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         let host = McpServerHost::new(registry);
         assert_eq!(host.server_info().name, "oneai");
@@ -226,89 +240,123 @@ mod tests {
     async fn test_full_protocol_flow() {
         // Create a host with a registered tool
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
         let host = McpServerHost::new(registry);
 
         // Step 1: Initialize
-        let init_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "test-client", "version": "1.0.0" }
-            }
-        })).await;
+        let init_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test-client", "version": "1.0.0" }
+                }
+            }))
+            .await;
 
         assert_eq!(init_response.get("id").and_then(|v| v.as_u64()), Some(1));
         let result = init_response.get("result").unwrap();
-        assert_eq!(result.get("protocolVersion").and_then(|v| v.as_str()), Some("2024-11-05"));
+        assert_eq!(
+            result.get("protocolVersion").and_then(|v| v.as_str()),
+            Some("2024-11-05")
+        );
         assert!(result.get("capabilities").is_some());
-        assert_eq!(result.get("serverInfo").unwrap().get("name").and_then(|n| n.as_str()), Some("oneai"));
+        assert_eq!(
+            result
+                .get("serverInfo")
+                .unwrap()
+                .get("name")
+                .and_then(|n| n.as_str()),
+            Some("oneai")
+        );
 
         // Step 2: Initialized notification (should return no-response sentinel)
-        let initialized_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        })).await;
+        let initialized_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }))
+            .await;
         assert!(initialized_response.get("__mcp_no_response").is_some());
 
         // Step 3: tools/list
-        let tools_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {}
-        })).await;
+        let tools_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .await;
 
         let tools_result = tools_response.get("result").unwrap();
         let tools = tools_result.get("tools").unwrap().as_array().unwrap();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].get("name").and_then(|n| n.as_str()), Some("calculator"));
+        assert_eq!(
+            tools[0].get("name").and_then(|n| n.as_str()),
+            Some("calculator")
+        );
 
         // Step 4: tools/call
-        let call_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": "calculator",
-                "arguments": { "expression": "2+3" }
-            }
-        })).await;
+        let call_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "calculator",
+                    "arguments": { "expression": "2+3" }
+                }
+            }))
+            .await;
 
         let call_result = call_response.get("result").unwrap();
         let content = call_result.get("content").unwrap().as_array().unwrap();
         assert_eq!(content.len(), 1);
-        assert_eq!(content[0].get("type").and_then(|t| t.as_str()), Some("text"));
+        assert_eq!(
+            content[0].get("type").and_then(|t| t.as_str()),
+            Some("text")
+        );
         assert_eq!(content[0].get("text").and_then(|t| t.as_str()), Some("5"));
 
         // Step 5: ping
-        let ping_response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "ping"
-        })).await;
+        let ping_response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "ping"
+            }))
+            .await;
         assert!(ping_response.get("result").is_some());
     }
 
     #[tokio::test]
     async fn test_protocol_error_unknown_tool() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
         let host = McpServerHost::new(registry);
 
         // Call a tool that doesn't exist
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "nonexistent_tool",
-                "arguments": {}
-            }
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "nonexistent_tool",
+                    "arguments": {}
+                }
+            }))
+            .await;
 
         let error = response.get("error").unwrap();
         assert_eq!(error.get("code").and_then(|c| c.as_i64()), Some(-32601));
@@ -319,11 +367,13 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         let host = McpServerHost::new(registry);
 
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "unknown/method"
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "unknown/method"
+            }))
+            .await;
 
         let error = response.get("error").unwrap();
         assert_eq!(error.get("code").and_then(|c| c.as_i64()), Some(-32601));
@@ -332,21 +382,29 @@ mod tests {
     #[tokio::test]
     async fn test_tool_call_error_result() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
         let host = McpServerHost::new(registry);
 
         // Call calculator with invalid expression — should return isError: true
-        let response = host.process_message(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "calculator",
-                "arguments": { "expression": "" }
-            }
-        })).await;
+        let response = host
+            .process_message(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "calculator",
+                    "arguments": { "expression": "" }
+                }
+            }))
+            .await;
 
         let result = response.get("result").unwrap();
-        assert!(result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false));
+        assert!(result
+            .get("isError")
+            .and_then(|e| e.as_bool())
+            .unwrap_or(false));
     }
 }

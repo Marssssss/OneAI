@@ -18,8 +18,8 @@
 //! a single long-running case collapsing to zero. Quality is supplied by the
 //! caller — typically the normalized score from a correctness metric.)
 
-use serde::{Deserialize, Serialize};
 use oneai_trace::{Span, SpanKind};
+use serde::{Deserialize, Serialize};
 
 /// Per-case efficiency breakdown derived from the trace span tree + measured
 /// wall-clock. This is the "efficiency axis" of the three-axis evaluation.
@@ -82,16 +82,32 @@ impl EfficiencyProfile {
         let (mut tree_cache_read, mut tree_cache_creation) = (0u64, 0u64);
         for llm in root.spans_by_kind(SpanKind::LLM) {
             for ev in &llm.events {
-                if let Some(v) = ev.attributes.get("llm.cache_read_tokens").and_then(|v| v.as_u64()) {
+                if let Some(v) = ev
+                    .attributes
+                    .get("llm.cache_read_tokens")
+                    .and_then(|v| v.as_u64())
+                {
                     tree_cache_read += v;
                 }
-                if let Some(v) = ev.attributes.get("llm.cache_creation_tokens").and_then(|v| v.as_u64()) {
+                if let Some(v) = ev
+                    .attributes
+                    .get("llm.cache_creation_tokens")
+                    .and_then(|v| v.as_u64())
+                {
                     tree_cache_creation += v;
                 }
             }
         }
-        let cache_read_tokens = if tree_cache_read > 0 { tree_cache_read } else { cache_read_tokens };
-        let cache_creation_tokens = if tree_cache_creation > 0 { tree_cache_creation } else { cache_creation_tokens };
+        let cache_read_tokens = if tree_cache_read > 0 {
+            tree_cache_read
+        } else {
+            cache_read_tokens
+        };
+        let cache_creation_tokens = if tree_cache_creation > 0 {
+            tree_cache_creation
+        } else {
+            cache_creation_tokens
+        };
 
         Self {
             inference_ms,

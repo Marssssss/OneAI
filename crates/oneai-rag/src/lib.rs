@@ -17,23 +17,21 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
-pub mod document;
-pub mod index;
-pub mod retrieval;
-pub mod embedding;
 pub mod chunk_split;
+pub mod document;
+pub mod embedding;
+pub mod index;
 pub mod provider_adapter;
+pub mod retrieval;
 
-pub use document::*;
-pub use index::*;
-pub use retrieval::*;
-pub use embedding::*;
 pub use chunk_split::*;
-pub use provider_adapter::{
-    EmbeddingProviderAdapter, EmbeddingProviderRegistry, EmbeddingResolver, EnvProbe,
-    Availability, OpenAiAdapter, VoyageAdapter, OllamaAdapter, FastEmbedAdapter,
-    OpenAiCompatAdapter,
-};
+pub use document::*;
+pub use embedding::*;
+pub use index::*;
 #[cfg(feature = "ort")]
 pub use provider_adapter::BgeM3Adapter;
+pub use provider_adapter::{
+    Availability, EmbeddingProviderAdapter, EmbeddingProviderRegistry, EmbeddingResolver, EnvProbe,
+    FastEmbedAdapter, OllamaAdapter, OpenAiAdapter, OpenAiCompatAdapter, VoyageAdapter,
+};
+pub use retrieval::*;

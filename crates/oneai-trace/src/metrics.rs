@@ -11,8 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::span::{Span, SpanKind, SpanStatus};
 use crate::event::EventKind;
+use crate::span::{Span, SpanKind, SpanStatus};
 
 // ─── TraceMetrics ────────────────────────────────────────────────────
 
@@ -88,7 +88,11 @@ impl TraceMetrics {
         let mut metrics = Self::default();
 
         // Session success: root span status
-        metrics.success_rate = if root.status == SpanStatus::Ok { 1.0 } else { 0.0 };
+        metrics.success_rate = if root.status == SpanStatus::Ok {
+            1.0
+        } else {
+            0.0
+        };
         metrics.total_session_duration_ms = root.duration_ms.unwrap_or(0);
 
         // Walk the tree and aggregate
@@ -97,16 +101,15 @@ impl TraceMetrics {
         // Average inference latency
         let inference_spans = root.spans_by_kind(SpanKind::LLM);
         if !inference_spans.is_empty() {
-            let total_latency: u64 = inference_spans.iter()
-                .filter_map(|s| s.duration_ms)
-                .sum();
+            let total_latency: u64 = inference_spans.iter().filter_map(|s| s.duration_ms).sum();
             metrics.avg_inference_latency_ms = total_latency as f64 / inference_spans.len() as f64;
         }
 
         // Workflow step success rate
         let workflow_spans = root.spans_by_kind(SpanKind::WORKFLOW);
         if !workflow_spans.is_empty() {
-            let completed = workflow_spans.iter()
+            let completed = workflow_spans
+                .iter()
                 .filter(|s| s.status == SpanStatus::Ok)
                 .count();
             metrics.workflow_step_success_rate = completed as f64 / workflow_spans.len() as f64;
@@ -115,7 +118,8 @@ impl TraceMetrics {
         // Tool success rate
         if metrics.tool_call_count > 0 {
             let tool_spans = root.spans_by_kind(SpanKind::TOOL);
-            let successful = tool_spans.iter()
+            let successful = tool_spans
+                .iter()
                 .filter(|s| s.status == SpanStatus::Ok)
                 .count();
             metrics.tool_success_rate = successful as f64 / metrics.tool_call_count as f64;
@@ -187,25 +191,56 @@ impl TraceMetrics {
         }
 
         let total_sessions = metrics_list.len() as f64;
-        let successful_sessions = metrics_list.iter()
-            .filter(|m| m.success_rate > 0.0)
-            .count() as f64;
+        let successful_sessions =
+            metrics_list.iter().filter(|m| m.success_rate > 0.0).count() as f64;
 
         Self {
             success_rate: successful_sessions / total_sessions,
             total_tokens: metrics_list.iter().map(|m| m.total_tokens).sum(),
-            avg_inference_latency_ms: metrics_list.iter().map(|m| m.avg_inference_latency_ms).sum::<f64>() / total_sessions,
+            avg_inference_latency_ms: metrics_list
+                .iter()
+                .map(|m| m.avg_inference_latency_ms)
+                .sum::<f64>()
+                / total_sessions,
             tool_call_count: metrics_list.iter().map(|m| m.tool_call_count).sum(),
-            tool_success_rate: metrics_list.iter().map(|m| m.tool_success_rate * m.tool_call_count as f64).sum::<f64>()
-                / metrics_list.iter().map(|m| m.tool_call_count as f64).sum::<f64>().max(1.0),
-            approval_denial_rate: metrics_list.iter().map(|m| m.approval_denial_rate).sum::<f64>()
-                / metrics_list.iter().map(|m| m.tool_call_count as f64).sum::<f64>().max(1.0),
-            parser_fallback_rate: metrics_list.iter().map(|m| m.parser_fallback_rate).sum::<f64>()
-                / metrics_list.iter().map(|m| m.tool_call_count as f64 + 1.0).sum::<f64>(),
+            tool_success_rate: metrics_list
+                .iter()
+                .map(|m| m.tool_success_rate * m.tool_call_count as f64)
+                .sum::<f64>()
+                / metrics_list
+                    .iter()
+                    .map(|m| m.tool_call_count as f64)
+                    .sum::<f64>()
+                    .max(1.0),
+            approval_denial_rate: metrics_list
+                .iter()
+                .map(|m| m.approval_denial_rate)
+                .sum::<f64>()
+                / metrics_list
+                    .iter()
+                    .map(|m| m.tool_call_count as f64)
+                    .sum::<f64>()
+                    .max(1.0),
+            parser_fallback_rate: metrics_list
+                .iter()
+                .map(|m| m.parser_fallback_rate)
+                .sum::<f64>()
+                / metrics_list
+                    .iter()
+                    .map(|m| m.tool_call_count as f64 + 1.0)
+                    .sum::<f64>(),
             total_retries: metrics_list.iter().map(|m| m.total_retries).sum(),
-            workflow_step_success_rate: metrics_list.iter().map(|m| m.workflow_step_success_rate).sum::<f64>() / total_sessions,
-            avg_iterations: metrics_list.iter().map(|m| m.avg_iterations).sum::<f64>() / total_sessions,
-            total_session_duration_ms: metrics_list.iter().map(|m| m.total_session_duration_ms).sum(),
+            workflow_step_success_rate: metrics_list
+                .iter()
+                .map(|m| m.workflow_step_success_rate)
+                .sum::<f64>()
+                / total_sessions,
+            avg_iterations: metrics_list.iter().map(|m| m.avg_iterations).sum::<f64>()
+                / total_sessions,
+            total_session_duration_ms: metrics_list
+                .iter()
+                .map(|m| m.total_session_duration_ms)
+                .sum(),
             error_count: metrics_list.iter().map(|m| m.error_count).sum(),
             checkpoint_count: metrics_list.iter().map(|m| m.checkpoint_count).sum(),
         }

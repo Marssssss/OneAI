@@ -69,26 +69,23 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
-
-pub mod types;
-pub mod error;
-pub mod transport;
-pub mod client;
 pub mod card;
-pub mod task_store;
+pub mod client;
+pub mod error;
 pub mod handler;
 pub mod router;
 pub mod server;
+pub mod task_store;
+pub mod transport;
+pub mod types;
 
 // ─── Public exports ──────────────────────────────────────────────────────────────
 
 // Core types
 pub use types::{
-    TaskState, Part, FileContent, Message, MessageRole,
-    TaskStatus, Task, Artifact, AgentSkill, AgentCapabilities,
-    AuthenticationInfo, AgentCard, AgentProvider,
-    PushNotificationConfig,
-    SendTaskParams, GetTaskParams, CancelTaskParams,
+    AgentCapabilities, AgentCard, AgentProvider, AgentSkill, Artifact, AuthenticationInfo,
+    CancelTaskParams, FileContent, GetTaskParams, Message, MessageRole, Part,
+    PushNotificationConfig, SendTaskParams, Task, TaskState, TaskStatus,
 };
 
 // Error types
@@ -96,10 +93,9 @@ pub use error::{A2AError, Result};
 
 // Transport types
 pub use transport::{
-    JsonRpcRequest, JsonRpcResponse, JsonRpcError,
-    TaskStreamEvent, parse_sse_event,
-    METHOD_TASKS_SEND, METHOD_TASKS_SEND_SUBSCRIBE,
-    METHOD_TASKS_GET, METHOD_TASKS_CANCEL, METHOD_AGENT_GET_CARD,
+    parse_sse_event, JsonRpcError, JsonRpcRequest, JsonRpcResponse, TaskStreamEvent,
+    METHOD_AGENT_GET_CARD, METHOD_TASKS_CANCEL, METHOD_TASKS_GET, METHOD_TASKS_SEND,
+    METHOD_TASKS_SEND_SUBSCRIBE,
 };
 
 // Client
@@ -107,10 +103,7 @@ pub use client::{A2AClient, TaskStream};
 
 // Card generation
 pub use card::{
-    agent_card_from_domain_pack,
-    parse_agent_card,
-    parse_agent_card_yaml,
-    well_known_agent_card,
+    agent_card_from_domain_pack, parse_agent_card, parse_agent_card_yaml, well_known_agent_card,
 };
 
 // Task store

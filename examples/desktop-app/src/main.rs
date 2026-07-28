@@ -14,12 +14,12 @@ use std::sync::Arc;
 
 use oneai_app::AppBuilder;
 use oneai_core::RiskLevel;
+use oneai_core::{InteractionRequest, InteractionResponse};
 use oneai_memory::MemoryManager;
 use oneai_persistence::FilePersistence;
-use oneai_tool::{CalculatorTool, FileReadTool, ShellTool};
-use oneai_core::{InteractionRequest, InteractionResponse};
-use oneai_platform_desktop::DesktopInteractionGateFactory;
 use oneai_platform_desktop::DesktopInteractionBridge;
+use oneai_platform_desktop::DesktopInteractionGateFactory;
+use oneai_tool::{CalculatorTool, FileReadTool, ShellTool};
 
 #[tokio::main]
 async fn main() {
@@ -62,11 +62,19 @@ async fn main() {
 
     // ─── Register Tools ─────────────────────────────────────────────
     println!("🛠  Registering tools...");
-    app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
-    app.register_tool(Arc::new(FileReadTool::new())).await.unwrap();
+    app.register_tool(Arc::new(CalculatorTool::new()))
+        .await
+        .unwrap();
+    app.register_tool(Arc::new(FileReadTool::new()))
+        .await
+        .unwrap();
     app.register_tool(Arc::new(ShellTool::new())).await.unwrap();
     let tools = app.tool_executor().list_tools().await;
-    println!("   ✓ Registered {} tools: {}", tools.len(), tools.join(", "));
+    println!(
+        "   ✓ Registered {} tools: {}",
+        tools.len(),
+        tools.join(", ")
+    );
     println!();
 
     // ─── Create Session ─────────────────────────────────────────────
@@ -79,11 +87,23 @@ async fn main() {
     println!("─────────────────────────────────────────");
 
     // Calculator is Low-risk → auto-approved without any dialog
-    let result = session.execute_tool("calculator", serde_json::json!({"expression": "2+3*4"})).await.unwrap();
-    println!("   calculator(2+3*4) → {} (success: {}, auto-approved)", result.content, result.success);
+    let result = session
+        .execute_tool("calculator", serde_json::json!({"expression": "2+3*4"}))
+        .await
+        .unwrap();
+    println!(
+        "   calculator(2+3*4) → {} (success: {}, auto-approved)",
+        result.content, result.success
+    );
 
-    let result = session.execute_tool("calculator", serde_json::json!({"expression": "100/5"})).await.unwrap();
-    println!("   calculator(100/5) → {} (success: {}, auto-approved)", result.content, result.success);
+    let result = session
+        .execute_tool("calculator", serde_json::json!({"expression": "100/5"}))
+        .await
+        .unwrap();
+    println!(
+        "   calculator(100/5) → {} (success: {}, auto-approved)",
+        result.content, result.success
+    );
     println!();
 
     // ─── Demo: High-Risk Tool (Requires Approval via Bridge) ───────
@@ -112,8 +132,10 @@ async fn main() {
                             continue;
                         }
                     };
-                    println!("   → Bridge received: tool={}, risk={:?}",
-                        approval.tool_name, approval.risk_level);
+                    println!(
+                        "   → Bridge received: tool={}, risk={:?}",
+                        approval.tool_name, approval.risk_level
+                    );
 
                     // Format the request for display
                     let formatted = DesktopInteractionBridge::format_request(approval);
@@ -121,7 +143,8 @@ async fn main() {
                     println!("   → Auto-approving (for demo purposes)");
 
                     // Send approval response
-                    DesktopInteractionBridge::send_response(item, InteractionResponse::Proceed).unwrap();
+                    DesktopInteractionBridge::send_response(item, InteractionResponse::Proceed)
+                        .unwrap();
                 }
                 None => {
                     // No pending items — wait briefly
@@ -136,9 +159,18 @@ async fn main() {
 
     // Shell tool → high risk → needs approval via bridge
     println!("   → Executing: shell(echo 'Approved by desktop gate')");
-    let result = session.execute_tool("shell", serde_json::json!({"command": "echo 'Approved by desktop gate'"})).await;
+    let result = session
+        .execute_tool(
+            "shell",
+            serde_json::json!({"command": "echo 'Approved by desktop gate'"}),
+        )
+        .await;
     match result {
-        Ok(output) => println!("   ✓ Result: success={}, content={}", output.success, output.content.trim()),
+        Ok(output) => println!(
+            "   ✓ Result: success={}, content={}",
+            output.success,
+            output.content.trim()
+        ),
         Err(e) => println!("   ✗ Error: {}", e),
     }
     println!();
@@ -155,7 +187,10 @@ async fn main() {
         .await
         .expect("Manual app build should succeed");
 
-    manual_app.register_tool(Arc::new(CalculatorTool::new())).await.unwrap();
+    manual_app
+        .register_tool(Arc::new(CalculatorTool::new()))
+        .await
+        .unwrap();
     let manual_session = manual_app.create_session();
 
     println!("   → Even calculator needs approval with manual-only gate");
@@ -169,7 +204,8 @@ async fn main() {
                         _ => "<non-tool point>".to_string(),
                     };
                     println!("   → Manual bridge: tool={}", tool_name);
-                    DesktopInteractionBridge::send_response(item, InteractionResponse::Proceed).unwrap();
+                    DesktopInteractionBridge::send_response(item, InteractionResponse::Proceed)
+                        .unwrap();
                 }
                 None => {
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -179,9 +215,14 @@ async fn main() {
     });
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let result = manual_session.execute_tool("calculator", serde_json::json!({"expression": "7*8"})).await;
+    let result = manual_session
+        .execute_tool("calculator", serde_json::json!({"expression": "7*8"}))
+        .await;
     match result {
-        Ok(output) => println!("   ✓ Result: success={}, content={}", output.success, output.content),
+        Ok(output) => println!(
+            "   ✓ Result: success={}, content={}",
+            output.success, output.content
+        ),
         Err(e) => println!("   ✗ Error: {}", e),
     }
     println!();

@@ -225,13 +225,24 @@ impl UsageSummary {
             return Self::empty();
         }
 
-        let total_tokens = records.iter().map(|r| r.prompt_tokens as u64 + r.completion_tokens as u64).sum();
+        let total_tokens = records
+            .iter()
+            .map(|r| r.prompt_tokens as u64 + r.completion_tokens as u64)
+            .sum();
         let prompt_tokens = records.iter().map(|r| r.prompt_tokens as u64).sum();
         let completion_tokens = records.iter().map(|r| r.completion_tokens as u64).sum();
         let call_count = records.len() as u64;
         let estimated_call_count = records.iter().filter(|r| r.is_estimated).count() as u64;
-        let first_call = records.iter().map(|r| r.timestamp).min().unwrap_or(Utc::now());
-        let last_call = records.iter().map(|r| r.timestamp).max().unwrap_or(Utc::now());
+        let first_call = records
+            .iter()
+            .map(|r| r.timestamp)
+            .min()
+            .unwrap_or(Utc::now());
+        let last_call = records
+            .iter()
+            .map(|r| r.timestamp)
+            .max()
+            .unwrap_or(Utc::now());
 
         Self {
             total_tokens,
@@ -332,10 +343,14 @@ impl UsageTracker for InMemoryUsageTracker {
 
         let mut by_model: HashMap<String, Vec<UsageRecord>> = HashMap::new();
         for record in records {
-            by_model.entry(record.model.clone()).or_default().push(record);
+            by_model
+                .entry(record.model.clone())
+                .or_default()
+                .push(record);
         }
 
-        Ok(by_model.into_iter()
+        Ok(by_model
+            .into_iter()
             .map(|(model, records)| (model, UsageSummary::from_records(&records)))
             .collect())
     }
@@ -345,10 +360,14 @@ impl UsageTracker for InMemoryUsageTracker {
 
         let mut by_model: HashMap<String, Vec<UsageRecord>> = HashMap::new();
         for record in global.iter() {
-            by_model.entry(record.model.clone()).or_default().push(record.clone());
+            by_model
+                .entry(record.model.clone())
+                .or_default()
+                .push(record.clone());
         }
 
-        Ok(by_model.into_iter()
+        Ok(by_model
+            .into_iter()
             .map(|(model, records)| (model, UsageSummary::from_records(&records)))
             .collect())
     }
@@ -477,8 +496,20 @@ mod tests {
     async fn test_in_memory_usage_tracker_record_and_query() {
         let tracker = InMemoryUsageTracker::new();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new(
+                "sess1",
+                "claude-sonnet-4",
+                "anthropic",
+                200,
+                100,
+            ))
+            .await
+            .unwrap();
 
         let session_usage = tracker.session_usage("sess1").await.unwrap();
         assert_eq!(session_usage.call_count, 2);
@@ -492,9 +523,24 @@ mod tests {
     async fn test_in_memory_usage_tracker_per_model_breakdown() {
         let tracker = InMemoryUsageTracker::new();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 300, 150)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new(
+                "sess1",
+                "claude-sonnet-4",
+                "anthropic",
+                200,
+                100,
+            ))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 300, 150))
+            .await
+            .unwrap();
 
         let by_model = tracker.usage_by_model("sess1").await.unwrap();
         assert_eq!(by_model.len(), 2);
@@ -512,8 +558,14 @@ mod tests {
     async fn test_in_memory_usage_tracker_clear() {
         let tracker = InMemoryUsageTracker::new();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess2", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
 
         tracker.clear_session("sess1").await.unwrap();
         let sess1 = tracker.session_usage("sess1").await.unwrap();
@@ -531,8 +583,20 @@ mod tests {
     async fn test_in_memory_usage_tracker_session_records() {
         let tracker = InMemoryUsageTracker::new();
 
-        tracker.record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50)).await.unwrap();
-        tracker.record_usage(UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 200, 100)).await.unwrap();
+        tracker
+            .record_usage(UsageRecord::new("sess1", "gpt-4o", "openai", 100, 50))
+            .await
+            .unwrap();
+        tracker
+            .record_usage(UsageRecord::new(
+                "sess1",
+                "claude-sonnet-4",
+                "anthropic",
+                200,
+                100,
+            ))
+            .await
+            .unwrap();
 
         let records = tracker.session_records("sess1").await.unwrap();
         assert_eq!(records.len(), 2);

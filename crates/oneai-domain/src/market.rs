@@ -34,9 +34,7 @@ use crate::DomainPack;
 #[derive(Debug, Clone)]
 pub enum PackSource {
     /// Local path (ONEAI.domain.yaml / .toml).
-    Local {
-        path: PathBuf,
-    },
+    Local { path: PathBuf },
     /// Git repository.
     Git {
         repo_url: String,
@@ -121,11 +119,15 @@ impl PackRegistry {
     /// Matches against name, description, and tags.
     pub fn search(&self, query: &str) -> Vec<&PackIndexEntry> {
         let query_lower = query.to_lowercase();
-        self.index.values()
+        self.index
+            .values()
             .filter(|entry| {
                 entry.name.to_lowercase().contains(&query_lower)
                     || entry.description.to_lowercase().contains(&query_lower)
-                    || entry.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                    || entry
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
             })
             .collect()
     }
@@ -170,7 +172,11 @@ impl PackRegistry {
     ///
     /// For builtin packs, uses the hardcoded constructors.
     /// For installed packs, loads from the cached directory.
-    pub fn load_installed(&self, name: &str, project_dir: &str) -> Result<DomainPack, PackLoadError> {
+    pub fn load_installed(
+        &self,
+        name: &str,
+        project_dir: &str,
+    ) -> Result<DomainPack, PackLoadError> {
         // Try builtin first
         if name == "coding" {
             return Ok(crate::coding_pack(project_dir));
@@ -211,15 +217,18 @@ impl PackRegistry {
                     if !self.index.contains_key(&name) {
                         let pack_dir = entry.path();
                         let description = self.read_pack_description(&pack_dir);
-                        self.index.insert(name.clone(), PackIndexEntry {
-                            name: name.clone(),
-                            description,
-                            version: "local".to_string(),
-                            author: "unknown".to_string(),
-                            tags: vec![name.clone()],
-                            source: PackSource::Local { path: pack_dir },
-                            is_builtin: false,
-                        });
+                        self.index.insert(
+                            name.clone(),
+                            PackIndexEntry {
+                                name: name.clone(),
+                                description,
+                                version: "local".to_string(),
+                                author: "unknown".to_string(),
+                                tags: vec![name.clone()],
+                                source: PackSource::Local { path: pack_dir },
+                                is_builtin: false,
+                            },
+                        );
                     }
                 }
             }
@@ -274,7 +283,11 @@ impl PackRegistry {
         Ok(pack_name)
     }
 
-    fn install_git(&self, repo_url: &str, ref_: Option<String>) -> Result<String, PackInstallError> {
+    fn install_git(
+        &self,
+        repo_url: &str,
+        ref_: Option<String>,
+    ) -> Result<String, PackInstallError> {
         let pack_name = extract_pack_name_from_git_url(repo_url);
         let dest = self.cache_dir.join(&pack_name);
 
@@ -298,7 +311,7 @@ impl PackRegistry {
 
         if !output.status.success() {
             return Err(PackInstallError::GitFailed(
-                String::from_utf8_lossy(&output.stderr).to_string()
+                String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
@@ -310,10 +323,7 @@ impl PackRegistry {
 
 fn extract_pack_name_from_git_url(url: &str) -> String {
     let url = url.trim_end_matches(".git");
-    url.rsplit('/')
-        .next()
-        .unwrap_or("custom-pack")
-        .to_string()
+    url.rsplit('/').next().unwrap_or("custom-pack").to_string()
 }
 
 fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -338,31 +348,56 @@ fn builtin_pack_entries() -> Vec<PackIndexEntry> {
     vec![
         PackIndexEntry {
             name: "coding".to_string(),
-            description: "Coding domain pack — software development tools, context, and strategies".to_string(),
+            description: "Coding domain pack — software development tools, context, and strategies"
+                .to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             author: "OneAI".to_string(),
-            tags: vec!["coding".to_string(), "software".to_string(), "development".to_string(),
-                        "editing".to_string(), "shell".to_string(), "git".to_string()],
-            source: PackSource::Local { path: PathBuf::from("builtin://coding") },
+            tags: vec![
+                "coding".to_string(),
+                "software".to_string(),
+                "development".to_string(),
+                "editing".to_string(),
+                "shell".to_string(),
+                "git".to_string(),
+            ],
+            source: PackSource::Local {
+                path: PathBuf::from("builtin://coding"),
+            },
             is_builtin: true,
         },
         PackIndexEntry {
             name: "research".to_string(),
-            description: "Research domain pack — web search, analysis, and synthesis tools".to_string(),
+            description: "Research domain pack — web search, analysis, and synthesis tools"
+                .to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             author: "OneAI".to_string(),
-            tags: vec!["research".to_string(), "search".to_string(), "analysis".to_string(),
-                        "web".to_string(), "synthesis".to_string(), "citation".to_string()],
-            source: PackSource::Local { path: PathBuf::from("builtin://research") },
+            tags: vec![
+                "research".to_string(),
+                "search".to_string(),
+                "analysis".to_string(),
+                "web".to_string(),
+                "synthesis".to_string(),
+                "citation".to_string(),
+            ],
+            source: PackSource::Local {
+                path: PathBuf::from("builtin://research"),
+            },
             is_builtin: true,
         },
         PackIndexEntry {
             name: "general".to_string(),
-            description: "General-purpose domain pack — minimal tool set for basic tasks".to_string(),
+            description: "General-purpose domain pack — minimal tool set for basic tasks"
+                .to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             author: "OneAI".to_string(),
-            tags: vec!["general".to_string(), "chat".to_string(), "calculator".to_string()],
-            source: PackSource::Local { path: PathBuf::from("builtin://general") },
+            tags: vec![
+                "general".to_string(),
+                "chat".to_string(),
+                "calculator".to_string(),
+            ],
+            source: PackSource::Local {
+                path: PathBuf::from("builtin://general"),
+            },
             is_builtin: true,
         },
         PackIndexEntry {
@@ -370,9 +405,16 @@ fn builtin_pack_entries() -> Vec<PackIndexEntry> {
             description: "Content creation and editing domain pack — coming soon".to_string(),
             version: "planned".to_string(),
             author: "OneAI".to_string(),
-            tags: vec!["writing".to_string(), "content".to_string(), "editing".to_string(),
-                        "creative".to_string()],
-            source: PackSource::Registry { name: "writing".to_string(), version: None },
+            tags: vec![
+                "writing".to_string(),
+                "content".to_string(),
+                "editing".to_string(),
+                "creative".to_string(),
+            ],
+            source: PackSource::Registry {
+                name: "writing".to_string(),
+                version: None,
+            },
             is_builtin: false,
         },
         PackIndexEntry {
@@ -380,9 +422,17 @@ fn builtin_pack_entries() -> Vec<PackIndexEntry> {
             description: "Data analysis and visualization domain pack — coming soon".to_string(),
             version: "planned".to_string(),
             author: "OneAI".to_string(),
-            tags: vec!["data".to_string(), "analysis".to_string(), "visualization".to_string(),
-                        "query".to_string(), "statistics".to_string()],
-            source: PackSource::Registry { name: "data".to_string(), version: None },
+            tags: vec![
+                "data".to_string(),
+                "analysis".to_string(),
+                "visualization".to_string(),
+                "query".to_string(),
+                "statistics".to_string(),
+            ],
+            source: PackSource::Registry {
+                name: "data".to_string(),
+                version: None,
+            },
             is_builtin: false,
         },
         PackIndexEntry {
@@ -390,9 +440,17 @@ fn builtin_pack_entries() -> Vec<PackIndexEntry> {
             description: "Infrastructure and deployment domain pack — coming soon".to_string(),
             version: "planned".to_string(),
             author: "OneAI".to_string(),
-            tags: vec!["devops".to_string(), "deploy".to_string(), "monitor".to_string(),
-                        "infrastructure".to_string(), "ci".to_string()],
-            source: PackSource::Registry { name: "devops".to_string(), version: None },
+            tags: vec![
+                "devops".to_string(),
+                "deploy".to_string(),
+                "monitor".to_string(),
+                "infrastructure".to_string(),
+                "ci".to_string(),
+            ],
+            source: PackSource::Registry {
+                name: "devops".to_string(),
+                version: None,
+            },
             is_builtin: false,
         },
     ]

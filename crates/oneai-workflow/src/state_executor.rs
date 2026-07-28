@@ -33,7 +33,7 @@ use oneai_core::traits::{InteractionGate, LlmProvider, Tool};
 use oneai_core::{InferenceRequest, InferenceResponse, Message, Role};
 
 use crate::state_graph::{
-    StateGraph, GraphState, GraphEdge, NodeAction, EdgeCondition, GraphExecutionResult,
+    EdgeCondition, GraphEdge, GraphExecutionResult, GraphState, NodeAction, StateGraph,
 };
 
 /// User-provided evaluator for an `EdgeCondition::Custom { name, .. }` variant.
@@ -92,7 +92,8 @@ pub struct NoopDelegateFactory;
 impl DelegateFactory for NoopDelegateFactory {
     async fn delegate(&self, agent_kind: &str, _task: &str) -> Result<String> {
         Err(OneAIError::Workflow(format!(
-            "Delegate action '{}' not supported — no DelegateFactory configured", agent_kind
+            "Delegate action '{}' not supported — no DelegateFactory configured",
+            agent_kind
         )))
     }
 }
@@ -215,11 +216,23 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
         state: &mut GraphState,
     ) -> Result<ActionResult> {
         // Extract LlmInfer fields
-        let (system_prompt_override, _use_streaming, include_tool_definitions,
-             tool_filter_override, thinking_budget, temperature, max_tokens) = match action {
+        let (
+            system_prompt_override,
+            _use_streaming,
+            include_tool_definitions,
+            tool_filter_override,
+            thinking_budget,
+            temperature,
+            max_tokens,
+        ) = match action {
             NodeAction::LlmInfer {
-                system_prompt_override, use_streaming, include_tool_definitions,
-                tool_filter_override, thinking_budget, temperature, max_tokens,
+                system_prompt_override,
+                use_streaming,
+                include_tool_definitions,
+                tool_filter_override,
+                thinking_budget,
+                temperature,
+                max_tokens,
             } => (
                 system_prompt_override.clone(),
                 *use_streaming,
@@ -246,7 +259,8 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
             let tools_map = self.tools.read().await;
             if let Some(filter) = &tool_filter_override {
                 // Filter: only include specified tools
-                tools_map.values()
+                tools_map
+                    .values()
                     .filter(|t| filter.contains(&t.name().to_string()))
                     .map(|t| oneai_core::ToolDefinition {
                         name: t.name().to_string(),
@@ -256,11 +270,14 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
                     .collect()
             } else {
                 // No filter — include all tools
-                tools_map.values().map(|t| oneai_core::ToolDefinition {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters_schema: t.parameters_schema(),
-                }).collect()
+                tools_map
+                    .values()
+                    .map(|t| oneai_core::ToolDefinition {
+                        name: t.name().to_string(),
+                        description: t.description().to_string(),
+                        parameters_schema: t.parameters_schema(),
+                    })
+                    .collect()
             }
         } else {
             vec![] // No tool definitions — pure text prompt
@@ -300,10 +317,9 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
         state: &mut GraphState,
     ) -> Result<ActionResult> {
         let tools_map = self.tools.read().await;
-        let tool = tools_map.get(tool_name)
-            .ok_or_else(|| OneAIError::Workflow(
-                format!("Tool '{}' not found for ToolCall node", tool_name)
-            ))?;
+        let tool = tools_map.get(tool_name).ok_or_else(|| {
+            OneAIError::Workflow(format!("Tool '{}' not found for ToolCall node", tool_name))
+        })?;
 
         let output = tool.execute(args.clone()).await?;
 
@@ -348,24 +364,30 @@ impl GraphActionExecutor for DirectProviderActionExecutor {
                     // Check for special internal tools (delegate, switch_paradigm)
                     if name == "delegate" {
                         // Parse delegate args
-                        let args_value: serde_json::Value = serde_json::from_str(args)
-                            .unwrap_or_else(|_| serde_json::json!({}));
-                        let agent_kind = args_value.get("agent_type")
-                            .and_then(|v| v.as_str()).unwrap_or("Explore").to_string();
-                        let task = args_value.get("task")
-                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let decision = oneai_core::GraphDecision::Delegate {
-                            agent_kind,
-                            task,
-                        };
+                        let args_value: serde_json::Value =
+                            serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
+                        let agent_kind = args_value
+                            .get("agent_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Explore")
+                            .to_string();
+                        let task = args_value
+                            .get("task")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let decision = oneai_core::GraphDecision::Delegate { agent_kind, task };
                         state.parsed_decision = Some(decision.clone());
                         return Ok(decision);
                     }
                     if name == "switch_paradigm" {
-                        let args_value: serde_json::Value = serde_json::from_str(args)
-                            .unwrap_or_else(|_| serde_json::json!({}));
-                        let paradigm = args_value.get("paradigm")
-                            .and_then(|v| v.as_str()).unwrap_or("react").to_string();
+                        let args_value: serde_json::Value =
+                            serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
+                        let paradigm = args_value
+                            .get("paradigm")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("react")
+                            .to_string();
                         let decision = oneai_core::GraphDecision::SwitchParadigm { paradigm };
                         state.parsed_decision = Some(decision.clone());
                         return Ok(decision);
@@ -488,7 +510,12 @@ impl StateGraphExecutor {
         max_iterations: usize,
     ) -> Self {
         let action_executor = Arc::new(DirectProviderActionExecutor::new(provider, tools));
-        Self::new(action_executor, delegate_factory, interaction_gate, max_iterations)
+        Self::new(
+            action_executor,
+            delegate_factory,
+            interaction_gate,
+            max_iterations,
+        )
     }
 
     /// Create with direct provider + default max_iterations (50).
@@ -522,10 +549,12 @@ impl StateGraphExecutor {
             state.iteration_count = iterations;
 
             // 1. Get the current node
-            let node = graph.get_node(&current_node_id)
-                .ok_or_else(|| OneAIError::Workflow(
-                    format!("Node '{}' not found in graph '{}'", current_node_id, graph.name)
-                ))?;
+            let node = graph.get_node(&current_node_id).ok_or_else(|| {
+                OneAIError::Workflow(format!(
+                    "Node '{}' not found in graph '{}'",
+                    current_node_id, graph.name
+                ))
+            })?;
 
             // 2. Check if this is a terminal node
             if graph.terminal_nodes.contains(&current_node_id) {
@@ -561,8 +590,10 @@ impl StateGraphExecutor {
                     }),
                     risk_level: oneai_core::RiskLevel::Medium,
                     permission_level: Some(oneai_core::PermissionLevel::Standard),
-                    justification: format!("StateGraph interrupt at node '{}' in graph '{}'",
-                        current_node_id, graph.name),
+                    justification: format!(
+                        "StateGraph interrupt at node '{}' in graph '{}'",
+                        current_node_id, graph.name
+                    ),
                 };
 
                 let approval = self
@@ -619,7 +650,8 @@ impl StateGraphExecutor {
                 // No matching condition — terminate
                 tracing::warn!(
                     "No matching edge condition from node '{}' in graph '{}'. Terminating.",
-                    current_node_id, graph.name
+                    current_node_id,
+                    graph.name
                 );
                 break;
             }
@@ -632,7 +664,8 @@ impl StateGraphExecutor {
         if iterations >= self.max_iterations {
             tracing::warn!(
                 "StateGraph '{}' exceeded max iterations ({}). Terminating.",
-                graph.name, self.max_iterations
+                graph.name,
+                self.max_iterations
             );
         }
 
@@ -663,31 +696,39 @@ impl StateGraphExecutor {
                 self.action_executor.execute_llm_infer(action, state).await
             }
 
-            NodeAction::ToolCall { tool_name, args_template } => {
+            NodeAction::ToolCall {
+                tool_name,
+                args_template,
+            } => {
                 // Template interpolation: {{variable}} → state.variables[key]
                 let resolved_name = interpolate_graph_template(tool_name, &state.variables);
                 let resolved_args = if let Some(template) = args_template {
                     let json_str = interpolate_graph_template(template, &state.variables);
-                    serde_json::from_str(&json_str)
-                        .unwrap_or(serde_json::json!({}))
+                    serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}))
                 } else {
                     serde_json::json!({})
                 };
 
                 // Delegate to GraphActionExecutor — which may run hooks,
                 // check permissions, interact with approval gate.
-                self.action_executor.execute_tool_call(&resolved_name, &resolved_args, state).await
+                self.action_executor
+                    .execute_tool_call(&resolved_name, &resolved_args, state)
+                    .await
             }
 
-            NodeAction::Delegate { agent_kind, task_template } => {
+            NodeAction::Delegate {
+                agent_kind,
+                task_template,
+            } => {
                 let task = interpolate_graph_template(task_template, &state.variables);
 
                 let result = self.delegate_factory.delegate(agent_kind, &task).await?;
 
                 // Append delegate result to conversation
-                state.conversation.add_message(Message::assistant(
-                    format!("[Delegate {}]: {}", agent_kind, result)
-                ));
+                state.conversation.add_message(Message::assistant(format!(
+                    "[Delegate {}]: {}",
+                    agent_kind, result
+                )));
 
                 // Set parsed_decision to Delegate
                 state.parsed_decision = Some(oneai_core::GraphDecision::Delegate {
@@ -712,7 +753,9 @@ impl StateGraphExecutor {
 
             NodeAction::ConditionCheck { condition } => {
                 let result = self.evaluate_condition_expression(condition, state)?;
-                state.variables.insert("_condition_result".to_string(), result.to_string());
+                state
+                    .variables
+                    .insert("_condition_result".to_string(), result.to_string());
                 Ok(ActionResult {
                     output: result.to_string(),
                     error: None,
@@ -721,7 +764,9 @@ impl StateGraphExecutor {
 
             NodeAction::SwitchParadigm { paradigm } => {
                 // Delegate to GraphActionExecutor — updates state.active_paradigm
-                self.action_executor.execute_paradigm_switch(paradigm, state).await
+                self.action_executor
+                    .execute_paradigm_switch(paradigm, state)
+                    .await
             }
         }
     }
@@ -731,11 +776,7 @@ impl StateGraphExecutor {
     /// Priority: conditional edges are evaluated in order; the first matching
     /// condition determines the next node. Unconditional edges (Always) act
     /// as fallback routing.
-    fn route_next_node(
-        &self,
-        edges: &[&GraphEdge],
-        state: &GraphState,
-    ) -> Result<Option<String>> {
+    fn route_next_node(&self, edges: &[&GraphEdge], state: &GraphState) -> Result<Option<String>> {
         for edge in edges {
             if let Some(condition) = &edge.condition {
                 if self.evaluate_edge_condition(condition, state)? {
@@ -763,28 +804,32 @@ impl StateGraphExecutor {
         match condition {
             EdgeCondition::HasToolCalls => {
                 // P2-2: Use parsed_decision instead of string matching
-                Ok(state.parsed_decision.as_ref()
+                Ok(state
+                    .parsed_decision
+                    .as_ref()
                     .map(|d| d.has_tool_calls())
                     .unwrap_or(false))
             }
 
             EdgeCondition::IsFinalAnswer => {
                 // P2-2: Use parsed_decision instead of !HasToolCalls
-                Ok(state.parsed_decision.as_ref()
+                Ok(state
+                    .parsed_decision
+                    .as_ref()
                     .map(|d| d.is_final())
                     .unwrap_or(false))
             }
 
             EdgeCondition::RequestsDelegation => {
                 // P2-2: Use parsed_decision
-                Ok(state.parsed_decision.as_ref()
+                Ok(state
+                    .parsed_decision
+                    .as_ref()
                     .map(|d| d.is_delegation())
                     .unwrap_or(false))
             }
 
-            EdgeCondition::ErrorOccurred => {
-                Ok(state.last_error.is_some())
-            }
+            EdgeCondition::ErrorOccurred => Ok(state.last_error.is_some()),
 
             EdgeCondition::StateEquals { variable, value } => {
                 Ok(state.variables.get(variable) == Some(value))
@@ -792,22 +837,18 @@ impl StateGraphExecutor {
 
             EdgeCondition::Always => Ok(true),
 
-            EdgeCondition::Custom { name, description } => {
-                Ok(evaluate_custom_condition(
-                    &self.custom_conditions,
-                    name,
-                    description,
-                    state,
-                ))
-            }
+            EdgeCondition::Custom { name, description } => Ok(evaluate_custom_condition(
+                &self.custom_conditions,
+                name,
+                description,
+                state,
+            )),
 
             EdgeCondition::ParadigmEquals { paradigm } => {
                 Ok(state.active_paradigm.as_ref() == Some(paradigm))
             }
 
-            EdgeCondition::IterationExceeds { count } => {
-                Ok(state.iteration_count > *count)
-            }
+            EdgeCondition::IterationExceeds { count } => Ok(state.iteration_count > *count),
         }
     }
 
@@ -833,7 +874,11 @@ impl StateGraphExecutor {
             return Ok(state.variables.get(var.trim()) == Some(&val.trim().to_string()));
         }
         // Fallback: treat as a state variable lookup (truthy check)
-        Ok(state.variables.get(condition).map(|v| v == "true").unwrap_or(false))
+        Ok(state
+            .variables
+            .get(condition)
+            .map(|v| v == "true")
+            .unwrap_or(false))
     }
 }
 
@@ -856,7 +901,7 @@ pub fn interpolate_graph_template(template: &str, variables: &HashMap<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state_graph::{StateGraph, GraphNode};
+    use crate::state_graph::{GraphNode, StateGraph};
 
     #[allow(dead_code)] // test fixture retained for future executor coverage
     fn make_simple_graph() -> StateGraph {
@@ -904,7 +949,9 @@ mod tests {
         let state = GraphState::new();
         let executor = make_test_executor();
 
-        let result = executor.evaluate_edge_condition(&EdgeCondition::Always, &state).unwrap();
+        let result = executor
+            .evaluate_edge_condition(&EdgeCondition::Always, &state)
+            .unwrap();
         assert!(result);
     }
 
@@ -914,11 +961,15 @@ mod tests {
         let executor = make_test_executor();
 
         // No error → false
-        assert!(!executor.evaluate_edge_condition(&EdgeCondition::ErrorOccurred, &state).unwrap());
+        assert!(!executor
+            .evaluate_edge_condition(&EdgeCondition::ErrorOccurred, &state)
+            .unwrap());
 
         // With error → true
         state.last_error = Some("test error".to_string());
-        assert!(executor.evaluate_edge_condition(&EdgeCondition::ErrorOccurred, &state).unwrap());
+        assert!(executor
+            .evaluate_edge_condition(&EdgeCondition::ErrorOccurred, &state)
+            .unwrap());
     }
 
     #[test]
@@ -927,15 +978,22 @@ mod tests {
         let executor = make_test_executor();
 
         // Variable not set → false
-        let cond = EdgeCondition::StateEquals { variable: "mode".to_string(), value: "react".to_string() };
+        let cond = EdgeCondition::StateEquals {
+            variable: "mode".to_string(),
+            value: "react".to_string(),
+        };
         assert!(!executor.evaluate_edge_condition(&cond, &state).unwrap());
 
         // Variable set but different value → false
-        state.variables.insert("mode".to_string(), "plan".to_string());
+        state
+            .variables
+            .insert("mode".to_string(), "plan".to_string());
         assert!(!executor.evaluate_edge_condition(&cond, &state).unwrap());
 
         // Variable matches → true
-        state.variables.insert("mode".to_string(), "react".to_string());
+        state
+            .variables
+            .insert("mode".to_string(), "react".to_string());
         assert!(executor.evaluate_edge_condition(&cond, &state).unwrap());
     }
 
@@ -945,17 +1003,23 @@ mod tests {
         let executor = make_test_executor();
 
         // No parsed_decision → false
-        assert!(!executor.evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state).unwrap());
+        assert!(!executor
+            .evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state)
+            .unwrap());
 
         // DirectAnswer → false
         state.parsed_decision = Some(oneai_core::GraphDecision::DirectAnswer {
             text: "Just a text answer".to_string(),
         });
-        assert!(!executor.evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state).unwrap());
+        assert!(!executor
+            .evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state)
+            .unwrap());
 
         // ToolCalls → true
         state.parsed_decision = Some(oneai_core::GraphDecision::ToolCalls { count: 1 });
-        assert!(executor.evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state).unwrap());
+        assert!(executor
+            .evaluate_edge_condition(&EdgeCondition::HasToolCalls, &state)
+            .unwrap());
     }
 
     #[test]
@@ -964,17 +1028,23 @@ mod tests {
         let executor = make_test_executor();
 
         // No parsed_decision → false
-        assert!(!executor.evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state).unwrap());
+        assert!(!executor
+            .evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state)
+            .unwrap());
 
         // DirectAnswer → true
         state.parsed_decision = Some(oneai_core::GraphDecision::DirectAnswer {
             text: "The answer is 42".to_string(),
         });
-        assert!(executor.evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state).unwrap());
+        assert!(executor
+            .evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state)
+            .unwrap());
 
         // ToolCalls → false
         state.parsed_decision = Some(oneai_core::GraphDecision::ToolCalls { count: 2 });
-        assert!(!executor.evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state).unwrap());
+        assert!(!executor
+            .evaluate_edge_condition(&EdgeCondition::IsFinalAnswer, &state)
+            .unwrap());
     }
 
     #[test]
@@ -987,11 +1057,15 @@ mod tests {
             agent_kind: "Explore".to_string(),
             task: "Search the codebase".to_string(),
         });
-        assert!(executor.evaluate_edge_condition(&EdgeCondition::RequestsDelegation, &state).unwrap());
+        assert!(executor
+            .evaluate_edge_condition(&EdgeCondition::RequestsDelegation, &state)
+            .unwrap());
 
         // ToolCalls → false
         state.parsed_decision = Some(oneai_core::GraphDecision::ToolCalls { count: 1 });
-        assert!(!executor.evaluate_edge_condition(&EdgeCondition::RequestsDelegation, &state).unwrap());
+        assert!(!executor
+            .evaluate_edge_condition(&EdgeCondition::RequestsDelegation, &state)
+            .unwrap());
     }
 
     #[test]
@@ -1000,7 +1074,9 @@ mod tests {
         let executor = make_test_executor();
 
         // No paradigm → false
-        let cond = EdgeCondition::ParadigmEquals { paradigm: "react".to_string() };
+        let cond = EdgeCondition::ParadigmEquals {
+            paradigm: "react".to_string(),
+        };
         assert!(!executor.evaluate_edge_condition(&cond, &state).unwrap());
 
         // Wrong paradigm → false
@@ -1043,13 +1119,21 @@ mod tests {
         let executor = make_test_executor();
 
         // "variable==value" pattern
-        state.variables.insert("mode".to_string(), "react".to_string());
-        assert!(executor.evaluate_condition_expression("mode==react", &state).unwrap());
-        assert!(!executor.evaluate_condition_expression("mode==plan", &state).unwrap());
+        state
+            .variables
+            .insert("mode".to_string(), "react".to_string());
+        assert!(executor
+            .evaluate_condition_expression("mode==react", &state)
+            .unwrap());
+        assert!(!executor
+            .evaluate_condition_expression("mode==plan", &state)
+            .unwrap());
 
         // "error_occurred" pattern
         state.last_error = Some("error".to_string());
-        assert!(executor.evaluate_condition_expression("error_occurred", &state).unwrap());
+        assert!(executor
+            .evaluate_condition_expression("error_occurred", &state)
+            .unwrap());
     }
 
     /// Create a test executor with mock dependencies (for condition testing only).
@@ -1062,42 +1146,51 @@ mod tests {
     }
 
     impl TestStateGraphExecutor {
-        fn evaluate_edge_condition(&self, condition: &EdgeCondition, state: &GraphState) -> Result<bool> {
+        fn evaluate_edge_condition(
+            &self,
+            condition: &EdgeCondition,
+            state: &GraphState,
+        ) -> Result<bool> {
             match condition {
-                EdgeCondition::HasToolCalls => {
-                    Ok(state.parsed_decision.as_ref()
-                        .map(|d| d.has_tool_calls())
-                        .unwrap_or(false))
-                }
-                EdgeCondition::IsFinalAnswer => {
-                    Ok(state.parsed_decision.as_ref()
-                        .map(|d| d.is_final())
-                        .unwrap_or(false))
-                }
-                EdgeCondition::RequestsDelegation => {
-                    Ok(state.parsed_decision.as_ref()
-                        .map(|d| d.is_delegation())
-                        .unwrap_or(false))
-                }
+                EdgeCondition::HasToolCalls => Ok(state
+                    .parsed_decision
+                    .as_ref()
+                    .map(|d| d.has_tool_calls())
+                    .unwrap_or(false)),
+                EdgeCondition::IsFinalAnswer => Ok(state
+                    .parsed_decision
+                    .as_ref()
+                    .map(|d| d.is_final())
+                    .unwrap_or(false)),
+                EdgeCondition::RequestsDelegation => Ok(state
+                    .parsed_decision
+                    .as_ref()
+                    .map(|d| d.is_delegation())
+                    .unwrap_or(false)),
                 EdgeCondition::ErrorOccurred => Ok(state.last_error.is_some()),
                 EdgeCondition::StateEquals { variable, value } => {
                     Ok(state.variables.get(variable) == Some(value))
                 }
                 EdgeCondition::Always => Ok(true),
                 EdgeCondition::Custom { name, .. } => {
-                    tracing::warn!("Custom condition '{}' not registered, defaulting to false", name);
+                    tracing::warn!(
+                        "Custom condition '{}' not registered, defaulting to false",
+                        name
+                    );
                     Ok(false)
                 }
                 EdgeCondition::ParadigmEquals { paradigm } => {
                     Ok(state.active_paradigm.as_ref() == Some(paradigm))
                 }
-                EdgeCondition::IterationExceeds { count } => {
-                    Ok(state.iteration_count > *count)
-                }
+                EdgeCondition::IterationExceeds { count } => Ok(state.iteration_count > *count),
             }
         }
 
-        fn evaluate_condition_expression(&self, condition: &str, state: &GraphState) -> Result<bool> {
+        fn evaluate_condition_expression(
+            &self,
+            condition: &str,
+            state: &GraphState,
+        ) -> Result<bool> {
             if condition == "has_tool_calls" {
                 return self.evaluate_edge_condition(&EdgeCondition::HasToolCalls, state);
             }
@@ -1110,7 +1203,11 @@ mod tests {
             if let Some((var, val)) = condition.split_once("==") {
                 return Ok(state.variables.get(var.trim()) == Some(&val.trim().to_string()));
             }
-            Ok(state.variables.get(condition).map(|v| v == "true").unwrap_or(false))
+            Ok(state
+                .variables
+                .get(condition)
+                .map(|v| v == "true")
+                .unwrap_or(false))
         }
     }
 
@@ -1165,7 +1262,10 @@ mod tests {
         registry.insert(
             "attempts_exhausted".to_string(),
             Arc::new(|s: &GraphState| {
-                s.variables.get("attempts").map(|v| v == "3").unwrap_or(false)
+                s.variables
+                    .get("attempts")
+                    .map(|v| v == "3")
+                    .unwrap_or(false)
             }),
         );
         assert!(evaluate_custom_condition(

@@ -4,9 +4,9 @@
 //! generates an implicit error message, and re-feeds it to the model
 //! for self-correction. Up to `max_retries` attempts are made.
 
-use oneai_core::{ContentBlock, InferenceRequest, Message, OneAIError, ParsedOutput, ParsingLayer};
 use oneai_core::error::ParserError;
 use oneai_core::traits::LlmProvider;
+use oneai_core::{ContentBlock, InferenceRequest, Message, OneAIError, ParsedOutput, ParsingLayer};
 
 use crate::fuzzy::FuzzyJsonRepair;
 
@@ -75,9 +75,7 @@ impl FallbackLoop {
             let response = provider.infer(corrected_request).await.map_err(|e| {
                 OneAIError::Parser(ParserError::FallbackExhausted {
                     retries: attempt,
-                    reason: format!(
-                        "provider error during self-correction attempt {attempt}: {e}"
-                    ),
+                    reason: format!("provider error during self-correction attempt {attempt}: {e}"),
                 })
             })?;
 
@@ -173,7 +171,9 @@ mod tests {
             std::pin::Pin<Box<dyn futures::Stream<Item = oneai_core::InferenceStreamChunk> + Send>>,
             OneAIError,
         > {
-            Err(OneAIError::Other("infer_stream not supported by StubProvider".to_string()))
+            Err(OneAIError::Other(
+                "infer_stream not supported by StubProvider".to_string(),
+            ))
         }
 
         fn capabilities(&self) -> ModelCapability {

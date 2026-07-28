@@ -31,9 +31,9 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
+use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
 
 // ─── ToolCallLog ──────────────────────────────────────────────────────────────
 
@@ -326,7 +326,8 @@ impl MockTool {
             }),
             ToolOutput {
                 success: true,
-                content: "Fetched content from URL: <html><body>Example page</body></html>".to_string(),
+                content: "Fetched content from URL: <html><body>Example page</body></html>"
+                    .to_string(),
                 error: None,
             },
             PermissionLevel::Standard,
@@ -416,7 +417,10 @@ mod tests {
         assert_eq!(tool.name(), "read_file");
         assert_eq!(tool.risk_level(), RiskLevel::Low); // Read → Low
 
-        let result = tool.execute(serde_json::json!({"path": "/test.txt"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"path": "/test.txt"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "hello world");
     }
@@ -425,8 +429,12 @@ mod tests {
     async fn test_mock_tool_call_logging() {
         let tool = MockTool::read_file_mock();
 
-        tool.execute(serde_json::json!({"path": "/a.txt"})).await.unwrap();
-        tool.execute(serde_json::json!({"path": "/b.txt"})).await.unwrap();
+        tool.execute(serde_json::json!({"path": "/a.txt"}))
+            .await
+            .unwrap();
+        tool.execute(serde_json::json!({"path": "/b.txt"}))
+            .await
+            .unwrap();
 
         let log = tool.call_log.lock().await;
         assert_eq!(log.len(), 2);
@@ -439,7 +447,10 @@ mod tests {
         let tool = MockTool::shell_mock();
         assert_eq!(tool.risk_level(), RiskLevel::High); // Full → High
 
-        let result = tool.execute(serde_json::json!({"command": "ls"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"command": "ls"}))
+            .await
+            .unwrap();
         assert!(result.success);
         assert_eq!(result.content, "Command output: OK");
     }
@@ -449,7 +460,10 @@ mod tests {
         let tool = MockTool::shell_mock_error();
         assert_eq!(tool.risk_level(), RiskLevel::High);
 
-        let result = tool.execute(serde_json::json!({"command": "timeout_cmd"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"command": "timeout_cmd"}))
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("timed out"));
     }
@@ -459,7 +473,10 @@ mod tests {
         let tool = MockTool::edit_file_mock();
         assert_eq!(tool.risk_level(), RiskLevel::Medium); // Standard → Medium
 
-        let result = tool.execute(serde_json::json!({"path": "/test.rs", "changes": "fix"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"path": "/test.rs", "changes": "fix"}))
+            .await
+            .unwrap();
         assert!(result.success);
     }
 
@@ -468,7 +485,10 @@ mod tests {
         let tool = MockTool::success_tool("custom_tool", "custom output");
         assert_eq!(tool.name(), "custom_tool");
 
-        let result = tool.execute(serde_json::json!({"input": "test"})).await.unwrap();
+        let result = tool
+            .execute(serde_json::json!({"input": "test"}))
+            .await
+            .unwrap();
         assert_eq!(result.content, "custom output");
     }
 
@@ -478,10 +498,14 @@ mod tests {
 
         assert_eq!(tool.call_count().await, 0);
 
-        tool.execute(serde_json::json!({"path": "/a"})).await.unwrap();
+        tool.execute(serde_json::json!({"path": "/a"}))
+            .await
+            .unwrap();
         assert_eq!(tool.call_count().await, 1);
 
-        tool.execute(serde_json::json!({"path": "/b"})).await.unwrap();
+        tool.execute(serde_json::json!({"path": "/b"}))
+            .await
+            .unwrap();
         assert_eq!(tool.call_count().await, 2);
     }
 }

@@ -24,13 +24,13 @@ pub const COLLAPSE_THRESHOLD: usize = 5;
 
 // ─── Semantic Palette ───────────────────────────────────────────────────────
 
-pub const ACCENT: Color = Color::Rgb(98, 176, 188);   // muted teal
-pub const SUCCESS: Color = Color::Rgb(150, 196, 122);   // muted sage green
-pub const WARNING: Color = Color::Rgb(214, 182, 96);    // muted gold
-pub const DANGER: Color = Color::Rgb(208, 124, 124);    // muted coral red
-pub const TEXT: Color = Color::Rgb(222, 222, 224);      // light neutral
-pub const DIM: Color = Color::Rgb(132, 132, 142);       // neutral gray
-pub const MUTED: Color = Color::Rgb(96, 96, 108);       // dark gray
+pub const ACCENT: Color = Color::Rgb(98, 176, 188); // muted teal
+pub const SUCCESS: Color = Color::Rgb(150, 196, 122); // muted sage green
+pub const WARNING: Color = Color::Rgb(214, 182, 96); // muted gold
+pub const DANGER: Color = Color::Rgb(208, 124, 124); // muted coral red
+pub const TEXT: Color = Color::Rgb(222, 222, 224); // light neutral
+pub const DIM: Color = Color::Rgb(132, 132, 142); // neutral gray
+pub const MUTED: Color = Color::Rgb(96, 96, 108); // dark gray
 
 // ─── Brand Colors ──────────────────────────────────────────────────────────
 

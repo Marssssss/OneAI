@@ -1,7 +1,7 @@
 //! Skill selector — lightweight top-K selection with progressive disclosure.
 
-use oneai_core::{SkillDescriptor, SelectionMode};
 use oneai_core::error::Result;
+use oneai_core::{SelectionMode, SkillDescriptor};
 
 /// Lightweight skill selector that dynamically injects relevant skills into context.
 ///
@@ -37,21 +37,30 @@ impl SkillSelector {
         registry: &[SkillDescriptor],
     ) -> Result<Vec<SkillDescriptor>> {
         // Keyword matching implementation
-        let scored = registry.iter().map(|skill| {
-            let keyword_score = skill.trigger_keywords.iter().map(|kw| {
-                if oneai_core::keyword_matches(user_input, kw) {
-                    1.0
-                } else {
-                    0.0
-                }
-            }).sum::<f32>() / skill.trigger_keywords.len().max(1) as f32;
-            (skill, keyword_score)
-        }).collect::<Vec<_>>();
+        let scored = registry
+            .iter()
+            .map(|skill| {
+                let keyword_score = skill
+                    .trigger_keywords
+                    .iter()
+                    .map(|kw| {
+                        if oneai_core::keyword_matches(user_input, kw) {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .sum::<f32>()
+                    / skill.trigger_keywords.len().max(1) as f32;
+                (skill, keyword_score)
+            })
+            .collect::<Vec<_>>();
 
         let mut sorted = scored;
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(sorted.into_iter()
+        Ok(sorted
+            .into_iter()
             .take(self.top_k)
             .filter(|(_, score)| *score > 0.0)
             .map(|(skill, _)| skill.clone())

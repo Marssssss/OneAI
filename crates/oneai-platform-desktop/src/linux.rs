@@ -6,15 +6,17 @@
 //! An optional GTK-based gate could be added behind a feature flag,
 //! but the CLI version is the primary Linux implementation for now.
 
-use std::sync::{Arc, Mutex};
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
 use oneai_core::error::Result;
 use oneai_core::platform::PlatformInteractionGate;
 use oneai_core::traits::InteractionGate;
-use oneai_tool::{ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate};
+use oneai_core::{InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel};
+use oneai_tool::{
+    ChannelInteractionGate, InteractionGateConfig, InteractionPendingItem, ThresholdInteractionGate,
+};
 
 use crate::bridge_common::DesktopInteractionBridge;
 
@@ -137,7 +139,9 @@ impl LinuxCliInteractionBridge {
                     match serde_json::from_str(args_json) {
                         Ok(args) => {
                             return InteractionResponse::ProceedWith {
-                                modification: oneai_core::InteractionModification::ReplaceToolArgs(args),
+                                modification: oneai_core::InteractionModification::ReplaceToolArgs(
+                                    args,
+                                ),
                             }
                         }
                         Err(_) => {

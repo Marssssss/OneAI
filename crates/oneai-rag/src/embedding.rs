@@ -22,13 +22,8 @@ use oneai_core::error::{OneAIError, Result};
 
 // Re-export core trait and types from oneai-core
 pub use oneai_core::{
-    EmbeddingModel,
-    EmbeddingService,
-    EmbeddingProvider,
-    InputType,
-    EmbeddingConfig,
-    EmbeddingHealthStatus,
-    KNOWN_EMBEDDING_DIMENSIONS,
+    EmbeddingConfig, EmbeddingHealthStatus, EmbeddingModel, EmbeddingProvider, EmbeddingService,
+    InputType, KNOWN_EMBEDDING_DIMENSIONS,
 };
 
 // ─── EmbeddingConfig::build_service() extension ──────────────────────────────
@@ -117,8 +112,18 @@ impl OpenAIEmbeddingService {
     }
 
     /// Create with a custom HTTP client.
-    pub fn with_client(api_key: String, model: EmbeddingModel, base_url: String, client: reqwest::Client) -> Self {
-        Self { model, api_key, base_url, client }
+    pub fn with_client(
+        api_key: String,
+        model: EmbeddingModel,
+        base_url: String,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            model,
+            api_key,
+            base_url,
+            client,
+        }
     }
 
     /// Get the embeddings API endpoint URL.
@@ -132,8 +137,9 @@ impl EmbeddingService for OpenAIEmbeddingService {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let texts = [text.to_string()];
         let embeddings = self.embed_batch(&texts).await?;
-        embeddings.into_iter().next()
-            .ok_or_else(|| OneAIError::Embedding("OpenAI embedding returned no results".to_string()))
+        embeddings.into_iter().next().ok_or_else(|| {
+            OneAIError::Embedding("OpenAI embedding returned no results".to_string())
+        })
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -153,7 +159,8 @@ impl EmbeddingService for OpenAIEmbeddingService {
             "input": texts,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(self.embeddings_url())
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -166,30 +173,37 @@ impl EmbeddingService for OpenAIEmbeddingService {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(OneAIError::Embedding(format!(
-                "OpenAI embedding API error: status {} — {}", status, body
+                "OpenAI embedding API error: status {} — {}",
+                status, body
             )));
         }
 
-        let response_json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| OneAIError::Embedding(format!("OpenAI embedding response parse error: {}", e)))?;
+        let response_json: serde_json::Value = response.json().await.map_err(|e| {
+            OneAIError::Embedding(format!("OpenAI embedding response parse error: {}", e))
+        })?;
 
-        let data_array = response_json.get("data")
+        let data_array = response_json
+            .get("data")
             .and_then(|d| d.as_array())
-            .ok_or_else(|| OneAIError::Embedding("OpenAI embedding response missing 'data' field".to_string()))?;
+            .ok_or_else(|| {
+                OneAIError::Embedding("OpenAI embedding response missing 'data' field".to_string())
+            })?;
 
         let mut sorted_data: Vec<(usize, Vec<f32>)> = Vec::new();
         for entry in data_array {
-            let index = entry.get("index")
-                .and_then(|i| i.as_u64())
-                .ok_or_else(|| OneAIError::Embedding("OpenAI embedding entry missing 'index'".to_string()))? as usize;
+            let index = entry.get("index").and_then(|i| i.as_u64()).ok_or_else(|| {
+                OneAIError::Embedding("OpenAI embedding entry missing 'index'".to_string())
+            })? as usize;
 
-            let embedding_array = entry.get("embedding")
+            let embedding_array = entry
+                .get("embedding")
                 .and_then(|e| e.as_array())
-                .ok_or_else(|| OneAIError::Embedding("OpenAI embedding entry missing 'embedding'".to_string()))?;
+                .ok_or_else(|| {
+                    OneAIError::Embedding("OpenAI embedding entry missing 'embedding'".to_string())
+                })?;
 
-            let embedding: Vec<f32> = embedding_array.iter()
+            let embedding: Vec<f32> = embedding_array
+                .iter()
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
 
@@ -201,7 +215,8 @@ impl EmbeddingService for OpenAIEmbeddingService {
         if sorted_data.len() != texts.len() {
             return Err(OneAIError::Embedding(format!(
                 "OpenAI embedding returned {} results for {} inputs",
-                sorted_data.len(), texts.len()
+                sorted_data.len(),
+                texts.len()
             )));
         }
 
@@ -275,12 +290,27 @@ impl VoyageEmbeddingService {
 
     /// Create with a custom base URL.
     pub fn with_base_url(api_key: String, model: EmbeddingModel, base_url: String) -> Self {
-        Self { model, api_key, base_url, client: reqwest::Client::new() }
+        Self {
+            model,
+            api_key,
+            base_url,
+            client: reqwest::Client::new(),
+        }
     }
 
     /// Create with a custom HTTP client.
-    pub fn with_client(api_key: String, model: EmbeddingModel, base_url: String, client: reqwest::Client) -> Self {
-        Self { model, api_key, base_url, client }
+    pub fn with_client(
+        api_key: String,
+        model: EmbeddingModel,
+        base_url: String,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            model,
+            api_key,
+            base_url,
+            client,
+        }
     }
 
     fn embeddings_url(&self) -> String {
@@ -293,8 +323,9 @@ impl EmbeddingService for VoyageEmbeddingService {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let texts = [text.to_string()];
         let embeddings = self.embed_batch(&texts).await?;
-        embeddings.into_iter().next()
-            .ok_or_else(|| OneAIError::Embedding("Voyage embedding returned no results".to_string()))
+        embeddings.into_iter().next().ok_or_else(|| {
+            OneAIError::Embedding("Voyage embedding returned no results".to_string())
+        })
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -314,7 +345,8 @@ impl EmbeddingService for VoyageEmbeddingService {
             "input": texts,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(self.embeddings_url())
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -327,30 +359,37 @@ impl EmbeddingService for VoyageEmbeddingService {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(OneAIError::Embedding(format!(
-                "Voyage embedding API error: status {} — {}", status, body
+                "Voyage embedding API error: status {} — {}",
+                status, body
             )));
         }
 
-        let response_json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| OneAIError::Embedding(format!("Voyage embedding response parse error: {}", e)))?;
+        let response_json: serde_json::Value = response.json().await.map_err(|e| {
+            OneAIError::Embedding(format!("Voyage embedding response parse error: {}", e))
+        })?;
 
-        let data_array = response_json.get("data")
+        let data_array = response_json
+            .get("data")
             .and_then(|d| d.as_array())
-            .ok_or_else(|| OneAIError::Embedding("Voyage embedding response missing 'data' field".to_string()))?;
+            .ok_or_else(|| {
+                OneAIError::Embedding("Voyage embedding response missing 'data' field".to_string())
+            })?;
 
         let mut sorted_data: Vec<(usize, Vec<f32>)> = Vec::new();
         for entry in data_array {
-            let index = entry.get("index")
-                .and_then(|i| i.as_u64())
-                .ok_or_else(|| OneAIError::Embedding("Voyage embedding entry missing 'index'".to_string()))? as usize;
+            let index = entry.get("index").and_then(|i| i.as_u64()).ok_or_else(|| {
+                OneAIError::Embedding("Voyage embedding entry missing 'index'".to_string())
+            })? as usize;
 
-            let embedding_array = entry.get("embedding")
+            let embedding_array = entry
+                .get("embedding")
                 .and_then(|e| e.as_array())
-                .ok_or_else(|| OneAIError::Embedding("Voyage embedding entry missing 'embedding'".to_string()))?;
+                .ok_or_else(|| {
+                    OneAIError::Embedding("Voyage embedding entry missing 'embedding'".to_string())
+                })?;
 
-            let embedding: Vec<f32> = embedding_array.iter()
+            let embedding: Vec<f32> = embedding_array
+                .iter()
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
 
@@ -362,7 +401,8 @@ impl EmbeddingService for VoyageEmbeddingService {
         if sorted_data.len() != texts.len() {
             return Err(OneAIError::Embedding(format!(
                 "Voyage embedding returned {} results for {} inputs",
-                sorted_data.len(), texts.len()
+                sorted_data.len(),
+                texts.len()
             )));
         }
 
@@ -429,12 +469,20 @@ impl OllamaEmbeddingService {
 
     /// Create with custom URL and model.
     pub fn with_url_and_model(base_url: String, model_name: String) -> Self {
-        Self { model_name, base_url, client: reqwest::Client::new() }
+        Self {
+            model_name,
+            base_url,
+            client: reqwest::Client::new(),
+        }
     }
 
     /// Create with a custom HTTP client.
     pub fn with_client(base_url: String, model_name: String, client: reqwest::Client) -> Self {
-        Self { model_name, base_url, client }
+        Self {
+            model_name,
+            base_url,
+            client,
+        }
     }
 
     fn embeddings_url(&self) -> String {
@@ -443,7 +491,9 @@ impl OllamaEmbeddingService {
 }
 
 impl Default for OllamaEmbeddingService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -454,7 +504,8 @@ impl EmbeddingService for OllamaEmbeddingService {
             "prompt": text,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(self.embeddings_url())
             .header("Content-Type", "application/json")
             .json(&request_body)
@@ -466,20 +517,26 @@ impl EmbeddingService for OllamaEmbeddingService {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(OneAIError::Embedding(format!(
-                "Ollama embedding API error: status {} — {}", status, body
+                "Ollama embedding API error: status {} — {}",
+                status, body
             )));
         }
 
-        let response_json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| OneAIError::Embedding(format!("Ollama embedding response parse error: {}", e)))?;
+        let response_json: serde_json::Value = response.json().await.map_err(|e| {
+            OneAIError::Embedding(format!("Ollama embedding response parse error: {}", e))
+        })?;
 
-        let embedding_array = response_json.get("embedding")
+        let embedding_array = response_json
+            .get("embedding")
             .and_then(|e| e.as_array())
-            .ok_or_else(|| OneAIError::Embedding("Ollama embedding response missing 'embedding' field".to_string()))?;
+            .ok_or_else(|| {
+                OneAIError::Embedding(
+                    "Ollama embedding response missing 'embedding' field".to_string(),
+                )
+            })?;
 
-        let embedding: Vec<f32> = embedding_array.iter()
+        let embedding: Vec<f32> = embedding_array
+            .iter()
             .filter_map(|v| v.as_f64().map(|f| f as f32))
             .collect();
 
@@ -576,7 +633,9 @@ impl FastEmbedService {
         match self.model.as_str() {
             "bge-base-en-v1.5" => "Xenova/bge-base-en-v1.5",
             "bge-large-en-v1.5" => "Xenova/bge-large-en-v1.5",
-            "mixedbread-embed-large-v1" | "mxbai-embed-large-v1" => "mixedbread-ai/mxbai-embed-large-v1",
+            "mixedbread-embed-large-v1" | "mxbai-embed-large-v1" => {
+                "mixedbread-ai/mxbai-embed-large-v1"
+            }
             "all-MiniLM-L6-v2" | _ => "Qdrant/all-MiniLM-L6-v2-onnx",
         }
     }
@@ -645,34 +704,42 @@ impl FastEmbedService {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let mut guard = self.inner.lock().map_err(|e| {
-            OneAIError::Embedding(format!("fastembed mutex poisoned: {e}"))
-        })?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| OneAIError::Embedding(format!("fastembed mutex poisoned: {e}")))?;
         if guard.is_none() {
             // 1) Prefer a pre-fetched cache (offline, proxy-safe).
             // 2) Fall back to hf-hub download (works where ureq's network is
             //    reachable — normal envs with direct HF access).
-            let model = self.try_load_from_cache().or_else(|| {
-                let opts = fastembed::TextInitOptions::new(self.fe_model())
-                    .with_show_download_progress(false);
-                fastembed::TextEmbedding::try_new(opts).ok()
-            }).ok_or_else(|| OneAIError::Embedding(
+            let model = self
+                .try_load_from_cache()
+                .or_else(|| {
+                    let opts = fastembed::TextInitOptions::new(self.fe_model())
+                        .with_show_download_progress(false);
+                    fastembed::TextEmbedding::try_new(opts).ok()
+                })
+                .ok_or_else(|| {
+                    OneAIError::Embedding(
                 "fastembed init failed: model not cached and network download unavailable. \
                  Run `scripts/download_fastembed_models.sh` to pre-fetch the ONNX model."
                     .to_string()
-            ))?;
+            )
+                })?;
             *guard = Some(model);
         }
         let model = guard.as_mut().expect("just-initialized fastembed model");
-        let embeddings = model.embed(texts, None).map_err(|e| {
-            OneAIError::Embedding(format!("fastembed embed failed: {e}"))
-        })?;
+        let embeddings = model
+            .embed(texts, None)
+            .map_err(|e| OneAIError::Embedding(format!("fastembed embed failed: {e}")))?;
         Ok(embeddings)
     }
 }
 
 impl Default for FastEmbedService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -765,7 +832,9 @@ impl EmbeddingServiceRegistry {
         Ok(EmbeddingHealthStatus::new(
             self.primary.model().as_str().to_string(),
             primary_healthy,
-            self.fallback.as_ref().map(|f| f.model().as_str().to_string()),
+            self.fallback
+                .as_ref()
+                .map(|f| f.model().as_str().to_string()),
             fallback_healthy,
             self.cache_enabled,
             self.cache.read().await.len(),
@@ -806,7 +875,10 @@ impl EmbeddingService for EmbeddingServiceRegistry {
             Err(primary_err) => {
                 // Try fallback if available
                 if let Some(fallback) = &self.fallback {
-                    tracing::warn!("Primary embedding service failed: {} — trying fallback", primary_err);
+                    tracing::warn!(
+                        "Primary embedding service failed: {} — trying fallback",
+                        primary_err
+                    );
                     fallback.embed(text).await?
                 } else {
                     return Err(primary_err);
@@ -856,7 +928,10 @@ impl EmbeddingService for EmbeddingServiceRegistry {
                 Ok(embs) => embs,
                 Err(primary_err) => {
                     if let Some(fallback) = &self.fallback {
-                        tracing::warn!("Primary embedding batch failed: {} — trying fallback", primary_err);
+                        tracing::warn!(
+                            "Primary embedding batch failed: {} — trying fallback",
+                            primary_err
+                        );
                         fallback.embed_batch(&uncached_texts).await?
                     } else {
                         return Err(primary_err);
@@ -961,7 +1036,8 @@ impl AutoEmbeddingDocumentIndex {
         let index = crate::index::DocumentIndex::with_default_stack(
             Some(embedding_service.clone()),
             reranker,
-        ).await?;
+        )
+        .await?;
         Ok(Self {
             index,
             embedding_service,
@@ -982,10 +1058,14 @@ impl AutoEmbeddingDocumentIndex {
     }
 
     /// Add a document with automatic embedding generation.
-    pub async fn add_document(&mut self, document: crate::document::Document) -> Result<Vec<String>> {
+    pub async fn add_document(
+        &mut self,
+        document: crate::document::Document,
+    ) -> Result<Vec<String>> {
         let chunk_ids = self.index.add_document(document).await?;
 
-        let chunk_texts: Vec<String> = chunk_ids.iter()
+        let chunk_texts: Vec<String> = chunk_ids
+            .iter()
             .filter_map(|id| self.index.get_chunk(id).map(|ic| ic.chunk.content.clone()))
             .collect();
 
@@ -996,7 +1076,9 @@ impl AutoEmbeddingDocumentIndex {
         let embeddings = self.embedding_service.embed_batch(&chunk_texts).await?;
 
         for (chunk_id, embedding) in chunk_ids.iter().zip(embeddings.iter()) {
-            self.index.add_embedding(chunk_id, embedding.clone()).await?;
+            self.index
+                .add_embedding(chunk_id, embedding.clone())
+                .await?;
         }
 
         Ok(chunk_ids)
@@ -1009,23 +1091,37 @@ impl AutoEmbeddingDocumentIndex {
     /// stack), runs **hybrid** retrieval (BM25 + dense → RRF) using both the
     /// query text and its embedding. Otherwise falls back to dense-only
     /// [`DocumentIndex::search`].
-    pub async fn search_by_text(&self, query_text: &str, top_k: usize) -> Result<Vec<crate::retrieval::RetrievalResult>> {
+    pub async fn search_by_text(
+        &self,
+        query_text: &str,
+        top_k: usize,
+    ) -> Result<Vec<crate::retrieval::RetrievalResult>> {
         let query_embedding = self.embedding_service.embed(query_text).await?;
         if self.index.retrieval_backend().is_some() {
-            self.index.search_hybrid(query_text, query_embedding, top_k).await
+            self.index
+                .search_hybrid(query_text, query_embedding, top_k)
+                .await
         } else {
             self.index.search(query_embedding, top_k).await
         }
     }
 
     /// Search by pre-computed embedding.
-    pub async fn search_by_embedding(&self, query_embedding: Vec<f32>, top_k: usize) -> Result<Vec<crate::retrieval::RetrievalResult>> {
+    pub async fn search_by_embedding(
+        &self,
+        query_embedding: Vec<f32>,
+        top_k: usize,
+    ) -> Result<Vec<crate::retrieval::RetrievalResult>> {
         self.index.search(query_embedding, top_k).await
     }
 
     /// Keyword search (no embedding needed). When a `RetrievalBackend` is
     /// configured, this runs real BM25; otherwise substring matching.
-    pub async fn search_by_keyword(&self, keyword: &str, top_k: usize) -> Vec<crate::retrieval::RetrievalResult> {
+    pub async fn search_by_keyword(
+        &self,
+        keyword: &str,
+        top_k: usize,
+    ) -> Vec<crate::retrieval::RetrievalResult> {
         self.index.search_by_keyword(keyword, top_k).await
     }
 
@@ -1074,14 +1170,23 @@ mod tests {
 
     #[test]
     fn test_embedding_model_name() {
-        assert_eq!(EmbeddingModel::openai_small().as_str(), "text-embedding-3-small");
+        assert_eq!(
+            EmbeddingModel::openai_small().as_str(),
+            "text-embedding-3-small"
+        );
         assert_eq!(EmbeddingModel::voyage3().as_str(), "voyage-3");
-        assert_eq!(EmbeddingModel::nomic_embed_text().as_str(), "nomic-embed-text");
+        assert_eq!(
+            EmbeddingModel::nomic_embed_text().as_str(),
+            "nomic-embed-text"
+        );
     }
 
     #[test]
     fn test_embedding_model_case_insensitive_dim_lookup() {
-        assert_eq!(EmbeddingModel::new("TEXT-EMBEDDING-3-SMALL").dimension(), 1536);
+        assert_eq!(
+            EmbeddingModel::new("TEXT-EMBEDDING-3-SMALL").dimension(),
+            1536
+        );
     }
 
     #[test]
@@ -1167,24 +1272,39 @@ mod tests {
         model: EmbeddingModel,
     }
     impl StubEmbed {
-        fn new() -> Self { Self { dim: 384, model: EmbeddingModel::allminilm_l6_v2() } }
-        fn with_dim_model(dim: usize, model: EmbeddingModel) -> Self { Self { dim, model } }
+        fn new() -> Self {
+            Self {
+                dim: 384,
+                model: EmbeddingModel::allminilm_l6_v2(),
+            }
+        }
+        fn with_dim_model(dim: usize, model: EmbeddingModel) -> Self {
+            Self { dim, model }
+        }
         fn vec_for(&self, text: &str) -> Vec<f32> {
             let mut h: u64 = 5381;
-            for b in text.bytes() { h = h.wrapping_mul(33).wrapping_add(b as u64); }
-            (0..self.dim).map(|i| {
-                let s = h.wrapping_add(i as u64);
-                ((s % 1000) as f32 / 1000.0 - 0.5) * 0.1
-            }).collect()
+            for b in text.bytes() {
+                h = h.wrapping_mul(33).wrapping_add(b as u64);
+            }
+            (0..self.dim)
+                .map(|i| {
+                    let s = h.wrapping_add(i as u64);
+                    ((s % 1000) as f32 / 1000.0 - 0.5) * 0.1
+                })
+                .collect()
         }
     }
     #[async_trait]
     impl EmbeddingService for StubEmbed {
-        async fn embed(&self, text: &str) -> Result<Vec<f32>> { Ok(self.vec_for(text)) }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            Ok(self.vec_for(text))
+        }
         async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
             Ok(texts.iter().map(|t| self.vec_for(t)).collect())
         }
-        fn model(&self) -> EmbeddingModel { self.model.clone() }
+        fn model(&self) -> EmbeddingModel {
+            self.model.clone()
+        }
     }
 
     // ─── FastEmbedService real-inference tests (need a cached model) ──────
@@ -1199,7 +1319,9 @@ mod tests {
         let service = FastEmbedService::new();
         let embedding = service.embed("hello world").await.unwrap();
         assert_eq!(embedding.len(), 384);
-        for val in &embedding { assert!(val.is_finite()); }
+        for val in &embedding {
+            assert!(val.is_finite());
+        }
     }
 
     #[tokio::test]
@@ -1295,8 +1417,14 @@ mod tests {
     async fn test_registry_with_fallback() {
         // primary returns 384-dim; fallback (768-dim) is wired but not used
         // because the primary succeeds.
-        let primary = Arc::new(StubEmbed::with_dim_model(384, EmbeddingModel::allminilm_l6_v2()));
-        let fallback = Arc::new(StubEmbed::with_dim_model(768, EmbeddingModel::bge_base_en_v15()));
+        let primary = Arc::new(StubEmbed::with_dim_model(
+            384,
+            EmbeddingModel::allminilm_l6_v2(),
+        ));
+        let fallback = Arc::new(StubEmbed::with_dim_model(
+            768,
+            EmbeddingModel::bge_base_en_v15(),
+        ));
         let registry = EmbeddingServiceRegistry::new(primary).with_fallback(fallback);
         let emb = registry.embed("test").await.unwrap();
         assert_eq!(emb.len(), 384);
@@ -1315,8 +1443,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_health_status_with_fallback() {
-        let primary = Arc::new(StubEmbed::with_dim_model(384, EmbeddingModel::allminilm_l6_v2()));
-        let fallback = Arc::new(StubEmbed::with_dim_model(768, EmbeddingModel::bge_base_en_v15()));
+        let primary = Arc::new(StubEmbed::with_dim_model(
+            384,
+            EmbeddingModel::allminilm_l6_v2(),
+        ));
+        let fallback = Arc::new(StubEmbed::with_dim_model(
+            768,
+            EmbeddingModel::bge_base_en_v15(),
+        ));
         let registry = EmbeddingServiceRegistry::new(primary).with_fallback(fallback);
         let status = registry.health_status().await.unwrap();
         assert!(status.primary_healthy);
@@ -1338,12 +1472,18 @@ mod tests {
         #[async_trait]
         impl EmbeddingService for Failing {
             async fn embed(&self, _: &str) -> Result<Vec<f32>> {
-                Err(oneai_core::error::OneAIError::Embedding("primary down".into()))
+                Err(oneai_core::error::OneAIError::Embedding(
+                    "primary down".into(),
+                ))
             }
             async fn embed_batch(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
-                Err(oneai_core::error::OneAIError::Embedding("primary down".into()))
+                Err(oneai_core::error::OneAIError::Embedding(
+                    "primary down".into(),
+                ))
             }
-            fn model(&self) -> EmbeddingModel { EmbeddingModel::allminilm_l6_v2() }
+            fn model(&self) -> EmbeddingModel {
+                EmbeddingModel::allminilm_l6_v2()
+            }
         }
         let primary: Arc<dyn EmbeddingService> = Arc::new(Failing);
         let fallback: Arc<dyn EmbeddingService> = Arc::new(StubEmbed::new());
@@ -1356,7 +1496,8 @@ mod tests {
 
     #[test]
     fn test_openai_service_creation() {
-        let service = OpenAIEmbeddingService::new("sk-test".to_string(), EmbeddingModel::openai_small());
+        let service =
+            OpenAIEmbeddingService::new("sk-test".to_string(), EmbeddingModel::openai_small());
         assert_eq!(service.model(), EmbeddingModel::openai_small());
         assert_eq!(service.dimension(), 1536);
     }
@@ -1364,7 +1505,8 @@ mod tests {
     #[test]
     fn test_openai_service_with_base_url() {
         let service = OpenAIEmbeddingService::with_base_url(
-            "sk-test".to_string(), EmbeddingModel::openai_small(),
+            "sk-test".to_string(),
+            EmbeddingModel::openai_small(),
             "https://api.deepseek.com/v1".to_string(),
         );
         assert_eq!(service.model(), EmbeddingModel::openai_small());
@@ -1393,14 +1535,8 @@ mod tests {
 
     #[test]
     fn test_health_status_is_functional() {
-        let status = EmbeddingHealthStatus::new(
-            "all-MiniLM-L6-v2".to_string(),
-            true,
-            None,
-            None,
-            true,
-            0,
-        );
+        let status =
+            EmbeddingHealthStatus::new("all-MiniLM-L6-v2".to_string(), true, None, None, true, 0);
         assert!(status.is_functional());
     }
 

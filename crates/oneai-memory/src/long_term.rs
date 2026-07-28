@@ -22,9 +22,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use oneai_core::{MemoryEntry, MemoryQuery, VectorSearchResult};
 use oneai_core::error::Result;
 use oneai_core::traits::{MemoryStore, VectorStore};
+use oneai_core::{MemoryEntry, MemoryQuery, VectorSearchResult};
 
 use crate::hybrid_scorer::HybridScorer;
 
@@ -72,10 +72,13 @@ impl EmbeddedVectorStore {
     ///
     /// Returns a score from 0.0 to 1.0 based on how recent the entry is.
     /// Uses exponential decay: more recent entries score higher.
-    pub fn temporal_score(entry_time: &chrono::DateTime<chrono::Utc>, reference_time: &chrono::DateTime<chrono::Utc>) -> f32 {
+    pub fn temporal_score(
+        entry_time: &chrono::DateTime<chrono::Utc>,
+        reference_time: &chrono::DateTime<chrono::Utc>,
+    ) -> f32 {
         let diff = reference_time.timestamp() - entry_time.timestamp();
         if diff <= 0 {
-            return 1.0 // Same time or future = maximum recency
+            return 1.0; // Same time or future = maximum recency
         }
         // Exponential decay with half-life of 1 hour (3600 seconds)
         let half_life: f64 = 3600.0;
@@ -96,7 +99,9 @@ impl EmbeddedVectorStore {
     ) -> Vec<VectorSearchResult> {
         let now = chrono::Utc::now();
 
-        let mut results: Vec<VectorSearchResult> = self.vectors.iter()
+        let mut results: Vec<VectorSearchResult> = self
+            .vectors
+            .iter()
             .map(|(id, embedding)| {
                 let semantic = Self::cosine_similarity(query_embedding, embedding);
                 let timestamp = self.timestamps.get(id).unwrap_or(&now);
@@ -112,7 +117,11 @@ impl EmbeddedVectorStore {
             .collect();
 
         // Sort by hybrid score descending
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
         results
     }
@@ -124,11 +133,17 @@ impl EmbeddedVectorStore {
     pub fn search_by_keyword(&self, keyword: &str, top_k: usize) -> Vec<VectorSearchResult> {
         let now = chrono::Utc::now();
 
-        let mut results: Vec<VectorSearchResult> = self.metadata.iter()
+        let mut results: Vec<VectorSearchResult> = self
+            .metadata
+            .iter()
             .filter(|(_, meta)| {
                 // Search in content field and all metadata values
-                meta.get("content").map(|c| oneai_core::keyword_matches(c, keyword)).unwrap_or(false)
-                    || meta.values().any(|v| oneai_core::keyword_matches(v, keyword))
+                meta.get("content")
+                    .map(|c| oneai_core::keyword_matches(c, keyword))
+                    .unwrap_or(false)
+                    || meta
+                        .values()
+                        .any(|v| oneai_core::keyword_matches(v, keyword))
             })
             .map(|(id, meta)| {
                 let timestamp = self.timestamps.get(id).unwrap_or(&now);
@@ -141,7 +156,11 @@ impl EmbeddedVectorStore {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
         results
     }
@@ -165,13 +184,22 @@ impl Default for EmbeddedVectorStore {
 
 #[async_trait::async_trait]
 impl VectorStore for EmbeddedVectorStore {
-    async fn upsert(&self, _id: &str, _embedding: Vec<f32>, _metadata: HashMap<String, String>) -> Result<()> {
+    async fn upsert(
+        &self,
+        _id: &str,
+        _embedding: Vec<f32>,
+        _metadata: HashMap<String, String>,
+    ) -> Result<()> {
         // Note: VectorStore trait requires &self, but we need mutation.
         // In practice, use ThreadSafeEmbeddedVectorStore which wraps this in RwLock.
         Ok(())
     }
 
-    async fn search(&self, _query_embedding: Vec<f32>, _top_k: usize) -> Result<Vec<VectorSearchResult>> {
+    async fn search(
+        &self,
+        _query_embedding: Vec<f32>,
+        _top_k: usize,
+    ) -> Result<Vec<VectorSearchResult>> {
         // Same interior mutability limitation
         Ok(Vec::new())
     }
@@ -221,7 +249,9 @@ impl ContentStore {
     /// Returns entries whose content contains the keyword,
     /// ordered by timestamp (most recent first).
     pub fn search_by_keyword(&self, keyword: &str) -> Vec<&MemoryEntry> {
-        let mut results: Vec<&MemoryEntry> = self.entries.values()
+        let mut results: Vec<&MemoryEntry> = self
+            .entries
+            .values()
             .filter(|entry| oneai_core::keyword_matches(&entry.content, keyword))
             .collect();
         // Sort by timestamp descending (most recent first)
@@ -237,7 +267,9 @@ impl ContentStore {
         keyword: &str,
         metadata_filters: &HashMap<String, String>,
     ) -> Vec<&MemoryEntry> {
-        let mut results: Vec<&MemoryEntry> = self.entries.values()
+        let mut results: Vec<&MemoryEntry> = self
+            .entries
+            .values()
             .filter(|entry| {
                 // Keyword match
                 if !keyword.is_empty() && !oneai_core::keyword_matches(&entry.content, keyword) {
@@ -328,13 +360,21 @@ impl ThreadSafeEmbeddedVectorStore {
     }
 
     /// Search with hybrid scoring (semantic + temporal).
-    pub async fn search_hybrid(&self, query_embedding: Vec<f32>, top_k: usize) -> Result<Vec<VectorSearchResult>> {
+    pub async fn search_hybrid(
+        &self,
+        query_embedding: Vec<f32>,
+        top_k: usize,
+    ) -> Result<Vec<VectorSearchResult>> {
         let store = self.inner.read().await;
         Ok(store.search_hybrid(&query_embedding, top_k, &self.scorer))
     }
 
     /// Keyword search over stored metadata.
-    pub async fn search_by_keyword(&self, keyword: &str, top_k: usize) -> Result<Vec<VectorSearchResult>> {
+    pub async fn search_by_keyword(
+        &self,
+        keyword: &str,
+        top_k: usize,
+    ) -> Result<Vec<VectorSearchResult>> {
         let store = self.inner.read().await;
         Ok(store.search_by_keyword(keyword, top_k))
     }
@@ -356,12 +396,21 @@ impl ThreadSafeEmbeddedVectorStore {
 
 #[async_trait::async_trait]
 impl VectorStore for ThreadSafeEmbeddedVectorStore {
-    async fn upsert(&self, id: &str, embedding: Vec<f32>, metadata: HashMap<String, String>) -> Result<()> {
+    async fn upsert(
+        &self,
+        id: &str,
+        embedding: Vec<f32>,
+        metadata: HashMap<String, String>,
+    ) -> Result<()> {
         let now = chrono::Utc::now();
         self.upsert_entry(id, embedding, metadata, now).await
     }
 
-    async fn search(&self, query_embedding: Vec<f32>, top_k: usize) -> Result<Vec<VectorSearchResult>> {
+    async fn search(
+        &self,
+        query_embedding: Vec<f32>,
+        top_k: usize,
+    ) -> Result<Vec<VectorSearchResult>> {
         self.search_hybrid(query_embedding, top_k).await
     }
 
@@ -404,7 +453,9 @@ impl ThreadSafeContentStore {
 
     /// Search entries by keyword.
     pub async fn search_by_keyword(&self, keyword: &str) -> Vec<MemoryEntry> {
-        self.inner.read().await
+        self.inner
+            .read()
+            .await
             .search_by_keyword(keyword)
             .into_iter()
             .cloned()
@@ -417,7 +468,9 @@ impl ThreadSafeContentStore {
         keyword: &str,
         metadata_filters: &HashMap<String, String>,
     ) -> Vec<MemoryEntry> {
-        self.inner.read().await
+        self.inner
+            .read()
+            .await
             .search_by_keyword_with_filter(keyword, metadata_filters)
             .into_iter()
             .cloned()
@@ -511,12 +564,9 @@ impl MemoryStore for LongTermMemory {
             let mut metadata = entry.metadata.clone();
             metadata.insert("content".to_string(), entry.content.clone());
 
-            self.vector_store.upsert_entry(
-                &entry.id,
-                embedding.clone(),
-                metadata,
-                entry.timestamp,
-            ).await?;
+            self.vector_store
+                .upsert_entry(&entry.id, embedding.clone(), metadata, entry.timestamp)
+                .await?;
         }
 
         Ok(())
@@ -525,7 +575,10 @@ impl MemoryStore for LongTermMemory {
     async fn retrieve(&self, query: &MemoryQuery, top_k: usize) -> Result<Vec<MemoryEntry>> {
         // If the query has an embedding, use hybrid search
         if let Some(query_embedding) = &query.embedding {
-            let results = self.vector_store.search_hybrid(query_embedding.clone(), top_k).await?;
+            let results = self
+                .vector_store
+                .search_hybrid(query_embedding.clone(), top_k)
+                .await?;
             // Look up full entries from content store by ID
             let mut entries = Vec::new();
             for result in results.iter() {
@@ -539,14 +592,14 @@ impl MemoryStore for LongTermMemory {
             let entries = if query.metadata_filters.is_empty() {
                 self.content_store.search_by_keyword(&query.text).await
             } else {
-                self.content_store.search_by_keyword_with_filter(
-                    &query.text,
-                    &query.metadata_filters,
-                ).await
+                self.content_store
+                    .search_by_keyword_with_filter(&query.text, &query.metadata_filters)
+                    .await
             };
             // Apply time range filter if specified
             let filtered: Vec<MemoryEntry> = if let Some(time_range) = &query.time_range {
-                entries.into_iter()
+                entries
+                    .into_iter()
                     .filter(|entry| {
                         entry.timestamp >= time_range.start && entry.timestamp <= time_range.end
                     })

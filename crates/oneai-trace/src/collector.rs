@@ -12,8 +12,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::span::Span;
 use crate::event::TraceEvent;
+use crate::span::Span;
 
 // ─── TraceCollector Trait ────────────────────────────────────────────
 
@@ -77,11 +77,17 @@ impl Default for InMemoryCollector {
 #[async_trait]
 impl TraceCollector for InMemoryCollector {
     async fn on_span_start(&self, span: &Span) {
-        self.spans.lock().unwrap().insert(span.span_id.clone(), span.clone());
+        self.spans
+            .lock()
+            .unwrap()
+            .insert(span.span_id.clone(), span.clone());
     }
 
     async fn on_span_end(&self, span: &Span) {
-        self.spans.lock().unwrap().insert(span.span_id.clone(), span.clone());
+        self.spans
+            .lock()
+            .unwrap()
+            .insert(span.span_id.clone(), span.clone());
     }
 
     async fn on_event(&self, _event: &TraceEvent, _span_id: &str) {
@@ -108,8 +114,7 @@ pub struct FileCollector {
 impl FileCollector {
     /// Create a new file collector that writes to the given path.
     pub fn new(path: &str) -> Self {
-        let file = std::fs::File::create(path)
-            .expect("Failed to create trace output file");
+        let file = std::fs::File::create(path).expect("Failed to create trace output file");
         Self {
             path: PathBuf::from(path),
             writer: Mutex::new(BufWriter::new(file)),
@@ -157,5 +162,7 @@ impl TraceCollector for NoopCollector {
     async fn on_span_start(&self, _span: &Span) {}
     async fn on_span_end(&self, _span: &Span) {}
     async fn on_event(&self, _event: &TraceEvent, _span_id: &str) {}
-    async fn flush(&self) -> Result<(), String> { Ok(()) }
+    async fn flush(&self) -> Result<(), String> {
+        Ok(())
+    }
 }

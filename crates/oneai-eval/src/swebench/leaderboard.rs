@@ -115,17 +115,23 @@ mod tests {
     fn result(id: &str, resolved: bool, calls: u64, patch: &str) -> EvalResult {
         let mut r = EvalResult::new(id, "issue", patch);
         r.api_calls = calls;
-        r.add_score(SWEBENCH_RESOLVED_METRIC, EvalScore::from_bool(resolved, "verdict"));
+        r.add_score(
+            SWEBENCH_RESOLVED_METRIC,
+            EvalScore::from_bool(resolved, "verdict"),
+        );
         r.set_metadata("patch", patch);
         r
     }
 
     #[test]
     fn test_render_leaderboard_aggregates() {
-        let report = EvalReport::new("swebench", vec![
-            result("a", true, 3, "diff a"),
-            result("b", false, 7, "diff b"),
-        ]);
+        let report = EvalReport::new(
+            "swebench",
+            vec![
+                result("a", true, 3, "diff a"),
+                result("b", false, 7, "diff b"),
+            ],
+        );
         let lb = render_swebench_leaderboard(&report);
 
         assert_eq!(lb.total_instances, 2);
@@ -147,10 +153,13 @@ mod tests {
 
     #[test]
     fn test_write_prediction_jsonl_roundtrip() {
-        let report = EvalReport::new("swebench", vec![
-            result("a", true, 1, "diff a"),
-            result("b", false, 2, ""), // no patch — skipped
-        ]);
+        let report = EvalReport::new(
+            "swebench",
+            vec![
+                result("a", true, 1, "diff a"),
+                result("b", false, 2, ""), // no patch — skipped
+            ],
+        );
         let dir = std::env::temp_dir().join(format!(
             "oneai_swebench_pred_{}",
             std::time::SystemTime::now()

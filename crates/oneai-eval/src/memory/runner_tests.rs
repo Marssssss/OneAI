@@ -25,12 +25,16 @@ impl EmbeddingService for HashEmbeddingService {
             v[((b as usize).wrapping_add(i)) % 32] += 0.5;
         }
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-        for x in v.iter_mut() { *x /= norm; }
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
         Ok(v)
     }
     async fn embed_batch(&self, texts: &[String]) -> oneai_core::error::Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(texts.len());
-        for t in texts { out.push(self.embed(t).await?); }
+        for t in texts {
+            out.push(self.embed(t).await?);
+        }
         Ok(out)
     }
     fn model(&self) -> oneai_core::traits::EmbeddingModel {
@@ -47,7 +51,10 @@ async fn builtin_suite_runs_and_produces_report() {
         .await
         .unwrap();
     assert_eq!(report.results.len(), cases.len());
-    assert!(report.results.iter().any(|r| r.case_id == "ie_synonym_cross_lang"));
+    assert!(report
+        .results
+        .iter()
+        .any(|r| r.case_id == "ie_synonym_cross_lang"));
 }
 
 #[tokio::test]
@@ -55,22 +62,40 @@ async fn semantic_path_beats_keyword_on_synonym_anti_example() {
     // §12.1 anchor: the synonym anti-example (Chinese fact, English query)
     // has zero keyword overlap → keyword baseline Recall@5 = 0, while the
     // semantic path (with the deterministic embedding) must surface it.
-    let cases: Vec<_> = builtin_suite().into_iter()
+    let cases: Vec<_> = builtin_suite()
+        .into_iter()
         .filter(|c| c.id == "ie_synonym_cross_lang")
         .collect();
     assert_eq!(cases.len(), 1);
 
     let kw_report = run_memory_eval("kw", &cases, &MemoryEvalConfig::no_embedding())
-        .await.unwrap();
-    let kw_recall = kw_report.results[0].scores.iter()
-        .find(|s| s.metric_name == "recall_at_k").unwrap().score.value;
-    assert!((kw_recall - 0.0).abs() < 1e-9, "keyword recall must miss the synonym fact");
+        .await
+        .unwrap();
+    let kw_recall = kw_report.results[0]
+        .scores
+        .iter()
+        .find(|s| s.metric_name == "recall_at_k")
+        .unwrap()
+        .score
+        .value;
+    assert!(
+        (kw_recall - 0.0).abs() < 1e-9,
+        "keyword recall must miss the synonym fact"
+    );
 
     let sem_cfg = MemoryEvalConfig::with_embedding(Arc::new(HashEmbeddingService));
     let sem_report = run_memory_eval("sem", &cases, &sem_cfg).await.unwrap();
-    let sem_recall = sem_report.results[0].scores.iter()
-        .find(|s| s.metric_name == "recall_at_k").unwrap().score.value;
-    assert!(sem_recall > 0.0, "semantic recall must surface the synonym fact");
+    let sem_recall = sem_report.results[0]
+        .scores
+        .iter()
+        .find(|s| s.metric_name == "recall_at_k")
+        .unwrap()
+        .score
+        .value;
+    assert!(
+        sem_recall > 0.0,
+        "semantic recall must surface the synonym fact"
+    );
 }
 
 #[tokio::test]
@@ -78,27 +103,45 @@ async fn knowledge_update_case_returns_current_value() {
     // §12.2 anchor: KU case invalidates the old auth value; recall must
     // return "session" (the current truth), and the old "JWT" must not be
     // the synthesized answer.
-    let cases: Vec<_> = builtin_suite().into_iter()
+    let cases: Vec<_> = builtin_suite()
+        .into_iter()
         .filter(|c| c.id == "ku_auth_switch")
         .collect();
     let cfg = MemoryEvalConfig::with_embedding(Arc::new(HashEmbeddingService));
     let report = run_memory_eval("ku", &cases, &cfg).await.unwrap();
     let answer = &report.results[0].actual_output;
-    assert!(answer.contains("session"), "current value must be recalled; got: {}", answer);
-    assert!(!answer.to_lowercase().starts_with("jwt"), "old superseded value must not lead");
+    assert!(
+        answer.contains("session"),
+        "current value must be recalled; got: {}",
+        answer
+    );
+    assert!(
+        !answer.to_lowercase().starts_with("jwt"),
+        "old superseded value must not lead"
+    );
 }
 
 #[tokio::test]
 async fn abstention_cases_score_correctly() {
     // ABS cases: no relevant facts → abstention metric = 1.0.
-    let cases: Vec<_> = builtin_suite().into_iter()
+    let cases: Vec<_> = builtin_suite()
+        .into_iter()
         .filter(|c| c.ability == MemoryAbility::Abstention)
         .collect();
     assert!(cases.len() >= 2);
     let report = run_memory_eval("abs", &cases, &MemoryEvalConfig::no_embedding())
-        .await.unwrap();
+        .await
+        .unwrap();
     for r in &report.results {
-        let abst = r.scores.iter().find(|s| s.metric_name == "abstention").unwrap();
-        assert!((abst.score.value - 1.0).abs() < 1e-9, "case {} should abstain", r.case_id);
+        let abst = r
+            .scores
+            .iter()
+            .find(|s| s.metric_name == "abstention")
+            .unwrap();
+        assert!(
+            (abst.score.value - 1.0).abs() < 1e-9,
+            "case {} should abstain",
+            r.case_id
+        );
     }
 }

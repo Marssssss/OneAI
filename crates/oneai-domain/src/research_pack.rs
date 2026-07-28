@@ -24,24 +24,25 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use oneai_core::PermissionLevel;
 use oneai_core::traits::Tool;
+use oneai_core::PermissionLevel;
 use oneai_tool::{
-    WebSearchTool, WebFetchTool, FileReadTool, GrepTool, GlobTool,
-    FileListTool, EnvironmentTool, CalculatorTool,
+    CalculatorTool, EnvironmentTool, FileListTool, FileReadTool, GlobTool, GrepTool, WebFetchTool,
+    WebSearchTool,
 };
 
-use oneai_workflow::{WorkflowConfig, StepConfig, StateGraph, GraphNode, GraphEdge, NodeAction, EdgeCondition};
+use oneai_workflow::{
+    EdgeCondition, GraphEdge, GraphNode, NodeAction, StateGraph, StepConfig, WorkflowConfig,
+};
 
-use crate::domain_pack::DomainPack;
-use crate::tool_decorator::ToolDecorator;
-use crate::permission_profile::{PermissionProfile, DenyPattern};
-use crate::paradigm_strategy::{ParadigmStrategy, SubAgentTypeDefinition, DomainParadigmKind};
-use crate::compression_template::CompressionTemplate;
 use crate::builtin_sources::{
-    DateSource, EnvironmentInfoSource, ProjectInstructionsSource,
-    ProjectConfigSource,
+    DateSource, EnvironmentInfoSource, ProjectConfigSource, ProjectInstructionsSource,
 };
+use crate::compression_template::CompressionTemplate;
+use crate::domain_pack::DomainPack;
+use crate::paradigm_strategy::{DomainParadigmKind, ParadigmStrategy, SubAgentTypeDefinition};
+use crate::permission_profile::{DenyPattern, PermissionProfile};
+use crate::tool_decorator::ToolDecorator;
 
 // ─── Research System Prompt ──────────────────────────────────────────────────
 
@@ -547,10 +548,11 @@ fn research_loop_graph() -> StateGraph {
                 "You are a research agent. Decide whether you need more information \
                  (search/fetch) or can synthesize what you've gathered. \
                  If you need more info, describe what to search for. \
-                 If you have enough, provide your synthesis.".to_string()
+                 If you have enough, provide your synthesis."
+                    .to_string(),
             ),
             use_streaming: true,
-            include_tool_definitions: true,  // P2-2: Send tools so model can decide
+            include_tool_definitions: true, // P2-2: Send tools so model can decide
             tool_filter_override: None,
             thinking_budget: None,
             temperature: None,
@@ -578,10 +580,11 @@ fn research_loop_graph() -> StateGraph {
             system_prompt_override: Some(
                 "Analyze the search/fetch results. Identify key findings, \
                  assess source quality, note contradictions or gaps. \
-                 Decide if you have enough information or need to search more.".to_string()
+                 Decide if you have enough information or need to search more."
+                    .to_string(),
             ),
             use_streaming: true,
-            include_tool_definitions: true,  // P2-2: Send tools for decision-making
+            include_tool_definitions: true, // P2-2: Send tools for decision-making
             tool_filter_override: None,
             thinking_budget: None,
             temperature: None,
@@ -598,10 +601,11 @@ fn research_loop_graph() -> StateGraph {
             system_prompt_override: Some(
                 "Compile a comprehensive research report with citations. \
                  Include: executive summary, methodology, findings (organized by theme), \
-                 conclusions, and areas for further research. Use [Source: URL] for citations.".to_string()
+                 conclusions, and areas for further research. Use [Source: URL] for citations."
+                    .to_string(),
             ),
             use_streaming: true,
-            include_tool_definitions: false,  // P2-2: No tools for final report
+            include_tool_definitions: false, // P2-2: No tools for final report
             tool_filter_override: None,
             thinking_budget: None,
             temperature: None,
@@ -718,13 +722,17 @@ mod tests {
         assert!(pack.paradigm_strategies.len() >= 4);
 
         // Deep research strategy
-        let research = pack.paradigm_strategies.iter()
+        let research = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.trigger_pattern.contains("research"))
             .unwrap();
         assert_eq!(research.paradigm_sequence.len(), 3);
 
         // Fact-checking strategy
-        let fact_check = pack.paradigm_strategies.iter()
+        let fact_check = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.trigger_pattern.contains("verify"))
             .unwrap();
         assert_eq!(fact_check.paradigm_sequence.len(), 2);
@@ -735,10 +743,22 @@ mod tests {
         let pack = research_pack("/tmp/test");
 
         assert_eq!(pack.compression_template.name, "research");
-        assert!(pack.compression_template.preserve_fields.contains(&"search_queries".to_string()));
-        assert!(pack.compression_template.preserve_fields.contains(&"key_findings".to_string()));
-        assert!(pack.compression_template.preserve_fields.contains(&"source_citations".to_string()));
-        assert!(pack.compression_template.truncate_rules.contains_key("search_result"));
+        assert!(pack
+            .compression_template
+            .preserve_fields
+            .contains(&"search_queries".to_string()));
+        assert!(pack
+            .compression_template
+            .preserve_fields
+            .contains(&"key_findings".to_string()));
+        assert!(pack
+            .compression_template
+            .preserve_fields
+            .contains(&"source_citations".to_string()));
+        assert!(pack
+            .compression_template
+            .truncate_rules
+            .contains_key("search_result"));
     }
 
     #[test]
@@ -746,22 +766,30 @@ mod tests {
         let pack = research_pack("/tmp/test");
 
         // Should match research tasks
-        let research_match = pack.paradigm_strategies.iter()
+        let research_match = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.matches("Research the impact of AI on healthcare"));
         assert!(research_match.is_some());
 
         // Should match fact-checking tasks
-        let fact_match = pack.paradigm_strategies.iter()
+        let fact_match = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.matches("Verify whether climate change causes more hurricanes"));
         assert!(fact_match.is_some());
 
         // Should match quick lookup tasks
-        let lookup_match = pack.paradigm_strategies.iter()
+        let lookup_match = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.matches("What is the capital of France"));
         assert!(lookup_match.is_some());
 
         // Should match synthesis tasks
-        let synthesis_match = pack.paradigm_strategies.iter()
+        let synthesis_match = pack
+            .paradigm_strategies
+            .iter()
             .find(|s| s.matches("Summarize the research on quantum computing"));
         assert!(synthesis_match.is_some());
     }

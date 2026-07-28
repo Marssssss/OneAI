@@ -17,8 +17,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
 use oneai_core::PermissionLevel;
+use serde::{Deserialize, Serialize};
 
 // ─── DenyPattern ───────────────────────────────────────────────────────────────
 
@@ -182,7 +182,9 @@ impl PermissionProfile {
         // Step 1: Check deny patterns (highest priority)
         for pattern in &self.deny_by_default {
             if pattern.matches(tool_name, args) {
-                return PermissionAction::Deny { reason: pattern.reason.clone() };
+                return PermissionAction::Deny {
+                    reason: pattern.reason.clone(),
+                };
             }
         }
 
@@ -202,7 +204,9 @@ impl PermissionProfile {
         }
 
         // Step 5: No domain rule — fall back to tool's default
-        PermissionAction::UseDefaultPermission { level: self.default_threshold }
+        PermissionAction::UseDefaultPermission {
+            level: self.default_threshold,
+        }
     }
 
     /// Merge two PermissionProfiles using the "strictest wins" rule.
@@ -216,13 +220,24 @@ impl PermissionProfile {
         let name = format!("{}_{}_merged", a.name, b.name);
 
         // Auto-approve: intersection (must be approved in BOTH domains)
-        let auto_approve = a.auto_approve.intersection(&b.auto_approve).cloned().collect();
+        let auto_approve = a
+            .auto_approve
+            .intersection(&b.auto_approve)
+            .cloned()
+            .collect();
 
         // Require confirmation: union (confirmed in ANY domain)
-        let require_confirmation = a.require_confirmation.union(&b.require_confirmation).cloned().collect();
+        let require_confirmation = a
+            .require_confirmation
+            .union(&b.require_confirmation)
+            .cloned()
+            .collect();
 
         // Deny patterns: union
-        let deny_by_default = a.deny_by_default.iter().cloned()
+        let deny_by_default = a
+            .deny_by_default
+            .iter()
+            .cloned()
             .chain(b.deny_by_default.iter().cloned())
             .collect();
 
@@ -304,13 +319,22 @@ mod tests {
             name: "coding".to_string(),
             auto_approve: HashSet::new(),
             require_confirmation: HashSet::new(),
-            deny_by_default: vec![DenyPattern::deny_tool_args("shell", "rm.*-rf", "Root deletion")],
+            deny_by_default: vec![DenyPattern::deny_tool_args(
+                "shell",
+                "rm.*-rf",
+                "Root deletion",
+            )],
             permission_overrides: HashMap::new(),
             default_threshold: PermissionLevel::Standard,
         };
 
         let action = profile.resolve("shell", &serde_json::json!({"command": "rm -rf /"}));
-        assert_eq!(action, PermissionAction::Deny { reason: "Root deletion".to_string() });
+        assert_eq!(
+            action,
+            PermissionAction::Deny {
+                reason: "Root deletion".to_string()
+            }
+        );
     }
 
     #[test]
@@ -355,7 +379,12 @@ mod tests {
         };
 
         let action = profile.resolve("shell", &serde_json::json!({}));
-        assert_eq!(action, PermissionAction::UseDefaultPermission { level: PermissionLevel::Full });
+        assert_eq!(
+            action,
+            PermissionAction::UseDefaultPermission {
+                level: PermissionLevel::Full
+            }
+        );
     }
 
     #[test]
@@ -373,7 +402,10 @@ mod tests {
             name: "research".to_string(),
             auto_approve: HashSet::from(["grep".to_string(), "web_search".to_string()]),
             require_confirmation: HashSet::from(["web_fetch".to_string()]),
-            deny_by_default: vec![DenyPattern::deny_tool("shell", "Research doesn't need shell")],
+            deny_by_default: vec![DenyPattern::deny_tool(
+                "shell",
+                "Research doesn't need shell",
+            )],
             permission_overrides: HashMap::from([("shell".to_string(), PermissionLevel::Full)]),
             default_threshold: PermissionLevel::Read,
         };
@@ -398,8 +430,17 @@ mod tests {
 
     #[test]
     fn test_stricter_level() {
-        assert_eq!(stricter_level(PermissionLevel::Read, PermissionLevel::Standard), PermissionLevel::Standard);
-        assert_eq!(stricter_level(PermissionLevel::Standard, PermissionLevel::Full), PermissionLevel::Full);
-        assert_eq!(stricter_level(PermissionLevel::Read, PermissionLevel::Read), PermissionLevel::Read);
+        assert_eq!(
+            stricter_level(PermissionLevel::Read, PermissionLevel::Standard),
+            PermissionLevel::Standard
+        );
+        assert_eq!(
+            stricter_level(PermissionLevel::Standard, PermissionLevel::Full),
+            PermissionLevel::Full
+        );
+        assert_eq!(
+            stricter_level(PermissionLevel::Read, PermissionLevel::Read),
+            PermissionLevel::Read
+        );
     }
 }

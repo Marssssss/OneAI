@@ -13,7 +13,9 @@ pub fn cmd_skill_list() {
     println!("🧩 Discovered Skills (convention directories)\n");
     let skills = discover_skills();
     if skills.is_empty() {
-        println!("  (none found in .claude/skills · .agents/skills · .opencode/skills · .oneai/skills)");
+        println!(
+            "  (none found in .claude/skills · .agents/skills · .opencode/skills · .oneai/skills)"
+        );
         println!("\n  Drop a skill as <name>/SKILL.md into any of those dirs (project or ~/).");
         println!("  The built-in skill-creator is always available inside a session.");
         return;

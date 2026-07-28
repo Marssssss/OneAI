@@ -31,7 +31,6 @@ pub fn skill_creator_skill() -> SkillDescriptor {
     }
 }
 
-
 // ─── Coding Domain Skills ────────────────────────────────────────────────────
 
 /// Built-in skills for the coding domain (8 skills).
@@ -559,7 +558,10 @@ mod tests {
         for domain in ["coding", "research", "general", "unknown"] {
             let skills = skills_for_domain(domain);
             let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
-            assert!(names.contains(&"skill-creator"), "domain {domain:?} missing skill-creator: {names:?}");
+            assert!(
+                names.contains(&"skill-creator"),
+                "domain {domain:?} missing skill-creator: {names:?}"
+            );
         }
     }
 
@@ -567,7 +569,14 @@ mod tests {
     fn skill_creator_prompt_is_substantial() {
         // The bundled SKILL.md must have real content (not empty / failed include).
         let s = skill_creator_skill();
-        assert!(s.prompt_template.len() > 1000, "skill-creator prompt too short: {}", s.prompt_template.len());
-        assert!(s.prompt_template.contains("Skill Creator"), "skill-creator prompt missing title");
+        assert!(
+            s.prompt_template.len() > 1000,
+            "skill-creator prompt too short: {}",
+            s.prompt_template.len()
+        );
+        assert!(
+            s.prompt_template.contains("Skill Creator"),
+            "skill-creator prompt missing title"
+        );
     }
 }

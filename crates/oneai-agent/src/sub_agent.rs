@@ -13,17 +13,17 @@
 //! the main agent can spawn specialized sub-agents for different aspects
 //! of a complex task.
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use async_trait::async_trait;
 
-use oneai_core::error::Result;
 use oneai_core::budget::TokenBudget;
+use oneai_core::error::Result;
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig};
-use crate::worktree_isolation::{WorktreeIsolation, WorktreeConfig, WorktreeHandle, MergeResult};
+use crate::worktree_isolation::{MergeResult, WorktreeConfig, WorktreeHandle, WorktreeIsolation};
 
 // ─── SubAgentKind ───────────────────────────────────────────────────────────
 
@@ -207,11 +207,7 @@ pub struct SubAgentWrapper {
 
 impl SubAgentWrapper {
     /// Create a new SubAgentWrapper from an existing AgentLoop with scoped configuration.
-    pub fn new(
-        kind: SubAgentKind,
-        budget: TokenBudget,
-        agent_loop: AgentLoop,
-    ) -> Self {
+    pub fn new(kind: SubAgentKind, budget: TokenBudget, agent_loop: AgentLoop) -> Self {
         Self {
             kind,
             budget,
@@ -274,7 +270,9 @@ impl SubAgentWrapper {
     pub fn default_worktree_config_for_kind(kind: &SubAgentKind) -> WorktreeConfig {
         match kind {
             SubAgentKind::Code | SubAgentKind::Custom(_) => WorktreeConfig::coding(),
-            SubAgentKind::Plan | SubAgentKind::Explore | SubAgentKind::Review => WorktreeConfig::read_only(),
+            SubAgentKind::Plan | SubAgentKind::Explore | SubAgentKind::Review => {
+                WorktreeConfig::read_only()
+            }
         }
     }
 }
@@ -304,7 +302,8 @@ impl SubAgent for SubAgentWrapper {
         // If the sub-agent modifies files (Code, Custom), create a git worktree
         // for isolated execution. Read-only agents skip this step.
         let worktree_handle = if let Some(project_path) = &self.project_path {
-            let isolation = WorktreeIsolation::new(project_path.clone(), self.worktree_config.clone());
+            let isolation =
+                WorktreeIsolation::new(project_path.clone(), self.worktree_config.clone());
             isolation.create(self.kind.name())?
         } else {
             // No project path configured — run without isolation
@@ -362,23 +361,24 @@ impl SubAgent for SubAgentWrapper {
         });
 
         // Wait for the sub-agent task to complete
-        let summary = handle.await
-            .map_err(|e| oneai_core::error::OneAIError::Agent(
-                format!("Sub-agent task '{}' panicked or was cancelled: {}", self.kind.name(), e)
-            ))?;
+        let summary = handle.await.map_err(|e| {
+            oneai_core::error::OneAIError::Agent(format!(
+                "Sub-agent task '{}' panicked or was cancelled: {}",
+                self.kind.name(),
+                e
+            ))
+        })?;
 
         // ─── Merge worktree changes back ─────────────────────────────────
         if is_isolated && summary.is_ok() {
-            let isolation = WorktreeIsolation::new(
-                project_path,
-                self.worktree_config.clone(),
-            );
+            let isolation = WorktreeIsolation::new(project_path, self.worktree_config.clone());
             let merge_result = isolation.merge_back(&worktree_handle)?;
 
             // Include merge result information in the summary
             if let Ok(mut s) = summary {
                 if !matches!(merge_result, MergeResult::Skipped { .. }) {
-                    s.key_findings.push(format!("Worktree merge: {}", merge_result.description()));
+                    s.key_findings
+                        .push(format!("Worktree merge: {}", merge_result.description()));
                 }
                 return Ok(self.validate_structured_output(s));
             }
@@ -411,7 +411,8 @@ impl SubAgentWrapper {
     /// sub-agent result (informational validation).
     fn validate_structured_output(&self, summary: SubAgentSummary) -> SubAgentSummary {
         if let Some(schema) = &self.structured_output_schema {
-            let validation = crate::structured_output::validate_json_schema(&summary.summary, schema);
+            let validation =
+                crate::structured_output::validate_json_schema(&summary.summary, schema);
 
             if !validation.passed {
                 tracing::warn!(
@@ -467,15 +468,24 @@ fn extract_key_findings(text: &str) -> Vec<String> {
         }
 
         // File path patterns
-        if trimmed.contains('/') && (trimmed.contains(".rs") || trimmed.contains(".py")
-            || trimmed.contains(".ts") || trimmed.contains(".js") || trimmed.contains(".toml")
-            || trimmed.contains(".json") || trimmed.contains(".md")) {
+        if trimmed.contains('/')
+            && (trimmed.contains(".rs")
+                || trimmed.contains(".py")
+                || trimmed.contains(".ts")
+                || trimmed.contains(".js")
+                || trimmed.contains(".toml")
+                || trimmed.contains(".json")
+                || trimmed.contains(".md"))
+        {
             findings.push(trimmed.to_string());
         }
 
         // Error/critical patterns
-        if trimmed.starts_with("Error:") || trimmed.starts_with("CRITICAL:")
-            || trimmed.starts_with("BUG:") || trimmed.starts_with("\u{26A0}") {
+        if trimmed.starts_with("Error:")
+            || trimmed.starts_with("CRITICAL:")
+            || trimmed.starts_with("BUG:")
+            || trimmed.starts_with("\u{26A0}")
+        {
             findings.push(trimmed.to_string());
         }
     }
@@ -540,7 +550,9 @@ pub struct SubAgentFactoryNone;
 #[async_trait]
 impl SubAgentFactory for SubAgentFactoryNone {
     async fn create(&self, _kind: SubAgentKind, _budget: TokenBudget) -> Result<Box<dyn SubAgent>> {
-        Err(oneai_core::error::OneAIError::Agent("Sub-agents cannot spawn further sub-agents".to_string()))
+        Err(oneai_core::error::OneAIError::Agent(
+            "Sub-agents cannot spawn further sub-agents".to_string(),
+        ))
     }
 
     fn available_kinds(&self) -> Vec<SubAgentKind> {
@@ -587,7 +599,10 @@ impl DefaultSubAgentFactory {
         tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
     ) -> Self {
         Self {
-            provider, parser, interaction_gate, tools,
+            provider,
+            parser,
+            interaction_gate,
+            tools,
             project_path: None,
             worktree_config: None,
         }
@@ -607,7 +622,10 @@ impl DefaultSubAgentFactory {
         worktree_config: WorktreeConfig,
     ) -> Self {
         Self {
-            provider, parser, interaction_gate, tools,
+            provider,
+            parser,
+            interaction_gate,
+            tools,
             project_path: Some(project_path),
             worktree_config: Some(worktree_config),
         }
@@ -625,7 +643,10 @@ impl DefaultSubAgentFactory {
     /// while its prompt tells it to "use available tools". The least-privilege
     /// scoping only bites when the named tools actually exist; when they don't,
     /// the useful behavior is to expose whatever is available.
-    async fn create_scoped_tools(&self, available_tools: &[&str]) -> Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>> {
+    async fn create_scoped_tools(
+        &self,
+        available_tools: &[&str],
+    ) -> Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>> {
         let full_tools = self.tools.read().await;
         let mut scoped = HashMap::new();
 
@@ -674,15 +695,13 @@ impl SubAgentFactory for DefaultSubAgentFactory {
         // The scoped_tools registry already filters at the execution level,
         // but ParadigmConfig further filters at the definition level
         // (what the LLM sees), which is the correct double-layer filtering.
-        let _paradigm_config = crate::agent_loop::ParadigmConfig::for_paradigm(
-            match kind {
-                SubAgentKind::Plan => crate::agent_loop::ParadigmKind::Plan,
-                SubAgentKind::Explore => crate::agent_loop::ParadigmKind::Explore,
-                SubAgentKind::Code => crate::agent_loop::ParadigmKind::ReAct,
-                SubAgentKind::Review => crate::agent_loop::ParadigmKind::Reflect,
-                _ => crate::agent_loop::ParadigmKind::ReAct,
-            }
-        );
+        let _paradigm_config = crate::agent_loop::ParadigmConfig::for_paradigm(match kind {
+            SubAgentKind::Plan => crate::agent_loop::ParadigmKind::Plan,
+            SubAgentKind::Explore => crate::agent_loop::ParadigmKind::Explore,
+            SubAgentKind::Code => crate::agent_loop::ParadigmKind::ReAct,
+            SubAgentKind::Review => crate::agent_loop::ParadigmKind::Reflect,
+            _ => crate::agent_loop::ParadigmKind::ReAct,
+        });
 
         let config = AgentLoopConfig {
             system_prompt,
@@ -699,11 +718,11 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             // budget was passed as max_tokens only, with no run-cost
             // termination guardrail).
             token_budget: Some(budget.clone()),
-            inject_skills: false, // Sub-agents don't need skill injection
-            usage_tracker: None, // Sub-agents inherit usage tracker from parent loop
-            rate_limiter: None, // Sub-agents inherit rate limiter from parent loop
+            inject_skills: false,  // Sub-agents don't need skill injection
+            usage_tracker: None,   // Sub-agents inherit usage tracker from parent loop
+            rate_limiter: None,    // Sub-agents inherit rate limiter from parent loop
             circuit_breaker: None, // Sub-agents inherit circuit breaker from parent loop
-            token_counter: None, // Sub-agents inherit token counter from parent loop
+            token_counter: None,   // Sub-agents inherit token counter from parent loop
             // Sub-agents are bounded by their delegation budget + iteration cap
             // and use the durable-log ContextCompressor; the parent's
             // model-aware ContextManager isn't threaded through the factory
@@ -730,7 +749,7 @@ impl SubAgentFactory for DefaultSubAgentFactory {
         // This is the key fix — sub-agents can only use their designated tools.
         let agent_loop = AgentLoop::new(
             self.provider.clone(),
-            scoped_tools,  // ← SCOPED, not self.tools.clone()
+            scoped_tools, // ← SCOPED, not self.tools.clone()
             self.parser.clone(),
             self.interaction_gate.clone(),
             Arc::new(oneai_skill::SkillSelector::new()),
@@ -752,7 +771,9 @@ impl SubAgentFactory for DefaultSubAgentFactory {
         //
         // Read-only agents (Plan, Explore, Review) don't need isolation —
         // they only read/search, they don't modify files.
-        let worktree_config = self.worktree_config.clone()
+        let worktree_config = self
+            .worktree_config
+            .clone()
             .unwrap_or_else(|| SubAgentWrapper::default_worktree_config_for_kind(&kind));
 
         let wrapper = if let Some(project_path) = &self.project_path {
@@ -771,11 +792,19 @@ impl SubAgentFactory for DefaultSubAgentFactory {
     }
 
     fn available_kinds(&self) -> Vec<SubAgentKind> {
-        vec![SubAgentKind::Plan, SubAgentKind::Explore, SubAgentKind::Code, SubAgentKind::Review]
+        vec![
+            SubAgentKind::Plan,
+            SubAgentKind::Explore,
+            SubAgentKind::Code,
+            SubAgentKind::Review,
+        ]
     }
 
     fn is_available(&self, kind: &SubAgentKind) -> bool {
-        matches!(kind, SubAgentKind::Plan | SubAgentKind::Explore | SubAgentKind::Code | SubAgentKind::Review)
+        matches!(
+            kind,
+            SubAgentKind::Plan | SubAgentKind::Explore | SubAgentKind::Code | SubAgentKind::Review
+        )
     }
 }
 
@@ -823,16 +852,19 @@ mod scoped_tools_tests {
     //! back to all registered tools instead of leaving the sub-agent with an
     //! empty toolset against a prompt that asks it to use tools.
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use crate::mock_provider::MockProvider;
+    use crate::mock_tool::MockTool;
     use oneai_core::traits::Tool;
     use oneai_parser::ThreeLayerParser;
-    use crate::mock_tool::MockTool;
-    use crate::mock_provider::MockProvider;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn build_factory(
         tool_names: &[&str],
-    ) -> (DefaultSubAgentFactory, Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>) {
+    ) -> (
+        DefaultSubAgentFactory,
+        Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    ) {
         let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         for n in tool_names {
             map.insert(
@@ -853,9 +885,17 @@ mod scoped_tools_tests {
     #[tokio::test]
     async fn scoped_tools_match_preferred_set() {
         // Coding tools present → scoped to the Code kind's preferred set only.
-        let (factory, _tools) =
-            build_factory(&["read_file", "edit_file", "shell", "grep", "glob", "memory_search"]);
-        let scoped = factory.create_scoped_tools(SubAgentKind::Code.default_tools()).await;
+        let (factory, _tools) = build_factory(&[
+            "read_file",
+            "edit_file",
+            "shell",
+            "grep",
+            "glob",
+            "memory_search",
+        ]);
+        let scoped = factory
+            .create_scoped_tools(SubAgentKind::Code.default_tools())
+            .await;
         let scoped_names: Vec<String> = scoped.read().await.keys().cloned().collect();
         assert!(scoped_names.contains(&"read_file".to_string()));
         assert!(scoped_names.contains(&"edit_file".to_string()));
@@ -868,7 +908,9 @@ mod scoped_tools_tests {
         // No coding tools registered (no DomainPack) → fallback exposes whatever
         // IS available, rather than an empty set.
         let (factory, _tools) = build_factory(&["memory_search", "web_fetch"]);
-        let scoped = factory.create_scoped_tools(SubAgentKind::Code.default_tools()).await;
+        let scoped = factory
+            .create_scoped_tools(SubAgentKind::Code.default_tools())
+            .await;
         let scoped_names: Vec<String> = scoped.read().await.keys().cloned().collect();
         assert_eq!(scoped_names.len(), 2);
         assert!(scoped_names.contains(&"memory_search".to_string()));
@@ -879,7 +921,9 @@ mod scoped_tools_tests {
     async fn scoped_tools_empty_registry_yields_empty() {
         // Truly empty registry → no fallback possible, empty set (honest).
         let (factory, _tools) = build_factory(&[]);
-        let scoped = factory.create_scoped_tools(SubAgentKind::Explore.default_tools()).await;
+        let scoped = factory
+            .create_scoped_tools(SubAgentKind::Explore.default_tools())
+            .await;
         assert!(scoped.read().await.is_empty());
     }
 }
