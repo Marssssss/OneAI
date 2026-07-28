@@ -156,11 +156,15 @@ impl SubAgentKind {
             Self::Review => &["read_file", "grep", "glob"],
             // Reflect: memory-only whitelist — it persists durable learnings,
             // never reads code / runs shell. The closed loop is memory write →
-            // future-turn recall. `skill_manage` joins this list in Stage B.
+            // future-turn recall. `skill_manage` (Stage B) joins so the
+            // reviewer can also patch/extend/retire skills directly — the
+            // Hermes patch→umbrella→support-file→create preference order
+            // becomes actionable.
             Self::Reflect => &[
                 "memory_search",
                 "core_memory_edit",
                 "archival_memory_insert",
+                "skill_manage",
             ],
             Self::Custom(_) => &["read_file", "grep", "glob", "edit_file", "shell"],
         }

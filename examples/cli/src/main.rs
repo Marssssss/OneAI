@@ -67,6 +67,7 @@
 mod cmd_a2a;
 mod cmd_chat;
 mod cmd_config;
+mod cmd_curator;
 mod cmd_embed;
 mod cmd_eval;
 mod cmd_init;
@@ -155,6 +156,17 @@ enum Commands {
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+    /// Run the skill lifecycle curator — status / run / pin / archive /
+    /// restore / backup / rollback (Phase 2.1 Stage B). The closed-loop
+    /// steward that retires stale skills (never deletes — only archives,
+    /// restorable via backups).
+    Curator {
+        #[command(subcommand)]
+        action: CuratorAction,
+        /// Domain pack (drives the `skill_lifecycle` policy; default: coding)
+        #[arg(long)]
+        domain: Option<String>,
     },
     /// Run evaluation suites
     Eval {
@@ -292,6 +304,44 @@ enum SkillAction {
     Show {
         /// Skill name
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CuratorAction {
+    /// Show every skill's lifecycle state / use_count / pinned / author
+    Status,
+    /// Apply automatic Active→Stale→Archived transitions (writes a backup
+    /// before any retirement), then print a report.
+    Run,
+    /// Pin a skill (exempt from automatic retirement)
+    Pin {
+        /// Skill name
+        name: String,
+    },
+    /// Unpin a skill
+    Unpin {
+        /// Skill name
+        name: String,
+    },
+    /// Manually archive a skill (reversible — a backup is written first)
+    Archive {
+        /// Skill name
+        name: String,
+    },
+    /// Restore an archived skill to Active
+    Restore {
+        /// Skill name
+        name: String,
+    },
+    /// Write a restorable snapshot of every skill the agent sees
+    Backup,
+    /// List available backup snapshot ids (unix timestamps, newest first)
+    Backups,
+    /// Restore a backup snapshot (skills + metadata) by id
+    Rollback {
+        /// Backup snapshot id (unix timestamp — see `backups`)
+        id: u64,
     },
 }
 
@@ -869,6 +919,40 @@ fn main() {
             SkillAction::List => cmd_skill::cmd_skill_list(),
             SkillAction::Show { name } => cmd_skill::cmd_skill_show(&name),
         },
+        Some(Commands::Curator { action, domain }) => {
+            let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+            rt.block_on(async move {
+                match action {
+                    CuratorAction::Status => {
+                        cmd_curator::cmd_curator_status(&config, domain.as_deref()).await
+                    }
+                    CuratorAction::Run => {
+                        cmd_curator::cmd_curator_run(&config, domain.as_deref()).await
+                    }
+                    CuratorAction::Pin { name } => {
+                        cmd_curator::cmd_curator_pin(&config, domain.as_deref(), &name, true).await
+                    }
+                    CuratorAction::Unpin { name } => {
+                        cmd_curator::cmd_curator_pin(&config, domain.as_deref(), &name, false).await
+                    }
+                    CuratorAction::Archive { name } => {
+                        cmd_curator::cmd_curator_archive(&config, domain.as_deref(), &name).await
+                    }
+                    CuratorAction::Restore { name } => {
+                        cmd_curator::cmd_curator_restore(&config, domain.as_deref(), &name).await
+                    }
+                    CuratorAction::Backup => {
+                        cmd_curator::cmd_curator_backup(&config, domain.as_deref()).await
+                    }
+                    CuratorAction::Backups => {
+                        cmd_curator::cmd_curator_backups(&config, domain.as_deref()).await
+                    }
+                    CuratorAction::Rollback { id } => {
+                        cmd_curator::cmd_curator_rollback(&config, domain.as_deref(), id).await
+                    }
+                }
+            });
+        }
         Some(Commands::Eval { action }) => match action {
             EvalAction::List => cmd_eval::cmd_eval_list(),
             EvalAction::Run {

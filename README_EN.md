@@ -268,6 +268,14 @@ oneai pack check <name>               # check an installed pack against the spec
 oneai skill list                       # list skills discovered from .claude/.agents/.opencode/.oneai skills
 oneai skill show <name>                # show skill details
 
+# ── Curator (skill lifecycle steward — never deletes, only archives + restorable) ──
+oneai curator status                   # per-skill lifecycle state / use_count / pinned / author
+oneai curator run                      # auto Active→Stale→Archived transitions (snapshots before retiring)
+oneai curator pin <name>               # pin (exempt from auto-retirement); unpin <name> to clear
+oneai curator archive <name>           # manually retire (reversible); restore <name> to revive
+oneai curator backup                   # write a restorable snapshot; backups lists snapshot ids
+oneai curator rollback <id>            # restore skills + metadata from a snapshot
+
 # ── Eval framework (quality × usage × efficiency three axes) ──
 oneai eval list                        # list eval suites
 oneai eval run coding_basics [--format markdown|json|compact] [--profile] [--record <path>]  # run a suite (--profile emits efficiency axis, --record records trajectory)

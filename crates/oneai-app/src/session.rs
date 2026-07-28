@@ -232,6 +232,11 @@ struct AppResources {
     /// loop (`.with_working_state_store`) so plan progress persists
     /// incrementally, and injects `[Unfinished Work]` on a fresh session.
     working_state_store: Option<Arc<dyn oneai_core::traits::WorkingStateStore>>,
+    /// Skill lifecycle metadata store (Phase 2.1 Stage B). Threaded into the
+    /// loop so the menu hides Archived skills + `skill` bumps use_count.
+    skill_metadata_store: Option<Arc<oneai_skill::SkillMetadataStore>>,
+    /// Skill curator (Phase 2.1 Stage B) — backs `skill_manage` + the CLI.
+    skill_curator: Option<Arc<oneai_skill::SkillCurator>>,
     /// The working-state project scope (cwd / repo). Threaded into the loop so
     /// working-state events land in the right per-project namespace.
     working_state_project: String,
@@ -300,6 +305,8 @@ impl AppSession {
                 constrained_output_policy: app.constrained_output_policy,
                 reflection_cadence: app.reflection_cadence,
                 working_state_store: app.working_state_store.clone(),
+                skill_metadata_store: app.skill_metadata_store.clone(),
+                skill_curator: app.skill_curator.clone(),
                 working_state_project: std::env::current_dir()
                     .ok()
                     .and_then(|p| p.to_str().map(|s| s.to_string()))
@@ -332,6 +339,18 @@ impl AppSession {
     /// The durable working-state store, if configured (`AppBuilder::working_state`).
     pub fn working_state_store(&self) -> Option<Arc<dyn oneai_core::traits::WorkingStateStore>> {
         self.app.working_state_store.clone()
+    }
+
+    /// Skill lifecycle metadata store (Phase 2.1 Stage B) — for `skill` /
+    /// `skill_manage` tool wiring. `None` when no DomainPack is loaded.
+    pub fn skill_metadata_store(&self) -> Option<Arc<oneai_skill::SkillMetadataStore>> {
+        self.app.skill_metadata_store.clone()
+    }
+
+    /// Skill curator (Phase 2.1 Stage B) — backs the `skill_manage` tool and
+    /// the `oneai curator` CLI. `None` when no DomainPack is loaded.
+    pub fn skill_curator(&self) -> Option<Arc<oneai_skill::SkillCurator>> {
+        self.app.skill_curator.clone()
     }
 
     /// The working-state project scope (cwd) for this session.
@@ -1164,6 +1183,15 @@ impl AppSession {
                     self.app.working_state_project.clone(),
                     self.session_id.clone(),
                 )
+        } else {
+            agent_loop
+        };
+
+        // Skill lifecycle store (Phase 2.1 Stage B): the menu hides Archived
+        // skills and the `skill` tool bumps `use_count`. Built from the merged
+        // pack's `skill_lifecycle` policy; None when no DomainPack is loaded.
+        let agent_loop = if let Some(store) = self.app.skill_metadata_store.clone() {
+            agent_loop.with_skill_metadata_store(store)
         } else {
             agent_loop
         };

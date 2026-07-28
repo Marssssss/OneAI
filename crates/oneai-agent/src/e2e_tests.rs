@@ -3158,9 +3158,21 @@ fn build_reflect_loop(
     factory: Arc<ReflectFactory>,
     config: AgentLoopConfig,
 ) -> AgentLoop {
+    build_reflect_loop_with_tools(provider, factory, config, memory_trio_tools())
+}
+
+/// Like `build_reflect_loop` but with a caller-supplied tool set — used by
+/// the Stage B tests that register only `skill_manage` (no memory trio) to
+/// exercise the relaxed footprint guard.
+fn build_reflect_loop_with_tools(
+    provider: MockProvider,
+    factory: Arc<ReflectFactory>,
+    config: AgentLoopConfig,
+    tools: Vec<Arc<dyn oneai_core::traits::Tool>>,
+) -> AgentLoop {
     let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
         let mut map = HashMap::new();
-        for tool in memory_trio_tools() {
+        for tool in tools {
             let name = oneai_core::traits::Tool::name(&*tool).to_string();
             map.insert(name, tool);
         }
@@ -3195,14 +3207,16 @@ fn reflect_subagent_kind_unit() {
         .default_system_prompt()
         .to_lowercase()
         .contains("frustration"));
-    // Memory-only whitelist (skill_manage joins in Stage B).
+    // Memory-only whitelist + skill_manage (Stage B lets the reviewer patch
+    // the skill library directly).
     let tools = SubAgentKind::default_tools(&SubAgentKind::Reflect).to_vec();
     assert_eq!(
         tools,
         vec![
             "memory_search",
             "core_memory_edit",
-            "archival_memory_insert"
+            "archival_memory_insert",
+            "skill_manage",
         ]
     );
     // Reflect is internal-only: NOT advertised for `delegate`.
@@ -3436,4 +3450,137 @@ async fn e2e_reflect_summary_not_injected_into_parent() {
         "reflect summary must NOT be injected into the parent conversation \
          (baseline {baseline_msgs} msgs, with-reflect {reflect_msgs} msgs)"
     );
+}
+
+/// Stage B: the reflect footprint guard fires when *only* `skill_manage` is
+/// registered (no memory trio) — the reviewer can curate the skill library
+/// without the memory tools being present. Without the relaxed guard, this
+/// would skip reflect entirely.
+#[tokio::test]
+async fn e2e_reflect_fires_with_skill_manage_only() {
+    use oneai_core::PermissionLevel;
+    let skill_manage = Arc::new(MockTool::new(
+        "skill_manage",
+        "curate skills",
+        serde_json::json!({"type": "object"}),
+        ToolOutput {
+            success: true,
+            content: "ok".to_string(),
+            error: None,
+        },
+        PermissionLevel::Read,
+    )) as Arc<dyn oneai_core::traits::Tool>;
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("skill_manage", serde_json::json!({"action": "list"})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let factory = Arc::new(ReflectFactory::new());
+    let creates = factory.creates();
+    let agent_loop = build_reflect_loop_with_tools(
+        provider,
+        factory.clone(),
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(20),
+            reflection_cadence: Some(1),
+            ..AgentLoopConfig::default()
+        },
+        vec![skill_manage],
+    );
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = agent_loop
+        .run_with_observer("do a thing", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let creates = creates.lock().unwrap().clone();
+    assert!(
+        !creates.is_empty(),
+        "reflect must fire when skill_manage (only) is registered: {creates:?}"
+    );
+    let reflections = observer
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, TestEvent::Reflection(_)))
+        .count();
+    assert!(reflections >= 1, "on_reflection should fire");
+}
+
+/// Stage B: `build_skill_menu` hides Archived skills (retired = invisible to
+/// the model) and reveals them again on restore. The curator's retirements
+/// take effect next turn without a restart.
+#[tokio::test]
+async fn e2e_skill_menu_hides_archived_skill() {
+    use oneai_core::SkillDescriptor;
+    use oneai_skill::lifecycle::{now_unix, SkillLifecycleConfig, SkillMetadataStore};
+    use oneai_skill::SkillRegistry;
+    use std::path::PathBuf;
+
+    fn tmp_root() -> PathBuf {
+        let name = std::thread::current().name().unwrap_or("test").to_string();
+        let mut h: u64 = 1469598103934665603;
+        for b in name.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        let p = std::env::temp_dir().join(format!("oneai-menu-{h:x}"));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    let registry = Arc::new(SkillRegistry::new());
+    registry
+        .register(SkillDescriptor {
+            name: "retire-me".into(),
+            description: "stale skill".into(),
+            prompt_template: "body".into(),
+            trigger_keywords: vec![],
+            embedding: None,
+        })
+        .await
+        .unwrap();
+    let store = Arc::new(SkillMetadataStore::new(
+        tmp_root(),
+        SkillLifecycleConfig::default(),
+    ));
+    store.load().await;
+
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer("done")]);
+    let agent_loop = build_reflect_loop_with_tools(
+        provider,
+        Arc::new(ReflectFactory::new()),
+        AgentLoopConfig {
+            inject_skills: true,
+            hard_max_iterations: Some(5),
+            ..AgentLoopConfig::default()
+        },
+        memory_trio_tools(),
+    )
+    .with_skill_registry(registry.clone(), None)
+    .with_skill_metadata_store(Arc::clone(&store));
+
+    // Initially visible.
+    let menu = agent_loop.build_skill_menu().await.unwrap();
+    assert!(menu.contains("retire-me"));
+
+    // Archive → hidden.
+    store.archive("retire-me", now_unix()).await;
+    let menu = agent_loop.build_skill_menu().await;
+    assert!(
+        menu.is_none() || !menu.unwrap().contains("retire-me"),
+        "archived skill must be hidden from the menu"
+    );
+
+    // Restore → visible again.
+    store.restore("retire-me", now_unix()).await;
+    let menu = agent_loop.build_skill_menu().await.unwrap();
+    assert!(menu.contains("retire-me"));
 }

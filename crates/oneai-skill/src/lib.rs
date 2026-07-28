@@ -15,11 +15,15 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod builtin;
+pub mod curator;
 pub mod discovery;
+pub mod lifecycle;
 pub mod registry;
 pub mod selector;
 
 pub use builtin::*;
+pub use curator::*;
 pub use discovery::*;
+pub use lifecycle::*;
 pub use registry::*;
 pub use selector::*;

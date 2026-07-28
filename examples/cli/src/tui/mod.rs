@@ -164,13 +164,10 @@ pub fn run_tui(
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        // Register the `skill` tool — gives the model a call path to load a
-        // skill's full prompt (progressive disclosure Tier2/Tier3).
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
-            app.skill_registry.clone(),
-        )))
-        .await
-        .unwrap();
+        // Register the skill tools — gives the model a call path to load a
+        // skill's full prompt (progressive disclosure) + manage the lifecycle
+        // (Stage B attaches metadata store + curator).
+        app.register_skill_tools().await.unwrap();
 
         let tool_names = app.tool_executor().list_tools().await;
         let session = app.create_session();

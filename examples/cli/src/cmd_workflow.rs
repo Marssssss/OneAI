@@ -83,11 +83,7 @@ fn build_app_with_domain(
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
-            app.skill_registry.clone(),
-        )))
-        .await
-        .unwrap();
+        app.register_skill_tools().await.unwrap();
 
         app
     })

@@ -240,6 +240,41 @@ pub fn skills_for_domain(domain: &str) -> Vec<SkillDescriptor> {
     all
 }
 
+/// Every built-in skill name across all domains (general + coding + research),
+/// including the always-on `skill-creator`. Used by the curator to seed these
+/// as `created_by = Bundled` + pinned so the automatic retirement pass never
+/// hides a shipped skill (Phase 2.1 Stage B).
+pub fn builtin_skill_names() -> Vec<&'static str> {
+    // Must stay in sync with `general_skills()` / `coding_skills()` /
+    // `research_skills()`. `skills_for_domain_always_includes_skill_creator`
+    // guards the always-on entry; a unit test below guards the full set.
+    let mut names = vec![
+        // general
+        "skill-creator",
+        "summarization",
+        "translation",
+        "creative-writing",
+        // coding
+        "project-planning",
+        "code-review",
+        "debug-analysis",
+        "refactoring",
+        "test-strategy",
+        "documentation",
+        "git-workflow",
+        "dependency-analysis",
+        // research
+        "deep-research",
+        "academic-search",
+        "data-extraction",
+        "citation-management",
+        "fact-verification",
+    ];
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Get the emoji icon for a skill name.
 ///
 /// Used in TUI rendering for visual identification.
@@ -577,6 +612,28 @@ mod tests {
         assert!(
             s.prompt_template.contains("Skill Creator"),
             "skill-creator prompt missing title"
+        );
+    }
+
+    #[test]
+    fn builtin_skill_names_matches_actual_builtins() {
+        // Guard: the hardcoded name list must match the descriptors the
+        // builder functions actually produce (else the curator would mis-seed
+        // Bundled provenance).
+        let mut actual: Vec<String> = general_skills()
+            .into_iter()
+            .chain(coding_skills())
+            .chain(research_skills())
+            .map(|s| s.name)
+            .collect();
+        actual.sort();
+        actual.dedup();
+        // builtin_skill_names is already sorted+deduped by construction.
+        let expected: Vec<&str> = builtin_skill_names();
+        let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            actual, expected_owned,
+            "builtin_skill_names() drifted from the actual builtin descriptors"
         );
     }
 }

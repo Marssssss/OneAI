@@ -268,6 +268,14 @@ oneai pack check <name>               # 对照规范检查已安装 pack
 oneai skill list                       # 列出从 .claude/.agents/.opencode/.oneai skills 发现的技能
 oneai skill show <name>                # 查看技能详情
 
+# ── Curator（技能生命周期管家，永不删除只归档 + 可回滚）──
+oneai curator status                   # 每个技能的生命周期状态/use_count/pinned/作者
+oneai curator run                      # 自动 Active→Stale→Archived 过渡（归档前先快照）
+oneai curator pin <name>               # 钉住（豁免自动退役）；unpin <name> 解除
+oneai curator archive <name>           # 手动归档（可逆）；restore <name> 恢复
+oneai curator backup                   # 写一份可回滚快照；backups 列出快照 id
+oneai curator rollback <id>            # 从快照恢复技能 + 元数据
+
 # ── 评测框架（能力 × 成本 × 效率 三轴）──
 oneai eval list                        # 列出评测套件
 oneai eval run coding_basics [--format markdown|json|compact] [--profile] [--record <path>]  # 运行套件（--profile 输出效率轴，--record 录制轨迹）

@@ -22,6 +22,7 @@ oneai-agent = { workspace = true }
 oneai-tool = { workspace = true }
 oneai-memory = { workspace = true }
 oneai-skill = { workspace = true }
+dirs = { workspace = true }
 oneai-parser = { workspace = true }
 oneai-rag = { workspace = true }
 oneai-workflow = { workspace = true }

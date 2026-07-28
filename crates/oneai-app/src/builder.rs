@@ -1864,6 +1864,60 @@ impl AppBuilder {
             ) as std::sync::Arc<dyn oneai_core::traits::WorkingStateStore>
         });
 
+        // Skill lifecycle store + curator (Phase 2.1 Stage B). Built from the
+        // merged pack's `skill_lifecycle` policy (CodingPack 30d/90d,
+        // assistant 60d/180d) — or the `coding()` default when no pack is
+        // loaded (mirrors `working_state_store`'s (200,50) fallback). Root:
+        // HomeDir → `~/.oneai/curator/` (skill *usage* is a personal habit, so
+        // metadata stays out of the repo); InRepo → `<working_state_root>/curator/`.
+        // The store is `load()`ed and the known bundled skill names are seeded
+        // `Bundled` + pinned so the always-on skill-creator is never
+        // auto-archived. The curator's referenced set (cron/workflow skills)
+        // starts empty — Stage B has no cron yet (Phase 3.2); `set_referenced`
+        // is the refresh hook.
+        let skill_policy = merged_domain_pack
+            .as_ref()
+            .map(|d| d.memory_profile.skill_lifecycle.clone())
+            .unwrap_or_else(oneai_domain::SkillLifecyclePolicy::coding);
+        let skill_config = oneai_skill::SkillLifecycleConfig {
+            stale_after: skill_policy.stale_after,
+            archive_after: skill_policy.archive_after,
+            backup_count: skill_policy.backup_count,
+            auto_transitions: skill_policy.auto_transitions,
+            grace_unused: skill_policy.grace_unused,
+        };
+        let skill_root: std::path::PathBuf = match skill_policy.storage_root {
+            oneai_domain::StorageRoot::HomeDir => dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                .join(".oneai")
+                .join("curator"),
+            // InRepo (and any future variant) → under the working-state root
+            // so metadata is co-located with task state.
+            _ => self
+                .working_state_root
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from(".oneai"))
+                .join("curator"),
+        };
+        let skill_metadata_store = std::sync::Arc::new(oneai_skill::SkillMetadataStore::new(
+            skill_root,
+            skill_config,
+        ));
+        skill_metadata_store.load().await;
+        // Seed bundled skills (always-on skill-creator + presets) as Bundled +
+        // pinned so they're exempt from auto-retirement — but only on first
+        // sight, so a user's deliberate unpin survives a rebuild.
+        let now = oneai_skill::lifecycle::now_unix();
+        let bundled_names: Vec<&str> = oneai_skill::builtin::builtin_skill_names();
+        skill_metadata_store.seed_bundled(&bundled_names, now).await;
+        let skill_curator = std::sync::Arc::new(oneai_skill::SkillCurator::new(
+            std::sync::Arc::clone(&self.skill_registry),
+            std::sync::Arc::clone(&skill_metadata_store),
+            std::collections::HashSet::new(),
+        ));
+        let skill_metadata_store = Some(skill_metadata_store);
+        let skill_curator = Some(skill_curator);
+
         Ok(App {
             provider,
             tool_registry: self.tool_registry,
@@ -1907,6 +1961,8 @@ impl AppBuilder {
             constrained_output_policy: self.constrained_output_policy,
             reflection_cadence: self.reflection_cadence,
             working_state_store,
+            skill_metadata_store,
+            skill_curator,
         })
     }
 }
@@ -2012,6 +2068,16 @@ pub struct App {
     /// continue an unfinished task from a previous session. See
     /// `AppBuilder::working_state`.
     pub working_state_store: Option<Arc<dyn oneai_core::traits::WorkingStateStore>>,
+    /// Skill lifecycle metadata store (Phase 2.1 Stage B) — the durable
+    /// per-skill `use_count` / `state` / `pinned` index + backup snapshots.
+    /// `None` when no DomainPack is loaded (no `skill_lifecycle` policy).
+    /// Threaded into the AgentLoop (menu hides Archived skills) and the
+    /// `skill` / `skill_manage` tools.
+    pub skill_metadata_store: Option<Arc<oneai_skill::SkillMetadataStore>>,
+    /// Skill curator (Phase 2.1 Stage B) — runs the automatic
+    /// `Active → Stale → Archived` retirement, writes restorable backups,
+    /// and backs the `skill_manage` tool + `oneai curator` CLI.
+    pub skill_curator: Option<Arc<oneai_skill::SkillCurator>>,
 }
 
 impl App {
@@ -2061,6 +2127,27 @@ impl App {
     pub async fn register_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
         self.tool_registry.register(tool.clone()).await?;
         self.workflow_executor.register_tool(tool).await;
+        Ok(())
+    }
+
+    /// Register the skill tools (Phase 2.1 Stage B): the `skill` tool
+    /// (progressive disclosure + use-count bumping + archive gate) and, when a
+    /// curator is present, the `skill_manage` tool (model-driven lifecycle
+    /// control). Call after builtin skills are registered so the menu is
+    /// populated. Replaces the per-CLI `SkillTool::new(...)` wiring.
+    pub async fn register_skill_tools(&self) -> Result<()> {
+        let skill_tool = match &self.skill_metadata_store {
+            Some(store) => oneai_agent::SkillTool::new(self.skill_registry.clone())
+                .with_metadata_store(store.clone()),
+            None => oneai_agent::SkillTool::new(self.skill_registry.clone()),
+        };
+        self.register_tool(std::sync::Arc::new(skill_tool)).await?;
+        if let Some(curator) = &self.skill_curator {
+            self.register_tool(std::sync::Arc::new(oneai_agent::SkillManageTool::new(
+                curator.clone(),
+            )))
+            .await?;
+        }
         Ok(())
     }
 

@@ -74,12 +74,9 @@ pub fn cmd_run(
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        // Register the `skill` tool (progressive disclosure Tier2/Tier3).
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
-            app.skill_registry.clone(),
-        )))
-        .await
-        .unwrap();
+        // Register the skill tools (progressive disclosure + lifecycle
+        // management — Stage B attaches the metadata store + curator).
+        app.register_skill_tools().await.unwrap();
 
         let mut session = app.create_session();
 

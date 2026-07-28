@@ -233,6 +233,109 @@ impl WorkingStatePolicy {
     }
 }
 
+// ─── SkillLifecyclePolicy ───────────────────────────────────────────────────
+
+/// Skill lifecycle policy — the "grow-with-you" dimension of the memory
+/// profile (Phase 2.1 Stage B). Folded into `MemoryProfile` rather than adding
+/// an 8th DomainPack layer, mirroring the `WorkingStatePolicy` precedent.
+///
+/// This is the *declarative* DomainPack-side config; `oneai-skill`'s
+/// `SkillMetadataStore` consumes its primitives (the store stays decoupled
+/// from `oneai-domain`). Answers, per domain:
+///
+/// - **When a skill goes stale / gets archived** — `stale_after` / `archive_after`.
+/// - **Whether the curator runs automatic transitions at all** —
+///   `auto_transitions` (off = the curator records usage only; retirement is
+///   manual). A domain that wants full manual control (e.g. a strict coding
+///   domain where every skill is curated) turns this off.
+/// - **How many restorable backup snapshots to keep** — `backup_count`.
+/// - **Where the metadata + backups live** — `storage_root` (skill *usage* is
+///   a user habit, so both presets default to `HomeDir` — putting personal
+///   use-counts in-repo would pollute the repo and leak usage patterns).
+/// - **Grace window for never-used fresh skills** — `grace_unused` (give a
+///   freshly-authored skill time to be discovered before aging it out).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillLifecyclePolicy {
+    /// Idle duration that ages a skill `Active → Stale`.
+    pub stale_after: Duration,
+    /// Idle duration that ages a skill `Stale → Archived`.
+    pub archive_after: Duration,
+    /// Whether the curator applies automatic transitions (`run`).
+    pub auto_transitions: bool,
+    /// How many rotating backup snapshots to keep on disk.
+    pub backup_count: usize,
+    /// Where the metadata index + backups live.
+    pub storage_root: StorageRoot,
+    /// Grace window for never-used skills since `created_at`.
+    pub grace_unused: Duration,
+}
+
+impl Default for SkillLifecyclePolicy {
+    fn default() -> Self {
+        Self {
+            stale_after: Duration::from_secs(30 * 24 * 3600),
+            archive_after: Duration::from_secs(90 * 24 * 3600),
+            auto_transitions: true,
+            backup_count: 5,
+            storage_root: StorageRoot::HomeDir,
+            grace_unused: Duration::from_secs(7 * 24 * 3600),
+        }
+    }
+}
+
+impl SkillLifecyclePolicy {
+    /// Coding-domain default. Skill *usage* is a personal habit, so metadata
+    /// lives under the user's home dir (not in-repo — putting personal
+    /// use-counts in the repo would pollute it and leak usage patterns across
+    /// teammates). Aggressive retirement (30d/90d) keeps the schema footprint
+    /// tight for the heavily-tooled coding domain.
+    pub fn coding() -> Self {
+        Self {
+            stale_after: Duration::from_secs(30 * 24 * 3600),
+            archive_after: Duration::from_secs(90 * 24 * 3600),
+            auto_transitions: true,
+            backup_count: 5,
+            storage_root: StorageRoot::HomeDir,
+            grace_unused: Duration::from_secs(7 * 24 * 3600),
+        }
+    }
+
+    /// Assistant/conversational default. Gentler retirement (60d/180d) —
+    /// assistant domains accumulate more skills and a skill that goes unused
+    /// for a few weeks may still be relevant to a recurring conversation.
+    pub fn assistant() -> Self {
+        Self {
+            stale_after: Duration::from_secs(60 * 24 * 3600),
+            archive_after: Duration::from_secs(180 * 24 * 3600),
+            auto_transitions: true,
+            backup_count: 5,
+            storage_root: StorageRoot::HomeDir,
+            grace_unused: Duration::from_secs(14 * 24 * 3600),
+        }
+    }
+
+    /// Merge two skill-lifecycle policies for multi-domain agents.
+    ///
+    /// Rules (aligned with the rest of `merge.rs`):
+    /// - **min** `stale_after` / `archive_after` / `grace_unused` (strictest
+    ///   retirement wins — a coding domain's 30d beats an assistant's 60d).
+    /// - **min** `backup_count` (keep fewest snapshots — strictest disk bound).
+    /// - `auto_transitions`: **OR** (any domain opting into auto transitions
+    ///   enables them — a domain that wants manual control can still pin).
+    /// - `storage_root`: take the **primary** (left), like
+    ///   `WorkingStatePolicy::merge` does for its enums.
+    pub fn merge(primary: &Self, other: &Self) -> Self {
+        Self {
+            stale_after: primary.stale_after.min(other.stale_after),
+            archive_after: primary.archive_after.min(other.archive_after),
+            auto_transitions: primary.auto_transitions || other.auto_transitions,
+            backup_count: primary.backup_count.min(other.backup_count),
+            storage_root: primary.storage_root.clone(),
+            grace_unused: primary.grace_unused.min(other.grace_unused),
+        }
+    }
+}
+
 // ─── MemoryProfile ───────────────────────────────────────────────────────────
 
 /// Domain-specific memory policy — the 7th DomainPack layer.
@@ -269,6 +372,12 @@ pub struct MemoryProfile {
     /// dimension of this profile — reference doc §9.1). Folded in rather than
     /// adding an 8th DomainPack layer.
     pub working_state: WorkingStatePolicy,
+
+    /// Skill lifecycle policy (Phase 2.1 Stage B) — the "grow-with-you"
+    /// dimension: when skills age to Stale/Archived, whether the curator runs
+    /// automatically, how many backups to keep. Folded in, mirroring
+    /// `working_state`.
+    pub skill_lifecycle: SkillLifecyclePolicy,
 }
 
 impl MemoryProfile {
@@ -282,6 +391,7 @@ impl MemoryProfile {
             enable_memory_tools: false,
             habit_fact_types: Vec::new(),
             working_state: WorkingStatePolicy::coding(),
+            skill_lifecycle: SkillLifecyclePolicy::coding(),
         }
     }
 
@@ -318,6 +428,12 @@ impl MemoryProfile {
     /// Set the working-state policy (persistence + reconciliation).
     pub fn working_state(mut self, policy: WorkingStatePolicy) -> Self {
         self.working_state = policy;
+        self
+    }
+
+    /// Set the skill-lifecycle policy (retirement + backups).
+    pub fn skill_lifecycle(mut self, policy: SkillLifecyclePolicy) -> Self {
+        self.skill_lifecycle = policy;
         self
     }
 
@@ -363,6 +479,7 @@ impl MemoryProfile {
                 FactType::new("source"),
             ])
             .working_state(WorkingStatePolicy::assistant())
+            .skill_lifecycle(SkillLifecyclePolicy::assistant())
     }
 }
 
@@ -404,6 +521,10 @@ impl MemoryProfile {
             enable_memory_tools: primary.enable_memory_tools || other.enable_memory_tools,
             habit_fact_types: habits,
             working_state: WorkingStatePolicy::merge(&primary.working_state, &other.working_state),
+            skill_lifecycle: SkillLifecyclePolicy::merge(
+                &primary.skill_lifecycle,
+                &other.skill_lifecycle,
+            ),
         }
     }
 }
@@ -532,5 +653,74 @@ mod tests {
         assert_eq!(m.compaction.keep_recent, 50);
         // Primary's storage_root wins (coding → InRepo) even though assistant is HomeDir.
         assert_eq!(m.storage_root, StorageRoot::InRepo);
+    }
+
+    #[test]
+    fn test_skill_lifecycle_presets() {
+        let c = SkillLifecyclePolicy::coding();
+        assert_eq!(c.stale_after, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(c.archive_after, Duration::from_secs(90 * 24 * 3600));
+        assert!(c.auto_transitions);
+        assert_eq!(c.backup_count, 5);
+        assert_eq!(c.storage_root, StorageRoot::HomeDir);
+
+        let a = SkillLifecyclePolicy::assistant();
+        // Assistant is gentler (longer retirement thresholds).
+        assert!(a.stale_after > c.stale_after);
+        assert!(a.archive_after > c.archive_after);
+        assert!(a.grace_unused > c.grace_unused);
+    }
+
+    #[test]
+    fn test_coding_profile_carries_coding_skill_lifecycle() {
+        let p = MemoryProfile::coding();
+        assert_eq!(
+            p.skill_lifecycle.stale_after,
+            Duration::from_secs(30 * 24 * 3600)
+        );
+        assert_eq!(p.skill_lifecycle.storage_root, StorageRoot::HomeDir);
+    }
+
+    #[test]
+    fn test_research_profile_carries_assistant_skill_lifecycle() {
+        let p = MemoryProfile::research();
+        assert_eq!(
+            p.skill_lifecycle.archive_after,
+            Duration::from_secs(180 * 24 * 3600)
+        );
+    }
+
+    #[test]
+    fn test_skill_lifecycle_merge_takes_min_thresholds() {
+        // Coding (30d/90d) merged with assistant (60d/180d) → min = 30d/90d.
+        let m = SkillLifecyclePolicy::merge(
+            &SkillLifecyclePolicy::coding(),
+            &SkillLifecyclePolicy::assistant(),
+        );
+        assert_eq!(m.stale_after, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(m.archive_after, Duration::from_secs(90 * 24 * 3600));
+        // min backup_count (both 5 → 5).
+        assert_eq!(m.backup_count, 5);
+        // OR auto_transitions (both true → true).
+        assert!(m.auto_transitions);
+        // Primary's storage_root wins.
+        assert_eq!(m.storage_root, StorageRoot::HomeDir);
+    }
+
+    #[test]
+    fn test_skill_lifecycle_merge_auto_or_and_backup_min() {
+        let a = SkillLifecyclePolicy {
+            auto_transitions: false,
+            backup_count: 8,
+            ..SkillLifecyclePolicy::coding()
+        };
+        let b = SkillLifecyclePolicy {
+            auto_transitions: true,
+            backup_count: 3,
+            ..SkillLifecyclePolicy::assistant()
+        };
+        let m = SkillLifecyclePolicy::merge(&a, &b);
+        assert!(m.auto_transitions); // OR
+        assert_eq!(m.backup_count, 3); // min
     }
 }

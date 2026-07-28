@@ -829,6 +829,11 @@ pub struct AgentLoop {
     /// progressive disclosure) into the system prompt each turn. The `skill`
     /// tool reads the same registry to load a skill's full prompt on demand.
     skill_registry: Arc<oneai_skill::SkillRegistry>,
+    /// Optional skill lifecycle metadata store (Phase 2.1 Stage B). When
+    /// set, `build_skill_menu` hides `Archived` skills (retired = invisible
+    /// to the model) and the `skill` tool bumps `use_count` on activation.
+    /// `None` = legacy stateless skill behavior.
+    skill_metadata_store: Option<Arc<oneai_skill::SkillMetadataStore>>,
     /// Manually-activated skill name (via `/skill <name>`). When set, the
     /// skill's full prompt_template is injected as a system message each turn.
     active_skill: Option<String>,
@@ -887,6 +892,7 @@ impl Clone for AgentLoop {
             interaction_gate: self.interaction_gate.clone(),
             skill_selector: self.skill_selector.clone(),
             skill_registry: self.skill_registry.clone(),
+            skill_metadata_store: self.skill_metadata_store.clone(),
             active_skill: self.active_skill.clone(),
             context_budget: self.context_budget.clone(),
             sub_agent_factory: self.sub_agent_factory.clone(),
@@ -971,6 +977,7 @@ impl AgentLoop {
             cancel_token: CancellationToken::new(),
             plan_mode_active: Arc::new(AtomicBool::new(config.plan_mode)),
             skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
+            skill_metadata_store: None,
             active_skill: None,
             config,
             domain_pack: None,
@@ -1014,6 +1021,7 @@ impl AgentLoop {
             cancel_token: CancellationToken::new(),
             plan_mode_active: Arc::new(AtomicBool::new(config.plan_mode)),
             skill_registry: Arc::new(oneai_skill::SkillRegistry::new()),
+            skill_metadata_store: None,
             active_skill: None,
             config,
             domain_pack: Some(domain_pack),
@@ -1031,6 +1039,18 @@ impl AgentLoop {
     ) -> Self {
         self.skill_registry = registry;
         self.active_skill = active_skill;
+        self
+    }
+
+    /// Attach the skill lifecycle metadata store (Phase 2.1 Stage B). When
+    /// set, the always-on skill menu hides `Archived` skills (retired =
+    /// invisible to the model) so the curator's retirements take effect
+    /// without a restart. The store should already be `load()`ed.
+    pub fn with_skill_metadata_store(
+        mut self,
+        store: Arc<oneai_skill::SkillMetadataStore>,
+    ) -> Self {
+        self.skill_metadata_store = Some(store);
         self
     }
 
@@ -4032,27 +4052,25 @@ impl AgentLoop {
         observer: &dyn AgentLoopObserver,
         trigger: ReflectionTrigger,
     ) {
-        // Footprint guard: don't fire if the memory tools the reflect
-        // sub-agent needs aren't registered — an empty-whitelist reflect
-        // agent can't persist anything. (The factory's strict mode would
-        // hand it zero tools; better to skip entirely.)
-        let needed = [
+        // Footprint guard: don't fire if neither the memory tools nor the
+        // `skill_manage` tool the reflect sub-agent needs are registered. The
+        // reviewer persists durable learnings via *either* path — memory facts
+        // (Stage A) or skill-library curation (Stage B). Fire only when at
+        // least one path is available; if both are absent, skip entirely (the
+        // strict-whitelist factory would hand it zero tools).
+        let memory_tools = [
             "memory_search",
             "core_memory_edit",
             "archival_memory_insert",
         ];
         {
             let tools = self.tools.read().await;
-            let missing: Vec<&str> = needed
-                .iter()
-                .copied()
-                .filter(|n| !tools.contains_key::<str>(*n))
-                .collect();
-            if !missing.is_empty() {
+            let memory_ok = memory_tools.iter().all(|n| tools.contains_key::<str>(*n));
+            let skill_manage_ok = tools.contains_key::<str>("skill_manage");
+            if !memory_ok && !skill_manage_ok {
                 tracing::info!(
                     trigger = ?trigger,
-                    "Skipping reflect sub-agent: memory tools not registered ({:?} missing)",
-                    missing
+                    "Skipping reflect sub-agent: neither memory tools nor skill_manage registered",
                 );
                 return;
             }
@@ -5130,12 +5148,27 @@ impl AgentLoop {
     /// every registered skill's name + description. Injected every turn so the
     /// model can discover skills and invoke the `skill` tool. Returns None when
     /// the registry is empty (no menu needed).
-    async fn build_skill_menu(&self) -> Option<String> {
+    pub(crate) async fn build_skill_menu(&self) -> Option<String> {
         let skills = self.skill_registry.list().await;
         if skills.is_empty() {
             return None;
         }
-        let mut lines = Vec::with_capacity(skills.len() + 2);
+        // Stage B: hide Archived skills (retired = invisible to the model).
+        // The curator's retirements take effect next turn without a restart.
+        let mut visible: Vec<_> = skills;
+        if let Some(store) = &self.skill_metadata_store {
+            let archived = store.list().await;
+            visible.retain(|s| {
+                archived
+                    .get(&s.name)
+                    .map(|m| m.state != oneai_skill::SkillState::Archived)
+                    .unwrap_or(true)
+            });
+        }
+        if visible.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::with_capacity(visible.len() + 2);
         lines.push(
             "# Available skills\n\
              Invoke a skill by calling the `skill` tool with its exact name. \
@@ -5143,7 +5176,7 @@ impl AgentLoop {
              Only call a skill when it is clearly relevant to the task."
                 .to_string(),
         );
-        for skill in &skills {
+        for skill in &visible {
             lines.push(format!("- {}: {}", skill.name, skill.description));
         }
         Some(lines.join("\n"))

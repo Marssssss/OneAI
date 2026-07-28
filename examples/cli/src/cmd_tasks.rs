@@ -199,11 +199,7 @@ pub fn cmd_tasks_continue(
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
-        app.register_tool(Arc::new(oneai_agent::SkillTool::new(
-            app.skill_registry.clone(),
-        )))
-        .await
-        .unwrap();
+        app.register_skill_tools().await.unwrap();
 
         // Create a brand-new session (new session id, does NOT read the old
         // session's conversation) and bind it to the existing durable task.
