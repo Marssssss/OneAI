@@ -3584,3 +3584,120 @@ async fn e2e_skill_menu_hides_archived_skill() {
     let menu = agent_loop.build_skill_menu().await.unwrap();
     assert!(menu.contains("retire-me"));
 }
+
+/// Stage C — cross-session cadence hydrate. Run 1 fires reflect mid-run (at
+/// the iter-2 cadence boundary) + on DirectAnswer, persisting
+/// `ReflectionFired` events to the working-state log with the *cumulative*
+/// iteration. Run 2 resumes the same task in a fresh loop: hydrate must
+/// restore `cadence_baseline` so firing continues from the prior session's
+/// last boundary (cum=4) — NOT from zero (which would re-fire the already-
+/// fired cum=2 boundary). The distinguishing assertion is
+/// `last_reflection_iter` strictly increasing across runs: with broken
+/// hydration it stays put (re-fires the same boundaries); with hydrate it
+/// advances past the prior run's last fire.
+#[tokio::test]
+async fn e2e_cadence_hydrates_across_run_resume() {
+    use oneai_core::Conversation;
+    use oneai_persistence::FileWorkingStateStore;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let store: Arc<dyn oneai_core::traits::WorkingStateStore> =
+        Arc::new(FileWorkingStateStore::new(dir.path().to_path_buf()));
+
+    // Pre-create the task in the store so run 1 can bind it via metadata.
+    let task_id = store
+        .create_task("u", "p", "do a thing", "", "sess1")
+        .await
+        .unwrap();
+
+    let mk_loop = |provider: MockProvider, factory: Arc<ReflectFactory>| {
+        build_reflect_loop(
+            provider,
+            factory,
+            AgentLoopConfig {
+                inject_skills: false,
+                hard_max_iterations: Some(20),
+                reflection_cadence: Some(2),
+                ..AgentLoopConfig::default()
+            },
+        )
+        .with_working_state_store(store.clone())
+        .with_working_state_scope("u", "p", "sess1")
+    };
+
+    let mk_conv = |task_id: &str| {
+        let mut conv = Conversation::new();
+        conv.metadata
+            .insert("task_id".to_string(), task_id.to_string());
+        conv
+    };
+
+    // ─── Run 1: two tool-call iters then answer ──────────────────────────
+    // iter1 (cum=1, no fire), iter2 (cum=2, cadence fire), iter3 (DirectAnswer fire).
+    let factory1 = Arc::new(ReflectFactory::new());
+    let observer1 = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let loop1 = mk_loop(
+        MockProvider::from_script(vec![
+            ScriptedResponse::tool_call("memory_search", serde_json::json!({"query": "a"})),
+            ScriptedResponse::tool_call("memory_search", serde_json::json!({"query": "b"})),
+            ScriptedResponse::direct_answer("done"),
+        ]),
+        factory1.clone(),
+    );
+    let result1 = loop1
+        .run_with_conversation(mk_conv(&task_id), "do a thing", &observer1)
+        .await
+        .unwrap();
+    assert!(result1.completed);
+    let creates1 = factory1.creates().lock().unwrap().clone();
+    assert!(
+        creates1.len() >= 2,
+        "run 1: reflect should fire ≥2× (cadence + DirectAnswer): {creates1:?}"
+    );
+
+    let ws1 = store.get_task(&task_id).await.unwrap().unwrap();
+    assert!(
+        ws1.reflection_count >= 2,
+        "run 1: ReflectionFired events must persist (count={})",
+        ws1.reflection_count
+    );
+    assert!(ws1.last_reflection_iter > 0);
+    let run1_last = ws1.last_reflection_iter;
+
+    // ─── Run 2: fresh loop, same task (cross-session resume) ────────────
+    // Hydrate sets baseline=run1_last. iter1 (cum=run1_last+1), iter2 DirectAnswer.
+    // Firing must continue past run1_last — not re-fire run1's boundaries.
+    let factory2 = Arc::new(ReflectFactory::new());
+    let observer2 = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let loop2 = mk_loop(
+        MockProvider::from_script(vec![
+            ScriptedResponse::tool_call("memory_search", serde_json::json!({"query": "c"})),
+            ScriptedResponse::direct_answer("done again"),
+        ]),
+        factory2.clone(),
+    );
+    let result2 = loop2
+        .run_with_conversation(mk_conv(&task_id), "do a thing", &observer2)
+        .await
+        .unwrap();
+    assert!(result2.completed);
+
+    let ws2 = store.get_task(&task_id).await.unwrap().unwrap();
+    assert!(
+        ws2.last_reflection_iter > run1_last,
+        "run 2 must advance past run 1's last fire boundary (hydrate broken would \
+         re-fire the same boundaries): run1_last={run1_last}, run2_last={}",
+        ws2.last_reflection_iter
+    );
+    assert!(
+        ws2.reflection_count > ws1.reflection_count,
+        "run 2 must add new ReflectionFired events: {} -> {}",
+        ws1.reflection_count,
+        ws2.reflection_count
+    );
+}

@@ -273,6 +273,8 @@ fn apply_event(state: &mut Option<WorkingState>, ev: &TaskEvent) {
                 owner_session: ev.session_id.clone(),
                 created_at: ev.ts.clone(),
                 updated_at: ev.ts.clone(),
+                reflection_count: 0,
+                last_reflection_iter: 0,
             });
         }
         (TaskEventType::GoalRevised, TaskEventPayload::Task { goal, intent }) => {
@@ -382,6 +384,15 @@ fn apply_event(state: &mut Option<WorkingState>, ev: &TaskEvent) {
             // Reconciliation is informational; it doesn't mutate working state,
             // only flags drift (the caller surfaces it via the pinned block).
             if let Some(s) = state.as_mut() {
+                s.updated_at = ev.ts.clone();
+            }
+        }
+        (TaskEventType::ReflectionFired, TaskEventPayload::ReflectionFired { iteration }) => {
+            // Phase 2.1 Stage C — fold the cumulative reflection counters so
+            // cross-session resume hydrates the cadence baseline + count.
+            if let Some(s) = state.as_mut() {
+                s.reflection_count = s.reflection_count.saturating_add(1);
+                s.last_reflection_iter = *iteration; // monotonic; last wins
                 s.updated_at = ev.ts.clone();
             }
         }
@@ -867,5 +878,26 @@ mod tests {
         assert!(open.is_empty());
         let archive = s.tasks_dir().join(format!("{}.archive.jsonl.gz", id));
         assert!(archive.exists());
+    }
+
+    #[tokio::test]
+    async fn reflection_event_projects_counters() {
+        let (_d, s) = store();
+        let id = s.create_task("u", "p", "g", "", "sess").await.unwrap();
+        // Two reflections fired at cumulative iterations 4 and 8.
+        for iter in [4u64, 8] {
+            s.append_event(
+                &id,
+                "sess",
+                None,
+                TaskEventType::ReflectionFired,
+                TaskEventPayload::ReflectionFired { iteration: iter },
+            )
+            .await
+            .unwrap();
+        }
+        let state = s.get_task(&id).await.unwrap().unwrap();
+        assert_eq!(state.reflection_count, 2);
+        assert_eq!(state.last_reflection_iter, 8); // last wins
     }
 }

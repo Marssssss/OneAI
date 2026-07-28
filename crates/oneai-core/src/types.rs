@@ -971,6 +971,20 @@ pub struct WorkingState {
     /// Last-mutation timestamp (RFC3339).
     #[serde(default)]
     pub updated_at: String,
+
+    /// Cumulative count of cadence-fired `Reflect` sub-agents across all
+    /// sessions for this task (Phase 2.1 Stage C). Folded from
+    /// `ReflectionFired` events; hydrated into `LoopState.reflections_fired`
+    /// on resume so the count survives restart.
+    #[serde(default)]
+    pub reflection_count: u32,
+
+    /// Cumulative iteration count of the most recent `ReflectionFired`
+    /// event — the hydrate baseline that lets a resumed task continue
+    /// cadence firing from where the prior session left off, instead of
+    /// re-firing already-fired boundaries from zero.
+    #[serde(default)]
+    pub last_reflection_iter: u64,
 }
 
 /// Lifecycle status of a task.
@@ -1231,6 +1245,10 @@ pub enum TaskEventType {
     Reconciliation,
     /// Materialized checkpoint — full derived state folded into the log.
     Snapshot,
+    /// A cadence-fired `Reflect` sub-agent ran (Phase 2.1 Stage C). Carries
+    /// the *cumulative* iteration count at fire time so cross-session resume
+    /// can skip already-fired boundaries instead of re-firing from zero.
+    ReflectionFired,
 }
 
 /// Typed event payload. Each variant pairs with a `TaskEventType`.
@@ -1275,6 +1293,11 @@ pub enum TaskEventPayload {
     },
     /// `Snapshot` — the full derived state at compaction time.
     Snapshot { state: WorkingState },
+    /// `ReflectionFired` — a cadence-fired reflect sub-agent ran (Stage C).
+    /// `iteration` is the *cumulative* iteration count at fire time
+    /// (baseline + run-local iterations), so a resumed task can compare
+    /// boundaries across sessions.
+    ReflectionFired { iteration: u64 },
 }
 
 // ─── InteractionGate types ───────────────────────────────────────────────────

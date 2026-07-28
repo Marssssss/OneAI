@@ -343,6 +343,11 @@ enum CuratorAction {
         /// Backup snapshot id (unix timestamp — see `backups`)
         id: u64,
     },
+    /// LLM consolidation pass (default-off, opt-in) — merge narrow skills into
+    /// class-level umbrella skills. Needs a configured LLM provider (ONEAI_API_KEY
+    /// or ~/.oneai/config.toml), unlike the other curator actions. Each merge is
+    /// reversible via `oneai curator rollback <id>` (printed in the report).
+    Consolidate,
 }
 
 #[derive(Subcommand)]
@@ -949,6 +954,9 @@ fn main() {
                     }
                     CuratorAction::Rollback { id } => {
                         cmd_curator::cmd_curator_rollback(&config, domain.as_deref(), id).await
+                    }
+                    CuratorAction::Consolidate => {
+                        cmd_curator::cmd_curator_consolidate(&config, domain.as_deref()).await
                     }
                 }
             });

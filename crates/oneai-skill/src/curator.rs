@@ -24,7 +24,7 @@
 //! a future Stage) reconciles the pack.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -34,6 +34,52 @@ use crate::lifecycle::{
     now_unix, SkillAuthor, SkillLifecycleConfig, SkillMetadata, SkillMetadataStore, SkillState,
 };
 use crate::registry::SkillRegistry;
+
+/// Error from [`SkillCurator::apply_merge`] — the only failure modes that
+/// abort a merge. Per-member problems (a member that's referenced or already
+/// archived) are *skipped with a warning*, not errors — a consolidation pass
+/// should apply what it can and report what it skipped.
+#[derive(Debug)]
+pub enum MergeError {
+    Io(String),
+    /// The umbrella name is already a registered skill — refuse to overwrite
+    /// via merge (the human reconciles, or picks a fresh umbrella name).
+    UmbrellaExists(String),
+    /// A requested member skill isn't registered.
+    NotFound(String),
+}
+
+impl std::fmt::Display for MergeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MergeError::Io(m) => write!(f, "I/O error writing umbrella skill: {m}"),
+            MergeError::UmbrellaExists(n) => {
+                write!(
+                    f,
+                    "umbrella skill '{n}' already registered (refuse merge overwrite)"
+                )
+            }
+            MergeError::NotFound(n) => write!(f, "skill '{n}' not registered"),
+        }
+    }
+}
+
+impl std::error::Error for MergeError {}
+
+/// Result of one umbrella merge applied by [`SkillCurator::apply_merge`].
+#[derive(Debug, Clone, Default)]
+pub struct MergeReport {
+    /// The umbrella skill name written + registered.
+    pub umbrella_name: String,
+    /// Members successfully archived into the umbrella.
+    pub members_archived: Vec<String>,
+    /// Members skipped (referenced by the active pack — destructive rewrite
+    /// is out of scope; the human reconciles).
+    pub members_skipped: Vec<String>,
+    /// The backup snapshot id written before any retirement (pass to
+    /// [`SkillCurator::rollback`] to undo the whole merge).
+    pub backup_id: u64,
+}
 
 /// A steward that runs the skill lifecycle against the live registry.
 pub struct SkillCurator {
@@ -148,6 +194,125 @@ impl SkillCurator {
             archived,
             backup_written,
         }
+    }
+
+    // ─── LLM consolidation (Phase 2.1 Stage C) ────────────────────────────
+    //
+    // `apply_automatic_transitions` (Stage B) is the *pure-function* half of
+    // the Hermes curator — age-based Active→Stale→Archived. The *LLM* half
+    // merges narrow one-session skills into class-level umbrella skills
+    // ("hundreds of narrow skills each capturing one session is a library
+    // failure, not a feature"). The LLM orchestration lives in `oneai-agent`
+    // (it needs a provider); these are the data-layer primitives the runner
+    // calls. Default-off / opt-in — never invoked from `run` or any
+    // cadence-fired path; only `oneai curator consolidate` triggers it.
+
+    /// Narrow Active skills that are safe consolidation candidates: not
+    /// pinned, not Bundled, not referenced by the active pack's workflows /
+    /// StateGraphs / cron. The LLM decides *which* of these to merge; this
+    /// just scopes the input so the proposer can't suggest retiring an
+    /// exempt skill.
+    pub async fn consolidation_candidates(&self) -> Vec<(SkillDescriptor, SkillMetadata)> {
+        let referenced = self.referenced.read().unwrap().clone();
+        let live = self.registry.list().await;
+        let meta = self.store.list().await;
+        let now_s = now_unix();
+        let mut out = Vec::new();
+        for s in live {
+            if referenced.contains(&s.name) {
+                continue;
+            }
+            let m = meta
+                .get(&s.name)
+                .cloned()
+                .unwrap_or_else(|| SkillMetadata::fresh(SkillAuthor::User, now_s));
+            if m.state != SkillState::Active || m.pinned || m.created_by == SkillAuthor::Bundled {
+                continue;
+            }
+            out.push((s, m));
+        }
+        out
+    }
+
+    /// Apply one LLM-proposed umbrella merge: write the umbrella `SKILL.md`
+    /// into `skills_dir`, register it, seed its metadata as `Agent`-authored,
+    /// then archive each member (one shared backup first → the whole merge
+    /// is one-step reversible via [`Self::rollback`]). Members referenced by
+    /// the active pack are skipped with a warning, not an error.
+    pub async fn apply_merge(
+        &self,
+        umbrella: SkillDescriptor,
+        members: &[String],
+        skills_dir: &Path,
+    ) -> Result<MergeReport, MergeError> {
+        // Refuse to clobber an existing skill via merge.
+        if self.registry.find_by_name(&umbrella.name).await.is_some() {
+            return Err(MergeError::UmbrellaExists(umbrella.name));
+        }
+        // Validate every member is registered before touching anything.
+        for m in members {
+            if self.registry.find_by_name(m).await.is_none() {
+                return Err(MergeError::NotFound(m.clone()));
+            }
+        }
+
+        // Write the umbrella SKILL.md (frontmatter + body), reusing the same
+        // materialization format as `rollback` so discovery re-finds it
+        // identically next session.
+        let skill_dir: PathBuf = skills_dir.join(&umbrella.name);
+        std::fs::create_dir_all(&skill_dir).map_err(|e| MergeError::Io(e.to_string()))?;
+        let body = if umbrella.prompt_template.is_empty() {
+            String::new()
+        } else {
+            umbrella.prompt_template.clone()
+        };
+        let frontmatter = format!(
+            "---\nname: {name}\ndescription: {desc}\n---\n",
+            name = umbrella.name,
+            desc = umbrella.description.replace('\n', " ")
+        );
+        std::fs::write(skill_dir.join("SKILL.md"), format!("{frontmatter}{body}"))
+            .map_err(|e| MergeError::Io(e.to_string()))?;
+
+        // Register + seed metadata.
+        self.registry.register(umbrella.clone()).await.ok();
+        let now_s = now_unix();
+        self.store
+            .ensure(&umbrella.name, SkillAuthor::Agent, now_s)
+            .await;
+
+        // One shared backup before retiring any member → whole merge
+        // reversible via a single rollback.
+        let live = self.registry.list().await;
+        let backup_path = self.store.write_backup(&live, SystemTime::now()).await;
+        let backup_id = backup_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.trim_end_matches(".json").parse::<u64>().ok())
+            .unwrap_or_else(now_unix);
+
+        let referenced = self.referenced.read().unwrap().clone();
+        let mut members_archived = Vec::new();
+        let mut members_skipped = Vec::new();
+        for m in members {
+            if referenced.contains(m) {
+                tracing::warn!(
+                    "consolidate: skipping member '{m}' — referenced by active pack's \
+                     workflows/StateGraphs/cron; reconcile the pack or unreference first."
+                );
+                members_skipped.push(m.clone());
+                continue;
+            }
+            self.store.archive(m, now_s).await;
+            members_archived.push(m.clone());
+        }
+
+        Ok(MergeReport {
+            umbrella_name: umbrella.name,
+            members_archived,
+            members_skipped,
+            backup_id,
+        })
     }
 
     /// Whether any skill would cross into Archived this run (cheap pre-check
@@ -397,5 +562,129 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(store.get("foo").await.unwrap().state, SkillState::Active);
         assert!(restore_dir.join("foo/SKILL.md").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_merge_writes_umbrella_and_archives_members() {
+        let registry = Arc::new(SkillRegistry::new());
+        registry.register(make_skill("narrow-a")).await.unwrap();
+        registry.register(make_skill("narrow-b")).await.unwrap();
+        let store = Arc::new(SkillMetadataStore::new(
+            tmp_root(),
+            SkillLifecycleConfig::default(),
+        ));
+        // Both members active + non-exempt → candidates.
+        store.ensure("narrow-a", SkillAuthor::User, 100).await;
+        store.ensure("narrow-b", SkillAuthor::User, 100).await;
+        let curator = SkillCurator::new(registry, Arc::clone(&store), HashSet::new());
+
+        let candidates = curator.consolidation_candidates().await;
+        assert_eq!(candidates.len(), 2);
+
+        let umbrella = SkillDescriptor {
+            name: "umbrella".into(),
+            description: "covers a+b".into(),
+            prompt_template: "merged body".into(),
+            trigger_keywords: vec!["k".into()],
+            embedding: None,
+        };
+        let skills_dir = store.root().join("skills");
+        let report = curator
+            .apply_merge(
+                umbrella,
+                &["narrow-a".to_string(), "narrow-b".to_string()],
+                &skills_dir,
+            )
+            .await
+            .expect("merge applies");
+        assert_eq!(report.umbrella_name, "umbrella");
+        assert_eq!(report.members_archived.len(), 2);
+        assert!(report.members_archived.contains(&"narrow-a".to_string()));
+        assert!(report.members_archived.contains(&"narrow-b".to_string()));
+
+        // Umbrella registered + SKILL.md written + authored by Agent.
+        assert!(curator.registry().find_by_name("umbrella").await.is_some());
+        assert!(skills_dir.join("umbrella/SKILL.md").exists());
+        assert_eq!(
+            store.get("umbrella").await.unwrap().created_by,
+            SkillAuthor::Agent
+        );
+        // Members archived.
+        assert_eq!(
+            store.get("narrow-a").await.unwrap().state,
+            SkillState::Archived
+        );
+        assert_eq!(
+            store.get("narrow-b").await.unwrap().state,
+            SkillState::Archived
+        );
+
+        // Whole merge reversible via the shared backup id.
+        let restore_dir = store.root().join("restore");
+        curator
+            .rollback(report.backup_id, &restore_dir)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("narrow-a").await.unwrap().state,
+            SkillState::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_merge_refuses_to_clobber_existing_umbrella() {
+        let registry = Arc::new(SkillRegistry::new());
+        registry.register(make_skill("umbrella")).await.unwrap();
+        registry.register(make_skill("m")).await.unwrap();
+        let store = Arc::new(SkillMetadataStore::new(
+            tmp_root(),
+            SkillLifecycleConfig::default(),
+        ));
+        let curator = SkillCurator::new(registry, store, HashSet::new());
+        let err = curator
+            .apply_merge(
+                make_skill("umbrella"),
+                &["m".to_string()],
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MergeError::UmbrellaExists(_)));
+    }
+
+    #[tokio::test]
+    async fn apply_merge_skips_referenced_members() {
+        let registry = Arc::new(SkillRegistry::new());
+        registry.register(make_skill("narrow")).await.unwrap();
+        registry.register(make_skill("ref")).await.unwrap();
+        let store = Arc::new(SkillMetadataStore::new(
+            tmp_root(),
+            SkillLifecycleConfig::default(),
+        ));
+        let mut referenced = HashSet::new();
+        referenced.insert("ref".to_string());
+        let curator = SkillCurator::new(registry, Arc::clone(&store), referenced);
+        // Seed metadata for both members so post-merge `get` resolves.
+        store.ensure("narrow", SkillAuthor::User, 100).await;
+        store.ensure("ref", SkillAuthor::User, 100).await;
+
+        let report = curator
+            .apply_merge(
+                SkillDescriptor {
+                    name: "umb".into(),
+                    description: "u".into(),
+                    prompt_template: "b".into(),
+                    trigger_keywords: vec![],
+                    embedding: None,
+                },
+                &["narrow".to_string(), "ref".to_string()],
+                &store.root().join("skills"),
+            )
+            .await
+            .unwrap();
+        // `narrow` archived; `ref` skipped (referenced).
+        assert_eq!(report.members_archived, vec!["narrow".to_string()]);
+        assert_eq!(report.members_skipped, vec!["ref".to_string()]);
+        assert_eq!(store.get("ref").await.unwrap().state, SkillState::Active);
     }
 }

@@ -12,11 +12,15 @@
 //! - `oneai curator backup`  — write a restorable snapshot of every skill.
 //! - `oneai curator backups` — list available backup snapshot ids.
 //! - `oneai curator rollback <id>` — restore a backup snapshot (skills + metadata).
+//! - `oneai curator consolidate` — LLM consolidation pass (Stage C, default-off
+//!   / opt-in). Merge narrow one-session skills into class-level umbrella
+//!   skills. Unlike the other actions this needs a configured LLM provider.
 //!
-//! Mirrors the `pack` subcommand pattern. Builds a provider-less App (the
-//! curator needs no LLM — only the SkillRegistry + SkillMetadataStore + the
-//! pack's `skill_lifecycle` policy). Discovered + builtin skills are loaded
-//! so the curator sees the same library the agent sees.
+//! Mirrors the `pack` subcommand pattern. The pure-function actions build a
+//! provider-less App (the curator needs no LLM — only the SkillRegistry +
+//! SkillMetadataStore + the pack's `skill_lifecycle` policy). Discovered +
+//! builtin skills are loaded so the curator sees the same library the agent
+//! sees.
 
 use oneai_app::AppBuilder;
 use oneai_domain::coding_pack;
@@ -223,6 +227,99 @@ pub async fn cmd_curator_rollback(config: &OneaiConfig, domain: Option<&str>, id
         Ok(n) => println!("✅ restored {n} skill(s) + metadata from snapshot {id}."),
         Err(e) => {
             eprintln!("rollback failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `oneai curator consolidate` — LLM consolidation pass (Stage C, default-off
+/// / opt-in). Unlike the other curator actions, this needs a configured LLM
+/// provider (the model proposes the umbrella merges). Builds a provider-backed
+/// App — mirroring `cmd_run`'s provider wiring — over the same skill library
+/// the agent sees, then runs [`oneai_agent::run_consolidation`].
+pub async fn cmd_curator_consolidate(config: &OneaiConfig, domain: Option<&str>) {
+    let domain_name = config.default_domain_pack(domain);
+
+    // Build the model config (needs a provider, unlike the other curator
+    // actions). Exit cleanly if no provider is configured.
+    let provider_config = config.to_model_config_with_overrides(None);
+    let Some(model_config) = provider_config else {
+        eprintln!("Error: `curator consolidate` needs an LLM provider.");
+        eprintln!("Set ONEAI_API_KEY or configure ~/.oneai/config.toml (model).");
+        std::process::exit(1);
+    };
+
+    let pack = get_builtin_pack(&domain_name, ".").unwrap_or_else(|| coding_pack("."));
+    let provider = oneai_provider::ProviderFactory::create(model_config);
+    let app = AppBuilder::new()
+        .provider(std::sync::Arc::from(provider))
+        .noop_interaction_gate()
+        .default_parser()
+        .generation_config(config.generation.clone())
+        .domain_pack(pack)
+        .build()
+        .await
+        .expect("curator consolidate App build failed");
+
+    // Load the same skill library the agent sees.
+    let skills = oneai_skill::builtin::skills_for_domain(&domain_name);
+    app.skill_registry.register_builtin(skills).await.unwrap();
+    app.register_skill_tools().await.unwrap();
+
+    let curator = match app.skill_curator.as_ref() {
+        Some(c) => c,
+        None => {
+            eprintln!("curator unavailable (no skill_lifecycle policy).");
+            std::process::exit(1);
+        }
+    };
+    let provider = app.provider.as_ref().expect("provider wired above");
+
+    // Write umbrella SKILL.md into the global skills dir so discovery
+    // re-finds them next session (same dir `rollback` restores into).
+    let skills_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".oneai")
+        .join("skills");
+
+    match oneai_agent::run_consolidation(
+        provider.as_ref(),
+        curator,
+        &skills_dir,
+        &config.generation,
+    )
+    .await
+    {
+        Ok(report) => {
+            if report.empty {
+                println!("🧩 Nothing to consolidate — library already tidy (<2 candidates).");
+                return;
+            }
+            println!("🧠 Consolidation pass complete.\n");
+            for mr in &report.proposals_applied {
+                println!(
+                    "  ✅ umbrella `{}` ← merged {} (archived: {})",
+                    mr.umbrella_name,
+                    mr.members_archived.len(),
+                    mr.members_archived.join(", ")
+                );
+                if !mr.members_skipped.is_empty() {
+                    println!(
+                        "     ⚠️  skipped (referenced by active pack): {}",
+                        mr.members_skipped.join(", ")
+                    );
+                }
+                println!("     ↩️  undo: `oneai curator rollback {}`", mr.backup_id);
+            }
+            if !report.proposals_skipped.is_empty() {
+                println!("\n  ⏭️  proposals skipped:");
+                for s in &report.proposals_skipped {
+                    println!("     - {s}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("consolidation failed: {e}");
             std::process::exit(1);
         }
     }

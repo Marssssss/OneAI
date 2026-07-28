@@ -392,6 +392,13 @@ pub struct LoopState {
     /// loop. Prevents re-firing on the same boundary after a retry that
     /// didn't advance `iterations`.
     pub reflections_fired: usize,
+    /// Cumulative iteration count at the last `ReflectionFired` event,
+    /// hydrated from the working-state event log on resume (Phase 2.1
+    /// Stage C). The cadence check fires on `cadence_baseline + iterations`
+    /// so a task resumed cross-session continues from the prior session's
+    /// last fire boundary instead of re-firing from zero. 0 when no store
+    /// is configured or the task has no prior reflections.
+    pub cadence_baseline: u64,
 }
 
 impl LoopState {
@@ -424,6 +431,7 @@ impl LoopState {
             user_id: String::new(),
             project: String::new(),
             reflections_fired: 0,
+            cadence_baseline: 0,
         }
     }
 
@@ -474,6 +482,7 @@ impl LoopState {
             user_id: String::new(),
             project: String::new(),
             reflections_fired: 0,
+            cadence_baseline: 0,
         }
     }
 
@@ -1111,6 +1120,16 @@ impl AgentLoop {
                             .insert("task_anchor".to_string(), ws.goal.clone());
                     }
                     state.working_state = Some(ws);
+                    // Phase 2.1 Stage C — hydrate the cumulative cadence
+                    // counters from the durable event log so a resumed task
+                    // continues from the prior session's last fire boundary
+                    // instead of re-firing from zero. `reflections_fired`
+                    // becomes the true cumulative count (was in-memory
+                    // telemetry that reset every run); `cadence_baseline`
+                    // anchors the cadence check to the cumulative iteration.
+                    let ws_hydr = state.working_state.as_ref().unwrap();
+                    state.reflections_fired = ws_hydr.reflection_count as usize;
+                    state.cadence_baseline = ws_hydr.last_reflection_iter;
                 }
                 Ok(None) => {
                     tracing::warn!(
@@ -1324,9 +1343,18 @@ impl AgentLoop {
             // iterations (mid-run), when not interrupted. The DirectAnswer
             // trigger fires separately at end-of-answer. See
             // `maybe_run_reflection`.
+            //
+            // Stage C: fire on the *cumulative* iteration count
+            // (`cadence_baseline + iterations`), so a task resumed
+            // cross-session continues from the prior session's last fire
+            // boundary. The `cum > baseline` guard skips the boundary the
+            // prior session already fired (baseline is itself a multiple of
+            // cadence) — no redundant re-fire on resume.
             if let Some(cadence) = self.config.reflection_cadence {
+                let cum = state.cadence_baseline + state.iterations as u64;
                 if cadence > 0
-                    && state.iterations.is_multiple_of(cadence)
+                    && cum > state.cadence_baseline
+                    && cum.is_multiple_of(cadence as u64)
                     && !self.interrupt_requested.load(Ordering::Relaxed)
                     && state.pending_interrupt.is_none()
                 {
@@ -4077,6 +4105,30 @@ impl AgentLoop {
         }
 
         state.reflections_fired += 1;
+        // Stage C — persist a `ReflectionFired` event to the working-state
+        // log so a resumed task hydrates this cumulative count + baseline.
+        // Best-effort: a persistence failure must never break the parent
+        // loop (mirrors the swallow-failures contract of this fn).
+        let cum_iter = state.cadence_baseline + state.iterations as u64;
+        if let Some(store) = self.working_state_store.clone() {
+            if let Some(task_id) = state.task_id.as_ref().cloned() {
+                let session_id = state.session_id.clone();
+                if let Err(e) = store
+                    .append_event(
+                        &task_id,
+                        &session_id,
+                        None,
+                        oneai_core::TaskEventType::ReflectionFired,
+                        oneai_core::TaskEventPayload::ReflectionFired {
+                            iteration: cum_iter,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!("Failed to persist ReflectionFired event (swallowed): {e}");
+                }
+            }
+        }
         let review_task = self.build_reflection_review_task(state);
         tracing::info!(
             trigger = ?trigger,
