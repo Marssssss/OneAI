@@ -578,7 +578,7 @@ impl Tool for ApplyPatchTool {
 
                 for (file_path, file_hunk_list) in &file_hunks {
                     // Security: reject path traversal
-                    if file_path.contains("..") {
+                    if crate::tool_interfaces::path_has_traversal(file_path) {
                         errors.push(format!("Path traversal detected in: {}", file_path));
                         continue;
                     }

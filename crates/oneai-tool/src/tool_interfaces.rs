@@ -203,9 +203,27 @@ impl PermissionAwareTool for ShellTool {
 /// - `sudo rm` — sudo deletion
 /// - `shutdown`, `reboot`, `halt` — system shutdown
 /// - `>` to /dev/sda — direct disk write
+/// - `rm -rf ~` / `rm -rf $HOME` — home-directory deletion (gap-analysis P1
+///   hardening: the original patterns only caught `rm -rf /`, so
+///   `rm -rf ~` / `rm -rf ~/*` / `rm -rf $HOME` slipped through)
+/// - `find ... -delete` / `find ... -exec rm` — recursive deletion via `find`
+///   (the `rm -rf /` regex doesn't match `find / -delete` or
+///   `find . -name '*.tmp' -delete`)
+/// - `curl ... | sh` / `wget ... | sh` / `| bash` — pipe-to-shell remote
+///   execution (supply-chain exfil/exec vector)
 fn default_blocked_patterns() -> Vec<regex::Regex> {
     [
         r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?/|-[a-zA-Z]*r[a-zA-Z]*\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/)",
+        // Home-directory recursive deletion: `rm -rf ~`, `rm -rf ~/*`,
+        // `rm -rf $HOME`, `rm -rf $HOME/*`. The `/`-anchored pattern above
+        // misses these because `~`/`$HOME` aren't `/`.
+        r"rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+(~|\$HOME)(\s|$|/)",
+        // Recursive delete via `find ... -delete` / `-exec rm`. Catches
+        // `find / -delete`, `find . -delete`, `find ~ -exec rm -rf {} \;`.
+        r"find\s+.*(-delete|-exec\s+rm)",
+        // Pipe-to-shell remote execution (curl/wget piped into sh/bash).
+        r"(curl|wget)\b.*\|\s*(sh|bash)",
+        r"\|\s*(sh|bash)\b",
         r"mkfs",
         r"dd\s+if=/dev/zero",
         r":\(\)\{\s*:\|:&\s*\};:",
@@ -213,10 +231,29 @@ fn default_blocked_patterns() -> Vec<regex::Regex> {
         r"sudo\s+rm",
         r"(shutdown|reboot|halt)\s+",
         r">\s*/dev/sda",
-    ].iter()
+    ]
+    .iter()
     .filter_map(|p| regex::Regex::new(p).ok())
     .collect()
 }
+
+/// Detect path-traversal (`..` as a real path component) without the false
+/// positives of a substring `contains("..")` check.
+///
+/// `Path::components()` classifies `..` as `Component::ParentDir` only when
+/// it is an actual path segment — so `foo/..bar` (a legitimate filename) is
+/// NOT flagged, while `../x`, `foo/../x`, and a leading `..` are. This is
+/// the gap-analysis P1 fix: the old `path.contains("..")` check both
+/// false-positived on `..bar`-style names and (without a base dir to
+/// canonicalize against) couldn't catch symlink escapes — the component
+/// check at least removes the false-positive half.
+pub(crate) fn path_has_traversal(path: &str) -> bool {
+    use std::path::Component;
+    std::path::Path::new(path)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+}
+
 
 /// Detect shell constructs that write files via redirection in a way that is
 /// *genuinely broken* (not merely suboptimal). Returns a short reason so the
@@ -687,7 +724,7 @@ impl Tool for FileReadTool {
         }
 
         // Security: reject paths that try to escape reasonable boundaries
-        if path.contains("..") {
+        if path_has_traversal(path) {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
@@ -921,7 +958,7 @@ impl Tool for FileEditTool {
         }
 
         // Security: reject path traversal
-        if file_path.contains("..") {
+        if path_has_traversal(file_path) {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
@@ -1054,7 +1091,7 @@ impl Tool for FileListTool {
             });
         }
 
-        if path.contains("..") {
+        if path_has_traversal(path) {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
@@ -1646,7 +1683,7 @@ impl Tool for NotebookEditTool {
         }
 
         // Security: reject path traversal
-        if notebook_path.contains("..") {
+        if path_has_traversal(notebook_path) {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
@@ -1974,7 +2011,7 @@ impl Tool for FileDeleteTool {
             });
         }
 
-        if path.contains("..") {
+        if path_has_traversal(path) {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
@@ -3106,3 +3143,28 @@ impl PermissionAwareTool for BrowserTool {
         PermissionLevel::Standard
     }
 }
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::path_has_traversal;
+
+    #[test]
+    fn flags_real_traversal() {
+        assert!(path_has_traversal("../secret"));
+        assert!(path_has_traversal("foo/../bar"));
+        assert!(path_has_traversal("../../etc/passwd"));
+        assert!(path_has_traversal("a/b/../../../c"));
+    }
+
+    #[test]
+    fn does_not_flag_dotdot_substring_in_name() {
+        // Gap-analysis P1 fix: the old `path.contains("..")` false-positived
+        // on legitimate names containing the literal `..` substring.
+        assert!(!path_has_traversal("foo/..bar"));
+        assert!(!path_has_traversal("..hidden"));
+        assert!(!path_has_traversal("a.b.c"));
+        assert!(!path_has_traversal("normal/path/file.txt"));
+        assert!(!path_has_traversal("/absolute/normal"));
+    }
+}
+

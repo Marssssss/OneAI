@@ -89,7 +89,7 @@ impl Tool for FileWriteTool {
         }
 
         // Security: reject path traversal
-        if path.contains("..") {
+        if crate::tool_interfaces::path_has_traversal(path) {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),

@@ -21,6 +21,7 @@ use oneai_core::PermissionLevel;
 use oneai_tool::{
     ApplyPatchTool, EnvironmentTool, FileEditTool, FileListTool, FileReadTool, FileWriteTool,
     GlobTool, GrepTool, NotebookEditTool, ShellTool, WebFetchTool, WebSearchTool,
+    default_sandbox_backend,
 };
 
 use oneai_workflow::{
@@ -188,7 +189,16 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
             Arc::new(FileEditTool::new()) as Arc<dyn Tool>,
             Arc::new(FileWriteTool::new()) as Arc<dyn Tool>,
             Arc::new(ApplyPatchTool::new()) as Arc<dyn Tool>,
-            Arc::new(ShellTool::new()) as Arc<dyn Tool>,
+            // Wire the real sandbox backend (Seatbelt on macOS, Docker on
+            // Linux, regex fallback) so the default CodingPack gets actual
+            // process-level isolation in production — not just regex blocking.
+            // Gap-analysis P1: ShellTool::new() left the backend None, so the
+            // production default never had real isolation. Tests that build
+            // ShellTool directly still use new() (regex-only) and are unaffected.
+            Arc::new(ShellTool::with_sandbox_backend(default_sandbox_backend(
+                std::path::Path::new(project_dir),
+                false,
+            ))) as Arc<dyn Tool>,
             Arc::new(GrepTool::new()) as Arc<dyn Tool>,
             Arc::new(GlobTool::new()) as Arc<dyn Tool>,
             Arc::new(FileListTool::new()) as Arc<dyn Tool>,
