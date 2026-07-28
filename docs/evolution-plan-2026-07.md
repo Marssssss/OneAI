@@ -74,11 +74,8 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **How**：`crates/oneai-tool` 的 `ToolRegistry` 过滤路径（已按范式过滤）加 `service_available()` 检查；`InteractionGate::PreInfer` 顺带 surface"工具 X 已配置但前置缺失"。
 - **Effort**：低。**Fit**：极高，落在现有 DomainPack/InteractionGate 上。**类型**：降成本+提清晰度。
 
-### 1.3 供应链纪律：精确锁定 + cargo audit/deny + lockfile 闸 + OIDC 发布 + 隔离冒烟（inspiration P0-3）
-- **What**：(a) CI 强制每个 `Cargo.toml` 外部 dep 精确版本（`=1.2.3`，对标 PI `check-pinned-deps`）。(b) `.github/workflows/audit.yml` 每日 `cargo audit` + `cargo deny check`（advisories+license+build-scripts allowlist）。(c) `Cargo.lock` 提交闸（未设 `ONEAI_ALLOW_LOCKFILE_CHANGE=1` 则拒）。(d) tag 触发 CI OIDC 可信发布到 crates.io + provenance，幂等跳过已发布。(e) `release:local` 等价：`cargo package`→仓外 `cargo add`→跑 `say-exactly-ok` 冒烟再 tag。
-- **Why**：OneAI v1.1.0 发 crates.io + 5 端原生 app，这整列是发布侧硬伤——对一个"框架"尤其致命。已验证当前**完全缺失**（仅 `ci.yml`，caret 版本）。
-- **How**：脚本 + workflow，对标 PI 的 `.npmrc`/`check-pinned-deps.mjs`/`check-lockfile-commit.mjs`/`npm-audit.yml`/`local-release.mjs`/`publish.mjs`。crates.io 已支持 GitHub OIDC 可信发布。
-- **Effort**：低-中（纯工具链）。**Fit**：高，无关架构、纯收益、可立即做。**类型**：修发布侧硬伤。
+### 1.3 供应链纪律：精确锁定 + cargo audit/deny + lockfile 闸 + OIDC 发布 + 隔离冒烟（inspiration P0-3）✅
+> **进度**：全完成（2026-07-28）。取舍：**不转 `=` 精确锁定**——`Cargo.lock` 已提交（workspace 发 binaries，reproducible builds 已保证），外部依赖全集中在根 `[workspace.dependencies]`；可复现性靠 Cargo.lock + cargo-deny，转 `=` 反成维护负担。落地：(a) 修内部 `oneai-*` path 依赖版本漂移 `1.0.0→1.1.0`（与 `[workspace.package]` lockstep，真发布侧 bug）；(b) `deny.toml` + `.github/workflows/audit.yml`（cron daily + PR，**单用 cargo-deny** 覆 advisories+licenses+bans+sources，不用 cargo-audit 避免双 ignore 列表漂移；首次跑修 3 个可 caret 升级的 advisory——crossbeam-deque 0.8.6→0.8.7、plist 1.9.0→1.10.0——其余 6 个带 rationale 忽略，均在 opt-in/未绑定路径）；(c) `ci.yml` lockfile-gate job（PR 改 Cargo.lock 未设 `ONEAI_ALLOW_LOCKFILE_CHANGE=1` 则拒）；(d) `.github/workflows/publish.yml`（tag `v*` 触发，复用 `scripts/publish_crates.sh`，`id-token:write` 留 Trusted Publishing，Path B token + Path A 文档化）；(e) `scripts/release-local.sh`（`cargo publish --dry-run` 每 crate = package+path-dep 重写+隔离构建+metadata 校验，冒烟后提示打 tag）。详见 CLAUDE.md「Supply-chain discipline」。
 
 ### 1.4 安全护栏补齐（gap P1 剩余）
 

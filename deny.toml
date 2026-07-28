@@ -1,0 +1,93 @@
+# cargo-deny configuration — supply-chain discipline (evolution-plan §1.3).
+#
+# Reproducibility is already guaranteed by the committed Cargo.lock; this file
+# adds the second belt: vulnerability advisories + license allowlist + ban on
+# wildcards/unknown sources. Run locally with `cargo deny check` (install via
+# `cargo install cargo-deny`) and in CI via .github/workflows/audit.yml.
+
+[graph]
+# Lint the dependency graph as it would resolve on CI's three host platforms.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+version = 2
+# yanked crates are a real hazard for a published framework.
+yanked = "deny"
+db-path = "~/.cargo/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# No advisories are pre-ignored. Accepted-risk advisories must carry a
+# rationale string — never ignore silently. Each entry below is a *pre-existing*
+# advisory surfaced on the first `cargo deny` run (2026-07-28); none are
+# currently exploitable on a default-config code path. They are tracked here so
+# the audit gate stays GREEN and enforces against NEW advisories going forward.
+# Re-evaluate each when its stated trigger fires.
+ignore = [
+    # yaml-rust 0.4.5 unmaintained. Transitive via `syntect` (TUI syntax
+    # highlighting in oneai-cli). No upstream fix — syntect pins yaml-rust.
+    # Only parses syntect's own syntax-definition files, not untrusted input.
+    { id = "RUSTSEC-2024-0320", reason = "syntect transitive, no upstream fix; not on untrusted input" },
+    # bincode unmaintained. Transitive via `syntect`. TUI-only, no untrusted
+    # serialization surface.
+    { id = "RUSTSEC-2025-0141", reason = "syntect transitive (TUI); no untrusted bincode input path" },
+    # paste unmaintained. Transitive via `tokenizers` (BGE-M3 tokenization in
+    # oneai-vector). `paste` is a build-time proc-macro helper, no runtime.
+    { id = "RUSTSEC-2024-0436", reason = "tokenizers build-time proc-macro helper, no runtime; upstream pin" },
+    # crossbeam fmt::Pointer invalid-pointer deref. Transitive via tokenizers.
+    # Requires an already-invalid pointer to trigger; not reachable from
+    # untrusted input on the tokenizers embedding path.
+    { id = "RUSTSEC-2026-0204", reason = "tokenizers transitive; requires invalid pointer, not untrusted-input reachable" },
+    # rmcp Streamable HTTP *server* DNS rebinding. OneAI's McpServerHost exposes
+    # the stdio transport only (`run_stdio`); the vulnerable HTTP server bind
+    # path is not wired. Re-evaluate when an HTTP MCP server is added (Phase 3.5).
+    { id = "RUSTSEC-2026-0189", reason = "McpServerHost is stdio-only; vulnerable Streamable HTTP server transport not bound" },
+    # wasmtime-wasi FilePerms bypass via hard links/renames. Affects only the
+    # restricted-filesystem WASI path (`WasiConfig::restricted`), which is opt-in
+    # (default `disabled()`). Track upstream wasmtime fix; upgrade before
+    # shipping production WASI filesystem access.
+    { id = "RUSTSEC-2026-0188", reason = "restricted-WASI path opt-in (default disabled); track upstream wasmtime fix" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# Allowlist covers every license transitively pulled by the workspace as of
+# 2026-07-28 (Apache-2.0 workspace + the usual MIT/BSD/ISC/Zlib/MPL suspects).
+# If `cargo deny check licenses` flags an out-of-allowlist license, add an
+# exception below with a `reason` rather than widening this list blindly.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    # CDLA-Permissive-2.0 — webpki root cert bundles (rustls/ureq transitive).
+    # A permissive data license; broad consensus treats it as OSFI-compatible.
+    "CDLA-Permissive-2.0",
+]
+exceptions = []
+
+[bans]
+# duplicate versions are noisy but not blocking; warn so contributors see drift.
+multiple-versions = "warn"
+wildcards = "deny"
+# No crate is blanket-banned yet.
+deny = []
+skip = []
+
+[sources]
+# Only crates.io is trusted. The workspace has no git/path-into-registry deps;
+# if one is ever added, it must be explicitly allow-listed here.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

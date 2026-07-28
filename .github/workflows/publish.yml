@@ -1,0 +1,70 @@
+name: Publish to crates.io
+
+# Publish all workspace crates to crates.io on tag push. Idempotent —
+# scripts/publish_crates.sh skips crates already on the registry, so re-running
+# a tag (or re-triggering after a partial failure) is safe.
+#
+# ── ONE-TIME SETUP (cannot be done from this repo — must be done in the
+#    crates.io web UI / GitHub by a crate owner) ─────────────────────────────
+#
+# Path B (implemented here — API token):
+#   Generate a crates.io API token (publish scope) and add it as the repo
+#   secret CARGO_REGISTRY_TOKEN. `cargo publish` reads it via the env var.
+#
+# Path A (Trusted Publishing, OIDC — preferred, no long-lived secret):
+#   For EACH oneai-* crate, on crates.io → crate → Settings → Trusted
+#   Publishing, bind GitHub repo = Marssssss/OneAI, workflow = publish.yml,
+#   environment = release. Then swap the "Publish" step below for the
+#   `rust-lang/crates-io-actions/publish@v1` action (it mints the OIDC token,
+#   does topological ordering, idempotency, and 429 retry internally — at that
+#   point scripts/publish_crates.sh stays as the local/manual path only).
+#
+# Order is handled by scripts/publish_crates.sh (Kahn topological sort over the
+# intra-workspace graph + 429 backoff). Do NOT call `cargo publish --workspace`
+# — it does not guarantee the order crates.io needs to resolve path-dep
+# rewrites on first publish.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: # manual re-run / dry-run
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+  # Keep id-token: write so Path A (Trusted Publishing) works after the
+  # one-time crates.io binding + action swap. Harmless for Path B.
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish workspace crates
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # Pre-flight: build cleanly from a publishable state before pushing
+      # anything to the registry.
+      - name: Build (workspace + all targets)
+        run: cargo build --workspace --all-targets
+
+      # `cargo publish` reads the token from $CARGO_REGISTRY_TOKEN.
+      - name: Publish (topological order, idempotent)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: ./scripts/publish_crates.sh

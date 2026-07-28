@@ -35,6 +35,17 @@ Do not wire a custom `reqwest::Client` into individual providers/tools for proxy
 
 Git commit messages must end with `Co-Authored-By: glm-5.2` (the model actually driving this repo), **not** the default Claude Opus co-author line. Commit messages in this repo are frequently written in Chinese.
 
+## Supply-chain discipline
+
+Reproducibility comes from the **committed `Cargo.lock`** (the workspace ships binaries — `oneai-cli` + examples — so the lockfile is tracked, not gitignored). On top of that, four gates enforce supply-chain integrity (evolution-plan §1.3):
+
+- **`deny.toml`** — `cargo deny check` config: advisories (RustSec), license allowlist, ban on wildcards/unknown sources. Single source of truth; `cargo audit` is NOT used in CI to avoid drifting two parallel ignore lists. Accepted-risk advisories live in `[advisories].ignore` with a per-entry `reason` string — never ignore silently. Install locally: `cargo install cargo-deny && cargo deny check`.
+- **`.github/workflows/audit.yml`** — daily cron + PR-triggered `cargo deny check`. PRs only gate on `Cargo.toml`/`Cargo.lock`/`deny.toml` changes.
+- **lockfile drift gate** (`ci.yml` `lockfile-gate` job) — a PR that modifies `Cargo.lock` fails CI unless `ONEAI_ALLOW_LOCKFILE_CHANGE=1` is set. To intentionally upgrade a dependency, set that env on the PR (or note it in the commit message and a maintainer re-runs with the env). Push-to-main always passes.
+- **`.github/workflows/publish.yml`** — tag `v*` triggered publish to crates.io via `scripts/publish_crates.sh` (Kahn topological order + idempotent skip + 429 backoff). `id-token: write` is set for crates.io Trusted Publishing (one-time crates.io UI binding required — see the workflow's setup header). Pre-publish smoke: `./scripts/release-local.sh` runs `cargo publish --dry-run` for every crate (packages + rewrites path deps + isolated build) before you tag.
+
+When adding a new external dependency: add it to `[workspace.dependencies]` in the root `Cargo.toml` and reference via `{ workspace = true }` in the crate. Do NOT wire per-crate version pins — they're centralized for a reason. Run `cargo deny check` before committing; if it flags a new license or advisory, add an exception/ignore with a rationale rather than widening blindly.
+
 ## Architecture: how the pieces wire together
 
 The integration point is **`oneai-app`'s `AppBuilder`** (`crates/oneai-app/src/builder.rs`). Every subsystem (provider, tools, memory, RAG, skills, parser, persistence, trace, domain packs, WASM, MCP, A2A, SmartRouter, usage) is optional and plugged in via builder methods, then assembled into an `App` → `AppSession`. **The LLM provider is optional** — tool-only or workflow-only usage needs no provider. When changing how a subsystem is constructed or wired, this builder is the single place to update.

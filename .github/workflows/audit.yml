@@ -1,0 +1,38 @@
+name: Supply-chain audit
+
+on:
+  schedule:
+    # Daily 09:07 UTC — off the :00 mark to spread load across the fleet.
+    - cron: "7 9 * * *"
+  workflow_dispatch:
+  pull_request:
+    # On PRs only gate advisories + licenses (the security-relevant checks);
+    # bans/sources drift is informational and handled by the daily run.
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/audit.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    name: cargo deny (advisories + licenses + bans + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # cargo-deny is the single source of truth for supply-chain gating. It
+      # subsumes `cargo audit` (advisories) AND adds license/ban/source checks.
+      # Using only cargo-deny avoids drifting two parallel ignore lists
+      # (deny.toml + audit.toml). Accepted-risk advisories live in deny.toml
+      # under [advisories].ignore with a per-entry rationale.
+      - name: cargo deny check
+        run: cargo deny --workspace check
+

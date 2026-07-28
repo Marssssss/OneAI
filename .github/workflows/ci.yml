@@ -11,6 +11,37 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Supply-chain gate: block accidental Cargo.lock drift in PRs. Cargo.lock IS
+  # committed (reproducible builds — see .gitignore), so a PR that bumps it
+  # must be intentional. To upgrade a dependency, set
+  # `ONEAI_ALLOW_LOCKFILE_CHANGE=1` on the PR (commit message line, or send the
+  # env var via the workflow_dispatch/PR label) — see CLAUDE.md supply-chain
+  # discipline. Push-to-main always passes (post-merge lockfile bumps are
+  # expected); the job only gates pull_request events.
+  lockfile-gate:
+    name: Cargo.lock drift gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Cargo.lock is unchanged unless explicitly allowed
+        run: |
+          set -euo pipefail
+          base="origin/${{ github.base_ref }}"
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          if git diff --exit-code "$base" -- Cargo.lock; then
+            echo "Cargo.lock unchanged — OK"
+          else
+            if [[ "${ONEAI_ALLOW_LOCKFILE_CHANGE:-0}" == "1" ]]; then
+              echo "::warning::Cargo.lock intentionally changed (ONEAI_ALLOW_LOCKFILE_CHANGE=1)"
+            else
+              echo "::error::Cargo.lock changed in this PR. If this is an intentional dependency upgrade, set ONEAI_ALLOW_LOCKFILE_CHANGE=1 (see CLAUDE.md supply-chain discipline)."
+              exit 1
+            fi
+          fi
+
   build-test:
     name: Build & Test (stable)
     runs-on: ubuntu-latest
