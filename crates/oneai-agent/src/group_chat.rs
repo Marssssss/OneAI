@@ -668,6 +668,7 @@ fn build_member_loop(
         metrics_provider: None,
         plan_mode: false,
         prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
+        reflection_cadence: None,
     };
     let context_assembler = ContextAssembler::new();
     let stream_parser = IncrementalStreamParser::new();

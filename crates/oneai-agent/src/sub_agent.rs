@@ -27,6 +27,45 @@ use crate::worktree_isolation::{MergeResult, WorktreeConfig, WorktreeHandle, Wor
 
 // ─── SubAgentKind ───────────────────────────────────────────────────────────
 
+/// System prompt for the cadence-fired `Reflect` sub-agent (Phase 2.1 Stage A).
+///
+/// Ports the Hermes-style learning strategy: frustration-as-signal, the
+/// patch→umbrella→support-file→create preference order (Stage A: only "write
+/// to memory" is actionable; the order is documented so Stage B `skill_manage`
+/// slots in unchanged), and the anti-pattern of capturing transient /
+/// environment failures as durable facts.
+const REFLECT_SYSTEM_PROMPT: &str = "\
+You are a background review sub-agent. Your job is to distill DURABLE learnings \
+from the parent agent's recent activity and persist them to memory so the agent \
+grows across sessions. You are NOT conversing with the user — produce no chat \
+prose; call memory tools then return a 1–3 sentence summary.
+
+## What to capture (frustration-as-signal)
+Treat repeated tool failures, retries, and user corrections as the strongest \
+signal. From them extract durable facts:
+- preferences (\"the user wants X / the agent should prefer Y\"),
+- decisions (\"chose approach A over B because …\"),
+- open tasks / blockers worth resuming,
+- critical files / commands / conventions discovered.
+
+## Preference order when consolidating a learning
+patch an existing skill > extend an umbrella skill > add a support-file > \
+create a new skill. (In this stage you can only persist facts to memory — \
+the ordering still guides WHICH fact to write: prefer updating an existing \
+core-memory fact over creating a new one.)
+
+## Anti-pattern — NEVER capture as a fact
+Environment / transient failures: a missing binary, a network 429, a transient \
+filesystem error, a flaky test. These are NOT durable learnings — recording \
+them poisons memory. Only record what the agent or user should durably do \
+differently.
+
+## Output contract
+- `core_memory_edit`: for always-on preferences / decisions (small, hot).
+- `archival_memory_insert`: for episodic learnings (larger, recall-on-demand).
+Then return a SubAgentSummary whose `summary` is 1–3 sentences naming what you \
+persisted (or \"nothing durable — all signals were transient\").";
+
 /// The type of sub-agent to spawn for a delegated task.
 ///
 /// Each kind maps to a specialized agent with different capabilities:
@@ -34,6 +73,11 @@ use crate::worktree_isolation::{MergeResult, WorktreeConfig, WorktreeHandle, Wor
 /// - Explore: Search and understand the codebase/environment
 /// - Code: Code implementation and modification
 /// - Review: Review and audit existing work
+/// - Reflect: Background review sub-agent (Phase 2.1 Stage A) — NOT
+///   model-driven via `delegate`; spawned directly by the `AgentLoop` on a
+///   cadence + on `DirectAnswer` delivery. Deliberately absent from
+///   `available_kinds`/`is_available` so it never appears in the `delegate`
+///   schema. Whitelist = memory tools; persists durable learnings.
 /// - Custom: User-defined sub-agent types
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SubAgentKind {
@@ -53,6 +97,12 @@ pub enum SubAgentKind {
     /// Returns a structured review with findings and suggestions.
     Review,
 
+    /// Reflect sub-agent — cadence-fired background reviewer (Phase 2.1
+    /// Stage A). Distills durable learnings from the parent loop's recent
+    /// activity and persists them to memory. Internal-only: spawned by the
+    /// `AgentLoop`'s cadence check, never by the model via `delegate`.
+    Reflect,
+
     /// Custom sub-agent type (user-defined).
     /// The string identifier maps to a registered sub-agent factory method.
     Custom(String),
@@ -66,6 +116,7 @@ impl SubAgentKind {
             Self::Explore => "explore",
             Self::Code => "code",
             Self::Review => "review",
+            Self::Reflect => "reflect",
             Self::Custom(name) => name,
         }
     }
@@ -79,28 +130,38 @@ impl SubAgentKind {
             "explore" => Self::Explore,
             "code" => Self::Code,
             "review" => Self::Review,
+            "reflect" => Self::Reflect,
             other => Self::Custom(other.to_string()),
         }
     }
 
     /// Get the default system prompt for this sub-agent kind.
-    fn default_system_prompt(&self) -> &str {
+    pub fn default_system_prompt(&self) -> &str {
         match self {
             Self::Plan => "You are a planning agent. Decompose the given task into ordered steps with dependencies. Return a structured plan as a numbered list.",
             Self::Explore => "You are an exploration agent. Search and understand the codebase using available tools. Return a comprehensive summary of your findings including file paths, function signatures, and key patterns.",
             Self::Code => "You are a code implementation agent. Write and modify code based on the given specification. Return a summary of all changes you made.",
             Self::Review => "You are a code review agent. Review code for correctness bugs, style issues, and potential improvements. Return a structured review with findings and suggestions.",
+            Self::Reflect => REFLECT_SYSTEM_PROMPT,
             Self::Custom(_) => "You are a specialized agent. Complete the given task and return a summary of your results.",
         }
     }
 
     /// Get the default available tools for this sub-agent kind.
-    fn default_tools(&self) -> &[&str] {
+    pub fn default_tools(&self) -> &[&str] {
         match self {
             Self::Explore => &["read_file", "grep", "glob", "list_directory"],
             Self::Code => &["read_file", "edit_file", "shell", "grep", "glob"],
             Self::Plan => &["read_file", "grep", "glob"],
             Self::Review => &["read_file", "grep", "glob"],
+            // Reflect: memory-only whitelist — it persists durable learnings,
+            // never reads code / runs shell. The closed loop is memory write →
+            // future-turn recall. `skill_manage` joins this list in Stage B.
+            Self::Reflect => &[
+                "memory_search",
+                "core_memory_edit",
+                "archival_memory_insert",
+            ],
             Self::Custom(_) => &["read_file", "grep", "glob", "edit_file", "shell"],
         }
     }
@@ -271,9 +332,10 @@ impl SubAgentWrapper {
     pub fn default_worktree_config_for_kind(kind: &SubAgentKind) -> WorktreeConfig {
         match kind {
             SubAgentKind::Code | SubAgentKind::Custom(_) => WorktreeConfig::coding(),
-            SubAgentKind::Plan | SubAgentKind::Explore | SubAgentKind::Review => {
-                WorktreeConfig::read_only()
-            }
+            SubAgentKind::Plan
+            | SubAgentKind::Explore
+            | SubAgentKind::Review
+            | SubAgentKind::Reflect => WorktreeConfig::read_only(),
         }
     }
 }
@@ -647,6 +709,7 @@ impl DefaultSubAgentFactory {
     async fn create_scoped_tools(
         &self,
         available_tools: &[&str],
+        strict: bool,
     ) -> Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>> {
         let full_tools = self.tools.read().await;
         let mut scoped = HashMap::new();
@@ -660,8 +723,9 @@ impl DefaultSubAgentFactory {
 
         // Fall back to the full tool set when the preferred tools are absent,
         // so the sub-agent isn't left with zero tools against a prompt that
-        // asks it to use them.
-        if scoped.is_empty() && !full_tools.is_empty() {
+        // asks it to use them. `strict` (Reflect) opts out: an empty whitelist
+        // stays empty rather than widening to tools the reviewer mustn't touch.
+        if scoped.is_empty() && !full_tools.is_empty() && !strict {
             tracing::info!(
                 "Sub-agent preferred tools {:?} not registered — falling back to all {} available tools",
                 available_tools,
@@ -689,7 +753,16 @@ impl SubAgentFactory for DefaultSubAgentFactory {
         //
         // This is similar to how Claude Code's Agent tool filters the tool set
         // based on the sub-agent type.
-        let scoped_tools = self.create_scoped_tools(available_tools_slice).await;
+        //
+        // `Reflect` is strict: if its memory-tool whitelist isn't registered it
+        // gets an EMPTY toolset (no fallback) — the alternative (falling back to
+        // all tools) would hand a background reviewer `edit_file`/`shell`, breaking
+        // the memory-only guarantee. The AgentLoop's cadence check skips firing
+        // reflect when the memory tools are absent, so the empty case is rare.
+        let strict_whitelist = matches!(kind, SubAgentKind::Reflect);
+        let scoped_tools = self
+            .create_scoped_tools(available_tools_slice, strict_whitelist)
+            .await;
 
         // Also set the ParadigmConfig for the sub-agent — this controls
         // which tools are sent to the LLM as tool definitions.
@@ -700,7 +773,9 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             SubAgentKind::Plan => crate::agent_loop::ParadigmKind::Plan,
             SubAgentKind::Explore => crate::agent_loop::ParadigmKind::Explore,
             SubAgentKind::Code => crate::agent_loop::ParadigmKind::ReAct,
-            SubAgentKind::Review => crate::agent_loop::ParadigmKind::Reflect,
+            SubAgentKind::Review | SubAgentKind::Reflect => {
+                crate::agent_loop::ParadigmKind::Reflect
+            }
             _ => crate::agent_loop::ParadigmKind::ReAct,
         });
 
@@ -712,7 +787,15 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             max_tokens: Some(budget.total),
             thinking_budget: None,
             stop_sequences: Vec::new(),
-            hard_max_iterations: Some(50),
+            // Reflect is a bounded background reviewer — 16 iterations cap
+            // keeps the cadence-fired sub-agent from running away (it should
+            // persist a few memory facts and stop). Other sub-agents keep the
+            // 50-iteration headroom for real exploration / coding work.
+            hard_max_iterations: Some(if matches!(kind, SubAgentKind::Reflect) {
+                16
+            } else {
+                50
+            }),
             // Sub-agent run-cost cap = the delegation budget. The loop
             // terminates when the delegated token budget is exhausted,
             // honoring the caller's `budget_tokens` cap (previously the
@@ -740,6 +823,9 @@ impl SubAgentFactory for DefaultSubAgentFactory {
             metrics_provider: None,
             plan_mode: false, // Sub-agents never run in plan mode
             prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
+            // Sub-agents never cadence-fire their own reflect (and `Reflect`
+            // kinds don't nest via SubAgentFactoryNone anyway).
+            reflection_cadence: None,
         };
 
         // Create a basic context assembler (no domain sources for sub-agents)
@@ -896,7 +982,7 @@ mod scoped_tools_tests {
             "memory_search",
         ]);
         let scoped = factory
-            .create_scoped_tools(SubAgentKind::Code.default_tools())
+            .create_scoped_tools(SubAgentKind::Code.default_tools(), false)
             .await;
         let scoped_names: Vec<String> = scoped.read().await.keys().cloned().collect();
         assert!(scoped_names.contains(&"read_file".to_string()));
@@ -911,7 +997,7 @@ mod scoped_tools_tests {
         // IS available, rather than an empty set.
         let (factory, _tools) = build_factory(&["memory_search", "web_fetch"]);
         let scoped = factory
-            .create_scoped_tools(SubAgentKind::Code.default_tools())
+            .create_scoped_tools(SubAgentKind::Code.default_tools(), false)
             .await;
         let scoped_names: Vec<String> = scoped.read().await.keys().cloned().collect();
         assert_eq!(scoped_names.len(), 2);
@@ -924,7 +1010,7 @@ mod scoped_tools_tests {
         // Truly empty registry → no fallback possible, empty set (honest).
         let (factory, _tools) = build_factory(&[]);
         let scoped = factory
-            .create_scoped_tools(SubAgentKind::Explore.default_tools())
+            .create_scoped_tools(SubAgentKind::Explore.default_tools(), false)
             .await;
         assert!(scoped.read().await.is_empty());
     }

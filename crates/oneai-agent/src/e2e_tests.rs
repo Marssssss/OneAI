@@ -116,6 +116,7 @@ enum TestEvent {
     Complete(AgentLoopResult),
     StreamChunk(String),
     Thinking(String),
+    Reflection(String),
 }
 
 impl AgentLoopObserver for TestObserver {
@@ -185,6 +186,12 @@ impl AgentLoopObserver for TestObserver {
             .lock()
             .unwrap()
             .push(TestEvent::Thinking(text.to_string()));
+    }
+    fn on_reflection(&self, summary: &str) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::Reflection(summary.to_string()));
     }
 }
 
@@ -3077,5 +3084,356 @@ async fn otel_metrics_recorded_during_run() {
         snap.tool_success_count >= 1,
         "successful read_file should bump tool_success_count: {:?}",
         snap
+    );
+}
+
+// ─── Phase 2.1 Stage A: cadence-fired Reflect sub-agent ─────────────────────
+
+/// A recording SubAgentFactory: logs every `create(kind, …)` call and returns
+/// a canned `MockSubAgent`. Lets reflect tests assert the loop spawned a
+/// `Reflect` sub-agent (and lets us assert it did NOT for interrupt / default
+/// cases) without standing up a real reflect AgentLoop.
+struct ReflectFactory {
+    creates: Arc<Mutex<Vec<SubAgentKind>>>,
+}
+
+impl ReflectFactory {
+    fn new() -> Self {
+        Self {
+            creates: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+    fn creates(&self) -> Arc<Mutex<Vec<SubAgentKind>>> {
+        self.creates.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl SubAgentFactory for ReflectFactory {
+    async fn create(
+        &self,
+        kind: SubAgentKind,
+        budget: TokenBudget,
+    ) -> oneai_core::error::Result<Box<dyn crate::sub_agent::SubAgent>> {
+        self.creates.lock().unwrap().push(kind.clone());
+        Ok(Box::new(MockSubAgent { kind, budget }))
+    }
+    fn available_kinds(&self) -> Vec<SubAgentKind> {
+        Vec::new() // Reflect is internal-only — not advertised for `delegate`.
+    }
+    fn is_available(&self, _kind: &SubAgentKind) -> bool {
+        false
+    }
+}
+
+/// Build the trio of memory tools the reflect sub-agent's footprint guard
+/// looks for, as cheap MockTools (the ReflectFactory never actually
+/// dispatches them — they only need to exist by name).
+fn memory_trio_tools() -> Vec<Arc<dyn oneai_core::traits::Tool>> {
+    use oneai_core::PermissionLevel;
+    let mk = |name: &'static str| {
+        Arc::new(MockTool::new(
+            name,
+            "memory tool",
+            serde_json::json!({"type": "object", "properties": {}}),
+            ToolOutput {
+                success: true,
+                content: "ok".to_string(),
+                error: None,
+            },
+            PermissionLevel::Read,
+        )) as Arc<dyn oneai_core::traits::Tool>
+    };
+    vec![
+        mk("memory_search"),
+        mk("core_memory_edit"),
+        mk("archival_memory_insert"),
+    ]
+}
+
+/// Build an AgentLoop wired for reflect tests: the memory trio registered
+/// (so the footprint guard passes) + a recording sub-agent factory.
+fn build_reflect_loop(
+    provider: MockProvider,
+    factory: Arc<ReflectFactory>,
+    config: AgentLoopConfig,
+) -> AgentLoop {
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
+        let mut map = HashMap::new();
+        for tool in memory_trio_tools() {
+            let name = oneai_core::traits::Tool::name(&*tool).to_string();
+            map.insert(name, tool);
+        }
+        Arc::new(tokio::sync::RwLock::new(map))
+    };
+    AgentLoop::new(
+        Arc::new(provider),
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        factory,
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        config,
+    )
+}
+
+#[test]
+fn reflect_subagent_kind_unit() {
+    use crate::sub_agent::SubAgentKind;
+    let k = SubAgentKind::from_str("reflect");
+    assert_eq!(k, SubAgentKind::Reflect);
+    assert_eq!(k.name(), "reflect");
+    // Hermes-style review prompt mentions frustration-as-signal.
+    assert!(SubAgentKind::Reflect
+        .default_system_prompt()
+        .to_lowercase()
+        .contains("frustration"));
+    // Memory-only whitelist (skill_manage joins in Stage B).
+    let tools = SubAgentKind::default_tools(&SubAgentKind::Reflect).to_vec();
+    assert_eq!(
+        tools,
+        vec![
+            "memory_search",
+            "core_memory_edit",
+            "archival_memory_insert"
+        ]
+    );
+    // Reflect is internal-only: NOT advertised for `delegate`.
+    assert!(!SubAgentKind::default_tools(&SubAgentKind::Plan).contains(&"memory_search"));
+}
+
+/// Cadence fires mid-run (every N iters) AND on DirectAnswer. Provider does
+/// two tool-call iterations then answers → reflect fires at iter 2 (cadence)
+/// and at DirectAnswer (iter 3).
+#[tokio::test]
+async fn e2e_reflect_cadence_fires_midrun_and_on_answer() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("memory_search", serde_json::json!({"query": "x"})),
+        ScriptedResponse::tool_call("memory_search", serde_json::json!({"query": "y"})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+
+    let factory = Arc::new(ReflectFactory::new());
+    let creates = factory.creates();
+    let agent_loop = build_reflect_loop(
+        provider,
+        factory.clone(),
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(20),
+            reflection_cadence: Some(2),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = agent_loop
+        .run_with_observer("do a thing", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed, "loop should complete");
+
+    let creates = creates.lock().unwrap().clone();
+    assert!(
+        creates.iter().all(|k| k == &SubAgentKind::Reflect),
+        "every sub-agent spawn must be a Reflect kind: {creates:?}"
+    );
+    assert!(
+        creates.len() >= 2,
+        "reflect should fire at least twice (mid-run cadence + DirectAnswer): {creates:?}"
+    );
+
+    let reflections: Vec<TestEvent> = observer
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, TestEvent::Reflection(_)))
+        .cloned()
+        .collect();
+    assert!(
+        reflections.len() >= 2,
+        "on_reflection should fire for each reflect: {:?}",
+        reflections
+    );
+}
+
+/// DirectAnswer-only trigger: cadence set huge so mid-run never fires, but
+/// reflect still fires once on DirectAnswer delivery.
+#[tokio::test]
+async fn e2e_reflect_fires_on_direct_answer_only() {
+    let provider = MockProvider::always_answers("final answer");
+    let factory = Arc::new(ReflectFactory::new());
+    let creates = factory.creates();
+    let agent_loop = build_reflect_loop(
+        provider,
+        factory.clone(),
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(20),
+            reflection_cadence: Some(usize::MAX),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = agent_loop
+        .run_with_observer("answer me", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let creates = creates.lock().unwrap();
+    assert_eq!(
+        creates.len(),
+        1,
+        "exactly one reflect (DirectAnswer trigger) — no mid-run fire: {creates:?}"
+    );
+    assert_eq!(creates[0], SubAgentKind::Reflect);
+}
+
+/// Interrupt suppresses reflect: request an interrupt before run → the loop
+/// returns at the 0-iteration boundary with reflect never spawned.
+#[tokio::test]
+async fn e2e_reflect_interrupt_suppresses() {
+    use oneai_core::InterruptReason;
+    let provider = MockProvider::always_answers("done");
+    let factory = Arc::new(ReflectFactory::new());
+    let creates = factory.creates();
+    let agent_loop = build_reflect_loop(
+        provider,
+        factory.clone(),
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(20),
+            reflection_cadence: Some(1),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    // Request interrupt before the loop starts — the top-of-while guard
+    // catches it on iteration 1 and returns partial, before any cadence fire.
+    agent_loop.request_interrupt(InterruptReason::Custom {
+        reason: "test interrupt".to_string(),
+    });
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let _ = agent_loop.run_with_observer("anything", &observer).await;
+
+    let creates = creates.lock().unwrap();
+    assert!(
+        creates.is_empty(),
+        "no reflect should fire when interrupted before the cadence boundary: {creates:?}"
+    );
+    let reflections = observer
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, TestEvent::Reflection(_)))
+        .count();
+    assert_eq!(reflections, 0);
+}
+
+/// Backward-compat: default config (reflection_cadence: None) → reflect never
+/// fires, even though the memory tools are registered and the factory exists.
+#[tokio::test]
+async fn e2e_reflect_default_off() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("memory_search", serde_json::json!({"query": "q"})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let factory = Arc::new(ReflectFactory::new());
+    let creates = factory.creates();
+    let agent_loop = build_reflect_loop(
+        provider,
+        factory.clone(),
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(20),
+            // reflection_cadence defaults to None
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = agent_loop
+        .run_with_observer("do a thing", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let creates = creates.lock().unwrap();
+    assert!(
+        creates.is_empty(),
+        "reflect must NOT fire with default (None) cadence: {creates:?}"
+    );
+    let reflections = observer
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, TestEvent::Reflection(_)))
+        .count();
+    assert_eq!(reflections, 0, "no on_reflection events with cadence off");
+}
+
+/// The reflect summary must NOT pollute the parent conversation — the whole
+/// point of sub-agent delegation is a clean parent context. Compare parent
+/// message count against a no-cadence baseline run with the same script.
+#[tokio::test]
+async fn e2e_reflect_summary_not_injected_into_parent() {
+    let script = vec![
+        ScriptedResponse::tool_call("memory_search", serde_json::json!({"query": "q"})),
+        ScriptedResponse::direct_answer("done"),
+    ];
+
+    // Baseline: cadence off.
+    let baseline = build_reflect_loop(
+        MockProvider::from_script(script.clone()),
+        Arc::new(ReflectFactory::new()),
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(20),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let baseline_result = baseline.run("do a thing").await.unwrap();
+    let baseline_msgs = baseline_result.conversation.messages.len();
+
+    // With reflect on (cadence=1) — should fire mid-run + on answer, yet the
+    // parent conversation must grow by the same amount as the baseline.
+    let with_reflect = build_reflect_loop(
+        MockProvider::from_script(script),
+        Arc::new(ReflectFactory::new()),
+        AgentLoopConfig {
+            inject_skills: false,
+            hard_max_iterations: Some(20),
+            reflection_cadence: Some(1),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let reflect_result = with_reflect.run("do a thing").await.unwrap();
+    let reflect_msgs = reflect_result.conversation.messages.len();
+
+    assert_eq!(
+        baseline_msgs, reflect_msgs,
+        "reflect summary must NOT be injected into the parent conversation \
+         (baseline {baseline_msgs} msgs, with-reflect {reflect_msgs} msgs)"
     );
 }

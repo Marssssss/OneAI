@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use oneai_core::budget::TokenBudget;
 use oneai_core::error::Result;
 use oneai_core::traits::{InteractionGate, LlmProvider, OutputParser, Tool};
 use oneai_core::{
@@ -110,6 +111,22 @@ pub trait AgentLoopObserver: Send + Sync {
     /// this to re-render the persistent plan panel. `None` means the plan was
     /// cleared; `Some(plan)` is the current state (clone).
     fn on_plan_update(&self, _plan: Option<&crate::plan_state::PlanState>) {}
+
+    /// Called when a cadence-fired `Reflect` sub-agent finishes (Phase 2.1
+    /// Stage A). The summary is NOT injected into the parent conversation —
+    /// the UI may surface it as a transient side-note. Default empty so
+    /// existing observers keep compiling.
+    fn on_reflection(&self, _summary: &str) {}
+}
+
+/// What fired a cadence-fired `Reflect` sub-agent — telemetry only
+/// (Phase 2.1 Stage A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflectionTrigger {
+    /// Mid-run: `iterations` crossed a multiple of `reflection_cadence`.
+    Cadence,
+    /// End-of-run: the loop just delivered a `DirectAnswer`.
+    DirectAnswer,
 }
 
 // ─── AgentDecision ──────────────────────────────────────────────────────────
@@ -371,6 +388,10 @@ pub struct LoopState {
     pub user_id: String,
     /// The project / cwd scope for working-state events.
     pub project: String,
+    /// Telemetry: how many cadence-fired `Reflect` sub-agents have run this
+    /// loop. Prevents re-firing on the same boundary after a retry that
+    /// didn't advance `iterations`.
+    pub reflections_fired: usize,
 }
 
 impl LoopState {
@@ -402,6 +423,7 @@ impl LoopState {
             session_id: String::new(),
             user_id: String::new(),
             project: String::new(),
+            reflections_fired: 0,
         }
     }
 
@@ -451,6 +473,7 @@ impl LoopState {
             session_id: String::new(),
             user_id: String::new(),
             project: String::new(),
+            reflections_fired: 0,
         }
     }
 
@@ -649,6 +672,15 @@ pub struct AgentLoopConfig {
     /// for A/B replay to measure the no-cache baseline (efficiency axis:
     /// `EfficiencyProfile.cache_read_tokens` / `cache_hit_ratio`).
     pub prompt_cache_policy: oneai_core::PromptCachePolicy,
+    /// Cadence for the background `Reflect` sub-agent (Phase 2.1 Stage A).
+    /// `None` (default) = reflect never fires (backward-compat). `Some(n)`
+    /// = fire a reflect sub-agent every `n` iterations (mid-run cadence) AND
+    /// once on `DirectAnswer` delivery, when not interrupted. The reflect
+    /// sub-agent inherits the parent provider, runs a Hermes-style review
+    /// prompt, and persists durable learnings to memory; its summary is
+    /// surfaced via `AgentLoopObserver::on_reflection` and is NOT injected
+    /// into the parent conversation.
+    pub reflection_cadence: Option<usize>,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -692,6 +724,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             // metrics_provider (otel) holds atomics and is not Debug-rendered;
             // the manual impl may omit fields, so it stays absent here.
             .field("plan_mode", &self.plan_mode)
+            .field("reflection_cadence", &self.reflection_cadence)
             .finish()
     }
 }
@@ -751,6 +784,7 @@ impl Default for AgentLoopConfig {
             metrics_provider: None,
             plan_mode: false,
             prompt_cache_policy: oneai_core::PromptCachePolicy::Auto,
+            reflection_cadence: None,
         }
     }
 }
@@ -1264,6 +1298,22 @@ impl AgentLoop {
                 state.conversation.messages.len(),
                 state.is_complete()
             );
+
+            // ─── Cadence-fired Reflect sub-agent (Phase 2.1 Stage A) ────────
+            // Fire a background review sub-agent every `reflection_cadence`
+            // iterations (mid-run), when not interrupted. The DirectAnswer
+            // trigger fires separately at end-of-answer. See
+            // `maybe_run_reflection`.
+            if let Some(cadence) = self.config.reflection_cadence {
+                if cadence > 0
+                    && state.iterations.is_multiple_of(cadence)
+                    && !self.interrupt_requested.load(Ordering::Relaxed)
+                    && state.pending_interrupt.is_none()
+                {
+                    self.maybe_run_reflection(&mut state, observer, ReflectionTrigger::Cadence)
+                        .await;
+                }
+            }
 
             // ─── Rate limiter check (wait if rate limit exceeded) ────────────
             if let Some(rate_limiter) = &self.config.rate_limiter {
@@ -1997,6 +2047,7 @@ impl AgentLoop {
             // MUST be added to the conversation BEFORE any tool results, so that the
             // OpenAI/Anthropic API format is valid: assistant message with tool_calls
             // precedes tool result messages that reference those call_ids.
+            let was_complete = state.is_complete();
             match decision {
                 AgentDecision::DirectAnswer { text } => {
                     observer.on_direct_answer(&text);
@@ -2897,6 +2948,22 @@ impl AgentLoop {
                         .await?;
                     state.feed_paradigm_result(paradigm, result);
                 }
+            }
+
+            // ─── DirectAnswer-triggered Reflect (Phase 2.1 Stage A) ─────────
+            // If the loop just completed this iteration (was not complete
+            // before the match, is complete after) and cadence is configured,
+            // fire a final background reflection on the delivered answer —
+            // unless the user interrupted. Mid-run cadence firing happened
+            // above at the iteration boundary; this is the end-of-run one.
+            if !was_complete
+                && state.is_complete()
+                && self.config.reflection_cadence.is_some()
+                && !self.interrupt_requested.load(Ordering::Relaxed)
+                && state.pending_interrupt.is_none()
+            {
+                self.maybe_run_reflection(&mut state, observer, ReflectionTrigger::DirectAnswer)
+                    .await;
             }
 
             // 7. Per-iteration checkpoint tick. Working-state persistence now
@@ -3894,6 +3961,140 @@ impl AgentLoop {
 
         // No redirect matched — keep original shell call
         call
+    }
+
+    // ─── Cadence-fired Reflect sub-agent (Phase 2.1 Stage A) ────────────────
+
+    /// Build the bounded digest the reflect sub-agent reviews. Compact by
+    /// design — keeps the sub-agent's own context small so it cheaply
+    /// distills a few durable learnings rather than re-reading the whole
+    /// transcript.
+    fn build_reflection_review_task(&self, state: &LoopState) -> String {
+        let mut out = String::new();
+        out.push_str(
+            "[Background reflection — distill DURABLE learnings; ignore \
+             transient / environment failures. Do not converse with the user.]\
+             \n\n",
+        );
+        out.push_str(&format!("Original task: {}\n", state.original_task));
+        out.push_str(&format!("Iterations so far: {}\n", state.iterations));
+        if let Some(answer) = &state.final_answer {
+            out.push_str(&format!("Final answer delivered: {}\n", answer));
+        }
+        // Last ≤8 messages as a compact transcript (role + a short text
+        // excerpt + any tool_call name). Bounded so the reflect sub-agent's
+        // context stays small.
+        let recent = state
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>();
+        if !recent.is_empty() {
+            out.push_str("\nRecent activity (last ≤8 messages):\n");
+            for m in recent.into_iter().rev() {
+                let role = format!("{:?}", m.role).to_lowercase();
+                let excerpt = m.text_content().chars().take(200).collect::<String>();
+                let tool_calls: Vec<String> = m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        oneai_core::ContentBlock::ToolCall { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                out.push_str(&format!("- [{role}] {excerpt}"));
+                if !tool_calls.is_empty() {
+                    out.push_str(&format!("  (tools: {})", tool_calls.join(", ")));
+                }
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Spawn a `Reflect` sub-agent with the parent provider + a memory-only
+    /// tool whitelist, run it, and surface its summary via
+    /// `on_reflection`. The summary is deliberately NOT injected into the
+    /// parent conversation — the whole point of sub-agent delegation is to
+    /// keep the parent context clean. Failures are logged and swallowed: a
+    /// background reflection must never break the parent loop.
+    ///
+    /// The sub-agent inherits the parent provider (warm) via
+    /// `DefaultSubAgentFactory`. Its own `AgentLoop` is built with
+    /// `SubAgentFactoryNone`, so the `delegate` meta-tool is auto-stripped
+    /// from its schema (no recursive nudge) and `hard_max_iterations=16`
+    /// bounds it.
+    async fn maybe_run_reflection(
+        &self,
+        state: &mut LoopState,
+        observer: &dyn AgentLoopObserver,
+        trigger: ReflectionTrigger,
+    ) {
+        // Footprint guard: don't fire if the memory tools the reflect
+        // sub-agent needs aren't registered — an empty-whitelist reflect
+        // agent can't persist anything. (The factory's strict mode would
+        // hand it zero tools; better to skip entirely.)
+        let needed = [
+            "memory_search",
+            "core_memory_edit",
+            "archival_memory_insert",
+        ];
+        {
+            let tools = self.tools.read().await;
+            let missing: Vec<&str> = needed
+                .iter()
+                .copied()
+                .filter(|n| !tools.contains_key::<str>(*n))
+                .collect();
+            if !missing.is_empty() {
+                tracing::info!(
+                    trigger = ?trigger,
+                    "Skipping reflect sub-agent: memory tools not registered ({:?} missing)",
+                    missing
+                );
+                return;
+            }
+        }
+
+        state.reflections_fired += 1;
+        let review_task = self.build_reflection_review_task(state);
+        tracing::info!(
+            trigger = ?trigger,
+            iteration = state.iterations,
+            "Spawning cadence-fired Reflect sub-agent"
+        );
+
+        // Budget: a small slice — the reviewer reads a digest + writes a few
+        // memory facts. Generous enough for one inference + a couple tool
+        // calls, tight enough to stay cheap.
+        let budget = TokenBudget::new(2000);
+        match self
+            .sub_agent_factory
+            .create(crate::sub_agent::SubAgentKind::Reflect, budget)
+            .await
+        {
+            Ok(sub_agent) => match sub_agent.run(&review_task).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        summary = %summary.summary,
+                        "Reflect sub-agent finished ({} key findings, budget_exceeded={})",
+                        summary.key_findings.len(),
+                        summary.budget_exceeded
+                    );
+                    observer.on_reflection(&summary.summary);
+                }
+                Err(e) => {
+                    tracing::warn!("Reflect sub-agent run failed (swallowed): {e}");
+                }
+            },
+            Err(e) => {
+                // Factory unavailable (e.g. SubAgentFactoryNone — no provider
+                // / factory wired). Not an error for the parent loop.
+                tracing::info!("Reflect sub-agent not spawned (factory unavailable): {e}");
+            }
+        }
     }
 
     /// Schedule a batch of delegations with dependency-aware concurrency.

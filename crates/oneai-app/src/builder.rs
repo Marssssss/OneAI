@@ -172,6 +172,11 @@ pub struct AppBuilder {
     /// the `AgentLoopConfig`. Only takes effect when `structured_output` is
     /// also configured on the loop. Default `Auto`.
     constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
+    /// Cadence for the background `Reflect` sub-agent (Phase 2.1 Stage A).
+    /// `None` (default) = reflect never fires. `Some(n)` = fire a reflect
+    /// sub-agent every `n` iterations + once on `DirectAnswer` delivery
+    /// (when not interrupted). Propagated into every `AgentLoopConfig`.
+    reflection_cadence: Option<usize>,
     /// Durable working-state store root (optional). When set, the app builds a
     /// `FileWorkingStateStore` rooted here so the agent persists goal/steps/
     /// decisions/blockers to per-task append-only event logs — enabling crash
@@ -229,6 +234,7 @@ impl AppBuilder {
             probe_context_windows: true,
             generation_config: oneai_core::GenerationConfig::new(),
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
+            reflection_cadence: None,
             working_state_root: None,
         }
     }
@@ -307,6 +313,17 @@ impl AppBuilder {
         policy: oneai_core::ConstrainedOutputPolicy,
     ) -> Self {
         self.constrained_output_policy = policy;
+        self
+    }
+
+    /// Set the cadence for the background `Reflect` sub-agent (Phase 2.1
+    /// Stage A). `Some(n)` fires a reflect sub-agent every `n` iterations
+    /// (mid-run) and once on `DirectAnswer` delivery, when not interrupted —
+    /// it distills durable learnings to memory. `None` (default) keeps
+    /// reflect off (backward-compat). The reflect sub-agent inherits the
+    /// parent provider and uses a memory-only tool whitelist.
+    pub fn reflection_cadence(mut self, cadence: usize) -> Self {
+        self.reflection_cadence = Some(cadence);
         self
     }
 
@@ -1888,6 +1905,7 @@ impl AppBuilder {
             probe_context_windows: self.probe_context_windows,
             generation_config: self.generation_config,
             constrained_output_policy: self.constrained_output_policy,
+            reflection_cadence: self.reflection_cadence,
             working_state_store,
         })
     }
@@ -1984,6 +2002,9 @@ pub struct App {
     /// Layer-1 constrained-decoding policy — propagated into every `AgentLoopConfig`.
     /// See `AppBuilder::constrained_output_policy`.
     pub constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
+    /// Reflect sub-agent cadence (Phase 2.1 Stage A) — `None` = off. See
+    /// `AppBuilder::reflection_cadence`.
+    pub reflection_cadence: Option<usize>,
     /// Durable working-state store (optional) — the cross-session source of
     /// truth for goal/steps/decisions/blockers, persisted as per-task append-only
     /// event logs. When set, the agent loop persists plan progress incrementally

@@ -225,6 +225,8 @@ struct AppResources {
     generation_config: oneai_core::GenerationConfig,
     /// Layer-1 constrained-decoding policy — propagated into every AgentLoopConfig.
     constrained_output_policy: oneai_core::ConstrainedOutputPolicy,
+    /// Reflect sub-agent cadence (Phase 2.1 Stage A) — `None` = off.
+    reflection_cadence: Option<usize>,
     /// Durable working-state store — the cross-session source of truth for
     /// goal/steps/decisions/blockers. When set, `run_agent` attaches it to the
     /// loop (`.with_working_state_store`) so plan progress persists
@@ -296,6 +298,7 @@ impl AppSession {
                 probe_context_windows: app.probe_context_windows,
                 generation_config: app.generation_config.clone(),
                 constrained_output_policy: app.constrained_output_policy,
+                reflection_cadence: app.reflection_cadence,
                 working_state_store: app.working_state_store.clone(),
                 working_state_project: std::env::current_dir()
                     .ok()
@@ -987,6 +990,7 @@ impl AppSession {
                 #[cfg(feature = "otel")]
                 metrics_provider: self.app.metrics_provider.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
+                reflection_cadence: self.app.reflection_cadence,
                 token_budget: Some(oneai_core::budget::TokenBudget::new(
                     DEFAULT_RUN_TOKEN_BUDGET,
                 )),
@@ -1073,6 +1077,7 @@ impl AppSession {
                 #[cfg(feature = "otel")]
                 metrics_provider: self.app.metrics_provider.clone(),
                 constrained_output_policy: self.app.constrained_output_policy,
+                reflection_cadence: self.app.reflection_cadence,
                 token_budget: Some(oneai_core::budget::TokenBudget::new(
                     DEFAULT_RUN_TOKEN_BUDGET,
                 )),
