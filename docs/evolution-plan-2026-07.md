@@ -25,13 +25,13 @@
 | **gap P1 — ShellTool 默认沙箱** | `ShellTool::new()` 默认接 sandbox backend | ❌ 未做 | `tool_interfaces.rs:112` `new()` 仍 regex-only |
 | **gap P1 — ToolExecutor 接 PermissionProfile** | 统一权限路径（修 workflow 绕过 deny） | ❌ 未做 | `executor.rs:139-219` 仍只看 `risk_level()`，无 `PermissionProfile`/`deny_by_default` |
 | **gap P1 — ThresholdGate 迁 PermissionLevel** |  | ❌ 未做 | `interaction_gate.rs:227,235,327` 仍 `RiskLevel` |
-| **inspiration P0-1 — cache-stable prompt** | 范式后缀化，不重写 system prompt | ❌ 未做 | `agent_loop.rs:4049` `.retain(\|m\| m.role != Role::System)` 仍删全部 system 消息 |
-| **inspiration P0-2 — check_fn Footprint gate** | 前置缺失则工具从 schema 零足迹排除 | ❌ 未做 | `ToolRegistry` 过滤路径无 service 检查 |
-| **inspiration P0-3 — 供应链纪律** | 精确锁定 / cargo audit-deny / lockfile 闸 / OIDC / 隔离冒烟 | ❌ 全未做 | 仅 `ci.yml`；`Cargo.toml` caret 版本（40 处 `version="`，仅 oneai-vector 段注释提及锁定） |
+| **inspiration P0-1 — cache-stable prompt** | 范式后缀化，不重写 system prompt | ✅ 已修 | `apply_paradigm_switch` 标记范式尾部 + 仅 retain 被标记块，保留稳定前缀 |
+| **inspiration P0-2 — check_fn Footprint gate** | 前置缺失则工具从 schema 零足迹排除 | ✅ 已修 | `Tool::service_available()` 默认方法 + `GatedTool`/`register_gated` + 三路径 `.filter` |
+| **inspiration P0-3 — 供应链纪律** | 精确锁定 / cargo audit-deny / lockfile 闸 / OIDC / 隔离冒烟 | ✅ 已修 | `deny.toml`+`audit.yml`+lockfile-gate+`publish.yml`+`release-local.sh` |
 
 **读取**：
 - gap-analysis 的 P0（虚假安全感脊梁）**已全部通电**——这是 2026-07-26 的成果。
-- 但 gap-analysis 的 **P1 安全护栏**与 inspiration 的 **P0（cache/check_fn/供应链）**两套"低投入、高杠杆、修硬伤"项**都还开着**。它们构成天然的下一优先层。
+- gap-analysis 的 **P1 安全护栏**（1.4）与 inspiration 的 **P0（cache/check_fn/供应链）**（1.1/1.2/1.3）+ 1.5 衍生项**全部闭合**（2026-07-28）。Phase 1 完成。
 - inspiration P1-P3（新能力）与 gap P2-P3（能力补齐/收尾）**基本正交**，可按"差异化→可达性→精细化"分阶段叠加。
 
 ---
@@ -62,17 +62,11 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 
 > 目标：把"已通电的脊梁"加固成"可信任的脊梁"，并立发布纪律。全部低-中投入、无新对外面、纯收益。必须先于 Phase 2-3 完成。
 
-### 1.1 cache-stable system prompt + 范式后缀化（修 inspiration P0-1 + gap P1 #10 合并）
-- **What**：拆 system prompt 为**稳定前缀**（身份/能力/权限/记忆锚/工具索引，会话期字节稳定，构建一次缓存）+ **范式尾部**。范式切换只动尾部追加 + 工具过滤，**绝不重写前缀**；时间戳降日级精度。修复 `apply_paradigm_switch` 删全部 system 消息（连 runtime_context/domain 注入一起丢）的现有行为。
-- **Why（成本+信任）**：`agent_loop.rs:4049` 现状是 Hermes 明令禁止的行为——每轮范式切换让 Anthropic 前缀缓存**每轮失效、成本翻倍**；且连带丢 runtime_context（日期/web 指引）是正确性 bug。这是现有架构最大张力。
-- **How**：`context_assembler.rs` + `apply_paradigm_switch`（`agent_loop.rs:4041-4049`）改为：保留稳定前缀，只移除/追加范式尾部 system 块；`runtime_context_block()` 不在范式切换时被清。对齐 Hermes `stable/context/volatile` 三层 + `invalidate_system_prompt` 仅压缩后调。范式指令优先走 user 消息或可丢弃尾部 system；skill 斜杠命令注 user 消息（保缓存）。
-- **Effort**：中。**Fit**：极高，直击最大张力，兼修成本与正确性。**类型**：修虚假安全感 + 降成本。
+### 1.1 cache-stable system prompt + 范式后缀化（修 inspiration P0-1 + gap P1 #10 合并）✅
+> **进度**：全完成（2026-07-28）。`apply_paradigm_switch`（`agent_loop.rs`）重写：范式尾部 system 消息以 `metadata["paradigm_tail"]` 标记，切换时 `retain` 仅移除被标记的尾部，**保留稳定前缀**（`build_system_prompt() + runtime_context_block()` = 身份/工具偏好规则/日期/web 指引）及其他合法 system 消息（反馈重试 prompt 等）。修两个 bug：(a) 范式切换让 Anthropic 前缀缓存每轮失效、成本翻倍；(b) `runtime_context_block`（日期+web 指引）连同被丢的正确性 bug。稳定前缀在会话期字节稳定（仅 session start 构建一次），缓存天然存活。1 新测（`e2e_scenario_4c`：断言切换后 `Current date and time`/`web_search`/身份 prompt 仍在 + 范式尾部并存）。取舍：未单独降时间戳日级——前缀仅 session start 构建一次已天然缓存稳定，非每轮重注。
 
-### 1.2 `check_fn` Footprint gate on ToolRegistry + DomainPack（inspiration P0-2）
-- **What**：给 `Tool` 注册加 `service_available: Option<fn()->bool>`；返回 false 的工具**从发给模型的 schema 中彻底排除**（零足迹，非"禁用"）。DomainPack Tool 层加 `gated_tools`。把 Footprint Ladder（extend→skill→service-gated→plugin→MCP→core tool）写进 CLAUDE.md 作新能力决策准则。
-- **Why**：OneAI 工具"装了就在 schema"。`check_fn` 让 per-domain/per-config 工具表小而聚焦，直接改路由质量、降 prompt token。补强 DomainPack 最便宜一步。
-- **How**：`crates/oneai-tool` 的 `ToolRegistry` 过滤路径（已按范式过滤）加 `service_available()` 检查；`InteractionGate::PreInfer` 顺带 surface"工具 X 已配置但前置缺失"。
-- **Effort**：低。**Fit**：极高，落在现有 DomainPack/InteractionGate 上。**类型**：降成本+提清晰度。
+### 1.2 `check_fn` Footprint gate on ToolRegistry + DomainPack（inspiration P0-2）✅
+> **进度**：全完成（2026-07-28）。(a) `Tool` trait（`oneai-core/traits.rs`）加默认方法 `fn service_available(&self) -> bool { true }`——零足迹门，非 async（每轮热路径）；(b) `oneai-tool` 加 `GatedTool` 包装器（`ServiceCheck = Arc<dyn Fn()->bool + Send+Sync>`）+ `ToolRegistry::register_gated(tool, check_fn)`——注册级 check_fn，任意工具可条件隐藏无需自实现；(c) `build_tool_definitions_for_paradigm` / `build_tool_definitions` / `build_tool_definitions_for_state` 三路径均 `.filter(service_available)`，隐藏即从 schema 彻底排除 + warn log surface "已配置但前置缺失"；(d) Footprint Ladder（extend→skill→service-gated→plugin→MCP→core tool）写进 CLAUDE.md 作新能力决策准则。3 新测（2 oneai-tool 单测 + `e2e_scenario_4b` 端到端断言 gated-off 工具不进 schema、sibling 可用工具仍在）。取舍：未加 DomainPack `gated_tools` 配置层——trait 方法 + 注册级 check_fn 已覆盖机制，DomainPack 层留后续按需。
 
 ### 1.3 供应链纪律：精确锁定 + cargo audit/deny + lockfile 闸 + OIDC 发布 + 隔离冒烟（inspiration P0-3）✅
 > **进度**：全完成（2026-07-28）。取舍：**不转 `=` 精确锁定**——`Cargo.lock` 已提交（workspace 发 binaries，reproducible builds 已保证），外部依赖全集中在根 `[workspace.dependencies]`；可复现性靠 Cargo.lock + cargo-deny，转 `=` 反成维护负担。落地：(a) 修内部 `oneai-*` path 依赖版本漂移 `1.0.0→1.1.0`（与 `[workspace.package]` lockstep，真发布侧 bug）；(b) `deny.toml` + `.github/workflows/audit.yml`（cron daily + PR，**单用 cargo-deny** 覆 advisories+licenses+bans+sources，不用 cargo-audit 避免双 ignore 列表漂移；首次跑修 3 个可 caret 升级的 advisory——crossbeam-deque 0.8.6→0.8.7、plist 1.9.0→1.10.0——其余 6 个带 rationale 忽略，均在 opt-in/未绑定路径）；(c) `ci.yml` lockfile-gate job（PR 改 Cargo.lock 未设 `ONEAI_ALLOW_LOCKFILE_CHANGE=1` 则拒）；(d) `.github/workflows/publish.yml`（tag `v*` 触发，复用 `scripts/publish_crates.sh`，`id-token:write` 留 Trusted Publishing，Path B token + Path A 文档化）；(e) `scripts/release-local.sh`（`cargo publish --dry-run` 每 crate = package+path-dep 重写+隔离构建+metadata 校验，冒烟后提示打 tag）。详见 CLAUDE.md「Supply-chain discipline」。
@@ -96,7 +90,8 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **How**：`crates/oneai-tool` 的 `executor.rs`/`tool_interfaces.rs`/`interaction_gate.rs`。jitter 已在 `error_recovery.rs:167` 完成，本条只补其余。
 - **Effort**：中。**Fit**：高，是 Phase 3 serverless backend/网关的前置（无它则攻击面爆增）。**类型**：修虚假安全感。
 
-### 1.5 非中断式空响应重试保 `prompt_cache_policy`（gap P1 衍生）
+### 1.5 非中断式空响应重试保 `prompt_cache_policy`（gap P1 衍生）✅
+> **进度**：全完成（2026-07-28）。空响应重试 `InferenceRequest`（`agent_loop.rs` ~5b empty-retry 块）由 `metadata: HashMap::new()` 改为带 `prompt_cache_policy` 的 map，重试仍命中前缀缓存。顺带修 StateGraph 节点推理路径（`AgentLoopGraphActionExecutor` 的 `InferenceRequest`）同病——也由空 map 改带 policy。1 新测（`e2e_scenario_4d`：断言主请求 + 重试请求 metadata 均带 `prompt_cache_policy`）。
 - **What**：空响应重试时保留 `prompt_cache_policy` metadata（`agent_loop.rs:1618` 现丢失），让重试仍命中 prompt cache。
 - **Why**：重试打不到缓存 = 重复成本，与 1.1 同源。
 - **Effort**：低。**Fit**：高。**类型**：降成本。

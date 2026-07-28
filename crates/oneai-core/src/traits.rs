@@ -100,6 +100,25 @@ pub trait Tool: Send + Sync {
     /// The risk level of this tool's operations.
     fn risk_level(&self) -> RiskLevel;
 
+    /// Whether this tool's backing service is available right now.
+    ///
+    /// The **`check_fn` Footprint gate**: a tool whose prerequisites are unmet
+    /// (no API key configured, backing binary missing, MCP server disconnected,
+    /// feature flag off) returns `false` here. The `AgentLoop` excludes such
+    /// tools **entirely** from the schema sent to the model — zero footprint,
+    /// not merely "disabled" — so the model never sees a broken option it
+    /// would otherwise try to call. This keeps the per-domain / per-config
+    /// tool table small and focused, improving routing quality and lowering
+    /// prompt tokens.
+    ///
+    /// Default `true`: existing tools remain visible unless they opt into
+    /// gating by overriding this (or are wrapped via a `GatedTool`
+    /// registration-level `check_fn`). This is a non-`async` check by design
+    /// — it runs on the tool-definition hot path every iteration.
+    fn service_available(&self) -> bool {
+        true
+    }
+
     /// Execute the tool with the given arguments.
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput>;
 }

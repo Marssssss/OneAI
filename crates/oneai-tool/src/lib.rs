@@ -97,6 +97,52 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ─── Footprint gate (check_fn) ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_gated_tool_hides_when_check_false() {
+        // A check_fn that reports the backing service as missing.
+        let available = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let check: ServiceCheck = {
+            let available = available.clone();
+            std::sync::Arc::new(move || *available.lock().unwrap())
+        };
+
+        let inner: std::sync::Arc<dyn Tool> = std::sync::Arc::new(FileReadTool::new());
+        let gated = GatedTool::new(inner, check);
+
+        // service is missing → footprint gate says hide
+        assert!(!gated.service_available());
+        // but the wrapper still delegates Tool identity/execution
+        assert_eq!(gated.name(), "read_file");
+
+        // flip the backing service on → tool reappears
+        *available.lock().unwrap() = true;
+        assert!(gated.service_available());
+    }
+
+    #[tokio::test]
+    async fn test_register_gated_still_executes_via_wrapper() {
+        // Even when gated, direct execute() must still delegate to the inner
+        // tool — "zero footprint" only removes the tool from the *schema sent
+        // to the model*, it does not disable execution for callers that hold
+        // the handle.
+        let check: ServiceCheck = std::sync::Arc::new(|| false);
+        let registry = ToolRegistry::new();
+        let calc: std::sync::Arc<dyn Tool> = std::sync::Arc::new(CalculatorTool::new());
+        registry.register_gated(calc, check).await.unwrap();
+
+        let tool = registry.get("calculator").await.expect("registered");
+        assert!(!tool.service_available(), "gated tool should report hidden");
+
+        let result = registry
+            .execute("calculator", serde_json::json!({"expression": "6 * 7"}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.content, "42");
+    }
+
     #[tokio::test]
     async fn test_calculator_tool() {
         let tool = CalculatorTool::new();

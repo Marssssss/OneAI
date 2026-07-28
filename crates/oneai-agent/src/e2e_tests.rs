@@ -622,6 +622,203 @@ async fn e2e_scenario_4_paradigm_switch() {
     );
 }
 
+// ─── Scenario 4b: Footprint gate (check_fn) excludes missing-service tools ────
+
+/// A tool whose `service_available()` is `false` must vanish from the schema
+/// sent to the model (zero footprint), while a sibling available tool still
+/// appears. This guards the `build_tool_definitions_for_paradigm` filter.
+#[tokio::test]
+async fn e2e_scenario_4b_footprint_gate_hides_unavailable_tool() {
+    use oneai_tool::{GatedTool, ServiceCheck};
+
+    // `read_file` gated off (backing service "missing"), `grep` available.
+    let check: ServiceCheck = Arc::new(|| false);
+    let read_file: Arc<dyn oneai_core::traits::Tool> =
+        Arc::new(GatedTool::new(Arc::new(MockTool::read_file_mock()), check));
+    let grep: Arc<dyn oneai_core::traits::Tool> = Arc::new(MockTool::grep_mock());
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> = {
+        let mut map = HashMap::new();
+        map.insert("read_file".to_string(), read_file);
+        map.insert("grep".to_string(), grep);
+        Arc::new(tokio::sync::RwLock::new(map))
+    };
+
+    let provider = MockProvider::always_answers("done");
+    let call_log = provider.call_log_handle();
+    let agent_loop = AgentLoop::new(
+        Arc::new(provider),
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(5),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let _ = agent_loop
+        .run_with_observer("do something with grep", &observer)
+        .await
+        .unwrap();
+
+    let logs = call_log.lock().await.clone();
+    let tools_sent: Vec<String> = logs
+        .iter()
+        .flat_map(|log| log.request.tools.iter().map(|t| t.name.clone()))
+        .collect();
+    assert!(
+        !tools_sent.iter().any(|n| n == "read_file"),
+        "gated-off read_file must NOT appear in model schema: {tools_sent:?}"
+    );
+    assert!(
+        tools_sent.iter().any(|n| n == "grep"),
+        "available grep must appear in model schema: {tools_sent:?}"
+    );
+}
+
+// ─── Scenario 4c: cache-stable system prompt survives paradigm switch ────────
+
+/// A paradigm switch must NOT nuke the durable system prefix. The stable
+/// prefix (`build_system_prompt() + runtime_context_block()` — current date +
+/// web-search nudge) must survive so the provider's prompt-prefix cache stays
+/// valid across switches and `runtime_context` (date / search guidance) is not
+/// lost for the rest of the session. The paradigm tail ("planning agent") is
+/// swapped in alongside it. Regression for the old `retain(|m| m.role !=
+/// Role::System)` behavior that wiped everything.
+#[tokio::test]
+async fn e2e_scenario_4c_paradigm_switch_preserves_stable_prefix() {
+    let read_file = MockTool::read_file_mock();
+
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::switch_paradigm("plan"),
+        ScriptedResponse::direct_answer("Plan: step 1 → step 2"),
+    ]);
+
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![Arc::new(read_file)],
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let result = agent_loop
+        .run_with_observer("Plan the implementation", &observer)
+        .await
+        .unwrap();
+
+    let system_texts: Vec<String> = result
+        .conversation
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .map(|m| m.text_content())
+        .collect();
+
+    // Stable prefix survives the switch — runtime_context_block is intact.
+    assert!(
+        system_texts
+            .iter()
+            .any(|t| t.contains("Current date and time")),
+        "runtime_context block (stable prefix) was dropped on paradigm switch: {system_texts:?}"
+    );
+    assert!(
+        system_texts.iter().any(|t| t.contains("web_search")),
+        "web-search guidance (stable prefix) was dropped on paradigm switch: {system_texts:?}"
+    );
+    // The base agent identity prompt also survives.
+    assert!(
+        system_texts
+            .iter()
+            .any(|t| t.contains("intelligent AI agent")),
+        "stable identity prefix was dropped on paradigm switch: {system_texts:?}"
+    );
+    // And the paradigm tail is present alongside it.
+    assert!(
+        system_texts.iter().any(|t| t.contains("planning agent")),
+        "paradigm tail missing after switch: {system_texts:?}"
+    );
+}
+
+// ─── Scenario 4d: empty-response retry preserves prompt_cache_policy ────────
+
+/// The empty-response retry must carry `prompt_cache_policy` into the
+/// retried `InferenceRequest` so the re-inference still hits the provider's
+/// prefix cache. Previously the retry built `metadata: HashMap::new()`,
+/// dropping the policy and making every empty-response retry a cache miss
+/// (re-billed prefix). Phase 1.5 regression.
+#[tokio::test]
+async fn e2e_scenario_4d_empty_retry_preserves_prompt_cache_policy() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::direct_answer(""), // empty → triggers empty-retry
+        ScriptedResponse::direct_answer("here is the real answer"),
+    ]);
+    let call_log = provider.call_log_handle();
+
+    let agent_loop = build_test_agent_loop(
+        provider,
+        vec![], // no tools needed
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(5),
+            prompt_cache_policy: oneai_core::PromptCachePolicy::On,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let _ = agent_loop
+        .run_with_observer("answer me", &observer)
+        .await
+        .unwrap();
+
+    let logs = call_log.lock().await.clone();
+    assert!(
+        logs.len() >= 2,
+        "expected main + retry inference calls, got {}: {logs:?}",
+        logs.len()
+    );
+
+    // Main request carries the policy.
+    assert_eq!(
+        logs[0].request.metadata.get("prompt_cache_policy"),
+        Some(&"on".to_string()),
+        "main request dropped prompt_cache_policy: {:?}",
+        logs[0].request.metadata
+    );
+    // Retry request also carries it — the regression.
+    assert_eq!(
+        logs[1].request.metadata.get("prompt_cache_policy"),
+        Some(&"on".to_string()),
+        "empty-response retry dropped prompt_cache_policy (cache miss on retry): {:?}",
+        logs[1].request.metadata
+    );
+}
+
 // ─── Scenario 5: Sub-agent delegation ─────────────────────────────────────────
 
 /// A mock sub-agent factory that returns a canned summary.

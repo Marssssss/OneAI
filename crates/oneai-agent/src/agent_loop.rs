@@ -1927,7 +1927,16 @@ impl AgentLoop {
                     stop_sequences: self.config.stop_sequences.clone(),
                     constrained_output: self.build_constrained_output(),
                     thinking_budget: self.config.thinking_budget,
-                    metadata: HashMap::new(),
+                    // Phase 1.5: carry the prompt-cache policy into the retry
+                    // so the re-inference still hits the provider's prefix
+                    // cache. Dropping it (the prior `HashMap::new()`) made
+                    // every empty-response retry a cache miss — the retried
+                    // prefix got re-billed at full price, same cost tension as
+                    // 1.1. Mirrors the metadata the main request sets above.
+                    metadata: HashMap::from([(
+                        "prompt_cache_policy".to_string(),
+                        self.config.prompt_cache_policy.as_str().to_string(),
+                    )]),
                 };
 
                 // Re-run inference with the follow-up prompt
@@ -4041,31 +4050,58 @@ impl AgentLoop {
     fn apply_paradigm_switch(&self, paradigm: ParadigmKind, state: &mut LoopState) -> String {
         let config = ParadigmConfig::for_paradigm(paradigm);
 
-        // Step 1: Replace system prompt in conversation
-        // Remove existing system messages and add the paradigm-specific one
+        // Cache-stable system prompt + paradigm suffixation (Phase 1.1).
+        //
+        // The durable system layer has two parts:
+        //   1. **Stable prefix** — the first system message, built once at
+        //      session start as `build_system_prompt() + runtime_context_block()`
+        //      (agent identity, `{{TOOL_PREFERENCE_RULES}}`, current date,
+        //      web-search nudge). Byte-stable for the session so the
+        //      provider's prompt-prefix cache survives across iterations and
+        //      paradigm switches — switching paradigm must NOT rewrite it.
+        //   2. **Paradigm tail** — paradigm-specific system messages added by
+        //      this method (the paradigm prompt + decision hint), tagged with
+        //      metadata[`PARADIGM_TAIL_KEY`] so they can be removed surgically.
+        //
+        // Previously this method did `retain(|m| m.role != Role::System)`,
+        // nuking the ENTIRE durable system layer on every switch. That
+        // (a) invalidated the prompt-prefix cache each switch — cost doubled
+        // on the very next iteration — and (b) dropped `runtime_context_block`
+        // (the date + web-search guidance) for the rest of the session, a
+        // correctness bug. Now we remove only the tagged paradigm tail,
+        // preserving the stable prefix and any other legitimately-injected
+        // system messages (feedback retry prompts, etc.).
+        const PARADIGM_TAIL_KEY: &str = "paradigm_tail";
         state
             .conversation
             .messages
-            .retain(|m| m.role != Role::System);
-        state
-            .conversation
-            .add_message(Message::system(&config.system_prompt));
+            .retain(|m| !(m.role == Role::System && m.metadata.contains_key(PARADIGM_TAIL_KEY)));
 
-        // Step 2: Inject decision hint as additional context
+        // Append the new (tagged) paradigm tail.
+        let mut prompt_msg = Message::system(&config.system_prompt);
+        prompt_msg
+            .metadata
+            .insert(PARADIGM_TAIL_KEY.to_string(), "1".to_string());
+        state.conversation.add_message(prompt_msg);
+
+        // Decision hint — also a tagged tail message so a later switch
+        // replaces it along with the prompt.
         if !config.decision_hint.is_empty() {
-            state.conversation.add_message(Message::system(format!(
-                "[Paradigm switch]: {}",
-                config.decision_hint
-            )));
+            let mut hint_msg =
+                Message::system(format!("[Paradigm switch]: {}", config.decision_hint));
+            hint_msg
+                .metadata
+                .insert(PARADIGM_TAIL_KEY.to_string(), "1".to_string());
+            state.conversation.add_message(hint_msg);
         }
 
-        // Step 3: Store ParadigmConfig for tool filtering
+        // Store ParadigmConfig for tool filtering
         state.active_paradigm = paradigm;
         state.active_paradigm_config = Some(config.clone());
 
         // Return a concise summary for the loop
         format!(
-            "{} paradigm activated — system prompt changed, tools filtered to: [{}]",
+            "{} paradigm activated — paradigm tail swapped, tools filtered to: [{}]",
             paradigm_name(&paradigm),
             config.tool_filter.join(", ")
         )
@@ -4617,6 +4653,8 @@ impl AgentLoop {
         if let Some(domain) = &self.domain_pack {
             tools_map
                 .values()
+                // Footprint gate — see `build_tool_definitions_for_paradigm`.
+                .filter(|tool| tool.service_available())
                 .map(|tool| {
                     // Check if there's a decorator for this tool
                     let decorator = domain.find_decorator(tool.name());
@@ -4656,6 +4694,8 @@ impl AgentLoop {
             // No domain pack — use raw tool definitions
             tools_map
                 .values()
+                // Footprint gate — see `build_tool_definitions_for_paradigm`.
+                .filter(|tool| tool.service_available())
                 .map(|tool| ToolDefinition {
                     name: tool.name().to_string(),
                     description: tool.description().to_string(),
@@ -4706,6 +4746,32 @@ impl AgentLoop {
             // No paradigm config — all tools available (default ReAct behavior)
             tools_map.values().collect()
         };
+
+        // ─── Footprint gate (check_fn) ──────────────────────────────────────────
+        // A tool whose backing service is missing (`service_available() ==
+        // false`) is excluded from the schema sent to the model **entirely** —
+        // zero footprint, not merely "disabled". This keeps the per-domain /
+        // per-config tool table focused: the model never sees a broken option
+        // (no API key, MCP server down, feature off) it would otherwise try to
+        // call. See the Footprint Ladder in `CLAUDE.md`. We surface each hidden
+        // tool via a warn log so "configured but prerequisite missing" is
+        // discoverable rather than silent.
+        let filtered_tools: Vec<&Arc<dyn Tool>> = filtered_tools
+            .into_iter()
+            .filter(|tool| {
+                if tool.service_available() {
+                    true
+                } else {
+                    tracing::warn!(
+                        "Footprint gate: tool '{}' excluded from model schema — \
+                        service_available() == false (prerequisite missing). It stays \
+                        registered and reappears automatically once its check passes.",
+                        tool.name()
+                    );
+                    false
+                }
+            })
+            .collect();
 
         // ─── Tool ordering strategy ──────────────────────────────────────────
         // Research shows LLMs exhibit significant position bias (15-30% accuracy
@@ -5206,7 +5272,13 @@ impl oneai_workflow::GraphActionExecutor for AgentLoopGraphActionExecutor {
             stop_sequences: self.config.stop_sequences.clone(),
             constrained_output: None,
             thinking_budget: thinking_budget.or(self.config.thinking_budget),
-            metadata: HashMap::new(),
+            // Carry the prompt-cache policy so StateGraph-node inference also
+            // hits the provider prefix cache — same rationale as the main loop
+            // request (Phase 1.5).
+            metadata: HashMap::from([(
+                "prompt_cache_policy".to_string(),
+                self.config.prompt_cache_policy.as_str().to_string(),
+            )]),
         };
 
         // Run inference
@@ -5574,6 +5646,12 @@ impl AgentLoopGraphActionExecutor {
         } else {
             tools_map.values().collect()
         };
+
+        // Footprint gate — see `build_tool_definitions_for_paradigm`.
+        let filtered_tools: Vec<&Arc<dyn Tool>> = filtered_tools
+            .into_iter()
+            .filter(|tool| tool.service_available())
+            .collect();
 
         // Apply domain pack tool decorators
         let mut defs: Vec<ToolDefinition> = if let Some(domain) = &self.domain_pack {
