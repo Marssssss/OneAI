@@ -2554,7 +2554,11 @@ async fn e2e_enter_plan_mode_escalates_to_plan_toolset() {
     assert!(result.final_answer.contains("executed"));
 
     let log = provider_handle.call_log().await;
-    assert!(log.len() >= 2, "expected ≥2 inference calls; got {}", log.len());
+    assert!(
+        log.len() >= 2,
+        "expected ≥2 inference calls; got {}",
+        log.len()
+    );
 
     // First call: normal mode → only enter_plan_mode among control tools.
     let first_tools: Vec<String> = log[0]

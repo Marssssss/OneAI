@@ -613,7 +613,9 @@ mod tests {
             reason: "full requires confirmation".to_string(),
         });
         let resp = handle.await.unwrap();
-        assert!(matches!(resp, InteractionResponse::Abort { reason } if reason == "full requires confirmation"));
+        assert!(
+            matches!(resp, InteractionResponse::Abort { reason } if reason == "full requires confirmation")
+        );
     }
 
     #[tokio::test]

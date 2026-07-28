@@ -30,9 +30,7 @@ use std::sync::Arc;
 
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{InteractionGate, LlmProvider, PermissionResolver, Tool};
-use oneai_core::{
-    InferenceRequest, InferenceResponse, Message, PermissionAction, Role,
-};
+use oneai_core::{InferenceRequest, InferenceResponse, Message, PermissionAction, Role};
 
 use crate::state_graph::{
     EdgeCondition, GraphEdge, GraphExecutionResult, GraphState, NodeAction, StateGraph,
@@ -220,10 +218,7 @@ impl DirectProviderActionExecutor {
 
     /// Attach a domain permission resolver so `ToolCall` nodes honour DomainPack
     /// `deny_by_default` policy on this stateless path too.
-    pub fn with_permission_resolver(
-        mut self,
-        resolver: Arc<dyn PermissionResolver>,
-    ) -> Self {
+    pub fn with_permission_resolver(mut self, resolver: Arc<dyn PermissionResolver>) -> Self {
         self.permission_resolver = Some(resolver);
         self
     }

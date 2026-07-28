@@ -254,7 +254,6 @@ pub(crate) fn path_has_traversal(path: &str) -> bool {
         .any(|c| matches!(c, Component::ParentDir))
 }
 
-
 /// Detect shell constructs that write files via redirection in a way that is
 /// *genuinely broken* (not merely suboptimal). Returns a short reason so the
 /// rejection error can tell the model what to fix.
@@ -3167,4 +3166,3 @@ mod traversal_tests {
         assert!(!path_has_traversal("/absolute/normal"));
     }
 }
-

@@ -220,10 +220,7 @@ impl WorkflowExecutor {
 
     /// Attach a domain permission resolver so tool steps honour DomainPack
     /// `deny_by_default` / `require_confirmation` policy on this path.
-    pub fn with_permission_resolver(
-        mut self,
-        resolver: Arc<dyn PermissionResolver>,
-    ) -> Self {
+    pub fn with_permission_resolver(mut self, resolver: Arc<dyn PermissionResolver>) -> Self {
         self.permission_resolver = Some(resolver);
         self
     }
@@ -433,9 +430,7 @@ async fn execute_step(
     // `deny_by_default` pattern was silently ignored here. When a resolver is
     // wired, a `Deny` short-circuits before any approval/execution; other
     // outcomes fall through to the existing per-step approval flow.
-    if let (Some(resolver), Some(tool_name)) =
-        (permission_resolver.as_ref(), step.tool.as_ref())
-    {
+    if let (Some(resolver), Some(tool_name)) = (permission_resolver.as_ref(), step.tool.as_ref()) {
         let check_args = interpolated_tool_args
             .clone()
             .or_else(|| step.tool_args.clone())
@@ -862,10 +857,11 @@ mod permission_resolver_tests {
         let config = WorkflowConfig::new("deny-test", vec![step("s1", "echo")]);
         let dag = compile(&config);
 
-        let executor = WorkflowExecutor::new_empty(Arc::new(NoopGate))
-            .with_permission_resolver(Arc::new(DenyResolver {
+        let executor = WorkflowExecutor::new_empty(Arc::new(NoopGate)).with_permission_resolver(
+            Arc::new(DenyResolver {
                 denied: "echo".to_string(),
-            }));
+            }),
+        );
         // Register the tool — the deny check runs before lookup, so even
         // unregistered tools are denied; we register to prove execution would
         // have run without the resolver.
@@ -886,10 +882,11 @@ mod permission_resolver_tests {
         let config = WorkflowConfig::new("allow-test", vec![step("s1", "echo")]);
         let dag = compile(&config);
 
-        let executor = WorkflowExecutor::new_empty(Arc::new(NoopGate))
-            .with_permission_resolver(Arc::new(DenyResolver {
+        let executor = WorkflowExecutor::new_empty(Arc::new(NoopGate)).with_permission_resolver(
+            Arc::new(DenyResolver {
                 denied: "not_echo".to_string(),
-            }));
+            }),
+        );
         executor.register_tool(Arc::new(EchoTool)).await;
 
         let result = executor.execute(&dag, &config).await.unwrap();

@@ -355,10 +355,7 @@ mod tests {
                 .execute(serde_json::json!({"command": cmd}))
                 .await
                 .unwrap();
-            assert!(
-                !result.success,
-                "dangerous command not blocked: {cmd}"
-            );
+            assert!(!result.success, "dangerous command not blocked: {cmd}");
             let err = result.error.unwrap_or_default();
             assert!(
                 err.contains("Command blocked by safety policy"),
@@ -373,10 +370,7 @@ mod tests {
         // *contain* similar substrings. `sha256sum` starts with `sh` but the
         // `\b` word boundary in the pipe-to-shell pattern correctly skips it.
         use crate::ShellTool;
-        let cases = [
-            "echo hello",
-            "echo test | sha256sum",
-        ];
+        let cases = ["echo hello", "echo test | sha256sum"];
         for cmd in cases {
             let tool = ShellTool::new();
             let result = tool

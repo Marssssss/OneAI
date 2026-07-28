@@ -132,10 +132,7 @@ impl ToolExecutor {
     /// before every dispatch so a DomainPack's `deny_by_default` /
     /// `require_confirmation` / `auto_approve` policy is honoured on this path
     /// (not just on the agent-loop's parallel dispatch path).
-    pub fn with_permission_resolver(
-        mut self,
-        resolver: Arc<dyn PermissionResolver>,
-    ) -> Self {
+    pub fn with_permission_resolver(mut self, resolver: Arc<dyn PermissionResolver>) -> Self {
         self.permission_resolver = Some(resolver);
         self
     }
@@ -172,11 +169,7 @@ impl ToolExecutor {
         match self.permission_resolver.as_ref() {
             Some(resolver) => match resolver.resolve(tool_name, &args) {
                 PermissionAction::Deny { reason } => {
-                    tracing::warn!(
-                        "Tool '{}' denied by domain policy: {}",
-                        tool_name,
-                        reason
-                    );
+                    tracing::warn!("Tool '{}' denied by domain policy: {}", tool_name, reason);
                     return Ok(ToolOutput {
                         success: false,
                         content: String::new(),
@@ -184,10 +177,7 @@ impl ToolExecutor {
                     });
                 }
                 PermissionAction::AutoApprove => {
-                    tracing::info!(
-                        "Tool '{}' auto-approved by domain policy",
-                        tool_name
-                    );
+                    tracing::info!("Tool '{}' auto-approved by domain policy", tool_name);
                     // Domain says skip the gate entirely regardless of risk.
                     return self.execute_with_timeout(tool, args).await;
                 }
@@ -762,7 +752,10 @@ mod tests {
         // Deny must short-circuit before execution (no tool.run), even under a
         // NoopInteractionGate that would otherwise auto-proceed.
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
         let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(NoopInteractionGate))
             .with_permission_resolver(Arc::new(StubResolver {
@@ -776,8 +769,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("Denied by domain policy"));
-        assert!(result.error.as_ref().unwrap().contains("forbidden in this domain"));
+        assert!(result
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Denied by domain policy"));
+        assert!(result
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("forbidden in this domain"));
         // Tool never ran — content stays empty.
         assert_eq!(result.content, "");
     }
@@ -792,7 +793,9 @@ mod tests {
         let payload = "ok".to_string();
         let registry = Arc::new(ToolRegistry::new());
         registry
-            .register(Arc::new(VerboseTool { payload: payload.clone() }))
+            .register(Arc::new(VerboseTool {
+                payload: payload.clone(),
+            }))
             .await
             .unwrap();
 
@@ -802,10 +805,11 @@ mod tests {
         // assert AutoApprove returns the payload (executed) under a DenyAll gate
         // even if we forced approval — but Low tools don't need approval. The
         // meaningful test is the deny one above; here we just confirm execute.
-        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(DenyAllInteractionGate))
-            .with_permission_resolver(Arc::new(StubResolver {
-                action: PermissionAction::AutoApprove,
-            }));
+        let executor =
+            ToolExecutor::with_interaction_gate(registry, Arc::new(DenyAllInteractionGate))
+                .with_permission_resolver(Arc::new(StubResolver {
+                    action: PermissionAction::AutoApprove,
+                }));
 
         let result = executor
             .execute("verbose", serde_json::json!({}))
@@ -822,12 +826,16 @@ mod tests {
         // gate; under a DenyAll gate the call is therefore denied — proving the
         // resolver overrode the tool's inherent Low risk.
         let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(CalculatorTool::new())).await.unwrap();
+        registry
+            .register(Arc::new(CalculatorTool::new()))
+            .await
+            .unwrap();
 
-        let executor = ToolExecutor::with_interaction_gate(registry, Arc::new(DenyAllInteractionGate))
-            .with_permission_resolver(Arc::new(StubResolver {
-                action: PermissionAction::RequireConfirmation,
-            }));
+        let executor =
+            ToolExecutor::with_interaction_gate(registry, Arc::new(DenyAllInteractionGate))
+                .with_permission_resolver(Arc::new(StubResolver {
+                    action: PermissionAction::RequireConfirmation,
+                }));
 
         let result = executor
             .execute("calculator", serde_json::json!({"expression": "2+3"}))

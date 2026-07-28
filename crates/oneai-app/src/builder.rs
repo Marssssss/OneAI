@@ -1469,10 +1469,7 @@ impl AppBuilder {
         // checks. `None` when no domain pack is configured.
         let permission_resolver: Option<Arc<dyn PermissionResolver>> = merged_domain_pack
             .as_ref()
-            .map(|dp| {
-                Arc::new(dp.permission_profile.clone())
-                    as Arc<dyn PermissionResolver>
-            });
+            .map(|dp| Arc::new(dp.permission_profile.clone()) as Arc<dyn PermissionResolver>);
 
         let tool_executor = {
             let exec = ToolExecutor::with_interaction_gate(
