@@ -88,7 +88,7 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
   1. ✅ **ToolExecutor 级输出尺寸上限**——`executor.rs` 加 `max_output_bytes`（默认 1MiB）+ `enforce_output_limit`，统一 tool-result 截断守卫。3 测。
   2. ✅ **统一权限路径**：`PermissionResolver` trait（`oneai-core`）+ `PermissionAction` 移至 core（domain re-export 保兼容）+ `PermissionProfile` impl trait；注入 `ToolExecutor`、`WorkflowExecutor`、`DirectProviderActionExecutor` 三条执行路径；`AppBuilder` 灌 merged DomainPack 的 `permission_profile`。修 workflow/StateGraph 工具步绕过 `deny_by_default` 的洞。6 测（3 ToolExecutor 单测 + 3 workflow e2e）。
   3. ⬜ `ShellTool::new()` 默认接 `default_sandbox_backend`；黑名单改规范化命令解析；文件工具 `..` 改 canonical-path 校验。
-  4. ⬜ `ThresholdInteractionGate` 迁到 `PermissionLevel`。
+  4. ✅ `ThresholdInteractionGate` 迁到 `PermissionLevel`：内部存 `Option<PermissionLevel>`，加 `new_with_permission_threshold` 构造器（RiskLevel `new` 保留向后兼容），`request()` 用 `permission_level` 取代 `risk_level` 决策。2 新测（permission 覆盖 risk / at-or-below auto-proceed）。
 - **Why**：现状 `executor.rs:139-219` 只看 `risk_level()` 不看 `PermissionProfile`，workflow 步骤绕过 domain 的 `deny_by_default`——权限两条路径分叉。无输出上限 → 一个无自截的 MCP/自定义工具长输出会在压缩触发前撑爆 context。ShellTool 默认无真隔离。
 - **How**：`crates/oneai-tool` 的 `executor.rs`/`tool_interfaces.rs`/`interaction_gate.rs`。jitter 已在 `error_recovery.rs:167` 完成，本条只补其余。
 - **Effort**：中。**Fit**：高，是 Phase 3 serverless backend/网关的前置（无它则攻击面爆增）。**类型**：修虚假安全感。

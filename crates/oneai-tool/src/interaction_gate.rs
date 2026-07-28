@@ -14,7 +14,8 @@ use std::sync::Arc;
 use oneai_core::error::{InteractionError, OneAIError, Result};
 use oneai_core::traits::InteractionGate;
 use oneai_core::{
-    ApprovalRequest, InteractionPoint, InteractionRequest, InteractionResponse, RiskLevel,
+    ApprovalRequest, InteractionPoint, InteractionRequest, InteractionResponse, PermissionLevel,
+    RiskLevel,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -222,17 +223,41 @@ impl InteractionGate for ChannelInteractionGate {
 pub struct ThresholdInteractionGate {
     pending_tx: mpsc::Sender<InteractionPendingItem>,
     config: InteractionGateConfig,
-    /// Risk level threshold for auto-proceeding tool approvals.
+    /// Permission-level threshold for auto-proceeding tool approvals.
     /// `None` means all tool approvals go through the channel.
-    auto_approve_threshold: Option<RiskLevel>,
+    ///
+    /// Stored as `PermissionLevel` (not legacy `RiskLevel`) so the gate's
+    /// auto-proceed decision is consistent with the rest of the permission
+    /// model (`InteractionGate`'s 5 decision points use `PermissionLevel`).
+    auto_approve_threshold: Option<PermissionLevel>,
 }
 
 impl ThresholdInteractionGate {
-    /// Create a gate that auto-proceeds tool calls strictly below `threshold`
+    /// Create a gate that auto-proceeds tool calls at or below `threshold`
     /// and forwards the rest to the channel.
+    ///
+    /// Accepts the legacy `RiskLevel` for backward compatibility with platform
+    /// adapters; internally converted to `PermissionLevel`.
     pub fn new(
         buffer_size: usize,
         auto_approve_threshold: RiskLevel,
+        config: InteractionGateConfig,
+    ) -> (Self, mpsc::Receiver<InteractionPendingItem>) {
+        Self::new_with_permission_threshold(
+            buffer_size,
+            PermissionLevel::from_risk_level(auto_approve_threshold),
+            config,
+        )
+    }
+
+    /// Create a gate that auto-proceeds tool calls at or below the
+    /// `PermissionLevel` `threshold` and forwards the rest to the channel.
+    ///
+    /// This is the preferred constructor — it aligns the threshold with the
+    /// `PermissionLevel`-based permission model used everywhere else.
+    pub fn new_with_permission_threshold(
+        buffer_size: usize,
+        auto_approve_threshold: PermissionLevel,
         config: InteractionGateConfig,
     ) -> (Self, mpsc::Receiver<InteractionPendingItem>) {
         let (pending_tx, pending_rx) = mpsc::channel(buffer_size);
@@ -296,14 +321,24 @@ impl InteractionGate for ThresholdInteractionGate {
             return Ok(InteractionResponse::Proceed);
         }
 
-        // Auto-proceed low-risk tool approvals below the threshold.
+        // Auto-proceed tool approvals at or below the threshold.
         if let Some(threshold) = &self.auto_approve_threshold {
             if let Some(approval) = Self::approval_of(&req) {
-                if should_auto_approve(&approval.risk_level, threshold) {
+                // Resolve the effective permission level: prefer the explicit
+                // `permission_level` on the request (the modern path), falling
+                // back to converting the legacy `risk_level`. This is the
+                // gap-analysis P1 alignment — the threshold gate used to
+                // compare legacy RiskLevel while the rest of the model used
+                // PermissionLevel, so a Full tool that reported a Medium
+                // risk_level could be auto-proceeded incorrectly.
+                let level = approval
+                    .permission_level
+                    .unwrap_or_else(|| PermissionLevel::from_risk_level(approval.risk_level));
+                if level.should_auto_approve(threshold) {
                     tracing::info!(
-                        "Auto-proceeding tool '{}' with risk level {:?} (below threshold {:?})",
+                        "Auto-proceeding tool '{}' with permission level {:?} (at/below threshold {:?})",
                         approval.tool_name,
-                        approval.risk_level,
+                        level,
                         threshold
                     );
                     return Ok(InteractionResponse::Proceed);
@@ -324,6 +359,10 @@ impl InteractionGate for ThresholdInteractionGate {
 /// Auto-approves if the request's risk level is strictly below the threshold.
 /// Risk level ordering: Low < Medium < High. Mirrors the legacy
 /// `approval::should_auto_approve`.
+///
+/// **Deprecated**: retained for backward compatibility. The
+/// `ThresholdInteractionGate` now compares `PermissionLevel` via
+/// [`PermissionLevel::should_auto_approve`]; new code should use that instead.
 pub fn should_auto_approve(request_level: &RiskLevel, threshold: &RiskLevel) -> bool {
     match (request_level, threshold) {
         (RiskLevel::Low, RiskLevel::Low) => true,
@@ -391,6 +430,24 @@ mod tests {
                 args: serde_json::json!({"cmd": "ls"}),
                 risk_level: risk,
                 permission_level: None,
+                justification: "test".to_string(),
+            },
+        }
+    }
+
+    /// Like `sample_tool_approval` but sets an explicit `permission_level` —
+    /// the modern request shape. Used to prove the threshold gate honours
+    /// `permission_level` over the legacy `risk_level` (gap-analysis P1 fix).
+    fn sample_tool_approval_with_permission(
+        risk: RiskLevel,
+        perm: PermissionLevel,
+    ) -> InteractionRequest {
+        InteractionRequest::ToolApproval {
+            approval: ApprovalRequest {
+                tool_name: "shell".to_string(),
+                args: serde_json::json!({"cmd": "ls"}),
+                risk_level: risk,
+                permission_level: Some(perm),
                 justification: "test".to_string(),
             },
         }
@@ -527,6 +584,55 @@ mod tests {
         });
         let resp = handle.await.unwrap();
         assert!(matches!(resp, InteractionResponse::Choose { option_id } if option_id == "opt_a"));
+    }
+
+    #[tokio::test]
+    async fn threshold_honours_permission_level_over_risk_level() {
+        // Gap-analysis P1 fix: the gate must decide on `permission_level`,
+        // not the legacy `risk_level`. Here a request carries a low
+        // `risk_level` but an explicit `PermissionLevel::Full` — under a
+        // `Standard` threshold it must NOT auto-proceed (would have, under
+        // the old risk-only comparison).
+        let (gate, mut rx) = ThresholdInteractionGate::new_with_permission_threshold(
+            4,
+            PermissionLevel::Standard,
+            InteractionGateConfig::default(),
+        );
+        let g = into_shared(gate);
+        let handle = tokio::spawn(async move {
+            g.request(sample_tool_approval_with_permission(
+                RiskLevel::Low,
+                PermissionLevel::Full,
+            ))
+            .await
+            .unwrap()
+        });
+        // Full > Standard threshold → forwarded to the channel, not auto-proceeded.
+        let item = rx.recv().await.unwrap();
+        let _ = item.response_tx.send(InteractionResponse::Abort {
+            reason: "full requires confirmation".to_string(),
+        });
+        let resp = handle.await.unwrap();
+        assert!(matches!(resp, InteractionResponse::Abort { reason } if reason == "full requires confirmation"));
+    }
+
+    #[tokio::test]
+    async fn threshold_permission_auto_proceeds_at_or_below() {
+        // PermissionLevel::Read at or below Standard threshold → auto-proceed.
+        let (gate, _rx) = ThresholdInteractionGate::new_with_permission_threshold(
+            4,
+            PermissionLevel::Standard,
+            InteractionGateConfig::default(),
+        );
+        let g = into_shared(gate);
+        let resp = g
+            .request(sample_tool_approval_with_permission(
+                RiskLevel::Low,
+                PermissionLevel::Read,
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(resp, InteractionResponse::Proceed));
     }
 
     // ─── InteractionGateConfig ───────────────────────────────────────────
