@@ -122,6 +122,14 @@ pub const TOOL_EXIT_PLAN_MODE: &str = "exit_plan_mode";
 /// `InteractionGate::request(PlanDecision{..})`; the user's choice is fed back
 /// as the tool result so the model can finish the plan with the decision baked in.
 pub const TOOL_REQUEST_PLAN_DECISION: &str = "request_plan_decision";
+/// Tool name for escalating from normal (execution) mode into plan mode. The
+/// loop intercepts this call and flips `plan_mode_active` on, so the next
+/// iteration exposes the full plan toolset (`task_create`/`exit_plan_mode`/…)
+/// instead of the execution tools. This keeps normal mode from advertising
+/// task tools — "工具即指令": advertising `task_create` nudges the model to
+/// over-engineer simple tasks. The model calls this only when it judges the
+/// task genuinely complex.
+pub const TOOL_ENTER_PLAN_MODE: &str = "enter_plan_mode";
 
 /// Whether a tool name is a plan/task control tool that the loop intercepts.
 pub fn is_control_tool(name: &str) -> bool {
@@ -132,6 +140,7 @@ pub fn is_control_tool(name: &str) -> bool {
             | TOOL_TASK_LIST
             | TOOL_EXIT_PLAN_MODE
             | TOOL_REQUEST_PLAN_DECISION
+            | TOOL_ENTER_PLAN_MODE
     )
 }
 
@@ -241,10 +250,29 @@ pub fn control_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
                 "required": ["decision_id", "question", "context", "options"]
             }),
         },
+        oneai_core::ToolDefinition {
+            name: TOOL_ENTER_PLAN_MODE.into(),
+            description: "Escalate from normal execution mode into plan mode. Call this ONLY when \
+                the task is genuinely complex and needs step-by-step decomposition (e.g. \
+                \"搭建一个完整项目\", multi-file refactor with ordering constraints) — NOT for \
+                simple one-shot tasks (\"创建一个 test 目录\") which you should just do directly \
+                with execution tools. After calling, the harness switches you into the plan \
+                toolset so you can commit a plan with `task_create` and submit it with \
+                `exit_plan_mode`. `plan` carries your initial decomposition sketch so your \
+                reasoning about the task's complexity is not lost.".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan": {
+                        "type": "string",
+                        "description": "Initial decomposition sketch / reasoning for why this task needs plan mode."
+                    }
+                },
+                "required": []
+            }),
+        },
     ]
 }
-
-/// Apply a control-tool call to the plan state, returning the tool output the
 /// model should see. `plan` is `&mut Option<PlanState>` on LoopState — created
 /// lazily on first task creation.
 ///
@@ -327,6 +355,19 @@ pub fn apply_control_tool(
                 "Decision request for '{}' was not intercepted by the interaction gate \
                  (plan mode off?). Proceeding with the planner's own judgement.",
                 q
+            ))
+        }
+        TOOL_ENTER_PLAN_MODE => {
+            // The loop intercepts `enter_plan_mode` inline (it needs &self to
+            // call `set_plan_mode`); this branch is a defensive backstop for
+            // when the inline path isn't taken (e.g. graph path tech debt).
+            // We cannot flip plan_mode from this free function, so just
+            // acknowledge — the loop's inline handler does the real flip.
+            let sketch = args.get("plan").and_then(|v| v.as_str()).unwrap_or("");
+            ok(format!(
+                "enter_plan_mode was not intercepted inline (plan mode unchanged). \
+                 Plan sketch: {}",
+                sketch
             ))
         }
         _ => fail(&format!("Unknown control tool: {}", tool_name)),
@@ -606,6 +647,7 @@ mod tests {
         assert!(names.contains(&TOOL_TASK_UPDATE));
         assert!(names.contains(&TOOL_TASK_LIST));
         assert!(names.contains(&TOOL_EXIT_PLAN_MODE));
+        assert!(names.contains(&TOOL_ENTER_PLAN_MODE));
     }
 
     #[test]

@@ -715,6 +715,11 @@ impl Default for AgentLoopConfig {
                 breadth-first search, \"react\" to return to the standard reason-then-act loop. \
                 After calling, execution continues inside that paradigm's graph and the result is \
                 fed back to you.\n\
+                - `enter_plan_mode(plan?)`: escalate from normal execution into plan mode. Call \
+                this ONLY when the task is genuinely complex and needs step-by-step decomposition \
+                — NOT for simple one-shot tasks, which you should just do directly with execution \
+                tools. After calling, you are switched into the plan toolset (task_create / \
+                exit_plan_mode) so you can commit a plan for approval. Avoid calling it for trivia.\n\
                 (Sub-agent kinds mirror the configured SubAgentTypeDefinitions; see the domain pack.)\n\n\
                 {{TOOL_PREFERENCE_RULES}}"
                 .to_string(),
@@ -1423,7 +1428,13 @@ impl AgentLoop {
             // ceiling — a fixed agent-side cap can exceed a model's max and error).
             // thinking_budget is opt-in (None here unless the user enabled it).
             let tool_defs = self
-                .build_tool_definitions_for_paradigm(state.active_paradigm_config.as_ref())
+                .build_tool_definitions_for_paradigm(
+                    state.active_paradigm_config.as_ref(),
+                    state
+                        .plan_state
+                        .as_ref()
+                        .is_some_and(|p| !p.steps.is_empty()),
+                )
                 .await;
             let mut request = InferenceRequest {
                 conversation: conv_for_inference,
@@ -1899,7 +1910,13 @@ impl AgentLoop {
 
                 // Re-build inference request with updated conversation
                 let retry_tool_defs = self
-                    .build_tool_definitions_for_paradigm(state.active_paradigm_config.as_ref())
+                    .build_tool_definitions_for_paradigm(
+                        state.active_paradigm_config.as_ref(),
+                        state
+                            .plan_state
+                            .as_ref()
+                            .is_some_and(|p| !p.steps.is_empty()),
+                    )
                     .await;
                 let retry_request = InferenceRequest {
                     conversation: state.conversation.clone(),
@@ -2292,6 +2309,37 @@ impl AgentLoop {
                                             .to_string(),
                                     error: None,
                                 },
+                            }
+                        } else if call.name == crate::plan_state::TOOL_ENTER_PLAN_MODE {
+                            // enter_plan_mode: the model judged the task complex
+                            // and escalates from normal execution into plan mode.
+                            // Flip the plan_mode flag on so the NEXT iteration
+                            // exposes the plan toolset (task_create /
+                            // exit_plan_mode / …) and blocks execution tools.
+                            // The plan sketch the model supplied is preserved as
+                            // a system message so its complexity reasoning isn't
+                            // lost when the system prompt is rewritten.
+                            let sketch = call
+                                .args
+                                .get("plan")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            self.set_plan_mode(true);
+                            if !sketch.is_empty() {
+                                state.conversation.add_message(Message::system(format!(
+                                    "[Entered plan mode — initial sketch]: {}",
+                                    sketch
+                                )));
+                            }
+                            oneai_core::ToolOutput {
+                                success: true,
+                                content: "Entered plan mode. Now call `task_create` to commit a \
+                                    step-by-step plan, then `exit_plan_mode` to submit it for \
+                                    approval. Execution tools are disabled until the plan is \
+                                    approved."
+                                    .to_string(),
+                                error: None,
                             }
                         } else if call.name == crate::plan_state::TOOL_REQUEST_PLAN_DECISION {
                             // PlanDecision: the model hit a tradeoff and asks the
@@ -4627,6 +4675,7 @@ impl AgentLoop {
     async fn build_tool_definitions_for_paradigm(
         &self,
         paradigm_config: Option<&ParadigmConfig>,
+        has_committed_plan: bool,
     ) -> Vec<ToolDefinition> {
         let tools_map = self.tools.read().await;
 
@@ -4747,18 +4796,45 @@ impl AgentLoop {
                 .collect()
         };
 
-        // Prepend the plan/task control tools (task_create/task_update/task_list/
-        // exit_plan_mode). These are intercepted by the loop, never dispatched
-        // to the tool registry — but the model must see their definitions to
-        // call them. In plan mode, only exit_plan_mode is exposed so the model
-        // is nudged to submit a plan rather than call execution tools.
+        // Prepend the plan/task control tools. Which ones are exposed depends
+        // on the mode — "工具即指令": advertising `task_create` in normal mode
+        // nudges the model to over-engineer simple tasks (issue #7), so:
+        //
+        //  - Plan mode: the full plan toolset (task_create / task_update /
+        //    task_list / request_plan_decision / exit_plan_mode) so the model
+        //    can build and submit a plan. `enter_plan_mode` is omitted (the
+        //    model is already in plan mode).
+        //  - Normal mode + a committed plan (post exit_plan_mode approval):
+        //    only task_update / task_list, so the model can track execution
+        //    progress on the committed steps. Re-planning tools
+        //    (task_create / request_plan_decision / exit_plan_mode /
+        //    enter_plan_mode) stay hidden — the plan is committed, execute.
+        //  - Normal mode, no plan yet: ONLY enter_plan_mode. The model must
+        //    judge complexity and escalate explicitly; simple tasks never see
+        //    task tools at all.
+        //
+        // These are intercepted by the loop, never dispatched to the tool
+        // registry — but the model must see their definitions to call them.
         let control_defs = if self.plan_mode() {
             crate::plan_state::control_tool_definitions()
                 .into_iter()
-                .filter(|d| d.name == crate::plan_state::TOOL_EXIT_PLAN_MODE)
+                .filter(|d| d.name != crate::plan_state::TOOL_ENTER_PLAN_MODE)
+                .collect::<Vec<_>>()
+        } else if has_committed_plan {
+            crate::plan_state::control_tool_definitions()
+                .into_iter()
+                .filter(|d| {
+                    matches!(
+                        d.name.as_str(),
+                        crate::plan_state::TOOL_TASK_UPDATE | crate::plan_state::TOOL_TASK_LIST
+                    )
+                })
                 .collect::<Vec<_>>()
         } else {
             crate::plan_state::control_tool_definitions()
+                .into_iter()
+                .filter(|d| d.name == crate::plan_state::TOOL_ENTER_PLAN_MODE)
+                .collect::<Vec<_>>()
         };
         let mut all = control_defs;
         all.append(&mut defs);
@@ -5993,7 +6069,9 @@ mod dynamic_tool_prompt_tests {
         // "shell". Without the fallback this would yield zero real tools.
         let loop_ = build_loop(&["shell"]);
         let cfg = ParadigmConfig::for_paradigm(ParadigmKind::Plan);
-        let defs = loop_.build_tool_definitions_for_paradigm(Some(&cfg)).await;
+        let defs = loop_
+            .build_tool_definitions_for_paradigm(Some(&cfg), false)
+            .await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(
             names.contains(&"shell"),
@@ -6009,7 +6087,9 @@ mod dynamic_tool_prompt_tests {
         // edit_file and shell are excluded for the Plan paradigm.
         let loop_ = build_loop(&["read_file", "edit_file", "shell"]);
         let cfg = ParadigmConfig::for_paradigm(ParadigmKind::Plan);
-        let defs = loop_.build_tool_definitions_for_paradigm(Some(&cfg)).await;
+        let defs = loop_
+            .build_tool_definitions_for_paradigm(Some(&cfg), false)
+            .await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
         assert!(!names.contains(&"edit_file"));

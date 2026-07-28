@@ -2449,6 +2449,155 @@ async fn e2e_meta_tools_not_injected_in_plan_mode() {
     );
 }
 
+// ─── enter_plan_mode escalation (issue #7) ─────────────────────────────────────
+
+/// In normal mode with NO committed plan, the task control tools
+/// (task_create / task_update / task_list / request_plan_decision) must NOT
+/// be advertised — "工具即指令": advertising them nudges the model to
+/// over-engineer simple tasks. Only `enter_plan_mode` is exposed (plus the
+/// delegate / switch_paradigm meta-tools, which are unrelated).
+#[tokio::test]
+async fn e2e_normal_mode_without_plan_hides_task_tools() {
+    let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer("done")]);
+    let (loop_, provider_handle) = build_meta_tool_loop(provider);
+
+    let observer = TestObserver {
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let _result = loop_
+        .run_with_observer("do something simple", &observer)
+        .await
+        .unwrap();
+
+    let log = provider_handle.call_log().await;
+    assert!(!log.is_empty(), "at least one inference call expected");
+    let sent_tools: Vec<String> = log[0]
+        .request
+        .tools
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    // Task tools must be hidden.
+    for hidden in [
+        "task_create",
+        "task_update",
+        "task_list",
+        "request_plan_decision",
+        "exit_plan_mode",
+    ] {
+        assert!(
+            !sent_tools.iter().any(|n| n == hidden),
+            "{} must NOT be advertised in planless normal mode; got: {:?}",
+            hidden,
+            sent_tools
+        );
+    }
+    // The escalation tool IS exposed.
+    assert!(
+        sent_tools.iter().any(|n| n == "enter_plan_mode"),
+        "enter_plan_mode should be advertised in planless normal mode; got: {:?}",
+        sent_tools
+    );
+}
+
+/// When the model calls `enter_plan_mode`, the loop flips plan_mode on, so the
+/// NEXT iteration advertises the plan toolset (task_create / exit_plan_mode / …)
+/// and NOT enter_plan_mode. Verifies the issue #7 escalation flow end-to-end:
+/// normal → enter_plan_mode → plan toolset → exit_plan_mode (approved) → answer.
+#[tokio::test]
+async fn e2e_enter_plan_mode_escalates_to_plan_toolset() {
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call(
+            "enter_plan_mode",
+            serde_json::json!({"plan": "搭建项目，需要 8 个步骤"}),
+        ),
+        ScriptedResponse::tool_call(
+            "exit_plan_mode",
+            serde_json::json!({
+                "plan": "do it in steps",
+                "steps": [{"id": "1", "description": "step one"}]
+            }),
+        ),
+        ScriptedResponse::direct_answer("executed"),
+    ]);
+    let provider_arc = Arc::new(provider);
+    let provider_handle = Arc::clone(&provider_arc);
+
+    let tools_map: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn oneai_core::traits::Tool>>>> =
+        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    let loop_ = AgentLoop::new(
+        provider_arc,
+        Arc::clone(&tools_map),
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(MockInteractionGate::new()),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        AgentLoopConfig {
+            // Start in NORMAL mode — the model escalates itself.
+            plan_mode: false,
+            use_streaming: false,
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let result = loop_.run("搭建一个完整项目").await.unwrap();
+    assert!(result.final_answer.contains("executed"));
+
+    let log = provider_handle.call_log().await;
+    assert!(log.len() >= 2, "expected ≥2 inference calls; got {}", log.len());
+
+    // First call: normal mode → only enter_plan_mode among control tools.
+    let first_tools: Vec<String> = log[0]
+        .request
+        .tools
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    assert!(
+        first_tools.iter().any(|n| n == "enter_plan_mode"),
+        "first call should advertise enter_plan_mode; got: {:?}",
+        first_tools
+    );
+    assert!(
+        !first_tools.iter().any(|n| n == "task_create"),
+        "first call must NOT advertise task_create; got: {:?}",
+        first_tools
+    );
+
+    // Second call: escalated to plan mode → full plan toolset, no enter_plan_mode.
+    let second_tools: Vec<String> = log[1]
+        .request
+        .tools
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    assert!(
+        second_tools.iter().any(|n| n == "task_create"),
+        "second call should advertise task_create (plan mode); got: {:?}",
+        second_tools
+    );
+    assert!(
+        second_tools.iter().any(|n| n == "exit_plan_mode"),
+        "second call should advertise exit_plan_mode (plan mode); got: {:?}",
+        second_tools
+    );
+    assert!(
+        !second_tools.iter().any(|n| n == "enter_plan_mode"),
+        "second call must NOT advertise enter_plan_mode (already in plan mode); got: {:?}",
+        second_tools
+    );
+}
+
 // ─── Context-assembly regression: pinned blocks reach the request ────────────
 
 /// A stub ContextSource for the regression test — injects a fixed marker
