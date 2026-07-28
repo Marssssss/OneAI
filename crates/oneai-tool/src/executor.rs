@@ -36,13 +36,30 @@ pub struct ToolExecutorConfig {
     /// Whether to require approval for Medium-risk tools.
     /// By default, only High-risk tools require approval.
     pub require_approval_for_medium: bool,
+    /// Maximum size of a tool's textual output in **bytes**. Outputs larger
+    /// than this are truncated at a UTF-8 char boundary and tagged with a
+    /// `[output truncated]` marker before being returned to the agent loop.
+    ///
+    /// This is the **single chokepoint** that bounds tool result size
+    /// regardless of whether an individual tool self-truncates — it protects
+    /// the context window from runaway MCP / custom-tool output that would
+    /// otherwise blow past the compressor trigger. Set to `0` to disable.
+    pub max_output_bytes: usize,
 }
+
+/// Default per-tool output cap: 1 MiB. Generous enough to never bite normal
+/// tool output (the largest built-in self-truncating tool, `FileReadTool`,
+/// also caps at 1 MiB), but small enough that a runaway multi-MB output from
+/// an unbounded MCP/custom tool cannot overflow the context before the
+/// compressor runs.
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 impl Default for ToolExecutorConfig {
     fn default() -> Self {
         Self {
             default_timeout_secs: 60,
             require_approval_for_medium: false,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
     }
 }
@@ -233,7 +250,7 @@ impl ToolExecutor {
 
         let result = tokio::time::timeout(timeout, tool.execute(args)).await;
 
-        match result {
+        let output = match result {
             Ok(output) => output, // output is already Result<ToolOutput, OneAIError>
             Err(_) => Ok(ToolOutput {
                 success: false,
@@ -244,7 +261,34 @@ impl ToolExecutor {
                     self.config.default_timeout_secs
                 )),
             }),
+        };
+
+        Ok(self.enforce_output_limit(tool.name(), output?))
+    }
+
+    /// Bound a tool's textual output to `max_output_bytes`. The single
+    /// chokepoint that protects the context window from runaway output
+    /// (e.g. an unbounded MCP / custom tool) regardless of whether the tool
+    /// self-truncates. `max_output_bytes == 0` disables the guard.
+    fn enforce_output_limit(&self, tool_name: &str, mut output: ToolOutput) -> ToolOutput {
+        let cap = self.config.max_output_bytes;
+        if cap == 0 || output.content.len() <= cap {
+            return output;
         }
+        let original_len = output.content.len();
+        // Walk back to the nearest UTF-8 char boundary so we never split a
+        // multi-byte sequence (which would produce an invalid String).
+        let mut cut = cap;
+        while cut > 0 && !output.content.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let mut truncated = String::from(&output.content[..cut]);
+        truncated.push_str(&format!(
+            "\n...[output truncated: tool '{}' returned {} bytes, exceeded {} byte limit]",
+            tool_name, original_len, cap
+        ));
+        output.content = truncated;
+        output
     }
 
     /// Register a tool in the registry.
@@ -464,6 +508,7 @@ mod tests {
         let config = ToolExecutorConfig {
             require_approval_for_medium: true,
             default_timeout_secs: 60,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         };
 
         let executor =
@@ -497,5 +542,137 @@ mod tests {
 
         let tools = executor.list_tools().await;
         assert_eq!(tools.len(), 2);
+    }
+
+    /// A mock tool whose `execute` returns an arbitrary-size payload — used to
+    /// exercise the executor-level output cap (the single chokepoint that
+    /// bounds tool result size regardless of whether a tool self-truncates).
+    struct VerboseTool {
+        payload: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for VerboseTool {
+        fn name(&self) -> &str {
+            "verbose"
+        }
+        fn description(&self) -> &str {
+            "returns a fixed payload"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk_level(&self) -> RiskLevel {
+            RiskLevel::Low
+        }
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput {
+                success: true,
+                content: self.payload.clone(),
+                error: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_truncates_oversized_output() {
+        // 5000-byte payload, 1000-byte cap → must truncate + tag.
+        let payload = "x".repeat(5000);
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(VerboseTool {
+                payload: payload.clone(),
+            }))
+            .await
+            .unwrap();
+
+        let executor = ToolExecutor::with_config(
+            registry,
+            Arc::new(NoopInteractionGate),
+            ToolExecutorConfig {
+                default_timeout_secs: 60,
+                require_approval_for_medium: false,
+                max_output_bytes: 1000,
+            },
+        );
+
+        let result = executor
+            .execute("verbose", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        // Content must be well under the original 5000 bytes (truncation tag
+        // adds only a short suffix).
+        assert!(
+            result.content.len() < 1100,
+            "content not truncated: {} bytes",
+            result.content.len()
+        );
+        assert!(result.content.contains("[output truncated"));
+        assert!(result.content.contains("5000 bytes"));
+        assert!(result.content.contains("1000 byte limit"));
+        // Truncated content must still be valid UTF-8 (no split multibyte seq).
+        assert!(std::str::from_utf8(result.content.as_bytes()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_preserves_small_output() {
+        // Payload under the cap must pass through verbatim.
+        let payload = "hello".to_string();
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(VerboseTool {
+                payload: payload.clone(),
+            }))
+            .await
+            .unwrap();
+
+        let executor = ToolExecutor::with_config(
+            registry,
+            Arc::new(NoopInteractionGate),
+            ToolExecutorConfig {
+                default_timeout_secs: 60,
+                require_approval_for_medium: false,
+                max_output_bytes: 1000,
+            },
+        );
+
+        let result = executor
+            .execute("verbose", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.content, "hello");
+        assert!(!result.content.contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_zero_cap_disables_guard() {
+        // max_output_bytes == 0 → guard disabled, full payload returned.
+        let payload = "x".repeat(5000);
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(VerboseTool {
+                payload: payload.clone(),
+            }))
+            .await
+            .unwrap();
+
+        let executor = ToolExecutor::with_config(
+            registry,
+            Arc::new(NoopInteractionGate),
+            ToolExecutorConfig {
+                default_timeout_secs: 60,
+                require_approval_for_medium: false,
+                max_output_bytes: 0,
+            },
+        );
+
+        let result = executor
+            .execute("verbose", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.content.len(), 5000);
+        assert!(!result.content.contains("truncated"));
     }
 }
