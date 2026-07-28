@@ -5,6 +5,7 @@
 > **One AI, Every Platform** — A cross-platform AI agent framework built in Rust: modular, type-safe, domain-pluggable, evaluable, natively multi-agent. One Rust core, six native targets.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml/badge.svg)](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
 [![Crates: 25](https://img.shields.io/badge/Crates-25-orange.svg)]()
 [![Tests: 1457](https://img.shields.io/badge/Tests-1457-green.svg)]()
@@ -1039,6 +1040,18 @@ export OHOS_NDK_HOME=/path/to/harmony/native   # contains llvm/bin/clang
 See `platforms/harmony/README.md`. The streaming callback fires on a tokio worker thread via `napi_threadsafe_function` and is dispatched on the ArkTS thread.
 
 ---
+
+## Contributing
+
+Contributions are welcome — bug fixes, docs, clippy lint cleanup, or new
+subsystems. Start by reading [CONTRIBUTING.md](CONTRIBUTING.md): it covers the
+local build/test commands, crate layering rules, the conventions you must not
+break (3-layer parser, permission model), and the pre-PR self-check.
+
+Looking for something approachable? Pick up an issue labeled
+[`good first issue`](https://github.com/Marssssss/OneAI/labels/good%20first%20issue).
+Design discussions go to [GitHub Discussions](https://github.com/Marssssss/OneAI/discussions).
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards.
 
 ## License
 

@@ -5,6 +5,7 @@
 > **One AI, Every Platform** — 跨平台 AI Agent 框架，基于 Rust 构建：模块化、类型安全、领域可插拔、可评测、多 Agent 原生，一套 Rust 内核打到六端。
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml/badge.svg)](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
 [![Crates: 25](https://img.shields.io/badge/Crates-25-orange.svg)]()
 [![Tests: 1457](https://img.shields.io/badge/Tests-1457-green.svg)]()
@@ -1036,6 +1037,17 @@ export OHOS_NDK_HOME=/path/to/harmony/native   # 含 llvm/bin/clang
 README 见 `platforms/harmony/README.md`。流式回调经 `napi_threadsafe_function` 在 tokio worker 线程触发、ArkTS 线程派发。
 
 ---
+
+## 贡献
+
+欢迎贡献!无论是修 bug、补文档、清理 clippy lint,还是新增子系统,
+都请先读 [CONTRIBUTING.md](CONTRIBUTING.md)——它说明了本地构建/测试命令、
+crate 分层规则、3 层解析器 / 权限模型等"别绕过"的约定,以及提 PR 前的自查清单。
+
+想找点容易上手的?认领一个标了
+[`good first issue`](https://github.com/Marssssss/OneAI/labels/good%20first%20issue)
+的 issue。设计讨论走 [GitHub Discussions](https://github.com/Marssssss/OneAI/discussions)。
+行为准则见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
 ## 许可证
 

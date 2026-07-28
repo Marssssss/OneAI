@@ -1,0 +1,8 @@
+[toolchain]
+# Floats to the latest stable on each machine. CI additionally exercises
+# the declared MSRV (see rust-version in the root Cargo.toml, currently 1.74).
+# Pin a specific channel here only if a subsystem (wasmtime / ort / uniffi)
+# breaks on a newer stable.
+channel = "stable"
+components = ["clippy", "rustfmt"]
+profile = "default"
