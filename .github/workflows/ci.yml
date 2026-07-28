@@ -42,12 +42,10 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
-      # Clippy currently surfaces ~120 historical lints (post auto-fix cleanup).
-      # It is informational for now so the CI stays green while the remaining
-      # lints are cleared as good-first-issues; flip to a hard failure once
-      # the count reaches zero by removing `continue-on-error`.
-      - name: Clippy (informational)
-        continue-on-error: true
+      # Enforcing: clippy runs under -D warnings. The historical lint tail was
+      # cleared (local + CI toolchains aligned to rust 1.97), so new
+      # contributions must not introduce clippy lints.
+      - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   msrv:
