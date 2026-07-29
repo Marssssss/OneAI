@@ -788,6 +788,13 @@ enum TokenAction {
     },
     /// List all known tokenizer profiles
     Models,
+    /// List the generated model catalog with capability flags (L3 authority)
+    Catalog,
+    /// Detect & show the Compat profile for a base_url (provider dispatch)
+    Compat {
+        /// Base URL to detect the compatibility family for
+        base_url: String,
+    },
     /// Check if text fits within a model's context window
     Fits {
         /// Text to check fit for
@@ -1229,6 +1236,12 @@ fn main() {
             }
             TokenAction::Models => {
                 cmd_token::run_token_models();
+            }
+            TokenAction::Catalog => {
+                cmd_token::run_token_catalog();
+            }
+            TokenAction::Compat { base_url } => {
+                cmd_token::run_token_compat(&base_url);
             }
             TokenAction::Fits { text, model } => {
                 cmd_token::run_token_fits(&text, &model);

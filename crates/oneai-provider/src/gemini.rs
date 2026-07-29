@@ -29,18 +29,45 @@ use tokio_stream::wrappers::ReceiverStream;
 pub struct GeminiProvider {
     config: ModelConfig,
     client: Client,
+    /// Resolved compatibility profile (drives dispatch; see `compat.rs`).
+    compat: crate::compat::Compat,
 }
 
 impl GeminiProvider {
     /// Create a new Gemini provider with the given configuration.
     pub fn new(config: ModelConfig) -> Self {
         let client = Client::new();
-        Self { config, client }
+        let compat = crate::compat::Compat::from_config(&config);
+        Self {
+            config,
+            client,
+            compat,
+        }
     }
 
     /// Create with a custom HTTP client.
     pub fn with_client(config: ModelConfig, client: Client) -> Self {
-        Self { config, client }
+        let compat = crate::compat::Compat::from_config(&config);
+        Self {
+            config,
+            client,
+            compat,
+        }
+    }
+
+    /// Create with an explicit pre-resolved compatibility profile (factory path).
+    pub(crate) fn with_compat(config: ModelConfig, compat: crate::compat::Compat) -> Self {
+        let client = Client::new();
+        Self {
+            config,
+            client,
+            compat,
+        }
+    }
+
+    /// The resolved compatibility profile.
+    pub fn compat(&self) -> crate::compat::Compat {
+        self.compat
     }
 
     /// Get the Gemini generateContent endpoint URL.
@@ -582,6 +609,16 @@ impl LlmProvider for GeminiProvider {
     }
 
     fn capabilities(&self) -> ModelCapability {
+        // Prefer the generated catalog's real per-model values; fall back to
+        // Gemini 2.0 defaults when the model isn't catalogued.
+        if let Some(cap) = self
+            .config
+            .model_name
+            .as_deref()
+            .and_then(oneai_core::catalog::capability_snapshot)
+        {
+            return cap;
+        }
         // Gemini 2.0 capabilities
         ModelCapability {
             supports_multimodal: true,

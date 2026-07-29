@@ -15,6 +15,7 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod anthropic;
+pub mod compat;
 pub mod gemini;
 pub mod model_router;
 pub mod ollama;
@@ -25,6 +26,7 @@ pub mod retry;
 pub mod smart_router;
 
 pub use anthropic::AnthropicProvider;
+pub use compat::{Compat, CompatFamily};
 pub use gemini::GeminiProvider;
 pub use model_router::{ModelRouter, RouteDecision, RouteProviderKind, RouteRule};
 pub use ollama::OllamaProvider;

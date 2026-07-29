@@ -134,6 +134,116 @@ pub fn run_token_models() -> i32 {
     0
 }
 
+/// List the generated model catalog with capability flags (L3 authority).
+///
+/// Unlike `run_token_models` (the context-window projection), this shows the
+/// full `ModelEntry` capability set — reasoning / modalities / thinking /
+/// strict / cache / tier — sourced from `crates/oneai-core/src/catalog`.
+pub fn run_token_catalog() -> i32 {
+    use oneai_core::catalog;
+
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║              OneAI Generated Model Catalog (L3)               ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("  Source: crates/oneai-core/src/catalog/models.snapshot.json");
+    println!("  Verify: cargo xtask check-model-data");
+    println!();
+
+    println!(
+        "  {:<10} {:<18} {:>10} {:>8} {:<3} {:<3} {:<3} {:<3} {:<9}",
+        "Provider", "Pattern", "Ctx(K)", "MaxOut", "Rsn", "Thk", "Str", "Cch", "Tier"
+    );
+    println!("  {}", "─".repeat(78));
+
+    for e in catalog::CATALOG.iter() {
+        println!(
+            "  {:<10} {:<18} {:>10} {:>8} {:<3} {:<3} {:<3} {:<3} {:<9}",
+            e.provider,
+            e.model_id,
+            e.context_window / 1000,
+            e.max_output_tokens,
+            if e.reasoning { "y" } else { "-" },
+            match e.thinking_format {
+                catalog::ThinkingFormat::None => "-",
+                catalog::ThinkingFormat::Interleaved => "i",
+                catalog::ThinkingFormat::Separate => "s",
+                _ => "?",
+            },
+            if e.supports_strict { "y" } else { "-" },
+            if e.cache_retention { "y" } else { "-" },
+            match e.tier {
+                oneai_core::RoutingTier::Cheap => "cheap",
+                oneai_core::RoutingTier::Balanced => "balanced",
+                oneai_core::RoutingTier::Powerful => "powerful",
+                _ => "?",
+            },
+        );
+    }
+
+    println!();
+    println!(
+        "  Legend: Rsn=reasoning Thk=thinking(i=interleaved/s=separate) Str=strict-json Cch=cache"
+    );
+    println!("  Total: {} models", catalog::CATALOG.len());
+    println!();
+    0
+}
+
+/// Show the detected [`Compat`] profile for a `base_url`.
+///
+/// Runs `oneai_provider::Compat::detect` and prints the family + flag set —
+/// the same dispatch the `ProviderFactory` uses.
+pub fn run_token_compat(base_url: &str) -> i32 {
+    use oneai_provider::{Compat, CompatFamily};
+
+    // Detect as if the user gave only a base_url (no explicit cloud_kind) —
+    // the same url-probe `ProviderFactory::resolve_provider` performs.
+    let compat = Compat::detect(base_url, None, oneai_core::ProviderType::Cloud);
+
+    println!("╔══════════════════════════════════════════════════╗");
+    println!("║              OneAI Compat Profile                 ║");
+    println!("╚══════════════════════════════════════════════════╝");
+    println!();
+    println!("  base_url : {base_url}");
+    println!(
+        "  family   : {} ({})",
+        match compat.family {
+            CompatFamily::OpenAICompat => "OpenAICompat",
+            CompatFamily::AnthropicCompat => "AnthropicCompat",
+            CompatFamily::GeminiCompat => "GeminiCompat",
+            CompatFamily::OllamaCompat => "OllamaCompat",
+            _ => "Unknown",
+        },
+        compat.family.label()
+    );
+    println!();
+    println!(
+        "  supports_strict_json_schema : {}",
+        compat.supports_strict_json_schema
+    );
+    println!(
+        "  supports_prompt_cache       : {}",
+        compat.supports_prompt_cache
+    );
+    println!(
+        "  cache_via_control_block     : {}",
+        compat.cache_via_control_block
+    );
+    println!(
+        "  thinking_via_field          : {}",
+        compat.thinking_via_field
+    );
+    println!(
+        "  reasoning_via_field         : {}",
+        compat.reasoning_via_field
+    );
+    println!("  native_chat_api             : {}", compat.native_chat_api);
+    println!("  auth_style                  : {:?}", compat.auth);
+    println!();
+    0
+}
+
 /// Check if text fits within a model's context window.
 pub fn run_token_fits(text: &str, model: &str) -> i32 {
     let counter = Arc::new(HeuristicTokenCounter::new()) as Arc<dyn TokenCounter>;

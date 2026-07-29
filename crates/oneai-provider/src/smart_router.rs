@@ -617,9 +617,16 @@ impl SmartRouter {
                     // Use TokenCounter for accurate context window lookup
                     tc.context_window_size(model) as u64
                 } else {
-                    // Fallback to heuristic from ModelQualityProfile
-                    let profile = self.find_profile_for_model(model);
-                    profile.map_or(128_000, |p| p.context_window_tokens)
+                    // No token counter: prefer the generated catalog's real
+                    // context window for the model, then the ModelQualityProfile
+                    // heuristic, then a 128K default.
+                    oneai_core::catalog::capability_snapshot(model)
+                        .map(|c| c.context_window_size as u64)
+                        .or_else(|| {
+                            self.find_profile_for_model(model)
+                                .map(|p| p.context_window_tokens)
+                        })
+                        .unwrap_or(128_000)
                 };
 
                 let would_overflow = (tokens as f64 / context_window as f64)
@@ -678,8 +685,13 @@ impl SmartRouter {
         // Context window overflow
         if self.config.context_aware {
             if let Some(tokens) = conversation_tokens {
-                let profile = self.find_profile_for_model(model);
-                let context_window = profile.map_or(128_000, |p| p.context_window_tokens);
+                let context_window = oneai_core::catalog::capability_snapshot(model)
+                    .map(|c| c.context_window_size as u64)
+                    .or_else(|| {
+                        self.find_profile_for_model(model)
+                            .map(|p| p.context_window_tokens)
+                    })
+                    .unwrap_or(128_000);
 
                 if (tokens as f64 / context_window as f64) > self.config.context_overflow_threshold
                 {

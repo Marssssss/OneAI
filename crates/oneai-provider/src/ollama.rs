@@ -23,13 +23,35 @@ use tokio_stream::wrappers::ReceiverStream;
 pub struct OllamaProvider {
     config: ModelConfig,
     client: Client,
+    /// Resolved compatibility profile (drives dispatch; see `compat.rs`).
+    compat: crate::compat::Compat,
 }
 
 impl OllamaProvider {
     /// Create a new Ollama provider with the given configuration.
     pub fn new(config: ModelConfig) -> Self {
         let client = Client::new();
-        Self { config, client }
+        let compat = crate::compat::Compat::from_config(&config);
+        Self {
+            config,
+            client,
+            compat,
+        }
+    }
+
+    /// Create with an explicit pre-resolved compatibility profile (factory path).
+    pub(crate) fn with_compat(config: ModelConfig, compat: crate::compat::Compat) -> Self {
+        let client = Client::new();
+        Self {
+            config,
+            client,
+            compat,
+        }
+    }
+
+    /// The resolved compatibility profile.
+    pub fn compat(&self) -> crate::compat::Compat {
+        self.compat
     }
 
     /// Get the Ollama chat completions endpoint URL.
@@ -347,6 +369,18 @@ impl LlmProvider for OllamaProvider {
     }
 
     fn capabilities(&self) -> ModelCapability {
+        // Prefer the generated catalog's real per-model values when the local
+        // model is catalogued (e.g. llama3.1, qwen3); fall back to conservative
+        // Ollama defaults otherwise — local models vary, so the L2 probe
+        // (`/api/show`) is the ultimate authority at runtime.
+        if let Some(cap) = self
+            .config
+            .model_name
+            .as_deref()
+            .and_then(oneai_core::catalog::capability_snapshot)
+        {
+            return cap;
+        }
         // Ollama capabilities depend on the model — use conservative defaults
         ModelCapability {
             supports_multimodal: false, // Depends on model

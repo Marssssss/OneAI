@@ -27,6 +27,7 @@ members = [
     "crates/oneai-studio",
     "crates/oneai-mcp",
     "crates/oneai-vector",
+    "xtask",
     "examples/cli",
     "examples/desktop-app",
     "examples/rust",
@@ -96,6 +97,10 @@ fastembed = "5"
 bytes = "1"
 base64 = "0.22"
 url = "2"
+
+# Hashing — used by the `xtask` model-catalog generator (manifest SHA256 +
+# structure hash). Pure-Rust, no-std-friendly, well-audited.
+sha2 = "0.10"
 
 # HTTP / SSE
 # `socks` enables SOCKS4/4a/5/5h connectors (ALL_PROXY=socks5://...).
@@ -211,3 +216,4 @@ wasmtime = "45"
 lto = "thin"
 codegen-units = 1
 strip = true
+

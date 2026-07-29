@@ -13,6 +13,7 @@
 //! - anything else → OpenAI-compatible (most services use OpenAI protocol)
 
 use crate::anthropic::AnthropicProvider;
+use crate::compat::{Compat, CompatFamily};
 use crate::gemini::GeminiProvider;
 use crate::ollama::OllamaProvider;
 use crate::openai::OpenAIProvider;
@@ -21,92 +22,75 @@ use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
 
 /// Factory for creating LlmProvider instances from configuration.
 ///
-/// Automatically detects the provider type from `base_url` when `cloud_kind`
-/// is not explicitly specified. Most LLM services today use the OpenAI-compatible
-/// protocol, so any unrecognized URL defaults to OpenAI-compatible.
+/// Dispatches via the resolved [`Compat`] profile (`Compat::from_config`),
+/// which is the single authority for "which protocol family does this
+/// endpoint speak" — driven by `base_url` host rules in [`Compat::detect`].
+/// Most LLM services today use the OpenAI-compatible protocol, so any
+/// unrecognized URL defaults to OpenAI-compatible.
 pub struct ProviderFactory;
 
 impl ProviderFactory {
     /// Create the appropriate provider based on the ModelConfig.
     ///
-    /// If `cloud_kind` is explicitly set, uses that. Otherwise, auto-detects
-    /// from `base_url`. If neither is set, defaults to OpenAI.
+    /// Dispatch is **Compat-driven**: the config is first normalized
+    /// (`resolve_provider`, which sets `cloud_kind`/`provider_type` from the
+    /// host rules in `Compat::detect`), then [`Compat::from_config`] selects
+    /// the family, then the matching provider struct is constructed with the
+    /// resolved profile. Behavior is identical to the prior `match cloud_kind`
+    /// dispatch — see `factory_dispatch_*` tests.
     pub fn create(config: ModelConfig) -> Box<dyn LlmProvider> {
-        let resolved_config = Self::resolve_provider(config);
-        match resolved_config.provider_type {
-            ProviderType::Cloud => {
-                match resolved_config.cloud_kind {
-                    Some(CloudProviderKind::Anthropic) => {
-                        Box::new(AnthropicProvider::new(resolved_config))
-                    }
-                    Some(CloudProviderKind::Gemini) => {
-                        Box::new(GeminiProvider::new(resolved_config))
-                    }
-                    // OpenAI and all OpenAI-compatible services (百炼, DeepSeek, 智谱, etc.)
-                    Some(CloudProviderKind::OpenAI) | None => {
-                        Box::new(OpenAIProvider::new(resolved_config))
-                    }
-                }
+        let resolved = Self::resolve_provider(config);
+        if matches!(resolved.provider_type, ProviderType::Transformers) {
+            panic!("Transformers provider not yet implemented. Use Local (Ollama) instead.");
+        }
+        let compat = Compat::from_config(&resolved);
+        match compat.family {
+            CompatFamily::AnthropicCompat => {
+                Box::new(AnthropicProvider::with_compat(resolved, compat))
             }
-            ProviderType::Local => Box::new(OllamaProvider::new(resolved_config)),
-            ProviderType::Transformers => {
-                panic!("Transformers provider not yet implemented. Use Local (Ollama) instead.");
-            }
+            CompatFamily::GeminiCompat => Box::new(GeminiProvider::with_compat(resolved, compat)),
+            CompatFamily::OllamaCompat => Box::new(OllamaProvider::with_compat(resolved, compat)),
+            CompatFamily::OpenAICompat => Box::new(OpenAIProvider::with_compat(resolved, compat)),
         }
     }
 
-    /// Auto-detect provider type from `base_url`.
+    /// Normalize a `ModelConfig` — set `cloud_kind`/`provider_type` from the
+    /// host rules in [`Compat::detect`] (the single authority). If
+    /// `cloud_kind` is already explicitly set, no auto-detection is applied.
     ///
-    /// Detection logic:
+    /// Detection logic (delegated to `Compat::detect`):
     /// - URLs containing `anthropic.com` → Anthropic protocol
-    /// - URLs containing `localhost` / `127.0.0.1` / `0.0.0.0` → Ollama (Local)
-    /// - Everything else → OpenAI-compatible protocol (covers OpenAI itself,
+    /// - URLs containing `generativelanguage.googleapis.com` /
+    ///   `aiplatform.googleapis.com` → Gemini
+    /// - `localhost` / `127.0.0.1` / `0.0.0.0` / `[::1]` → Ollama (Local)
+    /// - Everything else → OpenAI-compatible (covers OpenAI itself,
     ///   阿里百炼/DashScope, DeepSeek, 智谱/GLM, Mistral, Groq, etc.)
     fn resolve_provider(config: ModelConfig) -> ModelConfig {
-        // If cloud_kind is already explicitly set, no auto-detection needed
+        // If cloud_kind is already explicitly set, no auto-detection needed.
         if config.cloud_kind.is_some() {
             return config;
         }
 
-        let url = config.resolved_url().to_lowercase();
-
-        // Detect Anthropic
-        if url.contains("anthropic.com") {
-            return ModelConfig {
+        let url = config.resolved_url();
+        let compat = Compat::detect(&url, config.cloud_kind, config.provider_type);
+        match compat.family {
+            CompatFamily::AnthropicCompat => ModelConfig {
                 cloud_kind: Some(CloudProviderKind::Anthropic),
                 ..config
-            };
-        }
-
-        // Detect Gemini
-        if url.contains("generativelanguage.googleapis.com")
-            || url.contains("aiplatform.googleapis.com")
-        {
-            return ModelConfig {
+            },
+            CompatFamily::GeminiCompat => ModelConfig {
                 cloud_kind: Some(CloudProviderKind::Gemini),
                 ..config
-            };
-        }
-
-        // Detect local/Ollama
-        if url.contains("localhost")
-            || url.contains("127.0.0.1")
-            || url.contains("0.0.0.0")
-            || url.contains("[::1]")
-        {
-            return ModelConfig {
+            },
+            CompatFamily::OllamaCompat => ModelConfig {
                 provider_type: ProviderType::Local,
                 cloud_kind: None,
                 ..config
-            };
-        }
-
-        // Everything else → OpenAI-compatible
-        // This covers: api.openai.com, dashscope.aliyuncs.com, api.deepseek.com,
-        // open.bigmodel.cn, api.mistral.ai, api.groq.com, and any custom endpoint
-        ModelConfig {
-            cloud_kind: Some(CloudProviderKind::OpenAI),
-            ..config
+            },
+            CompatFamily::OpenAICompat => ModelConfig {
+                cloud_kind: Some(CloudProviderKind::OpenAI),
+                ..config
+            },
         }
     }
 }
@@ -187,5 +171,83 @@ mod tests {
         let resolved = ProviderFactory::resolve_provider(config);
         // Explicit Anthropic should not be overridden by URL detection
         assert_eq!(resolved.cloud_kind, Some(CloudProviderKind::Anthropic));
+    }
+
+    // ── Compat-driven dispatch invariants (behavior preserved) ─────────
+    //
+    // `create` now dispatches via `Compat::from_config`; these assert the
+    // family each endpoint resolves to, so a future refactor can't silently
+    // reroute a provider. (Invariants on the family mapping, not frozen
+    // values — per 戒律 6.)
+
+    fn family_of(config: ModelConfig) -> CompatFamily {
+        let resolved = ProviderFactory::resolve_provider(config);
+        Compat::from_config(&resolved).family
+    }
+
+    #[test]
+    fn factory_dispatch_openai_for_openai_host() {
+        let cfg = ModelConfig::openai_compatible(
+            "sk".into(),
+            "https://api.openai.com/v1".into(),
+            "gpt-4o".into(),
+        );
+        assert_eq!(family_of(cfg), CompatFamily::OpenAICompat);
+    }
+
+    #[test]
+    fn factory_dispatch_openai_for_compat_hosts() {
+        // DeepSeek / 百炼 / 智谱 — all OpenAI-compatible.
+        for url in [
+            "https://api.deepseek.com/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "https://open.bigmodel.cn/api/paas/v4",
+        ] {
+            let cfg = ModelConfig::openai_compatible("sk".into(), url.into(), "m".into());
+            assert_eq!(family_of(cfg), CompatFamily::OpenAICompat, "{url}");
+        }
+    }
+
+    #[test]
+    fn factory_dispatch_anthropic_for_anthropic_host() {
+        let cfg = ModelConfig {
+            provider_type: oneai_core::ProviderType::Cloud,
+            cloud_kind: None,
+            api_key: Some("sk".into()),
+            base_url: Some("https://api.anthropic.com/v1".into()),
+            ..ModelConfig::default()
+        };
+        assert_eq!(family_of(cfg), CompatFamily::AnthropicCompat);
+    }
+
+    #[test]
+    fn factory_dispatch_gemini_for_google_host() {
+        let cfg = ModelConfig::gemini("sk".into(), "gemini-2.5-pro".into());
+        assert_eq!(family_of(cfg), CompatFamily::GeminiCompat);
+    }
+
+    #[test]
+    fn factory_dispatch_ollama_for_localhost() {
+        let cfg = ModelConfig {
+            provider_type: oneai_core::ProviderType::Cloud,
+            cloud_kind: None,
+            api_key: None,
+            base_url: Some("http://localhost:11434".into()),
+            ..ModelConfig::default()
+        };
+        assert_eq!(family_of(cfg), CompatFamily::OllamaCompat);
+    }
+
+    #[test]
+    fn factory_dispatch_ollama_for_explicit_local_type() {
+        // ProviderType::Local → Ollama regardless of host.
+        let cfg = ModelConfig {
+            provider_type: oneai_core::ProviderType::Local,
+            cloud_kind: None,
+            api_key: None,
+            base_url: Some("https://api.openai.com/v1".into()),
+            ..ModelConfig::default()
+        };
+        assert_eq!(family_of(cfg), CompatFamily::OllamaCompat);
     }
 }

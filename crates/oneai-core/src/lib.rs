@@ -20,6 +20,7 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod budget;
+pub mod catalog;
 pub mod circuit_breaker;
 pub mod context_accounting;
 pub mod context_manager;
@@ -36,6 +37,7 @@ pub mod types;
 pub mod usage;
 
 pub use budget::*;
+pub use catalog::*;
 pub use circuit_breaker::*;
 pub use context_accounting::*;
 pub use context_manager::*;

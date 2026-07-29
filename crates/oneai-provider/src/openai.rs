@@ -34,6 +34,8 @@ pub struct OpenAIProvider {
     /// Retry configuration for transient API errors.
     /// Default: 3 retries with exponential backoff (1s → 2s → 4s).
     pub retry_config: ProviderRetryConfig,
+    /// Resolved compatibility profile (drives dispatch; see `compat.rs`).
+    compat: crate::compat::Compat,
 }
 
 impl OpenAIProvider {
@@ -42,30 +44,52 @@ impl OpenAIProvider {
     /// Default retry config: 3 retries, exponential backoff (1s → 2s → 4s).
     pub fn new(config: ModelConfig) -> Self {
         let client = Client::new();
+        let compat = crate::compat::Compat::from_config(&config);
         Self {
             config,
             client,
             retry_config: ProviderRetryConfig::default(),
+            compat,
         }
     }
 
     /// Create with a custom HTTP client.
     pub fn with_client(config: ModelConfig, client: Client) -> Self {
+        let compat = crate::compat::Compat::from_config(&config);
         Self {
             config,
             client,
             retry_config: ProviderRetryConfig::default(),
+            compat,
         }
     }
 
     /// Create with custom retry configuration.
     pub fn with_retry_config(config: ModelConfig, retry_config: ProviderRetryConfig) -> Self {
         let client = Client::new();
+        let compat = crate::compat::Compat::from_config(&config);
         Self {
             config,
             client,
             retry_config,
+            compat,
         }
+    }
+
+    /// Create with an explicit pre-resolved compatibility profile (factory path).
+    pub(crate) fn with_compat(config: ModelConfig, compat: crate::compat::Compat) -> Self {
+        let client = Client::new();
+        Self {
+            config,
+            client,
+            retry_config: ProviderRetryConfig::default(),
+            compat,
+        }
+    }
+
+    /// The resolved compatibility profile.
+    pub fn compat(&self) -> crate::compat::Compat {
+        self.compat
     }
 
     /// Set the retry configuration (builder pattern).
@@ -817,7 +841,16 @@ impl LlmProvider for OpenAIProvider {
     }
 
     fn capabilities(&self) -> ModelCapability {
-        // Default capabilities for OpenAI-compatible models
+        // Prefer the generated catalog's real per-model values when known;
+        // fall back to OpenAI-compatible defaults otherwise.
+        if let Some(cap) = self
+            .config
+            .model_name
+            .as_deref()
+            .and_then(oneai_core::catalog::capability_snapshot)
+        {
+            return cap;
+        }
         ModelCapability {
             supports_multimodal: true,
             supports_streaming: true,

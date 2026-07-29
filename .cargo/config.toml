@@ -1,0 +1,5 @@
+# Workspace cargo config. `cargo xtask <cmd>` runs the model-catalog
+# generator / verifier (`xtask` is a workspace member excluded from
+# `default-members`, so bare `cargo build` never compiles it).
+[alias]
+xtask = "run -p xtask --"

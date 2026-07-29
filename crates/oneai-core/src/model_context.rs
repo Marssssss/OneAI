@@ -54,175 +54,24 @@ pub struct ModelContextEntry {
 
 /// The built-in static model library — L3 fallback for context-window resolution.
 ///
-/// Searched in order by `builtin_lookup`; the first substring match wins, so
-/// entries are arranged specific → general within each family. Values reflect
-/// publicly documented limits as of mid-2026; for the authoritative number,
-/// the L2 provider probe (or L1 user override) takes precedence.
-pub static BUILTIN_MODEL_CONTEXT: &[ModelContextEntry] = &[
-    // ── Anthropic ───────────────────────────────────────────────────────────
-    ModelContextEntry {
-        provider: "anthropic",
-        model_id: "claude-opus",
-        context_window: 200_000,
-        max_output_tokens: 32_000,
-    },
-    ModelContextEntry {
-        provider: "anthropic",
-        model_id: "claude-sonnet",
-        context_window: 200_000,
-        max_output_tokens: 16_000,
-    },
-    ModelContextEntry {
-        provider: "anthropic",
-        model_id: "claude-haiku",
-        context_window: 200_000,
-        max_output_tokens: 8_192,
-    },
-    // ── OpenAI ──────────────────────────────────────────────────────────────
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "gpt-4.1-nano",
-        context_window: 1_000_000,
-        max_output_tokens: 32_000,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "gpt-4.1-mini",
-        context_window: 1_000_000,
-        max_output_tokens: 32_000,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "gpt-4.1",
-        context_window: 1_000_000,
-        max_output_tokens: 32_000,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "gpt-4o-mini",
-        context_window: 128_000,
-        max_output_tokens: 16_384,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "gpt-4o",
-        context_window: 128_000,
-        max_output_tokens: 16_384,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "o4-mini",
-        context_window: 200_000,
-        max_output_tokens: 100_000,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "o3-pro",
-        context_window: 200_000,
-        max_output_tokens: 100_000,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "o3-mini",
-        context_window: 200_000,
-        max_output_tokens: 100_000,
-    },
-    ModelContextEntry {
-        provider: "openai",
-        model_id: "o3",
-        context_window: 200_000,
-        max_output_tokens: 100_000,
-    },
-    // ── Google Gemini ───────────────────────────────────────────────────────
-    ModelContextEntry {
-        provider: "gemini",
-        model_id: "gemini-2.5-pro",
-        context_window: 2_000_000,
-        max_output_tokens: 8_192,
-    },
-    ModelContextEntry {
-        provider: "gemini",
-        model_id: "gemini-2.5-flash",
-        context_window: 1_000_000,
-        max_output_tokens: 8_192,
-    },
-    ModelContextEntry {
-        provider: "gemini",
-        model_id: "gemini-2.0-flash",
-        context_window: 1_000_000,
-        max_output_tokens: 8_192,
-    },
-    // ── GLM (智谱) ──────────────────────────────────────────────────────────
-    ModelContextEntry {
-        provider: "glm",
-        model_id: "glm-5",
-        context_window: 203_000,
-        max_output_tokens: 16_384,
-    },
-    ModelContextEntry {
-        provider: "glm",
-        model_id: "glm-4",
-        context_window: 128_000,
-        max_output_tokens: 4_096,
-    },
-    // ── DeepSeek ────────────────────────────────────────────────────────────
-    ModelContextEntry {
-        provider: "deepseek",
-        model_id: "deepseek-reasoner",
-        context_window: 64_000,
-        max_output_tokens: 32_000,
-    },
-    ModelContextEntry {
-        provider: "deepseek",
-        model_id: "deepseek-chat",
-        context_window: 128_000,
-        max_output_tokens: 8_192,
-    },
-    // ── Qwen ────────────────────────────────────────────────────────────────
-    ModelContextEntry {
-        provider: "qwen",
-        model_id: "qwen3",
-        context_window: 128_000,
-        max_output_tokens: 8_192,
-    },
-    ModelContextEntry {
-        provider: "qwen",
-        model_id: "qwen2.5",
-        context_window: 128_000,
-        max_output_tokens: 8_192,
-    },
-    // ── Llama (via Ollama) ──────────────────────────────────────────────────
-    ModelContextEntry {
-        provider: "llama",
-        model_id: "llama3.3",
-        context_window: 128_000,
-        max_output_tokens: 4_096,
-    },
-    ModelContextEntry {
-        provider: "llama",
-        model_id: "llama3.1",
-        context_window: 128_000,
-        max_output_tokens: 4_096,
-    },
-    ModelContextEntry {
-        provider: "llama",
-        model_id: "llama3",
-        context_window: 8_192,
-        max_output_tokens: 4_096,
-    },
-];
+/// Now backed by the generated [`crate::catalog`] (`CATALOG`), which is the
+/// single source of truth. This static is a context-window projection kept for
+/// API compatibility; see `catalog::BUILTIN_MODEL_CONTEXT`. Searched in order
+/// by `builtin_lookup`; the first substring match wins, so entries are arranged
+/// specific → general within a family. Values reflect publicly documented
+/// limits as of mid-2026; for the authoritative number, the L2 provider probe
+/// (or L1 user override) takes precedence.
+pub use crate::catalog::BUILTIN_MODEL_CONTEXT;
 
-/// Look up a model in the built-in static library by case-insensitive substring match.
+/// Look up a model in the built-in static library by case-insensitive
+/// substring match.
 ///
-/// Returns the first `BUILTIN_MODEL_CONTEXT` entry whose `model_id` is a
-/// substring of `model` (lowercased). The table is ordered specific → general
-/// so e.g. `"gpt-4.1-nano"` matches before `"gpt-4.1"` before `"gpt-4"`.
+/// Delegates to [`crate::catalog::lookup`] (the generated catalog) and
+/// projects to `ModelContextEntry`. Returns the first `CATALOG` entry whose
+/// `model_id` is a substring of `model` (lowercased). The table is ordered
+/// specific → general so e.g. `"gpt-4.1-nano"` matches before `"gpt-4.1"`.
 pub fn builtin_lookup(model: &str) -> Option<ModelContextEntry> {
-    let lower = model.to_lowercase();
-    BUILTIN_MODEL_CONTEXT
-        .iter()
-        .find(|entry| lower.contains(entry.model_id))
-        .copied()
+    crate::catalog::lookup(model).map(|e| e.to_context_entry())
 }
 
 // ─── ContextSource ───────────────────────────────────────────────────────────
