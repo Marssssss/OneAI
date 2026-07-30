@@ -146,6 +146,11 @@ impl Gateway {
 
 /// Segment `text` into chunks ≤ `max_len`, preferring paragraph (`\n\n`) and
 /// newline boundaries, falling back to hard cut. Never returns an empty chunk.
+///
+/// CJK-aware: `max_len` is a byte budget, and a hard cut at an arbitrary byte
+/// lands inside a multi-byte codepoint → panic. So the byte cap is floored to
+/// the nearest char boundary before slicing, and the final cut is advanced to a
+/// boundary if needed.
 fn segment_text(text: &str, max_len: usize) -> Vec<&str> {
     if text.len() <= max_len {
         return vec![text];
@@ -157,15 +162,27 @@ fn segment_text(text: &str, max_len: usize) -> Vec<&str> {
             out.push(rest);
             break;
         }
-        // Try to cut at the last paragraph break within the window.
-        let window = &rest[..max_len];
+        // Floor the byte cap to a char boundary (CJK: a 3-byte char may straddle
+        // max_len). `is_char_boundary` is stable since 1.9.
+        let mut cap = max_len;
+        while cap > 0 && !rest.is_char_boundary(cap) {
+            cap -= 1;
+        }
+        // Try to cut at the last paragraph / newline break within the window.
+        let window = &rest[..cap];
         let cut = window
             .rfind("\n\n")
             .map(|i| i + 2)
             .or_else(|| window.rfind('\n').map(|i| i + 1))
-            .unwrap_or(max_len);
-        // Guard against pathological 0-cut (e.g. window starts with \n\n).
-        let cut = cut.max(1).min(rest.len());
+            .unwrap_or(cap)
+            .max(1)
+            .min(rest.len());
+        // Advance cut to a char boundary (rfind results land on ASCII newlines,
+        // so they're already boundaries; this guards the hard-cut fallback).
+        let mut cut = cut;
+        while cut < rest.len() && !rest.is_char_boundary(cut) {
+            cut += 1;
+        }
         out.push(&rest[..cut]);
         rest = &rest[cut..];
     }
@@ -282,6 +299,43 @@ mod tests {
             assert!(c.len() <= 20, "chunk over limit: {} bytes", c.len());
         }
         assert_eq!(sent.concat(), long);
+    }
+
+    #[test]
+    fn segment_text_cjk_no_panic_on_mid_char_boundary() {
+        // Reproduces the production panic: a 3-byte CJK char straddling the
+        // byte cap. "工" is 3 bytes (E5 B7 A5). Build a string where byte
+        // offset `cap` lands inside a 工 char, and verify segment_text floors to
+        // a char boundary instead of panicking.
+        // 2998 bytes of 'a' + "工工工" → byte 3000 (cap=3000) is inside the
+        // first 工 (bytes 2998..3001).
+        let prefix = "a".repeat(2998);
+        let suffix = "工工工";
+        let text = format!("{prefix}{suffix}");
+        assert_eq!(text.len(), 2998 + 9);
+        let chunks = segment_text(&text, 3000);
+        // No panic, every chunk is valid UTF-8 and ≤ cap, concat reproduces.
+        for c in &chunks {
+            assert!(c.len() <= 3000);
+            assert!(std::str::from_utf8(c.as_bytes()).is_ok());
+        }
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn segment_text_cjk_prefers_newline_boundary() {
+        // 2400 bytes of CJK, then a newline, then ASCII — the newline sits
+        // inside the cap window, so the cut should land on it (not mid-char).
+        let cjk = "你好世界".repeat(200); // 4 chars * 3 bytes * 200 = 2400 bytes
+        let text = format!("{cjk}\n{}", "x".repeat(700)); // 2400+1+700 = 3101 > 3000
+        let chunks = segment_text(&text, 3000);
+        assert!(chunks.len() >= 2);
+        assert!(chunks[0].ends_with('\n'), "first cut should land on the newline");
+        for c in &chunks {
+            assert!(c.len() <= 3000);
+            assert!(std::str::from_utf8(c.as_bytes()).is_ok());
+        }
+        assert_eq!(chunks.concat(), text);
     }
 
     #[tokio::test]
