@@ -51,6 +51,17 @@ pub trait MessagePlatform: Send + Sync {
         4000
     }
 
+    /// Whether the platform can receive the reply as multiple streamed chunks
+    /// (vs. one finalized message). When true, the gateway asks the runner to
+    /// push intermediate assistant chunks via [`crate::ReplySink`] so the user
+    /// sees incremental progress. Default `false` — platforms with strict
+    /// customer-service message windows (WeChat OA) or that bill per message
+    /// should stay non-streaming. Feishu overrides `true` (REST send accepts
+    /// repeated calls).
+    fn supports_streaming_reply(&self) -> bool {
+        false
+    }
+
     // ─── Outbound ─────────────────────────────────────────────────────────
 
     /// Send `text` to the channel. Called by the gateway after each turn.

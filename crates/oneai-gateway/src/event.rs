@@ -106,4 +106,9 @@ pub struct SessionSource {
     pub session_id: String,
     /// The platform-native sender id.
     pub user_id: String,
+    /// The DomainPack name this channel is bound to (§3.1 tail #1: per-channel
+    /// whole-pack switching). Locked at first mint — the runner reads this
+    /// task-local to pick the lazily-built App for that pack.
+    #[serde(default)]
+    pub pack: String,
 }

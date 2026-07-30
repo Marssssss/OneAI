@@ -78,6 +78,16 @@ impl SqliteUsageTracker {
             ))
         })?;
 
+        // See `SqliteSessionStore::open_connection` for the rationale: the
+        // usage tracker shares `~/.oneai/oneai.db` with the session store and
+        // is concurrently written by the TUI / supervisor / gateway
+        // processes. WAL + busy_timeout keeps concurrent writers from failing
+        // with `database is locked`.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| OneAIError::Persistence(format!("set busy_timeout: {e}")))?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .map_err(|e| OneAIError::Persistence(format!("set WAL pragma: {e}")))?;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS usage_records (
                 id TEXT PRIMARY KEY,

@@ -48,7 +48,7 @@ pub use event::{ChannelId, MessageEvent, Sender, SessionSource};
 pub use gateway::Gateway;
 pub use platform::{MessagePlatform, PlatformRegistry};
 pub use profile::{ProfileRoute, RouteEntry};
-pub use runner::{GatewayRunner, TurnOutcome};
+pub use runner::{GatewayRunner, ReplySink, TurnOutcome};
 
 tokio::task_local! {
     /// The originating channel/session context for the current task tree.

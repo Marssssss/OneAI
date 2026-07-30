@@ -80,6 +80,25 @@ impl SqliteSessionStore {
             ))
         })?;
 
+        // Multi-process concurrency guard. OneAI runs the TUI, the supervisor
+        // daemon, and the gateway as *separate processes* that all touch the
+        // same `~/.oneai/oneai.db`. Without WAL, the default rollback-journal
+        // mode takes an exclusive lock on write → concurrent writers get
+        // `database is locked` (and there's no busy wait by default, so the
+        // first contended write fails immediately).
+        //
+        // - `journal_mode=WAL` lets readers proceed while a write is in flight
+        //   and lets multiple processes hold the db concurrently (WAL is a
+        //   persistent db-level setting, but setting it per-connection is a
+        //   harmless no-op once in effect). `synchronous=NORMAL` is the
+        //   recommended companion for WAL (durable across crashes, faster).
+        // - `busy_timeout=5000ms` makes a contended writer *wait* rather than
+        //   fail instantly — per-connection, must be set on every open.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| OneAIError::Persistence(format!("set busy_timeout: {e}")))?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .map_err(|e| OneAIError::Persistence(format!("set WAL pragma: {e}")))?;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
@@ -954,7 +973,45 @@ mod tests {
         (store, dir)
     }
 
-    // ─── STM tests ────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn wal_mode_enabled_for_concurrent_processes() {
+        // Regression for the TUI/gateway DB-lock bug: the store must open in
+        // WAL mode so separate processes can write the same oneai.db.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("wal_test.db");
+        let store = SqliteSessionStore::new(&db_path);
+        // Trigger open_connection so the WAL pragma is applied.
+        store.save_stm("s0", &[]).await.unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_across_stores_do_not_busy() {
+        // Two independent stores (separate connection opens) over the same
+        // file — mirrors the TUI + gateway two-process case. Pre-WAL the
+        // second writer failed with SQLITE_BUSY; WAL + busy_timeout serializes
+        // the writers instead of rejecting the second.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("conc.db");
+        let entries_a = vec![make_entry("e_a", "x", None)];
+        let entries_b = vec![make_entry("e_b", "y", None)];
+        let store_a = SqliteSessionStore::new(&db_path);
+        let store_b = SqliteSessionStore::new(&db_path);
+        let (ra, rb) = tokio::join!(
+            store_a.save_stm("sess_a", &entries_a),
+            store_b.save_stm("sess_b", &entries_b),
+        );
+        ra.unwrap();
+        rb.unwrap();
+        assert_eq!(store_a.load_stm("sess_a").await.unwrap().len(), 1);
+        assert_eq!(store_b.load_stm("sess_b").await.unwrap().len(), 1);
+    }
+
+    // ─── STM tests ────────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_stm_save_load() {

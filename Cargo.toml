@@ -106,6 +106,12 @@ url = "2"
 # structure hash). Pure-Rust, no-std-friendly, well-audited.
 sha2 = "0.10"
 
+# AES-256-CBC — Feishu encrypted event payloads (encrypt_key mode). `cipher`
+# is a transitive dependency of `aes`; pinned explicitly so `cargo deny`
+# audits it directly.
+aes = "0.8"
+cipher = "0.4"
+
 # Gateway webhook surface + platform signature verification (Feishu HMAC-SHA256,
 # WeChat SHA-1). Pinned centrally per supply-chain discipline.
 axum = { version = "0.8", features = ["json"] }

@@ -29,6 +29,10 @@ pub struct ChannelBinding {
     pub user_id: Option<String>,
     /// The bound OneAI session id.
     pub session_id: String,
+    /// The DomainPack name this channel is bound to (§3.1 tail #1). Locked at
+    /// first mint — subsequent routing changes don't migrate the session.
+    #[serde(default)]
+    pub pack: String,
     pub created_at: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
 }
@@ -115,10 +119,18 @@ impl ChannelDirectory {
 
     /// Resolve the bound session id for `channel`, minting + persisting a new
     /// UUID session id on first contact. Idempotent on subsequent visits.
+    ///
+    /// `pack` is the DomainPack name resolved for this channel. It is **locked
+    /// at first mint** — written to the binding once and left untouched on
+    /// later visits, so a routing-rule change doesn't yank an existing
+    /// channel's session into a different pack (and lose its conversation
+    /// history). Callers that want the *effective* pack should read it back
+    /// via [`ChannelDirectory::get`].
     pub async fn resolve_or_mint(
         &self,
         channel: &ChannelId,
         user_id: Option<&str>,
+        pack: &str,
     ) -> Result<String> {
         let key = channel.key();
         let now = Utc::now();
@@ -139,6 +151,7 @@ impl ChannelDirectory {
             channel: channel.raw.clone(),
             user_id: user_id.map(|s| s.to_string()),
             session_id: session_id.clone(),
+            pack: pack.to_string(),
             created_at: now,
             last_seen: now,
         };

@@ -9,10 +9,10 @@
 //!   body + verification_token)`, hex-encoded. (Feishu's documented formula uses
 //!   the `encrypt` field; in plaintext mode — no `encrypt_key` — the body string
 //!   stands in for `encrypt`.)
-//! - **Encrypted events** (when `encrypt_key` is configured) are NOT yet
-//!   supported — the adapter returns a clear error so the user knows to unset
-//!   `encrypt_key` (plaintext mode). AES-256-CBC decryption is a documented
-//!   follow-up (evolution-plan §3.1).
+//! - **Encrypted events** (when `encrypt_key` is configured) arrive as
+//!   `{"encrypt":"<base64>"}`. [`decrypt_event`] does AES-256-CBC
+//!   (key = SHA256(encrypt_key), IV = first 16 bytes, PKCS7) and the adapter
+//!   parses the decrypted envelope.
 //! - **im.message.receive_v1**: the text-message event. Parsed to a
 //!   [`MessageEvent`] whose `channel.raw` is the `chat_id` and `sender.id` is
 //!   the sender's `open_id`.
@@ -40,6 +40,10 @@ pub struct FeishuConfig {
     pub app_secret: String,
     /// The app's "Verification Token" (event subscription page).
     pub verification_token: String,
+    /// The app's "Encrypt Key" (event subscription page). When set, Feishu
+    /// delivers events as `{"encrypt":"<base64 AES-256-CBC>"}` and the adapter
+    /// decrypts with [`decrypt_event`]. `None` = plaintext mode.
+    pub encrypt_key: Option<String>,
     /// Base URL — `https://open.feishu.cn` (Lark: `https://open.larksuite.com`).
     pub base_url: String,
 }
@@ -52,6 +56,9 @@ impl FeishuConfig {
             verification_token: std::env::var("FEISHU_VERIFY_TOKEN")
                 .ok()
                 .unwrap_or_default(),
+            encrypt_key: std::env::var("FEISHU_ENCRYPT_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
             base_url: std::env::var("FEISHU_BASE_URL")
                 .unwrap_or_else(|_| "https://open.feishu.cn".to_string()),
         })
@@ -83,6 +90,89 @@ pub fn verify_feishu_signature(
     let computed = hex::encode(digest);
     // constant-time-ish compare via simple eq (signature is hex; not secret-ish here)
     computed == signature_header
+}
+
+/// Decrypt a Feishu `encrypt` payload (encrypt_key mode).
+///
+/// Feishu's formula: `encrypt = base64( AES-256-CBC( plaintext, key =
+/// SHA256(encrypt_key), iv = first 16 bytes ) )` with PKCS7 padding. Returns
+/// the plaintext JSON event envelope.
+pub fn decrypt_event(encrypt_b64: &str, encrypt_key: &str) -> Result<String> {
+    use aes::cipher::generic_array::GenericArray;
+    use aes::cipher::{BlockDecrypt, KeyInit};
+    use aes::Aes256;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    // key = SHA256(encrypt_key) → 32 bytes (AES-256).
+    let mut hasher = Sha256::new();
+    hasher.update(encrypt_key.as_bytes());
+    let key = hasher.finalize();
+
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(encrypt_b64.as_bytes())
+        .map_err(|e| GatewayError::Parse(format!("encrypt base64 decode: {e}")))?;
+    // IV (16) + at least one block; total length must be a multiple of 16.
+    if ciphertext.len() < 32 || ciphertext.len() % 16 != 0 {
+        return Err(GatewayError::Parse(format!(
+            "bad encrypted payload length: {} bytes",
+            ciphertext.len()
+        )));
+    }
+    let (iv, body) = ciphertext.split_at(16);
+
+    let cipher = Aes256::new(GenericArray::from_slice(&key));
+    let mut plain = Vec::with_capacity(body.len());
+    let mut prev: &[u8] = iv;
+    for block in body.chunks(16) {
+        let mut buf = GenericArray::clone_from_slice(block);
+        cipher.decrypt_block(&mut buf);
+        // CBC: XOR the decrypted block with the previous ciphertext block
+        // (or the IV for the first block).
+        for (b, p) in buf.iter_mut().zip(prev.iter()) {
+            *b ^= p;
+        }
+        plain.extend_from_slice(&buf);
+        prev = block;
+    }
+
+    // PKCS7 unpad.
+    let pad = *plain.last().unwrap_or(&0) as usize;
+    if pad == 0 || pad > 16 || plain.len() < pad {
+        return Err(GatewayError::Parse(format!("bad PKCS7 padding: {pad}")));
+    }
+    if !plain[plain.len() - pad..]
+        .iter()
+        .all(|&b| b as usize == pad)
+    {
+        return Err(GatewayError::Parse("inconsistent PKCS7 padding".into()));
+    }
+    plain.truncate(plain.len() - pad);
+    String::from_utf8(plain)
+        .map_err(|e| GatewayError::Parse(format!("decrypt plaintext not utf8: {e}")))
+}
+
+/// Handle a (possibly-decrypted) event envelope: echo `url_verification`
+/// challenges, else parse an `im.message.receive_v1` event.
+fn ack_envelope(value: &serde_json::Value) -> Result<WebhookAck> {
+    if value.get("type").and_then(|v| v.as_str()) == Some("url_verification") {
+        let challenge = value
+            .get("challenge")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Ok(WebhookAck {
+            status: 200,
+            body: serde_json::json!({ "challenge": challenge }).to_string(),
+            event: None,
+        });
+    }
+    let event = parse_message_event(value)?;
+    Ok(WebhookAck {
+        status: 200,
+        body: "{\"ok\":true}".to_string(),
+        event: Some(event),
+    })
 }
 
 #[cfg(test)]
@@ -206,6 +296,12 @@ impl MessagePlatform for FeishuPlatform {
         3000
     }
 
+    /// Feishu's REST send accepts repeated calls — stream the reply so the
+    /// user sees incremental progress (§3.1 tail #3).
+    fn supports_streaming_reply(&self) -> bool {
+        true
+    }
+
     async fn send(&self, channel: &ChannelId, text: &str) -> Result<()> {
         let token = self.tenant_access_token().await?;
         let body = serde_json::json!({
@@ -251,30 +347,10 @@ impl WebhookHandler for FeishuPlatform {
             .map_err(|e| GatewayError::Parse(format!("non-utf8 body: {e}")))?;
         let value: serde_json::Value = serde_json::from_str(body_str)?;
 
-        // URL verification handshake — echo the challenge.
-        if value.get("type").and_then(|v| v.as_str()) == Some("url_verification") {
-            let challenge = value
-                .get("challenge")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            return Ok(WebhookAck {
-                status: 200,
-                body: serde_json::json!({ "challenge": challenge }).to_string(),
-                event: None,
-            });
-        }
-
-        // Encrypted events (encrypt_key configured) — not yet supported.
-        if value.get("encrypt").is_some() {
-            return Err(GatewayError::Platform {
-                platform: "feishu".into(),
-                message: "encrypted events (encrypt_key set) not yet supported — unset encrypt_key for plaintext mode"
-                    .into(),
-            });
-        }
-
-        // Signature verification (plaintext mode).
+        // Signature verification over the raw body string — applies to both
+        // plaintext events and the `{"encrypt":"..."}` envelope (Feishu signs
+        // the body string it sent). Skipped when no verification_token is set
+        // (local dev only).
         if !self.cfg.verification_token.is_empty() {
             let ts = header_str(headers, "x-lark-request-timestamp").unwrap_or_default();
             let nonce = header_str(headers, "x-lark-request-nonce").unwrap_or_default();
@@ -287,13 +363,23 @@ impl WebhookHandler for FeishuPlatform {
             }
         }
 
-        // im.message.receive_v1 — unwrap the event envelope.
-        let event = parse_message_event(&value)?;
-        Ok(WebhookAck {
-            status: 200,
-            body: "{\"ok\":true}".to_string(),
-            event: Some(event),
-        })
+        // Encrypted envelope (encrypt_key configured) → decrypt, then handle
+        // the inner envelope (which may itself be a url_verification challenge).
+        if let Some(enc) = value.get("encrypt").and_then(|v| v.as_str()) {
+            let key = self.cfg.encrypt_key.as_ref().ok_or_else(|| GatewayError::Platform {
+                platform: "feishu".into(),
+                message:
+                    "encrypted event received but FEISHU_ENCRYPT_KEY unset — set it or disable encrypt_key in Feishu backend"
+                        .into(),
+            })?;
+            let plaintext = decrypt_event(enc, key)?;
+            let inner: serde_json::Value = serde_json::from_str(&plaintext)
+                .map_err(|e| GatewayError::Parse(format!("decrypted payload not JSON: {e}")))?;
+            return ack_envelope(&inner);
+        }
+
+        // Plaintext event envelope.
+        ack_envelope(&value)
     }
 }
 
@@ -411,5 +497,99 @@ mod envelope_tests {
     fn reject_non_message_event() {
         let v = serde_json::json!({"header": {"event_type": "other"}, "event": {}});
         assert!(parse_message_event(&v).is_err());
+    }
+}
+
+#[cfg(test)]
+mod encrypt_tests {
+    use super::*;
+    use base64::Engine;
+
+    /// Mirror of `decrypt_event`'s algorithm, encrypting direction — so a
+    /// round-trip proves the CBC + PKCS7 implementation is self-consistent.
+    fn encrypt_event(plaintext: &str, encrypt_key: &str) -> String {
+        use aes::cipher::generic_array::GenericArray;
+        use aes::cipher::{BlockEncrypt, KeyInit};
+        use aes::Aes256;
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(encrypt_key.as_bytes());
+        let key = hasher.finalize();
+        let cipher = Aes256::new(GenericArray::from_slice(&key));
+
+        // PKCS7 pad to a multiple of 16.
+        let mut plain = plaintext.as_bytes().to_vec();
+        let pad = 16 - (plain.len() % 16);
+        plain.resize(plain.len() + pad, pad as u8);
+
+        // Fixed IV (deterministic for the round-trip test).
+        let iv = [0u8; 16];
+        let mut out = Vec::with_capacity(16 + plain.len());
+        out.extend_from_slice(&iv);
+        let mut prev: Vec<u8> = iv.to_vec();
+        for block in plain.chunks(16) {
+            let mut buf = GenericArray::clone_from_slice(block);
+            for (b, p) in buf.iter_mut().zip(prev.iter()) {
+                *b ^= p;
+            }
+            cipher.encrypt_block(&mut buf);
+            out.extend_from_slice(&buf);
+            prev = buf.to_vec();
+        }
+        base64::engine::general_purpose::STANDARD.encode(&out)
+    }
+
+    #[test]
+    fn decrypt_event_round_trips() {
+        let key = "test_encrypt_key";
+        let plaintext = r#"{"schema":"2.0","header":{"event_type":"im.message.receive_v1"},"event":{"sender":{"sender_id":{"open_id":"ou_x"}},"message":{"chat_id":"oc_x","message_id":"om_x","content":"{\"text\":\"hi\"}"}}}"#;
+        let enc = encrypt_event(plaintext, key);
+        let dec = decrypt_event(&enc, key).unwrap();
+        assert_eq!(dec, plaintext);
+    }
+
+    #[test]
+    fn decrypt_event_rejects_bad_payload() {
+        assert!(decrypt_event("not-base64!!!", "k").is_err());
+        // too short (< 32 bytes / not block-aligned)
+        let short = base64::engine::general_purpose::STANDARD.encode(b"short");
+        assert!(decrypt_event(&short, "k").is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_handles_encrypted_envelope() {
+        // Build an FeishuPlatform with encrypt_key set; feed it an encrypted
+        // im.message.receive_v1 envelope; verify the event is extracted.
+        let key = "ek";
+        let inner = serde_json::json!({
+            "schema": "2.0",
+            "header": {"event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_x"}},
+                "message": {
+                    "chat_id": "oc_enc",
+                    "message_id": "om_enc",
+                    "content": "{\"text\":\"hi\"}"
+                }
+            }
+        });
+        let enc = encrypt_event(&inner.to_string(), key);
+        let body = serde_json::json!({ "encrypt": enc }).to_string();
+        let cfg = FeishuConfig {
+            app_id: "a".into(),
+            app_secret: "s".into(),
+            verification_token: String::new(), // skip signature
+            encrypt_key: Some(key.into()),
+            base_url: "https://open.feishu.cn".into(),
+        };
+        let plat = FeishuPlatform::new(cfg);
+        let ack = plat
+            .parse(&axum::http::HeaderMap::new(), body.as_bytes(), "")
+            .await
+            .unwrap();
+        let event = ack.event.unwrap();
+        assert_eq!(event.channel.raw, "oc_enc");
+        assert_eq!(event.text, "hi");
     }
 }

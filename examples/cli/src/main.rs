@@ -554,6 +554,23 @@ enum GatewayAction {
     },
     /// List bound channels (platform → session id) from the directory
     Channels,
+    /// Install / manage the macOS LaunchAgent that auto-starts the supervisor
+    /// (with inlined gateway) at login — §3.1 Part F.
+    Autostart {
+        #[command(subcommand)]
+        action: AutostartAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AutostartAction {
+    /// Write the LaunchAgent plist + `launchctl load` (runs `supervisor serve
+    /// --with-gateway` on login, kept alive across crashes).
+    Install,
+    /// `launchctl unload` + remove the plist.
+    Uninstall,
+    /// Show whether the LaunchAgent is loaded.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -572,6 +589,15 @@ enum SupervisorAction {
         /// Default user identity for memory namespacing
         #[arg(long)]
         user: Option<String>,
+        /// Also bring up the message gateway (Feishu/WeChat webhook + Feishu
+        /// long-connection) in this process — the auto-start path: a LaunchAgent
+        /// runs `supervisor serve --with-gateway` so the gateway comes up on
+        /// boot without a separate command (§3.1 Part E/F).
+        #[arg(long, default_value_t = false)]
+        with_gateway: bool,
+        /// Bind address for the inlined gateway webhook (default: 0.0.0.0:9090)
+        #[arg(long)]
+        gateway_bind: Option<String>,
     },
     /// List supervised instances on a running daemon
     List {
@@ -1054,6 +1080,11 @@ fn main() {
             GatewayAction::Channels => {
                 cmd_gateway::cmd_gateway_channels();
             }
+            GatewayAction::Autostart { action } => match action {
+                AutostartAction::Install => cmd_gateway::cmd_gateway_autostart_install(),
+                AutostartAction::Uninstall => cmd_gateway::cmd_gateway_autostart_uninstall(),
+                AutostartAction::Status => cmd_gateway::cmd_gateway_autostart_status(),
+            },
         },
         Some(Commands::Supervisor { action }) => match action {
             SupervisorAction::Serve {
@@ -1061,12 +1092,16 @@ fn main() {
                 domain,
                 model,
                 user,
+                with_gateway,
+                gateway_bind,
             } => cmd_supervisor::cmd_supervisor_serve(
                 &config,
                 socket.as_deref(),
                 domain.as_deref(),
                 model.as_deref(),
                 user.as_deref(),
+                with_gateway,
+                gateway_bind.as_deref(),
             ),
             SupervisorAction::List { socket } => {
                 cmd_supervisor::cmd_supervisor_list(socket.as_deref())

@@ -378,6 +378,7 @@ mod tests {
             app_id: "cli_test".into(),
             app_secret: "secret".into(),
             verification_token: String::new(),
+            encrypt_key: None,
             base_url: "https://open.feishu.cn".into(),
         }
     }

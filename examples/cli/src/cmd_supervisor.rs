@@ -37,6 +37,8 @@ pub fn cmd_supervisor_serve(
     domain: Option<&str>,
     model: Option<&str>,
     user: Option<&str>,
+    with_gateway: bool,
+    gateway_bind: Option<&str>,
 ) {
     let socket_path = socket_or_default(socket);
     let root_dir = socket_path
@@ -50,6 +52,9 @@ pub fn cmd_supervisor_serve(
     println!("   Registry: {}", root_dir.display());
     if let Some(d) = domain {
         println!("   Default domain: {}", d);
+    }
+    if with_gateway {
+        println!("   Inlined gateway: ENABLED (Feishu/WeChat/loopback webhook + long-connection)");
     }
     println!();
 
@@ -73,7 +78,33 @@ pub fn cmd_supervisor_serve(
     };
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    if let Err(e) = rt.block_on(oneai_supervisor::serve(sup_config, runner)) {
+    if let Err(e) = rt.block_on(async move {
+        // Inlined gateway (§3.1 Part E): when --with-gateway is set, the
+        // supervisor daemon also brings up the message gateway (webhook +
+        // Feishu long-connection) in this same process. run_gateway_task
+        // spawns the webhook server + long-connection as detached background
+        // tasks; the returned handle is dropped so they keep running while the
+        // supervisor's IPC loop runs in the foreground. The gateway's App is
+        // built independently of the supervisor's per-instance Apps — both
+        // touch ~/.oneai/oneai.db, isolated by WAL (Part A).
+        if with_gateway {
+            let pack_name = config.default_domain_pack(domain);
+            let gw_addr: std::net::SocketAddr = gateway_bind
+                .and_then(|b| b.parse().ok())
+                .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 9090)));
+            let (_gateway, _handle) = crate::cmd_gateway::run_gateway_task(
+                config,
+                gw_addr,
+                provider_config,
+                &pack_name,
+                user,
+            )
+            .await?;
+        }
+        oneai_supervisor::serve(sup_config, runner)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+    }) {
         eprintln!("Error running supervisor daemon: {}", e);
         std::process::exit(1);
     }
