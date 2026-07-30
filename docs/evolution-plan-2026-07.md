@@ -128,7 +128,20 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **How**：reflect 子代理必须 (a) 继承父 provider 取暖、(b) `WriteOrigin::BackgroundReview` 标记、(c) **持久化隔离**——共享 session_id 取暖但硬关 `SqliteSessionStore` 写和压缩（对标 Hermes `_persist_disabled`/`compression_enabled=False`）、(d) 关递归 nudge、(e) `max_iterations=16`。`auxiliary.background_review.{provider,model}` 经 `SmartRouter` 路由便宜模型 + digest 重放。把学习策略 prompt 移植进 `skill-creator` skill body。CLI `oneai curator run/status/restore/pin` 对标 `pack validate`。
 - **Effort**：中-高。**Fit**：高。**类型**：新增差异化能力。**前置**：1.1（缓存稳定，否则 reflect 子代理 fork 取暖失效）。
 
-### 2.2 headless 监督进程 `oneai-supervisor`（inspiration P1-2）
+### 2.2 headless 监督进程 `oneai-supervisor`（inspiration P1-2）✅
+> **进度**：全完成（2026-07-30）。新 crate `crates/oneai-supervisor/`，坐 `oneai-app` **之下**（同 `oneai-studio`），**不**持 App/AppSession——定义 `SupervisorRunner`+`InstanceHandle` trait 由 CLI 实现（镜像 `StudioRunner`，**不加 AppBuilder 方法**：一 AppBuilder=一 App=一 session，supervisor 需 N per-instance session）。
+> - `registry.rs`：`InstanceRegistry` 持久化 `~/.oneai/server/instances.json`（原子写 tmp+rename 镜像 working_state_store），`recover_after_restart()` 把 `Running`→`Crashed("supervisor_restart")`——live handle 没但持久记录存活供重连客户端得知需 re-spawn。
+> - `protocol.rs`：**换行分隔 JSON**（无 `tokio-util` codec——workspace 仅 `rt` feature），`Request{id,method,params}`/`Response{ok,result|error}`/`StreamLine{event|done+result|error}`，`rpc_stream` 事件 live 流。
+> - `transport.rs`：`IpcListener`/`IpcStream` **具体 enum**（非 dyn，避 object-safety）——Unix `UnixListener`/`UnixStream`+bind 前 unlink 旧 sock / Windows `named_pipe::ServerOptions` 每连接一实例（`first_pipe_instance` 仅首）/ in-memory `tokio::io::duplex` 对供便携测试 + in-proc 直连。
+> - `supervisor.rs`：`Supervisor` 编排 spawn/list/status/stop/rpc/rpc_stream，`Event` enum 镜像 `StudioEvent`，`StreamingObserver` 实现 `AgentLoopObserver`→`EventSink`（`LineSink`/`CollectingSink`），OTEL span 经 `Option<TraceContext>`。
+> - `server.rs`：accept 循环；`rpc_stream` spawn turn task+`LineSink`→unbounded channel→writer arm drain（事件 **live** 并发，镜像 studio `ws.rs` channel-to-writer，**不用** `Arc<Mutex<WriteHalf>>`）。
+> - `client.rs`：`SupervisorClient` + `connect_with_recover` 指数 backoff 重连（原生 app 重连入口）。
+> - **stop 机制**：**不**向 `run_agent` 注入额外 `CancellationToken`；`AgentLoop::request_interrupt(InterruptReason::Custom)`（agent_loop.rs:3249）触发 loop 内 `cancel_token`，inference/streaming/tool 分支 `select!` 即中止。
+> - CLI `oneai supervisor serve/list/spawn/stop/status/rpc/rpc-stream`（`SupervisorRunnerImpl` 每次 spawn 新建 App+AppSession，镜像 cmd_studio）。
+> - **坑**：(a) `Option<serde_json::Value>` 反序列化 `null`→`None`，故 void 方法 stop 的 Response 不能用 `Value::Null`，改 `json!({"stopped":true})`，否则客户端 "ok response missing result"；(b) `#[non_exhaustive]` 的 `Event` 在外部 crate match 须带 `_` 臂。
+> - **测试**：crate 18 单测 + 3 e2e（UDS 全生命周期+reconnect+missing instance），**1516 workspace tests 绿**（1472 baseline +44 含 heisen...实际 supervisor +21），fmt+clippy 清；真二进制冒烟 `serve/list/spawn`+`instances.json` 持久+重启 recover 验证通过。**Phase 2 至此闭合**。
+> - **剩余 opt-in 后续**：进程隔离（OS 子进程而非 in-proc tokio task）；可作 `oneai-studio` 的一个 mode。
+
 - **What**：后台 daemon 监督长寿命 AgentLoop 进程，持久化 `~/.oneai/server/instances.json` 实例注册表，`recover_after_restart()` 重连。UDS（Unix）/ named pipe（Win）`~/.oneai/server.sock`，`spawn/list/stop/status/rpc/rpc_stream`。原生 app 作 IPC 客户端重连。
 - **Why**：OneAI 原生 app（macOS/Win/iOS/Android/Harmony）后台/被杀就会话死。`FileWorkingStateStore` 持久化任务状态但不持久化"活会话重连句柄"。修"会话存活"问题。
 - **How**：对标 `pi-server`。先做 in-proc supervised tokio task，进程隔离作 opt-in 后续。复用 `oneai-trace` OTEL（已通电）。可作 `oneai-studio` 的一个 mode。
