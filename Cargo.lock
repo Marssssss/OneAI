@@ -3529,6 +3529,7 @@ dependencies = [
  "oneai-rag",
  "oneai-skill",
  "oneai-studio",
+ "oneai-supervisor",
  "oneai-tool",
  "oneai-trace",
  "oneai-uniffi",
@@ -3540,6 +3541,7 @@ dependencies = [
  "serde_json",
  "syntect",
  "tokio",
+ "tokio-stream",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
@@ -3875,6 +3877,27 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tower",
  "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "oneai-supervisor"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dirs 5.0.1",
+ "futures",
+ "oneai-agent",
+ "oneai-core",
+ "oneai-trace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
  "tracing",
  "uuid",
 ]

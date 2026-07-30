@@ -79,6 +79,7 @@ mod cmd_run;
 mod cmd_session;
 mod cmd_skill;
 mod cmd_studio;
+mod cmd_supervisor;
 mod cmd_tasks;
 mod cmd_token;
 mod cmd_usage;
@@ -146,6 +147,11 @@ enum Commands {
         /// User identity for memory namespacing
         #[arg(long)]
         user: Option<String>,
+    },
+    /// Supervise long-lived AgentLoop instances over IPC (headless daemon)
+    Supervisor {
+        #[command(subcommand)]
+        action: SupervisorAction,
     },
     /// Manage domain packs
     Pack {
@@ -517,6 +523,75 @@ enum A2aAction {
         url: String,
         /// Task message
         message: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SupervisorAction {
+    /// Start the headless supervisor daemon (serves the IPC socket)
+    Serve {
+        /// IPC socket path (default: ~/.oneai/server.sock)
+        #[arg(long)]
+        socket: Option<String>,
+        /// Default domain pack for spawned instances
+        #[arg(long)]
+        domain: Option<String>,
+        /// Default model override
+        #[arg(long)]
+        model: Option<String>,
+        /// Default user identity for memory namespacing
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// List supervised instances on a running daemon
+    List {
+        #[arg(long)]
+        socket: Option<String>,
+    },
+    /// Spawn a new supervised instance on a running daemon
+    Spawn {
+        /// Instance id
+        id: String,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        socket: Option<String>,
+    },
+    /// Stop an instance on a running daemon
+    Stop {
+        /// Instance id
+        id: String,
+        #[arg(long)]
+        socket: Option<String>,
+    },
+    /// Query an instance's status on a running daemon
+    Status {
+        /// Instance id
+        id: String,
+        #[arg(long)]
+        socket: Option<String>,
+    },
+    /// Run one agent turn on an instance (request-response)
+    Rpc {
+        /// Instance id
+        id: String,
+        /// Task message
+        message: String,
+        #[arg(long)]
+        socket: Option<String>,
+    },
+    /// Run one agent turn on an instance, streaming live events
+    RpcStream {
+        /// Instance id
+        id: String,
+        /// Task message
+        message: String,
+        #[arg(long)]
+        socket: Option<String>,
     },
 }
 
@@ -931,6 +1006,52 @@ fn main() {
                 user.as_deref(),
             );
         }
+        Some(Commands::Supervisor { action }) => match action {
+            SupervisorAction::Serve {
+                socket,
+                domain,
+                model,
+                user,
+            } => cmd_supervisor::cmd_supervisor_serve(
+                &config,
+                socket.as_deref(),
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+            ),
+            SupervisorAction::List { socket } => {
+                cmd_supervisor::cmd_supervisor_list(socket.as_deref())
+            }
+            SupervisorAction::Spawn {
+                id,
+                domain,
+                model,
+                user,
+                socket,
+            } => cmd_supervisor::cmd_supervisor_spawn(
+                socket.as_deref(),
+                &id,
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+            ),
+            SupervisorAction::Stop { id, socket } => {
+                cmd_supervisor::cmd_supervisor_stop(socket.as_deref(), &id)
+            }
+            SupervisorAction::Status { id, socket } => {
+                cmd_supervisor::cmd_supervisor_status(socket.as_deref(), &id)
+            }
+            SupervisorAction::Rpc {
+                id,
+                message,
+                socket,
+            } => cmd_supervisor::cmd_supervisor_rpc(socket.as_deref(), &id, &message),
+            SupervisorAction::RpcStream {
+                id,
+                message,
+                socket,
+            } => cmd_supervisor::cmd_supervisor_rpc_stream(socket.as_deref(), &id, &message),
+        },
         Some(Commands::Pack { action }) => match action {
             PackAction::List => cmd_pack::cmd_pack_list(),
             PackAction::Show { name } => cmd_pack::cmd_pack_show(&name),

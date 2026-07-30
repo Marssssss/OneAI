@@ -25,6 +25,7 @@ members = [
     "crates/oneai-wasm",
     "crates/oneai-eval",
     "crates/oneai-studio",
+    "crates/oneai-supervisor",
     "crates/oneai-mcp",
     "crates/oneai-vector",
     "xtask",
@@ -63,6 +64,7 @@ default-members = [
     "crates/oneai-wasm",
     "crates/oneai-eval",
     "crates/oneai-studio",
+    "crates/oneai-supervisor",
     "crates/oneai-mcp",
     "crates/oneai-vector",
     "examples/cli",
@@ -203,6 +205,7 @@ oneai-a2a = { path = "crates/oneai-a2a", version = "1.1.0" }
 oneai-wasm = { path = "crates/oneai-wasm", version = "1.1.0" }
 oneai-eval = { path = "crates/oneai-eval", version = "1.1.0" }
 oneai-studio = { path = "crates/oneai-studio", version = "1.1.0" }
+oneai-supervisor = { path = "crates/oneai-supervisor", version = "1.1.0" }
 oneai-mcp = { path = "crates/oneai-mcp", version = "1.1.0" }
 oneai-vector = { path = "crates/oneai-vector", version = "1.1.0" }
 

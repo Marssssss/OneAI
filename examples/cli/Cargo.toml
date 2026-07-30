@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -43,6 +44,7 @@ oneai-domain = { workspace = true }
 oneai-skill = { workspace = true }
 oneai-eval = { workspace = true }
 oneai-studio = { workspace = true }
+oneai-supervisor = { workspace = true }
 oneai-mcp = { workspace = true }
 oneai-a2a = { workspace = true }
 oneai-wasm = { workspace = true }
