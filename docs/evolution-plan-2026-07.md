@@ -175,11 +175,13 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 
 > 目标：让 OneAI 从"原生 app 单进程 UI 客户端"变成"随处可达的代理"（消息平台 + cron + serverless 终端），并打通自扩展环与训练数据飞轮。这是最大新用户面，建在 Phase 1 硬化基座上。
 
-### 3.1 消息网关 `oneai-gateway` + ChannelDirectory + SessionSource + profile routing（inspiration P2-1）
+### 3.1 消息网关 `oneai-gateway` + ChannelDirectory + SessionSource + profile routing（inspiration P2-1）✅
 - **What**：新 `oneai-gateway` crate（peer `oneai-a2a`）暴露 `MessagePlatform` trait（`connect/handle_message/send` + 能力标志作 default trait method）+ `PlatformRegistry`（延迟加载）+ 规范 `MessageEvent`+`SessionSource`。一个 `GatewayRunner` tokio 多路复用。`ChannelDirectory`（友好名→ID，定期重建）+ `tokio::task_local!` 带 SessionSource（防并发互踩）。`ProfileRoute` 表 (platform/guild/channel/thread)→DomainPack，特异性评分。
 - **Why**：OneAI 原生 app 是单进程 UI 客户端；网关让 OneAI 变 Telegram bot/Discord bot/Slack app。最大新用户面。
 - **How**：网关坐 `AppBuilder` 之上如 `oneai-a2a` server host。复用 `FilePersistence`/`SqliteSessionStore` 存跨 channel session origin。首 2-3 adapter（Telegram `teloxide`/Discord `serenity`/Slack）。profile routing 复用 `MergedDomainPack` + 把 `apply_paradigm_switch` 机制扩展到换整 pack。**能力标志作 default trait method**是关键可移植教训。
 - **Effort**：高。**Fit**：高，落在现有 AppBuilder/A2A 范式上。**类型**：新增能力。**前置**：1.4（统一权限路径，否则多平台权限混乱）。
+
+> - **结果（2026-07-30）**：`oneai-gateway` crate 落地（peer supervisor/studio，**零 oneai-\* 依赖**，镜像 `StudioRunner` 用 `GatewayRunner` trait 而非持 `Arc<App>`——CLI `cmd_gateway` 注入真实 App impl 调 `create_session_with_id`+`run_agent_silent`）。`MessagePlatform` trait（能力标志作 default method）+ `PlatformRegistry` + `MessageEvent`/`SessionSource`（`tokio::task_local!`）+ `ChannelDirectory`（`~/.oneai/gateway/channels.json` 持久+recover）+ `ProfileRoute`（特异性评分，首版返回 default pack）+ axum webhook（`POST /gateway/{platform}`+微信 GET 握手，复用 studio tower-http，3.2/3.5 可复用）。adapter：**Loopback**（默认/CI 测）+ **Feishu**（明文+签名验签 sha256，AES encrypt_key 解密留后续）+ **WeChat**（sha1 握手+quick-xml 解析+customer-send）。`cargo deny` 把 quick-xml 提至 0.41（修 RUSTSEC NsReader OOM）。15 单测绿（含 axum+reqwest 端到端 webhook smoke）；workspace 测试全绿；fmt+clippy 清。**留后续**：per-channel 整 DomainPack 切换（`HashMap<pack,Arc<App>>` 懒建）、Feishu AES 解密、流式回投（接 `AgentLoopObserver`）。CLI：`oneai gateway serve --bind/--domain` + `oneai gateway channels`。凭据经 env：`FEISHU_APP_ID/APP_SECRET/VERIFY_TOKEN`、`WECHAT_APPID/SECRET/TOKEN`。
 
 ### 3.2 cron ABC + 外部 one-shot provider（inspiration P2-2）
 - **What**：把 `InMemoryScheduler`（`crates/oneai-scheduler/src/scheduler.rs:27`，重启即死）提为一个 `CronScheduler` trait 的一个 provider（最小面 `name/start`，`fire_due/reconcile/on_jobs_changed` 安全默认）+ `FileJobStore`（JSONL，对标 `FileWorkingStateStore`）+ `parse_schedule("30m"/"every 2h"/cron/ISO)` + `deliver="origin"` + 外部 one-shot provider（`provision(job_id,fire_at,callback_url)` + axum `/cron/fire` JWT 验证）+ store 级 CAS at-most-once。

@@ -28,6 +28,7 @@ members = [
     "crates/oneai-supervisor",
     "crates/oneai-mcp",
     "crates/oneai-vector",
+    "crates/oneai-gateway",
     "xtask",
     "examples/cli",
     "examples/desktop-app",
@@ -67,6 +68,7 @@ default-members = [
     "crates/oneai-supervisor",
     "crates/oneai-mcp",
     "crates/oneai-vector",
+    "crates/oneai-gateway",
     "examples/cli",
     "examples/desktop-app",
     "examples/rust",
@@ -103,6 +105,15 @@ url = "2"
 # Hashing — used by the `xtask` model-catalog generator (manifest SHA256 +
 # structure hash). Pure-Rust, no-std-friendly, well-audited.
 sha2 = "0.10"
+
+# Gateway webhook surface + platform signature verification (Feishu HMAC-SHA256,
+# WeChat SHA-1). Pinned centrally per supply-chain discipline.
+axum = { version = "0.8", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hex = "0.4"
+sha1 = "0.10"
+quick-xml = "0.41"
 
 # HTTP / SSE
 # `socks` enables SOCKS4/4a/5/5h connectors (ALL_PROXY=socks5://...).
@@ -208,6 +219,7 @@ oneai-studio = { path = "crates/oneai-studio", version = "1.1.0" }
 oneai-supervisor = { path = "crates/oneai-supervisor", version = "1.1.0" }
 oneai-mcp = { path = "crates/oneai-mcp", version = "1.1.0" }
 oneai-vector = { path = "crates/oneai-vector", version = "1.1.0" }
+oneai-gateway = { path = "crates/oneai-gateway", version = "1.1.0" }
 
 # WASM
 wasmtime = "45"

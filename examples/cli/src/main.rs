@@ -24,6 +24,8 @@
 //!   oneai a2a discover <url> — Discover remote A2A agent
 //!   oneai a2a list        — List configured A2A endpoints
 //!   oneai a2a send <url> <msg> — Send task to remote agent
+//!   oneai gateway serve   — Start the message-platform webhook server (Feishu/WeChat/loopback)
+//!   oneai gateway channels — List bound channels
 //!   oneai wasm list       — List loaded WASM modules
 //!   oneai wasm load <n> <f> — Load a WASM module
 //!   oneai wasm run <n>   — Execute a WASM module
@@ -70,6 +72,7 @@ mod cmd_config;
 mod cmd_curator;
 mod cmd_embed;
 mod cmd_eval;
+mod cmd_gateway;
 mod cmd_init;
 mod cmd_mcp;
 mod cmd_memory;
@@ -147,6 +150,12 @@ enum Commands {
         /// User identity for memory namespacing
         #[arg(long)]
         user: Option<String>,
+    },
+    /// Message gateway — expose OneAI as a Feishu / WeChat / loopback bot over
+    /// webhooks (Phase 3.1)
+    Gateway {
+        #[command(subcommand)]
+        action: GatewayAction,
     },
     /// Supervise long-lived AgentLoop instances over IPC (headless daemon)
     Supervisor {
@@ -524,6 +533,27 @@ enum A2aAction {
         /// Task message
         message: String,
     },
+}
+
+#[derive(Subcommand)]
+enum GatewayAction {
+    /// Start the gateway webhook server (Feishu / WeChat / loopback)
+    Serve {
+        /// Address to bind (default: 0.0.0.0:9090)
+        #[arg(long, default_value = "0.0.0.0:9090")]
+        bind: String,
+        /// Domain pack to use
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model name override (overrides ONEAI_MODEL / config)
+        #[arg(long)]
+        model: Option<String>,
+        /// User identity for memory namespacing
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// List bound channels (platform → session id) from the directory
+    Channels,
 }
 
 #[derive(Subcommand)]
@@ -1006,6 +1036,25 @@ fn main() {
                 user.as_deref(),
             );
         }
+        Some(Commands::Gateway { action }) => match action {
+            GatewayAction::Serve {
+                bind,
+                domain,
+                model,
+                user,
+            } => {
+                cmd_gateway::cmd_gateway_serve(
+                    &config,
+                    &bind,
+                    domain.as_deref(),
+                    model.as_deref(),
+                    user.as_deref(),
+                );
+            }
+            GatewayAction::Channels => {
+                cmd_gateway::cmd_gateway_channels();
+            }
+        },
         Some(Commands::Supervisor { action }) => match action {
             SupervisorAction::Serve {
                 socket,
