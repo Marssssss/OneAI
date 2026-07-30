@@ -862,11 +862,12 @@ mod tests {
         // Build a no-op-gate app with default tools + sqlite; provider is
         // optional — an app with no provider still builds (has_provider=false).
         let db = tmp_db("create");
-        let cfg = format!(
+        let cfg = CString::new(format!(
             "{{\"kind\":\"openai\",\"api_key\":\"sk-test\",\"model\":\"gpt-4o\",\"db_path\":\"{}\",\"default_tools\":true}}",
             db
-        );
-        let h = oneai_create_app(unsafe { CStr::from_ptr(cfg.as_ptr() as *const c_char) }.as_ptr());
+        ))
+        .unwrap();
+        let h = oneai_create_app(cfg.as_ptr());
         assert!(
             !h.is_null(),
             "create_app should succeed; err={:?}",
