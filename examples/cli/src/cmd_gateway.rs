@@ -56,6 +56,17 @@ pub fn cmd_gateway_serve(
     model_override: Option<&str>,
     user: Option<&str>,
 ) {
+    // Initialize tracing to stderr so webhook hits, signature failures, and
+    // parse errors are visible (gateway runs headless — no TUI to take over
+    // the terminal). Default: info + oneai_gateway=debug; RUST_LOG overrides.
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,oneai_gateway=debug"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+
     println!("🤖 OneAI Gateway — message-platform webhook server");
     println!("   Bind:   http://{}", bind);
     println!("   Routes: POST /gateway/{{platform}}   (Feishu/WeChat/loopback)");

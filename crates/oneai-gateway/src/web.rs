@@ -132,6 +132,14 @@ async fn post_inbound(
     body: axum::body::Bytes,
 ) -> Response {
     let query = raw_query.0.unwrap_or_default();
+    // Unconditional visibility: the single most useful diagnostic line. If the
+    // user sends a platform message and does NOT see this, the platform's
+    // webhook push never reached the server (→ check public URL / TLS / proxy).
+    eprintln!(
+        "[gateway] inbound POST /gateway/{} ({} bytes)",
+        platform,
+        body.len()
+    );
     let handler = match state.handlers.get(&platform) {
         Some(h) => h.clone(),
         None => {
