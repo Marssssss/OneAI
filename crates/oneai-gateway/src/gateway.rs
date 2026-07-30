@@ -109,23 +109,71 @@ impl Gateway {
             "inbound message routed"
         );
 
-        let source = SessionSource {
-            platform: platform_name.clone(),
-            channel: channel_raw.clone(),
-            session_id: session_id.clone(),
-            user_id: user_id.clone(),
-            pack: effective_pack,
-        };
-        let task_text = event.text.clone();
-        let runner = self.runner.clone();
-
-        // Resolve the platform adapter up front — needed both to build the
-        // streaming sink and to relay the final reply.
         let platform = self
             .platforms
             .get(&platform_name)
             .ok_or_else(|| GatewayError::UnknownPlatform(platform_name.clone()))?
             .clone();
+
+        let source = SessionSource {
+            platform: platform_name,
+            channel: channel_raw,
+            session_id,
+            user_id,
+            pack: effective_pack,
+        };
+        self.run_and_reply(source, platform, event.channel, event.text)
+            .await
+    }
+
+    /// Deliver a scheduled cron job's task into a *known* channel session
+    /// (§3.2 `deliver=origin`) — no mint (the session id is the cron job's
+    /// bound origin). Sets `SESSION_SOURCE`, runs the turn (streaming when
+    /// supported), and relays the reply over the platform adapter, segmented
+    /// to the platform's `max_text_length`. The scheduler's `CronRunner`
+    /// impl (CLI) calls this so a cron fire reuses the gateway's `send()`
+    /// exactly — one code path for inbound messages and scheduled jobs.
+    pub async fn deliver_scheduled(
+        &self,
+        channel: ChannelId,
+        session_id: String,
+        pack: String,
+        user_id: String,
+        task: &str,
+    ) -> Result<()> {
+        let platform_name = channel.platform.clone();
+        let channel_raw = channel.raw.clone();
+        let platform = self
+            .platforms
+            .get(&platform_name)
+            .ok_or_else(|| GatewayError::UnknownPlatform(platform_name.clone()))?
+            .clone();
+        let source = SessionSource {
+            platform: platform_name,
+            channel: channel_raw,
+            session_id,
+            user_id,
+            pack,
+        };
+        self.run_and_reply(source, platform, channel, task.to_string())
+            .await
+    }
+
+    /// Run a turn under `SESSION_SOURCE` and relay the reply to `channel` via
+    /// `platform` (segmented; streaming when both sides support it, with a
+    /// dedup skip of the final send when chunks were already streamed).
+    /// Shared by [`handle_inbound`] (inbound message) and [`deliver_scheduled`]
+    /// (cron fire) so the two paths can't diverge.
+    async fn run_and_reply(
+        &self,
+        source: SessionSource,
+        platform: Arc<dyn MessagePlatform>,
+        channel: ChannelId,
+        task_text: String,
+    ) -> Result<()> {
+        let platform_name = source.platform.clone();
+        let session_id = source.session_id.clone();
+        let runner = self.runner.clone();
 
         // Streaming reply (§3.1 tail #3): if the platform accepts streamed
         // chunks and the runner can stream, hand a sink to the runner so the
@@ -138,7 +186,7 @@ impl Gateway {
 
         let (outcome, streamed) = if should_stream {
             let sink: Arc<dyn ReplySink> =
-                StreamingReplySink::new(platform.clone(), event.channel.clone()).await;
+                StreamingReplySink::new(platform.clone(), channel.clone()).await;
             let sink_for_runner = sink.clone();
             let o = SESSION_SOURCE
                 .scope(source, async move {
@@ -170,7 +218,6 @@ impl Gateway {
             TurnOutcome::Done { final_answer, .. } => final_answer.clone(),
             TurnOutcome::Rejected { reason } => {
                 warn!(platform = %platform_name, reason = %reason, "turn rejected");
-                // Surface a friendly note so the user isn't left without a reply.
                 format!("[oneai] 未能处理: {}", reason)
             }
             TurnOutcome::Error { message } => {
@@ -191,7 +238,7 @@ impl Gateway {
 
         let max_len = platform.max_text_length().max(1);
         for chunk in segment_text(&reply, max_len) {
-            platform.send(&event.channel, chunk).await?;
+            platform.send(&channel, chunk).await?;
         }
         Ok(())
     }
@@ -418,6 +465,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deliver_scheduled_runs_turn_and_replies() {
+        // §3.2 cron fire → gateway.deliver_scheduled (known session, no mint)
+        // reuses run_and_reply so the reply is relayed to the origin channel.
+        let (gw, plat) = gateway_with(4000);
+        gw.deliver_scheduled(
+            ChannelId::new("loopback", "cron-chan"),
+            "sess-123".to_string(),
+            "coding".to_string(),
+            "u-cron".to_string(),
+            "standup time",
+        )
+        .await
+        .unwrap();
+        assert_eq!(plat.take(), vec!["echo: standup time"]);
+    }
+
+    #[tokio::test]
     async fn session_id_stable_across_messages() {
         // First message mints a session; second resolves to the same one.
         let (gw, _plat) = gateway_with(4000);
@@ -588,9 +652,6 @@ mod tests {
 
     #[tokio::test]
     async fn non_streaming_runner_falls_back_to_final_send() {
-        // EchoRunner.supports_streaming() == false → even on a streaming-
-        // capable platform, the gateway uses run_turn and sends the final
-        // answer normally.
         struct EchoRunner;
         #[async_trait]
         impl GatewayRunner for EchoRunner {

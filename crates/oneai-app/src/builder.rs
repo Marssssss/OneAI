@@ -182,6 +182,11 @@ pub struct AppBuilder {
     /// decisions/blockers to per-task append-only event logs — enabling crash
     /// recovery and cross-session task continuation.
     working_state_root: Option<std::path::PathBuf>,
+    /// Optional durable cron scheduler (Phase 3.2). Held on `App` so future
+    /// agent tools can query schedules; the CLI drives the lifecycle
+    /// (`cron serve` / `supervisor serve --with-cron`). The trait seam lives
+    /// in `oneai_core` (`CronScheduler`); concrete impls in `oneai_scheduler`.
+    cron_scheduler: Option<Arc<dyn oneai_core::traits::CronScheduler>>,
 }
 
 impl AppBuilder {
@@ -236,6 +241,7 @@ impl AppBuilder {
             constrained_output_policy: oneai_core::ConstrainedOutputPolicy::Auto,
             reflection_cadence: None,
             working_state_root: None,
+            cron_scheduler: None,
         }
     }
 
@@ -1324,6 +1330,26 @@ impl AppBuilder {
         self
     }
 
+    // ─── Cron Scheduler (Phase 3.2) ───────────────────────────────────────────
+
+    /// Inject a durable cron scheduler (Phase 3.2). The scheduler is *held*
+    /// on `App` (so future agent tools can query schedules) but its lifecycle
+    /// is driven by the CLI (`cron serve` / `supervisor serve --with-cron`),
+    /// which constructs the `CronSchedulerImpl` + a `CronRunner` that routes
+    /// fired jobs into the gateway's `deliver_scheduled`. This seam is the
+    /// one place `AppBuilder` touches the scheduler — pure setter, no side
+    /// effects (the scheduler is started by the caller, not at build time).
+    ///
+    /// ```ignore
+    /// use oneai_scheduler::CronSchedulerImpl;
+    /// let sched = Arc::new(CronSchedulerImpl::new(store, runner));
+    /// let app = AppBuilder::new().cron_provider(sched).build()?;
+    /// ```
+    pub fn cron_provider(mut self, scheduler: Arc<dyn oneai_core::traits::CronScheduler>) -> Self {
+        self.cron_scheduler = Some(scheduler);
+        self
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -1972,6 +1998,7 @@ impl AppBuilder {
             working_state_store,
             skill_metadata_store,
             skill_curator,
+            cron_scheduler: self.cron_scheduler,
         })
     }
 }
@@ -2087,6 +2114,9 @@ pub struct App {
     /// `Active → Stale → Archived` retirement, writes restorable backups,
     /// and backs the `skill_manage` tool + `oneai curator` CLI.
     pub skill_curator: Option<Arc<oneai_skill::SkillCurator>>,
+    /// Durable cron scheduler (Phase 3.2) — held for future agent-tool
+    /// queries; lifecycle driven by the CLI. See `AppBuilder::cron_provider`.
+    pub cron_scheduler: Option<Arc<dyn oneai_core::traits::CronScheduler>>,
 }
 
 impl App {

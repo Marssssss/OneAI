@@ -1,6 +1,6 @@
 [package]
 name = "oneai-scheduler"
-description = "OneAI task scheduling with platform heartbeat"
+description = "OneAI task scheduling — in-memory timers + durable cron orchestration (Phase 3.2)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,12 +8,35 @@ repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true, features = ["serde"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
+dirs = { workspace = true }
 oneai-core = { workspace = true }
+
+# External one-shot trigger HTTP surface (default — `POST /cron/fire` shared-
+# secret bearer receiver). Reuses the gateway's axum/tower base.
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, features = ["cors"], optional = true }
+# Outbound one-shot provisioning (POST registration to an external cron
+# service). Reuses the env-var proxy discipline.
+reqwest = { workspace = true, optional = true }
+
+[features]
+default = ["oneshot-http"]
+# axum `POST /cron/fire` receiving surface (shared-secret bearer).
+oneshot-http = ["dep:axum", "dep:tower", "dep:tower-http"]
+# Outbound `provision(job_id, fire_at, callback_url)` registration to an
+# external cron service (cron-job.org / GitHub Actions / systemd timer).
+oneshot-provision = ["dep:reqwest"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+reqwest = { workspace = true }

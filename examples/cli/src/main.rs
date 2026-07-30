@@ -26,6 +26,7 @@
 //!   oneai a2a send <url> <msg> — Send task to remote agent
 //!   oneai gateway serve   — Start the message-platform webhook server (Feishu/WeChat/loopback)
 //!   oneai gateway channels — List bound channels
+//!   oneai cron add/list/rm/fire/serve — Durable NL/cron scheduling + external one-shot triggers (Phase 3.2)
 //!   oneai wasm list       — List loaded WASM modules
 //!   oneai wasm load <n> <f> — Load a WASM module
 //!   oneai wasm run <n>   — Execute a WASM module
@@ -69,6 +70,7 @@
 mod cmd_a2a;
 mod cmd_chat;
 mod cmd_config;
+mod cmd_cron;
 mod cmd_curator;
 mod cmd_embed;
 mod cmd_eval;
@@ -161,6 +163,13 @@ enum Commands {
     Supervisor {
         #[command(subcommand)]
         action: SupervisorAction,
+    },
+    /// Cron — durable NL/cron/ISO scheduling + external one-shot triggers
+    /// (Phase 3.2). Deliver fired jobs into the gateway's bound channel
+    /// sessions (`deliver=origin`).
+    Cron {
+        #[command(subcommand)]
+        action: CronAction,
     },
     /// Manage domain packs
     Pack {
@@ -571,6 +580,76 @@ enum AutostartAction {
     Uninstall,
     /// Show whether the LaunchAgent is loaded.
     Status,
+}
+
+#[derive(Subcommand)]
+enum CronAction {
+    /// Add a scheduled cron job.
+    Add {
+        /// Job name.
+        #[arg(long)]
+        name: String,
+        /// Schedule: `"30m"` / `"every 2h"` / ISO `"2026-08-01T09:00:00Z"` /
+        /// 5-field cron `"0 9 * * *"`.
+        #[arg(long)]
+        schedule: String,
+        /// The task / prompt to deliver into the agent turn.
+        #[arg(long)]
+        task: String,
+        /// Originating platform name (for `deliver=origin`).
+        #[arg(long, default_value = "loopback")]
+        platform: String,
+        /// Originating channel (raw) to deliver the reply to.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Session id to deliver into (defaults to a fresh id bound to the
+        /// channel on first fire).
+        #[arg(long)]
+        session: Option<String>,
+        /// Bound DomainPack (carried via SESSION_SOURCE for the lazily-built
+        /// App factory). Default: coding.
+        #[arg(long)]
+        pack: Option<String>,
+        /// Delivery mode: `origin` (relay reply to the channel) or `silent`
+        /// (run the turn, log only). Default: origin.
+        #[arg(long, default_value = "origin")]
+        deliver: String,
+    },
+    /// List scheduled cron jobs.
+    List,
+    /// Remove a cron job by id.
+    Rm {
+        /// Job id.
+        id: String,
+    },
+    /// Manually fire a cron job now (force — ignores the due window; routes
+    /// through the same CAS path so it can't double-fire the current window).
+    Fire {
+        /// Job id.
+        id: String,
+    },
+    /// Start the cron orchestrator ticker + the external `/cron/fire`
+    /// one-shot receiver. Reuses the gateway for delivery (`deliver=origin`)
+    /// — builds a real `App` + the gateway, wires a `CronRunner` that calls
+    /// `gateway.deliver_scheduled(...)`, and starts the scheduler + HTTP
+    /// receiver.
+    Serve {
+        /// Address for the `/cron/fire` receiver (default: 0.0.0.0:9091).
+        #[arg(long, default_value = "0.0.0.0:9091")]
+        cron_bind: String,
+        /// Gateway webhook bind (the gateway runs in-process for delivery).
+        #[arg(long, default_value = "0.0.0.0:9090")]
+        gateway_bind: String,
+        /// Domain pack.
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model override.
+        #[arg(long)]
+        model: Option<String>,
+        /// User identity for memory namespacing.
+        #[arg(long)]
+        user: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1085,6 +1164,44 @@ fn main() {
                 AutostartAction::Uninstall => cmd_gateway::cmd_gateway_autostart_uninstall(),
                 AutostartAction::Status => cmd_gateway::cmd_gateway_autostart_status(),
             },
+        },
+        Some(Commands::Cron { action }) => match action {
+            CronAction::Add {
+                name,
+                schedule,
+                task,
+                platform,
+                channel,
+                session,
+                pack,
+                deliver,
+            } => cmd_cron::cmd_cron_add(
+                &name,
+                &schedule,
+                &task,
+                &platform,
+                channel.as_deref(),
+                session.as_deref(),
+                pack.as_deref(),
+                &deliver,
+            ),
+            CronAction::List => cmd_cron::cmd_cron_list(),
+            CronAction::Rm { id } => cmd_cron::cmd_cron_rm(&id),
+            CronAction::Fire { id } => cmd_cron::cmd_cron_fire(&id),
+            CronAction::Serve {
+                cron_bind,
+                gateway_bind,
+                domain,
+                model,
+                user,
+            } => cmd_cron::cmd_cron_serve(
+                &config,
+                &cron_bind,
+                &gateway_bind,
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+            ),
         },
         Some(Commands::Supervisor { action }) => match action {
             SupervisorAction::Serve {

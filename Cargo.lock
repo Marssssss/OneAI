@@ -3564,6 +3564,7 @@ dependencies = [
  "oneai-persistence",
  "oneai-provider",
  "oneai-rag",
+ "oneai-scheduler",
  "oneai-skill",
  "oneai-studio",
  "oneai-supervisor",
@@ -3882,13 +3883,19 @@ name = "oneai-scheduler"
 version = "1.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
+ "dirs 5.0.1",
  "futures",
  "oneai-core",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
+ "tower-http",
  "tracing",
  "uuid",
 ]

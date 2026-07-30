@@ -134,6 +134,43 @@ pub(crate) async fn run_gateway_task(
     ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
+    let gateway = build_gateway(config, model_config, pack_name, user).await?;
+
+    // ── Webhook state (webhook-push adapters) ──
+    let mut state = WebhookState::new(gateway.clone())
+        .with(Arc::new(oneai_gateway::web::LoopbackWebhookHandler));
+    // Re-register any feishu/wechat adapters build_gateway wired (they're
+    // already in the gateway's platform registry; the webhook state needs
+    // them as WebhookHandlers too).
+    // (build_gateway registered platforms on the gateway; for the webhook
+    // handlers we re-resolve from env — they impl both MessagePlatform +
+    // WebhookHandler.)
+    if let Some(cfg) = oneai_gateway::adapters::feishu::FeishuConfig::from_env() {
+        state = state.with(oneai_gateway::adapters::feishu::FeishuPlatform::arc(cfg));
+    }
+    if let Some(cfg) = oneai_gateway::adapters::wechat::WeChatConfig::from_env() {
+        state = state.with(oneai_gateway::adapters::wechat::WeChatPlatform::arc(cfg));
+    }
+
+    println!("\nGateway listening on http://{addr}… press Ctrl+C to stop.\n");
+    let handle = tokio::spawn(async move {
+        serve_web(WebConfig { addr }, state)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+    });
+    Ok((gateway, handle))
+}
+
+/// Build a `Gateway` (per-pack App factory + platform adapters resolved from
+/// env + the long-connection transports) WITHOUT starting the webhook server
+/// — shared by `gateway serve` (via [`run_gateway_task`]), `cron serve`, and
+/// `cron fire` (one-shot delivery). The caller decides what to start on top.
+pub(crate) async fn build_gateway(
+    config: &OneaiConfig,
+    model_config: Option<oneai_core::ModelConfig>,
+    pack_name: &str,
+    user: Option<&str>,
+) -> Result<Arc<Gateway>, Box<dyn std::error::Error + Send + Sync>> {
     let has_provider = model_config.is_some();
     if !has_provider {
         eprintln!("⚠️  No LLM provider configured (set ONEAI_API_KEY / ONEAI_BASE_URL).");
@@ -202,24 +239,7 @@ pub(crate) async fn run_gateway_task(
         oneai_gateway::adapters::feishu_ws::start_long_connection(cfg, http, gateway.clone());
         println!("   Feishu long-connection: started (configure 长连接 mode in Feishu backend)");
     }
-
-    // ── Webhook state (webhook-push adapters) ──
-    let mut state = WebhookState::new(gateway.clone())
-        .with(Arc::new(oneai_gateway::web::LoopbackWebhookHandler));
-    if let Some(p) = &feishu_platform {
-        state = state.with(p.clone());
-    }
-    if let Some(p) = &wechat_platform {
-        state = state.with(p.clone());
-    }
-
-    println!("\nGateway listening on http://{addr}… press Ctrl+C to stop.\n");
-    let handle = tokio::spawn(async move {
-        serve_web(WebConfig { addr }, state)
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
-    });
-    Ok((gateway, handle))
+    Ok(gateway)
 }
 
 // ─── Per-pack App factory (§3.1 tail #1) ───────────────────────────────────

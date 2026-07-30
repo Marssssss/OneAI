@@ -10,6 +10,7 @@
 //! - `OutputParser`: 3-layer output parsing defense
 //! - `StateReducer`: ScopeState reduction for parallel agents
 //! - `TaskScheduler`: Platform-independent task scheduling
+//! - `CronScheduler`: Durable cron / NL-schedule orchestration (Phase 3.2)
 //! - `StatePersistence`: Checkpoint save/load for agent state recovery
 //! - `VectorStore` / `VectorBackend` / `KeywordBackend` / `RetrievalBackend`:
 //!   pluggable retrieval backends (legacy minimal vs. hybrid-with-filters)
@@ -387,6 +388,58 @@ pub trait TaskScheduler: Send + Sync {
 
     /// Cancel a scheduled task.
     async fn cancel(&self, handle: &TaskHandle) -> Result<()>;
+}
+
+// ─── CronScheduler ────────────────────────────────────────────────────────────
+
+/// Durable cron / NL-schedule orchestration (Phase 3.2).
+///
+/// The minimal trait surface a host (the CLI `cron serve`, the supervisor) needs
+/// to *start* a scheduler; everything else is a safe default. Concrete
+/// providers live in `oneai-scheduler` (`CronSchedulerImpl` backed by a
+/// [`JobStore`] — in-memory or `FileJobStore` JSONL — plus a delivery `CronRunner`
+/// seam). `AppBuilder::cron_provider(...)` holds an `Arc<dyn CronScheduler>` so
+/// future agent tools can query schedules; the CLI drives the lifecycle.
+///
+/// This mirrors the ABC+orchestrator pattern of the gateway's `GatewayRunner`:
+/// the trait is the minimal seam, the impl owns the rich API (`add_job` / `list`
+/// / `remove`). Capability flags are default trait methods (key portability
+/// lesson from `MessagePlatform`) — see [`Self::supports_external_trigger`].
+///
+/// [`JobStore`]: ../../oneai_scheduler/trait.JobStore.html
+#[async_trait]
+pub trait CronScheduler: Send + Sync {
+    /// Provider name (e.g. `"in-memory"`, `"file"`).
+    fn name(&self) -> &str;
+
+    /// Start the scheduler (spawn the ticker loop / arm timers). Idempotent.
+    async fn start(&self) -> Result<()>;
+
+    /// Fire all jobs due at or before `now`. Default: no-op (a non-ticking
+    /// provider). Returns the number of jobs fired.
+    async fn fire_due(&self, _now: chrono::DateTime<chrono::Utc>) -> Result<u32> {
+        Ok(0)
+    }
+
+    /// Reconcile in-memory state with the persistent store after a restart
+    /// (re-arm timers, surface missed one-shots). Default: no-op.
+    async fn reconcile(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Notify the scheduler that jobs changed (added / removed / edited) so it
+    /// can re-arm. Default: no-op (a provider that polls the store on each
+    /// tick ignores this).
+    async fn on_jobs_changed(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether this provider accepts external one-shot triggers over HTTP
+    /// (`POST /cron/fire`). Default: `false` (only the file-backed provider
+    /// that owns the axum receiver returns `true`).
+    fn supports_external_trigger(&self) -> bool {
+        false
+    }
 }
 
 // ─── ScheduledTask / TaskHandle ───────────────────────────────────────────────
