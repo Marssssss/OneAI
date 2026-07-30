@@ -111,6 +111,9 @@ sha2 = "0.10"
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+# Feishu long-connection (outbound WSS) transport — rustls posture to match
+# the workspace (no OpenSSL).
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 hex = "0.4"
 sha1 = "0.10"
 quick-xml = "0.41"

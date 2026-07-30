@@ -26,9 +26,11 @@ axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 
-# Feishu signature verification (plain SHA-256 over timestamp+nonce+body+token).
+# Feishu signature verification (plain SHA-256 over timestamp+nonce+body+token)
+# + long-connection (outbound WSS) transport.
 hex = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
 
 # WeChat signature verification (SHA-1) + XML parsing.
 sha1 = { workspace = true, optional = true }
@@ -38,8 +40,9 @@ quick-xml = { workspace = true, optional = true }
 default = ["axum-webhook"]
 # axum webhook receiving surface (POST /gateway/{platform} + WeChat GET handshake).
 axum-webhook = []
-# Feishu (Lark) bot adapter — inbound event verification + outbound message send.
-feishu = ["dep:hex", "dep:sha2"]
+# Feishu (Lark) bot adapter — inbound event verification + outbound message send
+# + long-connection (outbound WSS) transport for no-public-URL local use.
+feishu = ["dep:hex", "dep:sha2", "dep:tokio-tungstenite"]
 # WeChat Official Account adapter — signature handshake + XML parse + send.
 wechat = ["dep:sha1", "dep:hex", "dep:quick-xml"]
 

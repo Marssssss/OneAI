@@ -141,6 +141,11 @@ impl FeishuPlatform {
         Arc::new(Self::new(cfg))
     }
 
+    /// Credentials + HTTP client, handed to the long-connection transport.
+    pub fn cfg_and_http(&self) -> (FeishuConfig, reqwest::Client) {
+        (self.cfg.clone(), self.http.clone())
+    }
+
     const TOKEN_TOLERANCE: Duration = Duration::from_secs(60);
 
     async fn tenant_access_token(&self) -> Result<String> {
@@ -293,7 +298,7 @@ impl WebhookHandler for FeishuPlatform {
 }
 
 /// Parse an `im.message.receive_v1` event into a [`MessageEvent`].
-fn parse_message_event(value: &serde_json::Value) -> Result<MessageEvent> {
+pub(crate) fn parse_message_event(value: &serde_json::Value) -> Result<MessageEvent> {
     // Envelope: {"schema":"2.0","header":{...,"event_type":"im.message.receive_v1"},"event":{...}}
     let header = value
         .get("header")

@@ -10,6 +10,12 @@ pub mod loopback;
 #[cfg(feature = "feishu")]
 pub mod feishu;
 
+#[cfg(feature = "feishu")]
+pub mod feishu_pb;
+
+#[cfg(feature = "feishu")]
+pub mod feishu_ws;
+
 #[cfg(feature = "wechat")]
 pub mod wechat;
 

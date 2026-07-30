@@ -171,35 +171,60 @@ async fn serve(
         has_provider,
     });
 
-    // ── Platform registry + webhook state ──
-    let mut platforms = PlatformRegistry::new();
-
-    // Loopback always on (local dev + smoke).
-    platforms.register(Arc::new(LoopbackPlatform::new()));
-    let mut state = WebhookState::new(Arc::new(Gateway::new(
-        runner.clone(),
-        platforms,
-        ChannelDirectory::default_root().await?,
-        ProfileRoute::new(pack_name),
-    )))
-    .with(Arc::new(oneai_gateway::web::LoopbackWebhookHandler));
-
-    // Feishu adapter (if env credentials present).
-    if let Some(cfg) = oneai_gateway::adapters::feishu::FeishuConfig::from_env() {
-        println!("   Feishu adapter: ENABLED (app_id={})", cfg.app_id);
-        state = state.with(oneai_gateway::adapters::feishu::FeishuPlatform::arc(cfg));
-    } else {
+    // ── Resolve platform adapters from env ──
+    let feishu_platform = oneai_gateway::adapters::feishu::FeishuConfig::from_env().map(|cfg| {
+        println!(
+            "   Feishu adapter: ENABLED (app_id={}) + long-connection (no public URL needed)",
+            cfg.app_id
+        );
+        oneai_gateway::adapters::feishu::FeishuPlatform::arc(cfg)
+    });
+    if feishu_platform.is_none() {
         println!(
             "   Feishu adapter: off (set FEISHU_APP_ID/FEISHU_APP_SECRET/FEISHU_VERIFY_TOKEN)"
         );
     }
-
-    // WeChat adapter (if env credentials present).
-    if let Some(cfg) = oneai_gateway::adapters::wechat::WeChatConfig::from_env() {
+    let wechat_platform = oneai_gateway::adapters::wechat::WeChatConfig::from_env().map(|cfg| {
         println!("   WeChat adapter: ENABLED (appid={})", cfg.app_id);
-        state = state.with(oneai_gateway::adapters::wechat::WeChatPlatform::arc(cfg));
-    } else {
+        oneai_gateway::adapters::wechat::WeChatPlatform::arc(cfg)
+    });
+    if wechat_platform.is_none() {
         println!("   WeChat adapter: off (set WECHAT_APPID/WECHAT_SECRET/WECHAT_TOKEN)");
+    }
+
+    // ── Platform registry (so handle_inbound can send replies) ──
+    let mut platforms = PlatformRegistry::new();
+    platforms.register(Arc::new(LoopbackPlatform::new())); // local dev + smoke
+    if let Some(p) = &feishu_platform {
+        platforms.register(p.clone());
+    }
+    if let Some(p) = &wechat_platform {
+        platforms.register(p.clone());
+    }
+
+    // ── Gateway (holds the registry) ──
+    let gateway = Arc::new(Gateway::new(
+        runner.clone(),
+        platforms,
+        ChannelDirectory::default_root().await?,
+        ProfileRoute::new(pack_name),
+    ));
+
+    // ── Start long-connection transports (outbound WSS, no public URL) ──
+    if let Some(p) = &feishu_platform {
+        let (cfg, http) = p.cfg_and_http();
+        oneai_gateway::adapters::feishu_ws::start_long_connection(cfg, http, gateway.clone());
+        println!("   Feishu long-connection: started (configure 长连接 mode in Feishu backend)");
+    }
+
+    // ── Webhook state (webhook-push adapters) ──
+    let mut state = WebhookState::new(gateway.clone())
+        .with(Arc::new(oneai_gateway::web::LoopbackWebhookHandler));
+    if let Some(p) = &feishu_platform {
+        state = state.with(p.clone());
+    }
+    if let Some(p) = &wechat_platform {
+        state = state.with(p.clone());
     }
 
     println!("\nListening… press Ctrl+C to stop.\n");
