@@ -125,7 +125,12 @@ pub fn start_long_connection(
             match bootstrap(&cfg, &http).await {
                 Ok((url, cfg2)) => {
                     config = cfg2;
-                    info!(attempt, url = %url, "feishu long-connection bootstrap ok");
+                    info!(
+                        attempt, url = %url,
+                        ping_secs = config.ping().as_secs(),
+                        reconnect_secs = config.reconnect().as_secs(),
+                        "feishu long-connection bootstrap ok",
+                    );
                     match serve_connection(&url, config.clone(), &cfg, &http, gateway.clone()).await
                     {
                         Ok(()) => {
@@ -225,10 +230,21 @@ async fn serve_connection(
         let frame = match Frame::decode(&bytes) {
             Some(f) => f,
             None => {
-                warn!("feishu ws: failed to decode frame");
+                warn!("feishu ws: failed to decode frame ({} bytes)", bytes.len());
                 continue;
             }
         };
+        // Per-frame visibility — the key diagnostic. If you send a Feishu
+        // message and never see this line, Feishu isn't pushing events down
+        // the WS (→ check backend: 长连接 mode + im.message.receive_v1 subscribed
+        // + app version published + bot capability + permissions).
+        debug!(
+            method = frame.method,
+            ftype = frame.header("type").unwrap_or(""),
+            msg_id = frame.header("message_id").unwrap_or(""),
+            payload_len = frame.payload.len(),
+            "feishu ws: received frame",
+        );
         match frame.method {
             FRAME_TYPE_CONTROL => {
                 // pong: server may push an updated ClientConfig in payload.
@@ -295,6 +311,7 @@ async fn serve_connection(
     // Drop writer on exit; sink goes back via the writer task's exit.
     drop(write_tx);
     let _ = writer.await;
+    info!("feishu ws: read loop ended");
     Ok(())
 }
 
