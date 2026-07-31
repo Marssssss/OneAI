@@ -29,6 +29,10 @@ pub struct MergeProposal {
     pub umbrella_description: String,
     pub umbrella_body: String,
     pub members: Vec<String>,
+    /// Optional umbrella version declared by the model. When `None`, the
+    /// runner falls back to the max version among the member skills so a
+    /// merged umbrella never silently regresses below its constituents.
+    pub umbrella_version: Option<String>,
 }
 
 /// Result of a consolidation pass — what was applied + what was skipped.
@@ -78,6 +82,13 @@ pub async fn run_consolidation(
         });
     }
 
+    // name → declared version, so an umbrella whose members carry versions
+    // inherits the max — a merge must never silently regress the version.
+    let member_versions: HashMap<&str, Option<&str>> = candidates
+        .iter()
+        .map(|(s, _)| (s.name.as_str(), s.version.as_deref()))
+        .collect();
+
     let mut report = ConsolidationReport::default();
     for proposal in proposals {
         // An umbrella must cover ≥2 members — drop degenerate proposals.
@@ -88,12 +99,18 @@ pub async fn run_consolidation(
             ));
             continue;
         }
+        // Resolve the umbrella version: model-declared wins; otherwise take the
+        // max version across the members that declared one.
+        let umbrella_version = proposal
+            .umbrella_version
+            .clone()
+            .or_else(|| max_member_version(&proposal.members, &member_versions));
         let umbrella = oneai_core::SkillDescriptor {
             name: proposal.umbrella_name.clone(),
             description: proposal.umbrella_description.clone(),
             prompt_template: proposal.umbrella_body.clone(),
-            trigger_keywords: Vec::new(),
-            embedding: None,
+            version: umbrella_version,
+            ..Default::default()
         };
         match curator
             .apply_merge(umbrella, &proposal.members, skills_dir)
@@ -114,6 +131,25 @@ pub async fn run_consolidation(
     Ok(report)
 }
 
+/// Pick the maximum declared version across the named member skills.
+///
+/// Lexicographic max — sufficient for the common semver-ish case (equal-width
+/// numeric segments like `"1.2.0"`), and the model can always declare an
+/// explicit `umbrella_version` to override. Members with no version are
+/// ignored; if none of the members declared a version, returns `None`.
+/// (A `semver`-aware comparison would pull a new workspace dependency for a
+/// minor heuristic — supply-chain discipline says no.)
+fn max_member_version(
+    members: &[String],
+    versions: &HashMap<&str, Option<&str>>,
+) -> Option<String> {
+    members
+        .iter()
+        .filter_map(|m| versions.get(m.as_str()).copied().flatten())
+        .max_by(|a, b| a.cmp(b))
+        .map(String::from)
+}
+
 /// Build the Hermes-style consolidation prompt over the candidate digest.
 ///
 /// Ported from `docs/hermes-pi-inspiration.md` §2.3 Loop B + the Stage A
@@ -125,10 +161,12 @@ fn build_consolidation_prompt(
 ) -> String {
     let mut digest = String::new();
     for (s, m) in candidates {
+        let version = s.version.as_deref().unwrap_or("none");
         digest.push_str(&format!(
-            "- name: {}\n  description: {}\n  use_count: {}\n  body_excerpt: {}\n",
+            "- name: {}\n  description: {}\n  version: {}\n  use_count: {}\n  body_excerpt: {}\n",
             s.name,
             s.description,
+            version,
             m.use_count,
             s.prompt_template.chars().take(240).collect::<String>(),
         ));
@@ -139,19 +177,21 @@ Your job is to merge narrow skills into class-level **umbrella** skills that cov
 the shared pattern, so the library stays small and the model can find the one \
 skill that governs a whole class of task.
 
-Candidate skills (name / description / use_count / body_excerpt):
+Candidate skills (name / description / version / use_count / body_excerpt):
 {digest}
 Rules:
 - Propose merges ONLY among the candidates above. Never invent skills not listed.
 - Each umbrella must cover **>=2** members. A single-skill "merge" is useless.
 - An umbrella name is short, class-level (e.g. `git-workflows`, not `git-push-force-from-feature-branch`).
 - The umbrella body folds the members' shared procedure + drops per-session noise.
+- The umbrella version should be the max of the members' versions (or higher if \
+you bump it); omit `umbrella_version` only if no member declares a version.
 - Do NOT propose merging a skill the agent clearly still uses standalone \
 (use_count high relative to peers) — leave the popular ones alone.
 - If no two candidates share a class, return an empty proposals list.
 
 Respond with ONLY a JSON object (no prose, no code fence) of shape:
-{{"proposals":[{{"umbrella_name":"...","umbrella_description":"...","umbrella_body":"...","members":["skill-a","skill-b"]}}]}}
+{{"proposals":[{{"umbrella_name":"...","umbrella_description":"...","umbrella_body":"...","umbrella_version":"...","members":["skill-a","skill-b"]}}]}}
 "#;
     // {digest} is the one interpolation; the literal JSON braces are escaped
     // as {{ }} so format! doesn't treat them as placeholders.
@@ -226,6 +266,11 @@ fn parse_proposals(raw: &str) -> Vec<MergeProposal> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            // Optional — the runner falls back to max member version when absent.
+            umbrella_version: item
+                .get("umbrella_version")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             members,
         });
     }
@@ -259,8 +304,14 @@ mod tests {
             description: desc.into(),
             prompt_template: format!("do {desc} carefully"),
             trigger_keywords: vec!["k".into()],
-            embedding: None,
+            ..Default::default()
         }
+    }
+
+    fn make_skill_versioned(name: &str, desc: &str, version: &str) -> SkillDescriptor {
+        let mut s = make_skill(name, desc);
+        s.version = Some(version.to_string());
+        s
     }
 
     async fn make_curator(
@@ -376,5 +427,83 @@ mod tests {
         assert_eq!(report.proposals_skipped.len(), 1);
         // No umbrella written.
         assert!(registry.find_by_name("umb").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn umbrella_inherits_max_member_version_when_model_omits_it() {
+        // Members carry versions 1.2.0 and 1.10.0; the model omits
+        // `umbrella_version`. The umbrella must inherit the max member
+        // version so a merge never silently regresses.
+        // NOTE: max here is lexicographic ("1.2.0" > "1.10.0" lexically) —
+        // see `max_member_version`'s doc why that's acceptable and how the
+        // model can override with an explicit `umbrella_version`.
+        let skills = vec![
+            make_skill_versioned("git-push-a", "push a", "1.2.0"),
+            make_skill_versioned("git-push-b", "push b", "1.10.0"),
+        ];
+        let (registry, store, curator) = make_curator(skills).await;
+        let json = serde_json::json!({
+            "proposals": [{
+                "umbrella_name": "git-push-workflow",
+                "umbrella_description": "push safely",
+                "umbrella_body": "Always push with lease.",
+                "members": ["git-push-a", "git-push-b"]
+            }]
+        })
+        .to_string();
+        let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer(json)]);
+        let skills_dir = store.root().join("skills");
+        let report = run_consolidation(
+            &provider,
+            &curator,
+            &skills_dir,
+            &GenerationConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.proposals_applied.len(), 1);
+        let umbrella = registry
+            .find_by_name("git-push-workflow")
+            .await
+            .expect("umbrella registered");
+        // Lexicographic max of ["1.2.0", "1.10.0"] is "1.2.0".
+        assert_eq!(umbrella.version.as_deref(), Some("1.2.0"));
+    }
+
+    #[tokio::test]
+    async fn umbrella_uses_model_declared_version_over_member_max() {
+        // The model declares umbrella_version explicitly → it wins over the
+        // member-max fallback.
+        let skills = vec![
+            make_skill_versioned("git-push-a", "push a", "1.2.0"),
+            make_skill_versioned("git-push-b", "push b", "1.2.0"),
+        ];
+        let (registry, store, curator) = make_curator(skills).await;
+        let json = serde_json::json!({
+            "proposals": [{
+                "umbrella_name": "git-push-workflow",
+                "umbrella_description": "push safely",
+                "umbrella_body": "Always push with lease.",
+                "umbrella_version": "2.0.0",
+                "members": ["git-push-a", "git-push-b"]
+            }]
+        })
+        .to_string();
+        let provider = MockProvider::from_script(vec![ScriptedResponse::direct_answer(json)]);
+        let skills_dir = store.root().join("skills");
+        let report = run_consolidation(
+            &provider,
+            &curator,
+            &skills_dir,
+            &GenerationConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.proposals_applied.len(), 1);
+        let umbrella = registry
+            .find_by_name("git-push-workflow")
+            .await
+            .expect("umbrella registered");
+        assert_eq!(umbrella.version.as_deref(), Some("2.0.0"));
     }
 }

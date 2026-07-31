@@ -1,10 +1,11 @@
 //! Skill selector — lightweight top-K selection with progressive disclosure.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use oneai_core::error::Result;
 use oneai_core::traits::EmbeddingService;
-use oneai_core::{SelectionMode, SkillDescriptor};
+use oneai_core::{SelectionMode, SkillDescriptor, SkillTrust};
 
 /// Lightweight skill selector that dynamically injects relevant skills into context.
 ///
@@ -77,6 +78,15 @@ impl SkillSelector {
         user_input: &str,
         registry: &[SkillDescriptor],
     ) -> Result<Vec<SkillDescriptor>> {
+        // Dependency gate (戒律 #3: real consumer of `depends_on`). A skill
+        // declaring deps on skills not present in the registry can't function,
+        // so it is never surfaced for injection — regardless of relevance.
+        let names: HashSet<&str> = registry.iter().map(|s| s.name.as_str()).collect();
+        let eligible: Vec<&SkillDescriptor> = registry
+            .iter()
+            .filter(|s| Self::deps_satisfied(s, &names))
+            .collect();
+
         // Without an embedding service — or in explicit keyword mode — use the
         // historical keyword path. This preserves backward compatibility for
         // every call site that never wired an embedding service.
@@ -85,15 +95,15 @@ impl SkillSelector {
             SelectionMode::VectorSimilarity | SelectionMode::Hybrid
         ) && self.embedding_service.is_some();
         if !use_vector {
-            return Ok(self.select_keyword(user_input, registry));
+            return Ok(self.select_keyword(user_input, &eligible));
         }
 
         // Vector-capable path: embed the user input once, then score each skill.
         let svc = self.embedding_service.as_ref().expect("checked above");
         let user_emb = svc.embed(user_input).await?;
 
-        let mut scored: Vec<(&SkillDescriptor, f32)> = Vec::with_capacity(registry.len());
-        for skill in registry {
+        let mut scored: Vec<(&SkillDescriptor, f32)> = Vec::with_capacity(eligible.len());
+        for skill in &eligible {
             let keyword_score = Self::keyword_score(user_input, skill);
 
             // Use the skill's pre-computed embedding when available; otherwise
@@ -112,11 +122,16 @@ impl SkillSelector {
                 }
             };
 
-            let score = match self.mode {
+            let raw = match self.mode {
                 SelectionMode::VectorSimilarity => vec_sim,
                 SelectionMode::Hybrid => 0.5 * keyword_score + 0.5 * vec_sim,
                 SelectionMode::KeywordMatch => keyword_score,
             };
+            // Trust down-rank (戒律 #3: real consumer of `trust`). Untrusted
+            // skills (unknown/external origin) take a small penalty so a
+            // Trusted/Project skill wins ties. Applied symmetrically to the
+            // keyword path via select_keyword below.
+            let score = raw * Self::trust_penalty(skill);
             scored.push((skill, score));
         }
 
@@ -134,18 +149,23 @@ impl SkillSelector {
     fn select_keyword(
         &self,
         user_input: &str,
-        registry: &[SkillDescriptor],
+        eligible: &[&SkillDescriptor],
     ) -> Vec<SkillDescriptor> {
-        let mut scored: Vec<(&SkillDescriptor, f32)> = registry
+        let mut scored: Vec<(&&SkillDescriptor, f32)> = eligible
             .iter()
-            .map(|skill| (skill, Self::keyword_score(user_input, skill)))
+            .map(|skill| {
+                (
+                    skill,
+                    Self::keyword_score(user_input, skill) * Self::trust_penalty(skill),
+                )
+            })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored
             .into_iter()
             .take(self.top_k)
             .filter(|(_, score)| *score > 0.0)
-            .map(|(skill, _)| skill.clone())
+            .map(|(skill, _)| (*skill).clone())
             .collect()
     }
 
@@ -163,6 +183,27 @@ impl SkillSelector {
             })
             .sum::<f32>()
             / skill.trigger_keywords.len().max(1) as f32
+    }
+
+    /// All declared deps of `skill` present in `names`? A skill missing any
+    /// declared dependency is filtered out before scoring — it can't function.
+    fn deps_satisfied(skill: &SkillDescriptor, names: &HashSet<&str>) -> bool {
+        skill
+            .depends_on
+            .iter()
+            .all(|dep| names.contains(dep.as_str()))
+    }
+
+    /// Trust down-rank multiplier. `Untrusted` skills (unknown/external origin)
+    /// get 0.9× so they lose ties to Trusted/Project skills; the others are
+    /// unpenalized. Returns 1.0 for any trust tier not explicitly penalized, so
+    /// future `SkillTrust` variants added under `#[non_exhaustive]` default to
+    /// neutral rather than silently breaking selection.
+    fn trust_penalty(skill: &SkillDescriptor) -> f32 {
+        match skill.trust {
+            SkillTrust::Untrusted => 0.9,
+            _ => 1.0,
+        }
     }
 }
 
@@ -204,21 +245,21 @@ mod tests {
                 description: "Execute shell commands".to_string(),
                 prompt_template: "You can use shell.".to_string(),
                 trigger_keywords: vec!["shell".to_string(), "command".to_string()],
-                embedding: None,
+                ..Default::default()
             },
             SkillDescriptor {
                 name: "code_review".to_string(),
                 description: "Review code".to_string(),
                 prompt_template: "You can review code.".to_string(),
                 trigger_keywords: vec!["review".to_string(), "code".to_string()],
-                embedding: None,
+                ..Default::default()
             },
             SkillDescriptor {
                 name: "calculator".to_string(),
                 description: "Calculate numbers".to_string(),
                 prompt_template: "You can calculate.".to_string(),
                 trigger_keywords: vec!["calculate".to_string(), "math".to_string()],
-                embedding: None,
+                ..Default::default()
             },
         ];
 
@@ -274,20 +315,21 @@ mod tests {
                 prompt_template: "You can use shell.".to_string(),
                 trigger_keywords: vec!["shell".to_string(), "command".to_string()],
                 embedding: None, // embedded on the fly from description
+                ..Default::default()
             },
             SkillDescriptor {
                 name: "code_review".to_string(),
                 description: "Review code".to_string(),
                 prompt_template: "You can review code.".to_string(),
                 trigger_keywords: vec!["review".to_string(), "code".to_string()],
-                embedding: None,
+                ..Default::default()
             },
             SkillDescriptor {
                 name: "calculator".to_string(),
                 description: "Calculate numbers".to_string(),
                 prompt_template: "You can calculate.".to_string(),
                 trigger_keywords: vec!["calculate".to_string(), "math".to_string()],
-                embedding: None,
+                ..Default::default()
             },
         ]
     }
@@ -354,5 +396,81 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "calculator");
+    }
+
+    #[tokio::test]
+    async fn test_skill_selector_filters_skill_with_unsatisfied_dep() {
+        // `git_flow` declares a dep on `git` which is absent from the registry
+        // → filtered out before scoring, even though it's keyword-relevant.
+        let mut reg = sample_registry();
+        reg.push(SkillDescriptor {
+            name: "git_flow".to_string(),
+            description: "Execute shell commands git flow".to_string(),
+            prompt_template: "git flow.".to_string(),
+            trigger_keywords: vec!["shell".to_string(), "git".to_string()],
+            depends_on: vec!["git".to_string()], // git not in registry
+            ..Default::default()
+        });
+        let selector = SkillSelector::new();
+        let result = selector
+            .select_skills("I need to run a shell command", &reg)
+            .await
+            .unwrap();
+        assert!(result.iter().all(|s| s.name != "git_flow"));
+        // Sanity: the satisfied `shell` skill still surfaces.
+        assert_eq!(result[0].name, "shell");
+    }
+
+    #[tokio::test]
+    async fn test_skill_selector_keeps_skill_with_satisfied_dep() {
+        // `git_flow` declares a dep on `git` which IS in the registry → kept.
+        let mut reg = sample_registry();
+        reg.push(SkillDescriptor {
+            name: "git".to_string(),
+            description: "git".to_string(),
+            prompt_template: "git.".to_string(),
+            trigger_keywords: vec!["git".to_string()],
+            ..Default::default()
+        });
+        reg.push(SkillDescriptor {
+            name: "git_flow".to_string(),
+            description: "git flow shell".to_string(),
+            prompt_template: "git flow.".to_string(),
+            trigger_keywords: vec!["shell".to_string(), "git".to_string()],
+            depends_on: vec!["git".to_string()], // git present → satisfied
+            ..Default::default()
+        });
+        let selector = SkillSelector::new();
+        let result = selector
+            .select_skills("I need to run a shell command git flow", &reg)
+            .await
+            .unwrap();
+        assert!(result.iter().any(|s| s.name == "git_flow"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_selector_untrusted_loses_tie_to_trusted() {
+        // Two skills with identical keyword relevance: shell (Trusted) and
+        // shell_untrusted (Untrusted). The Trusted one must rank first.
+        let mut reg = sample_registry();
+        reg.push(SkillDescriptor {
+            name: "shell_untrusted".to_string(),
+            description: "Execute shell commands".to_string(),
+            prompt_template: "You can use shell.".to_string(),
+            trigger_keywords: vec!["shell".to_string(), "command".to_string()],
+            trust: oneai_core::SkillTrust::Untrusted,
+            ..Default::default()
+        });
+        // Mark the original shell as Trusted (its default is Untrusted since
+        // tests don't go through discovery).
+        reg[0].trust = oneai_core::SkillTrust::Trusted;
+
+        let selector = SkillSelector::new();
+        let result = selector
+            .select_skills("I need to run a shell command", &reg)
+            .await
+            .unwrap();
+        assert!(!result.is_empty());
+        assert_eq!(result[0].name, "shell");
     }
 }

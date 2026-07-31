@@ -226,7 +226,7 @@ mod tests {
                 "command".to_string(),
                 "execute".to_string(),
             ],
-            embedding: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&skill).unwrap();
         let parsed: SkillDescriptor = serde_json::from_str(&json).unwrap();

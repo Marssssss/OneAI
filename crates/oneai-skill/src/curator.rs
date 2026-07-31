@@ -451,7 +451,7 @@ mod tests {
             description: format!("desc {name}"),
             prompt_template: "body".into(),
             trigger_keywords: vec!["k".into()],
-            embedding: None,
+            ..Default::default()
         }
     }
 
@@ -586,7 +586,7 @@ mod tests {
             description: "covers a+b".into(),
             prompt_template: "merged body".into(),
             trigger_keywords: vec!["k".into()],
-            embedding: None,
+            ..Default::default()
         };
         let skills_dir = store.root().join("skills");
         let report = curator
@@ -675,7 +675,7 @@ mod tests {
                     description: "u".into(),
                     prompt_template: "b".into(),
                     trigger_keywords: vec![],
-                    embedding: None,
+                    ..Default::default()
                 },
                 &["narrow".to_string(), "ref".to_string()],
                 &store.root().join("skills"),

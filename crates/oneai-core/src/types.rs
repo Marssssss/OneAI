@@ -1951,10 +1951,31 @@ impl MemoryFact {
     }
 }
 
+// ─── SkillTrust ──────────────────────────────────────────────────────────────
+
+/// Skill 信任层级——由 skill discovery 按发现目录计算填入，**不可**由
+/// frontmatter 声明（任一 skill 文件都能谎报 `trust: bundled`，与 OneAI
+/// 权限诚实原则相左）。selector 对 `Untrusted` skill 降权。
+///
+/// `#[non_exhaustive]` per the v0.2.0 API-stability commitment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SkillTrust {
+    /// 与 OneAI 一起发布（builtin）或用户全局目录（`~/.oneai`/`~/.claude`
+    /// 等）发现。
+    Trusted,
+    /// 项目目录（`.oneai/skills`/`.claude/skills` 等，walk-up 祖先）发现。
+    Project,
+    /// 来源未知/外部——selector 降权，平局时输给 Trusted/Project。
+    #[default]
+    Untrusted,
+}
+
 // ─── SkillDescriptor ──────────────────────────────────────────────────────────
 
 /// Description of a SKILL that can be dynamically injected into agent context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SkillDescriptor {
     /// Unique skill name.
     pub name: String,
@@ -1972,6 +1993,27 @@ pub struct SkillDescriptor {
     /// Pre-computed embedding for vector matching.
     #[serde(default)]
     pub embedding: Option<Vec<f32>>,
+
+    /// Skill content version (semver-ish string, e.g. `"1.2.0"`). Consumer:
+    /// skill consolidation picks the newest-version member on merge +
+    /// provenance display. `None` = undeclared (backward-compatible with
+    /// pre-existing skills that carry no version).
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// Names of other skills this skill requires present in the registry.
+    /// The selector filters out skills whose declared deps are not all
+    /// available — a skill missing a dependency can't function, so it is
+    /// never surfaced for injection.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+
+    /// Trust tier — **computed by discovery** from which convention directory
+    /// the skill was found in (global → `Trusted`, project → `Project`,
+    /// unknown → `Untrusted`), not declared in frontmatter (anti-spoof).
+    /// The selector down-ranks `Untrusted` skills.
+    #[serde(default)]
+    pub trust: SkillTrust,
 }
 
 // ─── SelectionMode ────────────────────────────────────────────────────────────

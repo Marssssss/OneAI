@@ -263,15 +263,17 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **Why**：PI 的分缝让 continue/retry/轮间突变成一行回调；OneAI 把范式/delegate/StateGraph 塞进 match 臂。架构迁移，独立功能。
 - **Effort**：高。**Fit**：中。**类型**：架构迁移。
 
-### 4.6 收尾清死代码 + SkillSelector 真工作（gap P3）— 部分完成 ✅
+### 4.6 收尾清死代码 + SkillSelector 真工作（gap P3）— 完成 ✅
 - **What**：(a) 删 `mcp_tools.rs` 死桩副本、遗留 `ltm_entries`/`ShortTermMemory`/`LongTermMemory`（或 P3-1 稳定性承诺下显式 deprecate）。(b) `SkillSelector` embedding 真工作 + skill 版本/依赖/trust 边界。(c) StateGraph 并行分支（frontier）；WorkflowDag 改 BTreeMap 恢复确定性。
 - **Why**：gap P3 收尾，降维护陷阱。Team/Swarm/Handoff 已在 `c8bedbe` 整层移除（无需再做）。
 - **Effort**：中。**Fit**：中。**类型**：清死代码。
 - **2026-07-31 落地**（部分）：
   - (a) 删 `oneai-tool/src/mcp_tools.rs` 死桩（stub `McpToolWrapper::execute` 占位 + `McpServerManager` 空壳；真实现是 `mcp_real.rs` 的 `Real*`），删 2 个冗余 stub 测试（`mcp_real::test_mcp_tool_wrapper_properties` 已覆盖同款断言）。`LongTermMemory` 已是 M2 legacy（模块注释明示 MemoryManager 不在 production path 用它），P3-1 稳定性承诺下不删改加 `#[deprecated(since="1.1.0", note=...)]` + 3 个 impl 块 + 2 个测试加 `#[allow(deprecated)]`。**`ltm_entries` 经核实非死代码**——是 `SqliteSessionStore` 活表（已接线 AppBuilder），计划描述过时，不动。`ShortTermMemory` 仍是活滑动窗口，非 legacy，不动。
-  - (b) `SkillSelector` 接真 embedding ✅：注入 `Option<Arc<dyn EmbeddingService>>`，`with_embedding_service()` 构造器；Vector/Hybrid 模式 embed user_input 一次 + 各 skill 预存 `embedding`（或 on-the-fly embed description）cosine 排序，无 service 或 KeywordMatch 退化关键词路径（向后兼容）；`AppBuilder` build() 默认 selector 注入已建 `embedding_service`（P5-2）。4 新测（vector 排序/hybrid 预存/无 service 退化/零相似度过滤）。**留待后续**：skill 版本/依赖/trust 边界（`SkillDescriptor` 无 version 字段，需设计）。
-  - (c) `WorkflowDag.nodes` + `StateGraph.nodes`/`edges` `HashMap`→`BTreeMap` 恢复迭代确定性（roots/leaves/levels 顺序稳定，过时"order depends on HashMap"测试注释更新为确定性 `vec![]` 断言）✅。**留待后续**：StateGraph frontier 并行分支（grep 确认未实现，属新增能力非确定性修复，单列后续做）。
-  - 1643 tests 绿，fmt+clippy(-D)+deny ok。
+  - (b) `SkillSelector` 接真 embedding ✅：注入 `Option<Arc<dyn EmbeddingService>>`，`with_embedding_service()` 构造器；Vector/Hybrid 模式 embed user_input 一次 + 各 skill 预存 `embedding`（或 on-the-fly embed description）cosine 排序，无 service 或 KeywordMatch 退化关键词路径（向后兼容）；`AppBuilder` build() 默认 selector 注入已建 `embedding_service`（P5-2）。4 新测（vector 排序/hybrid 预存/无 service 退化/零相似度过滤）。
+  - (b′) **skill 版本/依赖/trust 边界 ✅（2026-07-31 收尾）**：`SkillDescriptor` 加 `version: Option<String>` + `depends_on: Vec<String>` + `trust: SkillTrust`（均 `#[serde(default)]` + `#[derive(Default)]`，`SkillTrust` `#[non_exhaustive]` 守 P3-1）。**trust 用"计算 origin"非 frontmatter 声明**（frontmatter 可伪造，与权限诚实原则相左）——`scan_skills_dir` 加 `trust` 参数，`discover_skills` 按发现目录传 `Trusted`（global）/`Project`（project），builtin 显式 `Trusted`；`SkillConfig` 只加 `version`+`depends_on`（on-disk 声明），不加 trust。Selector 消费：`deps_satisfied` 过滤缺依赖 skill 不召回 + `Untrusted` 降权 ×0.9（平局输给 Trusted/Project）；consolidation digest 列 version，umbrella 继承成员最大 version（lexicographic，零新依赖——拒引 `semver`），模型显式 `umbrella_version` 优先。45 处 `SkillDescriptor` 字面量迁移 `..Default::default()`。+7 测（version/depends_on 解析 / deps 过滤 / deps 满足召回 / trust 平局 / version 继承 ×2 / version 覆盖）。
+  - (c) `WorkflowDag.nodes` + `StateGraph.nodes`/`edges` `HashMap`→`BTreeMap` 恢复迭代确定性（roots/leaves/levels 顺序稳定，过时"order depends on HashMap"测试注释更新为确定性 `vec![]` 断言）✅。
+  - (c′) **StateGraph frontier 并行分支 ✅（2026-07-31 收尾）**：`route_next_node`→`route_next_nodes: Vec<String>`（返回**所有**可满足出边 target——互斥条件边 0/1 元素与旧"首匹配"逐字节等价；多 `Always`/多条件同时成立 ≥2 触发 fork）。`execute()` 单 walker→`frontier: BTreeSet<String>` 多 walker：单节点或带 interrupt→sequential path（旧循环等价，戒律 #7 回归保证）；≥2 无 interrupt→parallel path（各 branch 在 `state.clone()` 隔离跑 `execute_node_action` + `route_next_nodes` 消费自家 `parsed_decision`，`futures::future::join_all` 并发，按 `node_id` 顺序确定性合并 conversation/variables/last_result/should_terminate；next_frontier 取并集→`BTreeSet` dedup = 自然 join，多分支共指下游节点入一次且因 barrier 后才跑）。+3 测（fork 合并顺序 / join 只跑一次 + iterations=3 / 单分支回归）。零新依赖。
+  - 1652 tests 绿（1643 baseline +9），fmt+clippy(-D)+deny ok。
 
 ---
 

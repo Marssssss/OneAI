@@ -8,7 +8,7 @@
 //! - prompt_template: full prompt injected into agent context on activation
 //! - trigger_keywords: keywords for SkillSelector matching
 
-use oneai_core::SkillDescriptor;
+use oneai_core::{SkillDescriptor, SkillTrust};
 
 /// The Anthropic `skill-creator` skill, bundled so OneAI can create and
 /// iterate on skills out of the box. Source: ModelScope `@anthropics/skill-creator`
@@ -27,7 +27,8 @@ pub fn skill_creator_skill() -> SkillDescriptor {
             "eval".into(), "benchmark".into(), "improve skill".into(),
             "skill-creator".into(),
         ],
-        embedding: None,
+        trust: SkillTrust::Trusted,
+        ..Default::default()
     }
 }
 
@@ -47,7 +48,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "plan".into(), "roadmap".into(), "architecture".into(),
                 "design".into(), "milestone".into(), "scope".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "code-review".into(),
@@ -57,7 +59,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "review".into(), "audit".into(), "check".into(),
                 "lint".into(), "critique".into(), "inspect".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "debug-analysis".into(),
@@ -67,7 +70,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "bug".into(), "debug".into(), "error".into(),
                 "crash".into(), "fix".into(), "trace".into(), "panic".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "refactoring".into(),
@@ -77,7 +81,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "refactor".into(), "clean".into(), "simplify".into(),
                 "restructure".into(), "optimize".into(), "rewrite".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "test-strategy".into(),
@@ -87,7 +92,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "test".into(), "coverage".into(), "verify".into(),
                 "validate".into(), "e2e".into(), "unit".into(), "integration".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "documentation".into(),
@@ -97,7 +103,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "document".into(), "readme".into(), "api-docs".into(),
                 "comment".into(), "explain".into(), "guide".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "git-workflow".into(),
@@ -107,7 +114,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "git".into(), "branch".into(), "commit".into(),
                 "merge".into(), "rebase".into(), "conflict".into(), "cherry-pick".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "dependency-analysis".into(),
@@ -117,7 +125,8 @@ pub fn coding_skills() -> Vec<SkillDescriptor> {
                 "dependency".into(), "crate".into(), "package".into(),
                 "version".into(), "upgrade".into(), "security".into(), "audit".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
     ]
 }
@@ -137,7 +146,8 @@ pub fn research_skills() -> Vec<SkillDescriptor> {
                 "research".into(), "investigate".into(), "survey".into(),
                 "study".into(), "explore".into(), "deep".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "academic-search".into(),
@@ -147,7 +157,8 @@ pub fn research_skills() -> Vec<SkillDescriptor> {
                 "paper".into(), "arxiv".into(), "citation".into(),
                 "literature".into(), "journal".into(), "conference".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "data-extraction".into(),
@@ -157,7 +168,8 @@ pub fn research_skills() -> Vec<SkillDescriptor> {
                 "extract".into(), "parse".into(), "scrape".into(),
                 "transform".into(), "convert".into(), "structured".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "citation-management".into(),
@@ -167,7 +179,8 @@ pub fn research_skills() -> Vec<SkillDescriptor> {
                 "citation".into(), "reference".into(), "bibliography".into(),
                 "format".into(), "cite".into(), "doi".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "fact-verification".into(),
@@ -177,7 +190,8 @@ pub fn research_skills() -> Vec<SkillDescriptor> {
                 "verify".into(), "confirm".into(), "validate".into(),
                 "cross-check".into(), "fact".into(), "claim".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
     ]
 }
@@ -199,7 +213,8 @@ pub fn general_skills() -> Vec<SkillDescriptor> {
                 "summarize".into(), "condense".into(), "brief".into(),
                 "overview".into(), "tl;dr".into(), "digest".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "translation".into(),
@@ -209,7 +224,8 @@ pub fn general_skills() -> Vec<SkillDescriptor> {
                 "translate".into(), "翻译".into(), "language".into(),
                 "localize".into(), "english".into(), "chinese".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
         SkillDescriptor {
             name: "creative-writing".into(),
@@ -219,7 +235,8 @@ pub fn general_skills() -> Vec<SkillDescriptor> {
                 "write".into(), "create".into(), "compose".into(),
                 "story".into(), "poem".into(), "marketing".into(), "copy".into(),
             ],
-            embedding: None,
+            trust: SkillTrust::Trusted,
+            ..Default::default()
         },
     ];
     skills

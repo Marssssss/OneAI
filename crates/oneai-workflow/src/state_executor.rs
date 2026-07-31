@@ -25,9 +25,10 @@
 //! The `DirectProviderActionExecutor` provides backward-compatible behavior
 //! (direct provider.infer() + tool.execute() without AgentLoop integration).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use futures::future::join_all;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{InteractionGate, LlmProvider, PermissionResolver, Tool};
 use oneai_core::{InferenceRequest, InferenceResponse, Message, PermissionAction, Role};
@@ -107,6 +108,24 @@ pub struct ActionResult {
     pub output: String,
     /// Error message if the action failed.
     pub error: Option<String>,
+}
+
+/// Outcome of running one node in a parallel frontier fork (see
+/// [`StateGraphExecutor::execute_frontier_parallel`]).
+///
+/// Each branch owns its isolated state clone (so concurrent branches never
+/// race on shared mutable state) plus the targets it routed to. The caller
+/// merges branches back deterministically by `node_id` (BTreeSet) order.
+struct BranchResult {
+    /// The frontier node this branch ran.
+    node_id: String,
+    /// The action's output/error for this branch.
+    action_result: ActionResult,
+    /// This branch's final isolated state (clone + its own writes).
+    branch_state: GraphState,
+    /// Targets this branch's outgoing edges routed to (computed against
+    /// `branch_state` — consuming this branch's own `parsed_decision`).
+    next_targets: Vec<String>,
 }
 
 // ─── GraphActionExecutor Trait ──────────────────────────────────────────────────
@@ -578,16 +597,39 @@ impl StateGraphExecutor {
 
     /// Execute a StateGraph starting from its entry point.
     ///
-    /// Walks the graph, executing each node's action and routing to the
-    /// next node based on edge conditions. Returns a GraphExecutionResult
-    /// with the final state, completion status, and iteration count.
+    /// Walks the graph as a **frontier** of ready nodes (not a single walker).
+    /// Each iteration:
+    /// 1. If any frontier node is terminal, execute the deterministic-first
+    ///    one alone and return `completed: true`.
+    /// 2. Otherwise execute every frontier node — sequentially when the
+    ///    frontier has one node (the historical ReAct/conditional case, no
+    ///    clone overhead, behaviour identical to the pre-frontier loop) or any
+    ///    node carries an `interrupt` point; concurrently when the frontier
+    ///    fans out ≥2 non-interrupt nodes (a fork — each branch runs on an
+    ///    isolated state clone, results merged back deterministically by node
+    ///    ID order).
+    /// 3. Route each executed node's outgoing edges (`route_next_nodes` — all
+    ///    satisfiable edges, so a node with two `Always` edges forks both
+    ///    targets). The union of targets is the next frontier; a target
+    ///    reached by multiple branches appears once (natural join — it runs
+    ///    only after the barrier since all branches completed this iteration).
+    /// 4. Terminate when the frontier is empty, `should_terminate` is set, or
+    ///    `max_iterations` is exceeded.
+    ///
+    /// Single-branch graphs (the common ReAct/conditional case) keep frontier
+    /// size 1 throughout → the sequential path → identical to the old loop
+    /// (regression guarantee). Forks (≥2 simultaneous satisfiable edges) are
+    /// the only behaviour that differs, and they couldn't be expressed before.
     pub async fn execute(
         &self,
         graph: &StateGraph,
         initial_state: GraphState,
     ) -> Result<GraphExecutionResult> {
         let mut state = initial_state;
-        let mut current_node_id = graph.entry_point.clone();
+        // BTreeSet, not HashSet: deterministic iteration order so terminal
+        // pick, merge order, and next-frontier composition are reproducible
+        // across runs (戒律 #6 — invariants, not frozen values).
+        let mut frontier: BTreeSet<String> = std::iter::once(graph.entry_point.clone()).collect();
         let mut iterations = 0;
         let mut interrupt_checkpoints = Vec::new();
 
@@ -595,16 +637,25 @@ impl StateGraphExecutor {
             iterations += 1;
             state.iteration_count = iterations;
 
-            // 1. Get the current node
-            let node = graph.get_node(&current_node_id).ok_or_else(|| {
-                OneAIError::Workflow(format!(
-                    "Node '{}' not found in graph '{}'",
-                    current_node_id, graph.name
-                ))
-            })?;
+            if frontier.is_empty() {
+                break;
+            }
 
-            // 2. Check if this is a terminal node
-            if graph.terminal_nodes.contains(&current_node_id) {
+            // 1. Terminal: if any frontier node is terminal, execute the
+            //    deterministic-first one alone and complete. Terminals don't
+            //    participate in forks (a fork into a terminal is an edge case;
+            //    we pick one deterministically).
+            if let Some(term_id) = frontier
+                .iter()
+                .find(|id| graph.terminal_nodes.contains(id))
+                .cloned()
+            {
+                let node = graph.get_node(&term_id).ok_or_else(|| {
+                    OneAIError::Workflow(format!(
+                        "Terminal node '{}' not found in graph '{}'",
+                        term_id, graph.name
+                    ))
+                })?;
                 let action_result = self.execute_node_action(&node.action, &mut state).await?;
                 state.last_result = Some(action_result.output.clone());
                 state.last_error = action_result.error.clone();
@@ -613,97 +664,45 @@ impl StateGraphExecutor {
                     name: graph.name.clone(),
                     final_state: state,
                     completed: true,
-                    terminal_node: Some(current_node_id),
+                    terminal_node: Some(term_id),
                     iterations,
                     interrupt_checkpoints,
                 });
             }
 
-            // 3. Check interrupt point
-            if node.interrupt {
-                let checkpoint_id = format!("interrupt_{}_{}", graph.name, current_node_id);
-                interrupt_checkpoints.push(checkpoint_id.clone());
+            // 2. Decide path: sequential (single-node frontier OR any interrupt)
+            //    vs parallel fork (≥2 nodes, none interrupt).
+            let has_interrupt = frontier
+                .iter()
+                .any(|id| graph.get_node(id).map(|n| n.interrupt).unwrap_or(false));
 
-                // Request human approval
-                let approval_request = oneai_core::ApprovalRequest {
-                    tool_name: "state_graph_interrupt".into(),
-                    args: serde_json::json!({
-                        "node": current_node_id,
-                        "description": match &node.action {
-                            NodeAction::HumanApproval { description } => description.clone(),
-                            _ => "Interrupt point reached".to_string(),
-                        },
-                        "state": state.variables,
-                    }),
-                    risk_level: oneai_core::RiskLevel::Medium,
-                    permission_level: Some(oneai_core::PermissionLevel::Standard),
-                    justification: format!(
-                        "StateGraph interrupt at node '{}' in graph '{}'",
-                        current_node_id, graph.name
-                    ),
-                };
+            let next_targets: Vec<String> = if frontier.len() == 1 || has_interrupt {
+                self.execute_frontier_sequential(
+                    graph,
+                    &frontier,
+                    &mut state,
+                    &mut interrupt_checkpoints,
+                )
+                .await?
+            } else {
+                self.execute_frontier_parallel(graph, &frontier, &mut state)
+                    .await?
+            };
 
-                let approval = self
-                    .interaction_gate
-                    .request(oneai_core::InteractionRequest::ToolApproval {
-                        approval: approval_request,
-                    })
-                    .await?;
-                match approval {
-                    oneai_core::InteractionResponse::Abort { reason } => {
-                        state.should_terminate = true;
-                        state.last_error = Some(format!("Interrupt denied: {}", reason));
-                        return Ok(GraphExecutionResult {
-                            name: graph.name.clone(),
-                            final_state: state,
-                            completed: false,
-                            terminal_node: None,
-                            iterations,
-                            interrupt_checkpoints,
-                        });
-                    }
-                    oneai_core::InteractionResponse::Revise { feedback } => {
-                        // Stateless graph path can't loop on feedback → deny.
-                        state.should_terminate = true;
-                        state.last_error = Some(format!("Interrupt denied: {}", feedback));
-                        return Ok(GraphExecutionResult {
-                            name: graph.name.clone(),
-                            final_state: state,
-                            completed: false,
-                            terminal_node: None,
-                            iterations,
-                            interrupt_checkpoints,
-                        });
-                    }
-                    _ => { /* Proceed / ProceedWith / Choose — continue execution */ }
-                }
-            }
-
-            // 4. Execute node action
-            let action_result = self.execute_node_action(&node.action, &mut state).await?;
-
-            // 5. Update state
-            state.last_result = Some(action_result.output.clone());
-            state.last_error = action_result.error.clone();
             if state.should_terminate {
                 break;
             }
 
-            // 6. Evaluate outgoing edges → route to next node
-            let edges = graph.get_edges_from(&current_node_id);
-            let next_node = self.route_next_node(&edges, &state)?;
-
-            if next_node.is_none() {
-                // No matching condition — terminate
+            if next_targets.is_empty() {
                 tracing::warn!(
-                    "No matching edge condition from node '{}' in graph '{}'. Terminating.",
-                    current_node_id,
+                    "No matching edge condition from frontier {:?} in graph '{}'. Terminating.",
+                    frontier,
                     graph.name
                 );
                 break;
             }
 
-            current_node_id = next_node.unwrap();
+            frontier = next_targets.into_iter().collect();
         }
 
         // Did we exceed max_iterations or terminate without reaching a terminal node?
@@ -724,6 +723,225 @@ impl StateGraphExecutor {
             iterations,
             interrupt_checkpoints,
         })
+    }
+
+    /// Execute a frontier sequentially on the shared state.
+    ///
+    /// Used when the frontier is a single node (the historical single-walker
+    /// case — no clone, behaviour identical to the pre-frontier loop) or when
+    /// any frontier node carries an interrupt point (approval gating is
+    /// conservative under sequential execution; fork-with-interrupt is an edge
+    /// case we don't parallelize). Returns the union of each node's routed
+    /// next-targets. Sets `should_terminate`/`last_result`/`last_error` on the
+    /// shared state exactly as the historical loop did.
+    async fn execute_frontier_sequential(
+        &self,
+        graph: &StateGraph,
+        frontier: &BTreeSet<String>,
+        state: &mut GraphState,
+        interrupt_checkpoints: &mut Vec<String>,
+    ) -> Result<Vec<String>> {
+        let mut next = Vec::new();
+        for node_id in frontier {
+            let node = graph.get_node(node_id).ok_or_else(|| {
+                OneAIError::Workflow(format!(
+                    "Node '{}' not found in graph '{}'",
+                    node_id, graph.name
+                ))
+            })?;
+
+            // Interrupt point — request human approval (same shape as the
+            // historical loop, run in frontier-node order).
+            if node.interrupt {
+                let checkpoint_id = format!("interrupt_{}_{}", graph.name, node_id);
+                interrupt_checkpoints.push(checkpoint_id.clone());
+                let approval_request = oneai_core::ApprovalRequest {
+                    tool_name: "state_graph_interrupt".into(),
+                    args: serde_json::json!({
+                        "node": node_id,
+                        "description": match &node.action {
+                            NodeAction::HumanApproval { description } => description.clone(),
+                            _ => "Interrupt point reached".to_string(),
+                        },
+                        "state": state.variables,
+                    }),
+                    risk_level: oneai_core::RiskLevel::Medium,
+                    permission_level: Some(oneai_core::PermissionLevel::Standard),
+                    justification: format!(
+                        "StateGraph interrupt at node '{}' in graph '{}'",
+                        node_id, graph.name
+                    ),
+                };
+                let approval = self
+                    .interaction_gate
+                    .request(oneai_core::InteractionRequest::ToolApproval {
+                        approval: approval_request,
+                    })
+                    .await?;
+                match approval {
+                    oneai_core::InteractionResponse::Abort { reason } => {
+                        state.should_terminate = true;
+                        state.last_error = Some(format!("Interrupt denied: {}", reason));
+                        return Ok(next);
+                    }
+                    oneai_core::InteractionResponse::Revise { feedback } => {
+                        state.should_terminate = true;
+                        state.last_error = Some(format!("Interrupt denied: {}", feedback));
+                        return Ok(next);
+                    }
+                    _ => { /* Proceed / ProceedWith / Choose — continue */ }
+                }
+            }
+
+            let action_result = self.execute_node_action(&node.action, state).await?;
+            state.last_result = Some(action_result.output.clone());
+            state.last_error = action_result.error.clone();
+            if state.should_terminate {
+                return Ok(next);
+            }
+
+            let edges = graph.get_edges_from(node_id);
+            next.extend(self.route_next_nodes(&edges, state)?);
+        }
+        Ok(next)
+    }
+
+    /// Execute a parallel fork frontier concurrently on isolated state clones.
+    ///
+    /// Precondition: `frontier.len() >= 2` and **no** node has `interrupt`
+    /// (the caller guarantees this). Each branch runs `execute_node_action` on
+    /// a clone of the shared state (so concurrent branches never race on
+    /// shared mutable state — the MVI/Redux isolation pattern), then routes its
+    /// own outgoing edges against its own clone (consuming its own
+    /// `parsed_decision` — no cross-branch decision leakage). Results are
+    /// merged back deterministically by node-ID (BTreeSet) order.
+    async fn execute_frontier_parallel(
+        &self,
+        graph: &StateGraph,
+        frontier: &BTreeSet<String>,
+        state: &mut GraphState,
+    ) -> Result<Vec<String>> {
+        // Snapshot the incoming conversation length so each branch's appended
+        // messages can be sliced out for deterministic merge.
+        let baseline_msgs = state.conversation.messages.len();
+        // Owned snapshot of the incoming state. Each branch clones THIS (via a
+        // shared immutable borrow) so no branch captures `&mut state` — the
+        // concurrent futures only ever share `&self`, `&graph`, and `&incoming`.
+        let incoming = state.clone();
+
+        // Build one future per frontier node. Each future borrows `&self`
+        // (immutable — execute_node_action/route_next_nodes take &self),
+        // `&graph`, and `&incoming` (shared), and owns its state clone, so the
+        // futures are independent and safe to poll concurrently. join_all
+        // interleaves them on this task: LLM-await branches yield and let
+        // siblings progress — real concurrency for the in-flight provider
+        // calls without needing Send+'static spawns.
+        let branch_futs: Vec<_> = frontier
+            .iter()
+            .map(|node_id| {
+                // Each branch gets its own owned starting state cloned from the
+                // shared snapshot. (`&self`/`&graph`/`node_id` are shared refs —
+                // Copy — so `async move` can capture them by-move harmlessly;
+                // `seed` is the only owned value moved in.)
+                let seed = incoming.clone();
+                async move {
+                    let node = match graph.get_node(node_id) {
+                        Some(n) => n,
+                        None => {
+                            return BranchResult {
+                                node_id: node_id.clone(),
+                                action_result: ActionResult {
+                                    output: String::new(),
+                                    error: Some(format!(
+                                        "Node '{}' not found in graph '{}'",
+                                        node_id, graph.name
+                                    )),
+                                },
+                                branch_state: seed,
+                                next_targets: Vec::new(),
+                            };
+                        }
+                    };
+                    let mut branch_state = seed;
+                    let action_result = match self
+                        .execute_node_action(&node.action, &mut branch_state)
+                        .await
+                    {
+                        Ok(ar) => ar,
+                        Err(e) => ActionResult {
+                            output: String::new(),
+                            error: Some(e.to_string()),
+                        },
+                    };
+                    let edges = graph.get_edges_from(node_id);
+                    // Routing uses this branch's own parsed_decision (set by the
+                    // action it just ran). Consumed locally — never leaks to siblings.
+                    let next_targets = self
+                        .route_next_nodes(&edges, &branch_state)
+                        .unwrap_or_default();
+                    BranchResult {
+                        node_id: node_id.clone(),
+                        action_result,
+                        branch_state,
+                        next_targets,
+                    }
+                }
+            })
+            .collect();
+
+        let mut branches: Vec<BranchResult> = join_all(branch_futs).await;
+        // join_all preserves submission order (frontier's BTreeSet order), but
+        // sort explicitly by node_id so the merge below is deterministically
+        // ordered regardless of which branch's provider responded first — a
+        // hard invariant (戒律 #6), not a coincidence of completion order.
+        branches.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+
+        // Deterministic merge by node-ID order (branches came from a BTreeSet,
+        // so iteration order is already deterministic; the vec preserves it).
+        let mut joined_output = Vec::new();
+        let mut first_error: Option<String> = None;
+        let mut any_terminate = false;
+        for b in &branches {
+            joined_output.push(b.action_result.output.clone());
+            if first_error.is_none() {
+                first_error = b.action_result.error.clone();
+            }
+            any_terminate |= b.branch_state.should_terminate;
+        }
+        state.last_result = Some(joined_output.join("\n---\n"));
+        state.last_error = first_error;
+        state.should_terminate = any_terminate;
+
+        // Conversation: append each branch's appended messages (those beyond
+        // the shared baseline) in node-ID order — deterministic regardless of
+        // which branch's provider responded first.
+        for b in &branches {
+            let extra_from = baseline_msgs.min(b.branch_state.conversation.messages.len());
+            for m in &b.branch_state.conversation.messages[extra_from..] {
+                state.conversation.add_message(m.clone());
+            }
+        }
+        // Variables: union; conflict resolved by node-ID order (last wins) —
+        // deterministic. Baseline values are rewritten with identical values
+        // by earlier branches, a harmless no-op.
+        for b in &branches {
+            for (k, v) in &b.branch_state.variables {
+                state.variables.insert(k.clone(), v.clone());
+            }
+        }
+        // parsed_decision: take the last branch's (node-ID order) for
+        // debugging/observability only. Edge routing already consumed each
+        // branch's own decision above; the next frontier is computed from
+        // those per-branch results, not from this shared field.
+        if let Some(last) = branches.last() {
+            state.parsed_decision = last.branch_state.parsed_decision.clone();
+        }
+
+        let mut next = Vec::new();
+        for b in &branches {
+            next.extend(b.next_targets.iter().cloned());
+        }
+        Ok(next)
     }
 
     /// Execute a node's action and update the state.
@@ -818,23 +1036,29 @@ impl StateGraphExecutor {
         }
     }
 
-    /// Route to the next node by evaluating outgoing edge conditions.
+    /// Route to the next node(s) by evaluating outgoing edge conditions.
     ///
-    /// Priority: conditional edges are evaluated in order; the first matching
-    /// condition determines the next node. Unconditional edges (Always) act
-    /// as fallback routing.
-    fn route_next_node(&self, edges: &[&GraphEdge], state: &GraphState) -> Result<Option<String>> {
+    /// Returns the targets of **all** satisfiable outgoing edges (conditional
+    /// edges whose condition holds, plus every unconditional `Always` edge).
+    /// For the historical single-branch case — mutually-exclusive conditional
+    /// edges (HasToolCalls vs IsFinalAnswer) where only one holds — this yields
+    /// 0 or 1 targets, identical to the old "first match" behaviour. When a
+    /// node fans out multiple `Always` edges or multiple simultaneously-true
+    /// conditions, all targets are returned, and the caller runs them as a
+    /// parallel frontier (fork). Conditional edges are still evaluated in
+    /// declared order; `Always` edges act as unconditional fan-out.
+    fn route_next_nodes(&self, edges: &[&GraphEdge], state: &GraphState) -> Result<Vec<String>> {
+        let mut next = Vec::with_capacity(edges.len());
         for edge in edges {
-            if let Some(condition) = &edge.condition {
-                if self.evaluate_edge_condition(condition, state)? {
-                    return Ok(Some(edge.to.clone()));
-                }
-            } else {
-                // No condition — unconditional edge (fallback)
-                return Ok(Some(edge.to.clone()));
+            let satisfied = match &edge.condition {
+                Some(condition) => self.evaluate_edge_condition(condition, state)?,
+                None => true, // unconditional edge
+            };
+            if satisfied {
+                next.push(edge.to.clone());
             }
         }
-        Ok(None)
+        Ok(next)
     }
 
     /// Evaluate an edge condition against the current state.
@@ -1330,5 +1554,283 @@ mod tests {
             "tries >= 3",
             &other_state
         ));
+    }
+
+    // ─── Frontier parallel-execution tests ─────────────────────────────────
+    //
+    // These exercise the `execute()` frontier loop (B2). Delegate nodes are
+    // ideal fixtures: they route through `delegate_factory` (NOT the
+    // `GraphActionExecutor`), so a fork of Delegate nodes needs only a trivial
+    // mock DelegateFactory + a null action executor (purely a construction
+    // requirement — never called for Delegate/ConditionCheck nodes).
+
+    use async_trait::async_trait;
+    use oneai_core::InferenceResponse;
+
+    /// A no-op `GraphActionExecutor` for tests that only exercise Delegate /
+    /// ConditionCheck / HumanApproval nodes (which don't touch the action
+    /// executor). Its methods are never called; they return an error if they
+    /// ever are, failing the test loudly rather than silently.
+    struct NullGraphActionExecutor;
+
+    #[async_trait]
+    impl GraphActionExecutor for NullGraphActionExecutor {
+        async fn execute_llm_infer(
+            &self,
+            _action: &NodeAction,
+            _state: &mut GraphState,
+        ) -> Result<ActionResult> {
+            Err(OneAIError::Workflow(
+                "NullGraphActionExecutor::execute_llm_infer \
+                called — this test fixture only supports Delegate/ConditionCheck nodes"
+                    .into(),
+            ))
+        }
+        async fn execute_tool_call(
+            &self,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+            _state: &mut GraphState,
+        ) -> Result<ActionResult> {
+            Err(OneAIError::Workflow(
+                "NullGraphActionExecutor::execute_tool_call called".into(),
+            ))
+        }
+        async fn execute_paradigm_switch(
+            &self,
+            _paradigm: &str,
+            state: &mut GraphState,
+        ) -> Result<ActionResult> {
+            // Mirrors the direct executor's no-op behaviour so a SwitchParadigm
+            // node could still be exercised if a future test wants it.
+            state.active_paradigm = Some(_paradigm.to_string());
+            state.parsed_decision = None;
+            Ok(ActionResult {
+                output: format!("Paradigm switched to: {}", _paradigm),
+                error: None,
+            })
+        }
+        async fn parse_decision(
+            &self,
+            _response: &InferenceResponse,
+            _state: &mut GraphState,
+        ) -> Result<oneai_core::GraphDecision> {
+            Ok(oneai_core::GraphDecision::DirectAnswer {
+                text: String::new(),
+            })
+        }
+    }
+
+    /// A `DelegateFactory` that returns a deterministic result per agent_kind,
+    /// so each Delegate branch appends a distinct `[Delegate <kind>: result:<kind>]`
+    /// message to the conversation — letting fork/diamond tests assert which
+    /// branches ran and in what merge order.
+    struct RecordingDelegateFactory;
+
+    #[async_trait]
+    impl DelegateFactory for RecordingDelegateFactory {
+        async fn delegate(&self, agent_kind: &str, _task: &str) -> Result<String> {
+            Ok(format!("result:{agent_kind}"))
+        }
+    }
+
+    /// A noop `InteractionGate` for tests that exercise no interrupt nodes.
+    /// `StubPlatformInteractionGate` (oneai-core) always proceeds and is
+    /// `enabled()==false` — zero-latency, no UI.
+    fn make_frontier_executor() -> StateGraphExecutor {
+        use oneai_core::platform::StubPlatformInteractionGate;
+        StateGraphExecutor::new(
+            Arc::new(NullGraphActionExecutor),
+            Arc::new(RecordingDelegateFactory),
+            Arc::new(StubPlatformInteractionGate::macos()) as Arc<dyn InteractionGate>,
+            50,
+        )
+    }
+
+    /// Build a Delegate node with two unconditional (`Always`) edges forking
+    /// to `a` and `b`, then both converging on a terminal `join`.
+    fn make_fork_graph(
+        entry_kind: &str,
+        a_kind: &str,
+        b_kind: &str,
+        join_kind: &str,
+    ) -> StateGraph {
+        let mut graph = StateGraph::new("fork", "entry");
+        graph.add_node(GraphNode {
+            id: "entry".to_string(),
+            action: NodeAction::Delegate {
+                agent_kind: entry_kind.to_string(),
+                task_template: "t".to_string(),
+            },
+            interrupt: false,
+            metadata: HashMap::new(),
+        });
+        graph.add_node(GraphNode {
+            id: "a".to_string(),
+            action: NodeAction::Delegate {
+                agent_kind: a_kind.to_string(),
+                task_template: "t".to_string(),
+            },
+            interrupt: false,
+            metadata: HashMap::new(),
+        });
+        graph.add_node(GraphNode {
+            id: "b".to_string(),
+            action: NodeAction::Delegate {
+                agent_kind: b_kind.to_string(),
+                task_template: "t".to_string(),
+            },
+            interrupt: false,
+            metadata: HashMap::new(),
+        });
+        graph.add_node(GraphNode {
+            id: "join".to_string(),
+            action: NodeAction::Delegate {
+                agent_kind: join_kind.to_string(),
+                task_template: "t".to_string(),
+            },
+            interrupt: false,
+            metadata: HashMap::new(),
+        });
+        // entry forks to both a and b (two Always edges → route_next_nodes
+        // returns both → frontier {a, b}).
+        graph.add_edge(GraphEdge {
+            from: "entry".to_string(),
+            to: "a".to_string(),
+            condition: Some(EdgeCondition::Always),
+            metadata: HashMap::new(),
+        });
+        graph.add_edge(GraphEdge {
+            from: "entry".to_string(),
+            to: "b".to_string(),
+            condition: Some(EdgeCondition::Always),
+            metadata: HashMap::new(),
+        });
+        // Both branches converge on `join`.
+        graph.add_edge(GraphEdge {
+            from: "a".to_string(),
+            to: "join".to_string(),
+            condition: Some(EdgeCondition::Always),
+            metadata: HashMap::new(),
+        });
+        graph.add_edge(GraphEdge {
+            from: "b".to_string(),
+            to: "join".to_string(),
+            condition: Some(EdgeCondition::Always),
+            metadata: HashMap::new(),
+        });
+        graph.add_terminal("join");
+        graph
+    }
+
+    /// Helper: the `[Delegate <kind>: result:<kind>]` message text a branch
+    /// appends (mirrors `execute_node_action`'s Delegate arm formatting).
+    fn delegate_msg(kind: &str) -> String {
+        format!("[Delegate {}]: result:{}", kind, kind)
+    }
+
+    #[tokio::test]
+    async fn frontier_fork_runs_both_branches_and_merges() {
+        // entry(S) → {a, b} → join(J). Both branches must run; their messages
+        // must both reach the merged conversation, in deterministic node-ID
+        // order (a before b), regardless of which branch's delegate resolved
+        // first.
+        let graph = make_fork_graph("S", "A", "B", "J");
+        let executor = make_frontier_executor();
+        let result = executor.execute(&graph, GraphState::new()).await.unwrap();
+
+        assert!(result.completed, "should reach terminal join");
+        assert_eq!(result.terminal_node.as_deref(), Some("join"));
+        // 4 delegate messages appended: S, A, B, J.
+        let texts: Vec<String> = result
+            .final_state
+            .conversation
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect();
+        assert_eq!(
+            texts.len(),
+            4,
+            "expected 4 delegate messages, got {texts:?}"
+        );
+        assert_eq!(texts[0], delegate_msg("S"));
+        assert_eq!(texts[1], delegate_msg("A"));
+        assert_eq!(texts[2], delegate_msg("B"));
+        assert_eq!(texts[3], delegate_msg("J"));
+    }
+
+    #[tokio::test]
+    async fn frontier_join_runs_only_after_both_branches_complete() {
+        // Same fork graph, but verify `join` runs exactly once (not twice) —
+        // i.e. the natural-join dedup in `next_frontier` collapsed a+ b→join
+        // into a single frontier entry, and the barrier (join_all) ensured
+        // both a and b finished before join executed.
+        let graph = make_fork_graph("S", "A", "B", "J");
+        let executor = make_frontier_executor();
+        let result = executor.execute(&graph, GraphState::new()).await.unwrap();
+
+        // join's message appears exactly once.
+        let join_count = result
+            .final_state
+            .conversation
+            .messages
+            .iter()
+            .filter(|m| m.text_content() == delegate_msg("J"))
+            .count();
+        assert_eq!(
+            join_count, 1,
+            "join must run exactly once (natural-join dedup)"
+        );
+        // iterations: entry(1) + fork{a,b}(1) + join(1) = 3.
+        assert_eq!(result.iterations, 3);
+    }
+
+    #[tokio::test]
+    async fn frontier_single_branch_unchanged_from_legacy_behaviour() {
+        // A linear single-branch graph (entry → join, one Always edge) must
+        // behave exactly as the pre-frontier single-walker loop: frontier
+        // stays size 1, sequential path, 2 iterations, terminal reached.
+        // This is the regression guard (戒律 #7).
+        let mut graph = StateGraph::new("linear", "entry");
+        graph.add_node(GraphNode {
+            id: "entry".to_string(),
+            action: NodeAction::Delegate {
+                agent_kind: "S".to_string(),
+                task_template: "t".to_string(),
+            },
+            interrupt: false,
+            metadata: HashMap::new(),
+        });
+        graph.add_node(GraphNode {
+            id: "join".to_string(),
+            action: NodeAction::Delegate {
+                agent_kind: "J".to_string(),
+                task_template: "t".to_string(),
+            },
+            interrupt: false,
+            metadata: HashMap::new(),
+        });
+        graph.add_edge(GraphEdge {
+            from: "entry".to_string(),
+            to: "join".to_string(),
+            condition: Some(EdgeCondition::Always),
+            metadata: HashMap::new(),
+        });
+        graph.add_terminal("join");
+
+        let executor = make_frontier_executor();
+        let result = executor.execute(&graph, GraphState::new()).await.unwrap();
+        assert!(result.completed);
+        assert_eq!(result.terminal_node.as_deref(), Some("join"));
+        assert_eq!(result.iterations, 2);
+        let texts: Vec<String> = result
+            .final_state
+            .conversation
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect();
+        assert_eq!(texts, vec![delegate_msg("S"), delegate_msg("J")]);
     }
 }

@@ -170,7 +170,7 @@ mod tests {
             description: "Generate creative content".into(),
             prompt_template: "You are a creative writing expert.".into(),
             trigger_keywords: vec!["write".into()],
-            embedding: None,
+            ..Default::default()
         }
     }
 

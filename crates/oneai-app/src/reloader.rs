@@ -88,7 +88,7 @@ mod tests {
                 description: "pre-existing".into(),
                 prompt_template: "do pre".into(),
                 trigger_keywords: vec![],
-                embedding: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -129,7 +129,7 @@ mod tests {
                 description: "pre-existing".into(),
                 prompt_template: "do pre".into(),
                 trigger_keywords: vec![],
-                embedding: None,
+                ..Default::default()
             })
             .await
             .unwrap();

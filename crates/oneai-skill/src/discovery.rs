@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use oneai_core::SkillDescriptor;
+use oneai_core::{SkillDescriptor, SkillTrust};
 use serde::{Deserialize, Serialize};
 
 // ─── Candidate skill files ──────────────────────────────────────────────────
@@ -59,8 +59,11 @@ const GLOBAL_SKILL_DIRS: &[&str] = &[
 
 // ─── SkillConfig ────────────────────────────────────────────────────────────
 
-/// The on-disk skill config (mirrors [`SkillDescriptor`] minus the computed embedding).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// The on-disk skill config (mirrors [`SkillDescriptor`] minus the computed
+/// `embedding` and `trust`). `trust` is **not** an on-disk field — it is
+/// computed by discovery from the convention directory the skill was found in
+/// (anti-spoof; see [`SkillTrust`]).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SkillConfig {
     /// Unique skill name. May be empty in the file; falls back to the file/dir name.
     #[serde(default)]
@@ -70,6 +73,13 @@ pub struct SkillConfig {
     pub prompt_template: String,
     #[serde(default)]
     pub trigger_keywords: Vec<String>,
+    /// Skill content version (semver-ish). Surfaces in consolidation merge
+    /// + provenance. `None` = undeclared.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Names of other skills this skill requires present in the registry.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 impl From<SkillConfig> for SkillDescriptor {
@@ -80,6 +90,11 @@ impl From<SkillConfig> for SkillDescriptor {
             prompt_template: c.prompt_template,
             trigger_keywords: c.trigger_keywords,
             embedding: None,
+            version: c.version,
+            depends_on: c.depends_on,
+            // trust left at default (Untrusted) — discovery overrides it from
+            // the directory the skill was actually found in.
+            trust: oneai_core::SkillTrust::default(),
         }
     }
 }
@@ -142,6 +157,8 @@ fn parse_skill_md(content: &str) -> Result<SkillConfig, SkillDiscoveryError> {
             description: String::new(),
             prompt_template: String::new(),
             trigger_keywords: vec![],
+            version: None,
+            depends_on: vec![],
         }
     };
     if cfg.prompt_template.is_empty() {
@@ -183,21 +200,27 @@ fn home_dir() -> PathBuf {
 /// Discover all skills from convention directories: global dirs first, then
 /// project dirs walked up from cwd to the git worktree root. Project-level
 /// skills override global ones with the same name.
+///
+/// `trust` is computed here from the directory a skill is found in — global
+/// dirs yield `SkillTrust::Trusted`, project dirs yield `SkillTrust::Project`
+/// — and stamped onto each parsed `SkillDescriptor`. This is the **only** place
+/// trust is set: it reflects where the skill file actually lives, not a
+/// frontmatter declaration the file could spoof.
 pub fn discover_skills() -> Vec<SkillDescriptor> {
     let mut by_name: HashMap<String, SkillDescriptor> = HashMap::new();
 
-    // Global first (lower precedence).
+    // Global first (lower precedence) → Trusted.
     let home = home_dir();
     for sub in GLOBAL_SKILL_DIRS {
-        for skill in scan_skills_dir(&home.join(sub)) {
+        for skill in scan_skills_dir(&home.join(sub), SkillTrust::Trusted) {
             by_name.insert(skill.name.clone(), skill);
         }
     }
 
-    // Project-level (higher precedence — overrides global on name clash).
+    // Project-level (higher precedence — overrides global on name clash) → Project.
     for ancestor in project_ancestors() {
         for sub in PROJECT_SKILL_DIRS {
-            for skill in scan_skills_dir(&ancestor.join(sub)) {
+            for skill in scan_skills_dir(&ancestor.join(sub), SkillTrust::Project) {
                 by_name.insert(skill.name.clone(), skill);
             }
         }
@@ -232,7 +255,11 @@ fn project_ancestors() -> Vec<PathBuf> {
 /// Scan a single skills directory: each subdirectory `<name>/SKILL.md` (or
 /// `skill.yaml`/`.toml`) becomes a skill; a bare skill file placed directly in
 /// the dir is also accepted. Unparseable entries are logged and skipped.
-fn scan_skills_dir(dir: &Path) -> Vec<SkillDescriptor> {
+///
+/// `trust` is stamped onto every parsed skill — it reflects the directory
+/// being scanned (global → `Trusted`, project → `Project`) and is the
+/// anti-spoof provenance the selector uses to down-rank untrusted skills.
+fn scan_skills_dir(dir: &Path, trust: SkillTrust) -> Vec<SkillDescriptor> {
     let mut out = vec![];
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -245,15 +272,17 @@ fn scan_skills_dir(dir: &Path) -> Vec<SkillDescriptor> {
             for cand in SKILL_FILE_CANDIDATES {
                 let p = path.join(cand);
                 if p.exists() {
-                    if let Some(skill) = read_parse(&p, cand, &file_name) {
+                    if let Some(mut skill) = read_parse(&p, cand, &file_name) {
+                        skill.trust = trust;
                         out.push(skill);
                     }
                     break;
                 }
             }
         } else if let Some(ext) = skill_file_ext(&file_name) {
-            if let Some(skill) = read_parse(&path, &file_name, &file_name) {
+            if let Some(mut skill) = read_parse(&path, &file_name, &file_name) {
                 let _ = ext; // ext already applied inside read_parse via cand
+                skill.trust = trust;
                 out.push(skill);
             }
         }
@@ -319,6 +348,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_version_and_depends_on_from_frontmatter() {
+        // New declared fields survive round-trip through both yaml and md.
+        let yaml =
+            "name: git_flow\ndescription: d\nversion: \"1.2.0\"\ndepends_on: [git, github_pr]\n";
+        let s = parse_skill_descriptor("fb", "yaml", yaml).unwrap();
+        assert_eq!(s.version.as_deref(), Some("1.2.0"));
+        assert_eq!(s.depends_on, vec!["git", "github_pr"]);
+
+        let md = "---\nname: coder\ndescription: A coding skill\nversion: \"0.3.1\"\ndepends_on: [shell]\n---\nBody.\n";
+        let s = parse_skill_descriptor("fb", "md", md).unwrap();
+        assert_eq!(s.version.as_deref(), Some("0.3.1"));
+        assert_eq!(s.depends_on, vec!["shell"]);
+        // Undeclared version/depends_on default cleanly (backward compat).
+        let legacy = "name: old\ndescription: d\nprompt_template: p\n";
+        let s = parse_skill_descriptor("fb", "yaml", legacy).unwrap();
+        assert!(s.version.is_none());
+        assert!(s.depends_on.is_empty());
+    }
+
+    #[test]
     fn parse_skill_md_frontmatter() {
         let md = "---\nname: coder\ndescription: A coding skill\ntrigger_keywords: [code]\n---\nYou are a coding expert.\nDo good work.\n";
         let s = parse_skill_descriptor("fb", "md", md).unwrap();
@@ -345,11 +394,13 @@ mod tests {
             "---\nname: my-skill\ndescription: demo\n---\nBody.\n",
         )
         .unwrap();
-        let found = scan_skills_dir(&tmp);
+        let found = scan_skills_dir(&tmp, SkillTrust::Project);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "my-skill");
         assert_eq!(found[0].description, "demo");
         assert!(found[0].prompt_template.contains("Body."));
+        // Trust is stamped from the directory being scanned, not declared.
+        assert_eq!(found[0].trust, SkillTrust::Project);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -361,9 +412,10 @@ mod tests {
             "name: standalone\ndescription: x\nprompt_template: y\n",
         )
         .unwrap();
-        let found = scan_skills_dir(&tmp);
+        let found = scan_skills_dir(&tmp, SkillTrust::Trusted);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "standalone");
+        assert_eq!(found[0].trust, SkillTrust::Trusted);
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -385,15 +437,18 @@ mod tests {
             "---\nname: dup\ndescription: PROJECT\n---\np\n",
         )
         .unwrap();
-        // Build a merged map the same way discover_skills does (sans home/cwd).
+        // Build a merged map the same way discover_skills does (sans home/cwd):
+        // global → Trusted, project → Project. Project wins on name clash,
+        // and its trust follows the project directory.
         let mut map = HashMap::new();
-        for s in scan_skills_dir(&tmp.join("global/.claude/skills")) {
+        for s in scan_skills_dir(&tmp.join("global/.claude/skills"), SkillTrust::Trusted) {
             map.insert(s.name.clone(), s);
         }
-        for s in scan_skills_dir(&tmp.join("proj/.claude/skills")) {
+        for s in scan_skills_dir(&tmp.join("proj/.claude/skills"), SkillTrust::Project) {
             map.insert(s.name.clone(), s);
         }
         assert_eq!(map.get("dup").unwrap().description, "PROJECT");
+        assert_eq!(map.get("dup").unwrap().trust, SkillTrust::Project);
         std::fs::remove_dir_all(&tmp).ok();
     }
 

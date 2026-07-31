@@ -3554,7 +3554,7 @@ async fn e2e_skill_menu_hides_archived_skill() {
             description: "stale skill".into(),
             prompt_template: "body".into(),
             trigger_keywords: vec![],
-            embedding: None,
+            ..Default::default()
         })
         .await
         .unwrap();

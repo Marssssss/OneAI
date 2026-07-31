@@ -796,7 +796,7 @@ mod tests {
             description: "d".into(),
             prompt_template: "body text".into(),
             trigger_keywords: vec!["k".into()],
-            embedding: None,
+            ..Default::default()
         }];
         let path = store
             .write_backup(&skills, SystemTime::UNIX_EPOCH + days(5))
@@ -835,7 +835,7 @@ mod tests {
             description: "d".into(),
             prompt_template: "".into(),
             trigger_keywords: vec![],
-            embedding: None,
+            ..Default::default()
         };
         for i in 0..6 {
             store

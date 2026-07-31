@@ -1086,7 +1086,7 @@ fn handle_user_input_async(
                             description: skill_desc.to_string(),
                             prompt_template: prompt_template.clone(),
                             trigger_keywords,
-                            embedding: None,
+                            ..Default::default()
                         };
 
                         rt.block_on(async {

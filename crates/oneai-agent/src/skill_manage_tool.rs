@@ -191,7 +191,7 @@ mod tests {
             description: format!("desc {name}"),
             prompt_template: "body".into(),
             trigger_keywords: vec!["k".into()],
-            embedding: None,
+            ..Default::default()
         }
     }
 
