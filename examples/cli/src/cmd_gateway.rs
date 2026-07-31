@@ -455,6 +455,7 @@ impl oneai_agent::AgentLoopObserver for StreamingRelayObserver {
 // alive across crashes (KeepAlive). TUI + supervisor/gateway then share
 // ~/.oneai/oneai.db isolated by WAL (Part A).
 
+#[cfg(target_os = "macos")]
 const LAUNCH_AGENT_LABEL: &str = "com.oneai.supervisor";
 
 #[cfg(target_os = "macos")]
