@@ -450,7 +450,13 @@ mod tests {
         let b = LocalBackend::new();
         let opts = ExecOptions::new(30, None, 50);
         // Print 200 bytes — must truncate to ~50 on a char boundary + suffix.
-        let res = b.execute("printf 'a%.0s' {1..200}", &opts).await.unwrap();
+        // NOTE: avoid bash brace-expansion (`{1..200}`) — the CI's `/bin/sh` is
+        // dash, which doesn't expand braces, so the printf would emit one byte
+        // and never truncate. `/dev/zero` + `tr` is portable across sh impls.
+        let res = b
+            .execute("head -c 200 /dev/zero | tr '\\0' 'a'", &opts)
+            .await
+            .unwrap();
         assert!(res.content.contains("[output truncated due to size limit]"));
     }
 }
