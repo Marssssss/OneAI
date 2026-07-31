@@ -17,6 +17,7 @@
 
 pub mod apply_patch;
 pub mod executor;
+pub mod file_ops;
 pub mod interaction_gate;
 pub mod local_tools;
 pub mod mcp_real;
@@ -30,6 +31,7 @@ pub mod tool_interfaces;
 // (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
 pub use apply_patch::{parse_unified_diff, ApplyPatchTool, DiffHunk, DiffLine};
 pub use executor::*;
+pub use file_ops::{DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps};
 pub use interaction_gate::*;
 pub use local_tools::{CalculatorTool, FileWriteTool};
 pub use mcp_real::McpServerManager as RealMcpServerManager;
@@ -103,6 +105,35 @@ mod tests {
         let registry = ToolRegistry::new();
         let result = registry.execute("nonexistent", serde_json::json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_override_tool_replaces_same_named() {
+        // Phase 4.2: override_tool swaps a same-named tool and the old
+        // instance must not linger (a ContainerizedCodingPack relies on this
+        // to drop-in replace read_file/shell with VM-backed impls).
+        let registry = ToolRegistry::new();
+        let calc: std::sync::Arc<dyn Tool> = std::sync::Arc::new(CalculatorTool::new());
+        registry.register(calc).await.unwrap();
+
+        // Sanity: the registered tool answers "2 + 3" → 5.
+        let out = registry
+            .execute("calculator", serde_json::json!({"expression": "2 + 3"}))
+            .await
+            .unwrap();
+        assert_eq!(out.content, "5");
+
+        // Override with a different impl of the same name. We reuse
+        // CalculatorTool (stateless) — the invariant under test is the
+        // replacement semantics, not the impl: after override, only one tool
+        // of that name remains and it's the new instance.
+        let replacement: std::sync::Arc<dyn Tool> = std::sync::Arc::new(CalculatorTool::new());
+        registry.override_tool(replacement).await.unwrap();
+
+        let names = registry.list_names().await;
+        assert_eq!(names.iter().filter(|n| *n == "calculator").count(), 1);
+        let still = registry.get("calculator").await.expect("still present");
+        assert_eq!(still.name(), "calculator");
     }
 
     // ─── Footprint gate (check_fn) ──────────────────────────────────────────

@@ -340,6 +340,18 @@ enum PackAction {
         /// Pack name to check
         name: String,
     },
+    /// Build a ContainerizedCodingPack — VM-backed shell + file tools (Gondolin
+    /// tool-override, evolution-plan §4.2). Prints the tool wiring for a
+    /// chosen backend so the same shell/read_file/edit_file/write_file/list_directory
+    /// route their side-effects through a Docker/Modal/Daytona terminal.
+    Containerized {
+        /// Terminal backend name (local / docker / modal / daytona)
+        #[arg(long, default_value = "docker")]
+        backend: String,
+        /// Project directory (CodingPack context sources are rooted here)
+        #[arg(long, default_value = ".")]
+        project_dir: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1373,6 +1385,10 @@ fn main() {
             PackAction::Validate { path } => cmd_pack::cmd_pack_validate(&path),
             PackAction::Spec => cmd_pack::cmd_pack_spec(),
             PackAction::Check { name } => cmd_pack::cmd_pack_check(&name),
+            PackAction::Containerized {
+                backend,
+                project_dir,
+            } => cmd_pack::cmd_pack_containerized(&backend, &project_dir),
         },
         Some(Commands::Skill { action }) => match action {
             SkillAction::List => cmd_skill::cmd_skill_list(),

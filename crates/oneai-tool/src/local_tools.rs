@@ -12,12 +12,25 @@ use oneai_core::{RiskLevel, ToolOutput};
 /// File write tool — writes content to a local file.
 ///
 /// This is a HIGH-RISK tool — writing files can overwrite important data.
-pub struct FileWriteTool;
+pub struct FileWriteTool {
+    /// The file-operations backend (Phase 4.2). Defaults to `LocalFileOps`
+    /// (current behavior, verbatim); a `RemoteFileOps` routes writes through
+    /// a `TerminalBackend` for a `ContainerizedCodingPack`.
+    file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>,
+}
 
 impl FileWriteTool {
-    /// Create a new file write tool.
+    /// Create a new file write tool with the local filesystem backend.
     pub fn new() -> Self {
-        Self
+        Self {
+            file_ops: std::sync::Arc::new(crate::file_ops::LocalFileOps::new()),
+        }
+    }
+
+    /// Create with a custom file-operations backend (Phase 4.2). Route writes
+    /// through a `TerminalBackend` (VM-backed) instead of the local FS.
+    pub fn with_file_ops(file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>) -> Self {
+        Self { file_ops }
     }
 }
 
@@ -99,44 +112,13 @@ impl Tool for FileWriteTool {
             });
         }
 
-        let result = if append {
-            // Append mode: open file in append mode and write content
-            let file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await;
-            match file {
-                Ok(f) => {
-                    use tokio::io::AsyncWriteExt;
-                    let mut writer = tokio::io::BufWriter::new(f);
-                    writer.write_all(content.as_bytes()).await
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            // Create parent directories if missing so the model can write to
-            // paths like `src/new_mod/mod.rs` in one step. tokio::fs::write
-            // alone fails when the parent dir does not exist, which previously
-            // pushed the model toward `mkdir -p` + `cat >` shell workarounds.
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                if !parent.as_os_str().is_empty()
-                    && !tokio::fs::try_exists(parent).await.unwrap_or(false)
-                {
-                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                        return Ok(ToolOutput {
-                            success: false,
-                            content: String::new(),
-                            error: Some(format!("Failed to create parent directories: {}", e)),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-            tokio::fs::write(path, content).await
-        };
+        // Delegate the write to the file-operations backend (Phase 4.2). The
+        // LocalFileOps path is byte-identical to the pre-refactor inline
+        // `tokio::fs::write`/append + parent-dir creation logic; a
+        // RemoteFileOps routes the write through a TerminalBackend.
+        let write_result = self.file_ops.write(path, content, append).await;
 
-        match result {
+        match write_result {
             Ok(_) => Ok(ToolOutput {
                 success: true,
                 content: format!("Successfully wrote {} bytes to {}", content.len(), path),

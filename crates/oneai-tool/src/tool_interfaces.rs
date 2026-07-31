@@ -603,6 +603,10 @@ pub struct FileReadTool {
     max_size_bytes: usize,
     /// Maximum number of lines to return (safety limit).
     max_lines: usize,
+    /// The file-operations backend (Phase 4.2). Defaults to `LocalFileOps`
+    /// (current behavior, verbatim); a `RemoteFileOps` routes reads through
+    /// a `TerminalBackend` for a `ContainerizedCodingPack`.
+    file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>,
 }
 
 impl FileReadTool {
@@ -610,6 +614,7 @@ impl FileReadTool {
         Self {
             max_size_bytes: 1024 * 1024, // 1MB
             max_lines: 2000,
+            file_ops: std::sync::Arc::new(crate::file_ops::LocalFileOps::new()),
         }
     }
 
@@ -618,7 +623,23 @@ impl FileReadTool {
         Self {
             max_size_bytes,
             max_lines: 2000,
+            file_ops: std::sync::Arc::new(crate::file_ops::LocalFileOps::new()),
         }
+    }
+
+    /// Create with a custom file-operations backend (Phase 4.2). Route reads
+    /// through a `TerminalBackend` (VM-backed) instead of the local FS.
+    pub fn with_file_ops(file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>) -> Self {
+        Self {
+            max_size_bytes: 1024 * 1024,
+            max_lines: 2000,
+            file_ops,
+        }
+    }
+
+    /// Get a reference to the file-operations backend.
+    pub fn file_ops(&self) -> &std::sync::Arc<dyn crate::file_ops::FileOperations> {
+        &self.file_ops
     }
 }
 
@@ -712,10 +733,8 @@ impl Tool for FileReadTool {
             });
         }
 
-        let file_path = std::path::Path::new(path);
-
-        // Check if file exists
-        if !file_path.exists() {
+        // Check if file exists via the file-operations backend (Phase 4.2).
+        if !self.file_ops.exists(path).await {
             return Ok(ToolOutput {
                 success: false,
                 content: String::new(),
@@ -724,11 +743,9 @@ impl Tool for FileReadTool {
             });
         }
 
-        // Check file size
-        let file_size = tokio::fs::metadata(path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        // Check file size (before reading — the tool enforces its own
+        // max_size, independent of the FileOperations backend).
+        let file_size = self.file_ops.metadata_size(path).await.unwrap_or(0);
 
         if file_size > self.max_size_bytes as u64 {
             return Ok(ToolOutput {
@@ -741,8 +758,8 @@ impl Tool for FileReadTool {
              ..Default::default() });
         }
 
-        // Read the file content
-        let content = tokio::fs::read_to_string(path).await;
+        // Read the file content via the file-operations backend (Phase 4.2).
+        let read_result = self.file_ops.read(path).await?;
 
         // Apply offset + limit if specified
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -751,8 +768,8 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(self.max_lines as u64) as usize;
 
-        match content {
-            Ok(text) => {
+        match (read_result.text, read_result.bytes) {
+            (Some(text), _) => {
                 let lines: Vec<&str> = text.lines().collect();
                 let total_lines = lines.len();
 
@@ -787,27 +804,22 @@ impl Tool for FileReadTool {
                     ..Default::default()
                 })
             }
-            Err(_) => {
-                // Binary file — read as bytes and base64 encode
-                let bytes = tokio::fs::read(path).await;
-                match bytes {
-                    Ok(data) => {
-                        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-                        Ok(ToolOutput {
-                            success: true,
-                            content: BASE64.encode(&data),
-                            error: None,
-                            ..Default::default()
-                        })
-                    }
-                    Err(e) => Ok(ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(format!("Failed to read file: {}", e)),
-                        ..Default::default()
-                    }),
-                }
+            (None, Some(data)) => {
+                // Binary file — base64-encode the bytes.
+                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+                Ok(ToolOutput {
+                    success: true,
+                    content: BASE64.encode(&data),
+                    error: None,
+                    ..Default::default()
+                })
             }
+            (None, None) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some("Failed to read file: no content returned".to_string()),
+                ..Default::default()
+            }),
         }
     }
 }
@@ -823,11 +835,23 @@ impl Tool for FileReadTool {
 ///
 /// This is a Standard-permission tool because it modifies files
 /// but with a precise, safe mechanism (exact string matching).
-pub struct FileEditTool;
+pub struct FileEditTool {
+    /// The file-operations backend (Phase 4.2). Defaults to `LocalFileOps`
+    /// (current behavior, verbatim); a `RemoteFileOps` routes the read+write
+    /// cycle through a `TerminalBackend`.
+    file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>,
+}
 
 impl FileEditTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            file_ops: std::sync::Arc::new(crate::file_ops::LocalFileOps::new()),
+        }
+    }
+
+    /// Create with a custom file-operations backend (Phase 4.2).
+    pub fn with_file_ops(file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>) -> Self {
+        Self { file_ops }
     }
 }
 
@@ -952,10 +976,11 @@ impl Tool for FileEditTool {
             });
         }
 
-        // Read the file
-        let content = tokio::fs::read_to_string(file_path).await;
-        match content {
-            Ok(text) => {
+        // Read the file via the file-operations backend (Phase 4.2).
+        let read_result = self.file_ops.read(file_path).await;
+        match read_result {
+            Ok(res) if res.text.is_some() => {
+                let text = res.text.unwrap();
                 // Check if old_string exists in the file
                 let count = text.matches(old_string).count();
                 if count == 0 {
@@ -985,9 +1010,8 @@ impl Tool for FileEditTool {
                     text.replacen(old_string, new_string, 1)
                 };
 
-                // Write back
-                let write_result = tokio::fs::write(file_path, new_content).await;
-                match write_result {
+                // Write back via the file-operations backend (overwrite).
+                match self.file_ops.write(file_path, &new_content, false).await {
                     Ok(_) => Ok(ToolOutput {
                         success: true,
                         content: format!(
@@ -1006,6 +1030,24 @@ impl Tool for FileEditTool {
                     }),
                 }
             }
+            Ok(res) if res.bytes.is_some() => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!(
+                    "Cannot edit binary file: {} (read_file returned base64 bytes)",
+                    file_path
+                )),
+                ..Default::default()
+            }),
+            Ok(_) => Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!(
+                    "Failed to read file: no content returned for {}",
+                    file_path
+                )),
+                ..Default::default()
+            }),
             Err(e) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
@@ -1022,11 +1064,23 @@ impl Tool for FileEditTool {
 ///
 /// Returns a list of files and directories in the specified path.
 /// This is a Read-permission tool (only observes, never modifies).
-pub struct FileListTool;
+pub struct FileListTool {
+    /// The file-operations backend (Phase 4.2). Defaults to `LocalFileOps`
+    /// (current behavior, verbatim); a `RemoteFileOps` routes the listing
+    /// through a `TerminalBackend`.
+    file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>,
+}
 
 impl FileListTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            file_ops: std::sync::Arc::new(crate::file_ops::LocalFileOps::new()),
+        }
+    }
+
+    /// Create with a custom file-operations backend (Phase 4.2).
+    pub fn with_file_ops(file_ops: std::sync::Arc<dyn crate::file_ops::FileOperations>) -> Self {
+        Self { file_ops }
     }
 }
 
@@ -1091,23 +1145,15 @@ impl Tool for FileListTool {
             });
         }
 
-        let entries = tokio::fs::read_dir(path).await;
+        let entries = self.file_ops.list_dir(path).await;
         match entries {
-            Ok(mut read_dir) => {
+            Ok(dir_entries) => {
                 let mut result = Vec::new();
-                while let Ok(Some(entry)) = read_dir.next_entry().await {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let file_type = entry.file_type().await;
-                    let is_dir = file_type.map(|ft| ft.is_dir()).unwrap_or(false);
-                    let size = if !is_dir {
-                        entry.metadata().await.map(|m| m.len()).unwrap_or(0)
+                for e in dir_entries {
+                    result.push(if e.is_dir {
+                        format!("  [DIR]  {}", e.name)
                     } else {
-                        0
-                    };
-                    result.push(if is_dir {
-                        format!("  [DIR]  {}", name)
-                    } else {
-                        format!("  [FILE] {} ({})", name, size)
+                        format!("  [FILE] {} ({})", e.name, e.size)
                     });
                 }
                 result.sort();

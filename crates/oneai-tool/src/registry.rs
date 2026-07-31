@@ -87,6 +87,31 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Override an already-registered tool by name (Phase 4.2 — Gondolin
+    /// tool-override). Functionally equivalent to [`register`](Self::register)
+    /// (both `insert` by `tool.name()`, so the new tool replaces any same-named
+    /// entry), but signals *intent* and emits an audit log so a pack author
+    /// can't silently clobber a built-in. Use this when a `ContainerizedCodingPack`
+    /// swaps a same-named tool (`read_file`/`shell`/…) for a VM-backed impl.
+    pub async fn override_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
+        let name = tool.name().to_string();
+        let was_present = {
+            let tools = self.tools.read().await;
+            tools.contains_key(&name)
+        };
+        if was_present {
+            tracing::info!("ToolRegistry: overriding tool '{}'", name);
+        } else {
+            tracing::warn!(
+                "ToolRegistry: override_tool('{}') called but no prior tool with that name was registered — inserting new",
+                name
+            );
+        }
+        let mut tools = self.tools.write().await;
+        tools.insert(name, tool);
+        Ok(())
+    }
+
     /// Register a tool gated behind a `check_fn` (Footprint gate).
     ///
     /// The tool is registered under its own name, wrapped in a `GatedTool`.

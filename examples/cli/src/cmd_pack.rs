@@ -10,6 +10,11 @@ pub const BUILTIN_PACKS: &[(&str, &str, &str)] = &[
     ("coding", "Software development — read, edit, search, shell tools", "8 tools: read_file, edit_file, shell, grep, glob, list_directory, notebook_edit, environment"),
     ("research", "Research & analysis — web search, read-only tools", "7 tools: web_search, web_fetch, read_file, grep, glob, list_directory, environment"),
     ("general", "General-purpose — minimal tool set", "1 tool: calculator"),
+    (
+        "containerized-coding",
+        "Containerized coding — VM-backed shell + file tools (Gondolin tool-override, §4.2)",
+        "shell/read_file/edit_file/write_file/list_directory route through a TerminalBackend",
+    ),
     ("writing", "Content creation & editing — coming soon", "planned: write, edit, review tools"),
     ("data", "Data analysis & visualization — coming soon", "planned: query, transform, plot tools"),
     ("devops", "Infrastructure & deployment — coming soon", "planned: deploy, monitor, rollback tools"),
@@ -77,7 +82,10 @@ pub fn cmd_pack_list() {
     // Builtin packs
     println!("  Built-in packs:");
     for (name, desc, tools) in BUILTIN_PACKS {
-        let icon = if *name == "coding" || *name == "research" || *name == "general" {
+        let icon = if matches!(
+            *name,
+            "coding" | "research" | "general" | "containerized-coding"
+        ) {
             "✅"
         } else {
             "🔜"
@@ -464,6 +472,28 @@ pub fn cmd_pack_spec() {
         oneai_domain::DomainPackSpec::SPEC_VERSION
     );
     println!("{}", json);
+}
+
+/// Build a ContainerizedCodingPack for the given backend and print its wiring
+/// (evolution-plan §4.2 — Gondolin tool-override). This is the CLI entry for
+/// the VM-backed coding pack: same tool names as `coding`, but shell + file
+/// side-effects route through a `TerminalBackend` (the VM is the boundary).
+pub fn cmd_pack_containerized(backend_name: &str, project_dir: &str) {
+    let backend = match super::cmd_terminal::build_backend(backend_name) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("❌ {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let pack = oneai_domain::containerized_coding_pack(project_dir, backend);
+    println!("📦 ContainerizedCodingPack (backend: {})\n", backend_name);
+    println!("  Side-effecting tools route through a single TerminalBackend —");
+    println!("  auth + command-string safety stay on the host; the VM is the boundary.\n");
+    print_pack_details(&pack);
+    println!("\nWire into an app:");
+    println!("  AppBuilder::new().provider(p).domain_pack(containerized_coding_pack(\"{project_dir}\", backend)).build()");
 }
 
 /// Check an installed pack against the specification.

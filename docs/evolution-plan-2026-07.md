@@ -34,7 +34,7 @@
 - gap-analysis 的 **P1 安全护栏**（1.4）与 inspiration 的 **P0（cache/check_fn/供应链）**（1.1/1.2/1.3）+ 1.5 衍生项**全部闭合**（2026-07-28）。Phase 1 完成。
 - inspiration P1-P3（新能力）与 gap P2-P3（能力补齐/收尾）**基本正交**，可按"差异化→可达性→精细化"分阶段叠加。
 - **Phase 2（差异化）全部闭合**（2026-07-29~31）：2.1 闭环学习三 Stage / 2.2 supervisor / 2.3 生成式 catalog / 2.4 记忆衰减。
-- **Phase 3（可达性）全部闭合**（2026-07-30~31）：3.1 网关 / 3.2 cron / 3.3 TerminalBackend / 3.4 自扩展热重载 / 3.5 A2A server / 3.6 HF 导出。Phase 4（精细化/综合）进行中：4.1-A 渲染合并定时器 ✅（2026-07-31），4.1-B ANSI 行级 diff / 4.2–4.5 待续。
+- **Phase 3（可达性）全部闭合**（2026-07-30~31）：3.1 网关 / 3.2 cron / 3.3 TerminalBackend / 3.4 自扩展热重载 / 3.5 A2A server / 3.6 HF 导出。Phase 4（精细化/综合）闭合：4.1-A 渲染合并定时器 ✅（2026-07-31），4.1-B ANSI 行级 diff 不做（判过度工程），4.2 Gondolin tool-override + Remote Operations ✅（2026-07-31），4.6 收尾清死代码/SkillSelector ✅；4.3 `Api`/`Provider` 分缝 / 4.4 hook 分缝 / 4.5 AgentLoop 纯循环分缝 ⏸ 暂不做（价值不高，2026-07-31 决策）。
 
 ---
 
@@ -245,26 +245,30 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **跟进修复（同日，残留 + 防撕裂）**：① 用户报"内容残留"——核实 `Event::Resize` 原落 `dispatch_event` 的 `_ => {}` 兜底（`mod.rs`），终端 resize/字体缩放不触发重绘 → 旧内容赖到下次按键。加 `Event::Resize(_) => app.request_render()`（ratatui `autoresize` + 每帧全屏 Clear 收尾）。② 顺带给 `terminal.draw()` 包 `?2026` 同步输出（`Begin/EndSynchronizedUpdate`，crossterm 0.28.1 原生），防快滚/resize/流式大块重绘撕裂；不支持 DECSET 2026 的终端自动 no-op，恒安全。两改共 1 行 + draw 段包 2 句。
 - **Part B（大胜场 ANSI 行级 diff）不做**：诚实重估——ratatui 本就双缓冲 cell 级差分（非全重绘），叠 Part A 去抖 + 现有 viewport 虚拟化 + render_cache，长历史流式已不卡；"弃 ratatui 行级 diff"为边际收益重写 chat 渲染高风险，判过度工程。`?2026` 那块价值已在上条单独落地（不需弃 ratatui）。
 
-### 4.2 Gondolin tool-override + Remote Operations 接口（inspiration P3-2）
+### 4.2 Gondolin tool-override + Remote Operations 接口（inspiration P3-2）✅
+> **进度**：全完成（2026-07-31）。代码级核对后计划描述部分过时，落地按真实状态收窄：
+> - **`BashOperations`/ShellTool 持 trait 对象 = 已由 Phase 3.3 满足**：`TerminalBackend` 就是 bash 操作接口，`ShellTool` 已持 `Arc<dyn TerminalBackend>`（`tool_interfaces.rs:82`）。不新造 `BashOperations` trait，避免重复 3.3 的 seam。
+> - **`ToolRegistry` 按名覆盖 = 功能已存在**：`register` 即 `HashMap::insert` by `tool.name()`（`registry.rs`），本质是 overwrite。落地是显式 `override_tool(tool)` 方法 + audit log（`info!` 覆盖 / `warn!` 无前置工具），供 pack 作者显式覆盖而非误覆盖。功能等价 `register`，但信号 + 审计。
+> - **真正的新工作 = 文件操作抽象**：`FileRead/Edit/Write/List` 原直接 `tokio::fs`，无法 VM-backed。新 `crates/oneai-tool/src/file_ops.rs`：`FileOperations` trait（`read`/`write(append)`/`list_dir`/`exists`/`metadata_size`/`name`，`FileReadResult`/`DirEntry` 均 `#[non_exhaustive]` 守 P3-1）+ `LocalFileOps`（逐字搬现有 `tokio::fs` 逻辑，**行为零变**，戒律 #7）+ `RemoteFileOps`（持 `Arc<dyn TerminalBackend>`，read 经 `cat`/NUL 检测→`base64`，write 经 `printf '<b64>' | base64 -d > path`——base64 在单引号内 shell-safe，任意内容无引号/分隔符碰撞，且**绕过** `ShellTool::detect_shell_file_write` 守卫因 RemoteFileOps 即 write_file 工具自身的后端，非模型直发命令；list 经 GNU `find -printf`；exists 经 `test -e`；size 经 `stat -c %s`）+ `shell_quote` 防注入（路径 `'…'` 包裹，嵌入 `'` → `'\''`）。
+> - **4 文件工具重构**：各加 `file_ops: Arc<dyn FileOperations>` 字段，`new()` 默认 `LocalFileOps`（行为零变），新 `with_file_ops()` 注入 `RemoteFileOps`。`execute()` 安全前置（`path_has_traversal`/空路径/`max_size`）留工具（uniform safety，对标 ShellTool 前置），`tokio::fs::*` 调用替换为 `self.file_ops.*`。offset/limit/行号格式化/binary base64 逻辑留工具。
+> - **`ContainerizedCodingPack`**（`crates/oneai-domain/src/containerized_pack.rs`）：`containerized_coding_pack(project_dir, backend) -> DomainPack` 复用 `coding_pack` 全部非工具层（decorators/context/permission_profile/paradigms/compression/memory/system_prompt/workflows/state_graphs/sub_agent_definitions），仅替换工具层：`ShellTool::with_backend` + `FileRead/Edit/Write/List::with_file_ops(Arc<RemoteFileOps>)` 全接同一 backend（共享 VM session，write 后 read 见同容器 FS）。grep/glob/notebook/environment/web/apply_patch 保持 `new()`（无 fs 副作用或本就只读语义；apply_patch 有自带多文件写逻辑，路由 RemoteFileOps 留后续）。pack `name="containerized-coding"`，工具名仍 `read_file`/`shell`/...（同名 = drop-in 替换 pack，**不**与 coding_pack merge，绕过 `merge.rs` dedup-by-first-seen）。`PermissionProfile` 保持 CodingPack 的（`shell`=Full override + deny_by_default 黑名单照跑）——VM 是边界但前置安全 uniform（戒律 #1，不砍权限）。
+> - **CLI**：`oneai pack containerized --backend <local|docker|modal|daytona> --project-dir`（复用 `cmd_terminal::build_backend`）打印 pack 接线 + 用法；`BUILTIN_PACKS` 加 `containerized-coding` 项。导出 `oneai_tool::{FileOperations,LocalFileOps,RemoteFileOps,...}` + `oneai_domain::containerized_coding_pack`。
+> - **取舍**：(1) RemoteFileOps 的 GNU `find -printf`/`stat -c`/`base64` 仅 Linux 容器（Docker/Modal/Daytona 均 Linux）；本地走 `LocalFileOps`，非 Linux 远端 v1 不支持。(2) apply_patch 不路由（自带多文件写，留后续）。(3) `override_tool` 不改 merge 语义（pack 是 drop-in 替换非 merge-add）。(4) 零新依赖（base64 已硬依赖）。
+> - **测试**：file_ops 12（quote 3 + Local round-trip/append/list 3 + Remote read text/binary/write base64/list find/exists+size/path quote 6）+ override 1（同名替换 + 旧实例不残留）+ containerized 3（同名工具集 / shell+file 路由注入 backend / permission_profile 继承 coding）。**1672 workspace tests 绿**（1652 baseline +20），fmt+clippy(-D)+deny（advisories/bans/licenses/sources）全 ok。
+
 - **What**：`oneai-tool` 定义 `BashOperations/ReadOperations/...` trait，`ShellTool`/`ReadTool` 持 `Box<dyn BashOperations>`；`ToolRegistry` 支持**按名覆盖**（当前只 add）；`ContainerizedCodingPack` DomainPack 提供 VM-backed 同名工具，`PermissionProfile` 保持 `Full`（VM 即边界）。
 - **Why**：PI 极简 + OneAI 权限的诚实综合——auth 留宿主、工具副作用进 micro-VM、靠 tool-override。吸收 Gondolin，**不砍权限**（戒律）。
 - **How**：`ToolRegistry` 加按名覆盖；3.3 的 `TerminalBackend` 已为它预留 host。
 - **Effort**：中-高。**Fit**：中。**类型**：综合。**前置**：3.3。
 
-### 4.3 `Api`/`Provider` 分缝（inspiration P3-3）
-- **What**：把 OneAI `LlmProvider` trait 拆成线协议（`Api`）+ provider 身份，OpenAI 兼容 provider 作配置行对一个 `openai-responses` Api impl。
-- **Why**：2.3 的 Compat 标志是权宜，这是根治——加 Ollama/vLLM/LM Studio/Groq 不再要新 trait impl。
-- **Effort**：高。**Fit**：中。**类型**：架构重构。**后续**：2.3。
+### 4.3 `Api`/`Provider` 分缝（inspiration P3-3）— ⏸ 暂不做（2026-07-31 决策）
+> **状态**：暂不做。2.3 的 Compat 标志已是权宜且覆盖现状（Ollama/vLLM/LM Studio/Groq 经 `compat.detect` 单一权威分发），完整 `Api`/`Provider` 分缝属架构重构、投入高、Fit 中，当前无新兼容 provider 拉动需求。如后续需加多个非 OpenAI 兼容线协议 provider 再重启。
 
-### 4.4 `observe`/`on` hook 分缝 + per-event-type 突变语义（inspiration P3-4）
-- **What**：`InteractionGate` 拆 observe（只读）/on（参与语义）两通道，每事件类型自带 result 型 + merge 策略（phantom-type），新增 `before_provider_request`/`before_compact`。`InteractionGate` 降为默认 impl 注册 `on(...)` handler，向后兼容。
-- **Why**：现有 5 决策点已通电但语义混在 match 臂；hook 分缝让扩展点不 speculative（戒律：无消费者不加 hook）。
-- **Effort**：中-高。**Fit**：中。**类型**：架构分缝。
+### 4.4 `observe`/`on` hook 分缝 + per-event-type 突变语义（inspiration P3-4）— ⏸ 暂不做（2026-07-31 决策）
+> **状态**：暂不做。现有 5 决策点已通电，hook 分缝属架构分缝、投入中-高、Fit 中，且戒律 #3（无消费者不加 hook）下无具体扩展点需求。如后续出现需 observe-only vs 参与-语义分缝的真实扩展场景再重启。
 
-### 4.5 纯循环 / 有状态外壳分缝（inspiration P3-5）
-- **What**：把 `AgentLoop` 的纯循环抽成对快照的 generator，状态移到有状态外壳，`continue`/`shouldStopAfterTurn`/`prepareNextTurn` 变回调。
-- **Why**：PI 的分缝让 continue/retry/轮间突变成一行回调；OneAI 把范式/delegate/StateGraph 塞进 match 臂。架构迁移，独立功能。
-- **Effort**：高。**Fit**：中。**类型**：架构迁移。
+### 4.5 纯循环 / 有状态外壳分缝（inspiration P3-5）— ⏸ 暂不做（2026-07-31 决策）
+> **状态**：暂不做。属 AgentLoop 架构迁移、投入高、Fit 中，提前做会动摇已通电的范式/delegate/StateGraph 路径（戒律 #8 已警示）。`continue`/`shouldStopAfterTurn`/`prepareNextTurn` 回调化留待 AgentLoop 下一次大重构窗口。
 
 ### 4.6 收尾清死代码 + SkillSelector 真工作（gap P3）— 完成 ✅
 - **What**：(a) 删 `mcp_tools.rs` 死桩副本、遗留 `ltm_entries`/`ShortTermMemory`/`LongTermMemory`（或 P3-1 稳定性承诺下显式 deprecate）。(b) `SkillSelector` embedding 真工作 + skill 版本/依赖/trust 边界。(c) StateGraph 并行分支（frontier）；WorkflowDag 改 BTreeMap 恢复确定性。

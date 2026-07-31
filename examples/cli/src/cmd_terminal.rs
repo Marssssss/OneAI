@@ -15,7 +15,7 @@ use oneai_tool::terminal::{ExecOptions, LocalBackend, SnapshotHandle, TerminalBa
 /// Build a backend by name. `local` is always available; `docker` requires
 /// the docker binary; `modal`/`daytona` require their feature flags (the CLI
 /// enables both on the `oneai-tool` dependency, so both are compiled in).
-fn build_backend(name: &str) -> Result<Arc<dyn TerminalBackend>, String> {
+pub(crate) fn build_backend(name: &str) -> Result<Arc<dyn TerminalBackend>, String> {
     match name {
         "local" => Ok(Arc::new(LocalBackend::new())),
         "docker" => {
