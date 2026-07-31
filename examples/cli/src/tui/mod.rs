@@ -14,7 +14,10 @@ use crossterm::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers,
     },
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+        EnterAlternateScreen, LeaveAlternateScreen,
+    },
     ExecutableCommand,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -242,6 +245,11 @@ fn dispatch_event(
         // submitting. Without this arm, paste falls into the `_` catch-all and is
         // dropped (but bracketed paste already prevents the keystream-split bug).
         Event::Paste(text) => app.handle_paste(&text),
+        // Terminal resize / font zoom: request a redraw so the new layout repaints
+        // promptly. Without this, old content lingers (ghosting) until the next
+        // keypress or stream token — ratatui's per-frame full-screen Clear handles
+        // the actual wipe once a draw runs, and `autoresize` re-queries the size.
+        Event::Resize(_, _) => app.request_render(),
         _ => {}
     }
 }
@@ -623,7 +631,14 @@ fn run_main_loop(
         // all text received before its deadline.
         if app.render.should_draw() {
             app.flush_stream_buffer();
+            // ?2026 synchronized output: batch this frame's cell updates into one
+            // atomic terminal swap so a large repaint (fast scroll / resize /
+            // streaming) can't be displayed mid-frame (tearing). Begin is flushed
+            // before ratatui emits its diff; End flushes after. No-ops on terminals
+            // that don't support DECSET 2026, so it's always safe to wrap.
+            let _ = crossterm::execute!(std::io::stdout(), BeginSynchronizedUpdate);
             terminal.draw(|f| render::draw(f, &mut app))?;
+            let _ = crossterm::execute!(std::io::stdout(), EndSynchronizedUpdate);
             app.render.clear();
         }
     }

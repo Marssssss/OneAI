@@ -134,10 +134,7 @@ impl RenderScheduler {
 
     /// 是否应在本轮 draw：有请求且 deadline 已到（或无 deadline）。
     pub fn should_draw(&self) -> bool {
-        self.requested
-            && self
-                .deadline
-                .is_none_or(|d| std::time::Instant::now() >= d)
+        self.requested && self.deadline.is_none_or(|d| std::time::Instant::now() >= d)
     }
 
     /// draw 后清空请求与 deadline。
