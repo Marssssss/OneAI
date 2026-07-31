@@ -187,6 +187,16 @@ pub struct AppBuilder {
     /// (`cron serve` / `supervisor serve --with-cron`). The trait seam lives
     /// in `oneai_core` (`CronScheduler`); concrete impls in `oneai_scheduler`.
     cron_scheduler: Option<Arc<dyn oneai_core::traits::CronScheduler>>,
+
+    /// Optional terminal backend (Phase 3.3). Held on `App` so the CLI
+    /// (`oneai terminal ...`) and future agent seams can drive it. The trait
+    /// seam lives in `oneai_tool` (`TerminalBackend`); concrete impls:
+    /// `LocalBackend` (default, current behavior), `DockerTerminalBackend`,
+    /// and feature-gated `ModalBackend` / `DaytonaBackend`. The `ShellTool`
+    /// owns its own backend (constructed via the DomainPack or `with_backend`);
+    /// this field is the app-level handle for out-of-band lifecycle
+    /// (snapshot / restore / cleanup).
+    terminal_backend: Option<Arc<dyn oneai_tool::TerminalBackend>>,
 }
 
 impl AppBuilder {
@@ -242,6 +252,7 @@ impl AppBuilder {
             reflection_cadence: None,
             working_state_root: None,
             cron_scheduler: None,
+            terminal_backend: None,
         }
     }
 
@@ -1350,6 +1361,27 @@ impl AppBuilder {
         self
     }
 
+    // ─── Terminal Backend (Phase 3.3) ───────────────────────────────────────
+
+    /// Set the app-level terminal backend (Phase 3.3). The trait seam lives in
+    /// `oneai_tool::TerminalBackend` (`execute` / `snapshot` / `restore` /
+    /// `cleanup(hibernate)`). The `ShellTool` owns its own backend (built via
+    /// the DomainPack or `ShellTool::with_backend`); this is the app-level
+    /// handle for out-of-band lifecycle — `oneai terminal exec / snapshot /
+    /// restore / cleanup`. Default (unset): `ShellTool::new()` uses
+    /// `LocalBackend` regardless.
+    ///
+    /// ```ignore
+    /// use oneai_tool::LocalBackend;
+    /// let app = AppBuilder::new()
+    ///     .terminal_backend(std::sync::Arc::new(LocalBackend::new()))
+    ///     .build()?;
+    /// ```
+    pub fn terminal_backend(mut self, backend: Arc<dyn oneai_tool::TerminalBackend>) -> Self {
+        self.terminal_backend = Some(backend);
+        self
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -2008,6 +2040,7 @@ impl AppBuilder {
             skill_metadata_store,
             skill_curator,
             cron_scheduler: self.cron_scheduler,
+            terminal_backend: self.terminal_backend,
         })
     }
 }
@@ -2126,6 +2159,10 @@ pub struct App {
     /// Durable cron scheduler (Phase 3.2) — held for future agent-tool
     /// queries; lifecycle driven by the CLI. See `AppBuilder::cron_provider`.
     pub cron_scheduler: Option<Arc<dyn oneai_core::traits::CronScheduler>>,
+    /// Terminal backend (Phase 3.3) — app-level handle for out-of-band
+    /// lifecycle (`oneai terminal exec/snapshot/restore/cleanup`). See
+    /// `AppBuilder::terminal_backend`. `ShellTool` owns its own backend.
+    pub terminal_backend: Option<Arc<dyn oneai_tool::TerminalBackend>>,
 }
 
 impl App {

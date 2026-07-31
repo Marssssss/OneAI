@@ -28,7 +28,7 @@ crossterm = { workspace = true, features = ["bracketed-paste"] }
 async-trait = { workspace = true }
 oneai-core = { workspace = true }
 oneai-app = { workspace = true }
-oneai-tool = { workspace = true }
+oneai-tool = { workspace = true, features = ["modal", "daytona"] }
 oneai-memory = { workspace = true }
 oneai-rag = { workspace = true }
 oneai-workflow = { workspace = true }

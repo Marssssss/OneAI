@@ -187,6 +187,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 dirs = "5"
+tempfile = "3"
 
 # TUI
 ratatui = "0.29"

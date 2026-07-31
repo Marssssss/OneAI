@@ -22,10 +22,21 @@ regex = { workspace = true }
 reqwest = { workspace = true }
 eventsource-stream = { workspace = true }
 tokio-stream = { workspace = true }
+dirs = { workspace = true }
 html2text = "0.5"
 walkdir = "2"
 glob = "0.3"
 urlencoding = "2"
 
+[features]
+default = []
+# Serverless terminal backends (Phase 3.3 Stage F). reqwest/serde_json are
+# already hard deps, so these features only gate whether the backend module
+# is compiled — zero new dependencies, opt-in (off by default per 戒律 #3).
+modal = []
+daytona = []
+
 [dev-dependencies]
 tokio-test = "0.4"
+axum = { workspace = true }
+tempfile = { workspace = true }

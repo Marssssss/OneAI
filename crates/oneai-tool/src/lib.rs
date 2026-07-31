@@ -24,6 +24,7 @@ pub mod mcp_tools;
 pub mod registry;
 pub mod sandbox;
 pub mod schedule_tool;
+pub mod terminal;
 pub mod tool_interfaces;
 
 // Explicit imports to avoid ambiguity between local_tools and tool_interfaces
@@ -43,6 +44,13 @@ pub use sandbox::{
     WrappedCommand,
 };
 pub use schedule_tool::ScheduleTool;
+#[cfg(feature = "daytona")]
+pub use terminal::daytona::DaytonaBackend;
+pub use terminal::docker::DockerTerminalBackend;
+pub use terminal::file_sync::{DockerFileSync, FileSyncManager, FileSyncStrategy};
+#[cfg(feature = "modal")]
+pub use terminal::modal::ModalBackend;
+pub use terminal::{ExecOptions, ExecResult, LocalBackend, SnapshotHandle, TerminalBackend};
 pub use tool_interfaces::*;
 pub use tool_interfaces::{SearchResult, WebSearchTool};
 

@@ -86,6 +86,7 @@ mod cmd_skill;
 mod cmd_studio;
 mod cmd_supervisor;
 mod cmd_tasks;
+mod cmd_terminal;
 mod cmd_token;
 mod cmd_usage;
 mod cmd_version;
@@ -170,6 +171,13 @@ enum Commands {
     Cron {
         #[command(subcommand)]
         action: CronAction,
+    },
+    /// Terminal — `TerminalBackend` management (Phase 3.3). Run commands
+    /// through a local / docker / serverless backend, and exercise the
+    /// snapshot / restore / cleanup(hibernate) lifecycle.
+    Terminal {
+        #[command(subcommand)]
+        action: TerminalAction,
     },
     /// Manage domain packs
     Pack {
@@ -649,6 +657,46 @@ enum CronAction {
         /// User identity for memory namespacing.
         #[arg(long)]
         user: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TerminalAction {
+    /// List available terminal backends (local / docker / modal / daytona).
+    List,
+    /// Execute a one-off command through a named backend.
+    Exec {
+        /// Backend name: `local` / `docker` / `modal` / `daytona`.
+        #[arg(long)]
+        backend: String,
+        /// The shell command to execute.
+        command: String,
+        /// Timeout in seconds (default 120).
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Max output size in bytes (default 100_000).
+        #[arg(long, default_value_t = 100_000)]
+        max_output: usize,
+    },
+    /// Snapshot the backend's session state (returns a restorable id).
+    Snapshot {
+        #[arg(long)]
+        backend: String,
+    },
+    /// Restore the backend from a snapshot id.
+    Restore {
+        #[arg(long)]
+        backend: String,
+        /// Snapshot id returned by `snapshot`.
+        id: String,
+    },
+    /// Tear down the backend. `--hibernate` stops+keeps (restorable); without
+    /// it the state is destroyed.
+    Cleanup {
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        hibernate: bool,
     },
 }
 
@@ -1202,6 +1250,22 @@ fn main() {
                 model.as_deref(),
                 user.as_deref(),
             ),
+        },
+        Some(Commands::Terminal { action }) => match action {
+            TerminalAction::List => cmd_terminal::cmd_terminal_list(),
+            TerminalAction::Exec {
+                backend,
+                command,
+                timeout,
+                max_output,
+            } => cmd_terminal::cmd_terminal_exec(&backend, &command, timeout, max_output),
+            TerminalAction::Snapshot { backend } => cmd_terminal::cmd_terminal_snapshot(&backend),
+            TerminalAction::Restore { backend, id } => {
+                cmd_terminal::cmd_terminal_restore(&backend, &id)
+            }
+            TerminalAction::Cleanup { backend, hibernate } => {
+                cmd_terminal::cmd_terminal_cleanup(&backend, hibernate)
+            }
         },
         Some(Commands::Supervisor { action }) => match action {
             SupervisorAction::Serve {

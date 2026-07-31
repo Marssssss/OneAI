@@ -65,10 +65,21 @@ pub struct ShellTool {
     allowed_working_dirs: Vec<std::path::PathBuf>,
 
     /// Sandbox mode (default: enabled).
+    ///
+    /// **Post Phase 3.3**: kept for introspection back-compat only
+    /// (the `sandbox_mode()` accessor). Execution no longer reads it —
+    /// command wrapping lives inside the [`TerminalBackend`] (`LocalBackend`
+    /// composes a [`SandboxBackend`]; serverless backends isolate internally).
     sandbox_mode: SandboxMode,
 
     /// Maximum output size in bytes (to prevent context overflow).
     max_output_bytes: usize,
+
+    /// The terminal backend that actually runs commands (Phase 3.3). Replaces
+    /// the inline `tokio::process::Command::new` spawn. `ShellTool::execute`
+    /// runs its command-string safety pre-flight (blocked patterns, shell
+    /// file-write detection), then delegates here.
+    backend: std::sync::Arc<dyn crate::terminal::TerminalBackend>,
 }
 
 /// Sandbox execution mode.
@@ -108,7 +119,8 @@ impl Default for SandboxMode {
 
 impl ShellTool {
     /// Create a new ShellTool with default safety settings.
-    /// Sandbox is enabled by default (regex-only, no backend).
+    /// Sandbox is enabled by default (regex-only, no backend). The terminal
+    /// backend is `LocalBackend` (current behavior, verbatim).
     pub fn new() -> Self {
         Self {
             blocked_patterns: default_blocked_patterns(),
@@ -117,6 +129,24 @@ impl ShellTool {
             allowed_working_dirs: Vec::new(),
             sandbox_mode: SandboxMode::Enabled { backend: None },
             max_output_bytes: 100_000, // ~100KB max output
+            backend: std::sync::Arc::new(crate::terminal::LocalBackend::new()),
+        }
+    }
+
+    /// Create a ShellTool with an explicit [`TerminalBackend`] (Phase 3.3).
+    ///
+    /// Use this to wire a serverless backend (Docker / Modal / Daytona) into
+    /// the tool. The safety pre-flight (blocked patterns, file-write guard)
+    /// still runs in `ShellTool::execute` before delegating to the backend.
+    pub fn with_backend(backend: std::sync::Arc<dyn crate::terminal::TerminalBackend>) -> Self {
+        Self {
+            blocked_patterns: default_blocked_patterns(),
+            default_timeout_secs: 120,
+            max_timeout_secs: 600,
+            allowed_working_dirs: Vec::new(),
+            sandbox_mode: SandboxMode::Enabled { backend: None },
+            max_output_bytes: 100_000,
+            backend,
         }
     }
 
@@ -125,6 +155,9 @@ impl ShellTool {
     /// The backend wraps commands before execution, providing real isolation
     /// (Seatbelt on macOS, Docker on Linux, etc.). This replaces the
     /// regex-only approach with actual process-level restrictions.
+    ///
+    /// **Phase 3.3**: the `SandboxBackend` is composed into a `LocalBackend`
+    /// (which does the wrapping); `sandbox_mode` is kept for introspection.
     pub fn with_sandbox_backend(
         backend: std::sync::Arc<dyn crate::sandbox::SandboxBackend>,
     ) -> Self {
@@ -134,16 +167,21 @@ impl ShellTool {
             max_timeout_secs: 600,
             allowed_working_dirs: Vec::new(),
             sandbox_mode: SandboxMode::Enabled {
-                backend: Some(backend),
+                backend: Some(backend.clone()),
             },
             max_output_bytes: 100_000,
+            backend: std::sync::Arc::new(crate::terminal::LocalBackend::with_sandbox(
+                backend,
+                Vec::new(),
+            )),
         }
     }
 
     /// Create a ShellTool with sandbox disabled (requires explicit reason).
     ///
     /// Analogous to Claude Code's `dangerouslyDisableSandbox` parameter.
-    /// The reason is logged for audit purposes.
+    /// The reason is logged for audit purposes. Execution still goes through
+    /// `LocalBackend`, but with no sandbox wrapping (raw command).
     pub fn dangerously_disable_sandbox(reason: impl Into<String>) -> Self {
         Self {
             blocked_patterns: default_blocked_patterns(),
@@ -154,6 +192,7 @@ impl ShellTool {
                 reason: reason.into(),
             },
             max_output_bytes: 100_000,
+            backend: std::sync::Arc::new(crate::terminal::LocalBackend::new()),
         }
     }
 
@@ -166,6 +205,7 @@ impl ShellTool {
             allowed_working_dirs: Vec::new(),
             sandbox_mode: SandboxMode::Enabled { backend: None },
             max_output_bytes: 100_000,
+            backend: std::sync::Arc::new(crate::terminal::LocalBackend::new()),
         }
     }
 
@@ -174,9 +214,14 @@ impl ShellTool {
         self.default_timeout_secs
     }
 
-    /// Get a reference to the sandbox mode.
+    /// Get a reference to the sandbox mode (introspection back-compat).
     pub fn sandbox_mode(&self) -> &SandboxMode {
         &self.sandbox_mode
+    }
+
+    /// Get a reference to the terminal backend (Phase 3.3).
+    pub fn backend(&self) -> &std::sync::Arc<dyn crate::terminal::TerminalBackend> {
+        &self.backend
     }
 }
 
@@ -511,103 +556,32 @@ impl Tool for ShellTool {
             });
         }
 
-        // Determine the actual command to run — wrap with sandbox backend if available
-        let effective_command = match &self.sandbox_mode {
-            SandboxMode::Enabled { backend } => {
-                if let Some(b) = backend {
-                    // Use real sandbox backend for process-level isolation
-                    let working_dir = if self.allowed_working_dirs.is_empty() {
-                        std::path::PathBuf::from(".")
-                    } else {
-                        self.allowed_working_dirs[0].clone()
-                    };
-                    let wrapped = b.wrap_command(command, &working_dir)?;
-                    tracing::info!("ShellTool: command wrapped by {} sandbox backend", b.name());
-                    // The wrapped command is already a complete shell command
-                    // (e.g., "sandbox-exec -p '...' sh -c '...'" for Seatbelt,
-                    //  or "docker run --rm ... sh -c '...'" for Docker)
-                    wrapped.shell_command
-                } else {
-                    // No backend — just use the raw command (regex-only protection)
-                    command.to_string()
-                }
-            }
-            SandboxMode::Disabled { reason } => {
-                tracing::warn!("ShellTool: sandbox disabled — reason: {}", reason);
-                command.to_string()
-            }
-        };
+        // Audit-log sandbox disable before delegating (mirrors the pre-refactor
+        // SandboxMode::Disabled warn). The backend (LocalBackend) was constructed
+        // without a sandbox wrapper when Disabled, so execution is the raw command.
+        if let SandboxMode::Disabled { reason } = &self.sandbox_mode {
+            tracing::warn!("ShellTool: sandbox disabled — reason: {}", reason);
+        }
 
-        // Determine the shell based on the platform and (on Windows) whether
-        // a POSIX `sh` is reachable. If the command is already wrapped by a
-        // sandbox backend (contains "sandbox-exec" or "docker"), we still need
-        // a shell that can execute the wrapped command string directly — `sh`
-        // handles this on every platform where it's available.
-        let (shell, shell_arg) = resolve_shell();
-
-        // Clamp timeout to max
+        // Clamp timeout to max (uniform policy across all backends).
         let timeout = args
             .get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_secs)
             .min(self.max_timeout_secs);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout),
-            tokio::process::Command::new(shell)
-                .arg(shell_arg)
-                .arg(&effective_command)
-                .output(),
-        )
-        .await;
+        let working_dir = self.allowed_working_dirs.first().cloned();
+        let opts = crate::terminal::ExecOptions::new(timeout, working_dir, self.max_output_bytes);
 
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let content = if stderr.is_empty() {
-                    stdout
-                } else {
-                    format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr)
-                };
-
-                // Truncate output if exceeds max size. Slice on a byte index
-                // only — must land on a UTF-8 char boundary or String slicing
-                // panics (it does on multibyte/CJK output). Walk back to the
-                // nearest boundary before slicing.
-                let truncated_content = if content.len() > self.max_output_bytes {
-                    let mut end = self.max_output_bytes;
-                    while end > 0 && !content.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    let mut truncated = content[..end].to_string();
-                    truncated.push_str("\n... [output truncated due to size limit]");
-                    truncated
-                } else {
-                    content
-                };
-
-                Ok(ToolOutput {
-                    success: output.status.success(),
-                    content: truncated_content,
-                    error: if output.status.success() {
-                        None
-                    } else {
-                        Some(format!("Exit code: {}", output.status.code().unwrap_or(-1)))
-                    },
-                })
-            }
-            Ok(Err(e)) => Ok(ToolOutput {
-                success: false,
-                content: String::new(),
-                error: Some(format!("Failed to execute command: {}", e)),
-            }),
-            Err(_) => Ok(ToolOutput {
-                success: false,
-                content: String::new(),
-                error: Some(format!("Command timed out after {} seconds", timeout)),
-            }),
-        }
+        // Delegate execution to the terminal backend. All command-string safety
+        // (blocked patterns, file-write guard) ran above; the backend owns the
+        // spawn mechanics (shell resolution, timeout, output truncation).
+        let res = self.backend.execute(command, &opts).await?;
+        Ok(ToolOutput {
+            success: res.success,
+            content: res.content,
+            error: res.error,
+        })
     }
 }
 
