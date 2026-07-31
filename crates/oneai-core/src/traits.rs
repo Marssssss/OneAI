@@ -1143,6 +1143,20 @@ pub trait RerankerProvider: Send + Sync {
 
 // ─── MemoryPersistence ─────────────────────────────────────────────────────
 
+/// Separator marking a conversation row as an internal **discarded-prefix
+/// archive snapshot** written by context compression (see
+/// `MemoryManager::archive_discarded_snapshot`). The id is formatted as
+/// `"{session_id}{DISCARDED_SNAPSHOT_MARKER}{uuid}"`.
+///
+/// These rows are NOT user-facing conversations — they hold the raw transcript
+/// that was summarized away, kept only for audit / on-demand `memory_search`
+/// fallback. Persistence backends MUST exclude them from `list_conversations`
+/// (they must never surface as selectable sessions in a foreign UI) and MUST
+/// cascade-delete them when the parent `session_id` is deleted.
+/// `load_conversation` still resolves them by exact id (for the audit/search
+/// path); only the listing and delete-cascade treat them specially.
+pub const DISCARDED_SNAPSHOT_MARKER: &str = "::discarded::";
+
 /// Trait for persisting and restoring memory and conversation state.
 ///
 /// Enables SQLite (or other) backends to store STM entries, LTM entries,

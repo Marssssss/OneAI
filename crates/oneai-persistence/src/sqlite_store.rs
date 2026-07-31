@@ -734,14 +734,26 @@ impl MemoryPersistence for SqliteSessionStore {
 
     async fn list_conversations(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.open_connection()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, created_at, updated_at, messages_json, title FROM conversations ORDER BY updated_at DESC"
-        ).map_err(|e| OneAIError::Persistence(
-            format!("Failed to prepare conversation list query: {}", e)
-        ))?;
+        // Exclude discarded-prefix archive snapshots — these are internal
+        // compression artifacts (`{session}{DISCARDED_SNAPSHOT_MARKER}{uuid}`),
+        // not user-facing conversations. Without this filter, every
+        // compression on a long conversation spawns a phantom "new session"
+        // in the foreign UI's sidebar (the discarded prefix, starting with
+        // an early user turn, shows up as a brand-new chat). `load_conversation`
+        // still resolves them by exact id for the audit / memory_search path.
+        let discard_pat = format!("%{}%", oneai_core::DISCARDED_SNAPSHOT_MARKER);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, created_at, updated_at, messages_json, title FROM conversations \
+             WHERE id NOT LIKE ?1 \
+             ORDER BY updated_at DESC",
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to prepare conversation list query: {}", e))
+            })?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params![discard_pat], |row| {
                 let id: String = row.get(0)?;
                 let created_at: String = row.get(1)?;
                 let updated_at: String = row.get(2)?;
@@ -800,11 +812,12 @@ impl MemoryPersistence for SqliteSessionStore {
 
     async fn delete_conversation(&self, id: &str) -> Result<()> {
         let conn = self.open_connection()?;
+        let discard_prefix = format!("{}{}%", id, oneai_core::DISCARDED_SNAPSHOT_MARKER);
 
-        // Delete conversation and its STM entries
+        // Delete STM entries for the session and any of its discarded snapshots.
         conn.execute(
-            "DELETE FROM stm_entries WHERE session_id = ?1",
-            rusqlite::params![id],
+            "DELETE FROM stm_entries WHERE session_id = ?1 OR session_id LIKE ?2",
+            rusqlite::params![id, discard_prefix],
         )
         .map_err(|e| {
             OneAIError::Persistence(format!(
@@ -812,9 +825,12 @@ impl MemoryPersistence for SqliteSessionStore {
                 id, e
             ))
         })?;
+        // Delete the conversation row and cascade-delete its discarded-prefix
+        // archive snapshots (`{id}{DISCARDED_SNAPSHOT_MARKER}{uuid}`) so they
+        // don't outlive the parent chat and leak as orphan rows.
         conn.execute(
-            "DELETE FROM conversations WHERE id = ?1",
-            rusqlite::params![id],
+            "DELETE FROM conversations WHERE id = ?1 OR id LIKE ?2",
+            rusqlite::params![id, discard_prefix],
         )
         .map_err(|e| {
             OneAIError::Persistence(format!("Failed to delete conversation '{}': {}", id, e))
@@ -1453,6 +1469,58 @@ mod tests {
         let (store, _dir) = make_store();
         let loaded = store.load_conversation("nonexistent").await.unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_discarded_snapshot_hidden_from_list_and_cascade_deleted() {
+        // Regression: context compression archives the summarized-away prefix
+        // as a conversation row whose id is `{session}{DISCARDED_SNAPSHOT_MARKER}{uuid}`
+        // (see MemoryManager::archive_discarded_snapshot). These rows are
+        // internal archive artifacts, NOT user-facing sessions. Two contracts:
+        //  1. list_conversations MUST hide them — otherwise every compression
+        //     on a long chat spawns a phantom "new session" in the sidebar
+        //     showing the discarded prefix (an early user turn), which the user
+        //     reads as a brand-new conversation that stole their first question.
+        //  2. delete_conversation MUST cascade-delete a session's discarded
+        //     snapshots so they don't leak as orphans after the parent chat is
+        //     deleted.
+        let (store, _dir) = make_store();
+
+        // The live conversation.
+        let mut conv = Conversation::with_id("sessA".to_string());
+        conv.add_message(oneai_core::Message::user(
+            "我需要面试Android Framework".to_string(),
+        ));
+        conv.add_message(oneai_core::Message::assistant("好的,我来介绍".to_string()));
+        store.save_conversation("sessA", &conv).await.unwrap();
+
+        // Two discarded-prefix snapshots, as the compressor would write them.
+        let snap1 = format!("sessA{}{}", oneai_core::DISCARDED_SNAPSHOT_MARKER, "u1");
+        let snap2 = format!("sessA{}{}", oneai_core::DISCARDED_SNAPSHOT_MARKER, "u2");
+        let mut disc = Conversation::with_id(snap1.clone());
+        disc.add_message(oneai_core::Message::user("进入下一个主题吧".to_string()));
+        store.save_conversation(&snap1, &disc).await.unwrap();
+        store.save_conversation(&snap2, &disc).await.unwrap();
+
+        // (1) Hidden from the listing — only the live session shows.
+        let sessions = store.list_conversations().await.unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "discarded snapshots must not appear in list_conversations"
+        );
+        assert_eq!(sessions[0].id, "sessA");
+
+        // `load_conversation` still resolves a discarded snapshot by exact id
+        // (audit / memory_search fallback path must keep working).
+        assert!(store.load_conversation(&snap1).await.unwrap().is_some());
+
+        // (2) Cascade-delete — removing the parent also removes its snapshots.
+        store.delete_conversation("sessA").await.unwrap();
+        assert!(store.load_conversation("sessA").await.unwrap().is_none());
+        assert!(store.load_conversation(&snap1).await.unwrap().is_none());
+        assert!(store.load_conversation(&snap2).await.unwrap().is_none());
+        assert!(store.list_conversations().await.unwrap().is_empty());
     }
 
     // ─── Persistence across restarts ──────────────────────────────────

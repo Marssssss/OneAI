@@ -624,7 +624,12 @@ impl MemoryManager {
         for m in discarded {
             conv.add_message(m);
         }
-        let id = format!("{}::discarded::{}", session_id, uuid::Uuid::new_v4());
+        let id = format!(
+            "{}{}{}",
+            session_id,
+            oneai_core::DISCARDED_SNAPSHOT_MARKER,
+            uuid::Uuid::new_v4()
+        );
         p.save_conversation(&id, &conv).await?;
         Ok(())
     }
