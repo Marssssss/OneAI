@@ -1209,6 +1209,22 @@ pub trait MemoryPersistence: Send + Sync {
     /// Load a conversation by ID.
     async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>>;
 
+    /// Load this session's discarded-prefix archive snapshots (the archival
+    /// tier), ordered oldest-first by creation time.
+    ///
+    /// These are the `{session_id}{DISCARDED_SNAPSHOT_MARKER}{uuid}` rows
+    /// written by context compression (see
+    /// `MemoryManager::archive_discarded_snapshot`). They hold the raw
+    /// transcript that was summarized away, and are merged back with the
+    /// live (compressed) conversation by
+    /// `MemoryManager::full_transcript_messages` to reconstruct the full
+    /// history for display — the model keeps seeing the compressed live
+    /// context, while the UI shows the complete, queryable transcript.
+    /// Default: empty (backends without an archive return nothing).
+    async fn load_discarded_snapshots(&self, _session_id: &str) -> Result<Vec<Conversation>> {
+        Ok(Vec::new())
+    }
+
     /// List all saved conversations (metadata only, not full message history).
     async fn list_conversations(&self) -> Result<Vec<SessionInfo>>;
 

@@ -95,6 +95,42 @@ pub struct MemoryManager {
     decay: tokio::sync::RwLock<Option<oneai_core::DecayPolicy>>,
 }
 
+/// Pure merge of a live (compressed) conversation with its discarded-prefix
+/// archive snapshots into a single linear transcript (system messages
+/// dropped — the foreign UI renders only `user`/`assistant` rows). See
+/// `MemoryManager::full_transcript_messages` for the full contract; this is
+/// the testable, persistence-free core.
+fn merge_full_transcript(live: &Conversation, snapshots: &[Conversation]) -> Vec<Message> {
+    use oneai_core::Role;
+
+    let mut out: Vec<Message> = Vec::new();
+    // 1. Pinned first user → front (compression pinned it out of the discarded
+    //    segment and re-injected it at the head of `live`).
+    let first_user_idx = live.messages.iter().position(|m| m.role == Role::User);
+    let live_tail_start = if let Some(i) = first_user_idx {
+        out.push(live.messages[i].clone());
+        i + 1
+    } else {
+        0
+    };
+    // 2. Discarded snapshots, oldest-first, skipping system messages
+    //    (base prompt + per-compression summaries).
+    for snap in snapshots {
+        for m in &snap.messages {
+            if m.role != Role::System {
+                out.push(m.clone());
+            }
+        }
+    }
+    // 3. Live recent tail (after the pinned first user), skipping system.
+    for m in &live.messages[live_tail_start..] {
+        if m.role != Role::System {
+            out.push(m.clone());
+        }
+    }
+    out
+}
+
 impl MemoryManager {
     /// Create a new memory manager with default configuration.
     ///
@@ -634,6 +670,42 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Reconstruct the FULL linear transcript for display by merging the
+    /// live (compressed) conversation with its discarded-prefix archive
+    /// snapshots — the MemGPT-style "archival tier" reassembled for the UI.
+    ///
+    /// The model keeps seeing the compressed `live` context (bounded, cheap
+    /// inference); the user sees the complete, queryable history. This is the
+    /// OpenAI-Assistants-Thread / Claude-Code-transcript pattern: lossless
+    /// storage is the source of truth, compression is a transient
+    /// per-inference view.
+    ///
+    /// Merge order (verified against a real 96→11 compression):
+    /// 1. The pinned original task (first `user` message in `live`) is pulled
+    ///    to the very front. Context compression pins it out of the discarded
+    ///    segment and re-injects it at the head of `live`, so it lives in
+    ///    `live` (not in any snapshot) but chronologically opens the chat.
+    /// 2. Each discarded snapshot (already oldest-first from
+    ///    `load_discarded_snapshots`): its non-`system` messages, in order.
+    ///    Snapshots are disjoint successive prefixes; their `system` messages
+    ///    (base prompt + `[Previous conversation summary]`) are skipped.
+    /// 3. The rest of `live` after the pinned first user (its non-`system`
+    ///    recent tail).
+    ///
+    /// Without persistence (in-memory run), returns `live.messages` cloned —
+    /// equivalent to the prior display behavior.
+    pub async fn full_transcript_messages(
+        &self,
+        session_id: &str,
+        live: &Conversation,
+    ) -> Result<Vec<Message>> {
+        let Some(p) = &self.persistence else {
+            return Ok(live.messages.clone());
+        };
+        let snapshots = p.load_discarded_snapshots(session_id).await?;
+        Ok(merge_full_transcript(live, &snapshots))
+    }
+
     // ─── Reflection ───────────────────────────────────────────────────
 
     /// §12.3: reflect mid-session if the cumulative importance of newly
@@ -1025,6 +1097,81 @@ mod manager_tests {
             .await
             .unwrap();
         assert_eq!(f.content, "pnpm");
+    }
+
+    #[test]
+    fn test_merge_full_transcript_reconstructs_linear_history() {
+        // Mirrors a real 96→11 compression: `live` is the post-compression
+        // conversation (summary system msg + pinned original task + recent
+        // tail); two discarded snapshots hold the raw early/middle segments,
+        // each starting with a system message (base prompt / prior summary)
+        // that must be skipped for display.
+        use oneai_core::{Message, Role};
+
+        // live = [summary system, first_user(pinned), recent assistant, recent user]
+        let mut live = Conversation::with_id("sessA".to_string());
+        live.add_message(Message::system(
+            "[Previous conversation summary]: ...".to_string(),
+        ));
+        live.add_message(Message::user("我需要面试Android Framework".to_string()));
+        live.add_message(Message::assistant("recent reply".to_string()));
+        live.add_message(Message::user("recent follow-up".to_string()));
+
+        // snap1 (oldest): base system prompt + early assistant + early user.
+        let mut s1 = Conversation::with_id("s1".to_string());
+        s1.add_message(Message::system("You are an intelligent agent".to_string()));
+        s1.add_message(Message::assistant(
+            "The user wants me to introduce Android Framework".to_string(),
+        ));
+        s1.add_message(Message::user("进入下一个主题吧".to_string()));
+
+        // snap2 (newer): prior summary system + middle user.
+        let mut s2 = Conversation::with_id("s2".to_string());
+        s2.add_message(Message::system(
+            "[Previous conversation summary]: ...".to_string(),
+        ));
+        s2.add_message(Message::user("middle topic question".to_string()));
+
+        let merged = merge_full_transcript(&live, &[s1, s2]);
+
+        // No system messages survive into display.
+        assert!(merged.iter().all(|m| m.role != Role::System));
+        // Pinned first user opens the transcript.
+        assert_eq!(merged[0].role, Role::User);
+        assert!(merged[0]
+            .text_content()
+            .contains("我需要面试Android Framework"));
+        // Then snap1's non-system messages (oldest-first), then snap2's, then
+        // live's recent tail — full linear order, no duplicates.
+        let texts: Vec<String> = merged.iter().map(|m| m.text_content()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "我需要面试Android Framework".to_string(),
+                "The user wants me to introduce Android Framework".to_string(),
+                "进入下一个主题吧".to_string(),
+                "middle topic question".to_string(),
+                "recent reply".to_string(),
+                "recent follow-up".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_merge_full_transcript_no_snapshots_no_pinned_user() {
+        // Short, never-compressed conversation with no pinned user and no
+        // snapshots: merge just returns live's non-system messages in place.
+        use oneai_core::{Message, Role};
+
+        let mut live = Conversation::with_id("c".to_string());
+        live.add_message(Message::system("base".to_string()));
+        live.add_message(Message::user("hi".to_string()));
+        live.add_message(Message::assistant("hey".to_string()));
+
+        let merged = merge_full_transcript(&live, &[]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].role, Role::User);
+        assert_eq!(merged[1].role, Role::Assistant);
     }
 
     #[tokio::test]

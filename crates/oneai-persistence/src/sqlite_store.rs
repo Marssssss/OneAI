@@ -732,6 +732,61 @@ impl MemoryPersistence for SqliteSessionStore {
         }
     }
 
+    /// Load a session's discarded-prefix archive snapshots, ordered
+    /// oldest-first by creation time. Each row's `messages_json` is parsed
+    /// into a `Conversation` (messages only — archive segments carry no
+    /// title/metadata worth restoring). Returns empty when SQLite
+    /// persistence is not enabled or no snapshots exist. The order is the
+    /// chronological compression order, which `full_transcript_messages`
+    /// relies on to reconstruct a linear history.
+    async fn load_discarded_snapshots(&self, session_id: &str) -> Result<Vec<Conversation>> {
+        let conn = self.open_connection()?;
+        let pat = format!("{}{}%", session_id, oneai_core::DISCARDED_SNAPSHOT_MARKER);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, messages_json FROM conversations \
+                 WHERE id LIKE ?1 \
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!(
+                    "Failed to prepare discarded-snapshot query: {}",
+                    e
+                ))
+            })?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![pat], |row| {
+                let id: String = row.get(0)?;
+                let messages_json: String = row.get(1)?;
+                Ok((id, messages_json))
+            })
+            .map_err(|e| {
+                OneAIError::Persistence(format!(
+                    "Failed to query discarded snapshots for '{}': {}",
+                    session_id, e
+                ))
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, messages_json) = row.map_err(|e| {
+                OneAIError::Persistence(format!("Failed to read discarded-snapshot row: {}", e))
+            })?;
+            let messages: Vec<oneai_core::Message> =
+                serde_json::from_str(&messages_json).map_err(|e| {
+                    OneAIError::Persistence(format!(
+                        "Failed to deserialize discarded snapshot '{}': {}",
+                        id, e
+                    ))
+                })?;
+            let mut conv = Conversation::with_id(id);
+            conv.messages = messages;
+            out.push(conv);
+        }
+        Ok(out)
+    }
+
     async fn list_conversations(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.open_connection()?;
         // Exclude discarded-prefix archive snapshots — these are internal
@@ -1521,6 +1576,44 @@ mod tests {
         assert!(store.load_conversation(&snap1).await.unwrap().is_none());
         assert!(store.load_conversation(&snap2).await.unwrap().is_none());
         assert!(store.list_conversations().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_discarded_snapshots_returns_owning_session_ordered() {
+        // `load_discarded_snapshots(sid)` must return ONLY this session's
+        // snapshots (not another session's), oldest-first by created_at — the
+        // merge in `full_transcript_messages` relies on chronological order to
+        // rebuild a linear transcript.
+        let (store, _dir) = make_store();
+
+        // Another session's snapshot must not leak in.
+        let mut other =
+            Conversation::with_id(format!("other{}", oneai_core::DISCARDED_SNAPSHOT_MARKER) + "x");
+        other.add_message(oneai_core::Message::user("other session".to_string()));
+        store.save_conversation(&other.id, &other).await.unwrap();
+
+        // Save two snapshots for sessA in order, with distinguishable content.
+        let mk = |suffix: &str, text: &str| {
+            let id = format!("sessA{}{}", oneai_core::DISCARDED_SNAPSHOT_MARKER, suffix);
+            let mut c = Conversation::with_id(id);
+            c.add_message(oneai_core::Message::assistant(text.to_string()));
+            c
+        };
+        let s1 = mk("u1", "first segment");
+        let s2 = mk("u2", "second segment");
+        store.save_conversation(&s1.id, &s1).await.unwrap();
+        store.save_conversation(&s2.id, &s2).await.unwrap();
+
+        let loaded = store.load_discarded_snapshots("sessA").await.unwrap();
+        assert_eq!(loaded.len(), 2, "only sessA's snapshots, not other's");
+        // Oldest-first: u1 before u2.
+        assert!(loaded[0].id.contains("u1"));
+        assert!(loaded[1].id.contains("u2"));
+        // Messages round-tripped intact.
+        assert_eq!(loaded[0].messages.len(), 1);
+        assert!(loaded[0].messages[0]
+            .text_content()
+            .contains("first segment"));
     }
 
     // ─── Persistence across restarts ──────────────────────────────────

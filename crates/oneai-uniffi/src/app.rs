@@ -242,22 +242,26 @@ impl OneAISession {
         }
     }
 
-    /// Snapshot the conversation's messages as `role` + `text` views.
+    /// Reconstruct the FULL transcript as `role` + `text` views for replay
+    /// into the foreign UI (after `create_session_with_id`).
     ///
-    /// Used to replay a resumed session's history into the foreign UI (after
-    /// `create_session_with_id`). Returns the in-memory conversation, which
-    /// includes any turns added since the session was created/resumed — so it
-    /// also reflects the current chat live. System/tool messages are included;
-    /// the foreign UI typically renders only `user` and `assistant` rows.
+    /// Merges the live (compressed) conversation with its discarded-prefix
+    /// archive snapshots so the user sees the complete history — the model
+    /// still sees only the bounded compressed `live` context for inference.
+    /// See `MemoryManager::full_transcript_messages`. Without persistence
+    /// (or on a load error), falls back to the live in-memory conversation.
+    /// System/tool messages are included; the foreign UI renders only `user`
+    /// and `assistant` rows.
     #[uniffi::method]
     pub async fn messages(&self) -> Vec<MessageView> {
         let inner = self.inner.lock().await;
-        inner
-            .conversation()
-            .messages
-            .iter()
-            .map(MessageView::from)
-            .collect()
+        let live = inner.conversation();
+        let full = inner
+            .memory_manager()
+            .full_transcript_messages(inner.session_id(), live)
+            .await
+            .unwrap_or_else(|_| live.messages.clone());
+        full.iter().map(MessageView::from).collect()
     }
 
     /// Persist the current in-memory conversation to SQLite immediately.
