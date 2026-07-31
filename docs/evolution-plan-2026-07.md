@@ -33,6 +33,8 @@
 - gap-analysis 的 P0（虚假安全感脊梁）**已全部通电**——这是 2026-07-26 的成果。
 - gap-analysis 的 **P1 安全护栏**（1.4）与 inspiration 的 **P0（cache/check_fn/供应链）**（1.1/1.2/1.3）+ 1.5 衍生项**全部闭合**（2026-07-28）。Phase 1 完成。
 - inspiration P1-P3（新能力）与 gap P2-P3（能力补齐/收尾）**基本正交**，可按"差异化→可达性→精细化"分阶段叠加。
+- **Phase 2（差异化）全部闭合**（2026-07-29~31）：2.1 闭环学习三 Stage / 2.2 supervisor / 2.3 生成式 catalog / 2.4 记忆衰减。
+- **Phase 3（可达性）全部闭合**（2026-07-30~31）：3.1 网关 / 3.2 cron / 3.3 TerminalBackend / 3.4 自扩展热重载 / 3.5 A2A server / 3.6 HF 导出。仅剩 Phase 4（精细化/综合）未做。
 
 ---
 
@@ -71,7 +73,7 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 ### 1.3 供应链纪律：精确锁定 + cargo audit/deny + lockfile 闸 + OIDC 发布 + 隔离冒烟（inspiration P0-3）✅
 > **进度**：全完成（2026-07-28）。取舍：**不转 `=` 精确锁定**——`Cargo.lock` 已提交（workspace 发 binaries，reproducible builds 已保证），外部依赖全集中在根 `[workspace.dependencies]`；可复现性靠 Cargo.lock + cargo-deny，转 `=` 反成维护负担。落地：(a) 修内部 `oneai-*` path 依赖版本漂移 `1.0.0→1.1.0`（与 `[workspace.package]` lockstep，真发布侧 bug）；(b) `deny.toml` + `.github/workflows/audit.yml`（cron daily + PR，**单用 cargo-deny** 覆 advisories+licenses+bans+sources，不用 cargo-audit 避免双 ignore 列表漂移；首次跑修 3 个可 caret 升级的 advisory——crossbeam-deque 0.8.6→0.8.7、plist 1.9.0→1.10.0——其余 6 个带 rationale 忽略，均在 opt-in/未绑定路径）；(c) `ci.yml` lockfile-gate job（PR 改 Cargo.lock 未设 `ONEAI_ALLOW_LOCKFILE_CHANGE=1` 则拒）；(d) `.github/workflows/publish.yml`（tag `v*` 触发，复用 `scripts/publish_crates.sh`，`id-token:write` 留 Trusted Publishing，Path B token + Path A 文档化）；(e) `scripts/release-local.sh`（`cargo publish --dry-run` 每 crate = package+path-dep 重写+隔离构建+metadata 校验，冒烟后提示打 tag）。详见 CLAUDE.md「Supply-chain discipline」。
 
-### 1.4 安全护栏补齐（gap P1 剩余）
+### 1.4 安全护栏补齐（gap P1 剩余）✅
 
 > **进度**：1.4-a（ToolExecutor 输出尺寸上限，commit df96063）✅；1.4-b（ToolExecutor/workflow 接 PermissionProfile，关闭 workflow 绕过 deny_by_default 洞）✅；1.4-c/1.4-d 待做。
 
@@ -102,7 +104,7 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 
 > 目标：把 OneAI 从"带 skill 的代理"变成"随你成长的代理"（Hermes 最大差异化），并现代化 provider 抽象、解决原生 app 会话存活。这是 OneAI 最该做的差异化层，落在现有 SubAgent/DomainPack/FileWorkingStateStore 上，不新子系统。
 
-### 2.1 闭环学习：cadence-fired reflection meta-tool + skill 生命周期 + curator（inspiration P1-1）
+### 2.1 闭环学习：cadence-fired reflection meta-tool + skill 生命周期 + curator（inspiration P1-1）✅
 
 > **进度**：Stage A 完成（2026-07-28）。`SubAgentKind::Reflect` 变体 + Hermes 式 review prompt（frustration-as-signal / patch→umbrella→support-file→create / 反模式禁捕获环境失败）+ `AgentLoopConfig.reflection_cadence: Option<usize>`（默认 None=关，向后兼容）+ `AgentLoopObserver::on_reflection` hook。触发=迭代数跨 cadence 倍数（mid-run）AND `DirectAnswer` 交付后，且 `!interrupt_requested` + 无 pending interrupt。reflect 子代理经现有 `SubAgentFactory` spawn，继承父 provider（取暖）；其自身 `AgentLoop` 用 `SubAgentFactoryNone`（`delegate` meta-tool 自动从 schema 剔除=无递归 nudge，由 `available_kinds().is_empty()` 路径），`hard_max_iterations=16`，`context_manager=None`（不压缩），memory-only 工具白名单（`memory_search`/`core_memory_edit`/`archival_memory_insert`，strict 模式不 fallback 全集）。summary 经 `on_reflection` 上报 + trace log，**不**注入父会话（保父上下文干净，sub-agent 委派本意）。Footprint gate：memory 工具未注册则跳过 reflect。`AppBuilder::reflection_cadence(n)` 全链路（AppBuilder→App→AppSession→两条 AgentLoopConfig 构造路径）。6 新测（Reflect 单测 + cadence fire / DirectAnswer-only / interrupt 抑制 / 默认关 / summary 不污染父会话）。**取舍**：跨 session cadence 从 `FileWorkingStateStore` hydrate / `auxiliary.background_review` SmartRouter 路由便宜模型 = Stage C 范畴，本阶段不做（cadence 计数器在 LoopState 内存，每次 run 复位）。
 
@@ -147,11 +149,13 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **How**：对标 `pi-server`。先做 in-proc supervised tokio task，进程隔离作 opt-in 后续。复用 `oneai-trace` OTEL（已通电）。可作 `oneai-studio` 的一个 mode。
 - **Effort**：中。**Fit**：高，直击原生 app 痛点。**类型**：新增能力。
 
-### 2.3 生成式 model catalog + 哈希校验 + 每模型 Compat 标志（inspiration P1-3）
+### 2.3 生成式 model catalog + 哈希校验 + 每模型 Compat 标志（inspiration P1-3）✅
 - **What**：(a) build 时从 models.dev + provider `/models` 生成 `crates/oneai-provider/src/catalog/models.generated.rs`（`pub static MODELS: &[ModelEntry]`，内嵌 JSON）+ `.manifest.json`（schema 版本+结构哈希+每文件 SHA256）。`cargo xtask check-model-data` 重推导验哈希跑 CI。release 内嵌快照 `--offline`。(b) `ModelEntry` 扩展带 `reasoning/input_modalities/thinking_format/supports_strict/cache_retention`。(c) `compat.rs` 加 `OpenAICompat`/`AnthropicCompat`/`GeminiCompat` 标志集，从 `base_url` 探测，取代 `if provider=="ollama"` 分支。
 - **Why**：OneAI 的 L3 `BUILTIN_MODEL_CONTEXT` 手维护且漂移；L2 probe 异步慢、依赖网络、首轮路径慢；能力硬编码 per-provider。OpenAI 兼容面在涨（Ollama/vLLM/LM Studio/Groq），各微妙破损。
 - **How**：把生成式 catalog 作三层解析的 L3 权威替代，probe 降级可选覆盖（仅 catalog 缺失时）。`Api`/`Provider` 分缝是更大重构（留 Phase 4 P3-3），先上 Compat 标志 + catalog。
 - **Effort**：中。**Fit**：高，现代化 provider 层、喂 SmartRouter 能力感知路由。**类型**：新增能力+修漂移。
+
+> - **结果（2026-07-29，commit `453a656`）**：(a) 生成式 catalog 落 `oneai-core/src/catalog/`（**非** `oneai-provider`——作 L3 权威替代手维护 `BUILTIN_MODEL_CONTEXT`，放 core 喂 provider/SmartRouter/CLI 共享读取）。`ModelEntry`（`#[non_exhaustive]`）扩 `reasoning/input_modalities/thinking_format/supports_strict/cache_retention/tier`；`CATALOG_JSON` 内嵌 canonical 快照；`models.manifest.json` 含 `structure_hash`（over canonical 排序键 JSON，非值冻结——戒律 6）+ per-file SHA256。新 `xtask` workspace 成员（`excluded` 出 `default-members`，bare `cargo build` 不编）+ `cargo xtask` alias：`gen-model-data`（快照→`generated.rs`+manifest，经 rustfmt 保字节稳定）/`check-model-data`（CI drift gate）/`fetch-model-data`（opt-in models.dev 网络刷新，非 CI，尊重 `HTTPS_PROXY`）。**无 build 期网络**（供应链纪律）。`model_context.rs::builtin_lookup` 改读 catalog 投影，保留 `ModelContextEntry`+`BUILTIN_MODEL_CONTEXT` 投影（P3-1 API 稳定）。(b) `compat.rs`（oneai-provider）：`CompatFamily`(OpenAI/Anthropic/Gemini/Ollama)+`Compat` flagset（`supports_strict_json_schema`/`supports_prompt_cache`/`cache_via_control_block`/`thinking_via_field`/`reasoning_via_field`/`native_chat_api`/`auth`）。`detect(base_url, cloud_kind, provider_type)` 逐字复刻 `provider_factory::resolve_provider` host 规则作分发单一权威；`from_config` 投影 post-resolve。`provider_factory::create` 改 `match compat.family` 分发（行为保持，Transformers panic guard 留）。各 provider struct 持 `compat` 字段+`with_compat` 工厂路径；`capabilities()` consult catalog 真值（命中）回退 hardcoded 现状（未命中）。**请求 shaping 不动**——现状已 per-request gated（`constrained_output`/`prompt_cache_policy` metadata），无 per-provider `if` 分支可迁，不造 speculative flag（戒律 3）。(c) SmartRouter 上下文溢出打分：无 `token_counter` 时 `context_window` 优先 catalog 真值，回退 `ModelQualityProfile` heuristic→128K。(d) CLI `oneai token catalog`（列 capability flags）+ `oneai token compat <base_url>`（detect+打印 family/flags）。(e) CI `ci.yml` 加 `model-data-gate` job。**取舍**：新依赖 `sha2`（纯 Rust，审计良好，cargo deny 过）→ `Cargo.lock` +11 行；不转 `=` 精确锁定（1.3 已立纪律）；完整 `Api`/`Provider` 分缝留 4.3。**1495 workspace tests 绿**（1472 baseline +23），fmt+clippy 清，xtask check 绿，cargo deny 过。
 
 ### 2.4 记忆衰减 + 递归反思（gap P2 #16，喂 2.1）✅
 > **进度**：全完成（2026-07-29）。两块：
@@ -193,23 +197,32 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 
 > - **补充（2026-07-31，agent 侧 seam）**：补上"对话式自然语言排程"的最后一块——`CronScheduler` trait 加 `add_job/list_jobs/remove_job/trigger_job`（安全默认 no-op，core 层 `CronJobSpec` 原语字段绕 oneai-core→oneai-scheduler 依赖方向）；`CronSchedulerImpl` 实现四方法（spec↔CronJob 转换 + `force_fire`+deliver）；新 `oneai_tool::ScheduleTool`（持 `Arc<dyn CronScheduler>`，action=add/list/remove/trigger 单工具，Footprint Ladder：仅 `AppBuilder.cron_provider(...)` 设置时 `build()` 自动注册——零 footprint 否则模型看不到）；`GatewayAppFactory` 注入 `.cron_provider(sched)` → 网关 chat 里 agent 有 `schedule` 工具，用户说"每天9点总结commits"，模型把 NL 翻成 `0 9 * * *`（LLM 即解析器，无单独 NL→cron 解析器）调工具建 job。`cmd_cron_serve` 用 `OnceLock<Arc<Gateway>>` 解 scheduler↔gateway 鸡生蛋（先建 sched+runner，gateway factory 拿 sched 注册工具，gateway 建好再 set cell，最后 `start` ticker）。+1 测（trait seam round-trip），oneai-scheduler 27→28 测绿；fmt+clippy 清。**至此 3.2 真正"对话式可达"**。
 
-### 3.3 终端 backend ABC + Modal/Daytona serverless（inspiration P2-3）
+### 3.3 终端 backend ABC + Modal/Daytona serverless（inspiration P2-3）✅
 - **What**：`oneai-tool` 抽 `TerminalBackend` trait（`execute/snapshot/restore/cleanup(hibernate:bool)`），`ShellTool` 持 `Arc<dyn TerminalBackend>` 而非直 `Command::new`。`LocalBackend`=现状零行为变，`DockerBackend`→Modal/Daytona。`cleanup(hibernate=true)` 是单 chokepoint（Modal snapshot+terminate、Daytona stop FS 保留）。`FileSyncManager` 同步 `~/.oneai`。
 - **Why**：OneAI ShellTool 本地唯一。serverless 给 (a) 成本 (b) 隔离 (c) 跨平台一致 (d) 配网关 scale-to-zero。直接赋能移动端长跑 coding agent。
 - **How**：spawn-per-call+session 快照模型直接移植。DomainPack `PermissionProfile` 可让 `Full` 风险命令自动路由 sandbox backend。先 Local=现状，加 Docker，再 Modal/Daytona。为 Phase 4 P3-2 Gondolin 预留 host。
 - **Effort**：中-高。**Fit**：高，独立价值（隔离+成本+移动 coding）。**类型**：新增能力。**前置**：1.4（ShellTool 沙箱/权限）。
 
-### 3.4 自扩展：`addedToolNames` + 数据层热重载（inspiration P2-4）
+> - **结果（2026-07-31，commit `4e2ded0`）**：`oneai-tool/terminal.rs` 抽 `TerminalBackend` trait（`execute/snapshot/restore/cleanup(hibernate)`，`#[non_exhaustive]` `ExecOptions`/`ExecResult`/`SnapshotHandle`）+ `LocalBackend`（逐字搬现有 spawn + UTF-8 截断逻辑）+ 共享纯函数 `format_and_truncate`。**命令串级前置安全**（`blocked_patterns`/`detect_shell_file_write`/空命令）留 `ShellTool::execute` 在 backend 调用前对所有 backend 统一生效；执行机制（`resolve_shell`/timeout/format）移进 backend。`LocalBackend` 持 `Option<Arc<dyn SandboxBackend>>` 复用 `wrap_command`；snapshot/restore/cleanup 默认 no-op（本地 FS 即状态）。`ShellTool` 4 构造器全保签名 shim（`new`/`with_sandbox_backend`/`dangerously_disable_sandbox`/`with_timeout`）+ 新 `with_backend`/`backend()`；`sandbox_mode` 字段留作 introspection back-compat；`coding_pack`/uniffi/4 构造点零改动。`terminal/docker.rs`：`DockerTerminalBackend` 真长生命周期容器（lazy create/exec/snapshot=commit/restore=stop+rm+create+start/cleanup stop+keep vs `rm -f`），纯 argv 构造单测（build_create/exec/start/stop/rm/commit_args）无 daemon 可跑。`terminal/file_sync.rs`：`FileSyncManager` 同步 `~/.oneai`（default no-op / Docker 走 `docker cp`）+ `FileSyncStrategy` trait。`terminal/{modal,daytona}.rs`：feature-gated reqwest HTTP client，**零新依赖**（reqwest/serde_json 已硬依赖），本地 axum mock 测 execute/snapshot/restore/cleanup。`AppBuilder.terminal_backend(Arc<dyn TerminalBackend>)` + `App.terminal_backend` 字段（镜像 `cron_provider` seam）。CLI `oneai terminal list/exec/snapshot/restore/cleanup`（镜像 `cmd_cron`）。**取舍**：`cleanup(hibernate=true)` 单 teardown chokepoint（Modal snapshot+terminate / Daytona stop FS 保留 / Docker stop+keep），戒律#3 opt-in feature gate 默认不编译。**1605 workspace tests 绿**（default 109 oneai-tool + modal/daytona feature 8 测），fmt+clippy 清，cargo deny ok；ShellTool 热路径零行为变（1573→1605 全绿）。
+
+### 3.4 自扩展：`addedToolNames` + 数据层热重载（inspiration P2-4）✅
 - **What**：(a) 工具结果加 `added_tool_names: Vec<String>`，`AgentLoop` 在工具批 finalize 后 diff `ToolRegistry` active 集，新注册工具盖到结果上，下轮前 `refresh_tool_registry()`，不换范式/不重启。`PermissionLevel::Standard` gate + DomainPack `ParadigmStrategies` 工具过滤刷新后重应用。(b) `/reload` 等价：会话中重读 DomainPack 数据层（skill markdown/MCP/MemoryProfile JSON/StateGraph），发 `reload` 事件，可由模型经控制工具触发。Rust DomainPack 仍编译期。
 - **Why**：`addedToolNames` 是 PI 最紧自扩展环，OneAI 无。热重载是迭代 agent 行为的大 UX 胜场（macOS 笔记显示用户重启重派生状态很痛）。
 - **How**：(a) `Tool` 结果类型加字段，turn 边界加 refresh。(b) `AppBuilder` 持 file-watched `ResourceLoader`，`reload_runtime` 控制工具排队 follow-up，快照 working-state→拆扩展 runtime→重读→`OnResume` 对账。
 - **Effort**：中。**Fit**：中-高。**类型**：新增能力。
 
-### 3.5 A2A server 接 axum + 真跑 AgentLoop（gap P2 #15，与可达性同层）
+> - **结果（2026-07-31，commit `fc2e046`）**：
+>   - **Part A 自扩展（PI addedToolNames 环）**：`ToolOutput` 加 `#[serde(default)] added_tool_names: Vec<String>` + derive `Default`；199 处 struct literal 机械迁移补 `..Default::default()`。`AgentLoop` 迭代前导快照 active（`service_available==true`）集；工具批 finalize 后 diff `now_active - prev` ∪ `reported(∩now_active)`，fire `AgentLoopObserver::on_tools_added` + 置 `pending_new_tools_note`；`inject_pinned_blocks` 发一次性 "Newly available tools" system 消息。**关键修复**：`execute_tool_calls` 持读锁跨 execute 死锁——clone `Arc` 出读守卫后 drop 再 `join_all`，解除工具 mid-turn `registry.register` 写锁死锁。范式 re-filter 自动（`build_tool_definitions_for_paradigm` 每轮 live 读）；PermissionLevel gate 仅文档（走既有 `PermissionResolver`/`InteractionGate`）。3 测（self-report surface / diff-backstop / latent gate-flip）。
+>   - **Part B 数据层热重载（`/reload` 等价）**：`DataLayerReloader` trait（oneai-core，零 skill/mcp 类型避依赖方向）；impl `AppDataLayerReloader`（oneai-app：`skill_registry.load_discovered` + `mcp.register_tools`）。MemoryProfile JSON/StateGraph 重读留后续。`ReloadTool`（oneai-agent，无参，risk Low）；条件注册（domain pack OR MCP present，仿 `schedule` 工具 Footprint gate；bare app 零工具保契约）。`AppBuilder.data_layer_reloader` + `.data_layer_reloader()` builder + `App` 字段/accessor；`App.mcp_plugin_registry` 改 `Option<Arc<>>` share 给 reloader。CLI `oneai reload --domain/--model/--user`（provider 可选，数据层与 LLM 无关）。`OnResume` no-op（reload 触共享 registry 不动 LoopState/working-state）。
+>   - **取舍**：**零新依赖**（无 `notify`/file-watch——计划主路径控制工具触发 honored，戒律#3 无消费者不加）。fmt + clippy(`-D warnings`) + test 全绿 + cargo deny ok。
+
+### 3.5 A2A server 接 axum + 真跑 AgentLoop（gap P2 #15，与可达性同层）✅
 - **What**：`A2AServerHost` 真起 HTTP server（`host.run(port)` 实现），`handle_send_task` 真跑 AgentLoop 而非占位响应；补 streaming/push notification 真投递/auth 校验/`tasks/resubscribe`/TaskStore 持久化。
 - **Why**：A2A server 是 OneAI "对外可达"的另一面（与网关对称：网关=inbound 消息，A2A=agent-to-agent RPC）。当前 card 声明 `streaming:true` 但 server 不能流（虚假广告）。属 gap P0 唯一未清项（明确留 P2）。
 - **How**：`crates/oneai-a2a/src/server.rs:15` + `handler.rs:98` + axum。复用 3.1 的 axum/JWT 基建。
 - **Effort**：中。**Fit**：高。**类型**：修虚假安全感（card 谎言）+ 新能力。**前置**：1.4（auth 校验）。
+
+> - **结果（2026-07-31，commit `db7b384`）**：gap P0 最后未清项闭合，A2A server 侧虚假安全感全修。`runner.rs`（NEW）：`A2ARunner` peer seam（镜像 `GatewayRunner`，a2a 在 app 下不能持 `Arc<App>`）+ `TaskOutcome` + `A2ASseSink`（sync `push_chunk`/`push_status`）+ `PlaceholderRunner`（复现旧占位回执，保现有单测不改即绿）。`handler.rs`：`handle_send_task` 抽 Text parts→`runner.run_task`→Done complete / Rejected·Error fail；`extract_text` 提 pub。`server.rs`：axum HTTP server（`GET /.well-known/agent-card` 无鉴权 + `POST /` JSON-RPC + 流式分支 + CORS）+ `serve`/`run(port)`；**共享密钥 Bearer 鉴权**（`ONEAI_A2A_SECRET` + `ct_eq` + `verify_bearer` 常量时间，镜像 `oneshot.rs`，无 secret 拒启）；`tasks/sendSubscribe`→SSE 流（`A2AChannelSink` `push_chunk`→artifact 事件 / `push_status`→status 事件 / 终态→task 事件）。`card.rs`：`authentication.schemes=["bearer"]`（诚实宣告鉴权）；`streaming:true` 保留（现真实现）；`push_notifications:false` 保留（诚实）。`cmd_a2a.rs`：`cmd_a2a_serve` 重写建真 App + `AppA2ARunner`（`create_session_with_id` + `run_agent_silent`/`run_agent`，`on_stream_chunk`→`sink.push_chunk`）+ `--port` flag。**取舍**：SSE wire 格式发 `{"type":...}` 而非 spec jsonrpc 信封，为与 `parse_sse_event` 端到端互通；文档化偏离（同 §3.2 JWT→shared-secret 偏离纪律）。按戒律#3（无消费者不加 hook）**推迟** `tasks/resubscribe`、push-notification 投递、TaskStore 磁盘持久化——理由写进 `server.rs` 模块 doc。冒烟实测：`ONEAI_A2A_SECRET=smoke oneai a2a serve --port 18080` → card 8 skills；`POST /` 无 bearer 401；`tasks/send` 带 bearer→真 AgentLoop 回合。**~1625 tests 绿**，fmt+clippy(`-D`)+deny（advisories/bans/licenses/sources）全 ok。
 
 ### 3.6 OSS 会话导出喂训练 `oneai session export-hf`（inspiration P2-5） ✅
 - **状态**：完成（2026-07-31）。`oneai session export-hf <id> -o <path>` 落地：stitch live + `load_discarded_snapshots`（archival 段 oldest-first，等价 `merge_full_transcript` 但免建 App）→ OpenAI messages 格式 JSONL 一行（`role`+`content: Vec<ContentBlock>`，**完整保留 ToolCall/ToolResult/Thinking 块**）；regex 脱敏 `sk-`/`AKIA`/`Bearer`/key=value（`redact_json_line` 纯函数 + IP 可选 `--redact-ips`）；`--task <id>` 经 `FileWorkingStateStore::read_events`（提 pub）附着 working-state 事件。8 单测绿，fmt+clippy(-D)+deny ok，真会话冒烟：25 live→41 msgs（含压缩段）、JSON 合法、零 key 泄漏。
