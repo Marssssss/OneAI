@@ -10,7 +10,7 @@
 //! - Path-based dependency queries
 //! - Cycle detection
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +51,11 @@ pub struct WorkflowDag {
     pub name: String,
 
     /// All nodes in the DAG, keyed by step ID.
-    pub nodes: HashMap<String, DagNode>,
+    ///
+    /// `BTreeMap` (not `HashMap`) is intentional: it makes iteration order
+    /// deterministic across runs, so `roots`/`leaves`/`levels` are stable —
+    /// important for reproducible workflow compilation and snapshot tests.
+    pub nodes: BTreeMap<String, DagNode>,
 
     /// The execution levels (parallel groups).
     /// Level 0 contains root nodes (no dependencies),
@@ -70,7 +74,7 @@ impl WorkflowDag {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            nodes: HashMap::new(),
+            nodes: BTreeMap::new(),
             levels: Vec::new(),
             roots: Vec::new(),
             leaves: Vec::new(),
@@ -90,8 +94,8 @@ impl WorkflowDag {
     /// 3. Identify root and leaf nodes
     pub fn build(&mut self) {
         // Build children from depends_on (collect first to avoid borrow conflict)
-        let children_map: HashMap<String, Vec<String>> = {
-            let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        let children_map: BTreeMap<String, Vec<String>> = {
+            let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for node in self.nodes.values() {
                 for parent_id in &node.depends_on {
                     map.entry(parent_id.clone())
@@ -214,7 +218,7 @@ impl WorkflowDag {
     /// Uses Kahn's algorithm — if after removing all nodes with no
     /// dependencies, some nodes remain, there's a cycle.
     pub fn has_cycle(&self) -> bool {
-        let mut in_degree: HashMap<String, usize> =
+        let mut in_degree: BTreeMap<String, usize> =
             self.nodes.keys().map(|id| (id.clone(), 0)).collect();
 
         for node in self.nodes.values() {
@@ -278,6 +282,7 @@ impl WorkflowDag {
 mod tests {
     use super::*;
     use crate::config::StepConfig;
+    use std::collections::HashMap;
 
     fn make_step(id: &str, depends_on: Vec<&str>) -> StepConfig {
         StepConfig {
@@ -331,15 +336,12 @@ mod tests {
         dag.build();
 
         assert_eq!(dag.level_count(), 2);
-        // Level 0 contains both "a" and "b" (order depends on HashMap iteration)
-        assert_eq!(dag.levels[0].len(), 2);
-        assert!(dag.levels[0].contains(&"a".to_string()));
-        assert!(dag.levels[0].contains(&"b".to_string()));
+        // Level 0 contains both "a" and "b" (deterministic alphabetical order
+        // since `nodes` is a BTreeMap).
+        assert_eq!(dag.levels[0], vec!["a", "b"]);
         assert_eq!(dag.levels[1], vec!["c"]);
-        // Roots are a and b (order may vary)
-        assert_eq!(dag.roots.len(), 2);
-        assert!(dag.roots.contains(&"a".to_string()));
-        assert!(dag.roots.contains(&"b".to_string()));
+        // Roots are a and b (deterministic alphabetical order).
+        assert_eq!(dag.roots, vec!["a", "b"]);
         assert_eq!(dag.leaves, vec!["c"]);
     }
 
@@ -356,10 +358,9 @@ mod tests {
 
         assert_eq!(dag.level_count(), 3);
         assert_eq!(dag.levels[0], vec!["a"]);
-        // Level 1 contains both "b" and "c" (order depends on HashMap)
-        assert_eq!(dag.levels[1].len(), 2);
-        assert!(dag.levels[1].contains(&"b".to_string()));
-        assert!(dag.levels[1].contains(&"c".to_string()));
+        // Level 1 contains both "b" and "c" (deterministic alphabetical order
+        // since `nodes` is a BTreeMap).
+        assert_eq!(dag.levels[1], vec!["b", "c"]);
         assert_eq!(dag.levels[2], vec!["d"]);
     }
 

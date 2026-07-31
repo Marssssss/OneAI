@@ -20,7 +20,6 @@ pub mod executor;
 pub mod interaction_gate;
 pub mod local_tools;
 pub mod mcp_real;
-pub mod mcp_tools;
 pub mod registry;
 pub mod sandbox;
 pub mod schedule_tool;
@@ -37,7 +36,6 @@ pub use mcp_real::McpServerManager as RealMcpServerManager;
 pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
 pub use mcp_real::{default_mcp_configs, optional_mcp_configs};
 pub use mcp_real::{McpConnection, McpFramingParser, McpServerConfig, McpToolInfo, McpTransport};
-pub use mcp_tools::*;
 pub use registry::*;
 pub use sandbox::{
     default_sandbox_backend, DockerBackend, RegexBackend, SandboxBackend, SeatbeltBackend,
@@ -486,33 +484,6 @@ mod tests {
         let (shell, arg) = resolve_shell();
         assert_eq!(shell, std::path::PathBuf::from("sh"));
         assert_eq!(arg, "-c");
-    }
-
-    #[test]
-    fn test_mcp_tool_wrapper() {
-        let tool = McpToolWrapper::new(
-            "web_search".to_string(),
-            "Search the web".to_string(),
-            serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
-            "web_server".to_string(),
-        );
-        assert_eq!(tool.name(), "web_search");
-        assert_eq!(tool.risk_level(), RiskLevel::Medium);
-    }
-
-    #[test]
-    fn test_mcp_server_manager() {
-        let mut manager = McpServerManager::new();
-        let tools = vec![McpToolWrapper::new(
-            "search".to_string(),
-            "Search tool".to_string(),
-            serde_json::json!({}),
-            "server1".to_string(),
-        )];
-        manager.register_server_tools("server1".to_string(), tools);
-
-        assert_eq!(manager.server_names().len(), 1);
-        assert_eq!(manager.all_tools().len(), 1);
     }
 
     #[tokio::test]

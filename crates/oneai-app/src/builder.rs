@@ -23,6 +23,7 @@ use oneai_core::ContextManager;
 use oneai_core::ContextManagerConfig;
 use oneai_core::EmbeddingConfig;
 use oneai_core::ProviderPoolConfig;
+use oneai_core::SelectionMode;
 use oneai_core::SmartRouteConfig;
 use oneai_core::TokenCounter;
 use oneai_core::{CloudProviderKind, ModelConfig};
@@ -2050,9 +2051,13 @@ impl AppBuilder {
             parser,
             memory_manager,
             rag_index: self.rag_index,
-            skill_selector: self
-                .skill_selector
-                .unwrap_or_else(|| Arc::new(SkillSelector::new())),
+            skill_selector: self.skill_selector.unwrap_or_else(|| {
+                Arc::new(SkillSelector::with_embedding_service(
+                    SelectionMode::Hybrid,
+                    3,
+                    embedding_service.clone(),
+                ))
+            }),
             skill_registry: self.skill_registry,
             active_skill: Arc::new(tokio::sync::RwLock::new(None)),
             persistence: self.persistence,

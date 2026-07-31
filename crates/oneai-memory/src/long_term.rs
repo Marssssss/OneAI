@@ -522,6 +522,12 @@ impl Default for ThreadSafeContentStore {
 /// 1. If query has an embedding → hybrid search (semantic + temporal)
 /// 2. If query has no embedding → keyword search on content store
 /// 3. Results are looked up in content store for full content
+#[deprecated(
+    since = "1.1.0",
+    note = "legacy MemoryEntry-based回溯 layer (M2); the canonical long-term memory is the \
+            `MemoryFact`-based `fact_archive` (Mem0-style, three-factor recall). Retained only \
+            for backward compatibility and direct low-level use; prefer `MemoryFactStore`."
+)]
 pub struct LongTermMemory {
     /// The underlying vector store for semantic search.
     vector_store: ThreadSafeEmbeddedVectorStore,
@@ -529,6 +535,7 @@ pub struct LongTermMemory {
     content_store: ThreadSafeContentStore,
 }
 
+#[allow(deprecated)]
 impl LongTermMemory {
     /// Create a new long-term memory with default settings.
     pub fn new() -> Self {
@@ -557,12 +564,14 @@ impl LongTermMemory {
     }
 }
 
+#[allow(deprecated)]
 impl Default for LongTermMemory {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(deprecated)]
 #[async_trait::async_trait]
 impl MemoryStore for LongTermMemory {
     async fn store(&self, entry: MemoryEntry) -> Result<()> {

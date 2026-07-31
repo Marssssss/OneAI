@@ -397,6 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises legacy LongTermMemory回溯 layer (retained for backward compat)
     async fn test_long_term_memory_store_and_retrieve() {
         let ltm = LongTermMemory::new();
 
@@ -434,6 +435,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises legacy LongTermMemory回溯 layer (retained for backward compat)
     async fn test_long_term_memory_keyword_search() {
         let ltm = LongTermMemory::new();
 

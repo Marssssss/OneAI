@@ -19,7 +19,7 @@
 //! (parallel step orchestration). StateGraph is used for agent flows
 //! that need iteration and dynamic routing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -256,11 +256,16 @@ pub struct StateGraph {
     pub name: String,
 
     /// All nodes in the graph, keyed by node ID.
-    pub nodes: HashMap<String, GraphNode>,
+    ///
+    /// `BTreeMap` (not `HashMap`) makes iteration order deterministic across
+    /// runs — important for reproducible rendering, snapshot tests, and
+    /// stable edge-fan-out ordering.
+    pub nodes: BTreeMap<String, GraphNode>,
 
     /// All edges in the graph, keyed by source node ID.
     /// Each source node can have multiple outgoing edges (with conditions).
-    pub edges: HashMap<String, Vec<GraphEdge>>,
+    /// `BTreeMap` for deterministic source-node iteration order.
+    pub edges: BTreeMap<String, Vec<GraphEdge>>,
 
     /// The entry point node ID (where execution starts).
     pub entry_point: String,
@@ -275,8 +280,8 @@ impl StateGraph {
     pub fn new(name: impl Into<String>, entry_point: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            nodes: HashMap::new(),
-            edges: HashMap::new(),
+            nodes: BTreeMap::new(),
+            edges: BTreeMap::new(),
             entry_point: entry_point.into(),
             terminal_nodes: Vec::new(),
         }

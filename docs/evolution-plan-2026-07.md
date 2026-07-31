@@ -263,10 +263,15 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **Why**：PI 的分缝让 continue/retry/轮间突变成一行回调；OneAI 把范式/delegate/StateGraph 塞进 match 臂。架构迁移，独立功能。
 - **Effort**：高。**Fit**：中。**类型**：架构迁移。
 
-### 4.6 收尾清死代码 + SkillSelector 真工作（gap P3）
+### 4.6 收尾清死代码 + SkillSelector 真工作（gap P3）— 部分完成 ✅
 - **What**：(a) 删 `mcp_tools.rs` 死桩副本、遗留 `ltm_entries`/`ShortTermMemory`/`LongTermMemory`（或 P3-1 稳定性承诺下显式 deprecate）。(b) `SkillSelector` embedding 真工作 + skill 版本/依赖/trust 边界。(c) StateGraph 并行分支（frontier）；WorkflowDag 改 BTreeMap 恢复确定性。
 - **Why**：gap P3 收尾，降维护陷阱。Team/Swarm/Handoff 已在 `c8bedbe` 整层移除（无需再做）。
 - **Effort**：中。**Fit**：中。**类型**：清死代码。
+- **2026-07-31 落地**（部分）：
+  - (a) 删 `oneai-tool/src/mcp_tools.rs` 死桩（stub `McpToolWrapper::execute` 占位 + `McpServerManager` 空壳；真实现是 `mcp_real.rs` 的 `Real*`），删 2 个冗余 stub 测试（`mcp_real::test_mcp_tool_wrapper_properties` 已覆盖同款断言）。`LongTermMemory` 已是 M2 legacy（模块注释明示 MemoryManager 不在 production path 用它），P3-1 稳定性承诺下不删改加 `#[deprecated(since="1.1.0", note=...)]` + 3 个 impl 块 + 2 个测试加 `#[allow(deprecated)]`。**`ltm_entries` 经核实非死代码**——是 `SqliteSessionStore` 活表（已接线 AppBuilder），计划描述过时，不动。`ShortTermMemory` 仍是活滑动窗口，非 legacy，不动。
+  - (b) `SkillSelector` 接真 embedding ✅：注入 `Option<Arc<dyn EmbeddingService>>`，`with_embedding_service()` 构造器；Vector/Hybrid 模式 embed user_input 一次 + 各 skill 预存 `embedding`（或 on-the-fly embed description）cosine 排序，无 service 或 KeywordMatch 退化关键词路径（向后兼容）；`AppBuilder` build() 默认 selector 注入已建 `embedding_service`（P5-2）。4 新测（vector 排序/hybrid 预存/无 service 退化/零相似度过滤）。**留待后续**：skill 版本/依赖/trust 边界（`SkillDescriptor` 无 version 字段，需设计）。
+  - (c) `WorkflowDag.nodes` + `StateGraph.nodes`/`edges` `HashMap`→`BTreeMap` 恢复迭代确定性（roots/leaves/levels 顺序稳定，过时"order depends on HashMap"测试注释更新为确定性 `vec![]` 断言）✅。**留待后续**：StateGraph frontier 并行分支（grep 确认未实现，属新增能力非确定性修复，单列后续做）。
+  - 1643 tests 绿，fmt+clippy(-D)+deny ok。
 
 ---
 
