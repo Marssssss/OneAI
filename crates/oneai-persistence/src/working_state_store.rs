@@ -89,7 +89,11 @@ impl FileWorkingStateStore {
 
     /// Read every event line from a task log, skipping malformed/partial
     /// trailing lines (crash safety §8.1). Returns events in log order.
-    async fn read_events(&self, task_id: &str) -> Result<Vec<TaskEvent>> {
+    ///
+    /// Public so CLI exporters (`oneai session export-hf --task <id>`) can
+    /// attach a task's raw event log to a dataset record without going
+    /// through the derived projection.
+    pub async fn read_events(&self, task_id: &str) -> Result<Vec<TaskEvent>> {
         let path = self.task_log_path(task_id);
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,

@@ -864,6 +864,25 @@ enum SessionAction {
         #[arg(long)]
         domain: Option<String>,
     },
+    /// Export a saved session to HuggingFace-dataset JSONL (Phase 3.6).
+    /// Stitches live + archived transcript, redacts secrets, optionally
+    /// attaches a task's working-state event log.
+    ExportHf {
+        /// Session ID to export
+        id: String,
+        /// Output .jsonl path
+        #[arg(short = 'o', long)]
+        out: String,
+        /// Attach a task's working-state event log (task id)
+        #[arg(long)]
+        task: Option<String>,
+        /// Working-state root (default: .oneai)
+        #[arg(long, default_value = ".oneai")]
+        ws_root: String,
+        /// Also redact private/loopback IPv4 addresses
+        #[arg(long)]
+        redact_ips: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1534,6 +1553,19 @@ fn main() {
                     domain.as_deref(),
                 ));
             }
+            SessionAction::ExportHf {
+                id,
+                out,
+                task,
+                ws_root,
+                redact_ips,
+            } => cmd_session::cmd_session_export_hf(
+                &id,
+                std::path::Path::new(&out),
+                task.as_deref(),
+                std::path::Path::new(&ws_root),
+                redact_ips,
+            ),
         },
         Some(Commands::Tasks { action }) => match action {
             TasksAction::List { user, root } => {

@@ -211,10 +211,11 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **How**：`crates/oneai-a2a/src/server.rs:15` + `handler.rs:98` + axum。复用 3.1 的 axum/JWT 基建。
 - **Effort**：中。**Fit**：高。**类型**：修虚假安全感（card 谎言）+ 新能力。**前置**：1.4（auth 校验）。
 
-### 3.6 OSS 会话导出喂训练 `oneai session export-hf`（inspiration P2-5）
+### 3.6 OSS 会话导出喂训练 `oneai session export-hf`（inspiration P2-5） ✅
+- **状态**：完成（2026-07-31）。`oneai session export-hf <id> -o <path>` 落地：stitch live + `load_discarded_snapshots`（archival 段 oldest-first，等价 `merge_full_transcript` 但免建 App）→ OpenAI messages 格式 JSONL 一行（`role`+`content: Vec<ContentBlock>`，**完整保留 ToolCall/ToolResult/Thinking 块**）；regex 脱敏 `sk-`/`AKIA`/`Bearer`/key=value（`redact_json_line` 纯函数 + IP 可选 `--redact-ips`）；`--task <id>` 经 `FileWorkingStateStore::read_events`（提 pub）附着 working-state 事件。8 单测绿，fmt+clippy(-D)+deny ok，真会话冒烟：25 live→41 msgs（含压缩段）、JSON 合法、零 key 泄漏。
 - **What**：CLI 子命令导 OneAI 会话（conversation + working-state 事件 + tool calls/results）为 HF-dataset 兼容 JSONL，正则脱敏（API key/token），`huggingface-cli upload`。配 `oneai-eval` 把导出会话当 eval case 重放（扩 `replay.rs`）。
 - **Why**：OneAI 有原始材料（`FileWorkingStateStore` JSONL + conversations）但无真实会话捕获 pipeline。造训练数据飞轮 + 真实世界 eval 语料（超 SWE-bench curated 玩具任务）。配 Hermes trajectory 压缩（ShareGPT、protect head+tail、snap boundary 不落 tool turn）可作 SFT/RL 数据。
-- **How**：`Conversation`/`Message` 已 serde-serializable。`secrecy` crate 脱敏。
+- **How**：`Conversation`/`Message` 已 serde-serializable；脱敏用 `regex`（workspace 已声明，免引 `secrecy`，供应链纪律#1）。**推迟**：`huggingface-cli upload`（外网凭证，产物落本地由用户上传）、`replay.rs` 重放扩展（provider-response 重放与 conversation 导出正交，留后续）。
 - **Effort**：低-中。**Fit**：高，扩现有 eval/replay。**类型**：新增能力。
 
 ---
