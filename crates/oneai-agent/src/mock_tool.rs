@@ -117,6 +117,7 @@ impl MockTool {
                 success: true,
                 content: "hello world".to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Read,
         )
@@ -138,6 +139,7 @@ impl MockTool {
                 success: true,
                 content: content.into(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Read,
         )
@@ -160,6 +162,7 @@ impl MockTool {
                 success: true,
                 content: "File edited successfully".to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Standard,
         )
@@ -182,6 +185,7 @@ impl MockTool {
                 success: true,
                 content: "Command output: OK".to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Full,
         )
@@ -204,6 +208,7 @@ impl MockTool {
                 success: false,
                 content: String::new(),
                 error: Some("Error: Command timed out after 30 seconds".to_string()),
+                ..Default::default()
             },
             PermissionLevel::Full,
         )
@@ -225,6 +230,7 @@ impl MockTool {
                 success: false,
                 content: String::new(),
                 error: Some(error_msg.into()),
+                ..Default::default()
             },
             PermissionLevel::Full,
         )
@@ -247,7 +253,7 @@ impl MockTool {
                 success: true,
                 content: "3 matches found:\nline 10: fn main()\nline 25: let result\nline 42: return result".to_string(),
                 error: None,
-            },
+             ..Default::default() },
             PermissionLevel::Read,
         )
     }
@@ -268,6 +274,7 @@ impl MockTool {
                 success: true,
                 content: "5 files found: main.rs, lib.rs, mod.rs, utils.rs, test.rs".to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Read,
         )
@@ -286,6 +293,7 @@ impl MockTool {
                 success: true,
                 content: "Platform: macOS, Working dir: /tmp/test, Shell: zsh".to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Read,
         )
@@ -307,6 +315,7 @@ impl MockTool {
                 success: true,
                 content: "main.rs, lib.rs, Cargo.toml, tests/".to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Read,
         )
@@ -329,6 +338,7 @@ impl MockTool {
                 content: "Fetched content from URL: <html><body>Example page</body></html>"
                     .to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Standard,
         )
@@ -349,6 +359,7 @@ impl MockTool {
                 success: true,
                 content: output.into(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Read,
         )
@@ -369,6 +380,7 @@ impl MockTool {
                 success: false,
                 content: String::new(),
                 error: Some(error_msg.into()),
+                ..Default::default()
             },
             PermissionLevel::Standard,
         )

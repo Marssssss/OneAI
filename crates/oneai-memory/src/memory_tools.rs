@@ -139,6 +139,7 @@ impl Tool for MemorySearchTool {
                 success: false,
                 content: String::new(),
                 error: Some("query is required".into()),
+                ..Default::default()
             });
         }
 
@@ -189,6 +190,7 @@ impl Tool for MemorySearchTool {
                 success: true,
                 content,
                 error: None,
+                ..Default::default()
             });
         }
 
@@ -208,6 +210,7 @@ impl Tool for MemorySearchTool {
             success: true,
             content,
             error: None,
+            ..Default::default()
         })
     }
 }
@@ -321,6 +324,7 @@ impl Tool for CoreMemoryEditTool {
                 success: false,
                 content: String::new(),
                 error: Some("subject, predicate, and content are required".into()),
+                ..Default::default()
             });
         }
         let importance = read_importance(&args, &fact_type);
@@ -352,6 +356,7 @@ impl Tool for CoreMemoryEditTool {
             success: true,
             content: msg,
             error: None,
+            ..Default::default()
         })
     }
 }
@@ -413,6 +418,7 @@ impl Tool for ArchivalInsertTool {
                 success: false,
                 content: String::new(),
                 error: Some("subject, predicate, and content are required".into()),
+                ..Default::default()
             });
         }
         let importance = read_importance(&args, &fact_type);
@@ -427,6 +433,7 @@ impl Tool for ArchivalInsertTool {
             success: true,
             content: "Fact archived.".to_string(),
             error: None,
+            ..Default::default()
         })
     }
 }

@@ -174,6 +174,7 @@ impl ToolExecutor {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Denied by domain policy: {}", reason)),
+                        ..Default::default()
                     });
                 }
                 PermissionAction::AutoApprove => {
@@ -254,6 +255,7 @@ impl ToolExecutor {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Execution denied: {}", reason)),
+                        ..Default::default()
                     })
                 }
                 InteractionResponse::Revise { feedback } => {
@@ -264,6 +266,7 @@ impl ToolExecutor {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Execution denied: {}", feedback)),
+                        ..Default::default()
                     })
                 }
                 InteractionResponse::Choose { .. } => {
@@ -316,6 +319,7 @@ impl ToolExecutor {
                     tool.name(),
                     self.config.default_timeout_secs
                 )),
+                ..Default::default()
             }),
         };
 
@@ -626,6 +630,7 @@ mod tests {
                 success: true,
                 content: self.payload.clone(),
                 error: None,
+                ..Default::default()
             })
         }
     }

@@ -520,6 +520,7 @@ impl Tool for ShellTool {
                 success: false,
                 content: String::new(),
                 error: Some("No command provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -531,7 +532,7 @@ impl Tool for ShellTool {
                     content: String::new(),
                     error: Some("Command blocked by safety policy: matches dangerous pattern. \
                         If you need to run this command, disable sandbox mode with explicit justification.".to_string()),
-                });
+                 ..Default::default() });
             }
         }
 
@@ -553,6 +554,7 @@ impl Tool for ShellTool {
                      or heredocs for file writing.",
                     reason
                 )),
+                ..Default::default()
             });
         }
 
@@ -581,6 +583,7 @@ impl Tool for ShellTool {
             success: res.success,
             content: res.content,
             error: res.error,
+            ..Default::default()
         })
     }
 }
@@ -693,6 +696,7 @@ impl Tool for FileReadTool {
                 success: false,
                 content: String::new(),
                 error: Some("No file path provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -704,6 +708,7 @@ impl Tool for FileReadTool {
                 error: Some(
                     "Path traversal detected: paths containing '..' are not allowed".to_string(),
                 ),
+                ..Default::default()
             });
         }
 
@@ -715,6 +720,7 @@ impl Tool for FileReadTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("File not found: {}", path)),
+                ..Default::default()
             });
         }
 
@@ -732,7 +738,7 @@ impl Tool for FileReadTool {
                     "File too large: {} bytes (max: {} bytes). Use offset+limit parameters to read partial content.",
                     file_size, self.max_size_bytes
                 )),
-            });
+             ..Default::default() });
         }
 
         // Read the file content
@@ -778,6 +784,7 @@ impl Tool for FileReadTool {
                     success: true,
                     content: format!("{}{}", header, output),
                     error: None,
+                    ..Default::default()
                 })
             }
             Err(_) => {
@@ -790,12 +797,14 @@ impl Tool for FileReadTool {
                             success: true,
                             content: BASE64.encode(&data),
                             error: None,
+                            ..Default::default()
                         })
                     }
                     Err(e) => Ok(ToolOutput {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Failed to read file: {}", e)),
+                        ..Default::default()
                     }),
                 }
             }
@@ -909,6 +918,7 @@ impl Tool for FileEditTool {
                 success: false,
                 content: String::new(),
                 error: Some("No file path provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -917,6 +927,7 @@ impl Tool for FileEditTool {
                 success: false,
                 content: String::new(),
                 error: Some("old_string cannot be empty".to_string()),
+                ..Default::default()
             });
         }
 
@@ -927,6 +938,7 @@ impl Tool for FileEditTool {
                 error: Some(
                     "old_string and new_string are identical — no change needed".to_string(),
                 ),
+                ..Default::default()
             });
         }
 
@@ -936,6 +948,7 @@ impl Tool for FileEditTool {
                 success: false,
                 content: String::new(),
                 error: Some("Path traversal detected".to_string()),
+                ..Default::default()
             });
         }
 
@@ -950,6 +963,7 @@ impl Tool for FileEditTool {
                         success: false,
                         content: String::new(),
                         error: Some(format!("old_string not found in file: {}", file_path)),
+                        ..Default::default()
                     });
                 }
 
@@ -961,7 +975,7 @@ impl Tool for FileEditTool {
                             "old_string found {} times in file (must be unique unless replace_all=true)",
                             count
                         )),
-                    });
+                     ..Default::default() });
                 }
 
                 // Perform the replacement
@@ -982,11 +996,13 @@ impl Tool for FileEditTool {
                             file_path
                         ),
                         error: None,
+                        ..Default::default()
                     }),
                     Err(e) => Ok(ToolOutput {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Failed to write file: {}", e)),
+                        ..Default::default()
                     }),
                 }
             }
@@ -994,6 +1010,7 @@ impl Tool for FileEditTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Failed to read file: {}", e)),
+                ..Default::default()
             }),
         }
     }
@@ -1061,6 +1078,7 @@ impl Tool for FileListTool {
                 success: false,
                 content: String::new(),
                 error: Some("No directory path provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1069,6 +1087,7 @@ impl Tool for FileListTool {
                 success: false,
                 content: String::new(),
                 error: Some("Path traversal detected".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1096,12 +1115,14 @@ impl Tool for FileListTool {
                     success: true,
                     content: result.join("\n"),
                     error: None,
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Failed to read directory: {}", e)),
+                ..Default::default()
             }),
         }
     }
@@ -1198,6 +1219,7 @@ impl Tool for GrepTool {
                 success: false,
                 content: String::new(),
                 error: Some("No search pattern provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1215,6 +1237,7 @@ impl Tool for GrepTool {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Path does not exist: {}", path)),
+                        ..Default::default()
                     });
                 }
 
@@ -1309,12 +1332,14 @@ impl Tool for GrepTool {
                         success: true,
                         content: format!("No matches found for pattern '{}' in {}", pattern, path),
                         error: None,
+                        ..Default::default()
                     })
                 } else {
                     Ok(ToolOutput {
                         success: true,
                         content: results.join("\n"),
                         error: None,
+                        ..Default::default()
                     })
                 }
             }
@@ -1322,6 +1347,7 @@ impl Tool for GrepTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Invalid regex pattern: {}", e)),
+                ..Default::default()
             }),
         }
     }
@@ -1405,6 +1431,7 @@ impl Tool for GlobTool {
                 success: false,
                 content: String::new(),
                 error: Some("No glob pattern provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1415,6 +1442,7 @@ impl Tool for GlobTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Path does not exist: {}", path)),
+                ..Default::default()
             });
         }
 
@@ -1455,6 +1483,7 @@ impl Tool for GlobTool {
                     success: false,
                     content: String::new(),
                     error: Some(format!("Invalid glob pattern '{}': {}", pattern, e)),
+                    ..Default::default()
                 });
             }
         }
@@ -1464,12 +1493,14 @@ impl Tool for GlobTool {
                 success: true,
                 content: format!("No files found matching pattern '{}' in {}", pattern, path),
                 error: None,
+                ..Default::default()
             })
         } else {
             Ok(ToolOutput {
                 success: true,
                 content: results.join("\n"),
                 error: None,
+                ..Default::default()
             })
         }
     }
@@ -1563,6 +1594,7 @@ impl Tool for EnvironmentTool {
             success: true,
             content: info.join("\n"),
             error: None,
+            ..Default::default()
         })
     }
 }
@@ -1652,6 +1684,7 @@ impl Tool for NotebookEditTool {
                 success: false,
                 content: String::new(),
                 error: Some("No notebook path provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1661,6 +1694,7 @@ impl Tool for NotebookEditTool {
                 success: false,
                 content: String::new(),
                 error: Some("Path traversal detected".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1670,6 +1704,7 @@ impl Tool for NotebookEditTool {
                 success: false,
                 content: String::new(),
                 error: Some("File must be a .ipynb notebook".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1685,6 +1720,7 @@ impl Tool for NotebookEditTool {
                             success: false,
                             content: String::new(),
                             error: Some(format!("Failed to parse notebook JSON: {}", e)),
+                            ..Default::default()
                         });
                     }
                 };
@@ -1712,6 +1748,7 @@ impl Tool for NotebookEditTool {
                         success: false,
                         content: String::new(),
                         error: Some("Notebook has no 'cells' array".to_string()),
+                        ..Default::default()
                     });
                 }
 
@@ -1726,6 +1763,7 @@ impl Tool for NotebookEditTool {
                                 success: false,
                                 content: String::new(),
                                 error: Some("cell_id is required for replace mode".to_string()),
+                                ..Default::default()
                             });
                         }
 
@@ -1789,11 +1827,13 @@ impl Tool for NotebookEditTool {
                                         cell_id, notebook_path
                                     ),
                                     error: None,
+                                    ..Default::default()
                                 }),
                                 Err(e) => Ok(ToolOutput {
                                     success: false,
                                     content: String::new(),
                                     error: Some(format!("Failed to write notebook: {}", e)),
+                                    ..Default::default()
                                 }),
                             }
                         } else {
@@ -1801,6 +1841,7 @@ impl Tool for NotebookEditTool {
                                 success: false,
                                 content: String::new(),
                                 error: Some(format!("Cell '{}' not found in notebook", cell_id)),
+                                ..Default::default()
                             })
                         }
                     }
@@ -1848,11 +1889,13 @@ impl Tool for NotebookEditTool {
                                     notebook_path
                                 ),
                                 error: None,
+                                ..Default::default()
                             }),
                             Err(e) => Ok(ToolOutput {
                                 success: false,
                                 content: String::new(),
                                 error: Some(format!("Failed to write notebook: {}", e)),
+                                ..Default::default()
                             }),
                         }
                     }
@@ -1863,6 +1906,7 @@ impl Tool for NotebookEditTool {
                                 success: false,
                                 content: String::new(),
                                 error: Some("cell_id is required for delete mode".to_string()),
+                                ..Default::default()
                             });
                         }
 
@@ -1876,6 +1920,7 @@ impl Tool for NotebookEditTool {
                                 success: false,
                                 content: String::new(),
                                 error: Some(format!("Cell '{}' not found in notebook", cell_id)),
+                                ..Default::default()
                             });
                         }
 
@@ -1892,11 +1937,13 @@ impl Tool for NotebookEditTool {
                                     cell_id, notebook_path
                                 ),
                                 error: None,
+                                ..Default::default()
                             }),
                             Err(e) => Ok(ToolOutput {
                                 success: false,
                                 content: String::new(),
                                 error: Some(format!("Failed to write notebook: {}", e)),
+                                ..Default::default()
                             }),
                         }
                     }
@@ -1907,6 +1954,7 @@ impl Tool for NotebookEditTool {
                             "Unknown edit_mode: '{}'. Use 'replace', 'insert', or 'delete'",
                             edit_mode
                         )),
+                        ..Default::default()
                     }),
                 }
             }
@@ -1914,6 +1962,7 @@ impl Tool for NotebookEditTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Failed to read notebook file: {}", e)),
+                ..Default::default()
             }),
         }
     }
@@ -1981,6 +2030,7 @@ impl Tool for FileDeleteTool {
                 success: false,
                 content: String::new(),
                 error: Some("No file path provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1989,6 +2039,7 @@ impl Tool for FileDeleteTool {
                 success: false,
                 content: String::new(),
                 error: Some("Path traversal detected".to_string()),
+                ..Default::default()
             });
         }
 
@@ -1998,11 +2049,13 @@ impl Tool for FileDeleteTool {
                 success: true,
                 content: format!("Successfully deleted: {}", path),
                 error: None,
+                ..Default::default()
             }),
             Err(e) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Failed to delete file: {}", e)),
+                ..Default::default()
             }),
         }
     }
@@ -2113,6 +2166,7 @@ impl Tool for WebFetchTool {
                 success: false,
                 content: String::new(),
                 error: Some("No URL provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -2122,6 +2176,7 @@ impl Tool for WebFetchTool {
                 success: false,
                 content: String::new(),
                 error: Some("URL must start with http:// or https://".to_string()),
+                ..Default::default()
             });
         }
 
@@ -2147,6 +2202,7 @@ impl Tool for WebFetchTool {
                             status.as_u16(),
                             status.canonical_reason().unwrap_or("Unknown")
                         )),
+                        ..Default::default()
                     });
                 }
 
@@ -2178,12 +2234,14 @@ impl Tool for WebFetchTool {
                             success: true,
                             content,
                             error: None,
+                            ..Default::default()
                         })
                     }
                     Err(e) => Ok(ToolOutput {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Failed to read response body: {}", e)),
+                        ..Default::default()
                     }),
                 }
             }
@@ -2191,6 +2249,7 @@ impl Tool for WebFetchTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("HTTP request failed: {}", e)),
+                ..Default::default()
             }),
             Err(_) => Ok(ToolOutput {
                 success: false,
@@ -2199,6 +2258,7 @@ impl Tool for WebFetchTool {
                     "Request timed out after {} seconds",
                     self.timeout_secs
                 )),
+                ..Default::default()
             }),
         }
     }
@@ -2341,6 +2401,7 @@ impl Tool for WebSearchTool {
                 success: false,
                 content: String::new(),
                 error: Some("No search query provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -2362,6 +2423,7 @@ impl Tool for WebSearchTool {
                         success: true,
                         content: format!("No results found for query '{}'", query),
                         error: None,
+                        ..Default::default()
                     })
                 } else {
                     let content = results
@@ -2379,6 +2441,7 @@ impl Tool for WebSearchTool {
                             content
                         ),
                         error: None,
+                        ..Default::default()
                     })
                 }
             }
@@ -2386,6 +2449,7 @@ impl Tool for WebSearchTool {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Search failed: {}", e)),
+                ..Default::default()
             }),
         }
     }
@@ -2846,12 +2910,14 @@ impl BrowserTool {
                     success: true,
                     content,
                     error: None,
+                    ..Default::default()
                 })
             }
             Ok(Err(e)) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(e.to_string()),
+                ..Default::default()
             }),
             Err(_) => Ok(ToolOutput {
                 success: false,
@@ -2861,6 +2927,7 @@ impl BrowserTool {
                     self.timeout.as_secs(),
                     url
                 )),
+                ..Default::default()
             }),
         }
     }
@@ -2945,6 +3012,7 @@ impl BrowserTool {
             success: true,
             content: result,
             error: None,
+            ..Default::default()
         })
     }
 
@@ -3003,11 +3071,13 @@ impl BrowserTool {
                 success: true,
                 content,
                 error: None,
+                ..Default::default()
             }),
             Ok(Err(e)) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(e.to_string()),
+                ..Default::default()
             }),
             Err(_) => Ok(ToolOutput {
                 success: false,
@@ -3016,6 +3086,7 @@ impl BrowserTool {
                     "Browser form submit timed out after {} seconds",
                     self.timeout.as_secs()
                 )),
+                ..Default::default()
             }),
         }
     }
@@ -3083,6 +3154,7 @@ impl Tool for BrowserTool {
                 success: false,
                 content: String::new(),
                 error: Some("browser: url parameter is required".to_string()),
+                ..Default::default()
             });
         }
 
@@ -3106,6 +3178,7 @@ impl Tool for BrowserTool {
                     "browser: unknown action '{}'. Use: navigate, extract, form_submit",
                     other
                 )),
+                ..Default::default()
             }),
         }
     }

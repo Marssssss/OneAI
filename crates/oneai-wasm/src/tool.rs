@@ -89,12 +89,14 @@ impl WasmTool {
                 success,
                 content,
                 error,
+                ..Default::default()
             })
         } else {
             Ok(ToolOutput {
                 success: true,
                 content: output_str.to_string(),
                 error: None,
+                ..Default::default()
             })
         }
     }

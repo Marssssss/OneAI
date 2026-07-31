@@ -541,6 +541,7 @@ impl Tool for ApplyPatchTool {
                 success: false,
                 content: String::new(),
                 error: Some("No patch provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -553,7 +554,7 @@ impl Tool for ApplyPatchTool {
                         success: false,
                         content: String::new(),
                         error: Some("No valid hunks found in patch — ensure the patch has proper --- and +++ headers".to_string()),
-                    });
+                     ..Default::default() });
                 }
 
                 // Group hunks by target file (use new_file as the target)
@@ -677,12 +678,14 @@ impl Tool for ApplyPatchTool {
                     } else {
                         Some(format!("{} errors during patch application", errors.len()))
                     },
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Failed to parse patch: {}", e)),
+                ..Default::default()
             }),
         }
     }

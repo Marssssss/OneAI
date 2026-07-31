@@ -315,6 +315,7 @@ impl WasmActionTemplate {
                 success: false,
                 content: String::new(),
                 error: Some("No expression provided".to_string()),
+                ..Default::default()
             };
         }
 
@@ -327,11 +328,13 @@ impl WasmActionTemplate {
                 success: true,
                 content: format!("{}", value),
                 error: None,
+                ..Default::default()
             },
             Err(msg) => ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(msg),
+                ..Default::default()
             },
         }
     }
@@ -346,6 +349,7 @@ impl WasmActionTemplate {
                 success: false,
                 content: String::new(),
                 error: Some("No data array provided".to_string()),
+                ..Default::default()
             };
         }
 
@@ -393,6 +397,7 @@ impl WasmActionTemplate {
                 serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
             }),
             error: None,
+            ..Default::default()
         }
     }
 
@@ -406,6 +411,7 @@ impl WasmActionTemplate {
                 success: false,
                 content: String::new(),
                 error: Some("No data array provided".to_string()),
+                ..Default::default()
             };
         }
 
@@ -424,6 +430,7 @@ impl WasmActionTemplate {
                 serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string())
             }),
             error: None,
+            ..Default::default()
         }
     }
 
@@ -438,6 +445,7 @@ impl WasmActionTemplate {
                 success: false,
                 content: String::new(),
                 error: Some("No data provided".to_string()),
+                ..Default::default()
             };
         }
 
@@ -450,11 +458,13 @@ impl WasmActionTemplate {
                     serde_json::to_string(&value).unwrap_or_else(|_| value.to_string())
                 }),
                 error: None,
+                ..Default::default()
             },
             None => ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Path '{}' not found in data", path)),
+                ..Default::default()
             },
         }
     }

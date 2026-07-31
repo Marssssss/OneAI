@@ -108,6 +108,12 @@ pub struct AppBuilder {
     mcp_plugin_registry: Option<McpPluginRegistry>,
     /// Whether to enable MCP server hosting.
     mcp_server_host_enabled: bool,
+    /// Custom data-layer reloader (evolution-plan §3.4). When `None` (the
+    /// default), `build()` constructs the standard `AppDataLayerReloader`
+    /// (skills + MCP re-registration) and registers the `reload` tool. Set
+    /// this to plug a custom reloader (or `NoReloader`-style no-op to
+    /// suppress the `reload` tool entirely).
+    data_layer_reloader: Option<Arc<dyn oneai_core::traits::DataLayerReloader>>,
     /// Whether to enable A2A server hosting.
     a2a_server_host_enabled: bool,
     /// Custom port for A2A server (default: 8080).
@@ -224,6 +230,7 @@ impl AppBuilder {
             wasm_resource_monitor: None,
             mcp_plugin_registry: None,
             mcp_server_host_enabled: false,
+            data_layer_reloader: None,
             a2a_server_host_enabled: false,
             a2a_server_port: None,
             a2a_server_agent_card: None,
@@ -1447,6 +1454,19 @@ impl AppBuilder {
         self
     }
 
+    /// Override the data-layer reloader (evolution-plan §3.4). When set, the
+    /// `reload` tool is backed by this reloader instead of the default
+    /// `AppDataLayerReloader` (skills + MCP re-registration). Use this to
+    /// plug a custom reloader or a no-op impl that suppresses reload
+    /// semantics.
+    pub fn data_layer_reloader(
+        mut self,
+        reloader: Arc<dyn oneai_core::traits::DataLayerReloader>,
+    ) -> Self {
+        self.data_layer_reloader = Some(reloader);
+        self
+    }
+
     /// Load MCP servers from the default config file and auto-connect.
     ///
     /// Reads `~/.oneai/mcp_servers.toml`, creates a McpPluginRegistry,
@@ -1611,13 +1631,41 @@ impl AppBuilder {
         }
 
         // Connect MCP plugin servers and register discovered tools
-        let mcp_plugin_registry = self.mcp_plugin_registry;
+        let mcp_plugin_registry = self.mcp_plugin_registry.map(std::sync::Arc::new);
         if let Some(_registry) = &mcp_plugin_registry {
             // Note: connect_all_enabled() is async and mutable, so we need to handle it carefully
             // We'll register tools in the build flow after creating the mutable registry
             tracing::info!(
                 "MCP plugin registry configured — tools will be registered at build time"
             );
+        }
+
+        // Data-layer reloader (evolution-plan §3.4) — backs the `reload`
+        // tool. Default = `AppDataLayerReloader` (skills + MCP
+        // re-registration); a user-supplied reloader overrides it. The
+        // reloader is always constructed (so the CLI `reload` subcommand and
+        // `app.data_layer_reloader()` work), but the `reload` **tool** is
+        // registered only when a data source is configured — zero footprint
+        // otherwise (a bare `AppBuilder::new().build()` has no domain pack
+        // and no MCP, so the model never sees a `reload` tool that would be
+        // a no-op). This mirrors the `schedule` tool's AppBuilder-level
+        // service-gating (Footprint Ladder). The AgentLoop reads the live
+        // registries every turn, so a reload surfaces next step.
+        let data_layer_reloader: Arc<dyn oneai_core::traits::DataLayerReloader> =
+            self.data_layer_reloader.take().unwrap_or_else(|| {
+                Arc::new(crate::reloader::AppDataLayerReloader::new(
+                    self.skill_registry.clone(),
+                    mcp_plugin_registry.clone(),
+                    self.tool_registry.clone(),
+                ))
+            });
+        let has_data_sources = merged_domain_pack.is_some() || mcp_plugin_registry.is_some();
+        if has_data_sources {
+            self.tool_registry
+                .register(Arc::new(oneai_agent::ReloadTool::new(
+                    data_layer_reloader.clone(),
+                )))
+                .await?;
         }
 
         // Create MCP server host if enabled
@@ -2022,6 +2070,7 @@ impl AppBuilder {
             mcp_plugin_registry,
             mcp_server_host,
             a2a_server_host,
+            data_layer_reloader: Some(data_layer_reloader),
             sqlite_store: self.sqlite_store,
             embedding_service,
             usage_tracker,
@@ -2101,12 +2150,18 @@ pub struct App {
     pub wasm_module_registry: Option<WasmModuleRegistry>,
     /// WASM resource monitor (optional — for execution metrics tracking).
     pub wasm_resource_monitor: Option<Arc<WasmResourceMonitor>>,
-    /// MCP plugin registry (optional — for MCP server management).
-    pub mcp_plugin_registry: Option<McpPluginRegistry>,
+    /// MCP plugin registry (optional — for MCP server management). Shared via
+    /// `Arc` so the data-layer reloader can re-register tools from it.
+    pub mcp_plugin_registry: Option<Arc<McpPluginRegistry>>,
     /// MCP server host (optional — for serving tools via MCP protocol).
     pub mcp_server_host: Option<McpServerHost>,
     /// A2A server host (optional — for serving agent capabilities via A2A protocol).
     pub a2a_server_host: Option<A2AServerHost>,
+    /// Data-layer reloader (evolution-plan §3.4) — backs the `reload` tool.
+    /// `None` only when the user explicitly suppressed it; otherwise the
+    /// standard `AppDataLayerReloader` (skills + MCP) is constructed in
+    /// `build()`.
+    pub data_layer_reloader: Option<Arc<dyn oneai_core::traits::DataLayerReloader>>,
     /// SQLite session store (for memory + conversation persistence).
     pub sqlite_store: Option<Arc<SqliteSessionStore>>,
     /// Embedding service (optional — for auto-embedding RAG and memory search).
@@ -2316,7 +2371,13 @@ impl App {
 
     /// Get the MCP plugin registry (for MCP server management).
     pub fn mcp_plugin_registry(&self) -> Option<&McpPluginRegistry> {
-        self.mcp_plugin_registry.as_ref()
+        self.mcp_plugin_registry.as_deref()
+    }
+
+    /// Get the data-layer reloader backing the `reload` tool
+    /// (evolution-plan §3.4). `None` only when explicitly suppressed.
+    pub fn data_layer_reloader(&self) -> Option<&Arc<dyn oneai_core::traits::DataLayerReloader>> {
+        self.data_layer_reloader.as_ref()
     }
 
     /// Get the MCP server host (for serving tools via MCP protocol).

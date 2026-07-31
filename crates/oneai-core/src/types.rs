@@ -693,7 +693,7 @@ pub struct ToolDefinition {
 // ─── ToolOutput ───────────────────────────────────────────────────────────────
 
 /// The output from a tool execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolOutput {
     /// Whether the tool execution succeeded.
     pub success: bool,
@@ -704,6 +704,32 @@ pub struct ToolOutput {
     /// Optional error message if execution failed.
     #[serde(default)]
     pub error: Option<String>,
+
+    /// Names of tools this execution newly added to (or activated within) the
+    /// active toolset — the **self-extension signal** (evolution-plan §3.4,
+    /// PI-Agent's `addedToolNames`).
+    ///
+    /// A tool whose side effect is to register new tools (e.g. an MCP server
+    /// connect that registers its remote tools, or an installer that flips a
+    /// latent tool's Footprint gate on) lists them here so the `AgentLoop` can
+    /// surface them. The loop also independently **diffs** the live
+    /// `ToolRegistry` active (`service_available()==true`) set each turn — the
+    /// diff is authoritative and catches tools registered/activated without
+    /// setting this field. This field is the explicit, observable self-report;
+    /// the union of both is what the model is told about.
+    ///
+    /// Newly surfaced tools are subject to the normal permission resolver +
+    /// `InteractionGate` on their first invocation — no special-casing, no
+    /// bypass of `deny_by_default` / paradigm `tool_filter` / the Footprint
+    /// gate. Their `PermissionLevel`/`risk_level()` is honoured as usual.
+    ///
+    /// Do **not** use `..Default::default()` to omit `success` when
+    /// constructing — `Default` sets `success = false` (a failure result).
+    /// Always set `success`/`content`/`error` explicitly; either name this
+    /// field or append `..Default::default()` when you want the empty
+    /// `added_tool_names` default.
+    #[serde(default)]
+    pub added_tool_names: Vec<String>,
 }
 
 // ─── RiskLevel (legacy) ────────────────────────────────────────────────────────
@@ -2373,6 +2399,41 @@ impl GraphDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_output_default_is_failure_with_empty_added_tool_names() {
+        // The `Default` impl backs `..Default::default()` for the
+        // self-extension field (§3.4). `success` defaults to `false` — a
+        // documented footgun: never omit `success` when constructing.
+        let d = ToolOutput::default();
+        assert!(!d.success);
+        assert!(d.content.is_empty());
+        assert!(d.error.is_none());
+        assert!(d.added_tool_names.is_empty());
+    }
+
+    #[test]
+    fn tool_output_round_trips_added_tool_names() {
+        let out = ToolOutput {
+            success: true,
+            content: "installed".into(),
+            error: None,
+            added_tool_names: vec!["read_file".into(), "grep".into()],
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        let back: ToolOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.added_tool_names, vec!["read_file", "grep"]);
+    }
+
+    #[test]
+    fn tool_output_legacy_json_without_added_tool_names_deserializes_empty() {
+        // A payload serialized before the field existed must still deserialize
+        // (the `#[serde(default)]` contract) — wire-format backward compat.
+        let legacy = r#"{"success":true,"content":"ok","error":null}"#;
+        let back: ToolOutput = serde_json::from_str(legacy).unwrap();
+        assert!(back.success);
+        assert!(back.added_tool_names.is_empty());
+    }
 
     #[test]
     fn keyword_matches_any_token_matches_natural_language_query() {

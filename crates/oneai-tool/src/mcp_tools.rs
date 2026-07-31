@@ -90,6 +90,7 @@ impl Tool for McpToolWrapper {
                 self.name, self.server_name, args
             ),
             error: None,
+            ..Default::default()
         })
     }
 }

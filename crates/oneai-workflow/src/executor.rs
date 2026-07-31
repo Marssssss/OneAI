@@ -576,6 +576,7 @@ async fn execute_step(
                         success: true,
                         content: String::new(),
                         error: None,
+                        ..Default::default()
                     })
                 } else {
                     // Build a minimal inference request with the interpolated prompt
@@ -603,6 +604,7 @@ async fn execute_step(
                             success: true,
                             content: inference_response.message.text_content(),
                             error: None,
+                            ..Default::default()
                         }),
                         Err(e) => Err(OneAIError::Provider(format!(
                             "LLM inference failed for step '{}': {}",
@@ -620,6 +622,7 @@ async fn execute_step(
                     success: true,
                     content: prompt_text,
                     error: None,
+                    ..Default::default()
                 })
             };
 
@@ -803,6 +806,7 @@ mod permission_resolver_tests {
                     .unwrap_or("ok")
                     .to_string(),
                 error: None,
+                ..Default::default()
             })
         }
     }

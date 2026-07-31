@@ -117,6 +117,7 @@ enum TestEvent {
     StreamChunk(String),
     Thinking(String),
     Reflection(String),
+    ToolsAdded(Vec<String>),
 }
 
 impl AgentLoopObserver for TestObserver {
@@ -192,6 +193,12 @@ impl AgentLoopObserver for TestObserver {
             .lock()
             .unwrap()
             .push(TestEvent::Reflection(summary.to_string()));
+    }
+    fn on_tools_added(&self, names: &[String]) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(TestEvent::ToolsAdded(names.to_vec()));
     }
 }
 
@@ -2954,12 +2961,14 @@ impl oneai_core::traits::Tool for FlakyReadTool {
                 success: false,
                 content: String::new(),
                 error: Some("Connection timeout".to_string()),
+                ..Default::default()
             })
         } else {
             Ok(ToolOutput {
                 success: true,
                 content: "file contents".to_string(),
                 error: None,
+                ..Default::default()
             })
         }
     }
@@ -3140,6 +3149,7 @@ fn memory_trio_tools() -> Vec<Arc<dyn oneai_core::traits::Tool>> {
                 success: true,
                 content: "ok".to_string(),
                 error: None,
+                ..Default::default()
             },
             PermissionLevel::Read,
         )) as Arc<dyn oneai_core::traits::Tool>
@@ -3467,6 +3477,7 @@ async fn e2e_reflect_fires_with_skill_manage_only() {
             success: true,
             content: "ok".to_string(),
             error: None,
+            ..Default::default()
         },
         PermissionLevel::Read,
     )) as Arc<dyn oneai_core::traits::Tool>;
@@ -3699,5 +3710,312 @@ async fn e2e_cadence_hydrates_across_run_resume() {
         "run 2 must add new ReflectionFired events: {} -> {}",
         ws1.reflection_count,
         ws2.reflection_count
+    );
+}
+
+// ─── Self-extension (evolution-plan §3.4) ─────────────────────────────────
+//
+// A tool whose side effect is to register/activate new tools must surface
+// them via `ToolOutput::added_tool_names` (and the loop's live-registry diff
+// backstops tools that register without self-reporting). The loop fires
+// `on_tools_added` and injects a one-shot system note so the model learns the
+// new tool exists next turn.
+
+use std::sync::atomic::AtomicBool;
+use tokio::sync::RwLock;
+
+use oneai_core::traits::Tool;
+use oneai_core::RiskLevel;
+
+/// A mock tool whose `service_available()` is backed by an `AtomicBool` — the
+/// Footprint gate the latent-tool test flips mid-turn.
+struct GatedMockTool {
+    name: String,
+    gate: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl Tool for GatedMockTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "A latent tool that activates when its gate flips"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
+    fn service_available(&self) -> bool {
+        self.gate.load(Ordering::Relaxed)
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+    ) -> std::result::Result<ToolOutput, oneai_core::error::OneAIError> {
+        Ok(ToolOutput {
+            success: true,
+            content: "latent tool ran".into(),
+            error: None,
+            ..Default::default()
+        })
+    }
+}
+
+/// A test tool that, on `execute`, mutates the shared tool map (fresh-register
+/// a tool and/or flip a latent gate) and returns a `ToolOutput` whose
+/// `added_tool_names` is set only when `self_report` is true.
+struct InstallerTool {
+    tools_map: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    /// Tool to freshly register on execute (None = no fresh registration).
+    install: Option<Arc<dyn Tool>>,
+    /// Latent gate to flip on execute (None = no gate flip).
+    flip_gate: Option<Arc<AtomicBool>>,
+    /// Whether to self-report via `added_tool_names`. When false, the loop's
+    /// diff is the only signal (backstop test).
+    self_report: bool,
+    /// Name reported in `added_tool_names` (the surfaced tool's name).
+    reported_name: Option<String>,
+}
+#[async_trait::async_trait]
+impl Tool for InstallerTool {
+    fn name(&self) -> &str {
+        "install_tool"
+    }
+    fn description(&self) -> &str {
+        "Install / activate another tool as a side effect"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+    ) -> std::result::Result<ToolOutput, oneai_core::error::OneAIError> {
+        let mut names: Vec<String> = Vec::new();
+        if let Some(t) = &self.install {
+            self.tools_map
+                .write()
+                .await
+                .insert(t.name().to_string(), t.clone());
+        }
+        if let Some(g) = &self.flip_gate {
+            g.store(true, Ordering::Relaxed);
+        }
+        if self.self_report {
+            if let Some(n) = &self.reported_name {
+                names.push(n.clone());
+            }
+        }
+        Ok(ToolOutput {
+            success: true,
+            content: "installed".to_string(),
+            error: None,
+            added_tool_names: names,
+        })
+    }
+}
+
+/// Build an AgentLoop whose tool map is shared with the test (so an installer
+/// tool can mutate it mid-turn). Mirrors `build_test_agent_loop` but takes the
+/// pre-built map.
+fn build_agent_loop_with_map(
+    provider: MockProvider,
+    tools_map: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    config: AgentLoopConfig,
+) -> AgentLoop {
+    AgentLoop::new(
+        Arc::new(provider),
+        tools_map,
+        Arc::new(ThreeLayerParser::new()),
+        Arc::new(oneai_tool::NoopInteractionGate),
+        Arc::new(SkillSelector::new()),
+        Arc::new(ContextBudgetManager::new(
+            TokenBudget::new(100000),
+            BudgetAllocation::default(),
+            Arc::new(oneai_core::budget::NoopCompressor),
+        )),
+        Arc::new(SubAgentFactoryNone),
+        ContextAssembler::new(),
+        IncrementalStreamParser::new(),
+        config,
+    )
+}
+
+#[tokio::test]
+async fn self_extension_surfaces_self_reported_tool() {
+    // Turn 1: call `install_tool` (registers `other_mock` + self-reports it).
+    // Turn 2: direct answer.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("install_tool", serde_json::json!({})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observer = TestObserver {
+        events: events.clone(),
+    };
+
+    let tools_map: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let other = Arc::new(MockTool::read_file_mock()) as Arc<dyn Tool>;
+    let installer = Arc::new(InstallerTool {
+        tools_map: tools_map.clone(),
+        install: Some(other.clone()),
+        flip_gate: None,
+        self_report: true,
+        reported_name: Some("read_file".to_string()),
+    }) as Arc<dyn Tool>;
+    tools_map
+        .write()
+        .await
+        .insert("install_tool".to_string(), installer);
+
+    let loop_ = build_agent_loop_with_map(
+        provider,
+        tools_map,
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let result = loop_
+        .run_with_observer("install a tool", &observer)
+        .await
+        .unwrap();
+    assert!(result.completed);
+
+    let evs = events.lock().unwrap().clone();
+    let added: Vec<Vec<String>> = evs
+        .iter()
+        .filter_map(|e| match e {
+            TestEvent::ToolsAdded(n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        added,
+        vec![vec!["read_file".to_string()]],
+        "on_tools_added must fire once with the self-reported tool name; got {added:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_extension_diff_backstops_unreported_registration() {
+    // A tool registers `other_mock` mid-turn WITHOUT setting added_tool_names.
+    // The loop's live-registry diff must still surface it.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("install_tool", serde_json::json!({})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observer = TestObserver {
+        events: events.clone(),
+    };
+
+    let tools_map: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let other = Arc::new(MockTool::read_file_mock()) as Arc<dyn Tool>;
+    let installer = Arc::new(InstallerTool {
+        tools_map: tools_map.clone(),
+        install: Some(other),
+        flip_gate: None,
+        self_report: false, // no added_tool_names — diff must catch it
+        reported_name: None,
+    }) as Arc<dyn Tool>;
+    tools_map
+        .write()
+        .await
+        .insert("install_tool".to_string(), installer);
+
+    let loop_ = build_agent_loop_with_map(
+        provider,
+        tools_map,
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let _ = loop_
+        .run_with_observer("install silently", &observer)
+        .await
+        .unwrap();
+
+    let evs = events.lock().unwrap().clone();
+    let surfaced = evs
+        .iter()
+        .any(|e| matches!(e, TestEvent::ToolsAdded(n) if n.contains(&"read_file".to_string())));
+    assert!(
+        surfaced,
+        "diff must surface the un-reported registration; events = {evs:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_extension_diff_catches_footprint_gate_flip() {
+    // A latent tool is pre-registered with service_available()=false (hidden
+    // from the schema). The installer flips its gate on; the diff must surface
+    // the now-active tool even though no fresh registration occurred.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("install_tool", serde_json::json!({})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observer = TestObserver {
+        events: events.clone(),
+    };
+
+    let tools_map: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let gate = Arc::new(AtomicBool::new(false));
+    let latent = Arc::new(GatedMockTool {
+        name: "latent_tool".to_string(),
+        gate: gate.clone(),
+    }) as Arc<dyn Tool>;
+    tools_map
+        .write()
+        .await
+        .insert("latent_tool".to_string(), latent);
+    let installer = Arc::new(InstallerTool {
+        tools_map: tools_map.clone(),
+        install: None,
+        flip_gate: Some(gate),
+        self_report: false, // diff-only — the gate flip is the signal
+        reported_name: None,
+    }) as Arc<dyn Tool>;
+    tools_map
+        .write()
+        .await
+        .insert("install_tool".to_string(), installer);
+
+    let loop_ = build_agent_loop_with_map(
+        provider,
+        tools_map,
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let _ = loop_
+        .run_with_observer("activate latent", &observer)
+        .await
+        .unwrap();
+
+    let evs = events.lock().unwrap().clone();
+    let surfaced = evs
+        .iter()
+        .any(|e| matches!(e, TestEvent::ToolsAdded(n) if n.contains(&"latent_tool".to_string())));
+    assert!(
+        surfaced,
+        "diff must surface the gate-flipped latent tool; events = {evs:?}"
     );
 }

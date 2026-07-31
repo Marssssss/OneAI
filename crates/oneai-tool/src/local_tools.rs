@@ -85,6 +85,7 @@ impl Tool for FileWriteTool {
                 success: false,
                 content: String::new(),
                 error: Some("No file path provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -94,6 +95,7 @@ impl Tool for FileWriteTool {
                 success: false,
                 content: String::new(),
                 error: Some("Path traversal detected".to_string()),
+                ..Default::default()
             });
         }
 
@@ -126,6 +128,7 @@ impl Tool for FileWriteTool {
                             success: false,
                             content: String::new(),
                             error: Some(format!("Failed to create parent directories: {}", e)),
+                            ..Default::default()
                         });
                     }
                 }
@@ -138,11 +141,13 @@ impl Tool for FileWriteTool {
                 success: true,
                 content: format!("Successfully wrote {} bytes to {}", content.len(), path),
                 error: None,
+                ..Default::default()
             }),
             Err(e) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Failed to write file: {}", e)),
+                ..Default::default()
             }),
         }
     }
@@ -207,6 +212,7 @@ impl Tool for CalculatorTool {
                 success: false,
                 content: String::new(),
                 error: Some("No expression provided".to_string()),
+                ..Default::default()
             });
         }
 
@@ -219,11 +225,13 @@ impl Tool for CalculatorTool {
                 success: true,
                 content: format!("{}", value),
                 error: None,
+                ..Default::default()
             }),
             Err(msg) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(msg),
+                ..Default::default()
             }),
         }
     }

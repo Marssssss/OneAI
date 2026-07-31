@@ -91,6 +91,7 @@ impl Tool for SkillTool {
                     "No skill name provided. Use a name from the 'Available skills' list."
                         .to_string(),
                 ),
+                ..Default::default()
             });
         }
 
@@ -108,6 +109,7 @@ impl Tool for SkillTool {
                              tool (action: restore) or `oneai curator restore {}`.",
                             skill_name, skill_name,
                         )),
+                        ..Default::default()
                     });
                 }
             }
@@ -132,6 +134,7 @@ impl Tool for SkillTool {
                     success: true,
                     content,
                     error: None,
+                    ..Default::default()
                 })
             }
             None => {
@@ -149,6 +152,7 @@ impl Tool for SkillTool {
                         "Skill '{}' not found. Available skills: {}",
                         skill_name, available_str
                     )),
+                    ..Default::default()
                 })
             }
         }

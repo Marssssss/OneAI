@@ -115,6 +115,7 @@ impl Tool for SkillManageTool {
                     success: true,
                     content: out,
                     error: None,
+                    ..Default::default()
                 })
             }
             Action::Archive | Action::Restore | Action::Pin | Action::Unpin => {
@@ -126,6 +127,7 @@ impl Tool for SkillManageTool {
                             "action `{:?}` requires a `skill` name",
                             action_name(&action)
                         )),
+                        ..Default::default()
                     });
                 }
                 // Guard: the named skill must be registered.
@@ -138,6 +140,7 @@ impl Tool for SkillManageTool {
                             "Skill '{}' not registered. Available: {}",
                             skill, available
                         )),
+                        ..Default::default()
                     });
                 }
                 let m = match action {
@@ -154,6 +157,7 @@ impl Tool for SkillManageTool {
                         skill, m.state, m.use_count, m.pinned, m.created_by
                     ),
                     error: None,
+                    ..Default::default()
                 })
             }
         }

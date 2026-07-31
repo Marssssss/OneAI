@@ -147,6 +147,7 @@ impl From<ToolOutputView> for oneai_core::ToolOutput {
             success: view.success,
             content: view.content,
             error: view.error,
+            ..Default::default()
         }
     }
 }
@@ -648,6 +649,7 @@ mod tests {
             success: true,
             content: "42".to_string(),
             error: None,
+            ..Default::default()
         };
         let view: ToolOutputView = output.into();
         assert!(view.success);

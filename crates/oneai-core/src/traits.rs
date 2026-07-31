@@ -145,6 +145,36 @@ pub trait PermissionResolver: Send + Sync {
     fn resolve(&self, tool_name: &str, args: &serde_json::Value) -> PermissionAction;
 }
 
+// ─── DataLayerReloader ──────────────────────────────────────────────────────
+
+/// Reload an agent's runtime **data layer** mid-session without restart
+/// (evolution-plan §3.4 — the `/reload`-equivalent).
+///
+/// A DomainPack's *Rust* structure is compile-time and not reloadable, but
+/// its **data files** — discovered skill markdown, MCP server tool
+/// registrations, (future) `MemoryProfile` JSON / `StateGraph` definitions —
+/// can be re-read at runtime. The model triggers this via the `reload` tool
+/// (or the CLI `oneai reload`); refresh of the visible tool/skill tables is
+/// automatic because the `AgentLoop` reads the live `ToolRegistry` /
+/// `SkillRegistry` every turn.
+///
+/// The trait lives in `oneai-core` (no references to skill/mcp types) so the
+/// agent layer can hold it without inverting the dependency direction; the
+/// concrete impl (`AppDataLayerReloader`) lives in `oneai-app`, which already
+/// depends on `oneai-skill` / `oneai-mcp` / `oneai-tool`.
+///
+/// Returns the names of items (re-)loaded/registered so the caller can log
+/// the reload event and surface it to the model. **OnResume reconcile is a
+/// no-op** — reload mutates shared registry maps, not `LoopState` or the
+/// working-state event log; the resume path (which rehydrates working state
+/// from the event log) is untouched.
+#[async_trait]
+pub trait DataLayerReloader: Send + Sync {
+    /// Re-read the runtime data layer (skills, MCP tools, …) and register /
+    /// re-register what changed. Returns the names of items (re-)loaded.
+    async fn reload_data_layer(&self) -> Result<Vec<String>>;
+}
+
 // ─── MemoryStore ──────────────────────────────────────────────────────────────
 
 /// Abstraction for both short-term and long-term memory.

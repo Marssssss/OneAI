@@ -553,6 +553,7 @@ fn ok(content: String) -> ToolOutput {
         success: true,
         content,
         error: None,
+        ..Default::default()
     }
 }
 
@@ -561,6 +562,7 @@ fn fail(msg: &str) -> ToolOutput {
         success: false,
         content: String::new(),
         error: Some(msg.to_string()),
+        ..Default::default()
     }
 }
 

@@ -178,6 +178,7 @@ mod tests {
             success: true,
             content: "42".to_string(),
             error: None,
+            ..Default::default()
         };
 
         let content = McpServerHost::tool_output_to_mcp_content(&output);
@@ -195,6 +196,7 @@ mod tests {
             success: false,
             content: String::new(),
             error: Some("Division by zero".to_string()),
+            ..Default::default()
         };
 
         let content = McpServerHost::tool_output_to_mcp_content(&output);

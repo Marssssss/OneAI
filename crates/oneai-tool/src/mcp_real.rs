@@ -612,6 +612,7 @@ impl McpConnection {
                             "MCP connection not established — call connect_and_discover() first"
                                 .to_string(),
                         ),
+                        ..Default::default()
                     });
                 }
 
@@ -972,6 +973,7 @@ impl McpConnection {
                 success: false,
                 content: String::new(),
                 error: Some(format!("MCP tool error: {}", error_msg)),
+                ..Default::default()
             });
         }
 
@@ -1004,6 +1006,7 @@ impl McpConnection {
             success: true,
             content,
             error: None,
+            ..Default::default()
         })
     }
 }

@@ -19,9 +19,11 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod builder;
+pub mod reloader;
 pub mod session;
 
 pub use builder::*;
+pub use reloader::*;
 pub use session::*;
 
 #[cfg(test)]

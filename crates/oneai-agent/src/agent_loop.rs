@@ -117,6 +117,15 @@ pub trait AgentLoopObserver: Send + Sync {
     /// the UI may surface it as a transient side-note. Default empty so
     /// existing observers keep compiling.
     fn on_reflection(&self, _summary: &str) {}
+
+    /// Called when a tool batch causes new tools to become active in the
+    /// schema (self-extension, evolution-plan §3.4) — either because a tool
+    /// self-reported them via `ToolOutput::added_tool_names` or because the
+    /// loop's live `ToolRegistry` diff detected a mid-turn registration /
+    /// Footprint-gate flip. The model is separately nudged via a one-shot
+    /// system note (`pending_new_tools_note`); this event lets the UI log the
+    /// extension. Default empty so existing observers keep compiling.
+    fn on_tools_added(&self, _names: &[String]) {}
 }
 
 /// What fired a cadence-fired `Reflect` sub-agent — telemetry only
@@ -399,6 +408,22 @@ pub struct LoopState {
     /// last fire boundary instead of re-firing from zero. 0 when no store
     /// is configured or the task has no prior reflections.
     pub cadence_baseline: u64,
+    /// Snapshot of the active (Footprint-gate `service_available()==true`)
+    /// tool names after the last tool batch — the baseline for the
+    /// self-extension diff (evolution-plan §3.4). After each tool batch the
+    /// loop recomputes the active set and surfaces any names newly present
+    /// vs. this baseline (mid-turn registrations / gate flips), unioned with
+    /// the tools each result self-reported via `ToolOutput::added_tool_names`.
+    /// The diff is authoritative (catches registrations that didn't
+    /// self-report); the field is the explicit signal. `None` until the first
+    /// batch establishes the baseline (so the initial toolset isn't reported
+    /// as "newly added").
+    pub prev_active_tool_names: Option<std::collections::HashSet<String>>,
+    /// A one-shot system note listing tools that became available this turn
+    /// (self-extension), consumed by `inject_pinned_blocks` on the next
+    /// context assembly. `Some(names)` when a tool batch surfaced new tools,
+    /// cleared after injection so the nudge doesn't repeat.
+    pub pending_new_tools_note: Option<Vec<String>>,
 }
 
 impl LoopState {
@@ -432,6 +457,8 @@ impl LoopState {
             project: String::new(),
             reflections_fired: 0,
             cadence_baseline: 0,
+            prev_active_tool_names: None,
+            pending_new_tools_note: None,
         }
     }
 
@@ -483,6 +510,8 @@ impl LoopState {
             project: String::new(),
             reflections_fired: 0,
             cadence_baseline: 0,
+            prev_active_tool_names: None,
+            pending_new_tools_note: None,
         }
     }
 
@@ -1398,6 +1427,26 @@ impl AgentLoop {
 
             observer.on_iteration_start(state.iterations, state.active_paradigm);
 
+            // ─── Self-extension baseline (evolution-plan §3.4) ──────────
+            // Snapshot the active (Footprint-gate `service_available()==true`)
+            // tool set at the START of this iteration. After this turn's tool
+            // batch finalizes, the diff compares the post-batch active set
+            // against this baseline — so tools registered / gate-flipped
+            // DURING this turn are surfaced (and the initial toolset, present
+            // at iteration 1's start, is never mis-reported as "newly added").
+            // Re-snapshotd every iteration; the post-batch diff is the only
+            // consumer.
+            {
+                let tools = self.tools.read().await;
+                state.prev_active_tool_names = Some(
+                    tools
+                        .values()
+                        .filter(|t| t.service_available())
+                        .map(|t| t.name().to_string())
+                        .collect(),
+                );
+            }
+
             // ─── Trace: log iteration event ──────────────────────────
             if let Some(ctx) = &self.config.trace_context {
                 ctx.log_event(
@@ -1458,6 +1507,11 @@ impl AgentLoop {
                 self.inject_pinned_blocks(&mut conv_for_inference, &state)
                     .await;
             }
+
+            // One-shot clear of the self-extension nudge — this turn's
+            // request is now built (including any compression re-build), so
+            // the new-tools note must not repeat next turn.
+            state.pending_new_tools_note = None;
 
             // Model-aware context-fit guard (gap-analysis #3). The durable
             // compression above is budget-driven (keeps the log bounded +
@@ -2301,6 +2355,7 @@ impl AgentLoop {
                                         call.name
                                     ),
                                     error: None,
+                                    ..Default::default()
                                 },
                             });
                             continue;
@@ -2351,6 +2406,7 @@ impl AgentLoop {
                                             you work."
                                             .to_string(),
                                         error: None,
+                                        ..Default::default()
                                     }
                                 }
                                 InteractionResponse::ProceedWith { modification } => {
@@ -2376,7 +2432,7 @@ impl AgentLoop {
                                                 Use task_update to mark steps in_progress/completed \
                                                 as you work. Edited plan:\n{}", new_plan),
                                             error: None,
-                                        }
+                                         ..Default::default() }
                                     } else {
                                         self.set_plan_mode(false);
                                         self.ensure_working_state_task(
@@ -2388,6 +2444,7 @@ impl AgentLoop {
                                             content: "Plan approved — proceeding with execution."
                                                 .to_string(),
                                             error: None,
+                                            ..Default::default()
                                         }
                                     }
                                 }
@@ -2400,6 +2457,7 @@ impl AgentLoop {
                                             feedback
                                         ),
                                         error: None,
+                                        ..Default::default()
                                     }
                                 }
                                 InteractionResponse::Abort { reason } => oneai_core::ToolOutput {
@@ -2409,6 +2467,7 @@ impl AgentLoop {
                                         reason
                                     ),
                                     error: None,
+                                    ..Default::default()
                                 },
                                 _ => oneai_core::ToolOutput {
                                     success: true,
@@ -2416,6 +2475,7 @@ impl AgentLoop {
                                         "Plan review returned no action; staying in plan mode."
                                             .to_string(),
                                     error: None,
+                                    ..Default::default()
                                 },
                             }
                         } else if call.name == crate::plan_state::TOOL_ENTER_PLAN_MODE {
@@ -2448,6 +2508,7 @@ impl AgentLoop {
                                     approved."
                                     .to_string(),
                                 error: None,
+                                ..Default::default()
                             }
                         } else if call.name == crate::plan_state::TOOL_REQUEST_PLAN_DECISION {
                             // PlanDecision: the model hit a tradeoff and asks the
@@ -2556,27 +2617,27 @@ impl AgentLoop {
                                         success: true,
                                         content: format!("User chose {} ({}). Bake this into the final plan.", option_id, label),
                                         error: None,
-                                    }
+                                     ..Default::default() }
                                 }
                                 InteractionResponse::Revise { feedback } => {
                                     oneai_core::ToolOutput {
                                         success: true,
                                         content: format!("User custom decision: {}. Bake this into the final plan.", feedback),
                                         error: None,
-                                    }
+                                     ..Default::default() }
                                 }
                                 InteractionResponse::Abort { reason } => {
                                     oneai_core::ToolOutput {
                                         success: true,
                                         content: format!("Decision aborted: {}. Pick a sensible default and continue planning.", reason),
                                         error: None,
-                                    }
+                                     ..Default::default() }
                                 }
                                 _ => oneai_core::ToolOutput {
                                     success: true,
                                     content: "Decision auto-proceeded. Pick a sensible default and continue planning.".to_string(),
                                     error: None,
-                                },
+                                 ..Default::default() },
                             }
                         } else {
                             crate::plan_state::apply_control_tool(
@@ -2639,6 +2700,7 @@ impl AgentLoop {
                                             success: true,
                                             content: plan_note.to_string(),
                                             error: None,
+                                            ..Default::default()
                                         },
                                     }
                                 })
@@ -2814,6 +2876,7 @@ impl AgentLoop {
                                                         success: false,
                                                         content: String::new(),
                                                         error: Some(last_error.clone()),
+                                                        ..Default::default()
                                                     };
                                                 }
                                             }
@@ -2891,6 +2954,23 @@ impl AgentLoop {
                         }
                     }
 
+                    // Collect tool names self-reported as newly added this batch
+                    // (before `feed_tool_results` moves `results`). Dedup,
+                    // preserve first-seen order. Used by the self-extension
+                    // diff below.
+                    let reported: Vec<String> = {
+                        let mut seen = std::collections::HashSet::new();
+                        let mut v: Vec<String> = Vec::new();
+                        for r in &results {
+                            for name in &r.output.added_tool_names {
+                                if seen.insert(name.clone()) {
+                                    v.push(name.clone());
+                                }
+                            }
+                        }
+                        v
+                    };
+
                     if has_denied {
                         state.set_final_answer(
                             "Task stopped: a required tool call was denied by the user."
@@ -2901,6 +2981,61 @@ impl AgentLoop {
                     } else {
                         state.feed_tool_results(results);
                     }
+
+                    // ─── Self-extension diff (evolution-plan §3.4) ────────
+                    // Surface tools that became active this batch: the union of
+                    // (a) what the executed tools self-reported via
+                    // `ToolOutput::added_tool_names` and (b) the live registry
+                    // diff vs. the post-last-batch baseline. The diff is
+                    // authoritative (catches mid-turn registrations / gate flips
+                    // that didn't self-report); the field is the explicit signal.
+                    // Runs after `feed_tool_results` moved `results`, so the
+                    // reported names are collected from the pre-move `results`
+                    // above (OTEL block) — here we only read the registry.
+                    let now_active: std::collections::HashSet<String> = {
+                        let tools = self.tools.read().await;
+                        tools
+                            .values()
+                            .filter(|t| t.service_available())
+                            .map(|t| t.name().to_string())
+                            .collect()
+                    };
+                    let newly_active: Vec<String> = match &state.prev_active_tool_names {
+                        Some(prev) => now_active
+                            .iter()
+                            .filter(|n| !prev.contains(*n))
+                            .cloned()
+                            .collect(),
+                        None => Vec::new(), // first batch — establishing baseline
+                    };
+                    // Self-reported names, filtered to those actually present +
+                    // active now (Footprint integrity: don't surface names that
+                    // aren't really registered / gate-on).
+                    let reported_present: Vec<String> = reported
+                        .iter()
+                        .filter(|n| now_active.contains(*n))
+                        .cloned()
+                        .collect();
+                    let mut surfaced: Vec<String> = Vec::new();
+                    {
+                        let mut seen = std::collections::HashSet::new();
+                        for n in newly_active.iter().chain(reported_present.iter()) {
+                            if seen.insert(n.clone()) {
+                                surfaced.push(n.clone());
+                            }
+                        }
+                    }
+                    if !surfaced.is_empty() {
+                        tracing::info!(
+                            "AgentLoop iteration {}: self-extension surfaced {} new tool(s): {:?}",
+                            state.iterations,
+                            surfaced.len(),
+                            surfaced,
+                        );
+                        observer.on_tools_added(&surfaced);
+                        state.pending_new_tools_note = Some(surfaced);
+                    }
+                    state.prev_active_tool_names = Some(now_active);
 
                     tracing::info!(
                         "AgentLoop iteration {}: ToolCalls completed. has_denied={}, conversation now has {} messages. \
@@ -3569,7 +3704,6 @@ impl AgentLoop {
             })
             .collect();
 
-        let tools_map = self.tools.read().await;
         let mut results = Vec::new();
 
         // Pre-check domain PermissionProfile for each call
@@ -3582,16 +3716,38 @@ impl AgentLoop {
             })
             .collect();
 
-        let futures: Vec<_> = routed_calls
+        // Clone the tool Arcs (and per-call permission checks) out of the
+        // read guard, then DROP the guard before any tool executes. A tool
+        // whose side effect is to register/activate other tools
+        // (self-extension, evolution-plan §3.4) may acquire the registry's
+        // write lock during `execute()`; holding this read guard across
+        // execute would deadlock against that write. The futures only need
+        // the cloned `Arc<dyn Tool>` — never the guard itself.
+        type ResolvedCall = (
+            ToolCallRequest,
+            Option<Arc<dyn Tool>>,
+            Option<PermissionAction>,
+        );
+        let resolved: Vec<ResolvedCall> = {
+            let tools_map = self.tools.read().await;
+            routed_calls
+                .into_iter()
+                .zip(domain_permission_checks)
+                .map(|(call, perm_check)| {
+                    let tool_opt = tools_map.get(&call.name).cloned();
+                    (call, tool_opt, perm_check)
+                })
+                .collect()
+        };
+        // `tools_map` read guard dropped here — before any execute() below.
+
+        let futures: Vec<_> = resolved
             .into_iter()
-            .enumerate()
-            .map(|(idx, call)| {
+            .map(|(call, tool_opt, perm_check)| {
                 let tool_name = call.name.clone();
                 let call_id = call.id.clone();
                 let args = call.args.clone();
-                let tool_opt = tools_map.get(&tool_name).cloned();
                 let interaction_gate = self.interaction_gate.clone();
-                let perm_check = domain_permission_checks[idx].clone();
                 async move {
                     // Step 1: Check domain PermissionProfile (highest priority)
                     match perm_check {
@@ -3602,6 +3758,7 @@ impl AgentLoop {
                                 success: false,
                                 content: String::new(),
                                 error: Some(format!("Denied by domain policy: {}", reason)),
+                                ..Default::default()
                             },
                         }),
                         Some(PermissionAction::AutoApprove) => {
@@ -3626,6 +3783,7 @@ impl AgentLoop {
                                             success: false,
                                             content: String::new(),
                                             error: Some(err_msg),
+                                            ..Default::default()
                                         },
                                     })
                                 }
@@ -3664,6 +3822,7 @@ impl AgentLoop {
                                             success: false,
                                             content: String::new(),
                                             error: Some(err_msg),
+                                            ..Default::default()
                                         },
                                     })
                                 }
@@ -3713,6 +3872,7 @@ impl AgentLoop {
                                             success: false,
                                             content: String::new(),
                                             error: Some(err_msg),
+                                            ..Default::default()
                                         },
                                     })
                                 }
@@ -3763,6 +3923,7 @@ impl AgentLoop {
                                             success: false,
                                             content: String::new(),
                                             error: Some(err_msg),
+                                            ..Default::default()
                                         },
                                     })
                                 }
@@ -3783,6 +3944,7 @@ impl AgentLoop {
                         success: false,
                         content: String::new(),
                         error: Some(format!("Tool execution error: {}", e)),
+                        ..Default::default()
                     },
                 }),
             }
@@ -5295,6 +5457,27 @@ impl AgentLoop {
                 }
             }
         }
+        // Self-extension nudge (evolution-plan §3.4): if a previous tool batch
+        // surfaced new tools, tell the model they exist. One-shot — cleared
+        // by the caller after this turn's request is built (so a compression
+        // re-build within the same turn still sees it, but the next turn does
+        // not). Read-only here; the caller owns the clear.
+        if let Some(names) = &state.pending_new_tools_note {
+            if !names.is_empty() {
+                let list = names
+                    .iter()
+                    .map(|n| format!("- `{n}`"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                conv.add_message(Message::system(format!(
+                    "# Newly available tools\n\
+                     The following tools became available after the last step:\n\
+                     {list}\n\n\
+                     Review their definitions above; use one if it helps complete \
+                     the task. There is no obligation to call them."
+                )));
+            }
+        }
     }
 
     /// Select a recovery strategy based on the type of tool call failure.
@@ -5393,6 +5576,7 @@ impl AgentLoop {
                     success: false,
                     content: String::new(),
                     error: Some(format!("User rejected: {}", feedback)),
+                    ..Default::default()
                 },
             }),
             Ok(InteractionResponse::Abort { reason }) => Ok(ToolCallResult {
@@ -5402,6 +5586,7 @@ impl AgentLoop {
                     success: false,
                     content: String::new(),
                     error: Some(format!("Denied: {}", reason)),
+                    ..Default::default()
                 },
             }),
             Ok(_) => Ok(ToolCallResult {
@@ -5411,6 +5596,7 @@ impl AgentLoop {
                     success: false,
                     content: String::new(),
                     error: Some("Unsupported interaction response for tool approval".to_string()),
+                    ..Default::default()
                 },
             }),
             Err(e) => Ok(ToolCallResult {
@@ -5420,6 +5606,7 @@ impl AgentLoop {
                     success: false,
                     content: String::new(),
                     error: Some(format!("Interaction error: {}", e)),
+                    ..Default::default()
                 },
             }),
         }

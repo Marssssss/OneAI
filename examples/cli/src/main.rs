@@ -80,6 +80,7 @@ mod cmd_mcp;
 mod cmd_memory;
 mod cmd_pack;
 mod cmd_provider;
+mod cmd_reload;
 mod cmd_run;
 mod cmd_session;
 mod cmd_skill;
@@ -136,6 +137,20 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
         /// User id — namespaces cross-session memory/habits
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Reload the agent's runtime data layer (skills / MCP tools) without
+    /// restarting (Phase 3.4). Re-reads convention-dir skill markdown and
+    /// re-registers MCP tools; the next `run`/`chat` sees them.
+    Reload {
+        /// Domain pack to use (selects builtin skills to register)
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model name override (overrides ONEAI_MODEL / config)
+        #[arg(long)]
+        model: Option<String>,
+        /// User identity for memory namespacing
         #[arg(long)]
         user: Option<String>,
     },
@@ -1169,6 +1184,18 @@ fn main() {
         }) => {
             cmd_run::cmd_run(
                 &prompt,
+                &config,
+                domain.as_deref(),
+                model.as_deref(),
+                user.as_deref(),
+            );
+        }
+        Some(Commands::Reload {
+            domain,
+            model,
+            user,
+        }) => {
+            cmd_reload::cmd_reload(
                 &config,
                 domain.as_deref(),
                 model.as_deref(),

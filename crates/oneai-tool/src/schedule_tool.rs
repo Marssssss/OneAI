@@ -90,6 +90,7 @@ impl Tool for ScheduleTool {
                 error: Some(format!(
                     "unknown action '{other}' (add|list|remove|trigger)"
                 )),
+                ..Default::default()
             }),
         }
     }
@@ -117,6 +118,7 @@ impl ScheduleTool {
                 success: false,
                 content: String::new(),
                 error: Some("add requires name, schedule, and task".to_string()),
+                ..Default::default()
             });
         }
         let spec = CronJobSpec {
@@ -161,11 +163,13 @@ impl ScheduleTool {
                      `oneai cron serve` must be running to deliver."
                 ),
                 error: None,
+                ..Default::default()
             }),
             Err(e) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("{e}")),
+                ..Default::default()
             }),
         }
     }
@@ -178,6 +182,7 @@ impl ScheduleTool {
                         success: true,
                         content: "No scheduled jobs.".to_string(),
                         error: None,
+                        ..Default::default()
                     });
                 }
                 let mut out = String::new();
@@ -191,12 +196,14 @@ impl ScheduleTool {
                     success: true,
                     content: out,
                     error: None,
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("{e}")),
+                ..Default::default()
             }),
         }
     }
@@ -208,6 +215,7 @@ impl ScheduleTool {
                 success: false,
                 content: String::new(),
                 error: Some("remove requires id".to_string()),
+                ..Default::default()
             });
         }
         match self.scheduler.remove_job(id).await {
@@ -215,11 +223,13 @@ impl ScheduleTool {
                 success: true,
                 content: format!("Removed job '{id}'."),
                 error: None,
+                ..Default::default()
             }),
             Ok(false) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("No job '{id}'.")),
+                ..Default::default()
             }),
             Err(e) => Err(OneAIError::Other(format!("{e}"))),
         }
@@ -232,6 +242,7 @@ impl ScheduleTool {
                 success: false,
                 content: String::new(),
                 error: Some("trigger requires id".to_string()),
+                ..Default::default()
             });
         }
         match self.scheduler.trigger_job(id).await {
@@ -239,11 +250,13 @@ impl ScheduleTool {
                 success: true,
                 content: format!("Fired job '{id}' (delivered via the gateway)."),
                 error: None,
+                ..Default::default()
             }),
             Ok(false) => Ok(ToolOutput {
                 success: false,
                 content: String::new(),
                 error: Some(format!("Could not fire '{id}' (not found / disabled).")),
+                ..Default::default()
             }),
             Err(e) => Err(OneAIError::Other(format!("{e}"))),
         }
