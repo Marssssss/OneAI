@@ -23,6 +23,7 @@ pub mod mcp_real;
 pub mod mcp_tools;
 pub mod registry;
 pub mod sandbox;
+pub mod schedule_tool;
 pub mod tool_interfaces;
 
 // Explicit imports to avoid ambiguity between local_tools and tool_interfaces
@@ -41,6 +42,7 @@ pub use sandbox::{
     default_sandbox_backend, DockerBackend, RegexBackend, SandboxBackend, SeatbeltBackend,
     WrappedCommand,
 };
+pub use schedule_tool::ScheduleTool;
 pub use tool_interfaces::*;
 pub use tool_interfaces::{SearchResult, WebSearchTool};
 

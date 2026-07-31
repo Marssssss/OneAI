@@ -98,6 +98,7 @@ pub fn cmd_supervisor_serve(
                 provider_config,
                 &pack_name,
                 user,
+                None,
             )
             .await?;
         }

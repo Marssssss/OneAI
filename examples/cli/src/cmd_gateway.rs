@@ -102,7 +102,7 @@ pub fn cmd_gateway_serve(
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(async {
         let (_gateway, handle) =
-            run_gateway_task(config, addr, provider_config, &pack_name, user).await?;
+            run_gateway_task(config, addr, provider_config, &pack_name, user, None).await?;
         handle
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })??;
@@ -127,6 +127,7 @@ pub(crate) async fn run_gateway_task(
     model_config: Option<oneai_core::ModelConfig>,
     pack_name: &str,
     user: Option<&str>,
+    cron: Option<Arc<dyn oneai_core::traits::CronScheduler>>,
 ) -> Result<
     (
         Arc<Gateway>,
@@ -134,7 +135,7 @@ pub(crate) async fn run_gateway_task(
     ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let gateway = build_gateway(config, model_config, pack_name, user).await?;
+    let gateway = build_gateway(config, model_config, pack_name, user, cron).await?;
 
     // ── Webhook state (webhook-push adapters) ──
     let mut state = WebhookState::new(gateway.clone())
@@ -170,6 +171,7 @@ pub(crate) async fn build_gateway(
     model_config: Option<oneai_core::ModelConfig>,
     pack_name: &str,
     user: Option<&str>,
+    cron: Option<Arc<dyn oneai_core::traits::CronScheduler>>,
 ) -> Result<Arc<Gateway>, Box<dyn std::error::Error + Send + Sync>> {
     let has_provider = model_config.is_some();
     if !has_provider {
@@ -187,6 +189,7 @@ pub(crate) async fn build_gateway(
         config: config.clone(),
         model_config,
         user: user.map(String::from),
+        cron,
     }) as Arc<dyn AppFactory>;
     let runner = Arc::new(AppGatewayRunner {
         factory,
@@ -255,6 +258,10 @@ struct GatewayAppFactory {
     config: OneaiConfig,
     model_config: Option<oneai_core::ModelConfig>,
     user: Option<String>,
+    /// Optional cron scheduler — when set, the lazily-built App gets
+    /// `.cron_provider(...)` so the `schedule` agent tool is registered
+    /// (the user can say "每天9点..." in chat and the agent wires a cron job).
+    cron: Option<Arc<dyn oneai_core::traits::CronScheduler>>,
 }
 
 #[async_trait]
@@ -278,6 +285,9 @@ impl AppFactory for GatewayAppFactory {
         }
         if let Some(uid) = &self.user {
             builder = builder.user_id(uid);
+        }
+        if let Some(cron) = &self.cron {
+            builder = builder.cron_provider(cron.clone());
         }
 
         let app = builder.build().await.ok()?;

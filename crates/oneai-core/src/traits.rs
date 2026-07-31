@@ -440,6 +440,93 @@ pub trait CronScheduler: Send + Sync {
     fn supports_external_trigger(&self) -> bool {
         false
     }
+
+    // ─── Job management (the agent-tool seam) ──────────────────────────────
+    //
+    // These let an agent `schedule` tool create / inspect / remove / manually
+    // fire cron jobs — so a user can say "每天9点总结commits" in chat and the
+    // agent wires it. Safe defaults: a minimal provider that only ticks
+    // returns "unsupported" / empty. The concrete `CronSchedulerImpl` impls
+    // these against its [`JobStore`]. Uses the core-level [`CronJobSpec`] so
+    // `oneai-core` need not depend on `oneai-scheduler`'s richer `CronJob`.
+
+    /// Add (or replace) a job from a spec. The impl parses `spec.schedule`
+    /// and arms `next_fire_at`. Returns the job id (generated if `spec.id`
+    /// is empty). Default: unsupported.
+    async fn add_job(&self, _spec: CronJobSpec) -> Result<String> {
+        Err(crate::error::OneAIError::Other(
+            "cron provider does not support add_job".to_string(),
+        ))
+    }
+
+    /// List all jobs as specs. Default: empty.
+    async fn list_jobs(&self) -> Result<Vec<CronJobSpec>> {
+        Ok(Vec::new())
+    }
+
+    /// Remove a job by id. Returns whether it existed. Default: false.
+    async fn remove_job(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Manually fire a job now (force — ignores the due window; the impl
+    /// routes through its delivery `CronRunner`). Returns whether it fired.
+    /// Default: false.
+    async fn trigger_job(&self, _id: &str) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+// ─── CronJobSpec ──────────────────────────────────────────────────────────────
+
+/// A core-level cron job spec — primitive fields only, so the
+/// [`CronScheduler`] trait can expose job management to agent tools without
+/// `oneai-core` depending on `oneai-scheduler`'s richer `CronJob`. The impl
+/// parses `schedule` (`"30m"` / `"every 2h"` / ISO / 5-field cron) and adds
+/// the store-internal `next_fire_at` / `last_fired_at`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJobSpec {
+    /// Job id. Empty → the provider generates one (uuid).
+    #[serde(default)]
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Raw schedule dialect, parsed by the provider.
+    pub schedule: String,
+    /// The task / prompt to deliver into the agent turn on each fire.
+    pub task: String,
+    /// Originating platform name (for `deliver=origin`). Default `loopback`.
+    #[serde(default)]
+    pub platform: String,
+    /// Originating channel (raw) to relay the reply to. Default empty.
+    #[serde(default)]
+    pub channel: String,
+    /// Session id to deliver into. Default empty → provider mints one.
+    #[serde(default)]
+    pub session_id: String,
+    /// Bound DomainPack. Default empty → `coding`.
+    #[serde(default)]
+    pub pack: String,
+    /// Originating user id. Default empty.
+    #[serde(default)]
+    pub user_id: String,
+    /// `"origin"` (relay reply to the channel) or `"silent"`. Default `origin`.
+    #[serde(default = "cron_default_deliver")]
+    pub deliver: String,
+    /// Enabled flag. Default true.
+    #[serde(default = "cron_default_true")]
+    pub enabled: bool,
+    /// Arbitrary metadata.
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+fn cron_default_deliver() -> String {
+    "origin".to_string()
+}
+
+fn cron_default_true() -> bool {
+    true
 }
 
 // ─── ScheduledTask / TaskHandle ───────────────────────────────────────────────

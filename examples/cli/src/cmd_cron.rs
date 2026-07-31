@@ -188,14 +188,16 @@ pub fn cmd_cron_fire(id: &str) {
         } else {
             job.pack.as_str()
         };
-        let gateway = match build_gateway(&config, model_config, pack, None).await {
+        let gateway = match build_gateway(&config, model_config, pack, None, None).await {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("Error building gateway: {e}");
                 std::process::exit(1);
             }
         };
-        let runner = GatewayCronRunner { gateway };
+        let runner = GatewayCronRunner::new();
+        // Fire is a one-shot CLI — set the cell then deliver.
+        let _ = runner.gateway_cell.set(gateway);
         match runner.deliver(&job).await {
             Ok(DeliveryOutcome::Done { reply, iterations }) => {
                 println!("✅ delivered ({} iterations).", iterations);
@@ -277,19 +279,35 @@ pub fn cmd_cron_serve(
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(async {
-        // ── Gateway (delivery + inbound) — built + served by run_gateway_task ──
-        let (gateway, gw_handle) =
-            crate::cmd_gateway::run_gateway_task(config, gw_addr, model_config, &pack_name, user)
-                .await?;
-
-        // ── Cron store + runner + orchestrator ──
+        // ── Cron store + runner + orchestrator (built FIRST so the gateway's
+        //    lazily-built App factory can inject `.cron_provider(sched)` →
+        //    the `schedule` agent tool appears in gateway chats) ──
         let store: Arc<dyn JobStore> = Arc::new(FileJobStore::new(default_root()).await?);
-        let runner = Arc::new(GatewayCronRunner {
-            gateway: gateway.clone(),
-        }) as Arc<dyn CronRunner>;
-        let sched = Arc::new(CronSchedulerImpl::new(store.clone(), runner));
+        // Build the concrete runner FIRST so we can set its gateway cell after
+        // the gateway exists; the scheduler gets an `Arc<dyn CronRunner>` clone
+        // of the *same* `GatewayCronRunner` (Arc clone — cell write is visible
+        // to the scheduler's copy).
+        let gw_runner = Arc::new(GatewayCronRunner::new());
+        let runner_dyn: Arc<dyn CronRunner> = gw_runner.clone();
+        let sched = Arc::new(CronSchedulerImpl::new(store.clone(), runner_dyn));
+        let cron_dyn: Arc<dyn CronScheduler> = sched.clone();
 
-        // ── Start the orchestrator ticker ──
+        // ── Gateway (delivery + inbound) — factory gets the scheduler so the
+        //    `schedule` tool is registered; the runner's gateway cell is set
+        //    once the gateway exists (chicken-and-egg via OnceLock) ──
+        let (gateway, gw_handle) = crate::cmd_gateway::run_gateway_task(
+            config,
+            gw_addr,
+            model_config,
+            &pack_name,
+            user,
+            Some(cron_dyn),
+        )
+        .await?;
+        let _ = gw_runner.gateway_cell.set(gateway.clone());
+
+        // ── Start the orchestrator ticker (after the gateway cell is set so
+        //    the first tick can deliver) ──
         sched.start().await.map_err(|e| {
             Box::new(std::io::Error::other(format!("cron start: {e}")))
                 as Box<dyn std::error::Error + Send + Sync>
@@ -333,22 +351,39 @@ pub fn cmd_cron_serve(
 
 // ─── CronRunner impl — routes fired jobs into the gateway ────────────────────
 
+/// Holds the gateway behind a `OnceLock` so the scheduler can be constructed
+/// *before* the gateway exists (the gateway's lazily-built App factory needs
+/// the scheduler to register the `schedule` tool → the scheduler's runner
+/// needs the gateway → chicken-and-egg). The cell is set once the gateway is
+/// built; `deliver` reads it (cron never fires before `serve` starts the
+/// ticker, which is after the gateway is up).
 struct GatewayCronRunner {
-    gateway: Arc<Gateway>,
+    gateway_cell: Arc<std::sync::OnceLock<Arc<Gateway>>>,
+}
+
+impl GatewayCronRunner {
+    fn new() -> Self {
+        Self {
+            gateway_cell: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    fn gateway(&self) -> &Arc<Gateway> {
+        self.gateway_cell
+            .get()
+            .expect("gateway not set before cron delivery")
+    }
 }
 
 #[async_trait]
 impl CronRunner for GatewayCronRunner {
     async fn deliver(&self, job: &CronJob) -> CronResult<DeliveryOutcome> {
         use oneai_scheduler::DeliverMode;
+        let gateway = self.gateway();
         if job.deliver == DeliverMode::Silent {
             // Run the turn but don't relay a reply — call the gateway runner
             // directly (no platform send).
-            let outcome = self
-                .gateway
-                .runner()
-                .run_turn(&job.session_id, &job.task)
-                .await;
+            let outcome = gateway.runner().run_turn(&job.session_id, &job.task).await;
             return Ok(map_outcome(outcome));
         }
         // Origin: deliver into the bound channel session, reply relayed by the
@@ -364,8 +399,7 @@ impl CronRunner for GatewayCronRunner {
         } else {
             job.pack.clone()
         };
-        match self
-            .gateway
+        match gateway
             .deliver_scheduled(channel, session_id, pack, job.user_id.clone(), &job.task)
             .await
         {

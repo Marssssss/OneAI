@@ -1569,6 +1569,15 @@ impl AppBuilder {
             }
         }
 
+        // Register the `schedule` agent tool when a cron scheduler is
+        // configured (Phase 3.2 agent-side seam) — zero footprint otherwise:
+        // the tool is never registered, so the model never sees it
+        // (Footprint Ladder: service-gated at the AppBuilder level).
+        if let Some(cron) = &self.cron_scheduler {
+            let tool = oneai_tool::ScheduleTool::new(cron.clone());
+            self.tool_registry.register(Arc::new(tool)).await?;
+        }
+
         // Connect MCP plugin servers and register discovered tools
         let mcp_plugin_registry = self.mcp_plugin_registry;
         if let Some(_registry) = &mcp_plugin_registry {

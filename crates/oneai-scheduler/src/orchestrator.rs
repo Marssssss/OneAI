@@ -29,6 +29,7 @@ use crate::error::Result;
 use crate::job::CronJob;
 use crate::runner::{CronRunner, DeliveryOutcome};
 use crate::store::JobStore;
+use crate::DeliverMode;
 
 /// The durable cron orchestrator.
 pub struct CronSchedulerImpl {
@@ -201,6 +202,50 @@ impl CronScheduler for CronSchedulerImpl {
         let _ = changed;
         Ok(())
     }
+
+    // ─── Job management (agent-tool seam) ───────────────────────────────────
+
+    async fn add_job(&self, spec: oneai_core::traits::CronJobSpec) -> CoreResult<String> {
+        let job = spec_to_job(spec, Utc::now())
+            .map_err(|e| oneai_core::error::OneAIError::Other(format!("cron add_job: {e}")))?;
+        let id = job.id.clone();
+        crate::add_job(&self.store, job, Utc::now())
+            .await
+            .map_err(|e| oneai_core::error::OneAIError::Other(format!("cron add_job: {e}")))?;
+        Ok(id)
+    }
+
+    async fn list_jobs(&self) -> CoreResult<Vec<oneai_core::traits::CronJobSpec>> {
+        let jobs = self
+            .store
+            .list()
+            .await
+            .map_err(|e| oneai_core::error::OneAIError::Other(format!("cron list: {e}")))?;
+        Ok(jobs.into_iter().map(job_to_spec).collect())
+    }
+
+    async fn remove_job(&self, id: &str) -> CoreResult<bool> {
+        self.store
+            .remove(id)
+            .await
+            .map_err(|e| oneai_core::error::OneAIError::Other(format!("cron remove: {e}")))
+    }
+
+    async fn trigger_job(&self, id: &str) -> CoreResult<bool> {
+        let now = Utc::now();
+        let snapshot = self
+            .store
+            .force_fire(id, now)
+            .await
+            .map_err(|e| oneai_core::error::OneAIError::Other(format!("cron trigger: {e}")))?;
+        match snapshot {
+            Some(job) => {
+                self.deliver(job).await;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 impl CronSchedulerImpl {
@@ -239,6 +284,73 @@ pub async fn add_job(
         job.next_fire_at = job.schedule.next_fire_after(now);
     }
     store.upsert(job).await
+}
+
+// ─── CronJobSpec ↔ CronJob conversion ────────────────────────────────────────
+
+/// Convert a core `CronJobSpec` into a scheduler `CronJob`: parse the
+/// schedule dialect, map the `deliver` string to [`DeliverMode`], generate an
+/// id if empty. `next_fire_at` is left `None` (the store / `add_job` arms it).
+fn spec_to_job(spec: oneai_core::traits::CronJobSpec, _now: DateTime<Utc>) -> Result<CronJob> {
+    let schedule = crate::parse_schedule(&spec.schedule)?;
+    let deliver = match spec.deliver.trim().to_ascii_lowercase().as_str() {
+        "" | "origin" => DeliverMode::Origin,
+        "silent" => DeliverMode::Silent,
+        other => {
+            return Err(crate::error::CronError::Store(format!(
+                "unknown deliver mode '{other}' (origin|silent)"
+            )))
+        }
+    };
+    let id = if spec.id.trim().is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        spec.id
+    };
+    Ok(CronJob {
+        id,
+        name: spec.name,
+        schedule,
+        task: spec.task,
+        session_id: spec.session_id,
+        platform: spec.platform,
+        channel: spec.channel,
+        pack: spec.pack,
+        user_id: spec.user_id,
+        deliver,
+        next_fire_at: None,
+        last_fired_at: None,
+        enabled: spec.enabled,
+        metadata: spec.metadata,
+    })
+}
+
+/// Convert a scheduler `CronJob` back to a core `CronJobSpec` (drops the
+/// store-internal `next_fire_at` / `last_fired_at`).
+fn job_to_spec(job: CronJob) -> oneai_core::traits::CronJobSpec {
+    let deliver = match job.deliver {
+        DeliverMode::Origin => "origin".to_string(),
+        DeliverMode::Silent => "silent".to_string(),
+    };
+    let schedule = match &job.schedule {
+        crate::Schedule::Interval { interval } => format!("{}s", interval.as_secs()),
+        crate::Schedule::OneShot { at } => at.to_rfc3339(),
+        crate::Schedule::Cron { expr } => expr.clone(),
+    };
+    oneai_core::traits::CronJobSpec {
+        id: job.id,
+        name: job.name,
+        schedule,
+        task: job.task,
+        platform: job.platform,
+        channel: job.channel,
+        session_id: job.session_id,
+        pack: job.pack,
+        user_id: job.user_id,
+        deliver,
+        enabled: job.enabled,
+        metadata: job.metadata,
+    }
 }
 /// A no-op [`CronRunner`] that records deliveries (for tests + the `Silent`
 /// delivery path when no gateway is wired).
@@ -317,5 +429,73 @@ mod tests {
         assert!(sched.trigger("j1", Utc::now()).await.unwrap());
         // Second trigger in same window: CAS rejects (advanced).
         assert!(!sched.trigger("j1", Utc::now()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn trait_seam_add_list_remove_trigger() {
+        // The agent-tool seam (CronScheduler::add_job/list_jobs/remove_job/
+        // trigger_job): the ScheduleTool drives these. Round-trip a job.
+        use oneai_core::traits::{CronJobSpec, CronScheduler as _};
+        let store: Arc<dyn JobStore> = Arc::new(InMemoryJobStore::new());
+        let runner: Arc<dyn CronRunner> = Arc::new(NoopCronRunner::new());
+        let sched = Arc::new(CronSchedulerImpl::with_tick(
+            store,
+            runner,
+            Duration::from_secs(1),
+        ));
+
+        // add: empty id → provider generates one; returns the id.
+        let id = sched
+            .add_job(CronJobSpec {
+                id: String::new(),
+                name: "standup".into(),
+                schedule: "0 9 * * *".into(),
+                task: "summarize commits".into(),
+                platform: "loopback".into(),
+                channel: "c1".into(),
+                session_id: String::new(),
+                pack: "coding".into(),
+                user_id: String::new(),
+                deliver: "origin".into(),
+                enabled: true,
+                metadata: std::collections::HashMap::new(),
+            })
+            .await
+            .unwrap();
+        assert!(!id.is_empty());
+
+        // list: the job shows up as a spec (round-trip).
+        let jobs = sched.list_jobs().await.unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "standup");
+        assert_eq!(jobs[0].schedule, "0 9 * * *");
+
+        // trigger: force-fires + delivers via the runner (CAS path).
+        assert!(sched.trigger_job(&id).await.unwrap());
+        // remove.
+        assert!(sched.remove_job(&id).await.unwrap());
+        assert!(sched.list_jobs().await.unwrap().is_empty());
+
+        // bad schedule → add_job returns the parse error.
+        let bad = sched
+            .add_job(CronJobSpec {
+                schedule: "not a schedule".into(),
+                ..CronJobSpec {
+                    id: String::new(),
+                    name: "x".into(),
+                    schedule: "not a schedule".into(),
+                    task: "x".into(),
+                    platform: String::new(),
+                    channel: String::new(),
+                    session_id: String::new(),
+                    pack: String::new(),
+                    user_id: String::new(),
+                    deliver: "origin".into(),
+                    enabled: true,
+                    metadata: std::collections::HashMap::new(),
+                }
+            })
+            .await;
+        assert!(bad.is_err());
     }
 }
