@@ -389,6 +389,16 @@ uint64_t uniffi_oneai_fn_method_oneaisession_send_user_message(uint64_t ptr, Rus
 RustBuffer uniffi_oneai_fn_method_oneaisession_session_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_TRANSCRIPT_OLDER
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_TRANSCRIPT_OLDER
+uint64_t uniffi_oneai_fn_method_oneaisession_transcript_older(uint64_t ptr, RustBuffer cursor, uint32_t limit
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_TRANSCRIPT_RECENT
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_METHOD_ONEAISESSION_TRANSCRIPT_RECENT
+uint64_t uniffi_oneai_fn_method_oneaisession_transcript_recent(uint64_t ptr, uint32_t limit
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_CLONE_ONEAITOOLWRAPPER
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_FN_CLONE_ONEAITOOLWRAPPER
 uint64_t uniffi_oneai_fn_clone_oneaitoolwrapper(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -894,6 +904,18 @@ uint16_t uniffi_oneai_checksum_method_oneaisession_send_user_message(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_SESSION_ID
 #define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_SESSION_ID
 uint16_t uniffi_oneai_checksum_method_oneaisession_session_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_TRANSCRIPT_OLDER
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_TRANSCRIPT_OLDER
+uint16_t uniffi_oneai_checksum_method_oneaisession_transcript_older(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_TRANSCRIPT_RECENT
+#define UNIFFI_FFIDEF_UNIFFI_ONEAI_CHECKSUM_METHOD_ONEAISESSION_TRANSCRIPT_RECENT
+uint16_t uniffi_oneai_checksum_method_oneaisession_transcript_recent(void
     
 );
 #endif

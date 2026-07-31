@@ -95,6 +95,16 @@ pub struct MemoryManager {
     decay: tokio::sync::RwLock<Option<oneai_core::DecayPolicy>>,
 }
 
+/// A page of the merged transcript for paginated display (oldest-first).
+/// `older_cursor` is the rank below this page (pass to `transcript_older`),
+/// or `None` when the top of the transcript has been reached.
+#[derive(Default)]
+pub struct TranscriptPageData {
+    pub messages: Vec<Message>,
+    pub total: usize,
+    pub older_cursor: Option<usize>,
+}
+
 /// Pure merge of a live (compressed) conversation with its discarded-prefix
 /// archive snapshots into a single linear transcript (system messages
 /// dropped — the foreign UI renders only `user`/`assistant` rows). See
@@ -706,6 +716,165 @@ impl MemoryManager {
         Ok(merge_full_transcript(live, &snapshots))
     }
 
+    /// A page of the merged transcript for paginated display.
+    ///
+    /// Paginated transcript: return the display (non-`system`) messages whose
+    /// 0-based display ranks (oldest = 0) fall in `[from_rank, to_rank)`, plus
+    /// the total display count `D` and an `older_cursor` = `Some(from_rank)`
+    /// when `from_rank > 0` (else `None` = reached the top).
+    ///
+    /// Uses the segment model (see `merge_full_transcript`): `[live_prefix] +
+    /// snapshots(oldest-first) + [live_tail]`. Only snapshot segments whose
+    /// rank range intersects `[from_rank, to_rank)` are deserialized (via
+    /// `load_conversation`); the live segments are sliced in-memory. This bounds
+    /// per-call memory + deserialization to 1-2 snapshots regardless of total
+    /// history length. Without persistence, the segment list collapses to the
+    /// live messages.
+    pub async fn transcript_page(
+        &self,
+        session_id: &str,
+        live: &Conversation,
+        from_rank: usize,
+        to_rank: usize,
+    ) -> Result<TranscriptPageData> {
+        use oneai_core::Role;
+
+        // live_prefix = messages[0..=first_user_idx] (system + pinned first
+        // user). `first_user_idx` is None ⇒ no pinned user ⇒ prefix is just
+        // the leading system message (or empty).
+        let live_prefix_end = match live.messages.iter().position(|m| m.role == Role::User) {
+            Some(i) => i + 1,
+            None => live.messages.len().min(1),
+        };
+        let prefix_msgs: Vec<&Message> = live.messages[..live_prefix_end]
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .collect();
+        let tail_msgs: Vec<&Message> = live.messages[live_prefix_end..]
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .collect();
+
+        let prefix_count = prefix_msgs.len();
+        let tail_count = tail_msgs.len();
+
+        // Snapshot display counts (cheap, no content load). Without
+        // persistence this is empty → page slices live only.
+        let snap_counts: Vec<(String, u32)> = match &self.persistence {
+            Some(p) => p.snapshot_display_counts(session_id).await?,
+            None => Vec::new(),
+        };
+        let snap_total: usize = snap_counts.iter().map(|(_, c)| *c as usize).sum();
+        let total = prefix_count + snap_total + tail_count;
+
+        let from = from_rank.min(total);
+        let to = to_rank.min(total);
+        let mut out: Vec<Message> = Vec::new();
+        if from < to {
+            // Walk segments oldest→newest, tracking each segment's global
+            // [seg_lo, seg_hi) rank range; slice the intersection.
+            let mut cur = 0usize;
+
+            // Seg 0: live_prefix (in-memory).
+            let seg_hi = cur + prefix_count;
+            if seg_hi > from && cur < to {
+                let lo = from.saturating_sub(cur);
+                let hi = to.min(seg_hi) - cur;
+                for m in &prefix_msgs[lo..hi] {
+                    out.push((*m).clone());
+                }
+            }
+            cur = seg_hi;
+
+            // Segs 1..N: snapshots (load only intersected ones).
+            if let Some(p) = &self.persistence {
+                for (sid, count) in &snap_counts {
+                    let seg_hi = cur + *count as usize;
+                    if seg_hi > from && cur < to {
+                        if let Some(snap) = p.load_conversation(sid).await? {
+                            let disp: Vec<&Message> = snap
+                                .messages
+                                .iter()
+                                .filter(|m| m.role != Role::System)
+                                .collect();
+                            let lo = from.saturating_sub(cur);
+                            let hi = to.min(seg_hi) - cur;
+                            for m in &disp[lo..hi] {
+                                out.push((*m).clone());
+                            }
+                        }
+                    }
+                    cur = seg_hi;
+                }
+            }
+
+            // Seg N+1: live_tail (in-memory).
+            let seg_hi = cur + tail_count;
+            if seg_hi > from && cur < to {
+                let lo = from.saturating_sub(cur);
+                let hi = to.min(seg_hi) - cur;
+                for m in &tail_msgs[lo..hi] {
+                    out.push((*m).clone());
+                }
+            }
+        }
+
+        let older_cursor = if from > 0 { Some(from) } else { None };
+        Ok(TranscriptPageData {
+            messages: out,
+            total,
+            older_cursor,
+        })
+    }
+
+    /// The most recent `limit` display messages (the bottom of the chat).
+    /// `older_cursor` is the rank below this page (for `transcript_older`),
+    /// or `None` when the whole transcript fit in one page.
+    pub async fn transcript_recent(
+        &self,
+        session_id: &str,
+        live: &Conversation,
+        limit: usize,
+    ) -> Result<TranscriptPageData> {
+        let total = self.transcript_total(session_id, live).await?;
+        let from = total.saturating_sub(limit);
+        self.transcript_page(session_id, live, from, total).await
+    }
+
+    /// Older messages immediately above `cursor_rank` (exclusive). Returns the
+    /// page `[max(0, cursor-limit), cursor)` and a new `older_cursor` below it.
+    pub async fn transcript_older(
+        &self,
+        session_id: &str,
+        live: &Conversation,
+        cursor_rank: usize,
+        limit: usize,
+    ) -> Result<TranscriptPageData> {
+        let to = cursor_rank;
+        let from = to.saturating_sub(limit);
+        self.transcript_page(session_id, live, from, to).await
+    }
+
+    /// Total display message count, cheap (no snapshot content load).
+    pub async fn transcript_total(&self, session_id: &str, live: &Conversation) -> Result<usize> {
+        use oneai_core::Role;
+        let live_count = live
+            .messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .count();
+        let snap_total: usize = match &self.persistence {
+            Some(p) => p
+                .snapshot_display_counts(session_id)
+                .await?
+                .iter()
+                .map(|(_, c)| *c as usize)
+                .sum(),
+            None => 0,
+        };
+        Ok(live_count + snap_total)
+    }
+
     // ─── Reflection ───────────────────────────────────────────────────
 
     /// §12.3: reflect mid-session if the cumulative importance of newly
@@ -1172,6 +1341,103 @@ mod manager_tests {
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].role, Role::User);
         assert_eq!(merged[1].role, Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn test_transcript_page_recent_then_older_chain() {
+        // Paginated merge against a real SQLite archive: live = compressed
+        // [summary sys, pinned first user, recent tail]; two discarded snapshots
+        // (each with a leading system message that must be skipped). Walk the
+        // pages newest→oldest via cursor and confirm the full linear order
+        // reconstructs with system dropped, first user at the oldest rank, and
+        // no duplicates.
+        use oneai_core::{Message, Role};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(oneai_persistence::SqliteSessionStore::new(
+            dir.path().join("t.db"),
+        ));
+
+        let manager = MemoryManager::with_persistence(
+            MemoryManagerConfig::default(),
+            Arc::clone(&store) as Arc<dyn oneai_core::traits::MemoryPersistence>,
+        );
+        let sid = "sessA";
+
+        // live = [summary sys, first_user(pinned), recent assistant, recent user]
+        let mut live = Conversation::with_id(sid.to_string());
+        live.add_message(Message::system(
+            "[Previous conversation summary]: ...".to_string(),
+        ));
+        live.add_message(Message::user("我需要面试Android Framework".to_string()));
+        live.add_message(Message::assistant("recent reply".to_string()));
+        live.add_message(Message::user("recent follow-up".to_string()));
+        store.save_conversation(sid, &live).await.unwrap();
+
+        // snap1 (oldest): base system prompt + early assistant + early user.
+        let s1 = format!("sessA{}u1", oneai_core::DISCARDED_SNAPSHOT_MARKER);
+        let mut snap1 = Conversation::with_id(s1.clone());
+        snap1.add_message(Message::system("You are an intelligent agent".to_string()));
+        snap1.add_message(Message::assistant(
+            "introduce Android Framework".to_string(),
+        ));
+        snap1.add_message(Message::user("进入下一个主题吧".to_string()));
+        store.save_conversation(&s1, &snap1).await.unwrap();
+
+        // snap2 (newer): prior summary system + middle user.
+        let s2 = format!("sessA{}u2", oneai_core::DISCARDED_SNAPSHOT_MARKER);
+        let mut snap2 = Conversation::with_id(s2.clone());
+        snap2.add_message(Message::system(
+            "[Previous conversation summary]: ...".to_string(),
+        ));
+        snap2.add_message(Message::user("middle topic".to_string()));
+        store.save_conversation(&s2, &snap2).await.unwrap();
+
+        // Total display messages: live=3 (first_user, recent reply, recent
+        // follow-up) + snap1=2 (assistant, user) + snap2=1 (user) = 6.
+        let total = manager.transcript_total(sid, &live).await.unwrap();
+        assert_eq!(total, 6);
+
+        // Recent page of 3 → the newest 3 display messages: [middle topic,
+        // recent reply, recent follow-up] (ranks 3,4,5). cursor = rank 3.
+        let page = manager.transcript_recent(sid, &live, 3).await.unwrap();
+        assert_eq!(page.total, 6);
+        assert_eq!(
+            page.older_cursor,
+            Some(3),
+            "cursor points below the oldest message in this page"
+        );
+        let texts: Vec<String> = page.messages.iter().map(|m| m.text_content()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "middle topic".to_string(),
+                "recent reply".to_string(),
+                "recent follow-up".to_string(),
+            ]
+        );
+
+        // Older page from cursor=3, limit=3 → ranks [0,3) = [first_user,
+        // introduce Android, 进入下一个主题]. cursor = None (reached top).
+        let page2 = manager.transcript_older(sid, &live, 3, 3).await.unwrap();
+        assert_eq!(page2.total, 6);
+        assert_eq!(page2.older_cursor, None, "reached the top");
+        let texts2: Vec<String> = page2.messages.iter().map(|m| m.text_content()).collect();
+        assert_eq!(
+            texts2,
+            vec![
+                "我需要面试Android Framework".to_string(),
+                "introduce Android Framework".to_string(),
+                "进入下一个主题吧".to_string(),
+            ]
+        );
+        // Pinned first user is the oldest display message.
+        assert_eq!(page2.messages[0].role, Role::User);
+        assert!(page2.messages[0].text_content().contains("我需要面试"));
+        // No system messages in either page.
+        assert!(page.messages.iter().all(|m| m.role != Role::System));
+        assert!(page2.messages.iter().all(|m| m.role != Role::System));
     }
 
     #[tokio::test]

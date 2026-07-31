@@ -829,8 +829,41 @@ private struct ChatDetail: View {
             // preference-key frame-direction logic (which couldn't tell a
             // programmatic auto-follow from a user scrolling back, yanking the
             // user down mid-stream). See `ScrollController` above.
+            //
+            // `ScrollViewReader` wraps ONLY to drive the "load earlier"
+            // scroll-to-prepended-page (a rare explicit action — its async
+            // `scrollTo` is fine here, no streaming competing). It does NOT
+            // replace `ScrollController` for snap/follow.
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    // "Load earlier messages" affordance. Shown only when older
+                    // transcript pages exist below the loaded window. Tapping
+                    // prepends one page (`vm.loadOlder`) and scrolls the page's
+                    // first id into view (see onChange below). Keeps `items`
+                    // bounded to the loaded window regardless of total history.
+                    if vm.hasOlder {
+                        Button {
+                            Task { await vm.loadOlder() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if vm.olderLoading {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.up")
+                                }
+                                Text(vm.olderLoading ? "加载中…" : "加载更早消息")
+                                    .font(.oCaption)
+                            }
+                            .foregroundStyle(Theme.onSurfaceVar)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.plain)
+                        .pointerCursor()
+                        .padding(.bottom, 2)
+                        .help("加载更早的历史消息")
+                    }
                     ForEach(vm.items) { entry in
                         switch entry {
                         case .user(let u): UserBubble(text: u.text, item: u, vm: vm).equatable()
@@ -866,6 +899,17 @@ private struct ChatDetail: View {
                     .padding(.bottom, 8)
                     .help("回到底部")
                 }
+            }
+            // After prepending an older page, scroll its first (oldest) id to
+            // the viewport top so the user sees the newly loaded messages. The
+            // 50ms delay lets the prepended content lay out first. nil (session
+            // load) is a no-op.
+            .onChange(of: vm.olderJumpId) { id in
+                guard let id = id else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    proxy.scrollTo(id, anchor: .top)
+                }
+            }
             }
 
             if let msg = vm.error {

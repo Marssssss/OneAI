@@ -1702,13 +1702,16 @@ public protocol OneAiSessionProtocol: AnyObject, Sendable {
     func interrupt() async 
     
     /**
-     * Snapshot the conversation's messages as `role` + `text` views.
+     * Reconstruct the FULL transcript as `role` + `text` views for replay
+     * into the foreign UI (after `create_session_with_id`).
      *
-     * Used to replay a resumed session's history into the foreign UI (after
-     * `create_session_with_id`). Returns the in-memory conversation, which
-     * includes any turns added since the session was created/resumed — so it
-     * also reflects the current chat live. System/tool messages are included;
-     * the foreign UI typically renders only `user` and `assistant` rows.
+     * Merges the live (compressed) conversation with its discarded-prefix
+     * archive snapshots so the user sees the complete history — the model
+     * still sees only the bounded compressed `live` context for inference.
+     * See `MemoryManager::full_transcript_messages`. Without persistence
+     * (or on a load error), falls back to the live in-memory conversation.
+     * System/tool messages are included; the foreign UI renders only `user`
+     * and `assistant` rows.
      */
     func messages() async  -> [MessageView]
     
@@ -1755,6 +1758,21 @@ public protocol OneAiSessionProtocol: AnyObject, Sendable {
      * Get the session ID.
      */
     func sessionId()  -> String
+    
+    /**
+     * Older messages immediately above `cursor` (from `transcript_recent` /
+     * a prior `transcript_older`). Returns the next page below the cursor and
+     * a new cursor for the page below that (or `None` at the top).
+     */
+    func transcriptOlder(cursor: String, limit: UInt32) async  -> TranscriptPage
+    
+    /**
+     * The most recent `limit` display messages (the bottom of the chat) for
+     * paginated loading on session open. See `TranscriptPage`. The cursor in
+     * the returned page is passed to `transcript_older` to fetch earlier
+     * messages on demand.
+     */
+    func transcriptRecent(limit: UInt32) async  -> TranscriptPage
     
 }
 /**
@@ -1862,13 +1880,16 @@ open func interrupt()async   {
 }
     
     /**
-     * Snapshot the conversation's messages as `role` + `text` views.
+     * Reconstruct the FULL transcript as `role` + `text` views for replay
+     * into the foreign UI (after `create_session_with_id`).
      *
-     * Used to replay a resumed session's history into the foreign UI (after
-     * `create_session_with_id`). Returns the in-memory conversation, which
-     * includes any turns added since the session was created/resumed — so it
-     * also reflects the current chat live. System/tool messages are included;
-     * the foreign UI typically renders only `user` and `assistant` rows.
+     * Merges the live (compressed) conversation with its discarded-prefix
+     * archive snapshots so the user sees the complete history — the model
+     * still sees only the bounded compressed `live` context for inference.
+     * See `MemoryManager::full_transcript_messages`. Without persistence
+     * (or on a load error), falls back to the live in-memory conversation.
+     * System/tool messages are included; the foreign UI renders only `user`
+     * and `assistant` rows.
      */
 open func messages()async  -> [MessageView]  {
     return
@@ -1992,6 +2013,51 @@ open func sessionId() -> String  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Older messages immediately above `cursor` (from `transcript_recent` /
+     * a prior `transcript_older`). Returns the next page below the cursor and
+     * a new cursor for the page below that (or `None` at the top).
+     */
+open func transcriptOlder(cursor: String, limit: UInt32)async  -> TranscriptPage  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaisession_transcript_older(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(cursor),FfiConverterUInt32.lower(limit)
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oneai_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oneai_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeTranscriptPage_lift,
+            errorHandler: nil
+            
+        )
+}
+    
+    /**
+     * The most recent `limit` display messages (the bottom of the chat) for
+     * paginated loading on session open. See `TranscriptPage`. The cursor in
+     * the returned page is passed to `transcript_older` to fetch earlier
+     * messages on demand.
+     */
+open func transcriptRecent(limit: UInt32)async  -> TranscriptPage  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_oneai_fn_method_oneaisession_transcript_recent(
+                        self.uniffiCloneHandle(),FfiConverterUInt32.lower(limit)
+                )
+            },
+            pollFunc: ffi_oneai_rust_future_poll_rust_buffer,
+            completeFunc: ffi_oneai_rust_future_complete_rust_buffer,
+            freeFunc: ffi_oneai_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeTranscriptPage_lift,
+            errorHandler: nil
+            
+        )
 }
     
 
@@ -3630,6 +3696,95 @@ public func FfiConverterTypeToolOutputView_lower(_ value: ToolOutputView) -> Rus
 
 
 /**
+ * A page of conversation history for paginated display (oldest-first).
+ *
+ * Returned by `OneAISession::transcript_recent` / `transcript_older`. The
+ * foreign UI loads only the recent page on session open, then prepends older
+ * pages on demand (e.g. a "load earlier messages" button) — bounding memory
+ * to the visible window regardless of total transcript length. The model
+ * still sees the compressed live context; this is purely the display path.
+ *
+ * `older_cursor` is an opaque token for the next-older page (pass to
+ * `transcript_older`), or `None` when the top of the transcript has been
+ * reached (hide the "load earlier" affordance).
+ */
+public struct TranscriptPage: Equatable, Hashable {
+    /**
+     * This page's messages, oldest-first (display order).
+     */
+    public var messages: [MessageView]
+    /**
+     * Opaque cursor for fetching the next-older page; `None` at top.
+     */
+    public var olderCursor: String?
+    /**
+     * Total display messages in the full transcript (for "X / Y" indicators).
+     */
+    public var total: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * This page's messages, oldest-first (display order).
+         */messages: [MessageView], 
+        /**
+         * Opaque cursor for fetching the next-older page; `None` at top.
+         */olderCursor: String?, 
+        /**
+         * Total display messages in the full transcript (for "X / Y" indicators).
+         */total: UInt32) {
+        self.messages = messages
+        self.olderCursor = olderCursor
+        self.total = total
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TranscriptPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTranscriptPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TranscriptPage {
+        return
+            try TranscriptPage(
+                messages: FfiConverterSequenceTypeMessageView.read(from: &buf), 
+                olderCursor: FfiConverterOptionString.read(from: &buf), 
+                total: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TranscriptPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeMessageView.write(value.messages, into: &buf)
+        FfiConverterOptionString.write(value.olderCursor, into: &buf)
+        FfiConverterUInt32.write(value.total, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptPage_lift(_ buf: RustBuffer) throws -> TranscriptPage {
+    return try FfiConverterTypeTranscriptPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTranscriptPage_lower(_ value: TranscriptPage) -> RustBuffer {
+    return FfiConverterTypeTranscriptPage.lower(value)
+}
+
+
+/**
  * Streaming event surfaced to foreign code during `OneAISession::run_task`
  * (and `OneAiGroupChatSession::run_task`).
  *
@@ -4809,7 +4964,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_oneai_checksum_method_oneaisession_interrupt() != 15203) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_oneai_checksum_method_oneaisession_messages() != 43109) {
+    if (uniffi_oneai_checksum_method_oneaisession_messages() != 55468) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaisession_retrieve_memory() != 60392) {
@@ -4825,6 +4980,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaisession_session_id() != 29299) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaisession_transcript_older() != 62182) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_oneai_checksum_method_oneaisession_transcript_recent() != 38207) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_oneai_checksum_method_oneaiappbuilder_build() != 2992) {

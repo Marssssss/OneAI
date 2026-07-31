@@ -320,6 +320,29 @@ final class ChatViewModel: ObservableObject {
     /// scroll-up — so the history landed mid-conversation instead of at the
     /// most recent message. This dedicated counter fires on every load.
     @Published var scrollRequest: Int = 0
+
+    // ── Paginated history (lazy "load earlier messages") ───────────────
+    // `messages()` returns the FULL merged transcript; for long sessions that
+    // deserializes every archived snapshot up front (memory + latency). Instead
+    // load only the recent page on session open (`transcriptRecent`), then
+    // prepend older pages on demand via `loadOlder()` (`transcriptOlder`).
+    // `items` holds only the loaded window — bounded memory regardless of total
+    // transcript length.
+    /// True when older messages exist below the currently-loaded window. Drives
+    /// the "加载更早消息 ↑" button at the top of the chat.
+    @Published var hasOlder: Bool = false
+    /// True while an older page is being fetched (button → spinner).
+    @Published var olderLoading: Bool = false
+    /// Opaque cursor for the next-older page (a rank string from Rust). `nil`
+    /// when at top or no session loaded.
+    private var olderCursor: String? = nil
+    /// Page size for transcript fetches.
+    private let transcriptPageSize: UInt32 = 50
+    /// Set by `loadOlder` to the first (oldest) id of the just-prepended page;
+    /// `Views` observes it to scroll that id to the viewport top so the user
+    /// sees the newly loaded older messages.
+    @Published var olderJumpId: UUID? = nil
+
     /// In-page dialog state (settings / scenario editor / edit-message /
     /// command palette / delete-session confirm). Non-nil → `ChatScreen`
     /// renders the overlay layer on top. See `AppOverlay`.
@@ -566,6 +589,12 @@ final class ChatViewModel: ObservableObject {
         groupSession = nil
         activeSpeakerItem = nil
         activeSpeakerId = nil
+        // A brand-new chat has no older pages — drop any cursor carried over
+        // from the previously-loaded session so the "load earlier" button
+        // doesn't dangle.
+        hasOlder = false
+        olderCursor = nil
+        olderJumpId = nil
         debriefActive = false
 
         if let scenario = scenario {
@@ -660,13 +689,41 @@ final class ChatViewModel: ObservableObject {
         debriefActive = false
         let s = await a.createSessionWithId(id: id)
         StreamLog.log("sess", "createSessionWithId (resume) id=\(id) resolvedId=\(s.sessionId())")
-        let msgs = await s.messages()
-        // Build the entry list off the main thread, then publish ONCE. Mutating
-        // `items` per message (N @Published sends + N ForEach diff passes) is
-        // what made switching to a long conversation stutter; a single
-        // assignment coalesces to one objectWillChange + one render.
-        var rebuilt: [ChatEntry] = []
+        // Paginated load: only the most recent page is fetched + rebuilt into
+        // `items` (full `messages()` would deserialize every archived snapshot
+        // up front). Older pages are prepended on demand via `loadOlder`.
+        let page = await s.transcriptRecent(limit: transcriptPageSize)
         var lastTask: String? = nil
+        let rebuilt = Self.rebuildEntries(from: page.messages, lastTask: &lastTask)
+        // Publishing @Published state must land on the main thread; an async
+        // non-isolated method resumes on a generic executor after the awaits
+        // above, so hop back before touching UI state.
+        await MainActor.run {
+            session = s
+            currentSessionId = s.sessionId()
+            items = rebuilt
+            lastUserTask = lastTask
+            error = nil
+            hasOlder = (page.olderCursor != nil)
+            olderCursor = page.olderCursor
+            olderJumpId = nil
+            streamTick.value += 1
+            // Force the detail to scroll to the most recent message (issue 7):
+            // a freshly loaded history must show the bottom, not wherever the
+            // previous session's scroll offset left the viewport.
+            scrollRequest += 1
+        }
+    }
+
+    /// Build a `[ChatEntry]` from a page of `MessageView`s, mirroring the
+    /// render filter: only non-empty `user` / `assistant` rows are replayed
+    // (system / tool / empty-text messages are dropped). `lastTask` is bumped
+    /// to the last user message seen, for `retryLast`.
+    private static func rebuildEntries(
+        from msgs: [MessageView],
+        lastTask: inout String?
+    ) -> [ChatEntry] {
+        var rebuilt: [ChatEntry] = []
         rebuilt.reserveCapacity(msgs.count)
         for m in msgs {
             switch m.role {
@@ -686,21 +743,31 @@ final class ChatViewModel: ObservableObject {
             default: break // system / tool — not replayed
             }
         }
-        // Publishing @Published state must land on the main thread; an async
-        // non-isolated method resumes on a generic executor after the awaits
-        // above, so hop back before touching UI state.
+        return rebuilt
+    }
+
+    /// Prepend one older page of transcript to `items` (lazy "load earlier
+    /// messages"). Driven by the top-of-chat button in `Views`. After
+    // prepending, `olderJumpId` is set to the page's first (oldest) id so the
+    /// ScrollViewReader scrolls it into view — no NSScrollView offset-compensation
+    /// timing race (the user is at the top, atBottom already false, no latch flip).
+    func loadOlder() async {
+        guard hasOlder, !olderLoading, let cursor = olderCursor, let s = session else { return }
+        olderLoading = true
+        StreamLog.log("sess", "loadOlder cursor=\(cursor) items=\(items.count)")
+        let page = await s.transcriptOlder(cursor: cursor, limit: transcriptPageSize)
+        var lastTask: String? = nil
+        let prepend = Self.rebuildEntries(from: page.messages, lastTask: &lastTask)
         await MainActor.run {
-            session = s
-            currentSessionId = s.sessionId()
-            items = rebuilt
-            lastUserTask = lastTask
-            error = nil
+            // Prepend older entries; keep lastUserTask the most-recent user msg.
+            items = prepend + items
+            hasOlder = (page.olderCursor != nil)
+            olderCursor = page.olderCursor
+            olderJumpId = prepend.first?.id
+            olderLoading = false
             streamTick.value += 1
-            // Force the detail to scroll to the most recent message (issue 7):
-            // a freshly loaded history must show the bottom, not wherever the
-            // previous session's scroll offset left the viewport.
-            scrollRequest += 1
         }
+        StreamLog.log("sess", "loadOlder done prepended=\(prepend.count) items=\(items.count) hasOlder=\(hasOlder)")
     }
 
     func deleteSession(_ id: String) async {

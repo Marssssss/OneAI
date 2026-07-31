@@ -1225,6 +1225,15 @@ pub trait MemoryPersistence: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Cheap per-snapshot DISPLAY message count (non-`system` messages) for
+    /// this session's discarded-prefix archive, oldest-first. Returns only
+    /// `(id, count)` — no message content is loaded. Used by
+    /// `MemoryManager::transcript_page` to compute segment boundaries for
+    /// pagination without deserializing any snapshot. Default: empty.
+    async fn snapshot_display_counts(&self, _session_id: &str) -> Result<Vec<(String, u32)>> {
+        Ok(Vec::new())
+    }
+
     /// List all saved conversations (metadata only, not full message history).
     async fn list_conversations(&self) -> Result<Vec<SessionInfo>>;
 

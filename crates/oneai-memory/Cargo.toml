@@ -20,3 +20,7 @@ oneai-core = { workspace = true }
 oneai-provider = { workspace = true }
 oneai-domain = { workspace = true }
 oneai-vector = { workspace = true }
+
+[dev-dependencies]
+oneai-persistence = { workspace = true }
+tempfile = { workspace = true }

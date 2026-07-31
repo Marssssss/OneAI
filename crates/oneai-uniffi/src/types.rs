@@ -456,6 +456,29 @@ impl From<&oneai_core::Message> for MessageView {
     }
 }
 
+// ─── TranscriptPage (paginated history) ───────────────────────────
+
+/// A page of conversation history for paginated display (oldest-first).
+///
+/// Returned by `OneAISession::transcript_recent` / `transcript_older`. The
+/// foreign UI loads only the recent page on session open, then prepends older
+/// pages on demand (e.g. a "load earlier messages" button) — bounding memory
+/// to the visible window regardless of total transcript length. The model
+/// still sees the compressed live context; this is purely the display path.
+///
+/// `older_cursor` is an opaque token for the next-older page (pass to
+/// `transcript_older`), or `None` when the top of the transcript has been
+/// reached (hide the "load earlier" affordance).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TranscriptPage {
+    /// This page's messages, oldest-first (display order).
+    pub messages: Vec<MessageView>,
+    /// Opaque cursor for fetching the next-older page; `None` at top.
+    pub older_cursor: Option<String>,
+    /// Total display messages in the full transcript (for "X / Y" indicators).
+    pub total: u32,
+}
+
 // ─── OneAIErrorView ─────────────────────────────────────────────────
 
 /// Flat error view (UniFFI-compatible).

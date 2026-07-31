@@ -787,6 +787,42 @@ impl MemoryPersistence for SqliteSessionStore {
         Ok(out)
     }
 
+    /// Cheap per-snapshot non-`system` message count, oldest-first. No
+    /// `messages_json` content is materialized — `json_each` counts in SQLite.
+    async fn snapshot_display_counts(&self, session_id: &str) -> Result<Vec<(String, u32)>> {
+        let conn = self.open_connection()?;
+        let pat = format!("{}{}%", session_id, oneai_core::DISCARDED_SNAPSHOT_MARKER);
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, (SELECT count(*) FROM json_each(s.messages_json) \
+                 WHERE json_extract(value, '$.role') != 'system') \
+                 FROM conversations s WHERE s.id LIKE ?1 \
+                 ORDER BY s.created_at ASC",
+            )
+            .map_err(|e| {
+                OneAIError::Persistence(format!("Failed to prepare snapshot-count query: {}", e))
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![pat], |row| {
+                let id: String = row.get(0)?;
+                let count: i64 = row.get(1).unwrap_or(0);
+                Ok((id, count as u32))
+            })
+            .map_err(|e| {
+                OneAIError::Persistence(format!(
+                    "Failed to query snapshot counts for '{}': {}",
+                    session_id, e
+                ))
+            })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| {
+                OneAIError::Persistence(format!("Failed to read snapshot-count row: {}", e))
+            })?);
+        }
+        Ok(out)
+    }
+
     async fn list_conversations(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.open_connection()?;
         // Exclude discarded-prefix archive snapshots — these are internal
@@ -1614,6 +1650,45 @@ mod tests {
         assert!(loaded[0].messages[0]
             .text_content()
             .contains("first segment"));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_display_counts_excludes_system_and_orders_oldest_first() {
+        // `snapshot_display_counts` returns only the non-`system` message count
+        // per snapshot (so pagination can size segments without loading
+        // content), oldest-first. System messages (base prompt + per-compression
+        // summaries) must NOT be counted.
+        let (store, _dir) = make_store();
+
+        let mk = |suffix: &str, msgs: &[(oneai_core::Role, &str)]| {
+            let id = format!("sess{}{}", oneai_core::DISCARDED_SNAPSHOT_MARKER, suffix);
+            let mut c = Conversation::with_id(id);
+            for (role, text) in msgs {
+                c.add_message(oneai_core::Message::text(*role, *text));
+            }
+            c
+        };
+        use oneai_core::Role;
+        // snap1: system + user + assistant  → 2 display msgs
+        let s1 = mk(
+            "u1",
+            &[
+                (Role::System, "base"),
+                (Role::User, "q1"),
+                (Role::Assistant, "a1"),
+            ],
+        );
+        // snap2: system + user  → 1 display msg
+        let s2 = mk("u2", &[(Role::System, "summary"), (Role::User, "q2")]);
+        store.save_conversation(&s1.id, &s1).await.unwrap();
+        store.save_conversation(&s2.id, &s2).await.unwrap();
+
+        let counts = store.snapshot_display_counts("sess").await.unwrap();
+        assert_eq!(counts.len(), 2);
+        assert!(counts[0].0.contains("u1"), "oldest-first");
+        assert!(counts[1].0.contains("u2"));
+        assert_eq!(counts[0].1, 2, "system excluded");
+        assert_eq!(counts[1].1, 1, "system excluded");
     }
 
     // ─── Persistence across restarts ──────────────────────────────────

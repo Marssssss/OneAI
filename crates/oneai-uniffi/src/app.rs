@@ -7,7 +7,18 @@ use oneai_core::traits::Tool;
 
 use crate::callback::{CallbackObserver, ChatEventCallback};
 use crate::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
-use crate::types::{MessageView, OneAIErrorView, PlatformView, SessionInfoView, ToolOutputView};
+use crate::types::{
+    MessageView, OneAIErrorView, PlatformView, SessionInfoView, ToolOutputView, TranscriptPage,
+};
+
+/// Map a memory-layer transcript page to the UniFFI view (stringified cursor).
+fn transcript_page_view(page: oneai_memory::TranscriptPageData) -> TranscriptPage {
+    TranscriptPage {
+        messages: page.messages.iter().map(MessageView::from).collect(),
+        older_cursor: page.older_cursor.map(|r| r.to_string()),
+        total: page.total as u32,
+    }
+}
 
 /// UniFFI-exported App wrapper.
 ///
@@ -262,6 +273,38 @@ impl OneAISession {
             .await
             .unwrap_or_else(|_| live.messages.clone());
         full.iter().map(MessageView::from).collect()
+    }
+
+    /// The most recent `limit` display messages (the bottom of the chat) for
+    /// paginated loading on session open. See `TranscriptPage`. The cursor in
+    /// the returned page is passed to `transcript_older` to fetch earlier
+    /// messages on demand.
+    #[uniffi::method]
+    pub async fn transcript_recent(&self, limit: u32) -> TranscriptPage {
+        let inner = self.inner.lock().await;
+        let live = inner.conversation();
+        let page = inner
+            .memory_manager()
+            .transcript_recent(inner.session_id(), live, limit as usize)
+            .await
+            .unwrap_or_default();
+        transcript_page_view(page)
+    }
+
+    /// Older messages immediately above `cursor` (from `transcript_recent` /
+    /// a prior `transcript_older`). Returns the next page below the cursor and
+    /// a new cursor for the page below that (or `None` at the top).
+    #[uniffi::method]
+    pub async fn transcript_older(&self, cursor: String, limit: u32) -> TranscriptPage {
+        let inner = self.inner.lock().await;
+        let live = inner.conversation();
+        let cursor_rank: usize = cursor.parse().unwrap_or(0);
+        let page = inner
+            .memory_manager()
+            .transcript_older(inner.session_id(), live, cursor_rank, limit as usize)
+            .await
+            .unwrap_or_default();
+        transcript_page_view(page)
     }
 
     /// Persist the current in-memory conversation to SQLite immediately.
