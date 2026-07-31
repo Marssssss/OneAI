@@ -550,6 +550,9 @@ enum A2aAction {
         /// Domain pack to use
         #[arg(long)]
         domain: Option<String>,
+        /// Port to bind (default: 8080)
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
     },
     /// Discover a remote A2A agent's capabilities
     Discover {
@@ -1489,8 +1492,8 @@ fn main() {
             }
         },
         Some(Commands::A2a { action }) => match action {
-            A2aAction::Serve { domain } => {
-                cmd_a2a::cmd_a2a_serve(domain.as_deref());
+            A2aAction::Serve { domain, port } => {
+                cmd_a2a::cmd_a2a_serve(domain.as_deref(), port);
             }
             A2aAction::Discover { url } => {
                 cmd_a2a::cmd_a2a_discover(&url);

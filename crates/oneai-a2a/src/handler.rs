@@ -2,16 +2,20 @@
 //!
 //! The A2AHandler implements the server-side A2A protocol:
 //! - `agent/getCard` → return cached AgentCard
-//! - `tasks/send` → create Task, process via ToolRegistry, return result
+//! - `tasks/send` → create Task, drive the [`A2ARunner`] (real AgentLoop when
+//!   the CLI injects an App-backed runner; [`PlaceholderRunner`] ack by
+//!   default), return the terminal Task
 //! - `tasks/get` → retrieve Task from TaskStore
 //! - `tasks/cancel` → transition Task to Canceled state
-//! - `tasks/sendSubscribe` → SSE streaming (placeholder for future)
+//! - `tasks/sendSubscribe` → non-streaming fallback returns the final Task;
+//!   real SSE streaming is handled at the axum layer (see [`crate::server`])
 
 use std::sync::Arc;
 
+use crate::runner::{A2ARunner, PlaceholderRunner, TaskOutcome};
 use crate::task_store::TaskStore;
 use crate::types::{
-    AgentCard, CancelTaskParams, GetTaskParams, Message, SendTaskParams, TaskState,
+    AgentCard, Artifact, CancelTaskParams, GetTaskParams, Message, Part, SendTaskParams, TaskState,
 };
 
 /// A2A JSON-RPC request handler.
@@ -23,15 +27,58 @@ pub struct A2AHandler {
     agent_card: AgentCard,
     /// Task store for managing task lifecycle.
     task_store: Arc<TaskStore>,
+    /// The runner that drives a real agent turn on `tasks/send`. Defaults to
+    /// [`PlaceholderRunner`] (pre-3.5 ack); the CLI injects an App-backed
+    /// runner via [`A2AHandler::with_runner`].
+    runner: Arc<dyn A2ARunner>,
 }
 
 impl A2AHandler {
     /// Create a new handler with an AgentCard and TaskStore.
+    ///
+    /// Defaults to a [`PlaceholderRunner`] (no real AgentLoop) — use
+    /// [`A2AHandler::with_runner`] to inject an App-backed runner.
     pub fn new(agent_card: AgentCard, task_store: Arc<TaskStore>) -> Self {
+        let runner: Arc<dyn A2ARunner> = Arc::new(PlaceholderRunner::new(agent_card.skills.len()));
         Self {
             agent_card,
             task_store,
+            runner,
         }
+    }
+
+    /// Builder: inject the runner that drives a real agent turn on
+    /// `tasks/send` / `tasks/sendSubscribe`.
+    pub fn with_runner(mut self, runner: Arc<dyn A2ARunner>) -> Self {
+        self.runner = runner;
+        self
+    }
+
+    /// The runner currently wired into this handler.
+    pub fn runner(&self) -> &Arc<dyn A2ARunner> {
+        &self.runner
+    }
+
+    /// Extract the user's text from a `tasks/send` Message by concatenating
+    /// its Text parts. Non-Text parts (File/Data) are rejected — the agent
+    /// surface is text-in/text-out and the card advertises
+    /// `default_input_modes: ["text/plain"]`.
+    pub fn extract_text(message: &Message) -> Result<String, &'static str> {
+        let mut text = String::new();
+        for part in &message.parts {
+            match part {
+                Part::Text { text: t } => text.push_str(t),
+                _ => {
+                    return Err(
+                        "only text parts are supported for tasks/send (File/Data parts rejected)",
+                    )
+                }
+            }
+        }
+        if text.trim().is_empty() {
+            return Err("message text is empty");
+        }
+        Ok(text)
     }
 
     /// Handle `agent/getCard` request — return the cached AgentCard.
@@ -47,12 +94,12 @@ impl A2AHandler {
         })
     }
 
-    /// Handle `tasks/send` request — create a Task and process it.
+    /// Handle `tasks/send` request — create a Task and drive the runner.
     ///
-    /// Creates a Task in Submitted state, transitions to Working,
-    /// then attempts to process the message. For P4-1, the processing
-    /// is simplified: we transition to Working then immediately complete
-    /// with a placeholder response. Full AgentLoop integration comes later.
+    /// Creates a Task in `Submitted`, transitions to `Working`, extracts the
+    /// user's text from the message, calls [`A2ARunner::run_task`], and maps
+    /// the [`TaskOutcome`] to a terminal state: `Done` → `Completed` with a
+    /// text Artifact; `Rejected`/`Error` → `Failed` with the reason.
     pub async fn handle_send_task(
         &self,
         id: Option<serde_json::Value>,
@@ -72,6 +119,28 @@ impl A2AHandler {
                 });
             }
         };
+
+        // Extract the user's text from the message (File/Data parts rejected)
+        let message_text = match Self::extract_text(&send_params.message) {
+            Ok(t) => t,
+            Err(msg) => {
+                return serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32602,
+                        "message": format!("Invalid params for tasks/send: {msg}"),
+                    }
+                });
+            }
+        };
+
+        // Bind the A2A task to a session id so multi-turn tasks continue the
+        // conversation (falls back to the task id when no session id is given).
+        let session_id = send_params
+            .session_id
+            .clone()
+            .unwrap_or_else(|| send_params.id.clone());
 
         // Create the task
         let _task = match self
@@ -111,35 +180,26 @@ impl A2AHandler {
             }
         };
 
-        // For P4-1: simplified processing — complete with placeholder response
-        // Full processing with ToolRegistry/AgentLoop integration comes later
-        let agent_response = Message::agent_text(format!(
-            "Task '{}' received and processed. Agent capabilities: {} skills available.",
-            send_params.id,
-            self.agent_card.skills.len()
-        ));
+        // Drive the runner — a real AgentLoop turn when the CLI injected an
+        // App-backed runner (PlaceholderRunner ack by default).
+        let outcome = self.runner.run_task(&session_id, &message_text).await;
 
-        let artifact = crate::types::Artifact::text(
-            "response",
-            agent_response
-                .parts
-                .iter()
-                .filter_map(|p| match p {
-                    crate::types::Part::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        // Map the outcome to a terminal Task state.
+        let task_result = match &outcome {
+            TaskOutcome::Done { final_answer, .. } => {
+                let artifact = Artifact::text("response", final_answer.clone());
+                self.task_store
+                    .complete_task(&send_params.id, Some(artifact))
+                    .await
+            }
+            TaskOutcome::Rejected { reason } | TaskOutcome::Error { message: reason } => {
+                self.task_store.fail_task(&send_params.id, reason).await
+            }
+        };
 
-        // Complete the task
-        match self
-            .task_store
-            .complete_task(&send_params.id, Some(artifact))
-            .await
-        {
-            Ok(completed_task) => {
-                let task_json = serde_json::to_value(&completed_task).unwrap_or_else(
+        match task_result {
+            Ok(terminal_task) => {
+                let task_json = serde_json::to_value(&terminal_task).unwrap_or_else(
                     |e| serde_json::json!({"error": format!("Serialization error: {}", e)}),
                 );
 
@@ -253,17 +313,22 @@ impl A2AHandler {
         }
     }
 
-    /// Handle `tasks/sendSubscribe` request — SSE streaming (placeholder).
+    /// Handle `tasks/sendSubscribe` — non-streaming fallback returns the final
+    /// Task (the same result as `tasks/send`).
     ///
-    /// For P4-1, this returns the same result as `tasks/send` but wrapped
-    /// in a stream-compatible format. Full SSE streaming will be implemented
-    /// when the axum HTTP server is added.
+    /// Real SSE streaming (artifact chunks + status updates as they're
+    /// produced) is handled at the **axum layer**, which detects
+    /// `tasks/sendSubscribe` before dispatching and builds an
+    /// [`axum::response::sse::Sse`] response backed by
+    /// [`A2ARunner::run_task_streaming`]. This single-Value path exists so
+    /// the JSON-RPC router (and its tests) still answer the method when the
+    /// streaming endpoint isn't used.
     pub async fn handle_send_subscribe(
         &self,
         id: Option<serde_json::Value>,
         params: &serde_json::Value,
     ) -> serde_json::Value {
-        // For now, delegate to handle_send_task — SSE streaming is a future enhancement
+        // Non-streaming fallback — real streaming is in the axum POST handler.
         self.handle_send_task(id, params).await
     }
 }

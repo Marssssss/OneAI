@@ -1,42 +1,91 @@
 //! A2A protocol management commands.
 //!
 //! Subcommands for discovering, connecting to, and serving as A2A agents.
+//!
+//! `a2a serve` (§3.5) starts a real axum HTTP server that serves the
+//! AgentCard at `/.well-known/agent-card` and runs the full AgentLoop on
+//! `tasks/send` (+ SSE streaming on `tasks/sendSubscribe`). `POST /` is
+//! gated by a shared-secret Bearer (`ONEAI_A2A_SECRET`).
 
-use oneai_a2a::{A2AClient, A2AServerHost, AgentCard, TaskStore};
+use async_trait::async_trait;
+use oneai_a2a::{A2AClient, A2ARunner, A2AServerHost, A2ASseSink, TaskOutcome};
+use oneai_app::AppBuilder;
+use oneai_tool::CalculatorTool;
 use std::sync::Arc;
 
-/// Start the A2A server (serve OneAI agent capabilities).
+use crate::cmd_pack::get_builtin_pack;
+use crate::config::OneaiConfig;
+
+/// Start the A2A server — serve OneAI agent capabilities over a real axum
+/// HTTP server (§3.5).
 ///
-/// Creates an A2AServerHost and processes messages in a loop.
-/// For P4-1, this runs a simple echo-style server that creates
-/// and completes tasks with placeholder responses.
-pub fn cmd_a2a_serve(domain: Option<&str>) {
-    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+/// Builds a real `App` for the given domain pack, wraps it in [`AppA2ARunner`]
+/// (the seam that drives `create_session_with_id` + `run_agent_silent` /
+/// `run_agent` on each incoming `tasks/send`), and serves:
+/// - `GET /.well-known/agent-card` (discovery, no auth)
+/// - `POST /` (JSON-RPC + SSE streaming, `ONEAI_A2A_SECRET` Bearer-gated)
+pub fn cmd_a2a_serve(domain: Option<&str>, port: u16) {
+    tracing_subscriber::fmt::init();
 
+    let config = OneaiConfig::load_or_default();
+    let domain_name = config.default_domain_pack(domain);
+    let domain_pack = match get_builtin_pack(&domain_name, ".") {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "Error: Unknown domain pack '{}'. Available: coding, research, general",
+                domain_name
+            );
+            std::process::exit(1);
+        }
+    };
+    let pack_name = domain_pack.name.clone();
+    let pack_tools = domain_pack.tools.clone();
+
+    // Provider is optional: without it the server still starts (discovery
+    // works) but `tasks/send` rejects with "no LLM provider configured".
+    let provider_config = config.to_model_config_with_overrides(None);
+    let has_provider = provider_config.is_some();
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
-        // Build the agent card
-        let agent_card = if let Some(domain_name) = domain {
-            match domain_name {
-                "coding" => {
-                    let pack = oneai_domain::coding_pack(".");
-                    oneai_a2a::agent_card_from_domain_pack(&pack, "http://localhost:8080")
-                }
-                "research" => {
-                    let pack = oneai_domain::research_pack(".");
-                    oneai_a2a::agent_card_from_domain_pack(&pack, "http://localhost:8080")
-                }
-                _ => AgentCard::new(
-                    domain_name,
-                    format!("{} agent", domain_name),
-                    "http://localhost:8080",
-                ),
-            }
-        } else {
-            AgentCard::new("oneai-agent", "OneAI Agent", "http://localhost:8080")
-        };
+        let mut builder = AppBuilder::new()
+            .default_parser()
+            .default_rate_limiter()
+            .noop_interaction_gate() // headless server → auto-approve tools
+            .trace_in_memory()
+            .generation_config(config.generation.clone())
+            .embedding_config(config.embedding.clone())
+            .domain_pack(domain_pack)
+            .sqlite_persistence(); // per-session A2A tasks resume the chat
 
-        let task_store = Arc::new(TaskStore::new());
-        let host = A2AServerHost::new(agent_card, task_store);
+        if let Some(mc) = &provider_config {
+            let provider = oneai_provider::ProviderFactory::create(mc.clone());
+            builder = builder.provider(Arc::from(provider));
+        }
+
+        let app = builder.build().await.expect("App build failed");
+
+        // Register skills + domain tools + calculator (same set as cmd_run).
+        let skills = oneai_skill::builtin::skills_for_domain(&pack_name);
+        let _ = app.skill_registry.register_builtin(skills).await;
+        for tool in &pack_tools {
+            let _ = app.register_tool(tool.clone()).await;
+        }
+        let _ = app.register_tool(Arc::new(CalculatorTool::new())).await;
+        let _ = app.register_skill_tools().await;
+
+        let runner = Arc::new(AppA2ARunner {
+            app,
+            has_provider,
+            lock: tokio::sync::Mutex::new(()),
+        }) as Arc<dyn A2ARunner>;
+
+        let url = format!("http://localhost:{port}");
+        let host = Arc::new(
+            A2AServerHost::from_domain_pack(&get_builtin_pack(&pack_name, ".").unwrap(), &url)
+                .with_runner(runner),
+        );
 
         println!("🤖 A2A Server starting...");
         println!(
@@ -51,22 +100,126 @@ pub fn cmd_a2a_serve(domain: Option<&str>) {
             host.agent_card().capabilities.push_notifications,
             host.agent_card().capabilities.state_transition_history,
         );
-
-        // Print well-known agent card
+        println!(
+            "   Provider: {}",
+            if has_provider {
+                "configured"
+            } else {
+                "NONE — tasks/send will reject"
+            }
+        );
+        println!("\n📋 Agent Card (/.well-known/agent-card):");
         if let Ok(card_json) = host.well_known_card_json() {
-            println!("\n📋 Agent Card (/.well-known/agent-card):");
             println!("{}", card_json);
         }
-
+        println!("\n   External task: POST /  (Authorization: Bearer $ONEAI_A2A_SECRET)");
+        if oneai_a2a::secret_from_env().is_none() {
+            eprintln!("⚠️  ONEAI_A2A_SECRET unset — server will refuse to start.");
+            eprintln!(
+                "   Set it (e.g. export ONEAI_A2A_SECRET=$(openssl rand -hex 32)) to enable."
+            );
+            std::process::exit(1);
+        }
         println!("\nPress Ctrl+C to stop the server.");
 
-        // Simple event loop — for now, just keep running
-        // Full HTTP server with axum will be added in a future phase
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for ctrl+c");
-        println!("Server stopped.");
+        if let Err(e) = host.run(port).await {
+            eprintln!("❌ A2A server error: {}", e);
+            std::process::exit(1);
+        }
     });
+}
+
+// ─── AppA2ARunner — drives create_session_with_id + run_agent_silent ────────
+
+/// The CLI's [`A2ARunner`] impl — holds one built `App` and a per-turn
+/// serialization lock (so concurrent A2A tasks on the same App don't race
+/// the shared `MemoryManager.set_session_id`). Mirrors `AppGatewayRunner`.
+struct AppA2ARunner {
+    app: oneai_app::App,
+    has_provider: bool,
+    lock: tokio::sync::Mutex<()>,
+}
+
+#[async_trait]
+impl A2ARunner for AppA2ARunner {
+    async fn run_task(&self, session_id: &str, message_text: &str) -> TaskOutcome {
+        if !self.has_provider {
+            return TaskOutcome::Rejected {
+                reason: "no LLM provider configured".to_string(),
+            };
+        }
+        // Serialize turns so the shared MemoryManager session binding doesn't
+        // race across concurrent A2A tasks.
+        let _guard = self.lock.lock().await;
+        let mut session = self.app.create_session_with_id(session_id).await;
+        match session.run_agent_silent(message_text).await {
+            Ok(r) => TaskOutcome::Done {
+                final_answer: r.final_answer,
+                completed: r.completed,
+                iterations: r.iterations,
+            },
+            Err(e) => TaskOutcome::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    /// Streaming reply path: wire a [`A2AStreamingObserver`] into `run_agent`
+    /// so `on_stream_chunk` pushes assistant tokens to the A2A SSE sink.
+    async fn run_task_streaming(
+        &self,
+        session_id: &str,
+        message_text: &str,
+        sink: Arc<dyn A2ASseSink>,
+    ) -> TaskOutcome {
+        if !self.has_provider {
+            return TaskOutcome::Rejected {
+                reason: "no LLM provider configured".to_string(),
+            };
+        }
+        let _guard = self.lock.lock().await;
+        let mut session = self.app.create_session_with_id(session_id).await;
+        let observer = A2AStreamingObserver { sink };
+        let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        match session
+            .run_agent(message_text, &observer, interrupt_slot)
+            .await
+        {
+            Ok(r) => TaskOutcome::Done {
+                final_answer: r.final_answer,
+                completed: r.completed,
+                iterations: r.iterations,
+            },
+            Err(e) => TaskOutcome::Error {
+                message: e.to_string(),
+            },
+        }
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.has_provider
+    }
+}
+
+/// Observer that relays assistant stream chunks to the A2A SSE sink. Mirrors
+/// `cmd_gateway::StreamingRelayObserver` (wired to `ReplySink` there).
+struct A2AStreamingObserver {
+    sink: Arc<dyn A2ASseSink>,
+}
+
+impl oneai_agent::AgentLoopObserver for A2AStreamingObserver {
+    fn on_iteration_start(&self, _: usize, _: oneai_agent::ParadigmKind) {}
+    fn on_direct_answer(&self, _: &str) {}
+    fn on_tool_calls(&self, _: &[oneai_agent::ToolCallRequest]) {}
+    fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
+    fn on_delegate(&self, _: &str, _: &oneai_agent::SubAgentKind) {}
+    fn on_paradigm_switch(&self, _: oneai_agent::ParadigmKind) {}
+    fn on_checkpoint(&self, _: usize) {}
+    fn on_complete(&self, _: &oneai_agent::AgentLoopResult) {}
+    fn on_stream_chunk(&self, text: &str) {
+        self.sink.push_chunk(text);
+    }
 }
 
 /// Discover a remote A2A agent's capabilities.

@@ -74,6 +74,7 @@ pub mod client;
 pub mod error;
 pub mod handler;
 pub mod router;
+pub mod runner;
 pub mod server;
 pub mod task_store;
 pub mod transport;
@@ -112,4 +113,5 @@ pub use task_store::TaskStore;
 // Server-side
 pub use handler::A2AHandler;
 pub use router::A2ARouter;
-pub use server::A2AServerHost;
+pub use runner::{A2ARunner, A2ASseSink, PlaceholderRunner, TaskOutcome};
+pub use server::{secret_from_env, serve, A2AServerHost, A2AWebState, WebConfig, A2A_SECRET_ENV};

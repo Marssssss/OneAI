@@ -129,7 +129,14 @@ pub fn agent_card_from_domain_pack(domain: &oneai_domain::DomainPack, url: &str)
             push_notifications: false,
             state_transition_history: true,
         },
-        authentication: AuthenticationInfo::default(),
+        // §3.5: the server gates `POST /` with a shared-secret Bearer
+        // (ONEAI_A2A_SECRET) — advertise it truthfully. The legacy
+        // `AuthenticationInfo::default()` (empty schemes) was a lie-by-
+        // omission once auth landed.
+        authentication: AuthenticationInfo {
+            schemes: vec!["bearer".to_string()],
+            credentials: None,
+        },
         documentation_url: None,
     }
 }

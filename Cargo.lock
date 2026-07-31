@@ -3450,6 +3450,7 @@ name = "oneai-a2a"
 version = "1.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "eventsource-stream",
  "futures",
@@ -3462,6 +3463,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tower",
+ "tower-http",
  "tracing",
  "uuid",
 ]

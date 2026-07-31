@@ -19,9 +19,15 @@ eventsource-stream = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+# HTTP server surface (POST / JSON-RPC + GET /.well-known/agent-card + SSE
+# streaming for tasks/sendSubscribe). Mirrors oneai-gateway's axum stack.
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
 oneai-core = { workspace = true }
 oneai-domain = { workspace = true }
 oneai-tool = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+reqwest = { workspace = true }
