@@ -85,6 +85,79 @@ impl WorkTimer {
     }
 }
 
+// ─── Render Scheduler ─────────────────────────────────────────────────────
+
+/// 单一渲染去抖调度器——合并旧 `dirty` 标志 + `stream_buffer` flush 两套并行机制。
+///
+/// 主循环在 `should_draw()` 真时 `flush_stream_buffer()` → `terminal.draw()` → `clear()`，
+/// poll 超时按 `deadline()` 收窄使循环恰在 deadline 唤醒。
+///
+/// - `request_render()`（即时）：设 requested + 清 deadline → 本轮立刻 draw
+///   （按键/交互路径，零延迟）。等价旧 `dirty = true`。
+/// - `request_render_debounced()`（流式 token / spinner）：设 requested；若 deadline 未
+///   武装则武装 `now + RENDER_FRAME_INTERVAL`，窗口内后续请求被合并（不延后），
+///   实现"批量突变→少 redraw"的去抖。
+///
+/// 闲置（无 request）= 不 draw；流式时 poll 在 deadline 唤醒（≈30fps）。
+pub struct RenderScheduler {
+    /// 有渲染请求自上次 draw 以来到达。
+    requested: bool,
+    /// 去抖 deadline：draw 不早于此 Instant；`None` = 即刻可画。
+    deadline: Option<std::time::Instant>,
+}
+
+/// 流式/spinner 渲染帧间隔（≈30fps）。可调；macOS 原生端同思路用 20fps。
+const RENDER_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
+impl RenderScheduler {
+    /// 首帧必画（对齐旧 `dirty: true` 初值）。
+    pub fn new() -> Self {
+        Self {
+            requested: true,
+            deadline: None,
+        }
+    }
+
+    /// 即时请求渲染（交互路径）：清 deadline，本轮立刻 draw。
+    pub fn request_render(&mut self) {
+        self.requested = true;
+        self.deadline = None;
+    }
+
+    /// 去抖请求渲染（流式 token / spinner）：武装 deadline，窗口内合并。
+    pub fn request_render_debounced(&mut self) {
+        self.requested = true;
+        if self.deadline.is_none() {
+            self.deadline = Some(std::time::Instant::now() + RENDER_FRAME_INTERVAL);
+        }
+    }
+
+    /// 是否应在本轮 draw：有请求且 deadline 已到（或无 deadline）。
+    pub fn should_draw(&self) -> bool {
+        self.requested
+            && self
+                .deadline
+                .is_none_or(|d| std::time::Instant::now() >= d)
+    }
+
+    /// draw 后清空请求与 deadline。
+    pub fn clear(&mut self) {
+        self.requested = false;
+        self.deadline = None;
+    }
+
+    /// 当前武装的 deadline（供主循环收窄 poll 超时）。
+    pub fn deadline(&self) -> Option<std::time::Instant> {
+        self.deadline
+    }
+}
+
+impl Default for RenderScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ─── Slash Commands ───────────────────────────────────────────────────────
 
 /// Supported slash commands for autocomplete.
@@ -527,9 +600,8 @@ pub struct App {
     /// Whether the app should quit.
     pub should_quit: bool,
 
-    /// Whether the UI needs to be redrawn (dirty flag for conditional rendering).
-    /// Set to true on any state change; reset to false after drawing.
-    pub dirty: bool,
+    /// 渲染去抖调度器（取代旧 `dirty` 标志，统一 draw 门控 + stream flush 时机）。
+    pub render: RenderScheduler,
 
     /// Whether the sidebar is visible.
     pub show_sidebar: bool,
@@ -687,11 +759,10 @@ pub struct App {
 
     // ─── Stream throttle ──────────────────────────────────────────────────
     /// Buffered stream text not yet applied to the last assistant message.
-    /// During streaming, chunks are buffered and flushed at ~10fps for smoother rendering.
+    /// Draw path (`run_main_loop` → `should_draw` → `flush_stream_buffer`) applies
+    /// it at the render-deadline cadence (~30fps) — the `RenderScheduler` owns the
+    /// draw-throttle role; this buffer only batches content appends.
     pub stream_buffer: String,
-
-    /// Timestamp of last stream buffer flush (for throttle timing).
-    pub last_stream_flush: std::time::Instant,
 
     // ─── Render cache ─────────────────────────────────────────────────────
     /// Cached rendered lines per message (avoids re-parsing markdown every frame).
@@ -754,7 +825,7 @@ impl App {
 
         Self {
             should_quit: false,
-            dirty: true, // First frame must always draw
+            render: RenderScheduler::new(), // First frame must always draw
             show_sidebar: true,
             input: String::new(),
             input_cursor_pos: 0,
@@ -802,7 +873,6 @@ impl App {
             search_results: Vec::new(),
             search_result_index: 0,
             stream_buffer: String::new(),
-            last_stream_flush: std::time::Instant::now(),
             render_cache: MessageRenderCache::new(),
             last_context_accounting: None,
             plan_state: None,
@@ -839,6 +909,16 @@ impl App {
         self.work_timer.stop_run();
     }
 
+    /// 即时请求渲染（交互路径，零延迟）——等价旧 `dirty = true`。
+    pub fn request_render(&mut self) {
+        self.render.request_render();
+    }
+
+    /// 去抖请求渲染（流式 token / spinner）——武装 deadline，窗口内合并。
+    pub fn request_render_debounced(&mut self) {
+        self.render.request_render_debounced();
+    }
+
     pub fn add_message(&mut self, role: ChatRole, content: impl Into<String>) {
         // Reset user_scrolled on new user message to re-enable auto-scroll
         if role == ChatRole::User {
@@ -852,7 +932,7 @@ impl App {
         self.messages.push(msg);
         self.scroll_to_bottom();
         self.update_session_info();
-        self.dirty = true;
+        self.request_render();
     }
 
     /// Add a pre-collapsed message (e.g., tool call card).
@@ -862,24 +942,24 @@ impl App {
         self.messages.push(msg);
         self.scroll_to_bottom();
         self.update_session_info();
-        self.dirty = true;
+        self.request_render();
     }
 
     /// Append text to the last assistant message (for streaming/typewriter).
     ///
-    /// During streaming, text is buffered in `stream_buffer` and only applied
-    /// when `flush_stream_buffer()` is called (at throttled intervals).
-    /// This prevents 100+ redraws/second during fast streaming.
+    /// Text is buffered in `stream_buffer` and applied when the main loop's
+    /// `RenderScheduler` reaches its draw deadline (~30fps). The scheduler owns
+    /// the draw-throttle role; this only batches content appends.
     pub fn append_to_last_assistant(&mut self, text: &str) {
-        // Buffer the chunk instead of immediately appending
         self.stream_buffer.push_str(text);
-        // Don't mark dirty yet — flush_stream_buffer() will do that
+        self.request_render_debounced();
     }
 
     /// Flush the stream buffer — apply buffered text to the last assistant message.
     ///
-    /// Called by the main loop at throttled intervals (~10fps) during streaming,
-    /// and on Complete events to ensure final text is displayed.
+    /// Called by the main loop draw path (when `RenderScheduler::should_draw()`)
+    /// and on Complete events to ensure final text is displayed. Does not touch
+    /// render scheduling — the caller/draw path owns "needs redraw".
     pub fn flush_stream_buffer(&mut self) {
         if self.stream_buffer.is_empty() {
             return;
@@ -891,8 +971,6 @@ impl App {
                 last.content.push_str(&self.stream_buffer);
                 self.stream_buffer.clear();
                 self.scroll_to_bottom();
-                // dirty is set by scroll_to_bottom()
-                self.last_stream_flush = std::time::Instant::now();
                 return;
             }
         }
@@ -900,14 +978,12 @@ impl App {
         let buffered_text = self.stream_buffer.clone();
         self.stream_buffer.clear();
         self.add_message(ChatRole::Assistant, buffered_text);
-        self.last_stream_flush = std::time::Instant::now();
     }
 
     /// Scroll to the bottom of the chat area.
     /// Disables user_scrolled so auto-scroll-to-bottom takes effect on next render.
     fn scroll_to_bottom(&mut self) {
         self.user_scrolled = false;
-        self.dirty = true;
     }
 
     /// Update current session info (message count, preview) from current state.
@@ -962,7 +1038,7 @@ impl App {
             self.collapsed_ids.insert(id.to_string());
         }
         self.render_cache.invalidate(id);
-        self.dirty = true;
+        self.request_render();
     }
 
     /// Save current input state to undo stack (for Ctrl+Z).
@@ -1014,7 +1090,7 @@ impl App {
                 };
             }
         }
-        self.dirty = true;
+        self.request_render();
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Option<String> {
@@ -1031,7 +1107,7 @@ impl App {
             let result = self.handle_autocomplete_key(key);
             // Always mark dirty after autocomplete key handling — index changes,
             // input changes, etc. all need visual feedback
-            self.dirty = true;
+            self.request_render();
             return result;
         }
 
@@ -1045,7 +1121,7 @@ impl App {
         };
 
         // Any key press that wasn't filtered out likely changed some state
-        self.dirty = true;
+        self.request_render();
         result
     }
 
@@ -1622,4 +1698,57 @@ fn find_prev_line_start(input: &str, pos: usize) -> usize {
     // The newline before current_start is at current_start - 1
     // Find start of line before that newline
     find_line_start(input, current_start - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scheduler_first_frame_must_draw() {
+        // new() primes requested=true so the first loop iteration draws (matches
+        // the old `dirty: true` initial value).
+        let s = RenderScheduler::new();
+        assert!(s.should_draw(), "fresh scheduler must be ready to draw");
+    }
+
+    #[test]
+    fn scheduler_immediate_request_draws_now() {
+        // request_render() clears any deadline → should_draw() true immediately,
+        // even right after a debounced deadline was armed.
+        let mut s = RenderScheduler::new();
+        s.clear();
+        s.request_render_debounced();
+        assert!(s.deadline().is_some(), "debounced arms a deadline");
+        s.request_render(); // interactive path overrides debounce → draw now
+        assert!(s.should_draw());
+        assert!(s.deadline().is_none(), "immediate request clears deadline");
+    }
+
+    #[test]
+    fn scheduler_debounced_coalesces_into_one_deadline() {
+        // Repeated debounced requests within the window must NOT push the deadline
+        // later — they coalesce into the first armed deadline.
+        let mut s = RenderScheduler::new();
+        s.clear();
+        s.request_render_debounced();
+        let first = s.deadline();
+        s.request_render_debounced();
+        s.request_render_debounced();
+        assert_eq!(
+            s.deadline(),
+            first,
+            "subsequent debounced calls must not extend deadline"
+        );
+        assert!(first.is_some());
+    }
+
+    #[test]
+    fn scheduler_clear_resets() {
+        let mut s = RenderScheduler::new();
+        s.request_render_debounced();
+        s.clear();
+        assert!(!s.should_draw(), "after clear, nothing to draw");
+        assert!(s.deadline().is_none());
+    }
 }

@@ -34,7 +34,7 @@
 - gap-analysis 的 **P1 安全护栏**（1.4）与 inspiration 的 **P0（cache/check_fn/供应链）**（1.1/1.2/1.3）+ 1.5 衍生项**全部闭合**（2026-07-28）。Phase 1 完成。
 - inspiration P1-P3（新能力）与 gap P2-P3（能力补齐/收尾）**基本正交**，可按"差异化→可达性→精细化"分阶段叠加。
 - **Phase 2（差异化）全部闭合**（2026-07-29~31）：2.1 闭环学习三 Stage / 2.2 supervisor / 2.3 生成式 catalog / 2.4 记忆衰减。
-- **Phase 3（可达性）全部闭合**（2026-07-30~31）：3.1 网关 / 3.2 cron / 3.3 TerminalBackend / 3.4 自扩展热重载 / 3.5 A2A server / 3.6 HF 导出。仅剩 Phase 4（精细化/综合）未做。
+- **Phase 3（可达性）全部闭合**（2026-07-30~31）：3.1 网关 / 3.2 cron / 3.3 TerminalBackend / 3.4 自扩展热重载 / 3.5 A2A server / 3.6 HF 导出。Phase 4（精细化/综合）进行中：4.1-A 渲染合并定时器 ✅（2026-07-31），4.1-B ANSI 行级 diff / 4.2–4.5 待续。
 
 ---
 
@@ -241,6 +241,8 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 - **What**：最小先上**合并定时器**（`render_requested`+`set_timeout` 去抖）；大胜场是 chat 面板绕 ratatui 全重绘、吐 ANSI diff 行包 `?2026` 同步输出（line 级而非 cell 级）。
 - **Why**：OneAI TUI perf 笔记（`tui-render-perf-fix`/`stream-macOS-mainqueue-flooding`/`macos-streaming-freeze-lazyvstack`）反复重发现此理；macOS `StreamCoalescer 20fps` 是同思路再发明。PI 有成熟独立答案。
 - **Effort**：低-中。**Fit**：中。**类型**：精细化。
+- **进度**：**Part A（合并定时器）✅（2026-07-31）**。`RenderScheduler`（`tui/app.rs`）合并旧 `dirty` 标志 + `stream_buffer`/100ms flush 两套并行机制为单一去抖调度器：`request_render()`（即时，交互路径零延迟，等价旧 `dirty=true`）/`request_render_debounced()`（流式 token + spinner，武装 `RENDER_FRAME_INTERVAL=33ms`≈30fps deadline，窗口内合并不延后）。主循环 `run_main_loop`（`tui/mod.rs`）draw 段改 `should_draw()`→`flush_stream_buffer()`→`terminal.draw()`→`clear()`；poll 超时按 `render.deadline()` 收窄使循环恰在 deadline 唤醒，流式帧率与空闲 50ms poll 解耦、闲置零 draw。删 `STREAM_FLUSH_INTERVAL`/`last_stream_flush` 独立节流块与 `flush_stream_buffer` 靠 `scroll_to_bottom()` 副作用设 dirty 的脆弱耦合（`app.rs:894` 旧注释）；`scroll_to_bottom` 不再设 dirty，draw 路径显式 flush。~50 处 `dirty=true` 迁移 `request_render()`。守按键即时绘制/全屏 Clear 消 ghosting/spinner 动画/scroll-to-bottom（戒律 #7）。4 新测（首帧必画/即时覆盖去抖/窗口内合并单 deadline/clear 复位）。零新依赖。
+- **Part B（大胜场 ANSI 行级 diff + `?2026` 同步输出）延后**：用户选 C（A 后接 B 分两次），B 留后续单独 phase——放弃 ratatui widget 体系重写 chat 渲染高风险，待 A 验证稳定后再起。
 
 ### 4.2 Gondolin tool-override + Remote Operations 接口（inspiration P3-2）
 - **What**：`oneai-tool` 定义 `BashOperations/ReadOperations/...` trait，`ShellTool`/`ReadTool` 持 `Box<dyn BashOperations>`；`ToolRegistry` 支持**按名覆盖**（当前只 add）；`ContainerizedCodingPack` DomainPack 提供 VM-backed 同名工具，`PermissionProfile` 保持 `Full`（VM 即边界）。

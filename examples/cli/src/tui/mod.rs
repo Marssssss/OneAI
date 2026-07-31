@@ -261,7 +261,7 @@ fn cycle_interaction_mode(app: &mut App) {
         }
     };
     app.add_message(ChatRole::System, hint);
-    app.dirty = true;
+    app.request_render();
 }
 
 /// Handle a single crossterm key event.
@@ -301,7 +301,7 @@ fn handle_key_event(
     }
     if app.search_mode {
         handle_search_key(app, key);
-        app.dirty = true;
+        app.request_render();
         return;
     }
     // Esc while the agent is running (and not in vim multi-line edit) →
@@ -323,7 +323,7 @@ fn handle_key_event(
                 );
             }
         });
-        app.dirty = true;
+        app.request_render();
         return;
     }
     let msg = app.handle_key_event(key);
@@ -360,12 +360,12 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
         crossterm::event::MouseEventKind::ScrollDown => {
             app.chat_scroll_y = app.chat_scroll_y.saturating_add(3);
             app.user_scrolled = true;
-            app.dirty = true;
+            app.request_render();
         }
         crossterm::event::MouseEventKind::ScrollUp => {
             app.chat_scroll_y = app.chat_scroll_y.saturating_sub(3);
             app.user_scrolled = true;
-            app.dirty = true;
+            app.request_render();
         }
 
         // ── Left button down (scrollbar or chat-area collapse toggle) ──────
@@ -381,7 +381,7 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                     app.chat_scroll_y = ((ratio * content_height as f64) as usize)
                         .min(content_height.saturating_sub(viewport_height));
                     app.user_scrolled = true;
-                    app.dirty = true;
+                    app.request_render();
                 }
             } else if is_in_chat {
                 // Chat-area click — toggle collapse for the message under the cursor.
@@ -432,7 +432,7 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                 if let Some(id) = target {
                     app.toggle_collapse(&id);
                     app.render_cache.invalidate(&id);
-                    app.dirty = true;
+                    app.request_render();
                 }
             }
         }
@@ -451,7 +451,7 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                 app.chat_scroll_y = ((ratio * content_height as f64) as usize)
                     .min(content_height.saturating_sub(viewport_height));
                 app.user_scrolled = true;
-                app.dirty = true;
+                app.request_render();
             }
         }
 
@@ -480,26 +480,32 @@ fn run_main_loop(
         // Advance spinner frame only when thinking (spinner animation needs periodic redraw)
         if app.is_thinking {
             app.spinner_frame = advance_frame(app.spinner_frame);
-            app.dirty = true;
-        }
-
-        // Stream throttle: flush buffered chunks at ~10fps (100ms interval)
-        // This prevents 100+ redraws/second during fast streaming
-        if !app.stream_buffer.is_empty() {
-            const STREAM_FLUSH_INTERVAL: std::time::Duration =
-                std::time::Duration::from_millis(100);
-            if app.last_stream_flush.elapsed() >= STREAM_FLUSH_INTERVAL {
-                app.flush_stream_buffer();
-            }
+            // Debounced: coalesce spinner redraws with any in-flight stream tokens so
+            // thinking+streaming share one ~30fps frame instead of forcing immediate draws.
+            app.request_render_debounced();
         }
 
         // Poll for events — use shorter interval when autocomplete is active
         // for more responsive typing/navigation (16ms ≈ 60fps feel)
         // Otherwise use 50ms to reduce CPU usage when idle
-        let poll_interval = if app.command_autocomplete {
+        let base_poll = if app.command_autocomplete {
             std::time::Duration::from_millis(16)
         } else {
             std::time::Duration::from_millis(50)
+        };
+        // When a debounced render deadline is armed (streaming/spinner), narrow the
+        // poll timeout so the loop wakes exactly at the deadline to draw, decoupling
+        // the streaming frame rate from the idle 50ms poll.
+        let poll_interval = match app.render.deadline() {
+            Some(d) => {
+                let now = std::time::Instant::now();
+                if d > now {
+                    std::cmp::min(base_poll, d - now)
+                } else {
+                    std::time::Duration::from_millis(0)
+                }
+            }
+            None => base_poll,
         };
 
         if event::poll(poll_interval)? {
@@ -609,12 +615,16 @@ fn run_main_loop(
             }
         }
 
-        // Render AFTER processing all events and state changes
-        // This ensures visual feedback appears immediately after key presses,
-        // without waiting for the next poll cycle.
-        if app.dirty {
+        // Render AFTER processing all events and state changes.
+        // The `RenderScheduler` gates drawing: immediate (`request_render()`) for
+        // interactive paths draws this iteration (zero-latency key feedback); a
+        // debounced deadline (streaming/spinner) coalesces bursts into ~30fps.
+        // Stream buffer is flushed in the draw path so a frame always reflects
+        // all text received before its deadline.
+        if app.render.should_draw() {
+            app.flush_stream_buffer();
             terminal.draw(|f| render::draw(f, &mut app))?;
-            app.dirty = false;
+            app.render.clear();
         }
     }
 
@@ -734,7 +744,7 @@ fn handle_user_input_async(
                         accounting.format_display(&app.provider_info),
                     );
                 }
-                app.dirty = true;
+                app.request_render();
                 return;
             }
             "/session" => {
@@ -899,7 +909,7 @@ fn handle_user_input_async(
                         mode_hint
                     ),
                 );
-                app.dirty = true;
+                app.request_render();
 
                 let session_state_cl = session_state.clone();
                 let tx = observer_tx.clone();
@@ -968,7 +978,7 @@ fn handle_user_input_async(
                     ChatRole::System,
                     "⏳ Compacting conversation (LLM summary)…",
                 );
-                app.dirty = true;
+                app.request_render();
 
                 let session_state_cl = session_state.clone();
                 let tx = observer_tx.clone();
@@ -1051,7 +1061,7 @@ fn handle_user_input_async(
                         } else {
                             app.add_message(ChatRole::System, "No active skill to deactivate.");
                         }
-                        app.dirty = true;
+                        app.request_render();
                         return;
                     }
                     "add" => {
@@ -1097,7 +1107,7 @@ fn handle_user_input_async(
                             "✅ Skill registered: {}\n  Description: {}\n  Prompt: \"{}\"\n  Keywords: [{}]",
                             skill_name, skill_desc, prompt_template, skill_name
                         ));
-                        app.dirty = true;
+                        app.request_render();
                         return;
                     }
                     "remove" => {
@@ -1122,7 +1132,7 @@ fn handle_user_input_async(
                                 app.add_message(ChatRole::Error, format!("Skill '{}' not found.", skill_name));
                             }
                         });
-                        app.dirty = true;
+                        app.request_render();
                         return;
                     }
                     "info" => {
@@ -1214,7 +1224,7 @@ fn handle_user_input_async(
                                     .await;
                             });
                         }
-                        app.dirty = true;
+                        app.request_render();
                         return;
                     }
                 }
@@ -1824,6 +1834,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // not Assistant (Checkpoint added an Iteration after it), and
             // creates a SECOND Assistant bubble from the buffer → two bubbles.
             app.flush_stream_buffer();
+            app.request_render(); // final text landed — draw the completed state now
 
             // If streaming already created an assistant message, don't add a duplicate.
             // Search backwards through all messages in the current turn (until we hit
@@ -1836,7 +1847,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 .any(|m| m.role == ChatRole::Assistant);
             if already_has_assistant {
                 // Streaming already showed this content — just ensure final redraw
-                app.dirty = true;
+                app.request_render();
             } else {
                 // No streaming happened — add the direct answer as a new message
                 app.add_message(ChatRole::Assistant, text);
@@ -1955,7 +1966,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 }
                 // Invalidate render cache since content changed
                 app.render_cache.invalidate(&msg.id);
-                app.dirty = true;
+                app.request_render();
             } else {
                 // No matching ToolInvocation message found — this can happen
                 // for /tool direct calls. Add a standalone result message.
@@ -2064,6 +2075,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
         ObserverEvent::Complete(result) => {
             // Flush any remaining buffered stream text before marking as done
             app.flush_stream_buffer();
+            app.request_render(); // final text landed — draw the completed state now
             app.stop_thinking(); // stop timer; last run duration retained for dim display
                                  // Remove useless thinking bubbles: the "Processing your request..."
                                  // placeholder (model never produced thinking) AND any empty thinking
@@ -2114,7 +2126,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             // (a fresh run creates a new plan via task_create / exit_plan_mode).
             app.plan_state = None;
 
-            app.dirty = true; // Need redraw to stop spinner
+            app.request_render(); // Need redraw to stop spinner
         }
         ObserverEvent::StreamChunk(text) => {
             app.append_to_last_assistant(&text);
@@ -2159,7 +2171,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 // New round of thinking — create a fresh bubble (auto-scrolls to bottom)
                 app.add_message(ChatRole::Thinking, text.clone());
             }
-            app.dirty = true;
+            app.request_render();
         }
         ObserverEvent::PlanUpdate(plan) => {
             // Live task list changed — update the persistent plan panel.
@@ -2179,7 +2191,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                     );
                 }
             }
-            app.dirty = true;
+            app.request_render();
         }
         ObserverEvent::Error(msg) => {
             app.stop_thinking(); // run ended via error; retain duration for dim display
@@ -2238,7 +2250,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.context_tokens = 0;
             app.context_tokens_is_estimated = false;
             app.last_context_accounting = None;
-            app.dirty = true;
+            app.request_render();
         }
         ObserverEvent::TokenUsageUpdate(usage) => {
             // Accumulate raw usage (some providers report real data, others 0)
@@ -2272,7 +2284,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 app.context_tokens_is_estimated = false;
             }
 
-            app.dirty = true; // Sidebar needs update
+            app.request_render(); // Sidebar needs update
         }
         ObserverEvent::ContextAccountingUpdate(accounting) => {
             // Context accounting from the assembled inference request.
@@ -2291,7 +2303,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.context_tokens = accounting.total_tokens;
             app.context_tokens_is_estimated = accounting.is_estimated;
             app.context_window_size = accounting.context_window_size;
-            app.dirty = true; // Sidebar needs update
+            app.request_render(); // Sidebar needs update
         }
     }
 }
@@ -2318,7 +2330,7 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
             } else {
                 app.approval_selected_index -= 1;
             }
-            app.dirty = true;
+            app.request_render();
             // Invalidate approval message cache to re-render with new selection
             if let Some(last_approval_id) = app
                 .messages
@@ -2338,7 +2350,7 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
             } else {
                 app.approval_selected_index += 1;
             }
-            app.dirty = true;
+            app.request_render();
             if let Some(last_approval_id) = app
                 .messages
                 .iter()
@@ -2504,7 +2516,7 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             (_, KeyCode::Esc) => {
                 // Cancel input — back to button navigation, plan still pending.
                 app.plan_revise_input = None;
-                app.dirty = true;
+                app.request_render();
             }
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 let feedback = std::mem::take(buf);
@@ -2519,15 +2531,15 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                     );
                 }
                 app.is_thinking = true;
-                app.dirty = true;
+                app.request_render();
             }
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 buf.pop();
-                app.dirty = true;
+                app.request_render();
             }
             (KeyModifiers::NONE, KeyCode::Char(c)) => {
                 buf.push(c);
-                app.dirty = true;
+                app.request_render();
             }
             _ => {}
         }
@@ -2557,38 +2569,38 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             } else {
                 app.plan_approval_selected_index - 1
             };
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::Tab) | (KeyModifiers::NONE, KeyCode::Right) => {
             // Tab/→ cycle forwards (wraps to first).
             app.plan_approval_selected_index = (app.plan_approval_selected_index + 1) % count;
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('j')) => {
             app.plan_approval_scroll = app.plan_approval_scroll.saturating_sub(1);
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
             let max = scroll_max(app);
             app.plan_approval_scroll = (app.plan_approval_scroll + 1).min(max);
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::PageUp) => {
             app.plan_approval_scroll = app.plan_approval_scroll.saturating_sub(8);
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::PageDown) => {
             let max = scroll_max(app);
             app.plan_approval_scroll = (app.plan_approval_scroll + 8).min(max);
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::Home) => {
             app.plan_approval_scroll = 0;
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::End) => {
             app.plan_approval_scroll = scroll_max(app);
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
             match app.plan_approval_selected_index {
@@ -2626,7 +2638,7 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                     app.is_thinking = true;
                 }
             }
-            app.dirty = true;
+            app.request_render();
         }
         (_, KeyCode::Esc) => {
             if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
@@ -2641,7 +2653,7 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                 );
             }
             app.is_thinking = true;
-            app.dirty = true;
+            app.request_render();
         }
         _ => {}
     }
@@ -2661,7 +2673,7 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
         match (key.modifiers, key.code) {
             (_, KeyCode::Esc) => {
                 app.plan_revise_input = None;
-                app.dirty = true;
+                app.request_render();
             }
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 let feedback = std::mem::take(buf);
@@ -2676,15 +2688,15 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                     );
                 }
                 app.is_thinking = true;
-                app.dirty = true;
+                app.request_render();
             }
             (KeyModifiers::NONE, KeyCode::Backspace) => {
                 buf.pop();
-                app.dirty = true;
+                app.request_render();
             }
             (KeyModifiers::NONE, KeyCode::Char(c)) => {
                 buf.push(c);
-                app.dirty = true;
+                app.request_render();
             }
             _ => {}
         }
@@ -2708,7 +2720,7 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                 } else {
                     state.selected -= 1;
                 }
-                app.dirty = true;
+                app.request_render();
             }
         }
         (KeyModifiers::NONE, KeyCode::Down)
@@ -2717,7 +2729,7 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
             if let Some(state) = app.plan_decision_pending.as_mut() {
                 if opts_len > 0 {
                     state.selected = (state.selected + 1) % opts_len;
-                    app.dirty = true;
+                    app.request_render();
                 }
             }
         }
@@ -2737,7 +2749,7 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                 let _ = state.reply_tx.send(resp);
             }
             app.is_thinking = true;
-            app.dirty = true;
+            app.request_render();
         }
         (KeyModifiers::NONE, KeyCode::Char('e')) => {
             app.plan_revise_input = Some(String::new());
@@ -2745,7 +2757,7 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                 ChatRole::System,
                 "✏️ Enter custom decision, then Enter (Esc to cancel).",
             );
-            app.dirty = true;
+            app.request_render();
         }
         (_, KeyCode::Esc) => {
             if let Some(state) = app.plan_decision_pending.take() {
@@ -2755,7 +2767,7 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                 app.add_message(ChatRole::System, "❌ Decision cancelled.");
             }
             app.is_thinking = true;
-            app.dirty = true;
+            app.request_render();
         }
         _ => {}
     }
