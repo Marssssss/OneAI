@@ -215,49 +215,49 @@ struct ScenarioEditor: View {
     /// startable from the sidebar without hitting "场景启动失败".
     static func validate(_ sc: Scenario) -> String? {
         if sc.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "请填写场景名。"
+            return NSLocalizedString("请填写场景名。", comment: "")
         }
         if sc.agents.isEmpty {
-            return "至少需要一个智能体(演员表不能为空)。"
+            return NSLocalizedString("至少需要一个智能体(演员表不能为空)。", comment: "")
         }
         let ids = Set(sc.agents.map { $0.id })
         for (i, a) in sc.agents.enumerated() {
             if a.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return "第 \(i + 1) 个智能体缺少名字。"
+                return String(format: NSLocalizedString("第 %d 个智能体缺少名字。", comment: ""), i + 1)
             }
             if a.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return "智能体「\(a.name)」缺少系统提示词。"
+                return String(format: NSLocalizedString("智能体「%@」缺少系统提示词。", comment: ""), a.name)
             }
         }
         if let order = sc.scriptOrder {
             for id in order where !ids.contains(id) {
-                return "轮次顺序引用了不存在的角色 id「\(id)」。"
+                return String(format: NSLocalizedString("轮次顺序引用了不存在的角色 id「%@」。", comment: ""), id)
             }
         }
         if let mid = sc.moderatorId, !mid.isEmpty, !ids.contains(mid) {
-            return "主持人 id「\(mid)」不在演员表中。"
+            return String(format: NSLocalizedString("主持人 id「%@」不在演员表中。", comment: ""), mid)
         }
         if let op = sc.openerAgentId, !op.isEmpty, !ids.contains(op) {
-            return "开场角色 id「\(op)」不在演员表中。"
+            return String(format: NSLocalizedString("开场角色 id「%@」不在演员表中。", comment: ""), op)
         }
         if sc.turnPolicy == .moderator {
             let mid = sc.moderatorId ?? ""
             if mid.isEmpty {
-                return "主持人策略需要选择一个主持人。"
+                return NSLocalizedString("主持人策略需要选择一个主持人。", comment: "")
             }
         }
         if let debrief = sc.debrief, !ids.contains(debrief.debriefMemberId) {
-            return "结束阶段的接管角色不在演员表中。"
+            return NSLocalizedString("结束阶段的接管角色不在演员表中。", comment: "")
         }
         return nil
     }
 
     /// One-line summary of a topic field's per-member visibility for the Menu label.
     private func visibilityLabel(for f: TopicField, in sc: Scenario) -> String {
-        guard let v = f.visibleTo, !v.isEmpty else { return "全员可见" }
+        guard let v = f.visibleTo, !v.isEmpty else { return NSLocalizedString("全员可见", comment: "") }
         let names = v.compactMap { sc.agent($0)?.name }
         let shown = names.isEmpty ? v.joined(separator: ",") : names.joined(separator: "/")
-        return "仅 \(shown) 可见"
+        return String(format: NSLocalizedString("仅 %@ 可见", comment: ""), shown)
     }
 }
 

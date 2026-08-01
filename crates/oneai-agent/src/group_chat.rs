@@ -136,6 +136,97 @@ pub struct ReviewLoopConfig {
     pub max_rounds: usize,
 }
 
+/// Engine prompt language for group-chat turn nudges and moderator routing.
+///
+/// Chinese (`Zh`, the default) preserves the historical engine behavior; `En`
+/// emits English nudges so an English-locale scenario drives the LLM in English
+/// end-to-end. The reviewer's `approve_marker` and these prompts must share a
+/// locale — an English preset pairs `ChatLocale::En` here with an English
+/// marker (e.g. `"approved"`), a Chinese preset pairs `Zh` with `"定稿"`.
+/// `#[non_exhaustive]` per the v0.2.0 stability commitment (P3-1); future
+/// locales fall back to the Zh prompt set.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatLocale {
+    #[default]
+    Zh,
+    En,
+}
+
+impl ChatLocale {
+    /// Default opener line when `opener_line` is unset.
+    fn opener_default(self) -> &'static str {
+        match self {
+            Self::En => "Start this conversation in your role.",
+            _ => "请以你的角色身份开始这场对话。",
+        }
+    }
+
+    /// First-ever turn nudge — the first speaker responds directly to the user.
+    fn first_ever(self, member_id: &str) -> String {
+        match self {
+            Self::En => format!("(The user just sent a message; respond as {member_id}.)"),
+            _ => format!("（用户刚发来消息，请以 {} 的身份作出回应。）", member_id),
+        }
+    }
+
+    /// Reviewer re-review nudge under a review-revise loop. Tells the reviewer
+    /// to emit `approve_marker` when the draft is ready to finalize.
+    fn reviewer_re_review(self, n: usize, approve_marker: &str) -> String {
+        match self {
+            Self::En => format!(
+                "(Now in review round {n}. Re-review the writer's latest revision. \
+                 If it has reached a quality ready to finalize, include \"{approve_marker}\" \
+                 in your reply to signal approval; otherwise give specific, actionable \
+                 revision feedback.)"
+            ),
+            _ => format!(
+                "（已进入第{n}轮复审。请再次审阅写手本轮的修改。若已达到可定稿的质量，请在回复中包含「{}」以示通过；否则给出具体、可执行的修改意见。）",
+                approve_marker
+            ),
+        }
+    }
+
+    /// Writer revise nudge under a review-revise loop.
+    fn writer_revise(self, n: usize) -> String {
+        match self {
+            Self::En => format!(
+                "(Now in revision round {n}. Revise your draft per the editor's previous \
+                 feedback and output the complete draft.)"
+            ),
+            _ => format!(
+                "（已进入第{n}轮修改。请根据编辑上一轮的修改意见修改你的稿件，并输出完整稿件。）"
+            ),
+        }
+    }
+
+    /// Continue-the-dialogue nudge for a non-first, non-review turn.
+    fn continue_turn(self, member_id: &str) -> String {
+        match self {
+            Self::En => format!(
+                "(It's your turn to speak ({member_id}); continue the conversation in context.)"
+            ),
+            _ => format!("（现在轮到你（{member_id}）发言，请结合上文继续对话。）"),
+        }
+    }
+
+    /// Moderator routing task — pick the next speaker id (or `"user"`).
+    fn moderator_pick_prompt(self, member_ids: &[String]) -> String {
+        match self {
+            Self::En => format!(
+                "You are the moderator of this conversation. Based on the current progress, \
+                 choose the next role to speak.\nAvailable roles: {} or \"user\" \
+                 (hand the floor back to the user).\nReply with only that role's id and nothing else.",
+                member_ids.join(", ")
+            ),
+            _ => format!(
+                "你是这场对话的主持人。根据当前对话进展，选择下一位应该发言的角色。\n可选角色: {} 或 \"user\"（把发言权交还给用户）。\n只回复该角色的 id，不要回复其他内容。",
+                member_ids.join(", ")
+            ),
+        }
+    }
+}
+
 /// Shared engine resources a group chat runs on (mirrors what
 /// `DefaultSubAgentFactory` needs to build a member loop). The provider is
 /// per-member (keyed by member id) so a scenario can mix models — e.g. a
@@ -167,6 +258,11 @@ pub struct GroupChatConfig {
     /// scripted speaker sequence repeats up to `max_rounds` until the reviewer
     /// emits `approve_marker`. `None` = single pass (default behavior).
     pub review_loop: Option<ReviewLoopConfig>,
+    /// Engine prompt language for turn nudges / moderator routing. Defaults to
+    /// [`ChatLocale::Zh`] (preserves historical behavior). Set `En` for an
+    /// English-locale scenario so the LLM is nudged in English end-to-end —
+    /// pairs with an English `approve_marker` on the review loop.
+    pub locale: ChatLocale,
 }
 
 // ─── GroupChatSession ────────────────────────────────────────────────────────
@@ -285,7 +381,7 @@ impl GroupChatSession {
             .config
             .opener_line
             .clone()
-            .unwrap_or_else(|| "请以你的角色身份开始这场对话。".to_string());
+            .unwrap_or_else(|| self.config.locale.opener_default().to_string());
         self.run_member(&opener_id, task, observer).await?;
         self.persist().await;
         Ok(())
@@ -420,23 +516,19 @@ impl GroupChatSession {
         first_ever: bool,
         review_loop: &Option<ReviewLoopConfig>,
     ) -> String {
+        let loc = self.config.locale;
         if first_ever {
-            return format!("（用户刚发来消息，请以 {} 的身份作出回应。）", member_id);
+            return loc.first_ever(member_id);
         }
         if let Some(r) = review_loop {
             let n = round + 1;
             if member_id == r.reviewer_id {
-                format!(
-                    "（已进入第{n}轮复审。请再次审阅写手本轮的修改。若已达到可定稿的质量，请在回复中包含「{}」以示通过；否则给出具体、可执行的修改意见。）",
-                    r.approve_marker
-                )
+                loc.reviewer_re_review(n, &r.approve_marker)
             } else {
-                format!(
-                    "（已进入第{n}轮修改。请根据编辑上一轮的修改意见修改你的稿件，并输出完整稿件。）"
-                )
+                loc.writer_revise(n)
             }
         } else {
-            format!("（现在轮到你（{member_id}）发言，请结合上文继续对话。）")
+            loc.continue_turn(member_id)
         }
     }
 
@@ -592,10 +684,7 @@ impl GroupChatSession {
             }
         }
         let member_ids: Vec<String> = self.config.members.iter().map(|m| m.id.clone()).collect();
-        let task = format!(
-            "你是这场对话的主持人。根据当前对话进展，选择下一位应该发言的角色。\n可选角色: {} 或 \"user\"（把发言权交还给用户）。\n只回复该角色的 id，不要回复其他内容。",
-            member_ids.join(", ")
-        );
+        let task = self.config.locale.moderator_pick_prompt(&member_ids);
         // Run the moderator silently (no UI events) using a SilentObserver,
         // then parse its final answer as the picked member id.
         let silent = SilentGroupObserver;
@@ -794,6 +883,7 @@ mod tests {
             opener_line: None,
             title: None,
             review_loop: None,
+            locale: ChatLocale::Zh,
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
@@ -848,6 +938,7 @@ mod tests {
             opener_line: Some("开始面试".into()),
             title: None,
             review_loop: None,
+            locale: ChatLocale::Zh,
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
@@ -884,6 +975,7 @@ mod tests {
             opener_line: None,
             title: None,
             review_loop: None,
+            locale: ChatLocale::Zh,
         };
         assert!(GroupChatSession::new(bad, resources(provider.clone())).is_err());
 
@@ -900,6 +992,7 @@ mod tests {
             opener_line: None,
             title: None,
             review_loop: None,
+            locale: ChatLocale::Zh,
         };
         assert!(GroupChatSession::new(bad2, resources(provider)).is_err());
     }
@@ -941,6 +1034,7 @@ mod tests {
                 approve_marker: "定稿".into(),
                 max_rounds: 3,
             }),
+            locale: ChatLocale::Zh,
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
@@ -1005,6 +1099,7 @@ mod tests {
                 approve_marker: "定稿".into(),
                 max_rounds: 2,
             }),
+            locale: ChatLocale::Zh,
         };
         let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
@@ -1188,6 +1283,7 @@ mod tests {
             opener_line: None,
             title: None,
             review_loop: None,
+            locale: ChatLocale::Zh,
         };
         let session = GroupChatSession::new(cfg, moderator_resources(provider)).unwrap();
         let obs = Arc::new(RecordingObserver::new());
@@ -1222,5 +1318,103 @@ mod tests {
             b_count, 1,
             "b speaks once — proof the moderator reacted to a's turn"
         );
+    }
+
+    // ─── ChatLocale prompt localization ──────────────────────────────────────
+
+    /// Pin both locales' prompt strings so an English-locale scenario gets
+    /// English nudges end-to-end, and the Chinese default is unchanged.
+    #[test]
+    fn locale_prompt_strings_localized() {
+        // Opener default.
+        assert!(ChatLocale::Zh.opener_default().contains("请以你的角色身份"));
+        assert!(ChatLocale::En
+            .opener_default()
+            .contains("Start this conversation"));
+
+        // First-ever turn nudge (member id interpolated).
+        let fe_zh = ChatLocale::Zh.first_ever("interviewer");
+        let fe_en = ChatLocale::En.first_ever("interviewer");
+        assert!(fe_zh.contains("请以 interviewer 的身份"));
+        assert!(fe_en.contains("respond as interviewer"));
+
+        // Continue-the-dialogue nudge.
+        let ct_zh = ChatLocale::Zh.continue_turn("coach");
+        let ct_en = ChatLocale::En.continue_turn("coach");
+        assert!(ct_zh.contains("现在轮到你"));
+        assert!(ct_en.contains("your turn to speak"));
+
+        // Reviewer re-review — marker interpolated, must appear verbatim in both
+        // (the reviewer's reply is matched by substring on approve_marker).
+        let rr_zh = ChatLocale::Zh.reviewer_re_review(2, "定稿");
+        let rr_en = ChatLocale::En.reviewer_re_review(2, "approved");
+        assert!(rr_zh.contains("第2轮复审") && rr_zh.contains("定稿"));
+        assert!(rr_en.contains("review round 2") && rr_en.contains("approved"));
+
+        // Writer revise nudge carries the round number.
+        assert!(ChatLocale::Zh.writer_revise(2).contains("第2轮修改"));
+        assert!(ChatLocale::En.writer_revise(2).contains("revision round 2"));
+
+        // Moderator routing prompt lists the member ids and demands id-only.
+        let ids = vec!["a".to_string(), "b".to_string()];
+        let mp_zh = ChatLocale::Zh.moderator_pick_prompt(&ids);
+        let mp_en = ChatLocale::En.moderator_pick_prompt(&ids);
+        assert!(mp_zh.contains("你是这场对话的主持人") && mp_zh.contains("只回复该角色"));
+        assert!(
+            mp_en.contains("You are the moderator")
+                && mp_en.contains("Reply with only that role's id")
+                && mp_en.contains("a, b")
+        );
+
+        // Default is Zh (preserves historical behavior).
+        assert_eq!(ChatLocale::default(), ChatLocale::Zh);
+    }
+
+    /// Smoke that `locale: ChatLocale::En` threads through `turn_nudge`
+    /// (first-ever + continue nudges) without panicking and still tags speakers
+    /// correctly — i.e. the English path is wired, not just the strings.
+    #[tokio::test]
+    async fn english_locale_scripted_round_threads() {
+        let provider = Arc::new(MockProvider::from_script(vec![
+            ScriptedResponse::direct_answer("answer one"),
+            ScriptedResponse::direct_answer("answer two"),
+        ]));
+        let cfg = GroupChatConfig {
+            members: vec![
+                GroupChatMemberSpec {
+                    id: "interviewer".into(),
+                    name: "Interviewer".into(),
+                    system_prompt: "You are the interviewer.".into(),
+                },
+                GroupChatMemberSpec {
+                    id: "coach".into(),
+                    name: "Coach".into(),
+                    system_prompt: "You are the coach.".into(),
+                },
+            ],
+            turn_policy: TurnPolicy::Scripted {
+                order: vec!["interviewer".into(), "coach".into()],
+            },
+            opener_agent_id: None,
+            opener_line: None,
+            title: None,
+            review_loop: None,
+            locale: ChatLocale::En,
+        };
+        let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
+        let obs = Arc::new(RecordingObserver::new());
+        session
+            .run_task("hello", obs.as_ref() as &dyn GroupChatObserver)
+            .await
+            .unwrap();
+
+        let conv = session.conversation().await;
+        let speakers: Vec<&str> = conv
+            .messages
+            .iter()
+            .filter_map(|m| m.metadata.get("speaker").map(|s| s.as_str()))
+            .collect();
+        // user + interviewer + coach — the English-nudged turns ran and tagged.
+        assert_eq!(speakers, vec!["user", "interviewer", "coach"]);
     }
 }

@@ -251,7 +251,7 @@ public sealed partial class MarkdownTextBlock : UserControl
         }
         var copyBtn = new Button
         {
-            Content = "复制", Padding = new Thickness(8, 2, 8, 2), FontSize = 11,
+            Content = OneAI.Services.Loc.Str("copy"), Padding = new Thickness(8, 2, 8, 2), FontSize = 11,
             Background = Transparent, BorderThickness = new Thickness(0),
         };
         copyBtn.Click += (_, _) =>
@@ -259,8 +259,8 @@ public sealed partial class MarkdownTextBlock : UserControl
             var dp = new Windows.ApplicationModel.DataTransfer.DataPackage { RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy };
             dp.SetText(code);
             Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dp);
-            copyBtn.Content = "已复制";
-            _ = DispatcherQueue.TryEnqueue(async () => { await Task.Delay(1200); copyBtn.Content = "复制"; });
+            copyBtn.Content = OneAI.Services.Loc.Str("copied");
+            _ = DispatcherQueue.TryEnqueue(async () => { await Task.Delay(1200); copyBtn.Content = OneAI.Services.Loc.Str("copy"); });
         };
         Grid.SetColumn(copyBtn, 2);
         header.Children.Add(copyBtn);
@@ -268,7 +268,7 @@ public sealed partial class MarkdownTextBlock : UserControl
         {
             var openBtn = new Button
             {
-                Content = "在画布打开", Padding = new Thickness(8, 2, 8, 2), FontSize = 11,
+                Content = OneAI.Services.Loc.Str("open_on_canvas"), Padding = new Thickness(8, 2, 8, 2), FontSize = 11,
                 Background = Transparent, BorderThickness = new Thickness(0),
             };
             openBtn.Click += (_, _) => ArtifactStore?.Open(lang, code);

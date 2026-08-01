@@ -628,7 +628,7 @@ final class ChatViewModel: ObservableObject {
                     }
                 }
             } catch {
-                self.error = "场景启动失败: \(friendlyError(error))"
+                self.error = String(format: NSLocalizedString("场景启动失败: %@", comment: ""), friendlyError(error))
                 currentScenario = nil
                 groupSession = nil
                 debriefActive = false

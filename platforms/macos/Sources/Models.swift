@@ -13,9 +13,9 @@ enum TurnPolicy: String, Codable, CaseIterable {
 
     var label: String {
         switch self {
-        case .scripted:   return "脚本式"
-        case .roundRobin: return "轮询"
-        case .moderator:  return "主持人选择"
+        case .scripted:   return NSLocalizedString("脚本式", comment: "")
+        case .roundRobin: return NSLocalizedString("轮询", comment: "")
+        case .moderator:  return NSLocalizedString("主持人选择", comment: "")
         }
     }
     /// The string the FFI `ScenarioSpecView.turn_policy` expects.
@@ -180,7 +180,8 @@ struct Scenario: Codable, Identifiable, Hashable {
                 ReviewLoopSpecView(reviewerId: rl.reviewerId,
                                    approveMarker: rl.approveMarker,
                                    maxRounds: UInt64(rl.maxRounds))
-            }
+            },
+            locale: AppLocale.current.chatLocaleView
         )
     }
 

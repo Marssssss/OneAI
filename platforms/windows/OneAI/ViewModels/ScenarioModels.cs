@@ -206,6 +206,7 @@ public class Scenario
             OpenerLine = OpenerLine,
             Title = title,
             ReviewLoop = rl,
+            Locale = OneAI.Services.AppLocaleHelper.LocaleCode,
         };
     }
 

@@ -169,7 +169,7 @@ pub async fn cmd_eval_run(
 /// Print the efficiency axis (three-axis: quality × tokens × latency) for
 /// each case + an aggregate. Backs the `oneai eval run --profile` flag.
 fn print_efficiency_profile(report: &oneai_eval::EvalReport) {
-    println!("\n── Efficiency Axis (能力 × 成本 × 效率) ────────────────");
+    println!("\n── Efficiency Axis (capability × cost × efficiency) ────────────────");
     println!(
         "{:<24} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
         "case", "infer_ms", "tool_ms", "overhd", "iters", "tokens", "cache%", "3axis"

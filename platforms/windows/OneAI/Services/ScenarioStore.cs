@@ -24,8 +24,10 @@ public class ScenarioStoreData
 public class ScenarioStore : ObservableObject
 {
     /// <summary>Bump when the preset structure changes — triggers a preset
-    /// re-seed on load.</summary>
-    private const int SchemaVersion = 5;
+    /// re-seed on load. v6: presets are now locale-aware (zh / en); an
+    /// English-system user re-seeds to the English preset set (names, prompts,
+    /// approve marker).</summary>
+    private const int SchemaVersion = 6;
 
     public ObservableCollection<Scenario> Scenarios { get; } = new();
 
@@ -36,7 +38,7 @@ public class ScenarioStore : ObservableObject
         Load();
         if (Scenarios.Count == 0)
         {
-            foreach (var s in Presets) Scenarios.Add(s);
+            foreach (var s in PresetsFor(AppLocaleHelper.Current)) Scenarios.Add(s);
             Save();
         }
     }
@@ -109,7 +111,7 @@ public class ScenarioStore : ObservableObject
     {
         var customs = Scenarios.Where(s => !s.Id.StartsWith("preset-")).ToList();
         Scenarios.Clear();
-        foreach (var p in Presets) Scenarios.Add(p);
+        foreach (var p in PresetsFor(AppLocaleHelper.Current)) Scenarios.Add(p);
         foreach (var c in customs) Scenarios.Add(c);
         Save();
     }
@@ -119,7 +121,7 @@ public class ScenarioStore : ObservableObject
     public static (string Name, string Color, string Avatar) SpeakerMeta(string speakerId, Scenario? scenario)
     {
         if (speakerId == "user" || string.IsNullOrEmpty(speakerId))
-            return ("你", "#8A8A8A", "");
+            return (Loc.Str("you"), "#8A8A8A", "");
         if (scenario?.AgentById(speakerId) is { } a)
             return (a.Name, a.Color, a.Avatar);
         return (speakerId, "#8A8A8A", "");
@@ -127,8 +129,17 @@ public class ScenarioStore : ObservableObject
 
     // ── Built-in presets ───────────────────────────────────────────────
     // IDs are stable so a user can edit a preset (it overwrites in place via
-    // Upsert). Prompts ported verbatim from macOS AgentStore.swift.
-    public static Scenario[] Presets => new[]
+    // Upsert). The locale selects which language variant of the names / prompts
+    // / markers ships. `zh` is the historical Chinese set; `en` ships English
+    // names + English persona prompts + an English review-loop marker
+    // ("approved" ↔ "定稿") so an English-locale scenario drives the LLM in
+    // English end-to-end (the engine locale in ScenarioSpecDto.Locale matches
+    // — see AppLocaleHelper / Scenario.SpecDto).
+    public static Scenario[] PresetsFor(AppLocale locale) =>
+        locale == AppLocale.En ? EnPresets : ZhPresets;
+
+    // Prompts ported verbatim from macOS AgentStore.swift zhPresets.
+    public static Scenario[] ZhPresets => new[]
     {
         new Scenario
         {
@@ -243,6 +254,134 @@ public class ScenarioStore : ObservableObject
             OpenerAgentId = "ideator",
             OpenerLine = "请围绕今天的主题,给出第一批点子,每条简述理由。",
             TopicFields = new() { new TopicField { Id = "topic", Label = "头脑风暴主题", Placeholder = "如:提升产品留存的点子" } },
+        },
+    };
+
+    /// English-locale preset set — names, persona prompts, topic-field labels,
+    /// opener lines, debrief text, and the review-loop marker ("approved")
+    /// all in English. Structure (ids, colors, icons/avatars, turn policies,
+    /// script orders) is identical to ZhPresets; only the human-/LLM-facing
+    /// text is translated. The "approved" marker pairs with ChatLocale.en
+    /// engine prompts (the editor is told to emit "approved"; the engine
+    /// matches it substring-wise to approve).</summary>
+    public static Scenario[] EnPresets => new[]
+    {
+        new Scenario
+        {
+            Id = "preset-interview",
+            Name = "Interview Practice",
+            Icon = "🎤",
+            Agents = new()
+            {
+                new Agent
+                {
+                    Id = "interviewer", Name = "Interviewer", Role = "Asks questions", Color = "#4D6BFE", Avatar = "👨‍💼",
+                    SystemPrompt = "You are a senior technical interviewer. Your job is to ask in-depth, progressive questions about the position the candidate is applying for. Ask only one question at a time; follow up or change direction only after the candidate answers. Do not answer for the candidate, and do not give coaching feedback — that is the coach's job. Keep a professional, measured tone.",
+                },
+                new Agent
+                {
+                    Id = "coach", Name = "Coach", Role = "Feedback", Color = "#3B8C5A", Avatar = "🎯",
+                    SystemPrompt = "You are an interview coach. After each of the candidate's answers, give targeted feedback: what was strong, what was weak, how to improve, plus a short, actionable \"next step\". Be specific and practical. Do not answer the interviewer's questions for the candidate. If the candidate's project experience is provided in [Scenario Background], tie your advice to those projects at a project-specific level (the interviewer does not see this — you use it only for coaching).",
+                },
+            },
+            TurnPolicy = TurnPolicy.Scripted,
+            // candidate answers → coach feedback → interviewer follow-up
+            ScriptOrder = new() { "coach", "interviewer" },
+            OpenerAgentId = "interviewer",
+            OpenerLine = "Let's begin the interview. Please give a brief self-introduction.",
+            TopicFields = new()
+            {
+                new TopicField { Id = "position", Label = "Position", Placeholder = "e.g. Frontend Engineer, 3 years" },
+                new TopicField { Id = "company", Label = "Target company", Placeholder = "e.g. ByteDance" },
+                new TopicField { Id = "level", Label = "Level", Placeholder = "e.g. Mid-level" },
+                // Project experience is injected only into the coach's background
+                // (VisibleTo: ["coach"]) — the interviewer never sees it and won't
+                // ask about it, but the coach can give project-specific advice.
+                new TopicField { Id = "projects", Label = "Project experience", Placeholder = "e.g. E-commerce order platform, owned inventory & payment modules; multiple allowed", VisibleTo = new() { "coach" } },
+            },
+            Debrief = new DebriefConfig
+            {
+                ButtonLabel = "End interview",
+                SummaryPrompt = "(Interview over.) As the coach, give an overall summary of the candidate's performance in this interview: highlights, weaknesses, areas to improve, and follow-up learning and practice recommendations.",
+                DebriefMemberId = "coach",
+            },
+        },
+        new Scenario
+        {
+            Id = "preset-language-partner",
+            Name = "Language Partner",
+            Icon = "🌐",
+            Agents = new()
+            {
+                new Agent
+                {
+                    Id = "partner", Name = "Language Partner", Role = "Practice", Color = "#B68C2E", Avatar = "🗣",
+                    SystemPrompt = "You are a foreign-language practice partner. Hold a natural conversation with the user, adjust difficulty to their level, gently correct wording and grammar mistakes as they come up, and offer more idiomatic phrasing. Advance the topic one step at a time. Speak the language specified under \"Language · Topic\" in [Scenario Background]; if the user didn't specify a language, default to English.",
+                },
+            },
+            TurnPolicy = TurnPolicy.RoundRobin,
+            OpenerAgentId = "partner",
+            OpenerLine = "Open naturally in the language and topic specified in the background, and start chatting with the user.",
+            TopicFields = new() { new TopicField { Id = "topic", Label = "Language · Topic", Placeholder = "e.g. Chinese · Travel" } },
+        },
+        new Scenario
+        {
+            Id = "preset-debate",
+            Name = "Debate",
+            Icon = "⚖️",
+            Agents = new()
+            {
+                new Agent { Id = "pro", Name = "Pro Debater", Role = "For", Color = "#4D6BFE", Avatar = "👍", SystemPrompt = "You are the pro debater. Argue from the supporting position — sharp viewpoints, strong supporting reasoning." },
+                new Agent { Id = "con", Name = "Con Debater", Role = "Against", Color = "#E5484D", Avatar = "👎", SystemPrompt = "You are the con debater. Argue from the opposing position — counter the pro side point for point, with solid reasoning." },
+                new Agent { Id = "moderator", Name = "Moderator", Role = "Facilitator", Color = "#8A8A8A", Avatar = "⚖️", SystemPrompt = "You are the debate moderator. In the first round, state today's motion and invite the pro side to open; thereafter, each round reply only with the next speaker's role id (pro/con/user) — nothing else — and keep both sides balanced." },
+            },
+            TurnPolicy = TurnPolicy.Moderator,
+            ModeratorId = "moderator",
+            OpenerAgentId = "moderator",
+            OpenerLine = "Please open: state today's motion and invite the pro side to begin.",
+            TopicFields = new() { new TopicField { Id = "motion", Label = "Debate motion", Placeholder = "e.g. Will AI replace humans" } },
+        },
+        new Scenario
+        {
+            Id = "preset-writing-workshop",
+            Name = "Writing Workshop",
+            Icon = "✏️",
+            Agents = new()
+            {
+                new Agent
+                {
+                    Id = "writer", Name = "Writer", Role = "Drafts", Color = "#4D6BFE", Avatar = "✍️",
+                    SystemPrompt = "You are the writer. Draft an initial piece based on the user's topic, focused on structure and expression. When the editor gives revision feedback, revise your draft accordingly and output the complete draft — don't just describe the changes.",
+                },
+                new Agent
+                {
+                    Id = "editor", Name = "Editor", Role = "Refines", Color = "#3B8C5A", Avatar = "📝",
+                    SystemPrompt = "You are the editor. Give specific, actionable revision suggestions on the writer's draft and explain your reasoning. After each review you must state a clear verdict: if the draft has reached a quality ready to finalize, include the word \"approved\" in your reply to signal approval; otherwise point out what needs changing and hand it back to the writer. Do not rewrite the whole piece for the writer.",
+                },
+            },
+            TurnPolicy = TurnPolicy.Scripted,
+            ScriptOrder = new() { "writer", "editor" },
+            // writer drafts → editor reviews → writer revises → editor re-reviews → …,
+            // until the editor includes "approved" or the 3-round cap (incl. the
+            // first pass) is reached, preventing infinite revision.
+            TopicFields = new() { new TopicField { Id = "topic", Label = "Writing topic", Placeholder = "e.g. An essay about autumn" } },
+            ReviewLoop = new ReviewLoopConfig { ReviewerId = "editor", ApproveMarker = "approved", MaxRounds = 3 },
+        },
+        new Scenario
+        {
+            Id = "preset-brainstorm",
+            Name = "Brainstorm",
+            Icon = "💡",
+            Agents = new()
+            {
+                new Agent { Id = "ideator", Name = "Ideator", Role = "Diverge", Color = "#B68C2E", Avatar = "💡", SystemPrompt = "You are the ideator. Quickly produce diverse, unconventional ideas around the user's topic — give 3 each time with a brief rationale." },
+                new Agent { Id = "critic", Name = "Critic", Role = "Converge", Color = "#3B8C5A", Avatar = "✅", SystemPrompt = "You are the critic. Surface risks and feasibility issues with the ideator's ideas, and flag the single most promising one." },
+            },
+            TurnPolicy = TurnPolicy.Scripted,
+            ScriptOrder = new() { "ideator", "critic" },
+            OpenerAgentId = "ideator",
+            OpenerLine = "Please give the first batch of ideas on today's topic, with a brief rationale for each.",
+            TopicFields = new() { new TopicField { Id = "topic", Label = "Brainstorm topic", Placeholder = "e.g. Ideas to improve user retention" } },
         },
     };
 }

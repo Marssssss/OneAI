@@ -111,10 +111,10 @@ public class ChatViewModel : ObservableObject
     /// static member through an instance reference).</summary>
     private static readonly IReadOnlyList<WelcomeSuggestion> _welcomeSuggestions = new List<WelcomeSuggestion>
     {
-        new() { Icon = "🔍", Text = "帮我总结一段笔记的核心要点" },
-        new() { Icon = "🔨", Text = "用 Rust 写一个读取 JSON 的命令行小工具" },
-        new() { Icon = "🌐", Text = "解释一下 Agent 与 RAG 的区别" },
-        new() { Icon = "✨", Text = "把这段话改写得更简洁专业" },
+        new() { Icon = "🔍", Text = OneAI.Services.Loc.Str("starter_summarize") },
+        new() { Icon = "🔨", Text = OneAI.Services.Loc.Str("starter_rust_json") },
+        new() { Icon = "🌐", Text = OneAI.Services.Loc.Str("starter_agent_rag") },
+        new() { Icon = "✨", Text = OneAI.Services.Loc.Str("starter_rewrite") },
     };
     public IReadOnlyList<WelcomeSuggestion> WelcomeSuggestions => _welcomeSuggestions;
 
@@ -151,8 +151,8 @@ public class ChatViewModel : ObservableObject
     public string PendingScenarioName => PendingScenario?.Name ?? "";
     public List<TopicField> PendingScenarioFields => PendingScenario?.TopicFields ?? new();
     public string TurnStatusLabel => (Running && ActiveSpeakerId != null)
-        ? $"{ScenarioStore.SpeakerMeta(ActiveSpeakerId!, CurrentScenario).Name} 正在发言…"
-        : "轮到你 — 发送你的回答";
+        ? $"{ScenarioStore.SpeakerMeta(ActiveSpeakerId!, CurrentScenario).Name} {OneAI.Services.Loc.Str("speaking")}"
+        : OneAI.Services.Loc.Str("your_turn");
 
     private string? _lastUserTask;
 
@@ -254,7 +254,7 @@ public class ChatViewModel : ObservableObject
             _groupSession = OneAiNative.CreateGroupSession(_app, spec.ToJson());
             if (_groupSession == IntPtr.Zero)
             {
-                Error = "场景启动失败: " + (OneAiNative.PtrToUtf8(OneAiNative.LastError()) ?? "unknown");
+                Error = OneAI.Services.Loc.Str("scenario_failed") + (OneAiNative.PtrToUtf8(OneAiNative.LastError()) ?? "unknown");
                 CurrentScenario = null;
                 _groupSession = IntPtr.Zero;
                 Running = false;

@@ -176,7 +176,7 @@ pub(crate) async fn build_gateway(
     let has_provider = model_config.is_some();
     if !has_provider {
         eprintln!("⚠️  No LLM provider configured (set ONEAI_API_KEY / ONEAI_BASE_URL).");
-        eprintln!("   Inbound messages will be rejected with [oneai] 未能处理.\n");
+        eprintln!("   Inbound messages will be rejected with [oneai] unhandled.\n");
     }
 
     // Runner: a lazily-built App per DomainPack (§3.1 tail #1). The gateway
@@ -240,7 +240,9 @@ pub(crate) async fn build_gateway(
     if let Some(p) = &feishu_platform {
         let (cfg, http) = p.cfg_and_http();
         oneai_gateway::adapters::feishu_ws::start_long_connection(cfg, http, gateway.clone());
-        println!("   Feishu long-connection: started (configure 长连接 mode in Feishu backend)");
+        println!(
+            "   Feishu long-connection: started (configure long-connection mode in Feishu backend)"
+        );
     }
     Ok(gateway)
 }

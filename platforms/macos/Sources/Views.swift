@@ -447,7 +447,8 @@ struct TopicIntakeView: View {
                         HStack(spacing: 6) {
                             Text(f.label).font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                             if let v = f.visibleTo, !v.isEmpty {
-                                Text("· 仅 \(v.compactMap { scenario.agent($0)?.name }.joined(separator: "/")) 可见")
+                                let names = v.compactMap { scenario.agent($0)?.name }.joined(separator: "/")
+                                Text(String(format: NSLocalizedString("· 仅 %@ 可见", comment: ""), names))
                                     .font(.oCaption2).foregroundStyle(Theme.tertiary)
                             }
                         }
@@ -522,7 +523,7 @@ private struct SessionRow: View, Equatable {
                         .font(.oSubheadline)
                         .fontWeight(isCurrent ? .semibold : .regular)
                         .lineLimit(1)
-                    Text("\(info.messageCount) 条 · \(relativeTime(info.updatedAtMs))")
+                    Text(String(format: NSLocalizedString("%@ 条 · %@", comment: ""), String(info.messageCount), relativeTime(info.updatedAtMs)))
                         .font(.oCaption)
                         .foregroundStyle(Theme.onSurfaceVar)
                         .lineLimit(1)
@@ -551,10 +552,10 @@ private struct SessionRow: View, Equatable {
 private func relativeTime(_ epochMs: Int64) -> String {
     let diff = Int64(Date().timeIntervalSince1970 * 1000) - epochMs
     let mins = diff / 60_000
-    if mins < 1 { return "刚刚" }
-    if mins < 60 { return "\(mins) 分钟前" }
-    if mins < 60 * 24 { return "\(mins / 60) 小时前" }
-    if mins < 60 * 24 * 7 { return "\(mins / (60 * 24)) 天前" }
+    if mins < 1 { return NSLocalizedString("刚刚", comment: "") }
+    if mins < 60 { return String(format: NSLocalizedString("%d 分钟前", comment: ""), mins) }
+    if mins < 60 * 24 { return String(format: NSLocalizedString("%d 小时前", comment: ""), mins / 60) }
+    if mins < 60 * 24 * 7 { return String(format: NSLocalizedString("%d 天前", comment: ""), mins / (60 * 24)) }
     let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"
     return f.string(from: Date(timeIntervalSince1970: TimeInterval(epochMs) / 1000))
 }
@@ -1077,7 +1078,7 @@ private struct TurnStatusBar: View {
             if vm.running, let sid = vm.activeSpeakerId {
                 let meta = AgentStore.speakerMeta(for: sid, in: vm.currentScenario)
                 Image(systemName: meta.2).foregroundStyle(Color(hex: meta.1))
-                Text("\(meta.0) 正在发言").font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
+                Text(String(format: NSLocalizedString("%@ 正在发言", comment: ""), meta.0)).font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                 ThreeDots()
             } else {
                 Image(systemName: "hand.raised").foregroundStyle(Theme.onSurfaceVar)
@@ -1267,7 +1268,7 @@ private struct ToolStepsCard: View {
                         .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
                     Image(systemName: "wrench.and.screwdriver")
                         .font(.oCaption2).foregroundStyle(Theme.primary)
-                    Text("调用了 \(steps.count) 个工具")
+                    Text(String(format: NSLocalizedString("调用了 %d 个工具", comment: ""), steps.count))
                         .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
                     if ok > 0 { Text("✓\(ok)").font(.oCaption2).foregroundStyle(Theme.tertiary) }
                     if fail > 0 { Text("✗\(fail)").font(.oCaption2).foregroundStyle(Theme.errorC) }
@@ -1807,6 +1808,12 @@ private struct SettingsSheet: View {
     @State private var embModel = ""
     @State private var embApiKey = ""
     @State private var embBaseUrl = ""
+    // Language override: "system" (follow system), "zh", "en". Written to
+    // `oneai_language` (engine/preset locale via AppLocale.current) and
+    // `AppleLanguages` (SwiftUI Text chrome). Takes effect after relaunch.
+    @State private var langSelection: String = {
+        UserDefaults.standard.string(forKey: "oneai_language") ?? "system"
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1846,6 +1853,30 @@ private struct SettingsSheet: View {
                 .font(.system(size: 13, design: .monospaced))
             Text("auto 探测链:openai-compat → voyage → openai → ollama → fastembed;全无可用时降级为关键词召回。embedding key 与主模型 key 相互独立。")
                 .font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
+
+            // Language — overrides both the SwiftUI chrome (AppleLanguages)
+            // and the engine/preset locale (oneai_language → AppLocale.current).
+            HStack {
+                Text("语言").font(.oHeadline)
+                Spacer()
+                Picker("", selection: $langSelection) {
+                    Text("跟随系统").tag("system")
+                    Text("中文").tag("zh")
+                    Text("English").tag("en")
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .onChange(of: langSelection) { new in
+                    if new == "system" {
+                        UserDefaults.standard.removeObject(forKey: "oneai_language")
+                        UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+                    } else {
+                        UserDefaults.standard.set(new, forKey: "oneai_language")
+                        UserDefaults.standard.set([new == "zh" ? "zh-Hans" : "en"], forKey: "AppleLanguages")
+                    }
+                }
+            }
+            Text("语言切换重启后生效。").font(.oCaption2).foregroundStyle(Theme.onSurfaceVar)
 
             HStack {
                 Spacer()

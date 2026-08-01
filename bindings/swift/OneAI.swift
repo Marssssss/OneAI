@@ -3412,6 +3412,12 @@ public struct ScenarioSpecView: Equatable, Hashable {
      * `max_rounds` until the reviewer emits `approve_marker`. `None` = single pass.
      */
     public var reviewLoop: ReviewLoopSpecView?
+    /**
+     * Engine prompt language for turn nudges / moderator routing. `None` =
+     * `Zh` (historical default). Set `En` for an English-locale scenario so
+     * the LLM is nudged in English; pairs with an English `approve_marker`.
+     */
+    public var locale: ChatLocaleView?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -3442,7 +3448,12 @@ public struct ScenarioSpecView: Equatable, Hashable {
         /**
          * Optional review-revise loop. When set, the scripted order repeats up to
          * `max_rounds` until the reviewer emits `approve_marker`. `None` = single pass.
-         */reviewLoop: ReviewLoopSpecView?) {
+         */reviewLoop: ReviewLoopSpecView?, 
+        /**
+         * Engine prompt language for turn nudges / moderator routing. `None` =
+         * `Zh` (historical default). Set `En` for an English-locale scenario so
+         * the LLM is nudged in English; pairs with an English `approve_marker`.
+         */locale: ChatLocaleView?) {
         self.members = members
         self.turnPolicy = turnPolicy
         self.scriptOrder = scriptOrder
@@ -3451,6 +3462,7 @@ public struct ScenarioSpecView: Equatable, Hashable {
         self.openerLine = openerLine
         self.title = title
         self.reviewLoop = reviewLoop
+        self.locale = locale
     }
 
     
@@ -3476,7 +3488,8 @@ public struct FfiConverterTypeScenarioSpecView: FfiConverterRustBuffer {
                 openerAgentId: FfiConverterOptionString.read(from: &buf), 
                 openerLine: FfiConverterOptionString.read(from: &buf), 
                 title: FfiConverterOptionString.read(from: &buf), 
-                reviewLoop: FfiConverterOptionTypeReviewLoopSpecView.read(from: &buf)
+                reviewLoop: FfiConverterOptionTypeReviewLoopSpecView.read(from: &buf), 
+                locale: FfiConverterOptionTypeChatLocaleView.read(from: &buf)
         )
     }
 
@@ -3489,6 +3502,7 @@ public struct FfiConverterTypeScenarioSpecView: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.openerLine, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
         FfiConverterOptionTypeReviewLoopSpecView.write(value.reviewLoop, into: &buf)
+        FfiConverterOptionTypeChatLocaleView.write(value.locale, into: &buf)
     }
 }
 
@@ -3948,6 +3962,78 @@ public func FfiConverterTypeChatEventView_lift(_ buf: RustBuffer) throws -> Chat
 #endif
 public func FfiConverterTypeChatEventView_lower(_ value: ChatEventView) -> RustBuffer {
     return FfiConverterTypeChatEventView.lower(value)
+}
+
+
+
+/**
+ * Engine prompt language for turn nudges / moderator routing. `zh` preserves
+ * the historical Chinese engine prompts; `en` emits English nudges so an
+ * English-locale scenario drives the LLM in English end-to-end. The reviewer's
+ * `approve_marker` should match (English marker with `en`).
+ */
+
+public enum ChatLocaleView: Equatable, Hashable {
+    
+    case zh
+    case en
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ChatLocaleView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatLocaleView: FfiConverterRustBuffer {
+    typealias SwiftType = ChatLocaleView
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatLocaleView {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .zh
+        
+        case 2: return .en
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChatLocaleView, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .zh:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .en:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatLocaleView_lift(_ buf: RustBuffer) throws -> ChatLocaleView {
+    return try FfiConverterTypeChatLocaleView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatLocaleView_lower(_ value: ChatLocaleView) -> RustBuffer {
+    return FfiConverterTypeChatLocaleView.lower(value)
 }
 
 
@@ -4699,6 +4785,30 @@ fileprivate struct FfiConverterOptionTypeReviewLoopSpecView: FfiConverterRustBuf
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeReviewLoopSpecView.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeChatLocaleView: FfiConverterRustBuffer {
+    typealias SwiftType = ChatLocaleView?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeChatLocaleView.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeChatLocaleView.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }

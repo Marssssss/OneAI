@@ -33,5 +33,12 @@
     <string>OneAI.icns</string>
     <key>CFBundleIconName</key>
     <string>OneAI</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh-Hans</string>
+        <string>en</string>
+    </array>
 </dict>
 </plist>

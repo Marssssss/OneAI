@@ -117,6 +117,13 @@ fn parse_scenario(json: &str) -> Option<ScenarioSpecView> {
                 .collect::<Vec<_>>()
         })
     };
+    let locale = v.get("locale").and_then(|x| x.as_str()).and_then(|s| {
+        match s {
+            "en" => Some(crate::group_chat::ChatLocaleView::En),
+            "zh" => Some(crate::group_chat::ChatLocaleView::Zh),
+            _ => None, // unknown / empty → None (Zh default downstream)
+        }
+    });
     let review_loop = v.get("review_loop").map(|r| {
         let rs = |k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let max = r.get("max_rounds").and_then(|x| x.as_u64()).unwrap_or(1);
@@ -135,6 +142,7 @@ fn parse_scenario(json: &str) -> Option<ScenarioSpecView> {
         opener_line: opt_str("opener_line"),
         title: opt_str("title"),
         review_loop,
+        locale,
     })
 }
 
@@ -966,6 +974,23 @@ mod tests {
         assert_eq!(rl.reviewer_id, "con");
         assert_eq!(rl.approve_marker, "定稿");
         assert_eq!(rl.max_rounds, 3);
+        // No "locale" field → None (Zh default downstream).
+        assert!(s.locale.is_none(), "absent locale must parse to None");
+
+        // Explicit locale values round-trip.
+        let with_en = parse_scenario(&json.replace("}", ",\"locale\":\"en\"}"))
+            .expect("parses with locale=en");
+        assert_eq!(with_en.locale, Some(crate::group_chat::ChatLocaleView::En));
+        let with_zh = parse_scenario(&json.replace("}", ",\"locale\":\"zh\"}"))
+            .expect("parses with locale=zh");
+        assert_eq!(with_zh.locale, Some(crate::group_chat::ChatLocaleView::Zh));
+        // Unknown locale → None (not a hard error; falls back to Zh downstream).
+        let with_bad = parse_scenario(&json.replace("}", ",\"locale\":\"fr\"}"))
+            .expect("parses with unknown locale");
+        assert!(
+            with_bad.locale.is_none(),
+            "unknown locale must parse to None"
+        );
     }
 
     #[test]

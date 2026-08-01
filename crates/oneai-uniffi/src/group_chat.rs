@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use oneai_agent::group_chat::{
-    GroupChatConfig, GroupChatMemberSpec, GroupChatObserver, GroupChatPersistence,
+    ChatLocale, GroupChatConfig, GroupChatMemberSpec, GroupChatObserver, GroupChatPersistence,
     GroupChatResources, GroupChatSession, TurnPolicy,
 };
 use oneai_agent::{
@@ -48,6 +48,27 @@ pub struct AgentSpecView {
     pub avatar: Option<String>,
 }
 
+/// Engine prompt language for turn nudges / moderator routing. `zh` preserves
+/// the historical Chinese engine prompts; `en` emits English nudges so an
+/// English-locale scenario drives the LLM in English end-to-end. The reviewer's
+/// `approve_marker` should match (English marker with `en`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ChatLocaleView {
+    Zh,
+    En,
+}
+
+impl From<ChatLocaleView> for ChatLocale {
+    fn from(v: ChatLocaleView) -> Self {
+        match v {
+            ChatLocaleView::En => ChatLocale::En,
+            // non_exhaustive fallback on the engine enum lands here for any
+            // future variant; Zh is the conservative default.
+            ChatLocaleView::Zh => ChatLocale::Zh,
+        }
+    }
+}
+
 /// A multi-agent scenario spec handed to `OneAIApp::create_group_session`.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ScenarioSpecView {
@@ -70,6 +91,10 @@ pub struct ScenarioSpecView {
     /// Optional review-revise loop. When set, the scripted order repeats up to
     /// `max_rounds` until the reviewer emits `approve_marker`. `None` = single pass.
     pub review_loop: Option<ReviewLoopSpecView>,
+    /// Engine prompt language for turn nudges / moderator routing. `None` =
+    /// `Zh` (historical default). Set `En` for an English-locale scenario so
+    /// the LLM is nudged in English; pairs with an English `approve_marker`.
+    pub locale: Option<ChatLocaleView>,
 }
 
 /// Review-revise loop config (e.g. writing workshop: writer drafts → editor
@@ -207,6 +232,7 @@ impl OneAiGroupChatSession {
                     approve_marker: r.approve_marker,
                     max_rounds: r.max_rounds as usize,
                 }),
+            locale: scenario.locale.map(ChatLocale::from).unwrap_or_default(),
         };
 
         let session =

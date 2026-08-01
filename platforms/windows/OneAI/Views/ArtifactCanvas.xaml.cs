@@ -49,7 +49,7 @@ public sealed partial class ArtifactCanvas : UserControl
         if (!string.IsNullOrEmpty(ExtFor(a.Lang)))
             picker.FileTypeChoices.Add(a.Title, new List<string> { "." + ExtFor(a.Lang) });
         else
-            picker.FileTypeChoices.Add("文本", new List<string> { ".txt" });
+            picker.FileTypeChoices.Add(OneAI.Services.Loc.Str("text_file"), new List<string> { ".txt" });
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(win));
         var file = await picker.PickSaveFileAsync();
         if (file != null) await FileIO.WriteTextAsync(file, a.Content);

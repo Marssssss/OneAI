@@ -162,8 +162,10 @@ fn draw_vim_input(f: &mut Frame, rect: Rect, app: &App, cursor_position: usize, 
         ));
 
     let hints = match mode {
-        VimMode::Normal => "[Enter=发送 Esc=退出vim i=插入 h/j/k/l=移动 x=删除 0/$=行首/行尾]",
-        VimMode::Insert => "[Esc=Normal Enter=换行 Ctrl+C=取消]",
+        VimMode::Normal => {
+            "[Enter=send Esc=exit vim i=insert h/j/k/l=move x=delete 0/$=line start/end]"
+        }
+        VimMode::Insert => "[Esc=Normal Enter=newline Ctrl+C=cancel]",
     };
 
     let mut all_lines = display_lines;

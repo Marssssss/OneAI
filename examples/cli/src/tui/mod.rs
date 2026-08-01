@@ -91,7 +91,7 @@ pub fn run_tui(
             let url = config.base_url.as_deref().unwrap_or("default");
             let model = config.model_name.as_deref().unwrap_or("unknown");
             let detected = if url.contains("dashscope") {
-                "阿里百炼"
+                "Alibaba Bailian"
             } else if url.contains("deepseek") {
                 "DeepSeek"
             } else if url.contains("anthropic") {
@@ -2119,7 +2119,7 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                         This usually means the LLM provider returned an error or empty response. \
                         Possible causes:\n\
                         • Provider doesn't support tool calling with this model\n\
-                        • Conversation format incompatible with the provider (智谱GLM/阿里百炼 require specific formats)\n\
+                        • Conversation format incompatible with the provider (Zhipu GLM / Alibaba Bailian require specific formats)\n\
                         • API rate limit or budget exceeded\n\
                         • Network error during streaming\n\
                         Try: check ONEAI_API_KEY and ONEAI_BASE_URL, verify the model supports tool calling."

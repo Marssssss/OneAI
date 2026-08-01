@@ -39,7 +39,7 @@ struct CommandPalette: View {
                     if !filteredScenarios.isEmpty {
                         sectionHeader("场景")
                         ForEach(filteredScenarios) { sc in
-                            cmdRow(icon: sc.icon, title: sc.name, subtitle: "\(sc.agents.count) 个智能体") {
+                            cmdRow(icon: sc.icon, title: sc.name, subtitle: String(format: NSLocalizedString("%d 个智能体", comment: ""), sc.agents.count)) {
                                 Task { await vm.newConversation(scenario: sc) }
                                 vm.overlay = nil
                             }
@@ -48,8 +48,8 @@ struct CommandPalette: View {
                     if !filteredSessions.isEmpty {
                         sectionHeader("最近会话")
                         ForEach(filteredSessions, id: \.id) { s in
-                            cmdRow(icon: "bubble.left", title: s.title?.isEmpty == false ? s.title! : "新对话",
-                                   subtitle: "\(s.messageCount) 条") {
+                            cmdRow(icon: "bubble.left", title: s.title?.isEmpty == false ? s.title! : NSLocalizedString("新对话", comment: ""),
+                                   subtitle: String(format: NSLocalizedString("%d 条", comment: ""), s.messageCount)) {
                                 Task { await vm.loadSession(s.id) }
                                 vm.overlay = nil
                             }

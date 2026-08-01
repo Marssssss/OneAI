@@ -112,6 +112,18 @@ else
   echo "  (no OneAI.icns — icon falls back to default; generate via iconutil)"
 fi
 
+# Localizations (.lproj) — each <lang>.lproj/Localizable.strings under
+# Resources/ ships as Contents/Resources/<lang>.lproj/Localizable.strings so
+# Bundle.main resolves SwiftUI LocalizedStringKey lookups (zh-Hans keys map
+# to English in en.lproj; zh-Hans falls back to the dev region = the Chinese
+# literal). Skip silently if no lproj dirs exist.
+for lproj in "$MACOS_DIR"/Resources/*.lproj; do
+  [[ -d "$lproj" ]] || continue
+  lang="$(basename "$lproj")"
+  mkdir -p "$BUILD_DIR/OneAI.app/Contents/Resources/$lang"
+  cp "$lproj"/* "$BUILD_DIR/OneAI.app/Contents/Resources/$lang"/
+done
+
 # — Distribution zip (unsigned) —————————————————————————————
 # The app is NOT code-signed or notarized. Users must right-click → Open on
 # first launch to bypass Gatekeeper's "unidentified developer" quarantine.

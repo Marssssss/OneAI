@@ -1,0 +1,188 @@
+// Localizable.strings — English (en) translations for the OneAI macOS app.
+//
+// Keyed by the Chinese literal that appears in the Swift source (SwiftUI
+// Text/Button/Label/Toggle/Picker/TextField/.help accept a LocalizedStringKey
+// and auto-resolve it through this file, so the view code stays unchanged).
+// Entries with %@ / %d are runtime format strings wrapped via
+// NSLocalizedString + String(format:) in the source (Errors / relativeTime /
+// ScenarioEditor validation / speaker counts). Preset scenario CONTENT
+// (names, persona prompts, opener lines) is bilingual data in AgentStore
+// (zhPresets / enPresets), not chrome — it is not localized here.
+
+// ── Generic chrome ──────────────────────────────────────────────────────
+"保存" = "Save";
+"编辑" = "Edit";
+"关闭" = "Close";
+"取消" = "Cancel";
+"删除" = "Delete";
+"复制" = "Copy";
+"分享" = "Share";
+"重试" = "Retry";
+"重发" = "Resend";
+"重新生成" = "Regenerate";
+"开始" = "Start";
+"编辑并重发" = "Edit & resend";
+"设置" = "Settings";
+"打开设置" = "Open Settings";
+"代码" = "code";
+"导出…" = "Export…";
+"复制代码" = "Copy code";
+"在画布打开" = "Open on canvas";
+"加载中…" = "Loading…";
+"加载更早消息" = "Load older messages";
+"加载更早消息 ↑" = "Load older messages ↑";
+"加载更早的历史消息" = "Load older history";
+"回到底部" = "Back to bottom";
+"思考中" = "Thinking";
+"思考中…" = "Thinking…";
+"已深度思考" = "Thought";
+"本轮约 token 数" = "Approx. tokens this turn";
+"结束并进入总结阶段" = "End and enter summary phase";
+"· 总结阶段" = "· Summary phase";
+"随着内容增加自动滚动" = "Auto-scroll as content grows";
+"跨平台 AI Agent 框架 · 单 Agent 对话与多角色场景都在这里" = "Cross-platform AI agent framework · single-agent chat and multi-role scenarios, all here";
+"先配置 Provider 再开始" = "Configure a provider first";
+"未配置 API Key,点击设置 → 填入 base url / api key / model 后保存" = "No API key configured — open Settings → enter base url / api key / model, then save";
+"语音输入(点击说话,再点结束)" = "Voice input (click to talk, click again to finish)";
+"语音识别不可用(检查权限/系统设置)" = "Voice recognition unavailable (check permissions / system settings)";
+
+// ── Sidebar / command palette ──────────────────────────────────────────
+"场景" = "Scenarios";
+"最近会话" = "Recent chats";
+"会话" = "Chats";
+"操作" = "Actions";
+"新对话" = "New chat";
+"新对话(单 Agent)" = "New chat (single agent)";
+"新场景" = "New scenario";
+"还没有会话\n点上方「新对话」开始吧" = "No chats yet\nTap \"New chat\" above to start";
+"编辑场景" = "Edit scenario";
+"删除场景" = "Delete scenario";
+"切换场景 / 会话 / 模型…" = "Switch scenario / chat / model…";
+"%d 个智能体" = "%d agents";  // (used via NSLocalizedString — see CommandPalette)
+"%d 条" = "%d msgs";
+"%@ 条" = "%@ msgs";
+
+// ── Chat surface ────────────────────────────────────────────────────────
+"%@ 正在发言" = "%@ is speaking";
+"轮到你 — 发送你的回答" = "Your turn — send your answer";
+"调用了 %d 个工具" = "Called %d tools";
+"场景启动失败" = "Scenario failed to start";
+"场景无法删除" = "Scenario could not be deleted";
+"场景启动失败: %@" = "Scenario failed to start: %@";
+
+// ── Relative time (Views.relativeTime) ──────────────────────────────────
+"刚刚" = "just now";
+"%d 分钟前" = "%d min ago";
+"%d 小时前" = "%d hours ago";
+"%d 天前" = "%d days ago";
+"%@ 条 · %@" = "%@ msgs · %@";
+
+// ── Errors (Errors.swift friendlyError) ─────────────────────────────────
+"模型服务报错(检查 api key / model / 网络): %@" = "Model service error (check api key / model / network): %@";
+"网络不通(检查代理 / baseUrl): %@" = "Network unreachable (check proxy / baseUrl): %@";
+"请求超时,可点重试" = "Request timed out — tap retry";
+"配置错误: %@" = "Config error: %@";
+"Agent 执行出错: %@" = "Agent error: %@";
+"持久化出错: %@" = "Persistence error: %@";
+"工具执行出错: %@" = "Tool error: %@";
+
+// ── Speaker / "you" ─────────────────────────────────────────────────────
+"你" = "You";
+
+// ── Settings language picker ────────────────────────────────────────────
+"语言" = "Language";
+"跟随系统" = "Follow system";
+"中文" = "中文";
+"English" = "English";
+"语言切换重启后生效。" = "Language change takes effect after relaunch.";
+
+// ── Turn policy labels (Models.TurnPolicy.label) ────────────────────────
+"脚本式" = "Scripted";
+"轮询" = "Round-robin";
+"主持人选择" = "Moderator picks";
+
+// ── Scenario editor (ScenarioEditor.swift) ──────────────────────────────
+"场景名" = "Scenario name";
+"演员表" = "Cast";
+"添加智能体" = "Add agent";
+"主题输入字段(开始场景时弹出,值会嵌入各角色背景)" = "Topic intake fields (shown on start; values are embedded into each member's background)";
+"字段名(如:应聘岗位)" = "Field name (e.g. Position)";
+"占位提示(可选)" = "Placeholder (optional)";
+"全员可见" = "Visible to all";
+"仅 %@ 可见" = "Visible only to %@";
+"· 仅 %@ 可见" = "· Visible only to %@";
+"添加字段" = "Add field";
+"结束阶段(可选,如面试结束后指导员总结)" = "Debrief phase (optional, e.g. coach summarizes after the interview)";
+"启用结束阶段" = "Enable debrief phase";
+"按钮文字" = "Button label";
+"接管角色" = "Takeover role";
+"总结提示词(发给接管角色)" = "Summary prompt (sent to the takeover role)";
+"轮次策略" = "Turn policy";
+"用户作答后按此顺序发言(用 id),到用户回合停下。" = "After the user answers, members speak in this order (by id), stopping at the user's turn.";
+"顺序,逗号分隔" = "Order, comma-separated";
+"演员表顺序轮流发言。" = "Cast speaks in list order, round-robin.";
+"由主持人决定下一位发言者。" = "A moderator decides the next speaker.";
+"主持人" = "Moderator";
+"首轮发起" = "Opening turn";
+"开场角色" = "Opening role";
+"(用户先发言)" = "(user speaks first)";
+"开场白(可选)" = "Opening line (optional)";
+"名字" = "Name";
+"角色(简短)" = "Role (short)";
+"系统提示词" = "System prompt";
+"model(空=继承)" = "model (empty = inherit)";
+"配色" = "Color";
+"头像 SF symbol" = "Avatar SF symbol";
+"kind/model 留空继承设置" = "kind/model — leave blank to inherit from settings";
+"请填写场景名。" = "Please enter a scenario name.";
+"至少需要一个智能体(演员表不能为空)。" = "Need at least one agent (cast cannot be empty).";
+"第 %d 个智能体缺少名字。" = "Agent %d is missing a name.";
+"智能体「%@」缺少系统提示词。" = "Agent \"%@\" is missing a system prompt.";
+"轮次顺序引用了不存在的角色 id「%@」。" = "Turn order references an unknown role id \"%@\".";
+"主持人 id「%@」不在演员表中。" = "Moderator id \"%@\" is not in the cast.";
+"开场角色 id「%@」不在演员表中。" = "Opening role id \"%@\" is not in the cast.";
+"主持人策略需要选择一个主持人。" = "The moderator policy requires selecting a moderator.";
+"结束阶段的接管角色不在演员表中。" = "The debrief takeover role is not in the cast.";
+
+// ── Topic intake (Views.swift) ──────────────────────────────────────────
+"开场角色会围绕你输入的信息发言;这些值会作为各角色背景,并写入会话名。留空可直接开始。" = "The opening role will speak around the info you enter; these values become each member's background and are written into the chat title. Leave blank to start directly.";
+"填入岗位与项目信息,面试官提问、指导员据此点评。项目经历仅指导员可见。" = "Enter the position and projects; the interviewer asks questions and the coach gives feedback. Project experience is visible only to the coach.";
+"指定语言与话题,陪练会按该语言自然对话并纠正你。" = "Specify a language and topic; the partner chats naturally in that language and corrects you.";
+"输入辩题,主持人开场后正反方轮流立论。" = "Enter the motion; after the moderator opens, pro and con argue in turn.";
+"给定写作主题,写手起草、编辑审阅,直到定稿。" = "Given a writing topic, the writer drafts and the editor reviews until approved.";
+"给出主题,创意官发散、评审收敛。" = "Give a topic; the ideator diverges and the critic converges.";
+
+// ── Settings panel (Views.swift) ───────────────────────────────────────
+"Provider 设置" = "Provider settings";
+"base url (如 https://api.openai.com/v1;留空=默认)" = "base url (e.g. https://api.openai.com/v1; blank = default)";
+"model (如 gpt-4o-mini / claude-sonnet-4-6 / llama3)" = "model (e.g. gpt-4o-mini / claude-sonnet-4-6 / llama3)";
+"Embedding 设置(记忆语义召回;默认 auto,通常无需改动)" = "Embedding settings (semantic memory recall; default auto, usually no change needed)";
+"model (空 = provider 默认)" = "model (blank = provider default)";
+"base url (openai-compat 必填;ollama → host:port)" = "base url (required for openai-compat; ollama → host:port)";
+"auto 探测链:openai-compat → voyage → openai → ollama → fastembed;全无可用时降级为关键词召回。embedding key 与主模型 key 相互独立。" = "Auto probe chain: openai-compat → voyage → openai → ollama → fastembed; falls back to keyword recall when none available. The embedding key is independent of the main model key.";
+"协议按 base url 自动识别:含 anthropic → anthropic;含 ollama 或 :11434 → ollama;其余按 openai 兼容。留空 base url 走各协议默认端点。保存后重建 App(历史保留)。" = "Protocol auto-detected from base url: anthropic → anthropic; ollama or :11434 → ollama; otherwise openai-compatible. Blank base url uses each protocol's default endpoint. Saving rebuilds the app (history preserved).";
+
+// ── Edit-message / delete-chat overlays (Views.swift) ───────────────────
+"编辑消息" = "Edit message";
+"删除会话" = "Delete chat";
+"确定删除这个会话?历史无法恢复。" = "Delete this chat? History cannot be recovered.";
+
+// ── Starter prompts (Views.swift) ──────────────────────────────────────
+"帮我总结一段笔记的核心要点" = "Summarize the key points of a note for me";
+"用 Rust 写一个读取 JSON 的命令行小工具" = "Write a Rust CLI tool that reads JSON";
+"解释一下 Agent 与 RAG 的区别" = "Explain the difference between an Agent and RAG";
+"把这段话改写得更简洁专业" = "Rewrite this more concisely and professionally";
+
+// ── Canvas (ArtifactCanvas.swift) ──────────────────────────────────────
+"点击代码块上的「在画布打开」" = "Tap \"Open on canvas\" on a code block";
+"长内容会在这里渲染,不挤占对话" = "Long content renders here, without crowding the chat";
+
+// ── Topic field labels (these appear as TextField labels in the intake) ─
+"应聘岗位" = "Position";
+"目标公司" = "Target company";
+"职位级别" = "Level";
+"项目经历" = "Project experience";
+"语言·话题" = "Language · Topic";
+"辩论主题" = "Debate motion";
+"写作主题" = "Writing topic";
+"头脑风暴主题" = "Brainstorm topic";

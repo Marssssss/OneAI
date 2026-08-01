@@ -67,7 +67,7 @@ pub fn cmd_tasks_list(user: Option<&str>, root: Option<&str>) {
     );
     for b in &briefs {
         println!(
-            "  • [{}] {} (步骤剩余 {}, 卡点 {}, 状态 {}, 更新 {})",
+            "  • [{}] {} (steps left {}, blockers {}, status {}, updated {})",
             b.task_id,
             b.goal,
             b.open_step_count,
@@ -121,7 +121,7 @@ pub fn cmd_tasks_show(id: &str, root: Option<&str>) {
         for d in &ws.decisions {
             println!("  • {} → {}", d.question, d.chosen);
             if !d.rationale.is_empty() {
-                println!("      理由: {}", d.rationale);
+                println!("      reason: {}", d.rationale);
             }
         }
     }
@@ -212,7 +212,7 @@ pub fn cmd_tasks_continue(
         // non-completed step.
         session
             .run_agent_silent(
-                "继续上次未完成的任务，从第一个未完成步骤开始，不要重复已完成的工作。",
+                "Continue the unfinished task from the first incomplete step; do not repeat completed work.",
             )
             .await
     });

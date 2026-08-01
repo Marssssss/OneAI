@@ -558,6 +558,7 @@ mod tests {
             opener_line: None,
             title: None,
             review_loop: None,
+            locale: None,
         };
         let res = app.create_group_session(scenario);
         assert!(res.is_err(), "empty members must error");
@@ -586,6 +587,7 @@ mod tests {
             opener_line: None,
             title: None,
             review_loop: None,
+            locale: None,
         };
         let res = app.create_group_session(scenario);
         assert!(

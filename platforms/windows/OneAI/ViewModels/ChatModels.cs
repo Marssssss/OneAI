@@ -176,7 +176,7 @@ public class AssistantItem : ChatItem
     public SolidColorBrush SpeakerBrush => ColorUtil.BrushFromHex(SpeakerColor);
     public Windows.UI.Color SpeakerColorFaint => ColorUtil.FaintFromHex(SpeakerColor);
     public Visibility HasThinking => string.IsNullOrEmpty(Thinking) ? Visibility.Collapsed : Visibility.Visible;
-    public string ThinkingHeader => ThinkingActive ? "思考中…" : "已深度思考";
+    public string ThinkingHeader => ThinkingActive ? OneAI.Services.Loc.Str("thinking") : OneAI.Services.Loc.Str("thought");
     /// <summary>Streaming partial text capped to the last `cap` chars. A plain
     /// TextBlock re-lays-out its whole content every flush; capping bounds the
     /// CoreText work so a long reply doesn't saturate the UI thread mid-stream.

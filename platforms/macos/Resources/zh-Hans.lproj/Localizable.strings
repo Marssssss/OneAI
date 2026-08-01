@@ -1,0 +1,10 @@
+// Localizable.strings — Chinese (Simplified).
+//
+// Intentionally near-empty: the development region is zh-Hans, so when a key
+// is not found here, Bundle falls back to returning the key itself — and the
+// keys ARE the Chinese literals used in the Swift source. So Chinese-locale
+// users see the original Chinese text with no mapping needed. English
+// translations live in en.lproj/Localizable.strings. Add an explicit entry
+// here only if a key's display form must differ from its source literal.
+
+"刚刚" = "刚刚";

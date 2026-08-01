@@ -15,7 +15,9 @@ private struct ScenarioStoreData: Codable {
 }
 
 /// Bump when the preset structure changes — triggers a preset re-seed on load.
-private let SCENARIO_SCHEMA_VERSION = 5
+/// v6: presets are now locale-aware (zh / en); an English-system user re-seeds
+/// to the English preset set (names, prompts, approve marker).
+private let SCENARIO_SCHEMA_VERSION = 6
 
 final class AgentStore: ObservableObject {
     @Published var scenarios: [Scenario] = []
@@ -29,7 +31,7 @@ final class AgentStore: ObservableObject {
     init() {
         load()
         if scenarios.isEmpty {
-            scenarios = Self.presets
+            scenarios = Self.presets(locale: AppLocale.current)
             save()
         }
     }
@@ -82,15 +84,29 @@ final class AgentStore: ObservableObject {
     /// untouched. Used when the on-disk schema is older than the current one.
     private func reseedPresets() {
         let customs = scenarios.filter { !$0.id.hasPrefix("preset-") }
-        scenarios = Self.presets + customs
+        scenarios = Self.presets(locale: AppLocale.current) + customs
         save()
     }
 
     // MARK: - Built-in presets
 
-    /// The five preset scenarios shipped with the app. IDs are stable so a
-    /// user can edit a preset (it overwrites in place via `upsert`).
-    static let presets: [Scenario] = [
+    /// The five preset scenarios shipped with the app, localized for the
+    /// effective `locale`. IDs are stable so a user can edit a preset (it
+    /// overwrites in place via `upsert`); the locale only selects which
+    /// language variant of the names / prompts / markers ships. `zh` is the
+    /// historical Chinese set; `en` ships English names + English persona
+    /// prompts + an English review-loop marker (`"approved"` ↔ `"定稿"`) so an
+    /// English-locale scenario drives the LLM in English end-to-end (the
+    /// engine prompt locale in `ScenarioSpecView.locale` matches — see
+    /// `AppLocale.current` / `Scenario.specView`).
+    static func presets(locale: AppLocale) -> [Scenario] {
+        switch locale {
+        case .en: return enPresets
+        case .zh: return zhPresets
+        }
+    }
+
+    static let zhPresets: [Scenario] = [
         Scenario(
             id: "preset-interview",
             name: "面试演练",
@@ -250,11 +266,193 @@ final class AgentStore: ObservableObject {
         ),
     ]
 
+    /// English-locale preset set — names, persona prompts, topic-field labels,
+    /// opener lines, debrief text, and the review-loop marker (`"approved"`)
+    /// all in English. Structure (ids, colors, icons, turn policies, script
+    /// orders) is identical to `zhPresets` so behavior matches; only the
+    /// human-/LLM-facing text is translated. The `"approved"` marker pairs
+    /// with `ChatLocale.en` engine prompts (the editor is told to emit
+    /// `"approved"`; the engine matches it substring-wise to approve).
+    static let enPresets: [Scenario] = [
+        Scenario(
+            id: "preset-interview",
+            name: "Interview Practice",
+            icon: "person.crop.circle.badge.questionmark",
+            agents: [
+                Agent(id: "interviewer", name: "Interviewer", role: "Asks questions",
+                      systemPrompt: """
+                      You are a senior technical interviewer. Your job is to ask in-depth, \
+                      progressive questions about the position the candidate is applying for. \
+                      Ask only one question at a time; follow up or change direction only after \
+                      the candidate answers. Do not answer for the candidate, and do not give \
+                      coaching feedback — that is the coach's job. Keep a professional, measured tone.
+                      """,
+                      model: nil, color: "#4D6BFE",
+                      avatar: "person.crop.circle.badge.questionmark", kind: nil, apiKey: nil, baseUrl: nil),
+                Agent(id: "coach", name: "Coach", role: "Feedback",
+                      systemPrompt: """
+                      You are an interview coach. After each of the candidate's answers, give \
+                      targeted feedback: what was strong, what was weak, how to improve, plus a \
+                      short, actionable "next step". Be specific and practical. Do not answer \
+                      the interviewer's questions for the candidate. If the candidate's project \
+                      experience is provided in [Scenario Background], tie your advice to those \
+                      projects at a project-specific level (the interviewer does not see this — \
+                      you use it only for coaching).
+                      """,
+                      model: nil, color: "#3B8C5A",
+                      avatar: "person.crop.circle.badge.checkmark", kind: nil, apiKey: nil, baseUrl: nil),
+            ],
+            turnPolicy: .scripted,
+            // candidate answers → coach feedback → interviewer follow-up
+            scriptOrder: ["coach", "interviewer"],
+            moderatorId: nil,
+            openerAgentId: "interviewer",
+            openerLine: "Let's begin the interview. Please give a brief self-introduction.",
+            topicFields: [
+                TopicField(id: "position", label: "Position", placeholder: "e.g. Frontend Engineer, 3 years"),
+                TopicField(id: "company", label: "Target company", placeholder: "e.g. ByteDance"),
+                TopicField(id: "level", label: "Level", placeholder: "e.g. Mid-level"),
+                // Project experience is injected only into the coach's background
+                // (visibleTo: ["coach"]) — the interviewer never sees it and won't
+                // ask about it, but the coach can give project-specific advice.
+                TopicField(id: "projects", label: "Project experience", placeholder: "e.g. E-commerce order platform, owned inventory & payment modules; multiple allowed",
+                           visibleTo: ["coach"]),
+            ],
+            debrief: DebriefConfig(
+                buttonLabel: "End interview",
+                summaryPrompt: "(Interview over.) As the coach, give an overall summary of the candidate's performance in this interview: highlights, weaknesses, areas to improve, and follow-up learning and practice recommendations.",
+                debriefMemberId: "coach"
+            ),
+            reviewLoop: nil
+        ),
+        Scenario(
+            id: "preset-language-partner",
+            name: "Language Partner",
+            icon: "globe",
+            agents: [
+                Agent(id: "partner", name: "Language Partner", role: "Practice",
+                      systemPrompt: """
+                      You are a foreign-language practice partner. Hold a natural conversation \
+                      with the user, adjust difficulty to their level, gently correct wording \
+                      and grammar mistakes as they come up, and offer more idiomatic phrasing. \
+                      Advance the topic one step at a time. Speak the language specified under \
+                      "Language · Topic" in [Scenario Background]; if the user didn't specify \
+                      a language, default to English.
+                      """,
+                      model: nil, color: "#B68C2E",
+                      avatar: "globe", kind: nil, apiKey: nil, baseUrl: nil),
+            ],
+            turnPolicy: .roundRobin,
+            scriptOrder: nil, moderatorId: nil,
+            openerAgentId: "partner",
+            openerLine: "Open naturally in the language and topic specified in the background, and start chatting with the user.",
+            topicFields: [
+                TopicField(id: "topic", label: "Language · Topic", placeholder: "e.g. Chinese · Travel"),
+            ],
+            debrief: nil,
+            reviewLoop: nil
+        ),
+        Scenario(
+            id: "preset-debate",
+            name: "Debate",
+            icon: "scalemass",
+            agents: [
+                Agent(id: "pro", name: "Pro Debater", role: "For",
+                      systemPrompt: "You are the pro debater. Argue from the supporting position — sharp viewpoints, strong supporting reasoning.",
+                      model: nil, color: "#4D6BFE",
+                      avatar: "arrow.up.circle", kind: nil, apiKey: nil, baseUrl: nil),
+                Agent(id: "con", name: "Con Debater", role: "Against",
+                      systemPrompt: "You are the con debater. Argue from the opposing position — counter the pro side point for point, with solid reasoning.",
+                      model: nil, color: "#E5484D",
+                      avatar: "arrow.down.circle", kind: nil, apiKey: nil, baseUrl: nil),
+                Agent(id: "moderator", name: "Moderator", role: "Facilitator",
+                      systemPrompt: "You are the debate moderator. In the first round, state today's motion and invite the pro side to open; thereafter, each round reply only with the next speaker's role id (pro/con/user) — nothing else — and keep both sides balanced.",
+                      model: nil, color: "#8A8A8A",
+                      avatar: "scalemass", kind: nil, apiKey: nil, baseUrl: nil),
+            ],
+            turnPolicy: .moderator,
+            scriptOrder: nil,
+            moderatorId: "moderator",
+            openerAgentId: "moderator",
+            openerLine: "Please open: state today's motion and invite the pro side to begin.",
+            topicFields: [
+                TopicField(id: "motion", label: "Debate motion", placeholder: "e.g. Will AI replace humans"),
+            ],
+            debrief: nil,
+            reviewLoop: nil
+        ),
+        Scenario(
+            id: "preset-writing-workshop",
+            name: "Writing Workshop",
+            icon: "pencil.line",
+            agents: [
+                Agent(id: "writer", name: "Writer", role: "Drafts",
+                      systemPrompt: """
+                      You are the writer. Draft an initial piece based on the user's topic, \
+                      focused on structure and expression. When the editor gives revision \
+                      feedback, revise your draft accordingly and output the complete draft — \
+                      don't just describe the changes.
+                      """,
+                      model: nil, color: "#4D6BFE",
+                      avatar: "pencil.line", kind: nil, apiKey: nil, baseUrl: nil),
+                Agent(id: "editor", name: "Editor", role: "Refines",
+                      systemPrompt: """
+                      You are the editor. Give specific, actionable revision suggestions on \
+                      the writer's draft and explain your reasoning. After each review you \
+                      must state a clear verdict: if the draft has reached a quality ready \
+                      to finalize, include the word "approved" in your reply to signal \
+                      approval; otherwise point out what needs changing and hand it back to \
+                      the writer. Do not rewrite the whole piece for the writer.
+                      """,
+                      model: nil, color: "#3B8C5A",
+                      avatar: "pencil.tip.crop.circle", kind: nil, apiKey: nil, baseUrl: nil),
+            ],
+            turnPolicy: .scripted,
+            scriptOrder: ["writer", "editor"],
+            moderatorId: nil,
+            openerAgentId: nil,
+            openerLine: nil,
+            topicFields: [
+                TopicField(id: "topic", label: "Writing topic", placeholder: "e.g. An essay about autumn"),
+            ],
+            debrief: nil,
+            // writer drafts → editor reviews → writer revises → editor re-reviews → …,
+            // until the editor includes "approved" or the 3-round cap (incl. the
+            // first pass) is reached, preventing infinite revision.
+            reviewLoop: ReviewLoopConfig(reviewerId: "editor", approveMarker: "approved", maxRounds: 3)
+        ),
+        Scenario(
+            id: "preset-brainstorm",
+            name: "Brainstorm",
+            icon: "lightbulb",
+            agents: [
+                Agent(id: "ideator", name: "Ideator", role: "Diverge",
+                      systemPrompt: "You are the ideator. Quickly produce diverse, unconventional ideas around the user's topic — give 3 each time with a brief rationale.",
+                      model: nil, color: "#B68C2E",
+                      avatar: "lightbulb", kind: nil, apiKey: nil, baseUrl: nil),
+                Agent(id: "critic", name: "Critic", role: "Converge",
+                      systemPrompt: "You are the critic. Surface risks and feasibility issues with the ideator's ideas, and flag the single most promising one.",
+                      model: nil, color: "#3B8C5A",
+                      avatar: "checkmark.seal", kind: nil, apiKey: nil, baseUrl: nil),
+            ],
+            turnPolicy: .scripted,
+            scriptOrder: ["ideator", "critic"],
+            moderatorId: nil,
+            openerAgentId: "ideator",
+            openerLine: "Please give the first batch of ideas on today's topic, with a brief rationale for each.",
+            topicFields: [
+                TopicField(id: "topic", label: "Brainstorm topic", placeholder: "e.g. Ideas to improve user retention"),
+            ],
+            debrief: nil,
+            reviewLoop: nil
+        ),
+    ]
+
     /// Resolve an agent across all scenarios by id (for rendering speaker names
     /// in a running conversation). Returns (name, color, avatar).
     static func speakerMeta(for speakerId: String, in scenario: Scenario?) -> (String, String, String) {
         if speakerId == "user" || speakerId.isEmpty {
-            return ("你", "#8A8A8A", "person.crop.circle")
+            return (NSLocalizedString("你", comment: ""), "#8A8A8A", "person.crop.circle")
         }
         if let a = scenario?.agent(speakerId) {
             return (a.name, a.color, a.avatar)

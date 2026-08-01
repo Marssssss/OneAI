@@ -70,7 +70,7 @@ public sealed partial class MainWindow : Window
         var sc = new Scenario
         {
             Id = Guid.NewGuid().ToString("N").Substring(0, 8),
-            Name = "新场景",
+            Name = OneAI.Services.Loc.Str("new_scenario"),
             Icon = "👥",
             TurnPolicy = TurnPolicy.Scripted,
         };
@@ -91,10 +91,10 @@ public sealed partial class MainWindow : Window
             var dlg = new ContentDialog
             {
                 XamlRoot = this.Content.XamlRoot,
-                Title = "删除会话",
-                Content = "确定删除这个会话?历史无法恢复。",
-                PrimaryButtonText = "删除",
-                SecondaryButtonText = "取消",
+                Title = OneAI.Services.Loc.Str("delete_chat"),
+                Content = OneAI.Services.Loc.Str("delete_chat_confirm"),
+                PrimaryButtonText = OneAI.Services.Loc.Str("delete"),
+                SecondaryButtonText = OneAI.Services.Loc.Str("cancel"),
                 DefaultButton = ContentDialogButton.Secondary,
             };
             if (await dlg.ShowAsync() == ContentDialogResult.Primary)
