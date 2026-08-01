@@ -1,16 +1,16 @@
 # OneAI 多 Agent 机制白皮书
 
-> ⚠ **更新说明（2026-07）**：本文原描述的 **Team/Swarm/Handoff** 三种编排原语已从代码库移除。它们与主 Loop 的 `delegate`（分层委托，一轮多委托 + 依赖感知并行波次）+ `switch_paradigm`（切换固定图流）+ 确定性 StateGraph 能力重复，且 Handoff 从未接入 AgentLoop、Swarm 的任务分解/质量评估为硬编码启发式。聚合/路由/辩论等编排模式现由 `delegate` + StateGraph 表达；引擎级 GroupChat 原语保留。下文涉及 Team/Swarm/Handoff 的章节仅作历史设计参考，不再对应可运行代码。
->
-> 版本：对应代码库 `0.2.0` / 1.0.0 线。本文基于对 `crates/oneai-agent`、`oneai-workflow`、`oneai-domain`、`oneai-memory`、`oneai-core` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。文末与业界前沿多 Agent 系统（LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code 子代理 / Google A2A / MCP）对标。
+> 版本：对应代码库 1.1.0 线。本文基于对 `crates/oneai-agent`、`oneai-workflow`、`oneai-domain`、`oneai-memory`、`oneai-core` 源码的逐文件审阅撰写，机制均标注 `file:line` 以便核对。文末与业界前沿多 Agent 系统（LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code 子代理 / Google A2A / MCP）对标。
 >
 > 说明：撰写时本环境无法联网检索，前沿对标部分基于截至 2025 年初的训练知识，已尽量标注可核对的论文/项目名；具体版本号以各项目最新发布为准。
+>
+> 历史注记：OneAI 早期曾实现 Team/Swarm/Handoff 三种编排原语，已于 2026-07 整层移除——它们与主 Loop 的 `delegate` + `switch_paradigm` + 确定性 StateGraph 能力重复（Handoff 从未接入 AgentLoop，Swarm 的分解/质量评估为硬编码启发式）。聚合/路由/辩论等编排模式现由 `delegate` + StateGraph 表达；引擎级 GroupChat 原语保留。本文不再描述这三者。
 
 ---
 
 ## 0. 一句话概括
 
-OneAI 的多 Agent 系统是一个 **「Claude-Code 式动态 Agentic Loop + 模型驱动的 delegate/switch_paradigm 元工具 + LangGraph 式可循环 StateGraph 闭环 + 四种编排原语（Team/Swarm/Handoff/GroupChat）+ 压缩耦合记忆」** 的引擎：每一轮迭代由模型决定下一步是直接作答、调工具、委托子 Agent、还是切换范式——不是固定管线。委托支持一轮多委托 + 依赖感知的 Kahn 波次并行调度；范式切换可内联升级系统提示与工具集，并可挂载 DomainPack 预定义的 StateGraph 图流；多 Agent 协作既能在主 Loop 内通过子 Agent 分层分解，也能经由 Team/Swarm/Handoff/GroupChat 原语做聚合/路由/移交/对话。整个编排行为由 DomainPack 声明，一行 `AppBuilder::domain_pack(...)` 切换。
+OneAI 的多 Agent 系统是一个 **「Claude-Code 式动态 Agentic Loop + 模型驱动的 delegate/switch_paradigm 元工具 + LangGraph 式可循环 StateGraph 闭环 + 引擎级 GroupChat 原语 + 压缩耦合记忆」** 的引擎：每一轮迭代由模型决定下一步是直接作答、调工具、委托子 Agent、还是切换范式——不是固定管线。委托支持一轮多委托 + 依赖感知的 Kahn 波次并行调度；范式切换可内联升级系统提示与工具集，并可挂载 DomainPack 预定义的 StateGraph 图流；多 Agent 协作在主 Loop 内通过子 Agent 分层分解 + GroupChat 原语做场景化多角色对话，聚合/路由/辩论等模式由 `delegate` + 确定性 StateGraph 表达。整个编排行为由 DomainPack 声明，一行 `AppBuilder::domain_pack(...)` 切换。
 
 ---
 
@@ -35,13 +35,10 @@ OneAI 的多 Agent 系统是一个 **「Claude-Code 式动态 Agentic Loop + 模
             │ + 抗压缩重注入   │ │ + SmartRouter  │ │  │  ActionExecutor)   │
             └─────────────────┘ └────────────────┘ │  └────────────────────┘
                                 ┌─────────────────▼─────────────┐
-                                │  委托 / 编排原语层             │
+                                │  委托 / GroupChat 层           │
                                 │  · SubAgentWrapper(+worktree) │
                                 │  · spawn_sub_agents_batch     │
                                 │    (Kahn 波次 DAG 调度)        │
-                                │  · TeamCoordinator (4 策略)   │
-                                │  · SwarmOrchestrator (3 路由) │
-                                │  · HandoffTool/Manager        │
                                 │  · GroupChatSession           │
                                 │  · AsyncTaskRunner (后台)     │
                                 └───────────────────────────────┘
@@ -60,8 +57,8 @@ OneAI 的多 Agent 系统是一个 **「Claude-Code 式动态 Agentic Loop + 模
 
 | crate | 角色 | 关键文件 |
 |---|---|---|
-| `oneai-core` | 基础类型与 trait：`ContentBlock`/`Conversation`、`TokenBudget`/`ContextBudgetManager`、`Team`/`Swarm`/`Handoff` 配置与日志 trait、`RecallStrategy` | `budget.rs`、`team.rs`、`swarm.rs`、`handoff.rs` |
-| `oneai-agent` | 多 Agent 引擎本体：动态 Loop、范式、子 Agent、并行、编排原语 | `agent_loop.rs:4741`、`sub_agent.rs:870`、`parallel_executor.rs`、`team.rs:1080`、`swarm.rs:998`、`handoff.rs:871`、`group_chat.rs:874`、`meta_tool.rs` |
+| `oneai-core` | 基础类型与 trait：`ContentBlock`/`Conversation`、`TokenBudget`/`ContextBudgetManager`、`RecallStrategy` | `budget.rs`、`traits.rs`、`types.rs` |
+| `oneai-agent` | 多 Agent 引擎本体：动态 Loop、范式、子 Agent、并行、GroupChat | `agent_loop.rs:4741`、`sub_agent.rs:870`、`parallel_executor.rs`、`group_chat.rs:874`、`meta_tool.rs` |
 | `oneai-workflow` | StateGraph 引擎：可循环图、条件边、中断点、`GraphActionExecutor` 桥 | `state_graph.rs:512`、`state_executor.rs:1093`、`dag.rs`、`executor.rs` |
 | `oneai-domain` | DomainPack 7 层声明式领域配置（含范式策略、StateGraph、MemoryProfile） | `domain_pack.rs:50`、`paradigm_strategy.rs`、`memory_profile.rs` |
 | `oneai-memory` | 长程记忆：三层、压缩耦合抽取、三因子召回 | `manager.rs:655`、`compression.rs:492`、`fact_extraction.rs` |
@@ -244,7 +241,7 @@ while 还有 pending:
 
 `manager.rs:9-13, 347-580`：`MemoryManager::recall_facts(query, top_k)` 用**相关度 + 近因 + 重要度**三因子（Generative-Agents 式）从 archival 召回，每轮经 `CoreMemorySource` 注入。配 `EmbeddingService` 走语义相关度，否则退化关键词。会话末 `reflect()` 把整段对话提炼成 episodic 事实。详见 `docs/memory-mechanism.md`。
 
-> 注：召回当前存在已知缺陷——存储事实的 embedding 恒为 None，语义召回退化为关键词（见记忆 `memory-semantic-recall-inactive.md`）。机制完整但语义路径待修。
+> 注：存储事实 embedding 恒为 None、语义召回退化为关键词的缺陷已在 1.1.0 修复（archive_facts 统一嵌入 embedding）。详见 `docs/memory-mechanism.md`。
 
 ### 6.4 PlanState：活任务清单防遗忘
 
@@ -262,48 +259,24 @@ while 还有 pending:
 
 ---
 
-## 7. 四种多 Agent 编排原语
+## 7. GroupChat 原语（场景化多角色对话）
 
-除主 Loop 内的子 Agent 委托外，OneAI 提供四种显式编排原语，覆盖不同协作拓扑。
+除主 Loop 内的子 Agent 委托外，OneAI 提供一种引擎级编排原语用于场景化多角色对话；扇出/路由/辩论等拓扑由 `delegate` + 确定性 StateGraph 表达（历史上的 Team/Swarm/Handoff 三原语已移除，见文首历史注记）。
 
-### 7.1 TeamCoordinator（聚合，4 策略）
+### 7.1 GroupChatSession（共享转录对话，引擎原语）
 
-`team.rs:1-15, 48-151`：输入 `TeamConfig`（策略 + 角色 + 预算），经 `SubAgentFactory` 创建成员，按策略执行：
-
-| 策略 | 拓扑 | 用途 |
-|---|---|---|
-| **Coordinate** | 全员并行同任务 → 协调者合成共识 | 多专家交叉验证 |
-| **Route** | 路由 agent 选最佳专家，只跑一个 | 任务分流到对口专家 |
-| **Collaborate** | 串行，各建在上一个输出上 | 流水线式接力 |
-| **Debate** | 多方辩论 → judge 仲裁 | 多视角对抗求优 |
-
-共享团队预算，按角色数分配；记 token、记 `TeamCoordinationLog`。
-
-### 7.2 SwarmOrchestrator（动态池，3 路由）
-
-`swarm.rs:1-15, 45-143`：复杂任务分解为 `SwarmTask`，按能力路由到最佳 agent，并发执行（尊重依赖），结果按质量阈值校验，失败用替代 agent 重试，聚合成 `SwarmResult`。路由：`BestFit`（最高质量）/ `LoadBalanced`（考虑当前负载）/ `Fastest`（最高速度）。（注：代码注释把 CostOptimized 也列在枚举里，见 `oneai-core` 的 `SwarmRouting`，已删 USD 成本维度后保留 token/速度/质量导向。）
-
-### 7.3 HandoffTool / HandoffManager（移交，模型驱动）
-
-`handoff.rs:1-54`：**移交即工具调用**。`HandoffTool` 实现 `Tool` trait 注册进 ToolRegistry，模型像调普通工具一样调它（`target` + `reason`）。`HandoffManager` 检测到该调用后：解析目标与原因 → 经 `SubAgentFactory` 创建接收 agent → 转移对话上下文（或摘要，`transfer_conversation`）→ 接收 agent 续跑。关键设计是模型自然决定何时移交、移交给谁——工具描述告知可用目标。
-
-### 7.4 GroupChatSession（共享转录对话，引擎原语）
-
-`group_chat.rs:1-29`：区别于 Team 的**聚合**（扇出 N 个 → 合并一个结果），GroupChat 是**对话**：N 个 persona agent 在**一个共享 Conversation** 里轮流发言，人在环中。对应 AutoGen GroupChat / Coze 多 Agent 对话模式，下沉到引擎层使每个原生端口（macOS/Windows/Android/iOS）免费获得，无需在 UI 层重实现编排。
+`group_chat.rs:1-29`：区别于委托的扇出-合并（聚合多份结果），GroupChat 是**对话**：N 个 persona agent 在**一个共享 Conversation** 里轮流发言，人在环中。对应 AutoGen GroupChat / Coze 多 Agent 对话模式，下沉到引擎层使每个原生端口（macOS/Windows/Android/iOS）免费获得，无需在 UI 层重实现编排。
 
 - 每成员是精简 `AgentLoop`（persona system prompt，共享 provider/tools/parser）。
 - 一条共享 `Conversation` 持对话；每成员跑在**派生转录**（共享减去 system 消息）上，自己的 persona system prompt 由 loop 新鲜注入；只把该成员最终答案以 `metadata["speaker"]=<id>` 标记回灌。
 - **轮次策略**（`TurnPolicy` @ `group_chat.rs:100-116`）：`Scripted`（固定序，如面试 `[coach, interviewer]`）/ `RoundRobin`（成员序）/ `Moderator`（主持成员选下一位发言者，可交回 `"user"`）。
 - **ReviewLoopConfig**（`group_chat.rs:126-134`）：写作工坊式评审-修改循环——writer 起草 → editor 评审 → writer 修改 → … 直到 editor 吐 `approve_marker` 或达 `max_rounds` 上限。
 
-### 7.5 四原语对比
+### 7.2 委托 vs GroupChat 对比
 
 | 原语 | 拓扑 | 控制权 | 主控上下文 | 典型场景 |
 |---|---|---|---|---|
 | SubAgent 委托 | 分层（父→子） | 模型驱动 meta-tool | 父保持干净（只收摘要） | 任务分解、隔离执行 |
-| Team | 扇出/串行/辩论 | 预设策略 | 协调者合成 | 多专家验证/流水线/对抗 |
-| Swarm | 动态池 + 路由 | 能力路由器 | 聚合结果 | 大规模复杂任务并发 |
-| Handoff | 链式移交 | 模型驱动 tool | 转移给接收方 | 专家接力、换手 |
 | GroupChat | 共享对话轮流 | 轮次策略/主持 | 共享转录 | 多角色对话、人在环 |
 
 ---
@@ -339,8 +312,7 @@ while 还有 pending:
 | **委托/子 Agent** | meta-tool `delegate`，只回灌摘要 | Claude Code subagents、Devin 子任务 | 与 Claude Code 模式一致，强调主上下文干净 |
 | **并行委托** | 一轮多委托 + Kahn 波次 DAG 调度 + 环检测 | LLMCompiler（并行函数调用）、LangGraph parallel branches | OneAI 把 DAG 编排权交模型，拓扑自动并行化 |
 | **隔离** | git worktree + ScopeState(MVI/Redux) | Claude Code worktree isolation | 同样用 git worktree，额外加状态隔离 |
-| **多 Agent 编排原语** | Team/Swarm/Handoff/GroupChat 四原语 | AutoGen GroupChat、CrewAI roles、Swarm handoff、MetaGPT SOP | OneAI 把四类拓扑收敛为引擎内原语，原生端口共享 |
-| **移交机制** | Handoff as Tool（模型自然决定） | OpenAI Swarm `handoff` function | 几乎同一设计：移交即工具调用 |
+| **多 Agent 编排** | `delegate` Kahn 波次并行 + GroupChat 原语 | AutoGen GroupChat、CrewAI roles、OpenAI Swarm handoff、MetaGPT SOP | OneAI 把聚合/路由/辩论收敛为 `delegate` + StateGraph，对话拓扑下沉为引擎 GroupChat 原语，原生端口共享 |
 | **范式切换** | 4 范式 + 内联升级 prompt/工具集 + 图流挂载 | Aider Architect/Editor、Reflexion、Plan-and-Solve | OneAI 扩展为 4 范式且与 StateGraph 联动 |
 | **长程上下文** | 持久/临时分离 + 固定块重注入抗压缩 | LangGraph state channels、Letta memory blocks | OneAI 的"重注入而非靠压缩器"思路独特 |
 | **记忆** | Letta 三层 + Mem0 冲突更新 + 三因子召回 + 压缩耦合抽取 | Letta、Mem0、Generative Agents、Zep-Graphiti | 融合多家，"压缩即丢失"闭环是亮点（详见记忆白皮书） |
@@ -362,7 +334,7 @@ OneAI 在注释中多次明示对标 Claude Code：动态 Agentic Loop（`agent_
 
 - **MetaGPT**：用 SOP（标准作业流）编码多 Agent 协作。OneAI 的 DomainPack 第 6 层 Workflows+StateGraph 是等价物——把领域 SOP 声明为可循环图。CodingPack 即"编码域的 SOP"。
 - **SWE-agent**：其 Agent-Computer Interface（约束原始 shell 到专用命令）对应 OneAI 的 `SmartToolRouter`（`route_shell_to_specialized` @ `agent_loop.rs:2643-2642`），把 `shell cat` 重定向到 `read_file`、`ls` 重定向到 `list_directory`——即使模型（GLM/Qwen）忽略工具偏好规则，运行时仍正确路由。OneAI 还有 SWE-bench 三轴（能力×成本×效率）评测框架（见记忆 `swe-bench-eval-three-axis.md`）。
-- **CrewAI**：role-based 多 Agent。OneAI 的 Team `AgentRole` + 4 策略覆盖其角色编排，但 OneAI 多了 GroupChat（对话式）和 Swarm（动态池）两种 CrewAI 没有的拓扑。
+- **CrewAI**：role-based 多 Agent。OneAI 的 GroupChat（对话式多角色 + 角色阵容 + 轮次策略 + 背景字段可见性）覆盖其角色编排场景；流水线/路由等拓扑由 `delegate` + StateGraph 表达。
 
 ### 9.5 协议层：A2A 与 MCP
 
@@ -377,15 +349,14 @@ OneAI 既实现 **Google A2A 协议**（`oneai-a2a`：P2-5 客户端 SDK + P4-1 
 3. **图流与 Loop 双向闭环**：`GraphActionExecutor` 桥让 StateGraph 不是旁路系统，范式切换即进入图流、图流节点又回调 loop 基础设施。
 4. **固定块抗压缩重注入**：持久/临时分离 + TaskAnchor/PlanProgress 靠重注入扛压缩，而非依赖压缩器保留——长程目标不丢。
 5. **编排声明式化**：编排范式、记忆、压缩、图流全声明在 DomainPack 7 层，一行切域、可合并多域。
-6. **四原语收敛**：Team/Swarm/Handoff/GroupChat 在同一引擎内，原生跨端共享，非 Python 脚本胶水。
+6. **编排收敛**：聚合/路由/辩论收敛为 `delegate` + StateGraph，场景化对话下沉为引擎 GroupChat 原语，原生跨端共享，非 Python 脚本胶水。
 
 ---
 
 ## 10. 已知局限与待办
 
-- **语义召回失效**：存储事实 embedding 恒为 None，三因子召回退化关键词（`memory-semantic-recall-inactive.md`，机制文档 `docs/memory-mechanism.md`）。
+- **（已修复，1.1.0）语义召回**：存储事实 embedding 恒为 None、三因子召回退化为关键词的缺陷已在 1.1.0 修复——archive_facts 统一嵌入 embedding，语义路径打通。详见 `docs/memory-mechanism.md`。
 - **图流桥未完全接线**：`AgentLoopGraphActionExecutor` 的 `parser`/`hook_registry`/`recovery_manager` 字段已克隆但尚未在 `GraphActionExecutor` impl 内读取（`agent_loop.rs:3790-3796` 注释标注为 follow-up），即图流路径的 OutputParser 决策解析、PreInfer/PostInfer 触发、工具错误恢复尚未与主 loop 完全一致。
-- **Swarm 分解为启发式**：`swarm.rs:157-160` 注释明示任务分解是启发式，生产可换 LLM 驱动分解。
 - **仅 4 范式**：`ParadigmKind` 为 `#[non_exhaustive]`，可扩展但当前内置仅 Plan/ReAct/Reflect/Explore。
 
 ---
@@ -408,9 +379,6 @@ OneAI 既实现 **Google A2A 协议**（`oneai-a2a`：P2-5 客户端 SDK + P4-1 
 | Worktree 隔离 | `crates/oneai-agent/src/worktree_isolation.rs:1` |
 | 并行执行器 | `crates/oneai-agent/src/parallel_executor.rs:77` |
 | 后台任务 | `crates/oneai-agent/src/async_task_runner.rs` |
-| Team 协调 | `crates/oneai-agent/src/team.rs:48` |
-| Swarm 编排 | `crates/oneai-agent/src/swarm.rs:45` |
-| Handoff | `crates/oneai-agent/src/handoff.rs:55` |
 | GroupChat | `crates/oneai-agent/src/group_chat.rs:1` |
 | StateGraph | `crates/oneai-workflow/src/state_graph.rs:1` |
 | StateGraph 执行器 | `crates/oneai-workflow/src/state_executor.rs:1` |

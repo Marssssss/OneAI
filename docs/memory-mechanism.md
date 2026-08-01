@@ -106,7 +106,7 @@ Recall 不是独立存储，而是**持久化的会话快照**：被压缩丢弃
 | `fact_type: FactType` | 类别标签，受领域 `extraction_schema` 约束（coding: `user_tooling_pref`/`decision`/`open_task`/`critical_file`；research: `source`/`claim`/`open_question`/`user_interest`） |
 | `subject` / `predicate` / `content` | 三元组：主体-谓词-值，如 `user.package_manager` / `prefers` / `pnpm` |
 | `importance: f32` | 重要度 [0,1]，召回排序用 |
-| `embedding: Option<Vec<f32>>` | 语义向量（**当前恒为 None，见 §8 缺口**） |
+| `embedding: Option<Vec<f32>>` | 语义向量（归档时由 `archive_facts` 统一嵌入；1.1.0 修复，见 §12.1） |
 | `created_at` / `updated_at` / `version` | 时间戳与版本号 |
 
 ### 3.2 冲突更新（Mem0 invariant）
@@ -183,11 +183,13 @@ score = 0.5 · relevance + 0.3 · recency + 0.2 · importance
 - **recency（近因）**：对 `updated_at` 做**指数衰减**，1 小时半衰期（`temporal_score_fact`，`fact_store.rs:212`，`0.5^(diff/3600)`）。可由 `RecallConfig.time_decay` 关闭。
 - **importance（重要度）**：事实的 `importance` 字段。
 
-> 注意：这三因子权重是**硬编码** `0.5/0.3/0.2`（`fact_store.rs:198`），且各因子**未做 min-max 归一化**（Generative Agents 原文要求归一化）。见 §8 缺口。
+> 注意：三因子权重与近因半衰期现纳入 `RecallConfig` 可调，召回前对候选集做 min-max 归一化再加权（1.1.0 修复，见 §12.4）。
 
-### 5.3 语义召回的退化与 query embedding
+### 5.3 语义召回与 query embedding
 
-`recall_facts`（`manager.rs:347`）会在配了 `EmbeddingService` 时给 **query** 算 embedding（`svc.embed(query)`，`manager.rs:352`），再传给 `search_hybrid`。**但存储的事实 `embedding` 恒为 `None`**（`fact_extraction.rs:159`、`memory_tools.rs:35` 均写死 `embedding: None`），所以 `search_hybrid` 里 `f.embedding.as_ref()` 永远是 None → 退回 keyword 命中路径（0.6 分）。**语义召回当前实际退化为关键词召回**。详见 §8。
+`recall_facts`（`manager.rs:347`）会在配了 `EmbeddingService` 时给 **query** 算 embedding（`svc.embed(query)`，`manager.rs:352`），再传给 `search_hybrid` 做 dense + keyword 混合检索。事实侧：`FactExtractor::extract`（`fact_extraction.rs:159`）与 `memory_tools::build_fact`（`memory_tools.rs:42`）产出时 `embedding` 为 `None`，但 `MemoryManager::archive_facts` 在归档时对 `"{subject} {predicate} {content}"` 统一嵌入（`manager.rs:550`，嵌入失败仅 warn 不阻断），故入库事实带向量，`search_hybrid` 的 dense 分支生效。
+
+> 1.1.0 前：归档不嵌入、事实 `embedding` 恒为 `None`，语义召回退化为关键词召回（query embedding 算了但无事实向量可比）——已修复，详见 §12.1。
 
 ### 5.4 memory_search 兜底回溯
 

@@ -254,7 +254,7 @@ OneAI 有**两套**裁剪/压缩实现，分工不同：
 
 ---
 
-## 8. 多代理上下文隔离（sub-agent / delegate / handoff）
+## 8. 多代理上下文隔离（sub-agent / delegate）
 
 ### 8.1 sub-agent 只回摘要（context isolation）
 
