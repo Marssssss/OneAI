@@ -337,7 +337,16 @@ final class ChatViewModel: ObservableObject {
     /// when at top or no session loaded.
     private var olderCursor: String? = nil
     /// Page size for transcript fetches.
-    private let transcriptPageSize: UInt32 = 50
+    //
+    // Capped at 12 (was 50) for the macOS chat list: the SwiftUI non-lazy
+    // `VStack` in a `ScrollView` realizes + measures every bubble eagerly to
+    // size the document → O(n²) AppKit layout, so a 50-message page froze the
+    // session switch for several seconds (issue #11). 12 keeps the layout
+    // cost well below the freeze threshold while still showing a usable
+    // recent window; older messages load on demand via `loadOlder()` (same
+    // page size). Safe minimal patch — touches only this number, no
+    // scroll/streaming machinery.
+    private let transcriptPageSize: UInt32 = 12
     /// Set by `loadOlder` to the first (oldest) id of the just-prepended page;
     /// `Views` observes it to scroll that id to the viewport top so the user
     /// sees the newly loaded older messages.
