@@ -122,27 +122,18 @@ enum ChatEntry: Identifiable {
 
 final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     weak var vm: ChatViewModel?
-    /// Generation captured at creation (issue #13). Bumped on every session
-    /// switch / new conversation in `ChatViewModel.interruptInFlight`. Once the
-    /// VM's current generation differs from this one, the stream belongs to a
-    /// session the user already left — its `onEvent`/`flush` drop every event
-    /// at the worker thread, never scheduling `DispatchQueue.main.async`. That
-    /// stops a previous turn's still-streaming inference from flooding the main
-    /// queue (each flush appended a junk bubble + bumped `streamTick` → O(n²)
-    /// re-render) and starving `loadSession`'s `MainActor.run { items = ... }`,
-    /// which presented as a freeze on session switch mid-stream.
-    private let generation: Int64
-    init(vm: ChatViewModel) {
+    /// Key of the session this callback's run belongs to (issue #13). Compared
+    /// against `vm.currentStreamKey()` (the visible session's key) on every
+    /// event to route it: visible → render into `items` + bump `streamTick`;
+    /// single-agent background → accumulate into `backgroundTurns[key]` (no
+    /// re-render, no freeze) so switching back shows the full streamed output;
+    /// group background → drop (group rounds are short, group resume isn't
+    /// wired). Group keys carry a `"group:"` prefix; single-agent keys are bare
+    /// session ids.
+    private let sessionKey: String
+    init(vm: ChatViewModel, sessionKey: String) {
         self.vm = vm
-        self.generation = vm.currentStreamGeneration()
-    }
-
-    /// True when this callback's session has been torn down (user switched
-    /// away). Read from the tokio worker thread; `currentStreamGeneration()`
-    /// is `NSLock`-guarded so this is safe.
-    private func isStale() -> Bool {
-        guard let vm = vm else { return true }
-        return vm.currentStreamGeneration() != generation
+        self.sessionKey = sessionKey
     }
 
     /// Buffer of coalesced hot fragments (streamChunk/thinking), drained by a
@@ -159,67 +150,73 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     private static let flushInterval: TimeInterval = 0.05
 
     func onEvent(event: ChatEventView) {
-        // Drop events from a stream whose session the user already left
-        // (issue #13) — at the source, before any main-queue dispatch, so a
-        // stale stream can't flood the main thread and freeze the app.
-        if isStale() { return }
-        // Fires on the tokio worker thread — but confirm: log whether it's
-        // actually the main thread. If onEvent runs on main, the Rust future
-        // is being driven on the main thread and a slow inference blocks the
-        // UI → that's the beachball cause.
-        if Self.isHot(event) {
-            lock.lock()
-            pendingHot.append(event)
-            let n = pendingHot.count
-            let schedule = !flushScheduled
-            if schedule { flushScheduled = true }
-            lock.unlock()
-            StreamLog.log("worker", "hot pending=\(n) onMain=\(Thread.isMainThread)")
-            if schedule {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.flushInterval) { [weak self] in
-                    self?.flush()
+        guard let vm = vm else { return }
+        let visible = (vm.currentStreamKey() == sessionKey)
+        // Visible session: full hot/non-hot flush machinery → `handle` (renders
+        // into `items` + bumps `streamTick`). Background single-agent: cheap
+        // per-event dispatch into the buffered turn (no `streamTick`, no
+        // re-render) so the run keeps accumulating while the user is elsewhere
+        // and switch-back shows the full output (issue #13). Background group:
+        // drop (group is interrupted on switch-away; rounds are short).
+        if visible {
+            // Fires on the tokio worker thread — but confirm: log whether it's
+            // actually the main thread. If onEvent runs on main, the Rust future
+            // is being driven on the main thread and a slow inference blocks the
+            // UI → that's the beachball cause.
+            if Self.isHot(event) {
+                lock.lock()
+                pendingHot.append(event)
+                let n = pendingHot.count
+                let schedule = !flushScheduled
+                if schedule { flushScheduled = true }
+                lock.unlock()
+                StreamLog.log("worker", "hot pending=\(n) onMain=\(Thread.isMainThread)")
+                if schedule {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.flushInterval) { [weak self] in
+                        self?.flush()
+                    }
+                }
+            } else {
+                lock.lock()
+                let pending = pendingHot
+                pendingHot.removeAll()
+                lock.unlock()
+                let kind = Self.eventKind(event)
+                StreamLog.log("worker", "nonhot=\(kind) pendingAhead=\(pending.count) onMain=\(Thread.isMainThread)")
+                let key = sessionKey
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let vm = self.vm else { return }
+                    for e in pending { vm.handle(e, key: key) }
+                    vm.handle(event, key: key)
                 }
             }
-        } else {
-            lock.lock()
-            let pending = pendingHot
-            pendingHot.removeAll()
-            lock.unlock()
-            let kind = Self.eventKind(event)
-            StreamLog.log("worker", "nonhot=\(kind) pendingAhead=\(pending.count) onMain=\(Thread.isMainThread)")
+        } else if !sessionKey.hasPrefix("group:") {
+            // Background single-agent: route to the buffered turn (no streamTick).
+            let key = sessionKey
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                guard let vm = self.vm else { return }
-                // Re-check staleness on the main thread too: the event passed
-                // the worker-thread check, but a session switch can land in
-                // the window between scheduling and execution (issue #13).
-                if self.isStale() { return }
-                for e in pending { vm.handle(e) }
-                vm.handle(event)
+                guard let vm = self?.vm else { return }
+                vm.handle(event, key: key)
             }
         }
+        // else group background → drop.
     }
 
     private func flush() {
-        // Drop a stale stream's coalesced flush — the user already switched
-        // sessions (issue #13).
-        if isStale() {
-            lock.lock(); pendingHot.removeAll(); lock.unlock()
-            return
-        }
         lock.lock()
         flushScheduled = false
         let pending = pendingHot
         pendingHot.removeAll()
         lock.unlock()
-        guard let vm = vm else { return }
-        if pending.isEmpty { return }
+        guard let vm = vm, !pending.isEmpty else { return }
+        let key = sessionKey
         let t0 = Date()
         StreamLog.log("main", "flush start pending=\(pending.count)")
         // handle() throttles streamTick internally — the first hot event in the
         // batch bumps (≥flushInterval since the last flush), the rest skip, so
-        // the whole batch produces exactly one re-render.
-        for e in pending { vm.handle(e) }
+        // the whole batch produces exactly one re-render. It re-checks
+        // visibility, so a switch that landed mid-flush routes the leftover
+        // events to the buffered turn instead of contaminating the new view.
+        for e in pending { vm.handle(e, key: key) }
         let durMs = Int(Date().timeIntervalSince(t0) * 1000)
         StreamLog.log("main", "flush end dur_ms=\(durMs)")
     }
@@ -419,23 +416,42 @@ final class ChatViewModel: ObservableObject {
     private var lastStreamFlush = Date.distantPast
     private static let streamFlushInterval: TimeInterval = 0.05
 
-    /// Generation token for stream invalidation (issue #13). Bumped in
-    /// `interruptInFlight()`; each `StreamCallback` captures the value at
-    /// creation and drops its events once it differs — see `StreamCallback`.
-    /// `NSLock`-guarded because it's read from the tokio worker thread
-    /// (`StreamCallback.onEvent`) and written from the main thread
-    /// (`interruptInFlight`, which runs on `loadSession`/`newConversation`'s
-    /// `MainActor.run` hop or just before it).
-    private let streamGenLock = NSLock()
-    private var streamGeneration: Int64 = 0
-    func currentStreamGeneration() -> Int64 {
-        streamGenLock.lock(); defer { streamGenLock.unlock() }
-        return streamGeneration
+    // ── Stream routing for session-switch-during-streaming (issue #13) ──
+    // When the user switches away from a still-streaming single-agent
+    // conversation, the in-flight run is NOT interrupted — it continues in the
+    // background and its events route to `backgroundTurns[key]` (a per-session
+    // `AssistantItem`) instead of the visible `items`. No `streamTick` bump →
+    // no main-queue re-render flood → no freeze. On switch-back, the buffered
+    // turn is restored into `items` (the live item, with everything streamed
+    // while away); the live session object is reused so future sends see the
+    // full conversation. Group rounds are short and group resume isn't wired,
+    // so group streams are dropped on switch-away (not buffered).
+    //
+    // `activeStreamKey` (NSLock-guarded: written from `interruptInFlight`/
+    // `loadSession`/`newConversation` on the cooperative pool, read from the
+    // tokio worker thread in `StreamCallback.onEvent`) is the key of the
+    // session whose events should render visibly. A `StreamCallback` captures
+    // its `sessionKey` at creation; `onEvent` routes by comparing the two.
+    private let streamKeyLock = NSLock()
+    private var activeStreamKey: String = ""
+    func currentStreamKey() -> String {
+        streamKeyLock.lock(); defer { streamKeyLock.unlock() }
+        return activeStreamKey
     }
-    private func bumpStreamGeneration() {
-        streamGenLock.lock(); defer { streamGenLock.unlock() }
-        streamGeneration &+= 1
+    func setActiveStreamKey(_ key: String) {
+        streamKeyLock.lock(); defer { streamKeyLock.unlock() }
+        activeStreamKey = key
     }
+    /// Buffered in-flight turn for a single-agent session the user switched
+    /// away from, keyed by session id. Drained on switch-back (`loadSession`).
+    private var backgroundTurns: [String: AssistantItem] = [:]
+    /// The live `OneAiSession` object for a backgrounded single-agent run,
+    /// reused on switch-back so future sends carry the full conversation
+    /// (a fresh `createSessionWithId` would read stale SQLite mid-run).
+    private var backgroundSessions: [String: OneAiSession] = [:]
+    /// Key for the active group-chat stream (group sessions have no
+    /// `sessionId()`; a fresh UUID per group conversation disambiguates).
+    private var groupStreamKey: String = ""
 
     var dbPath: String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -617,23 +633,29 @@ final class ChatViewModel: ObservableObject {
         pendingScenario = nil
     }
 
-    /// Interrupt any in-flight stream on the CURRENT session/group-session and
-    /// reset the running flags. Called when leaving a conversation (starting a
-    /// new one or loading history) so a still-streaming previous turn doesn't
-    /// keep bumping `streamTick` — which would otherwise auto-scroll/yank the
-    /// newly shown conversation to its bottom on every flush (issue 4: switch
-    /// to a history while another conversation is streaming → can't scroll it).
+    /// Tear down the visible conversation before swapping to another. For a
+    /// still-streaming single-agent turn, the run is NOT interrupted — it keeps
+    /// going in the background, its events routing to `backgroundTurns[sid]`
+    /// (no `streamTick` → no re-render flood → no freeze), and switching back
+    /// restores the full streamed output (issue #13). Group rounds are short
+    /// and group resume isn't wired, so group is interrupted + dropped.
     private func interruptInFlight() async {
-        // Invalidate every in-flight `StreamCallback` FIRST, before requesting
-        // the interrupt: `interrupt()` only flags the agent loop to stop at
-        // the next iteration boundary, so a mid-inference stream keeps emitting
-        // tokens for (potentially many) seconds. Bumping the generation makes
-        // those stale events get dropped at the worker thread instead of
-        // flooding the main queue and freezing the app on session switch
-        // (issue #13).
-        bumpStreamGeneration()
-        await session?.interrupt()
-        await groupSession?.interrupt()
+        if currentScenario == nil, let sid = currentSessionId,
+           running, let turn = activeSpeakerItem, let s = session {
+            // Preserve the live turn + session object FIRST (while the visible
+            // key still points here) so any event firing in the switch window
+            // finds the buffered turn immediately instead of creating a thrown-
+            // away one. The run (still going on `s`) keeps firing events into
+            // `backgroundTurns[sid]` once the visible key moves away.
+            backgroundTurns[sid] = turn
+            backgroundSessions[sid] = s
+        } else {
+            // Group (or non-streaming): stop the group round if one is in flight.
+            await groupSession?.interrupt()
+        }
+        // Visible key no longer matches any in-flight run → single-agent runs
+        // route to their buffered turn, group runs drop.
+        setActiveStreamKey("")
         running = false
         activeSpeakerItem = nil
         activeSpeakerId = nil
@@ -681,9 +703,14 @@ final class ChatViewModel: ObservableObject {
                 error = nil
                 currentSessionId = nil   // group-chat conversation id is engine-side
                 running = true
+                // Fresh per-conversation key for this group stream (group
+                // sessions have no `sessionId()`); visible key now matches the
+                // callback created below so its events render (issue #13).
+                groupStreamKey = "group:" + UUID().uuidString
+                setActiveStreamKey(groupStreamKey)
                 if scenario.openerAgentId != nil {
                     // Opener speaks first (it knows the topic from its system prompt).
-                    let cb = StreamCallback(vm: self)
+                    let cb = StreamCallback(vm: self, sessionKey: groupStreamKey)
                     try await gs.start(callback: cb)
                     running = false
                     await refreshSessions()   // scenario session shows up, titled, immediately
@@ -712,6 +739,10 @@ final class ChatViewModel: ObservableObject {
             currentSessionId = s.sessionId()
             items.removeAll()
             error = nil
+            // Visible key matches this session so its (forthcoming) stream
+            // renders; a still-streaming previous session keeps running in the
+            // background, routed to its buffered turn (issue #13).
+            setActiveStreamKey(s.sessionId())
         }
     }
 
@@ -757,14 +788,43 @@ final class ChatViewModel: ObservableObject {
         currentScenario = nil
         groupSession = nil
         debriefActive = false
-        let s = await a.createSessionWithId(id: id)
-        StreamLog.log("sess", "createSessionWithId (resume) id=\(id) resolvedId=\(s.sessionId())")
-        // Paginated load: only the most recent page is fetched + rebuilt into
-        // `items` (full `messages()` would deserialize every archived snapshot
-        // up front). Older pages are prepended on demand via `loadOlder`.
-        let page = await s.transcriptRecent(limit: transcriptPageSize)
+
+        // Restore a background (still-streaming) turn if this session was
+        // switched away from mid-stream (issue #13): its events kept
+        // accumulating into `backgroundTurns[id]` on the live object. Reuse the
+        // live `OneAiSession` so future sends carry the full conversation; the
+        // in-flight turn isn't in SQLite yet (auto-save is post-run), so the DB
+        // page alone would miss it. If the turn already completed (`done`),
+        // `run_agent` auto-saved the full conversation → trust the DB page and
+        // discard the buffer.
+        let bgTurn = backgroundTurns.removeValue(forKey: id)
+        let bgSession = backgroundSessions.removeValue(forKey: id)
+        let resumeBg = (bgTurn != nil && !(bgTurn?.done ?? true))
+
+        let s: OneAiSession
+        let page: TranscriptPage
+        if resumeBg, let live = bgSession {
+            // Reuse the live object (still running; its `inner` is locked for
+            // the run, so read older history from a throwaway DB-backed object).
+            s = live
+            let tmp = await a.createSessionWithId(id: id)
+            page = await tmp.transcriptRecent(limit: transcriptPageSize)
+        } else {
+            s = await a.createSessionWithId(id: id)
+            StreamLog.log("sess", "createSessionWithId (resume) id=\(id) resolvedId=\(s.sessionId())")
+            // Paginated load: only the most recent page is fetched + rebuilt into
+            // `items` (full `messages()` would deserialize every archived snapshot
+            // up front). Older pages are prepended on demand via `loadOlder`.
+            page = await s.transcriptRecent(limit: transcriptPageSize)
+        }
         var lastTask: String? = nil
-        let rebuilt = Self.rebuildEntries(from: page.messages, lastTask: &lastTask)
+        var rebuilt = Self.rebuildEntries(from: page.messages, lastTask: &lastTask)
+        if resumeBg, let turn = bgTurn {
+            // The DB page predates the in-flight turn (only the user message
+            // was pre-saved); append the live turn so switch-back shows the
+            // streamed-so-far output, then keep routing subsequent events to it.
+            rebuilt.append(.assistant(turn))
+        }
         // Publishing @Published state must land on the main thread; an async
         // non-isolated method resumes on a generic executor after the awaits
         // above, so hop back before touching UI state.
@@ -777,6 +837,16 @@ final class ChatViewModel: ObservableObject {
             hasOlder = (page.olderCursor != nil)
             olderCursor = page.olderCursor
             olderJumpId = nil
+            // Visible key now matches the resumed run's callback → its ongoing
+            // events render into the restored turn (issue #13).
+            setActiveStreamKey(s.sessionId())
+            if resumeBg, let turn = bgTurn {
+                activeSpeakerItem = turn
+                running = true     // the background run is still in flight
+            } else {
+                activeSpeakerItem = nil
+                running = false
+            }
             streamTick.value += 1
             // Force the detail to scroll to the most recent message (issue 7):
             // a freshly loaded history must show the bottom, not wherever the
@@ -853,22 +923,53 @@ final class ChatViewModel: ObservableObject {
     /// changes (a new member's turn), a fresh AssistantItem is created. For
     /// single-agent events (speaker nil), each runTask call's first event
     /// seeds the item.
-    func handle(_ event: ChatEventView) {
+    ///
+    /// `key` identifies the session the event belongs to (issue #13). When it
+    /// matches the visible session, the event renders into `items` and bumps
+    /// `streamTick`; otherwise it accumulates into `backgroundTurns[key]`
+    /// (single-agent) with no re-render — preserving output streamed while the
+    /// user was on another session for switch-back.
+    func handle(_ event: ChatEventView, key: String) {
+        let visible = (currentStreamKey() == key)
         let speakerId = speaker(of: event)
-        // New speaker → flush the previous item and start a new one.
-        if let sid = speakerId, activeSpeakerItem?.speakerId != sid {
-            let item = AssistantItem()
-            item.speakerId = sid
-            activeSpeakerItem = item
-            items.append(.assistant(item))
-            activeSpeakerId = sid
-        } else if activeSpeakerItem == nil {
-            // Single-agent (speaker nil) — create the turn's item on first event.
-            let item = AssistantItem()
-            activeSpeakerItem = item
-            items.append(.assistant(item))
+        // Resolve the turn this event mutates.
+        let turn: AssistantItem
+        if visible {
+            if let sid = speakerId, activeSpeakerItem?.speakerId != sid {
+                // New speaker → flush the previous item and start a new one.
+                let item = AssistantItem()
+                item.speakerId = sid
+                activeSpeakerItem = item
+                items.append(.assistant(item))
+                activeSpeakerId = sid
+                turn = item
+            } else if activeSpeakerItem == nil {
+                // Single-agent (speaker nil) — create the turn's item on first event.
+                let item = AssistantItem()
+                activeSpeakerItem = item
+                items.append(.assistant(item))
+                turn = item
+            } else {
+                turn = activeSpeakerItem!
+            }
+        } else if !key.hasPrefix("group:") {
+            // Background single-agent: one buffered turn per session key
+            // (speaker is always nil for single-agent). No `items` append —
+            // the turn stays hidden until switch-back restores it.
+            if let existing = backgroundTurns[key] {
+                turn = existing
+            } else {
+                let item = AssistantItem()
+                backgroundTurns[key] = item
+                turn = item
+            }
+        } else {
+            // Group background (only reachable via the visible→background race
+            // window: a switch lands between scheduling and `handle`). Group
+            // streams aren't buffered (rounds are short, resume isn't wired) —
+            // drop the leftover event.
+            return
         }
-        guard let turn = activeSpeakerItem else { return }
 
         switch event {
         case .thinking(let text, _):
@@ -883,7 +984,7 @@ final class ChatViewModel: ObservableObject {
             let flipped = turn.thinkingActive
             if flipped { turn.thinkingActive = false; turn.thinkingDone = true }
             turn.streaming = true; turn.text += text
-            if flipped { lastStreamFlush = Date.distantPast }
+            if flipped && visible { lastStreamFlush = Date.distantPast }
         case .toolCall(let id, let name, let argsJson, _):
             // Dedup by callId: the engine emits on_tool_calls both mid-stream
             // (incremental ToolCallComplete) AND after the iteration completes
@@ -907,12 +1008,15 @@ final class ChatViewModel: ObservableObject {
             if !finalText.isEmpty { turn.text = finalText }
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
             turn.streaming = false; turn.done = true
-            // Lightweight token estimate for the top-bar usage indicator.
-            lastTurnTokens = (finalText.count + turn.thinking.count) / 4
-            if currentScenario == nil { running = false }
+            // Lightweight token estimate for the top-bar usage indicator (visible
+            // session only — a background run shouldn't clobber the visible bar).
+            if visible { lastTurnTokens = (finalText.count + turn.thinking.count) / 4 }
+            if visible && currentScenario == nil { running = false }
         case .error(let message, _):
-            turn.error = message; turn.streaming = false; turn.done = true; running = false
+            turn.error = message; turn.streaming = false; turn.done = true
+            if visible { running = false }
         }
+        guard visible else { return }   // background: no version bump, no streamTick
         // Bump the per-item version so `.equatable()` on `AssistantBubble`
         // re-renders THIS bubble's body on the next flush. Done (idle) bubbles
         // are never mutated, so their version stays put → their body is skipped
@@ -977,16 +1081,25 @@ final class ChatViewModel: ObservableObject {
         try? await s.save()
         await refreshSessions()
 
-        let callback = StreamCallback(vm: self)
+        // Visible key matches this run so its events render (a background run
+        // from a previous session keeps routing to its buffered turn).
+        setActiveStreamKey(s.sessionId())
+        let callback = StreamCallback(vm: self, sessionKey: s.sessionId())
         StreamLog.log("run", "single-agent runTask start len=\(task.count)")
         do {
             try await s.runTask(task: task, callback: callback)
-            turn.streaming = false; turn.done = true; running = false
+            turn.streaming = false; turn.done = true
             StreamLog.log("run", "single-agent runTask end ok")
         } catch {
             turn.error = friendlyError(error)
-            turn.streaming = false; turn.done = true; running = false
+            turn.streaming = false; turn.done = true
             StreamLog.log("run", "single-agent runTask err=\(friendlyError(error))")
+        }
+        // Only clear `running` if this run is still the visible one — a
+        // background run completing while the user is on another (running)
+        // session must not clobber that session's flag (issue #13).
+        if currentStreamKey() == s.sessionId() {
+            running = false
         }
         await refreshSessions()
     }
@@ -1001,11 +1114,12 @@ final class ChatViewModel: ObservableObject {
         activeSpeakerId = nil
         running = true
         error = nil
-        let callback = StreamCallback(vm: self)
+        // Visible key matches this group's stream so its events render.
+        setActiveStreamKey(groupStreamKey)
+        let callback = StreamCallback(vm: self, sessionKey: groupStreamKey)
         StreamLog.log("run", "group runTask start len=\(task.count)")
         do {
             try await gs.runTask(userInput: task, callback: callback)
-            running = false
             StreamLog.log("run", "group runTask end ok")
         } catch {
             // Attach the error to the active speaker's item (or a fresh one).
@@ -1017,6 +1131,11 @@ final class ChatViewModel: ObservableObject {
             activeSpeakerItem?.error = friendlyError(error)
             activeSpeakerItem?.streaming = false
             activeSpeakerItem?.done = true
+        }
+        // Only clear `running` if this group is still the visible session — a
+        // group switched away from is interrupted, so its run ends, but it
+        // must not clobber another session's flag (issue #13).
+        if currentStreamKey() == groupStreamKey {
             running = false
         }
         try? await gs.save()
