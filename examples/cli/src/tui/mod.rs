@@ -145,25 +145,30 @@ pub fn run_tui(
         // root is in-repo `.oneai/` so it's git-trackable for coding domains.
         builder = builder.sqlite_persistence().working_state("./.oneai");
 
-        let app = builder.build().await.expect("App build failed");
-
-        // The skill registry is shared between the AgentLoop (always-on skill
-        // menu), the `skill` tool (on-demand prompt loading), and the TUI.
-        // Register built-in skills onto it FIRST so the SkillTool sees them.
+        // Wire the selected domain pack BEFORE build so the App picks up the
+        // full coding-pack behavior — system-prompt template, compression
+        // template + compression-coupled fact extraction, context sources
+        // (git status / working dir), permission profile, and memory profile
+        // (self-managed memory tools default ON). `build()` eagerly registers
+        // the pack's tools, so domain tools are no longer registered
+        // post-build. Issue #12 (memory) + full coding-pack parity.
         let domain_pack_name = domain_name.unwrap_or("coding");
-        let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
-        app.skill_registry.register_builtin(skills).await.unwrap();
-
-        // Register domain-specific tools from the selected domain pack
         let domain =
             crate::cmd_pack::get_builtin_pack(domain_pack_name, ".").unwrap_or_else(|| {
                 // Try loading from installed packs or project directory
                 oneai_domain::domain_pack_from_dir(".").unwrap_or_else(|_| coding_pack("."))
             });
-        for tool in &domain.tools {
-            app.register_tool(tool.clone()).await.unwrap();
-        }
-        // Also register CalculatorTool as a general-purpose tool
+        builder = builder.domain_pack(domain);
+
+        let app = builder.build().await.expect("App build failed");
+
+        // The skill registry is shared between the AgentLoop (always-on skill
+        // menu), the `skill` tool (on-demand prompt loading), and the TUI.
+        // Register built-in skills onto it FIRST so the SkillTool sees them.
+        let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
+        app.skill_registry.register_builtin(skills).await.unwrap();
+
+        // CalculatorTool is a general-purpose tool not in any domain pack.
         app.register_tool(Arc::new(CalculatorTool::new()))
             .await
             .unwrap();
