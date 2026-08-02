@@ -26,6 +26,39 @@ use crate::reflection::{EpisodicMemory, MemoryReflection};
 // path.
 pub use oneai_core::RecallStrategy;
 
+// ─── Memory tier tagging (Issue #12) ──────────────────────────────────────
+//
+// Core vs archival facts share the `memories` SQLite table (same conflict
+// key `user_id+subject+predicate`). To route them correctly on reload, each
+// persisted fact carries a reserved metadata key `__tier__`:
+//   - `"core"`     → always-in-context core tier (written via
+//                    `core_memory_edit`); reloaded into `core_memory` at
+//                    session start so it survives `/clear` + restart.
+//   - `"archival"` → archival tier (evicted from core, `archival_memory_insert`,
+//                    or compression-coupled `FactExtractor`); reloaded into
+//                    `fact_archive`, recalled on demand.
+// Absent `__tier__` (legacy rows) is treated as `"archival"` — the original
+// behavior — so existing DBs and `load_facts` callers are unaffected.
+const TIER_META_KEY: &str = "__tier__";
+const TIER_CORE: &str = "core";
+const TIER_ARCHIVAL: &str = "archival";
+
+/// Tag a fact with its memory tier (`__tier__` metadata). Idempotent —
+/// overwrites any prior tier so a fact moving core→archival (eviction) or
+/// archival→core (re-promotion) is reflected on the persisted row.
+fn set_tier(fact: &mut MemoryFact, tier: &str) {
+    fact.metadata
+        .insert(TIER_META_KEY.to_string(), tier.to_string());
+}
+
+/// Read a fact's tier, defaulting to `"archival"` for legacy rows.
+fn tier_of(fact: &MemoryFact) -> &str {
+    fact.metadata
+        .get(TIER_META_KEY)
+        .map(|s| s.as_str())
+        .unwrap_or(TIER_ARCHIVAL)
+}
+
 /// Configuration for the MemoryManager.
 #[derive(Debug, Clone)]
 pub struct MemoryManagerConfig {
@@ -431,9 +464,31 @@ impl MemoryManager {
             self.embed_fact(&mut fact).await;
             self.fact_archive.upsert(fact.clone()).await;
             if let Some(p) = &self.persistence {
+                // Tag as archival tier so reload routes it to `fact_archive`
+                // (not `core_memory`). This also re-tags evicted core facts
+                // core→archival on the persisted row. Issue #12.
+                set_tier(&mut fact, TIER_ARCHIVAL);
                 if let Err(e) = p.store_fact(&fact).await {
                     tracing::warn!("Failed to persist fact: {}", e);
                 }
+            }
+        }
+    }
+
+    /// Persist a core-memory fact to durable storage with `__tier__=core`.
+    ///
+    /// Called by the `core_memory_edit` tool so the agent's curated
+    /// always-in-context facts survive `/clear` and process restart. The
+    /// conflict key (`user_id+subject+predicate`) matches `archive_facts`,
+    /// so the `__tier__` metadata flips correctly when a fact later moves
+    /// to archival (eviction) or back (re-edit). No-op without a persistence
+    /// backend. Issue #12.
+    pub async fn persist_core_fact(&self, fact: &MemoryFact) {
+        if let Some(p) = &self.persistence {
+            let mut tagged = fact.clone();
+            set_tier(&mut tagged, TIER_CORE);
+            if let Err(e) = p.store_fact(&tagged).await {
+                tracing::warn!("Failed to persist core fact: {}", e);
             }
         }
     }
@@ -572,12 +627,21 @@ impl MemoryManager {
         let user_id = self.user_id().await;
         let session_id = self.session_id().await;
         // Cross-session habits (all user facts) — empty session scope.
+        // Split by `__tier__`: core-tier facts reload into the always-in-context
+        // `core_memory` (Issue #12 — so a name/preference set last session is
+        // in the `[Core Memory]` block this session without a tool call);
+        // archival-tier facts reload into `fact_archive` for on-demand recall.
         if let Ok(habits) = p.load_facts(&user_id, "").await {
             for f in habits {
-                self.fact_archive.upsert(f).await;
+                if tier_of(&f) == TIER_CORE {
+                    self.core_memory.upsert(f).await;
+                } else {
+                    self.fact_archive.upsert(f).await;
+                }
             }
         }
-        // This session's episodic facts.
+        // This session's episodic facts (always archival-tier — episodic
+        // facts are never promoted to core).
         if !session_id.is_empty() {
             if let Ok(episodic) = p.load_facts(&user_id, &session_id).await {
                 for f in episodic {
@@ -1997,5 +2061,139 @@ mod manager_tests {
             embedding: None,
             metadata: HashMap::new(),
         };
+    }
+
+    // ─── Issue #12: core-memory persistence + reload-into-core ─────────────
+
+    /// Build a core-style fact (user-scoped preference) for the #12 tests.
+    fn core_fact(user_id: &str, subject: &str, content: &str) -> oneai_core::MemoryFact {
+        oneai_core::MemoryFact {
+            id: format!("core_{}", uuid::Uuid::new_v4()),
+            user_id: user_id.to_string(),
+            session_id: String::new(),
+            fact_type: oneai_core::FactType::new("user_tooling_pref"),
+            subject: subject.to_string(),
+            predicate: "is".to_string(),
+            content: content.to_string(),
+            embedding: None,
+            metadata: HashMap::new(),
+            importance: 0.7,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            version: 1,
+            superseded: false,
+            superseded_at: None,
+            pinned: false,
+        }
+    }
+
+    /// `persist_core_fact` tags the row `__tier__=core` so reload routes it
+    /// back into `core_memory`, not the archive. Issue #12 break point #2.
+    #[tokio::test]
+    async fn persist_core_fact_tags_tier_core_and_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(oneai_persistence::SqliteSessionStore::new(
+            dir.path().join("core.db"),
+        ));
+        let manager = MemoryManager::with_persistence(
+            MemoryManagerConfig::default(),
+            Arc::clone(&store) as Arc<dyn MemoryPersistence>,
+        );
+        manager.set_user_id("alice").await;
+
+        let fact = core_fact("alice", "agent.name", "Bob");
+        manager.persist_core_fact(&fact).await;
+
+        // Reload from SQLite — the persisted row carries __tier__=core.
+        let loaded = store.load_facts("alice", "").await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "Bob");
+        assert_eq!(
+            loaded[0].metadata.get("__tier__").map(|s| s.as_str()),
+            Some("core"),
+            "persist_core_fact must tag the row __tier__=core"
+        );
+    }
+
+    /// The end-to-end #12 flow: a core fact persisted in session A is
+    /// reloaded into `core_memory` (the always-in-context block) at the start
+    /// of a fresh manager bound to the same store — so the agent remembers
+    /// "Bob" without a `memory_search` call. Issue #12 break point #3.
+    #[tokio::test]
+    async fn load_persisted_facts_routes_core_tier_into_core_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(oneai_persistence::SqliteSessionStore::new(
+            dir.path().join("core_reload.db"),
+        ));
+
+        // Session A: write a core fact (as core_memory_edit would).
+        let mgr_a = MemoryManager::with_persistence(
+            MemoryManagerConfig::default(),
+            Arc::clone(&store) as Arc<dyn MemoryPersistence>,
+        );
+        mgr_a.set_user_id("alice").await;
+        mgr_a
+            .persist_core_fact(&core_fact("alice", "agent.name", "Bob"))
+            .await;
+        // Also persist an archival fact the same way archive_facts would.
+        let mut arch = core_fact("alice", "project.lang", "Rust");
+        arch.metadata
+            .insert("__tier__".to_string(), "archival".to_string());
+        store.store_fact(&arch).await.unwrap();
+
+        // Session B: a fresh manager over the same store reloads.
+        let mgr_b = MemoryManager::with_persistence(
+            MemoryManagerConfig::default(),
+            Arc::clone(&store) as Arc<dyn MemoryPersistence>,
+        );
+        mgr_b.set_user_id("alice").await;
+        mgr_b.set_session_id("sessionB").await;
+        mgr_b.load_persisted_facts().await;
+
+        // Core-tier fact → core_memory (always-in-context block).
+        let core_facts = mgr_b.core_memory().facts().await;
+        assert!(
+            core_facts
+                .iter()
+                .any(|f| f.subject == "agent.name" && f.content == "Bob"),
+            "core-tier fact must reload into core_memory: {core_facts:?}"
+        );
+        assert!(
+            !core_facts.iter().any(|f| f.subject == "project.lang"),
+            "archival-tier fact must NOT land in core_memory: {core_facts:?}"
+        );
+
+        // Archival-tier fact → fact_archive (recalled on demand).
+        let recalled = mgr_b.recall_facts("Rust", 5).await.unwrap();
+        assert!(
+            recalled.iter().any(|f| f.subject == "project.lang"),
+            "archival-tier fact must reload into the archive for recall: {recalled:?}"
+        );
+    }
+
+    /// `archive_facts` tags persisted rows `__tier__=archival` so an evicted
+    /// core fact reloads into the archive (not back into core). Issue #12.
+    #[tokio::test]
+    async fn archive_facts_tags_tier_archival() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(oneai_persistence::SqliteSessionStore::new(
+            dir.path().join("arch.db"),
+        ));
+        let manager = MemoryManager::with_persistence(
+            MemoryManagerConfig::default(),
+            Arc::clone(&store) as Arc<dyn MemoryPersistence>,
+        );
+        manager.set_user_id("alice").await;
+
+        let fact = core_fact("alice", "tooling.editor", "vim");
+        manager.archive_facts(vec![fact]).await;
+
+        let loaded = store.load_facts("alice", "").await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].metadata.get("__tier__").map(|s| s.as_str()),
+            Some("archival"),
+            "archive_facts must tag the row __tier__=archival"
+        );
     }
 }

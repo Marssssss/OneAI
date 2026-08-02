@@ -334,8 +334,15 @@ impl Tool for CoreMemoryEditTool {
         // semantically searchable and carry an embedding when evicted to
         // archival. (build_fact is sync and can't await — embed here.)
         self.mm.embed_fact(&mut fact).await;
-        let outcome = self.mm.core_memory().upsert(fact).await;
-        // Enforce the core budget — evicted facts go to archival (paging).
+        let outcome = self.mm.core_memory().upsert(fact.clone()).await;
+        // Persist the core fact to durable storage (Issue #12) so it survives
+        // `/clear` and process restart. `persist_core_fact` tags it
+        // `__tier__=core`, which `load_persisted_facts` routes back into
+        // `core_memory` at the start of the next session.
+        self.mm.persist_core_fact(&fact).await;
+        // Enforce the core budget — evicted facts go to archival (paging),
+        // and are persisted there as `__tier__=archival` (re-tagging the row
+        // so reload routes them to the archive, not back into core).
         let evicted = self.mm.core_memory().enforce_budget().await;
         if !evicted.is_empty() {
             self.mm.archive_facts(evicted).await;
@@ -441,6 +448,7 @@ impl Tool for ArchivalInsertTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oneai_core::MemoryPersistence;
 
     fn mm() -> Arc<MemoryManager> {
         Arc::new(MemoryManager::new())
@@ -473,6 +481,57 @@ mod tests {
         assert_eq!(mm.core_memory().facts().await[0].content, "pnpm");
         assert_eq!(mm.core_memory().facts().await[0].version, 2);
         assert_eq!(mm.core_memory().facts().await[0].user_id, "alice");
+    }
+
+    /// Issue #12: `core_memory_edit` must persist the fact to SQLite with
+    /// `__tier__=core` so it survives `/clear` and reloads into the
+    /// always-in-context `[Core Memory]` block next session.
+    #[tokio::test]
+    async fn core_memory_edit_persists_core_tier_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(oneai_persistence::SqliteSessionStore::new(
+            dir.path().join("cme.db"),
+        ));
+        let mm = std::sync::Arc::new(MemoryManager::with_persistence(
+            crate::manager::MemoryManagerConfig::default(),
+            store.clone(),
+        ));
+        mm.set_user_id("alice").await;
+        mm.set_session_id("s1").await;
+
+        let tool = CoreMemoryEditTool::new(mm.clone());
+        let r = tool
+            .execute(args(
+                r#"{"fact_type":"user_tooling_pref","subject":"agent.name","predicate":"is","content":"Bob"}"#,
+            ))
+            .await
+            .unwrap();
+        assert!(r.success);
+
+        // Reload from SQLite — the fact is durable and tagged core.
+        let loaded = store.load_facts("alice", "").await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "Bob");
+        assert_eq!(
+            loaded[0].metadata.get("__tier__").map(|s| s.as_str()),
+            Some("core"),
+            "core_memory_edit must persist with __tier__=core"
+        );
+
+        // A fresh manager over the same store reloads it into core_memory.
+        let mm2 = std::sync::Arc::new(MemoryManager::with_persistence(
+            crate::manager::MemoryManagerConfig::default(),
+            store.clone(),
+        ));
+        mm2.set_user_id("alice").await;
+        mm2.set_session_id("s2").await;
+        mm2.load_persisted_facts().await;
+        let core = mm2.core_memory().facts().await;
+        assert!(
+            core.iter()
+                .any(|f| f.subject == "agent.name" && f.content == "Bob"),
+            "fresh session must reload the core fact into core_memory: {core:?}"
+        );
     }
 
     #[tokio::test]

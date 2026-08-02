@@ -309,6 +309,37 @@ pub fn runtime_context_block() -> String {
     )
 }
 
+/// Build the memory-guidance block appended to the system prompt when the
+/// active domain registers self-managed memory tools.
+///
+/// This is the **per-turn model-driven capture** mechanism (mirrors OpenClaw:
+/// the system prompt instructs the model to write durable facts to memory when
+/// the user shares them, and to recall them on demand). It is distinct from
+/// the periodic reflection/consolidation mechanism (`reflection.rs` /
+/// compression-coupled `FactExtractor`) — those run in the background; this
+/// nudges the model every turn.
+///
+/// Core memory (facts written via `core_memory_edit`) is persisted to SQLite
+/// (user-scoped, cross-session) and reloaded into the always-in-context
+/// `[Core Memory]` block at session start, so durable facts survive `/clear`
+/// and process restart without a tool call. Archival memory is recalled on
+/// demand via `memory_search`.
+pub fn memory_guidance_block() -> String {
+    "\n\n**Memory (IMPORTANT)**: You have a persistent long-term memory. When \
+     the user shares durable information about themselves or the task — name, \
+     identity, preferences, decisions, constraints, or any fact worth \
+     recalling later — proactively call `core_memory_edit` to store or update \
+     it in the same turn you learn it (a fact with the same \
+     `subject`+`predicate` is updated in place, so revise rather than \
+     duplicate). Do not wait or assume you will remember from context alone. \
+     When a question may depend on something from an earlier or previous \
+     session that you do not see in context, call `memory_search` to recall \
+     it before answering. Core memory (facts you write via \
+     `core_memory_edit`) is shown to you every turn; archival memory is \
+     recalled on demand."
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +500,23 @@ mod tests {
         assert!(
             block.contains("web_search"),
             "block should nudge web_search: {block}"
+        );
+    }
+
+    #[test]
+    fn memory_guidance_block_mentions_capture_and_recall_tools() {
+        let block = memory_guidance_block();
+        assert!(
+            block.contains("core_memory_edit"),
+            "guidance should tell the model to capture via core_memory_edit: {block}"
+        );
+        assert!(
+            block.contains("memory_search"),
+            "guidance should tell the model to recall via memory_search: {block}"
+        );
+        assert!(
+            block.contains("persistent long-term memory"),
+            "guidance should frame it as persistent memory: {block}"
         );
     }
 }

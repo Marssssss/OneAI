@@ -983,10 +983,27 @@ impl AppSession {
         // Build the AgentLoop from session resources
         let agent_loop = if let Some(domain) = &self.app.domain_pack {
             let mut config = AgentLoopConfig {
-                system_prompt: if domain.system_prompt_template.is_empty() {
-                    AgentLoopConfig::default().system_prompt
-                } else {
-                    domain.system_prompt_template.clone()
+                system_prompt: {
+                    let base = if domain.system_prompt_template.is_empty() {
+                        AgentLoopConfig::default().system_prompt
+                    } else {
+                        domain.system_prompt_template.clone()
+                    };
+                    // Per-turn model-driven memory capture guidance (mirrors
+                    // OpenClaw: the prompt tells the model to write durable
+                    // facts via `core_memory_edit` when the user shares them,
+                    // and recall via `memory_search`). Default for every domain
+                    // that opts into self-managed memory tools; distinct from
+                    // the periodic reflection/consolidation mechanism. Issue #12.
+                    if domain.memory_profile.enable_memory_tools {
+                        format!(
+                            "{}{}",
+                            base,
+                            oneai_agent::context_assembler::memory_guidance_block()
+                        )
+                    } else {
+                        base
+                    }
                 },
                 use_streaming: true,
                 plan_mode: self.plan_mode,
