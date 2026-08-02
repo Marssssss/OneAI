@@ -1798,8 +1798,9 @@ impl AppBuilder {
                 )) as Arc<dyn Tool>)
                 .await?;
             self.tool_registry
-                .register(Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone()))
-                    as Arc<dyn Tool>)
+                .register(
+                    Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone())) as Arc<dyn Tool>
+                )
                 .await?;
             self.tool_registry
                 .register(Arc::new(oneai_memory::ArchivalInsertTool::new(mm)) as Arc<dyn Tool>)
@@ -2454,11 +2455,11 @@ mod tests {
             .expect("Build should succeed");
 
         assert!(!app.has_provider()); // No provider set
-        // Self-managed memory tools are registered by DEFAULT for every build
-        // (issue #12) — per-turn model-driven memory capture is a default
-        // mechanism, not a domain opt-in. A bare builder with no domain pack,
-        // provider, or persistence still hands the model the capture/recall
-        // tools (in-memory until sqlite_persistence is wired).
+                                      // Self-managed memory tools are registered by DEFAULT for every build
+                                      // (issue #12) — per-turn model-driven memory capture is a default
+                                      // mechanism, not a domain opt-in. A bare builder with no domain pack,
+                                      // provider, or persistence still hands the model the capture/recall
+                                      // tools (in-memory until sqlite_persistence is wired).
         let tool_names = app.tool_executor().list_tools().await;
         assert!(tool_names.contains(&"core_memory_edit".to_string()));
         assert!(tool_names.contains(&"memory_search".to_string()));
