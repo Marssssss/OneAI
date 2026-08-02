@@ -396,7 +396,10 @@ impl MemoryProfile {
             extraction_schema: Vec::new(),
             recall: RecallConfig::default(),
             core_budget_tokens: 2048,
-            enable_memory_tools: false,
+            // Default ON: per-turn model-driven memory capture is a default
+            // mechanism every domain supports (issue #12). A domain that
+            // wants to opt out calls `.enable_memory_tools(false)`.
+            enable_memory_tools: true,
             habit_fact_types: Vec::new(),
             working_state: WorkingStatePolicy::coding(),
             skill_lifecycle: SkillLifecyclePolicy::coding(),
@@ -581,7 +584,8 @@ mod tests {
         let p = MemoryProfile::default();
         assert_eq!(p.name, "default");
         assert!(p.extraction_schema.is_empty());
-        assert!(!p.enable_memory_tools);
+        // Memory tools are default-on for every domain (issue #12).
+        assert!(p.enable_memory_tools);
         assert_eq!(p.core_budget_tokens, 2048);
     }
 

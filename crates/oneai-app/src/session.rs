@@ -980,6 +980,21 @@ impl AppSession {
         let circuit_breaker = self.app.circuit_breaker.clone();
         let token_counter = self.app.token_counter.clone();
 
+        // Whether self-managed memory tools are actually registered (issue #12).
+        // Detected from the registry rather than `domain.memory_profile` so the
+        // no-domain path (mobile/macOS native — no DomainPack) also gets the
+        // guidance when the builder registered the tools (default ON). This
+        // keeps the prompt's memory guidance in sync with the tools the model
+        // can actually call — never mention `core_memory_edit` if it isn't
+        // registered, and always mention it when it is.
+        let memory_tools_on = self
+            .app
+            .tool_executor
+            .tools_map()
+            .read()
+            .await
+            .contains_key("core_memory_edit");
+
         // Build the AgentLoop from session resources
         let agent_loop = if let Some(domain) = &self.app.domain_pack {
             let mut config = AgentLoopConfig {
@@ -992,10 +1007,11 @@ impl AppSession {
                     // Per-turn model-driven memory capture guidance (mirrors
                     // OpenClaw: the prompt tells the model to write durable
                     // facts via `core_memory_edit` when the user shares them,
-                    // and recall via `memory_search`). Default for every domain
-                    // that opts into self-managed memory tools; distinct from
-                    // the periodic reflection/consolidation mechanism. Issue #12.
-                    if domain.memory_profile.enable_memory_tools {
+                    // and recall via `memory_search`). Gated on the tool being
+                    // actually registered (default ON for every domain, incl.
+                    // the no-domain mobile/macOS path) — distinct from the
+                    // periodic reflection/consolidation mechanism. Issue #12.
+                    if memory_tools_on {
                         format!(
                             "{}{}",
                             base,
@@ -1094,6 +1110,18 @@ impl AppSession {
             .with_recovery_manager(std::sync::Arc::new(RecoveryManager::new()))
         } else {
             let mut config = AgentLoopConfig {
+                system_prompt: if memory_tools_on {
+                    // No DomainPack (mobile/macOS native path): the builder
+                    // still registered memory tools (default ON), so append
+                    // the same capture guidance. Issue #12.
+                    format!(
+                        "{}{}",
+                        AgentLoopConfig::default().system_prompt,
+                        oneai_agent::context_assembler::memory_guidance_block()
+                    )
+                } else {
+                    AgentLoopConfig::default().system_prompt
+                },
                 use_streaming: true,
                 plan_mode: self.plan_mode,
                 usage_tracker,

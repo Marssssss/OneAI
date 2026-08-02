@@ -1774,24 +1774,36 @@ impl AppBuilder {
                 .set_decay_policy(Some(domain.memory_profile.decay.clone()))
                 .await;
         }
-        if let Some(domain) = &merged_domain_pack {
-            if domain.memory_profile.enable_memory_tools {
-                let mm = memory_manager.clone();
-                let recall_cfg = domain.memory_profile.recall.clone();
-                self.tool_registry
-                    .register(Arc::new(oneai_memory::MemorySearchTool::with_recall_config(
-                        mm.clone(),
-                        recall_cfg,
-                    )) as Arc<dyn Tool>)
-                    .await?;
-                self.tool_registry
-                    .register(Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone()))
-                        as Arc<dyn Tool>)
-                    .await?;
-                self.tool_registry
-                    .register(Arc::new(oneai_memory::ArchivalInsertTool::new(mm)) as Arc<dyn Tool>)
-                    .await?;
-            }
+        // Self-managed memory tools (`memory_search` / `core_memory_edit` /
+        // `archival_memory_insert`). Default ON for every domain (issue #12):
+        // per-turn model-driven memory capture is a default mechanism, not a
+        // domain-specific opt-in. A domain explicitly setting
+        // `enable_memory_tools(false)` opts out; no domain pack at all (the
+        // mobile/macOS native path) also defaults ON so the agent can
+        // remember across sessions out of the box.
+        let memory_tools_on = merged_domain_pack
+            .as_ref()
+            .map(|d| d.memory_profile.enable_memory_tools)
+            .unwrap_or(true);
+        if memory_tools_on {
+            let mm = memory_manager.clone();
+            let recall_cfg = merged_domain_pack
+                .as_ref()
+                .map(|d| d.memory_profile.recall.clone())
+                .unwrap_or_default();
+            self.tool_registry
+                .register(Arc::new(oneai_memory::MemorySearchTool::with_recall_config(
+                    mm.clone(),
+                    recall_cfg,
+                )) as Arc<dyn Tool>)
+                .await?;
+            self.tool_registry
+                .register(Arc::new(oneai_memory::CoreMemoryEditTool::new(mm.clone()))
+                    as Arc<dyn Tool>)
+                .await?;
+            self.tool_registry
+                .register(Arc::new(oneai_memory::ArchivalInsertTool::new(mm)) as Arc<dyn Tool>)
+                .await?;
         }
 
         // Resolve usage tracker: use explicitly set tracker, or auto-create from persistence
@@ -2442,7 +2454,15 @@ mod tests {
             .expect("Build should succeed");
 
         assert!(!app.has_provider()); // No provider set
-        assert!(app.tool_executor().list_tools().await.is_empty());
+        // Self-managed memory tools are registered by DEFAULT for every build
+        // (issue #12) — per-turn model-driven memory capture is a default
+        // mechanism, not a domain opt-in. A bare builder with no domain pack,
+        // provider, or persistence still hands the model the capture/recall
+        // tools (in-memory until sqlite_persistence is wired).
+        let tool_names = app.tool_executor().list_tools().await;
+        assert!(tool_names.contains(&"core_memory_edit".to_string()));
+        assert!(tool_names.contains(&"memory_search".to_string()));
+        assert!(tool_names.contains(&"archival_memory_insert".to_string()));
     }
 
     #[tokio::test]
