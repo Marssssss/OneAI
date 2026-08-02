@@ -833,44 +833,62 @@ impl MemoryPersistence for SqliteSessionStore {
         // an early user turn, shows up as a brand-new chat). `load_conversation`
         // still resolves them by exact id for the audit / memory_search path.
         let discard_pat = format!("%{}%", oneai_core::DISCARDED_SNAPSHOT_MARKER);
+        // `child_pat` matches a session's OWN discarded snapshots — used to
+        // sum their counts back into that session's sidebar number.
+        let child_pat = format!("{}%", oneai_core::DISCARDED_SNAPSHOT_MARKER);
+        // Count ONLY the messages a UI actually renders. The macOS/Android
+        // chat views replay user + non-empty-text assistant turns (system /
+        // tool / empty-assistant messages are filtered out — see the Swift
+        // `rebuildEntries` / Android `loadSession`). Counting every stored
+        // message here made the sidebar "N 条" diverge from the visible
+        // bubble count, especially in group-chat (multi-speaker) and
+        // tool-heavy turns. The filter below mirrors that render filter
+        // exactly: role IN (user, assistant) AND at least one non-whitespace
+        // text block (== `Message::text_content().trim().is_empty()` negated).
+        //
+        // CRUCIAL: a session's `messages_json` only holds the LIVE
+        // (post-compression) tail; older turns live in discarded-prefix
+        // snapshots (`{id}{MARKER}{uuid}` rows). The displayed transcript
+        // merges live + snapshots (see `MemoryManager::transcript_page`),
+        // so the sidebar count must too — otherwise a long, compressed
+        // session shows only its tail count (e.g. "8 条") while the chat
+        // renders dozens of bubbles. The correlated subquery sums the
+        // bubble counts of all snapshots whose id starts with
+        // `{this_session}{MARKER}`.
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_at, updated_at, messages_json, title FROM conversations \
-             WHERE id NOT LIKE ?1 \
-             ORDER BY updated_at DESC",
+                "SELECT c.id, c.created_at, c.updated_at, c.title, \
+                        (SELECT count(*) FROM json_each(c.messages_json) m \
+                         WHERE json_extract(m.value, '$.role') IN ('user', 'assistant') \
+                           AND EXISTS (SELECT 1 FROM json_each(json_extract(m.value, '$.content')) k \
+                                       WHERE json_extract(k.value, '$.type') = 'text' \
+                                         AND trim(coalesce(json_extract(k.value, '$.text'), '')) != '')) \
+                        + COALESCE((SELECT SUM( \
+                                      (SELECT count(*) FROM json_each(s.messages_json) m \
+                                       WHERE json_extract(m.value, '$.role') IN ('user', 'assistant') \
+                                         AND EXISTS (SELECT 1 FROM json_each(json_extract(m.value, '$.content')) k \
+                                                     WHERE json_extract(k.value, '$.type') = 'text' \
+                                                       AND trim(coalesce(json_extract(k.value, '$.text'), '')) != '')) \
+                                    ) \
+                                    FROM conversations s \
+                                    WHERE s.id LIKE (c.id || ?2)), 0) \
+                           AS message_count \
+                 FROM conversations c \
+                 WHERE c.id NOT LIKE ?1 \
+                 ORDER BY c.updated_at DESC",
             )
             .map_err(|e| {
                 OneAIError::Persistence(format!("Failed to prepare conversation list query: {}", e))
             })?;
 
         let rows = stmt
-            .query_map(rusqlite::params![discard_pat], |row| {
+            .query_map(rusqlite::params![discard_pat, child_pat], |row| {
                 let id: String = row.get(0)?;
                 let created_at: String = row.get(1)?;
                 let updated_at: String = row.get(2)?;
-                let messages_json: String = row.get(3)?;
-                let title: Option<String> = row.get(4)?;
-                // Count ONLY the messages a UI actually renders. The macOS/Android
-                // chat views replay user + non-empty-text assistant turns (system /
-                // tool / empty-assistant messages are filtered out — see the Swift
-                // `loadSession`). Counting every stored message here made the sidebar
-                // "N 条" diverge from the visible bubble count, especially in
-                // group-chat (multi-speaker) and tool-heavy turns. Parse as
-                // `Message` and mirror that render filter exactly so the listed
-                // count matches what the user sees, for every session.
-                let count = serde_json::from_str::<Vec<oneai_core::Message>>(&messages_json)
-                    .map(|msgs| {
-                        msgs.iter()
-                            .filter(|m| {
-                                matches!(
-                                    m.role,
-                                    oneai_core::Role::User | oneai_core::Role::Assistant
-                                ) && !m.text_content().trim().is_empty()
-                            })
-                            .count()
-                    })
-                    .unwrap_or(0);
-                Ok((id, created_at, updated_at, count, title))
+                let title: Option<String> = row.get(3)?;
+                let message_count: i64 = row.get(4).unwrap_or(0);
+                Ok((id, created_at, updated_at, message_count as usize, title))
             })
             .map_err(|e| {
                 OneAIError::Persistence(format!("Failed to execute conversation list query: {}", e))
@@ -1360,6 +1378,81 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         // Most recently updated should be first
         assert_eq!(sessions[0].message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_list_includes_discarded_snapshot_counts() {
+        // Regression for issue #14: after context compression, a session's
+        // `messages_json` holds only the live tail; the discarded prefix is
+        // archived as a `{id}::discarded::{uuid}` snapshot row. The sidebar
+        // count must sum the live bubbles AND the snapshot bubbles so the
+        // "N 条" matches the bubbles the transcript view renders (live +
+        // snapshots merged in `transcript_page`).
+        let (store, _dir) = make_store();
+
+        // Live tail: 2 bubbles (user + assistant). Plus a leading system
+        // message and an empty-text assistant tool-call turn — both must be
+        // excluded from the count (render filter).
+        let mut conv = Conversation::with_id("sess1".to_string());
+        conv.add_message(oneai_core::Message::system("sys prompt".to_string()));
+        conv.add_message(oneai_core::Message::user("latest question".to_string()));
+        conv.add_message(oneai_core::Message::assistant("latest answer".to_string()));
+        // Empty-text assistant (tool-call-only) turn — must NOT count.
+        conv.add_message(oneai_core::Message {
+            role: oneai_core::Role::Assistant,
+            content: vec![oneai_core::ContentBlock::ToolCall {
+                id: "tc1".into(),
+                name: "search".into(),
+                args: "{}".into(),
+            }],
+            metadata: Default::default(),
+        });
+        store.save_conversation("sess1", &conv).await.unwrap();
+
+        // Two discarded snapshots (older turns), oldest-first by created_at.
+        let mk_snap = |suffix: &str, msgs: Vec<oneai_core::Message>| {
+            let id = format!("sess1{}{}", oneai_core::DISCARDED_SNAPSHOT_MARKER, suffix);
+            let mut s = Conversation::with_id(id);
+            for m in msgs {
+                s.add_message(m);
+            }
+            s
+        };
+        store
+            .save_conversation(
+                &format!("sess1{}u1", oneai_core::DISCARDED_SNAPSHOT_MARKER),
+                &mk_snap(
+                    "u1",
+                    vec![
+                        oneai_core::Message::user("old q1".to_string()),
+                        oneai_core::Message::assistant("old a1".to_string()),
+                        oneai_core::Message::user("old q2".to_string()),
+                        oneai_core::Message::assistant("old a2".to_string()),
+                    ],
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .save_conversation(
+                &format!("sess1{}u2", oneai_core::DISCARDED_SNAPSHOT_MARKER),
+                &mk_snap(
+                    "u2",
+                    vec![
+                        oneai_core::Message::user("mid q".to_string()),
+                        oneai_core::Message::assistant("mid a".to_string()),
+                    ],
+                ),
+            )
+            .await
+            .unwrap();
+
+        let sessions = store.list_conversations().await.unwrap();
+        // The two discarded snapshots must NOT appear as their own sessions.
+        assert_eq!(sessions.len(), 1);
+        // 2 (live bubbles) + 4 (snap u1) + 2 (snap u2) = 8. The system
+        // message and empty-text assistant turn are excluded.
+        assert_eq!(sessions[0].message_count, 8);
     }
 
     #[tokio::test]
