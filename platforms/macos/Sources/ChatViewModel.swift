@@ -122,7 +122,28 @@ enum ChatEntry: Identifiable {
 
 final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     weak var vm: ChatViewModel?
-    init(vm: ChatViewModel) { self.vm = vm }
+    /// Generation captured at creation (issue #13). Bumped on every session
+    /// switch / new conversation in `ChatViewModel.interruptInFlight`. Once the
+    /// VM's current generation differs from this one, the stream belongs to a
+    /// session the user already left — its `onEvent`/`flush` drop every event
+    /// at the worker thread, never scheduling `DispatchQueue.main.async`. That
+    /// stops a previous turn's still-streaming inference from flooding the main
+    /// queue (each flush appended a junk bubble + bumped `streamTick` → O(n²)
+    /// re-render) and starving `loadSession`'s `MainActor.run { items = ... }`,
+    /// which presented as a freeze on session switch mid-stream.
+    private let generation: Int64
+    init(vm: ChatViewModel) {
+        self.vm = vm
+        self.generation = vm.currentStreamGeneration()
+    }
+
+    /// True when this callback's session has been torn down (user switched
+    /// away). Read from the tokio worker thread; `currentStreamGeneration()`
+    /// is `NSLock`-guarded so this is safe.
+    private func isStale() -> Bool {
+        guard let vm = vm else { return true }
+        return vm.currentStreamGeneration() != generation
+    }
 
     /// Buffer of coalesced hot fragments (streamChunk/thinking), drained by a
     /// single scheduled flush. Without coalescing, every token fires its own
@@ -138,6 +159,10 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     private static let flushInterval: TimeInterval = 0.05
 
     func onEvent(event: ChatEventView) {
+        // Drop events from a stream whose session the user already left
+        // (issue #13) — at the source, before any main-queue dispatch, so a
+        // stale stream can't flood the main thread and freeze the app.
+        if isStale() { return }
         // Fires on the tokio worker thread — but confirm: log whether it's
         // actually the main thread. If onEvent runs on main, the Rust future
         // is being driven on the main thread and a slow inference blocks the
@@ -165,6 +190,10 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard let vm = self.vm else { return }
+                // Re-check staleness on the main thread too: the event passed
+                // the worker-thread check, but a session switch can land in
+                // the window between scheduling and execution (issue #13).
+                if self.isStale() { return }
                 for e in pending { vm.handle(e) }
                 vm.handle(event)
             }
@@ -172,6 +201,12 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
     }
 
     private func flush() {
+        // Drop a stale stream's coalesced flush — the user already switched
+        // sessions (issue #13).
+        if isStale() {
+            lock.lock(); pendingHot.removeAll(); lock.unlock()
+            return
+        }
         lock.lock()
         flushScheduled = false
         let pending = pendingHot
@@ -384,6 +419,24 @@ final class ChatViewModel: ObservableObject {
     private var lastStreamFlush = Date.distantPast
     private static let streamFlushInterval: TimeInterval = 0.05
 
+    /// Generation token for stream invalidation (issue #13). Bumped in
+    /// `interruptInFlight()`; each `StreamCallback` captures the value at
+    /// creation and drops its events once it differs — see `StreamCallback`.
+    /// `NSLock`-guarded because it's read from the tokio worker thread
+    /// (`StreamCallback.onEvent`) and written from the main thread
+    /// (`interruptInFlight`, which runs on `loadSession`/`newConversation`'s
+    /// `MainActor.run` hop or just before it).
+    private let streamGenLock = NSLock()
+    private var streamGeneration: Int64 = 0
+    func currentStreamGeneration() -> Int64 {
+        streamGenLock.lock(); defer { streamGenLock.unlock() }
+        return streamGeneration
+    }
+    private func bumpStreamGeneration() {
+        streamGenLock.lock(); defer { streamGenLock.unlock() }
+        streamGeneration &+= 1
+    }
+
     var dbPath: String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -571,6 +624,14 @@ final class ChatViewModel: ObservableObject {
     /// newly shown conversation to its bottom on every flush (issue 4: switch
     /// to a history while another conversation is streaming → can't scroll it).
     private func interruptInFlight() async {
+        // Invalidate every in-flight `StreamCallback` FIRST, before requesting
+        // the interrupt: `interrupt()` only flags the agent loop to stop at
+        // the next iteration boundary, so a mid-inference stream keeps emitting
+        // tokens for (potentially many) seconds. Bumping the generation makes
+        // those stale events get dropped at the worker thread instead of
+        // flooding the main queue and freezing the app on session switch
+        // (issue #13).
+        bumpStreamGeneration()
         await session?.interrupt()
         await groupSession?.interrupt()
         running = false
