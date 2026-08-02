@@ -54,3 +54,4 @@ oneai-scheduler = { workspace = true }
 syntect = "5.2"
 pulldown-cmark = "0.11"
 unicode-width = "0.2"
+arboard = { workspace = true }

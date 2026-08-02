@@ -133,6 +133,16 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
 
     let mut lines: Vec<Line> = Vec::with_capacity(visible_end.saturating_sub(visible_start) + 2);
 
+    // In-app Shift+drag selection range (screen-row indices, end inclusive).
+    // Out-of-range sentinel when no selection is active.
+    let (sel_lo, sel_hi) = match app.text_selection {
+        Some((a, b)) => (a.min(b), a.max(b)),
+        None => (usize::MAX, 0usize),
+    };
+    // Rebuild the plain-text map of visible rows for clipboard copy.
+    app.visible_line_text.clear();
+    let mut screen_row: usize = 0;
+
     if visible_end > visible_start {
         for (i, msg) in app.messages.iter().enumerate() {
             let (seg_start, seg_len) = seg_offsets[i];
@@ -157,17 +167,39 @@ pub fn draw_chat(f: &mut Frame, rect: Rect, app: &mut App) {
 
             // Search-match highlight is applied per visible line only.
             let is_search_match = app.search_mode && app.search_results.contains(&i);
-            if is_search_match {
-                for line in visible_slice {
+            for line in visible_slice {
+                // Plain text (without the search prefix) for clipboard copy.
+                let plain: String = line.spans.iter().flat_map(|s| s.content.chars()).collect();
+                app.visible_line_text.push(plain);
+                let in_selection = screen_row >= sel_lo && screen_row <= sel_hi;
+                screen_row += 1;
+
+                if is_search_match {
                     let mut new_spans = vec![Span::styled(
                         "🔍 ",
                         Style::default().fg(ratatui::style::Color::Yellow),
                     )];
                     new_spans.extend(line.spans.iter().cloned());
+                    if in_selection {
+                        for s in &mut new_spans {
+                            s.style = s.style.add_modifier(Modifier::REVERSED);
+                        }
+                    }
                     lines.push(Line::from(new_spans));
+                } else if in_selection {
+                    let hl_spans: Vec<Span> = line
+                        .spans
+                        .iter()
+                        .map(|s| {
+                            let mut s = s.clone();
+                            s.style = s.style.add_modifier(Modifier::REVERSED);
+                            s
+                        })
+                        .collect();
+                    lines.push(Line::from(hl_spans));
+                } else {
+                    lines.push(line.clone());
                 }
-            } else {
-                lines.extend(visible_slice.iter().cloned());
             }
         }
     }

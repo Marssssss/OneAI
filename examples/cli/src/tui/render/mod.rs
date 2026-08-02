@@ -110,19 +110,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // live progress as the model flips step statuses. When a plan is submitted
     // via exit_plan_mode, a floating accept/reject popup overlays instead.
     let plan_lines = plan::plan_panel_height(app);
+    // Dynamic input height: grow with the wrapped line count so multi-line
+    // input (Ctrl+Enter / bracketed paste) and long soft-wrapped lines stay
+    // inside the input box instead of overflowing into the chat area
+    // (issue #8). Capped at 40% of the screen; floored at 3 (border + 1 line
+    // + hint). +2 accounts for the top border and the hint line.
+    let input_visual = input::input_visual_line_count(&app.input, right_rect.width as usize);
+    let max_input_height = ((total_size.height as usize) * 2 / 5).max(3);
+    let input_height = (input_visual + 2).min(max_input_height).max(3) as u16;
     let panel_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if plan_lines > 0 {
             vec![
-                Constraint::Length(plan_lines), // plan bar
-                Constraint::Min(0),             // chat area
-                Constraint::Length(3),          // input box (2 lines + border)
+                Constraint::Length(plan_lines),   // plan bar
+                Constraint::Min(0),               // chat area
+                Constraint::Length(input_height), // input box (grows with content)
             ]
         } else {
             vec![
-                Constraint::Length(0), // no plan bar
-                Constraint::Min(0),    // chat area
-                Constraint::Length(3), // input box (2 lines + border)
+                Constraint::Length(0),            // no plan bar
+                Constraint::Min(0),               // chat area
+                Constraint::Length(input_height), // input box (grows with content)
             ]
         })
         .split(right_rect);

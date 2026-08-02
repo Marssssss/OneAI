@@ -114,6 +114,8 @@ cargo run -p oneai-cli      # or: cargo install oneai-cli, then just: oneai
 
 Enter the interactive agent: type a task and watch the full pipeline run live — streaming thinking bubbles, tool calls, plan checklist, usage stats, traces.
 
+**Text selection & copy**: the TUI keeps mouse capture on (wheel / scrollbar drag / `Ctrl+↑↓` / `PageUp-Down` / `Home` / `End` all scroll, and scrolling up to read history mid-stream is sticky — it won't snap back to the bottom). To select model output and copy, **hold `Shift` and drag in the chat area** — the app draws the selection highlight itself and writes the system clipboard (`arboard`), copying on release. It does **not** rely on the terminal's Shift-bypass, so it works on every terminal; plain click still toggles message collapse.
+
 **Interaction modes (cycle with `Shift+Tab`):**
 
 | Mode | Behavior |

@@ -49,6 +49,13 @@ ignore = [
     # (default `disabled()`). Track upstream wasmtime fix; upgrade before
     # shipping production WASI filesystem access.
     { id = "RUSTSEC-2026-0188", reason = "restricted-WASI path opt-in (default disabled); track upstream wasmtime fix" },
+    # wasmtime "Stores can mix up type indices between engines" (RUSTSEC-2026-0222 /
+    # GHSA-hgjw-h833-99q9 / CVE-2026-58494). Surfaced 2026-08-02 (advisory-DB
+    # gained it 2026-07-31). OneAI's WasmRuntime holds a single `Engine`
+    # (oneai-wasm/src/runtime.rs) and compiles/modules against it — no
+    # cross-engine type/component sharing, so the mixing condition is
+    # unreachable. Track upstream wasmtime fix.
+    { id = "RUSTSEC-2026-0222", reason = "single-Engine WasmRuntime; cross-engine type-index mixing unreachable; track upstream wasmtime fix" },
 ]
 
 [licenses]
@@ -73,6 +80,11 @@ allow = [
     # CDLA-Permissive-2.0 — webpki root cert bundles (rustls/ureq transitive).
     # A permissive data license; broad consensus treats it as OSFI-compatible.
     "CDLA-Permissive-2.0",
+    # BSL-1.0 (Boost Software License) — `arboard`'s Windows-clipboard
+    # transitive deps `clipboard-win` + `error-code`. OSI-approved permissive
+    # (MIT/Apache-class). Added 2026-08-02 when arboard was pulled for in-app
+    # Shift+drag text selection in the TUI.
+    "BSL-1.0",
 ]
 exceptions = []
 

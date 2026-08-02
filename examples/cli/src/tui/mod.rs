@@ -73,7 +73,12 @@ pub fn run_tui(
     }));
 
     // Setup terminal — enable mouse capture for scroll wheel support.
-    // Text selection works via mouse drag in chat area: drag to select → release to copy.
+    // Text selection & copy: hold **Shift** and drag in the chat area. The
+    // app owns the selection (highlight + arboard clipboard write) rather
+    // than relying on the terminal's Shift-bypass, so it works on every
+    // terminal. Mouse capture stays ON, so the wheel + scrollbar drag keep
+    // working; plain click still toggles message collapse. On release the
+    // selected rows are copied to the system clipboard automatically.
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
@@ -286,6 +291,11 @@ fn handle_key_event(
     rt: &tokio::runtime::Runtime,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
 ) {
+    // Cancel any lingering in-app text selection on the next key press (a
+    // stuck highlight can remain if a terminal fails to deliver the mouse-up
+    // of a Shift+drag). No-op when no selection is active.
+    app.clear_text_selection();
+
     // Shift+Tab / Shift+Tab — cycle interaction mode (Normal → Auto → Plan).
     // Handled globally so it works even while an approval card is shown.
     if key.kind == KeyEventKind::Press
@@ -368,11 +378,29 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
         && mouse_event.column >= chat_rect.x + chat_rect.width - 2
         && mouse_event.column <= chat_rect.x + chat_rect.width;
 
+    // Shift+drag → in-app text selection (works on every terminal; the app
+    // owns the highlight + clipboard write instead of relying on the
+    // terminal's Shift-bypass for mouse reporting).
+    let is_shift = mouse_event
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::SHIFT);
+    // Visible chat row under the cursor (0 = top of viewport).
+    let chat_row = if is_in_chat {
+        Some((mouse_event.row as usize).saturating_sub(chat_rect.y as usize))
+    } else {
+        None
+    };
+
     match mouse_event.kind {
         // ── Scroll wheel ──────────────────────────────────────────────────────
         crossterm::event::MouseEventKind::ScrollDown => {
             app.chat_scroll_y = app.chat_scroll_y.saturating_add(3);
-            app.user_scrolled = true;
+            // sticky-scroll: reaching the bottom re-enables auto-follow so
+            // new streamed content sticks to the bottom again.
+            let max_scroll = app
+                .content_height
+                .saturating_sub(app.last_chat_rect.height as usize);
+            app.user_scrolled = app.chat_scroll_y < max_scroll;
             app.request_render();
         }
         crossterm::event::MouseEventKind::ScrollUp => {
@@ -381,9 +409,13 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
             app.request_render();
         }
 
-        // ── Left button down (scrollbar or chat-area collapse toggle) ──────
+        // ── Left button down ────────────────────────────────────────────────
+        // Shift+down in chat → start selection. Plain down → scrollbar jump
+        // or chat-area collapse toggle (unchanged).
         crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-            if is_in_scrollbar {
+            if is_shift && is_in_chat {
+                app.update_text_selection(chat_row.unwrap_or(0));
+            } else if is_in_scrollbar {
                 // Scrollbar click — jump to position
                 let y_offset = (mouse_event.row - chat_rect.y) as usize;
                 let track_height = chat_rect.height as usize;
@@ -391,9 +423,10 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                 let viewport_height = chat_rect.height as usize;
                 if track_height > 0 && content_height > viewport_height {
                     let ratio = y_offset as f64 / track_height as f64;
-                    app.chat_scroll_y = ((ratio * content_height as f64) as usize)
-                        .min(content_height.saturating_sub(viewport_height));
-                    app.user_scrolled = true;
+                    let max_scroll = content_height.saturating_sub(viewport_height);
+                    app.chat_scroll_y = ((ratio * content_height as f64) as usize).min(max_scroll);
+                    // Dragged to bottom → re-enable auto-follow.
+                    app.user_scrolled = app.chat_scroll_y < max_scroll;
                     app.request_render();
                 }
             } else if is_in_chat {
@@ -450,6 +483,16 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
             }
         }
 
+        // ── Left button drag — in-app selection (during Shift+drag) ────────
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+            if app.text_selecting =>
+        {
+            // Extend the selection to the row under the cursor.
+            if let Some(row) = chat_row {
+                app.update_text_selection(row);
+            }
+        }
+
         // ── Left button drag (scrollbar only) ────────────────────────────────
         crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)
             if is_in_scrollbar =>
@@ -461,11 +504,27 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
             let viewport_height = chat_rect.height as usize;
             if track_height > 0 && content_height > viewport_height {
                 let ratio = y_offset as f64 / track_height as f64;
-                app.chat_scroll_y = ((ratio * content_height as f64) as usize)
-                    .min(content_height.saturating_sub(viewport_height));
-                app.user_scrolled = true;
+                let max_scroll = content_height.saturating_sub(viewport_height);
+                app.chat_scroll_y = ((ratio * content_height as f64) as usize).min(max_scroll);
+                // Dragged to bottom → re-enable auto-follow.
+                app.user_scrolled = app.chat_scroll_y < max_scroll;
                 app.request_render();
             }
+        }
+
+        // ── Left button up — finalize in-app selection + copy to clipboard ─
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left)
+            if app.text_selecting =>
+        {
+            let text = app.copy_selection_to_clipboard();
+            if !text.is_empty() {
+                let line_count = text.matches('\n').count() + 1;
+                app.add_message(
+                    ChatRole::System,
+                    format!("📋 Copied {line_count} line(s) to clipboard"),
+                );
+            }
+            app.request_render();
         }
 
         _ => {}
@@ -683,7 +742,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /usage · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, v=sidebar verbose, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Shift+Tab=mode(Normal/Auto/Plan)\nMouse: drag to select & copy text, scroll wheel to scroll, drag scrollbar to jump\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /usage · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, v=sidebar verbose, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Home/End=jump top/bottom, Shift+Tab=mode(Normal/Auto/Plan)\nSelect & copy: hold Shift + drag in chat — releases to copy to clipboard (works on every terminal) · Scroll: wheel / drag scrollbar / PageUp-Down / Ctrl+↑↓ / Home/End\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
                 return;
             }
             "/tools" | "/t" => {

@@ -730,6 +730,22 @@ pub struct App {
     /// Total content height in lines (computed during render, used for scrollbar drag).
     pub content_height: usize,
 
+    /// Plain text of each visible chat row, top-to-bottom (built in
+    /// `draw_chat`). Indexed by screen row relative to the chat rect top.
+    /// Used by in-app Shift+drag selection to copy the selected rows to the
+    /// clipboard — the app does its own selection rather than relying on the
+    /// terminal's Shift-bypass (which not all terminals honor).
+    pub visible_line_text: Vec<String>,
+
+    /// In-app text selection: `(start, end)` visible-row indices (end
+    /// inclusive), built while the user holds Shift + drags in the chat area.
+    /// `None` when no selection is active.
+    pub text_selection: Option<(usize, usize)>,
+
+    /// True while a Shift+drag selection is in progress (between mouse-down
+    /// and mouse-up). Distinguishes a drag from a plain click.
+    pub text_selecting: bool,
+
     /// Pending vim command (e.g., 'd' waiting for second 'd' to form 'dd').
     pub vim_pending_cmd: Option<char>,
 
@@ -861,6 +877,9 @@ impl App {
             user_scrolled: false,
             last_chat_rect: ratatui::layout::Rect::default(),
             content_height: 0,
+            visible_line_text: Vec::new(),
+            text_selection: None,
+            text_selecting: false,
             vim_pending_cmd: None,
             input_undo_stack: Vec::new(),
             search_mode: false,
@@ -967,7 +986,20 @@ impl App {
                 self.render_cache.invalidate(&last.id);
                 last.content.push_str(&self.stream_buffer);
                 self.stream_buffer.clear();
-                self.scroll_to_bottom();
+                // sticky-scroll: only auto-scroll to bottom when the user
+                // hasn't manually scrolled up to read history. Resetting
+                // `user_scrolled` here would yank the viewport back to the
+                // bottom every ~33ms during streaming, making it impossible
+                // to browse history mid-stream. The new content still lands
+                // in the last assistant bubble; the chat draw keeps the user's
+                // scroll position (`chat_scroll_y.min(max_scroll)`) — the
+                // growing `max_scroll` simply lets them scroll down to it.
+                // Auto-follow is re-enabled by an explicit "return to bottom"
+                // trigger: new user message, `End`, or dragging/scrolling to
+                // the very bottom (see `handle_singleline_key` / mouse handler).
+                if !self.user_scrolled {
+                    self.scroll_to_bottom();
+                }
                 return;
             }
         }
@@ -981,6 +1013,69 @@ impl App {
     /// Disables user_scrolled so auto-scroll-to-bottom takes effect on next render.
     fn scroll_to_bottom(&mut self) {
         self.user_scrolled = false;
+    }
+
+    /// Begin / extend the in-app text selection at `row` (a visible chat row
+    /// index relative to the chat rect top). Driven by Shift+drag — the app
+    /// owns the selection so it works on every terminal, regardless of whether
+    /// the terminal honors Shift-bypass for mouse reporting.
+    pub fn update_text_selection(&mut self, row: usize) {
+        let clamped = row.min(self.visible_line_text.len().saturating_sub(1));
+        if self.text_selecting {
+            if let Some(sel) = self.text_selection.as_mut() {
+                sel.1 = clamped;
+            }
+            self.request_render();
+        } else {
+            self.text_selecting = true;
+            self.text_selection = Some((clamped, clamped));
+            self.request_render();
+        }
+    }
+
+    /// Finalize the selection: copy the selected rows' plain text to the
+    /// system clipboard (via arboard), then clear the selection. Returns the
+    /// copied text (empty if nothing selected / clipboard unavailable).
+    pub fn copy_selection_to_clipboard(&mut self) -> String {
+        let (start, end) = match self.text_selection {
+            Some(s) => s,
+            None => {
+                self.text_selecting = false;
+                return String::new();
+            }
+        };
+        let lo = start.min(end);
+        let mut hi = start.max(end);
+        // Clamp to the last drawn visible rows (the map reflects the prior frame).
+        if self.visible_line_text.is_empty() {
+            self.text_selection = None;
+            self.text_selecting = false;
+            return String::new();
+        }
+        hi = hi.min(self.visible_line_text.len() - 1);
+        if lo > hi {
+            self.text_selection = None;
+            self.text_selecting = false;
+            return String::new();
+        }
+        let text = self.visible_line_text[lo..=hi].join("\n");
+        // Create the clipboard handle per-call — cheap, and avoids holding a
+        // long-lived platform clipboard handle across the event loop.
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            let _ = cb.set_text(text.clone());
+        }
+        self.text_selection = None;
+        self.text_selecting = false;
+        text
+    }
+
+    /// Cancel any in-app text selection (e.g. on Esc or new render cycle).
+    pub fn clear_text_selection(&mut self) {
+        if self.text_selection.is_some() {
+            self.text_selection = None;
+            self.text_selecting = false;
+            self.request_render();
+        }
     }
 
     /// Update current session info (message count, preview) from current state.
@@ -1341,6 +1436,22 @@ impl App {
             (KeyModifiers::NONE, KeyCode::PageDown) => {
                 self.chat_scroll_y = self.chat_scroll_y.saturating_add(20);
                 self.user_scrolled = true;
+                None
+            }
+
+            // Home/End: jump chat to top / bottom. End re-enables auto-follow
+            // (clears `user_scrolled`) so new streamed content sticks to bottom
+            // again — pairs with the sticky-scroll fix in `flush_stream_buffer`.
+            (KeyModifiers::NONE, KeyCode::Home) => {
+                self.chat_scroll_y = 0;
+                self.user_scrolled = true;
+                self.request_render();
+                None
+            }
+            (KeyModifiers::NONE, KeyCode::End) => {
+                self.user_scrolled = false;
+                self.scroll_to_bottom();
+                self.request_render();
                 None
             }
 
@@ -1747,5 +1858,202 @@ mod tests {
         s.clear();
         assert!(!s.should_draw(), "after clear, nothing to draw");
         assert!(s.deadline().is_none());
+    }
+
+    /// Build a minimal App for scroll/streaming tests (no provider, no tools).
+    fn test_app() -> App {
+        App::new(
+            "test".to_string(),
+            "test-model".to_string(),
+            Vec::new(),
+            "session1234567".to_string(),
+            std::sync::Arc::new(oneai_skill::SkillRegistry::new()),
+        )
+    }
+
+    #[test]
+    fn streaming_keeps_user_scroll_position() {
+        // sticky-scroll: while the user has scrolled up to read history
+        // (`user_scrolled = true`), a stream flush must NOT yank the viewport
+        // back to the bottom. The new content still lands in the last
+        // assistant bubble, but the user's scroll position is preserved.
+        let mut app = test_app();
+        app.add_message(ChatRole::Assistant, "hello".to_string());
+        app.user_scrolled = true;
+        app.chat_scroll_y = 5;
+
+        app.append_to_last_assistant(" world");
+        app.flush_stream_buffer();
+
+        assert!(
+            app.user_scrolled,
+            "user_scrolled must remain true mid-stream"
+        );
+        assert_eq!(app.chat_scroll_y, 5, "scroll position must not be reset");
+        assert_eq!(
+            app.messages.last().unwrap().content,
+            "hello world",
+            "streamed text must still be appended to the bubble"
+        );
+    }
+
+    #[test]
+    fn streaming_auto_follows_when_at_bottom() {
+        // When the user has NOT scrolled up, streaming auto-follows: the
+        // viewport stays pinned to the bottom as new content arrives.
+        let mut app = test_app();
+        app.add_message(ChatRole::Assistant, "hello".to_string());
+        // user_scrolled stays false (default)
+        app.append_to_last_assistant(" world");
+        app.flush_stream_buffer();
+
+        assert!(!app.user_scrolled, "auto-follow must remain enabled");
+        assert_eq!(app.messages.last().unwrap().content, "hello world");
+    }
+
+    #[test]
+    fn end_key_re_enables_auto_follow() {
+        // After scrolling up, pressing End jumps to bottom and re-enables
+        // auto-follow for subsequent streamed content.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = test_app();
+        app.add_message(ChatRole::Assistant, "hello".to_string());
+        app.user_scrolled = true;
+        app.chat_scroll_y = 5;
+
+        // `handle_key_event` returns Some(input) only on send; End returns None
+        // but clears `user_scrolled` as a side effect.
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(!app.user_scrolled, "End must re-enable auto-follow");
+    }
+
+    // ─── #9 streaming-flush correctness ───────────────────────────────────
+    //
+    // Audit conclusion: the AgentLoop fires BOTH `on_stream_chunk` (typewriter,
+    // agent_loop.rs:4800) AND `on_direct_answer` (full text, L2155) for one
+    // answer. `process_observer_event`'s `DirectAnswer` arm flushes the stream
+    // buffer FIRST (mod.rs ~L1856), then dedups via "is there already an
+    // Assistant bubble after the last User?". Because the concatenated chunks
+    // equal the full DirectAnswer text, the streamed bubble already holds the
+    // complete answer and the duplicate DirectAnswer is dropped — no loss, no
+    // double bubble. `Complete` flushes again then `retain`s empty thinking
+    // bubbles; the assistant survives. These tests lock those invariants.
+
+    #[test]
+    fn streaming_chunks_concatenate_no_loss() {
+        // Rapid chunks accumulate in stream_buffer; one flush applies them all
+        // to a single assistant bubble — no chunk is dropped between the 33ms
+        // debounce windows.
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "q".to_string());
+        app.start_thinking();
+        app.append_to_last_assistant("Hel");
+        app.append_to_last_assistant("lo ");
+        app.append_to_last_assistant("world");
+        // Not yet flushed — the buffer holds the concatenation.
+        assert_eq!(app.stream_buffer, "Hello world");
+        app.flush_stream_buffer();
+        let last = app.messages.last().expect("an assistant bubble exists");
+        assert_eq!(last.role, ChatRole::Assistant);
+        assert_eq!(last.content, "Hello world");
+    }
+
+    #[test]
+    fn direct_answer_flush_does_not_duplicate_bubble() {
+        // Simulates the DirectAnswer dedup: after streaming flushed a bubble,
+        // a second flush (DirectAnswer's flush-first) is a no-op (buffer empty)
+        // and never creates a second assistant bubble.
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "q".to_string());
+        app.start_thinking();
+        app.append_to_last_assistant("Hello world");
+        app.flush_stream_buffer();
+        // DirectAnswer's flush-first runs again:
+        app.flush_stream_buffer();
+        let n_assistant = app
+            .messages
+            .iter()
+            .filter(|m| m.role == ChatRole::Assistant)
+            .count();
+        assert_eq!(
+            n_assistant, 1,
+            "must not create a duplicate assistant bubble"
+        );
+    }
+
+    #[test]
+    fn complete_retain_keeps_streamed_assistant() {
+        // Complete flushes then retains empty thinking bubbles — the streamed
+        // assistant answer must survive the retain.
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "q".to_string());
+        app.start_thinking();
+        app.append_to_last_assistant("Hello world");
+        app.flush_stream_buffer();
+        // Mirror Complete's retain predicate.
+        app.messages.retain(|m| {
+            !(m.role == ChatRole::Thinking
+                && (m.content == "Processing your request..." || m.content.trim().is_empty()))
+        });
+        assert_eq!(
+            app.messages
+                .iter()
+                .filter(|m| m.role == ChatRole::Assistant)
+                .count(),
+            1
+        );
+        assert_eq!(app.messages.last().unwrap().content, "Hello world");
+    }
+
+    // ─── #10 in-app Shift+drag selection ────────────────────────────────
+    //
+    // The app owns the selection + clipboard write so it works on every
+    // terminal (no reliance on Shift-bypass). These test the selection range
+    // math + joined-text copy; `arboard::Clipboard::new()` is best-effort
+    // (no-op where no display server is available, e.g. CI) but the joined
+    // text is returned regardless.
+
+    #[test]
+    fn text_selection_copies_joined_rows() {
+        let mut app = test_app();
+        app.visible_line_text = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+            "delta".to_string(),
+        ];
+        // Shift+down at row 1, then drag to row 2.
+        app.update_text_selection(1);
+        assert!(app.text_selecting, "down starts a selection");
+        assert_eq!(app.text_selection, Some((1, 1)));
+        app.update_text_selection(2); // extend
+        assert_eq!(app.text_selection, Some((1, 2)));
+        let copied = app.copy_selection_to_clipboard();
+        assert_eq!(copied, "beta\ngamma");
+        assert!(app.text_selection.is_none(), "selection cleared after copy");
+        assert!(!app.text_selecting);
+    }
+
+    #[test]
+    fn text_selection_clamps_to_visible_rows() {
+        let mut app = test_app();
+        app.visible_line_text = vec!["only".to_string()];
+        // A row way past the viewport clamps to the last visible row.
+        app.update_text_selection(50);
+        assert_eq!(app.text_selection, Some((0, 0)));
+        let copied = app.copy_selection_to_clipboard();
+        assert_eq!(copied, "only");
+    }
+
+    #[test]
+    fn text_selection_reverses_to_upward_drag() {
+        // Dragging upward (start lower than end) still yields an in-order range.
+        let mut app = test_app();
+        app.visible_line_text = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        app.update_text_selection(2);
+        app.update_text_selection(0);
+        let copied = app.copy_selection_to_clipboard();
+        assert_eq!(copied, "a\nb\nc");
     }
 }
