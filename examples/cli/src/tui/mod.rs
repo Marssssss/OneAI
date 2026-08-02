@@ -4,7 +4,7 @@
 //! - Brand line: gradient "OneAI" with spinner when thinking
 //! - Left sidebar: context area + tools + paradigm + cost sections
 //! - Right panel: scrollable chat area with bubble-style messages
-//! - Input box: single-line with Enter=send, Esc=quit, Tab=sidebar
+//! - Input box: single-line with Enter=send, Ctrl+C=clear/quit, Tab=sidebar
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -327,13 +327,18 @@ fn handle_key_event(
         app.request_render();
         return;
     }
-    // Esc while the agent is running (and not in vim multi-line edit) →
-    // request an instant interrupt. The cancel token aborts the in-flight
-    // inference/stream; the loop pauses at the next boundary.
+    // Esc or Ctrl+C while the agent is running → request an instant
+    // interrupt. The cancel token aborts the in-flight inference/stream; the
+    // loop pauses at the next boundary. Ctrl+C is intercepted here so a
+    // mid-inference press interrupts instead of quitting (input is empty
+    // during inference, so the idle Ctrl+C path would otherwise quit). When
+    // idle, Esc is a no-op and Ctrl+C clears the draft / quits (handled in
+    // handle_singleline_key).
     if app.is_thinking
         && matches!(app.input_mode, input_mode::InputMode::SingleLine)
         && key.kind == KeyEventKind::Press
-        && key.code == KeyCode::Esc
+        && (key.code == KeyCode::Esc
+            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')))
     {
         rt.block_on(async {
             if let Some(agent_loop) = interrupt_slot.lock().await.as_ref() {
@@ -742,7 +747,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /usage · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, Ctrl+Enter=newline, Tab=sidebar, v=sidebar verbose, Esc=vim/quit, ↑↓=history, Ctrl+↑↓/PageUp/PageDown=scroll, Home/End=jump top/bottom, Shift+Tab=mode(Normal/Auto/Plan)\nSelect & copy: hold Shift + drag in chat — releases to copy to clipboard (works on every terminal) · Scroll: wheel / drag scrollbar / PageUp-Down / Ctrl+↑↓ / Home/End\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /usage · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, \\+Enter=newline, Tab=sidebar, v=sidebar verbose, Ctrl+C=clear/quit, ↑↓=line/history, Ctrl+↑↓/PageUp/PageDown=scroll, Home/End=jump top/bottom, Shift+Tab=mode(Normal/Auto/Plan)\nSelect & copy: hold Shift + drag in chat — releases to copy to clipboard (works on every terminal) · Scroll: wheel / drag scrollbar / PageUp-Down / Ctrl+↑↓ / Home/End\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
                 return;
             }
             "/tools" | "/t" => {

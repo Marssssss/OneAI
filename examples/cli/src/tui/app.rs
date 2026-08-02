@@ -17,7 +17,7 @@ use oneai_core::ApprovalRequest;
 use oneai_skill::SkillRegistry;
 
 use super::history::MessageHistory;
-use super::input_mode::{InputMode, VimMode};
+use super::input_mode::InputMode;
 
 // ─── Interaction Mode ──────────────────────────────────────────────────────
 
@@ -660,7 +660,7 @@ pub struct App {
     pub work_timer: WorkTimer,
 
     // ─── Enhanced fields ──────────────────────────────────────────────────
-    /// Current input mode (single-line or multi-line vim).
+    /// Current input mode (single-line).
     pub input_mode: InputMode,
 
     /// Current active paradigm.
@@ -708,10 +708,6 @@ pub struct App {
     /// Whether the one-time mode-prompt tip has been shown on first submission.
     pub mode_prompt_shown: bool,
 
-    /// Vim mode (for multi-line input).
-    #[allow(dead_code)]
-    pub vim_mode: VimMode,
-
     /// Spinner animation frame counter.
     pub spinner_frame: usize,
 
@@ -745,9 +741,6 @@ pub struct App {
     /// True while a Shift+drag selection is in progress (between mouse-down
     /// and mouse-up). Distinguishes a drag from a plain click.
     pub text_selecting: bool,
-
-    /// Pending vim command (e.g., 'd' waiting for second 'd' to form 'dd').
-    pub vim_pending_cmd: Option<char>,
 
     /// Input undo history (for Ctrl+Z). Stores previous input states.
     pub input_undo_stack: Vec<String>,
@@ -871,7 +864,6 @@ impl App {
             interaction_mode: InteractionMode::default(),
             verbose_sidebar: false,
             mode_prompt_shown: false,
-            vim_mode: VimMode::default(),
             spinner_frame: 0,
             chat_scroll_y: 0,
             user_scrolled: false,
@@ -880,7 +872,6 @@ impl App {
             visible_line_text: Vec::new(),
             text_selection: None,
             text_selecting: false,
-            vim_pending_cmd: None,
             input_undo_stack: Vec::new(),
             search_mode: false,
             command_autocomplete: false,
@@ -1159,29 +1150,26 @@ impl App {
     /// `EnableBracketedPaste` is active. Previously, multi-line pastes were split
     /// into a keystream where every newline triggered `Enter` → send, so only
     /// the first line went out for inference. This inserts the entire pasted
-    /// string at the cursor (in either SingleLine or vim mode) and never
-    /// submits — the user reviews then presses Enter.
+    /// string at the cursor and never submits — the user reviews then presses
+    /// Enter.
+    ///
+    /// Line endings are normalized to `\n` first. crossterm delivers paste bytes
+    /// verbatim (no CR→LF translation), and in raw mode many terminals send `\r`
+    /// (or `\r\n`) for line breaks. The rest of the input pipeline — `wrap_input`,
+    /// `input_visual_line_count`, Ctrl+Enter — only recognizes `\n`, so without
+    /// normalization a multi-line paste collapses to a single visual line.
     pub fn handle_paste(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        self.save_undo_state();
-        match self.input_mode {
-            InputMode::SingleLine => {
-                self.input.insert_str(self.input_cursor_pos, text);
-                self.input_cursor_pos += text.len();
-            }
-            InputMode::MultiLineVim {
-                cursor_position,
-                mode,
-            } => {
-                self.input.insert_str(cursor_position, text);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: cursor_position + text.len(),
-                    mode,
-                };
-            }
+        let normalized = normalize_paste_newlines(text);
+        if normalized.is_empty() {
+            return;
         }
+        self.save_undo_state();
+        // Only SingleLine mode exists now; insert at the cursor and advance.
+        self.input.insert_str(self.input_cursor_pos, &normalized);
+        self.input_cursor_pos += normalized.len();
         self.request_render();
     }
 
@@ -1203,14 +1191,8 @@ impl App {
             return result;
         }
 
-        // Dispatch based on current input mode
-        let result = match self.input_mode {
-            InputMode::SingleLine => self.handle_singleline_key(key),
-            InputMode::MultiLineVim {
-                cursor_position,
-                mode,
-            } => self.handle_vim_key(key, cursor_position, mode),
-        };
+        // Dispatch to the single-line input handler (the only input mode).
+        let result = self.handle_singleline_key(key);
 
         // Any key press that wasn't filtered out likely changed some state
         self.request_render();
@@ -1313,15 +1295,31 @@ impl App {
     /// Handle keys in single-line input mode.
     fn handle_singleline_key(&mut self, key: KeyEvent) -> Option<String> {
         match (key.modifiers, key.code) {
-            // Ctrl+Enter: insert newline
+            // Ctrl+Enter: insert newline (only delivered by terminals that
+            // distinguish it; macOS Terminal.app and others send plain Enter).
             (KeyModifiers::CONTROL, KeyCode::Enter) => {
                 self.input.insert(self.input_cursor_pos, '\n');
                 self.input_cursor_pos += 1; // '\n' is 1 byte
                 None
             }
 
-            // Enter (no modifier): send message
+            // Enter (no modifier): Claude Code-style line continuation — when
+            // the cursor sits at the end of the input and the last character
+            // is a backslash, Enter consumes that `\` and inserts a newline
+            // instead of sending. Otherwise Enter sends the message. This is
+            // the reliable way to build multi-line input since Ctrl+Enter is
+            // intercepted by the OS/terminal on macOS and never reaches us.
             (KeyModifiers::NONE, KeyCode::Enter) => {
+                if self.input_cursor_pos == self.input.len()
+                    && self.input.ends_with('\\')
+                    && !self.input.is_empty()
+                {
+                    self.save_undo_state();
+                    self.input.pop(); // drop the trailing backslash
+                    self.input.push('\n');
+                    self.input_cursor_pos = self.input.len();
+                    return None;
+                }
                 if self.input.is_empty() {
                     return None;
                 }
@@ -1333,14 +1331,8 @@ impl App {
                 Some(msg)
             }
 
-            // Escape: enter vim multi-line mode (Normal mode)
-            (_, KeyCode::Esc) => {
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: self.input_cursor_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
+            // Escape: no-op when idle. (Interrupting a running agent is handled
+            // earlier in mod.rs, before this function is reached.)
 
             // Tab: toggle sidebar
             (KeyModifiers::NONE, KeyCode::Tab) => {
@@ -1361,9 +1353,19 @@ impl App {
                 None
             }
 
-            // Ctrl+C: force quit
+            // Ctrl+C: clear the input draft; if already empty, quit (Claude
+            // Code convention — first press cancels the draft, second press
+            // exits). When the agent is running, Ctrl+C is intercepted earlier
+            // in mod.rs to interrupt inference instead of reaching here.
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                self.should_quit = true;
+                if !self.input.is_empty() {
+                    self.save_undo_state();
+                    self.input.clear();
+                    self.input_cursor_pos = 0;
+                    self.message_history.reset();
+                } else {
+                    self.should_quit = true;
+                }
                 None
             }
 
@@ -1374,9 +1376,13 @@ impl App {
                 None
             }
 
-            // ↑: navigate message history (only when input is empty)
+            // ↑: move the cursor up one logical line (column preserved). On the
+            // first line, fall back to message-history navigation only when the
+            // input is empty (so a non-empty draft is never discarded).
             (KeyModifiers::NONE, KeyCode::Up) => {
-                if self.input.is_empty() {
+                if let Some(p) = move_cursor_up(&self.input, self.input_cursor_pos) {
+                    self.input_cursor_pos = p;
+                } else if self.input.is_empty() {
                     if let Some(msg) = self.message_history.navigate_up() {
                         self.input = msg.to_string();
                         self.input_cursor_pos = self.input.len();
@@ -1385,9 +1391,12 @@ impl App {
                 None
             }
 
-            // ↓: navigate message history (only when input is empty)
+            // ↓: move the cursor down one logical line. On the last line,
+            // fall back to history navigation when input is empty.
             (KeyModifiers::NONE, KeyCode::Down) => {
-                if self.input.is_empty() {
+                if let Some(p) = move_cursor_down(&self.input, self.input_cursor_pos) {
+                    self.input_cursor_pos = p;
+                } else if self.input.is_empty() {
                     if let Some(msg) = self.message_history.navigate_down() {
                         self.input = msg;
                         self.input_cursor_pos = self.input.len();
@@ -1497,246 +1506,33 @@ impl App {
             _ => None,
         }
     }
-
-    /// Handle keys in multi-line vim mode.
-    fn handle_vim_key(
-        &mut self,
-        key: KeyEvent,
-        cursor_position: usize,
-        mode: VimMode,
-    ) -> Option<String> {
-        match mode {
-            VimMode::Normal => self.handle_vim_normal_key(key, cursor_position),
-            VimMode::Insert => self.handle_vim_insert_key(key, cursor_position),
-        }
-    }
-
-    /// Handle keys in vim Normal mode.
-    fn handle_vim_normal_key(&mut self, key: KeyEvent, cursor_position: usize) -> Option<String> {
-        // Check for pending dd command (first 'd' was pressed)
-        if self.vim_pending_cmd == Some('d') {
-            self.vim_pending_cmd = None;
-            match (key.modifiers, key.code) {
-                // dd: delete current line
-                (KeyModifiers::NONE, KeyCode::Char('d')) => {
-                    self.save_undo_state();
-                    let line_start = find_line_start(&self.input, cursor_position);
-                    let line_end = find_line_end(&self.input, cursor_position);
-                    // Remove the line content from line_start to line_end
-                    // Also remove the newline character if it exists
-                    let delete_end = if line_end < self.input.len()
-                        && self.input.as_bytes()[line_end] == b'\n'
-                    {
-                        line_end + 1
-                    } else if line_start > 0 && self.input.as_bytes()[line_start - 1] == b'\n' {
-                        line_start - 1
-                    } else {
-                        line_end
-                    };
-                    let del_range = if delete_end < line_start {
-                        // Single line at start — delete from line_start to line_end
-                        (line_start, line_end)
-                    } else {
-                        (line_start.min(delete_end), delete_end.max(line_end))
-                    };
-                    self.input.replace_range(del_range.0..del_range.1, "");
-                    // Place cursor at the start of the next line (or end of input)
-                    let new_pos = del_range.0.min(self.input.len());
-                    self.input_mode = InputMode::MultiLineVim {
-                        cursor_position: new_pos,
-                        mode: VimMode::Normal,
-                    };
-                    return None;
-                }
-                // Any other key cancels the pending 'd' command
-                _ => {
-                    // Fall through to normal key handling below
-                }
-            }
-        }
-
-        match (key.modifiers, key.code) {
-            // i: enter Insert mode
-            (KeyModifiers::NONE, KeyCode::Char('i')) => {
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position,
-                    mode: VimMode::Insert,
-                };
-                None
-            }
-
-            // Esc: exit multi-line mode, return to single-line
-            (_, KeyCode::Esc) => {
-                self.vim_pending_cmd = None;
-                self.input_mode = InputMode::SingleLine;
-                None
-            }
-
-            // d: start dd delete-line command (first press)
-            (KeyModifiers::NONE, KeyCode::Char('d')) => {
-                self.vim_pending_cmd = Some('d');
-                None
-            }
-
-            // h: move cursor left (one full Unicode char)
-            (KeyModifiers::NONE, KeyCode::Char('h')) => {
-                let new_pos = prev_char_boundary(&self.input, cursor_position);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: new_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // l: move cursor right (one full Unicode char)
-            (KeyModifiers::NONE, KeyCode::Char('l')) => {
-                let new_pos = next_char_boundary(&self.input, cursor_position);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: new_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // j: move cursor down (to next line)
-            (KeyModifiers::NONE, KeyCode::Char('j')) => {
-                let new_pos = find_next_line_start(&self.input, cursor_position);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: new_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // k: move cursor up (to previous line start)
-            (KeyModifiers::NONE, KeyCode::Char('k')) => {
-                let new_pos = find_prev_line_start(&self.input, cursor_position);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: new_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // 0: move to start of current line
-            (KeyModifiers::NONE, KeyCode::Char('0')) => {
-                let new_pos = find_line_start(&self.input, cursor_position);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: new_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // $: move to end of current line (use Shift+4 = '$')
-            (KeyModifiers::NONE, KeyCode::Char('$')) => {
-                let new_pos = find_line_end(&self.input, cursor_position);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: new_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // x: delete character at cursor — UTF-8 safe
-            (KeyModifiers::NONE, KeyCode::Char('x')) => {
-                if cursor_position < self.input.len()
-                    && self.input.is_char_boundary(cursor_position)
-                {
-                    let next = next_char_boundary(&self.input, cursor_position);
-                    self.input.replace_range(cursor_position..next, "");
-                }
-                // Cursor stays at same position (or adjusts if at end)
-                let new_pos = cursor_position.min(self.input.len());
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: new_pos,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // Enter: send message (in Normal mode, Enter sends)
-            (KeyModifiers::NONE, KeyCode::Enter) => {
-                if self.input.is_empty() {
-                    return None;
-                }
-                let msg = self.input.clone();
-                self.message_history.push(msg.clone());
-                self.input.clear();
-                self.input_mode = InputMode::SingleLine;
-                self.message_history.reset();
-                Some(msg)
-            }
-
-            // Ctrl+C: cancel and return to single-line
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                self.input.clear();
-                self.input_mode = InputMode::SingleLine;
-                None
-            }
-
-            _ => None,
-        }
-    }
-
-    /// Handle keys in vim Insert mode.
-    fn handle_vim_insert_key(&mut self, key: KeyEvent, cursor_position: usize) -> Option<String> {
-        match (key.modifiers, key.code) {
-            // Esc: return to Normal mode
-            (_, KeyCode::Esc) => {
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position,
-                    mode: VimMode::Normal,
-                };
-                None
-            }
-
-            // Enter: insert newline (in Insert mode, Enter = newline)
-            (KeyModifiers::NONE, KeyCode::Enter) => {
-                self.input.insert(cursor_position, '\n');
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: cursor_position + 1,
-                    mode: VimMode::Insert,
-                };
-                None
-            }
-
-            // Backspace: delete char before cursor — UTF-8 safe
-            (KeyModifiers::NONE, KeyCode::Backspace) => {
-                if cursor_position > 0 {
-                    let prev = prev_char_boundary(&self.input, cursor_position);
-                    self.input.replace_range(prev..cursor_position, "");
-                    self.input_mode = InputMode::MultiLineVim {
-                        cursor_position: prev,
-                        mode: VimMode::Insert,
-                    };
-                }
-                None
-            }
-
-            // Char input: insert at cursor position — advance by len_utf8
-            (KeyModifiers::NONE, KeyCode::Char(c)) | (KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-                self.input.insert(cursor_position, c);
-                self.input_mode = InputMode::MultiLineVim {
-                    cursor_position: cursor_position + c.len_utf8(),
-                    mode: VimMode::Insert,
-                };
-                None
-            }
-
-            // Ctrl+C: cancel and return to single-line
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                self.input.clear();
-                self.input_mode = InputMode::SingleLine;
-                None
-            }
-
-            _ => None,
-        }
-    }
 }
 
 // ─── UTF-8 Cursor Helpers ──────────────────────────────────────────────────
+
+/// Normalize line endings in pasted text to `\n`.
+///
+/// crossterm delivers bracketed-paste bytes verbatim; in raw mode many
+/// terminals send `\r` (or `\r\n`) for line breaks instead of `\n`. The input
+/// pipeline only splits on `\n`, so we collapse CRLF and lone CR to LF.
+fn normalize_paste_newlines(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
 
 /// Find the byte offset of the previous character boundary before `pos`.
 /// Used for Left arrow and Backspace — moves cursor one full Unicode char left.
@@ -1761,7 +1557,7 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
     p.min(s.len())
 }
 
-// ─── Vim Navigation Helpers ────────────────────────────────────────────────
+// ─── Line Navigation Helpers ───────────────────────────────────────────────
 
 /// Find the start of the line containing the given position.
 fn find_line_start(input: &str, pos: usize) -> usize {
@@ -1785,18 +1581,7 @@ fn find_line_end(input: &str, pos: usize) -> usize {
         .unwrap_or(input.len())
 }
 
-/// Find the start of the next line (for j movement).
-fn find_next_line_start(input: &str, pos: usize) -> usize {
-    // Find current line end, then the next line start
-    let line_end = find_line_end(input, pos);
-    if line_end < input.len() {
-        line_end + 1 // Skip the newline
-    } else {
-        pos // Already at last line, stay
-    }
-}
-
-/// Find the start of the previous line (for k movement).
+/// Find the start of the previous line.
 fn find_prev_line_start(input: &str, pos: usize) -> usize {
     // Find current line start, then find the newline before it
     let current_start = find_line_start(input, pos);
@@ -1806,6 +1591,50 @@ fn find_prev_line_start(input: &str, pos: usize) -> usize {
     // The newline before current_start is at current_start - 1
     // Find start of line before that newline
     find_line_start(input, current_start - 1)
+}
+
+/// Move the cursor up one logical line, preserving the display column
+/// (clamped to the previous line's length). Returns `None` if the cursor is
+/// already on the first line. The result is snapped to a char boundary so the
+/// cursor never splits a grapheme (column is measured in bytes, like the
+/// surrounding line helpers).
+fn move_cursor_up(input: &str, pos: usize) -> Option<usize> {
+    let line_start = find_line_start(input, pos);
+    if line_start == 0 {
+        return None;
+    }
+    let col = pos - line_start;
+    let prev_start = find_prev_line_start(input, pos);
+    let prev_end = find_line_end(input, prev_start);
+    let prev_len = prev_end - prev_start;
+    let target = prev_start + col.min(prev_len);
+    Some(snap_to_char_boundary(input, target))
+}
+
+/// Move the cursor down one logical line, preserving the display column.
+/// Returns `None` if the cursor is already on the last line.
+fn move_cursor_down(input: &str, pos: usize) -> Option<usize> {
+    let line_start = find_line_start(input, pos);
+    let line_end = find_line_end(input, pos);
+    if line_end >= input.len() {
+        return None; // on last line
+    }
+    let col = pos - line_start;
+    let next_start = line_end + 1;
+    let next_end = find_line_end(input, next_start);
+    let next_len = next_end - next_start;
+    let target = next_start + col.min(next_len);
+    Some(snap_to_char_boundary(input, target))
+}
+
+/// Snap a byte offset down to the nearest char boundary at or before it, so a
+/// column computed in bytes never lands inside a multi-byte grapheme.
+fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
+    let mut p = pos.min(s.len());
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
 }
 
 #[cfg(test)]
@@ -1818,6 +1647,180 @@ mod tests {
         // the old `dirty: true` initial value).
         let s = RenderScheduler::new();
         assert!(s.should_draw(), "fresh scheduler must be ready to draw");
+    }
+
+    #[test]
+    fn normalize_paste_collapses_crlf_and_cr() {
+        // CRLF → LF
+        assert_eq!(normalize_paste_newlines("a\r\nb\r\nc"), "a\nb\nc");
+        // lone CR (raw-mode terminals) → LF
+        assert_eq!(normalize_paste_newlines("a\rb\r"), "a\nb\n");
+        // already-LF passthrough — no allocation path
+        assert_eq!(normalize_paste_newlines("a\nb\n"), "a\nb\n");
+        // mixed
+        assert_eq!(normalize_paste_newlines("a\r\nb\rc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn handle_paste_preserves_multiline_for_render() {
+        // Simulate a raw-mode terminal delivering lone-CR line breaks: the input
+        // must end up with `\n` separators so wrap_input renders multiple lines
+        // (the bug was that it collapsed to one visual line).
+        let mut app = test_app();
+        app.handle_paste("line1\rline2\rline3");
+        assert_eq!(app.input, "line1\nline2\nline3");
+        // visual line count must reflect 3 lines, not 1
+        assert_eq!(
+            crate::tui::render::input::input_visual_line_count(&app.input, 80),
+            3
+        );
+    }
+
+    #[test]
+    fn ctrl_c_clears_input_then_quits_on_second_press() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        app.input = "draft text".to_string();
+        app.input_cursor_pos = app.input.len();
+
+        // First Ctrl+C clears the draft — must NOT quit.
+        let out = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(out.is_none());
+        assert!(app.input.is_empty(), "first Ctrl+C clears the draft");
+        assert_eq!(app.input_cursor_pos, 0);
+        assert!(!app.should_quit, "first Ctrl+C must not quit");
+
+        // Second Ctrl+C (input now empty) quits.
+        let out = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(out.is_none());
+        assert!(app.should_quit, "second Ctrl+C quits");
+    }
+
+    #[test]
+    fn arrow_up_down_move_cursor_between_lines() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        // "aa\nbb\ncc" — cursor at the very end (after 'cc').
+        app.input = "aa\nbb\ncc".to_string();
+        app.input_cursor_pos = app.input.len(); // 8, column 2 on the third line
+
+        // Up → third line column 2 → second line column min(2, 2)=2 → byte 5
+        // ("aa\nbb\ncc": line2 starts at 3, "bb" is 2 bytes, col 2 = end of "bb").
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.input_cursor_pos, 5, "Up from line 3 → line 2 col 2");
+
+        // Up again → first line column min(2, 2)=2 → byte 2 (end of "aa").
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.input_cursor_pos, 2, "Up from line 2 → line 1 col 2");
+
+        // Up on the first line: input is non-empty → no movement, no history.
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            app.input_cursor_pos, 2,
+            "Up on first line with non-empty input is a no-op"
+        );
+
+        // Down → back to line 2 col 2 → byte 5.
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.input_cursor_pos, 5, "Down from line 1 → line 2 col 2");
+        // Down → line 3 col 2 → byte 8 (end).
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.input_cursor_pos, 8, "Down from line 2 → line 3 col 2");
+    }
+
+    #[test]
+    fn backslash_enter_inserts_newline_instead_of_sending() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        app.input = "first line\\".to_string();
+        app.input_cursor_pos = app.input.len(); // cursor right after the `\`
+
+        // Enter consumes the trailing `\` and inserts a newline — does NOT send.
+        let out = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(out.is_none(), "trailing backslash + Enter must not send");
+        assert_eq!(app.input, "first line\n", "backslash replaced by newline");
+        assert_eq!(app.input_cursor_pos, app.input.len());
+
+        // Without a trailing backslash, Enter sends normally.
+        let mut app = test_app();
+        app.input = "hello".to_string();
+        app.input_cursor_pos = app.input.len();
+        let out = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out.as_deref(), Some("hello"));
+        assert!(app.input.is_empty());
+
+        // A backslash NOT at the cursor's end position doesn't trigger
+        // continuation — Enter sends the message as-is.
+        let mut app = test_app();
+        app.input = "ab\\cd".to_string(); // backslash mid-string
+        app.input_cursor_pos = app.input.len();
+        // last char is 'd', not '\' → send
+        let out = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(out.as_deref(), Some("ab\\cd"));
+    }
+
+    #[test]
+    fn move_cursor_vertical_preserves_and_clamps_column() {
+        // Equal-length lines "aa\nbb": a(0)a(1)\n(2)b(3)b(4).
+        // line1 start0 len2, line2 start3 len2 — col 1 preserved both ways.
+        assert_eq!(
+            move_cursor_down("aa\nbb", 1),
+            Some(4),
+            "col 1 preserved going down"
+        );
+        assert_eq!(
+            move_cursor_up("aa\nbb", 4),
+            Some(1),
+            "col 1 preserved going up"
+        );
+        // Boundary lines → None.
+        assert_eq!(move_cursor_up("aa\nbb", 0), None, "first line → None");
+        assert_eq!(move_cursor_down("aa\nbb", 4), None, "last line → None");
+        // Clamp down: "aaaa\nb" — line1 len4, line2 len1. col 3 → clamp to 1
+        // (after 'b', the last line's end). a(0..3)\n(4)b(5).
+        assert_eq!(
+            move_cursor_down("aaaa\nb", 3),
+            Some(6),
+            "col 3 clamps to line2 len1"
+        );
+        // Clamp up: "b\naaaa" — line1 len1, line2 len4. col 3 → clamp to 1
+        // (end-of-line1 = the '\n'). b(0)\n(1)a(2..5).
+        assert_eq!(
+            move_cursor_up("b\naaaa", 5),
+            Some(1),
+            "col 3 clamps to line1 len1"
+        );
+    }
+
+    #[test]
+    fn arrow_up_falls_back_to_history_when_input_empty() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        app.message_history.push("older msg".to_string());
+        assert!(app.input.is_empty());
+
+        // Up on empty input pulls history into the input box.
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.input, "older msg");
+        assert_eq!(app.input_cursor_pos, app.input.len());
+    }
+
+    #[test]
+    fn arrow_up_on_nonempty_single_line_does_not_discard_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        app.message_history.push("older msg".to_string());
+        app.input = "current draft".to_string();
+        app.input_cursor_pos = app.input.len();
+
+        // Up must not pull history (would overwrite the draft) and must not
+        // move the cursor (single line → no line above). No-op.
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            app.input, "current draft",
+            "non-empty draft must survive Up"
+        );
+        assert_eq!(app.input_cursor_pos, app.input.len());
     }
 
     #[test]
