@@ -1834,33 +1834,37 @@ impl AppBuilder {
             })
         });
 
-        // Resolve model context resolver: explicit, or auto-create when any
-        // token/context component is configured, so the expanded built-in
-        // library (L3) + L1 overrides take effect even without explicit setup.
-        // Seeded with L1 user-profiles from context_manager_config.profiles.
+        // Resolve model context resolver: explicit, or auto-create by default.
+        // Seeded with L1 user-profiles from context_manager_config.profiles;
         // L1 provider-extras (ModelConfig.extra["context_window"]) are added
         // after the provider is resolved below.
+        // Always provide a 3-layer resolver when none was explicitly attached.
+        // The builtin L3 library + name-heuristic path resolves the context
+        // window for any known model (e.g. glm-5.2 → 203K) synchronously,
+        // without a network request. Without this, `AppSession` falls back to
+        // a hardcoded 100_000 (session.rs), so the budget threshold (0.8×window)
+        // is wrong — e.g. a 203K model compresses at 80K instead of ~162K,
+        // destroying mid-task instructions far earlier than the displayed
+        // window suggests. Seeded with L1 user-profiles from
+        // `context_manager_config.profiles`; L1 provider-extras
+        // (`ModelConfig.extra["context_window"]`) are added after the provider is
+        // resolved below. The resolver is cheap (a lookup table) and its sync
+        // `resolve_cached` path never probes, so wiring it unconditionally is
+        // safe even with no provider.
         let resolved_resolver: Option<Arc<oneai_core::ModelContextResolver>> =
             self.model_context_resolver.clone().or_else(|| {
-                if self.context_manager_config.is_some()
-                    || self.context_manager.is_some()
-                    || self.token_counter.is_some()
-                {
-                    let mut profiles = std::collections::HashMap::new();
-                    if let Some(cfg) = &self.context_manager_config {
-                        for p in &cfg.profiles {
-                            if p.context_window_tokens > 0 {
-                                profiles.insert(p.model_name.clone(), p.context_window_tokens);
-                            }
+                let mut profiles = std::collections::HashMap::new();
+                if let Some(cfg) = &self.context_manager_config {
+                    for p in &cfg.profiles {
+                        if p.context_window_tokens > 0 {
+                            profiles.insert(p.model_name.clone(), p.context_window_tokens);
                         }
                     }
-                    Some(Arc::new(oneai_core::ModelContextResolver::new(
-                        profiles,
-                        std::collections::HashMap::new(),
-                    )))
-                } else {
-                    None
                 }
+                Some(Arc::new(oneai_core::ModelContextResolver::new(
+                    profiles,
+                    std::collections::HashMap::new(),
+                )))
             });
 
         // Resolve token counter: use explicitly set counter, or create default

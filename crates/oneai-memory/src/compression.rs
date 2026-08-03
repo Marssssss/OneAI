@@ -46,6 +46,19 @@ pub struct ContextCompressor {
 }
 
 impl ContextCompressor {
+    /// Default number of recent *messages* to keep verbatim during compression.
+    ///
+    /// Agentic loops emit ~2 messages per tool round-trip (ToolCall +
+    /// ToolResult), so 16 messages ≈ 8 tool round-trips of headroom beyond the
+    /// latest user instruction — which is *always* kept verbatim regardless of
+    /// this value (see `compress`'s latest-user extension). The previous
+    /// default of 6 let a steering instruction fall out of the tail within ~3
+    /// tool round-trips. Override via the `ContextCompressor::new` /
+    /// `with_template` constructor (programmatic) or the `/compact` parameter
+    /// (CLI); raise for long-context models, lower only when a domain needs
+    /// more aggressive summarization.
+    pub const DEFAULT_KEEP_RECENT_TURNS: usize = 16;
+
     /// Create a new compressor with the given settings and LLM provider.
     pub fn new(
         threshold_tokens: usize,
@@ -174,11 +187,29 @@ impl ContextCompressor {
         // than letting it fall into the summarizable segment and be summarized
         // away. It is pulled out of `older_messages` and re-added to the
         // compressed conversation intact, between the summary and the recent tail.
-        let recent_start = total_messages - self.keep_recent_turns;
+        let recent_start_default = total_messages - self.keep_recent_turns;
         let first_user_idx = conversation
             .messages
             .iter()
             .position(|m| m.role == Role::User);
+
+        // Extend the recent tail backward to include the *most recent* user
+        // message verbatim — symmetric to the first-user pin. In an agentic
+        // turn a single user instruction is followed by many tool round-trips
+        // (each ToolCall + ToolResult = 2 messages), so a message-count window
+        // pushes the user's steering instruction out of the tail within ~3 tool
+        // round-trips and summarizes it into the lossy summary. The model then
+        // re-derives its objective from the pinned *original* task and
+        // re-analyzes from scratch. Extending `recent_start` to the latest user
+        // index guarantees the live instruction always survives in-context.
+        let last_user_idx = conversation
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::User);
+        let recent_start = match last_user_idx {
+            Some(idx) if idx < recent_start_default => idx,
+            _ => recent_start_default,
+        };
 
         // The first user message is pinned only when it would otherwise be
         // summarized (i.e. it sits before the recent tail). When it's already
@@ -199,6 +230,21 @@ impl ContextCompressor {
             .map(|&i| conversation.messages[i].clone())
             .collect();
         let recent_messages = &conversation.messages[recent_start..];
+
+        // Nothing left to summarize — the whole conversation is the first user
+        // message plus the recent tail (e.g. a single long agentic turn whose
+        // latest user instruction forced `recent_start` back to 0). The
+        //无损截断 tier (budget.rs Step 2) already capped tool results before
+        // us; summarization can't help further, so return as-is rather than
+        // asking the LLM to summarize an empty older segment.
+        if older_messages.is_empty() {
+            return Ok(CompressedResult {
+                compressed_conversation: conversation.clone(),
+                summary: None,
+                removed_entries: Vec::new(),
+                discarded_messages: Vec::new(),
+            });
+        }
 
         // Build the text to summarize.
         //
@@ -579,6 +625,80 @@ mod closure_tests {
             .any(|m| m.role == Role::User
                 && m.text_content()
                     .contains("I use pnpm for package management.")));
+    }
+
+    #[tokio::test]
+    async fn compression_keeps_latest_user_message_in_recent_tail() {
+        // Regression for the "re-analyze from scratch" bug: in an agentic turn
+        // the latest user steering instruction is followed by many tool
+        // round-trips (each ≥2 messages). A message-count `keep_recent` window
+        // pushed that instruction out of the tail within ~3 tool round-trips
+        // and summarized it away — the model then re-derived its objective
+        // from the pinned *original* task and re-analyzed. The recent tail must
+        // extend back to include the most recent user message verbatim.
+        let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider));
+        let mut conv = Conversation::new();
+        conv.add_message(Message::user("original task")); // first user — pinned
+                                                          // Older filler turns — these get summarized away.
+        conv.add_message(Message::assistant("ack 1"));
+        conv.add_message(Message::assistant("ack 2"));
+        conv.add_message(Message::assistant("ack 3"));
+        // Latest user steering instruction — MUST survive verbatim.
+        conv.add_message(Message::user("START FROM P0 NOW (latest instruction)"));
+        // Tool round-trips after the latest user push it past a 6-message tail.
+        for i in 0..8 {
+            conv.add_message(Message::assistant(format!("toolcall {}", i)));
+            conv.add_message(Message::assistant(format!("toolresult {}", i)));
+        }
+        // total = 21; recent_start_default = 21-6 = 15; last_user_idx = 4 < 15
+        // → tail extends back to 4, keeping the latest user verbatim.
+        let result = compressor.compress(&conv).await.unwrap();
+
+        let compressed_text: String = result
+            .compressed_conversation
+            .messages
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            compressed_text.contains("START FROM P0 NOW (latest instruction)"),
+            "latest user instruction must survive in the recent tail, got: {compressed_text}"
+        );
+        assert!(
+            !result
+                .discarded_messages
+                .iter()
+                .any(|m| m.text_content().contains("START FROM P0 NOW")),
+            "latest user instruction must NOT be summarized into the discarded segment"
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_no_summary_when_only_recent_tail_remains() {
+        // A single long agentic turn (one user message + many tool
+        // round-trips): the latest-user extension pulls `recent_start` back to
+        // 0, leaving the older segment empty. There is nothing to summarize,
+        // so the compressor returns the conversation as-is — no LLM call.
+        let compressor = ContextCompressor::new(1, 6, Arc::new(DualMockProvider));
+        let mut conv = Conversation::new();
+        conv.add_message(Message::user("the only user instruction"));
+        for i in 0..10 {
+            conv.add_message(Message::assistant(format!("toolcall {}", i)));
+            conv.add_message(Message::assistant(format!("toolresult {}", i)));
+        }
+        let total = conv.messages.len();
+        let result = compressor.compress(&conv).await.unwrap();
+        assert!(
+            result.summary.is_none(),
+            "no summary expected when the older segment is empty"
+        );
+        assert!(result.discarded_messages.is_empty());
+        assert_eq!(
+            result.compressed_conversation.messages.len(),
+            total,
+            "conversation preserved verbatim — nothing to compress"
+        );
     }
 
     /// Deterministic 4-d embedder for the routing regression below.

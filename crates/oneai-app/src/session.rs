@@ -1060,7 +1060,7 @@ impl AppSession {
             let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> = Arc::new(
                 oneai_memory::ContextCompressor::with_template(
                     budget_total, // threshold_tokens — trigger compression at the effective budget (80% of context window)
-                    6,            // keep_recent_turns
+                    oneai_memory::ContextCompressor::DEFAULT_KEEP_RECENT_TURNS,
                     provider.clone(),
                     domain.compression_template.clone(),
                 )
@@ -1163,7 +1163,7 @@ impl AppSession {
             let compressor: Arc<dyn oneai_core::budget::ContextCompressorTrait> = Arc::new(
                 oneai_memory::ContextCompressor::new(
                     budget_total, // threshold_tokens — effective budget (80% of context window)
-                    6,            // keep_recent_turns
+                    oneai_memory::ContextCompressor::DEFAULT_KEEP_RECENT_TURNS,
                     provider.clone(),
                 )
                 .with_fact_extraction(
