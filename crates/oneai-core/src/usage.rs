@@ -89,6 +89,18 @@ pub struct UsageRecord {
     /// Number of completion (output) tokens.
     pub completion_tokens: u32,
 
+    /// Input tokens served from the provider's prompt cache (Anthropic
+    /// `cache_read_input_tokens`). 0 for providers/calls without prompt
+    /// caching. Surfaces the cache-hit ratio in usage reports.
+    #[serde(default)]
+    pub cache_read_tokens: u32,
+
+    /// Input tokens written into the provider's prompt cache
+    /// (`cache_creation_input_tokens`). 0 for providers/calls without
+    /// prompt caching.
+    #[serde(default)]
+    pub cache_creation_tokens: u32,
+
     /// When this call occurred.
     pub timestamp: DateTime<Utc>,
 
@@ -123,6 +135,8 @@ impl UsageRecord {
             completion_tokens,
             timestamp: Utc::now(),
             is_estimated: false,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
             metadata: HashMap::new(),
         }
     }
@@ -149,6 +163,8 @@ impl UsageRecord {
             completion_tokens,
             timestamp,
             is_estimated: false,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
             metadata,
         }
     }
@@ -171,6 +187,15 @@ impl UsageRecord {
         self.prompt_tokens = prompt_tokens;
         self.completion_tokens = completion_tokens;
         self.is_estimated = true;
+        self
+    }
+
+    /// Set the prompt-cache token breakdown (read + creation) for this call.
+    /// Populated from `TokenUsage.cache_read_tokens` /
+    /// `cache_creation_tokens` so usage reports can show the cache-hit ratio.
+    pub fn with_cache_tokens(mut self, cache_read_tokens: u32, cache_creation_tokens: u32) -> Self {
+        self.cache_read_tokens = cache_read_tokens;
+        self.cache_creation_tokens = cache_creation_tokens;
         self
     }
 }
@@ -198,6 +223,16 @@ pub struct UsageSummary {
     #[serde(default)]
     pub estimated_call_count: u64,
 
+    /// Aggregated prompt tokens served from the provider's prompt cache
+    /// (`cache_read_input_tokens`). 0 when no calls reported cache stats.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+
+    /// Aggregated prompt tokens written into the provider's prompt cache
+    /// (`cache_creation_input_tokens`).
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
+
     /// Timestamp of the first call.
     pub first_call: DateTime<Utc>,
 
@@ -214,6 +249,8 @@ impl UsageSummary {
             completion_tokens: 0,
             call_count: 0,
             estimated_call_count: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
             first_call: Utc::now(),
             last_call: Utc::now(),
         }
@@ -233,6 +270,8 @@ impl UsageSummary {
         let completion_tokens = records.iter().map(|r| r.completion_tokens as u64).sum();
         let call_count = records.len() as u64;
         let estimated_call_count = records.iter().filter(|r| r.is_estimated).count() as u64;
+        let cache_read_tokens = records.iter().map(|r| r.cache_read_tokens as u64).sum();
+        let cache_creation_tokens = records.iter().map(|r| r.cache_creation_tokens as u64).sum();
         let first_call = records
             .iter()
             .map(|r| r.timestamp)
@@ -250,6 +289,8 @@ impl UsageSummary {
             completion_tokens,
             call_count,
             estimated_call_count,
+            cache_read_tokens,
+            cache_creation_tokens,
             first_call,
             last_call,
         }
@@ -260,6 +301,8 @@ impl UsageSummary {
         self.total_tokens += record.prompt_tokens as u64 + record.completion_tokens as u64;
         self.prompt_tokens += record.prompt_tokens as u64;
         self.completion_tokens += record.completion_tokens as u64;
+        self.cache_read_tokens += record.cache_read_tokens as u64;
+        self.cache_creation_tokens += record.cache_creation_tokens as u64;
         self.call_count += 1;
         if record.is_estimated {
             self.estimated_call_count += 1;
@@ -268,6 +311,21 @@ impl UsageSummary {
         if self.call_count == 1 {
             self.first_call = record.timestamp;
         }
+    }
+
+    /// Fraction of input tokens served from the prompt cache.
+    ///
+    /// `cache_read / (cache_read + cache_creation + total_tokens)`. Returns
+    /// 0.0 when no cache data is present (provider without prompt caching).
+    /// Mirrors `EfficiencyProfile::cache_hit_ratio` so TUI/usage reports and
+    /// the eval efficiency axis agree on one definition.
+    pub fn cache_hit_ratio(&self) -> f64 {
+        let cached = self.cache_read_tokens + self.cache_creation_tokens;
+        if cached == 0 {
+            return 0.0;
+        }
+        let denom = (cached + self.total_tokens).max(1) as f64;
+        self.cache_read_tokens as f64 / denom
     }
 }
 
@@ -490,6 +548,49 @@ mod tests {
         // Estimated counts are included in the totals.
         assert_eq!(summary.prompt_tokens, 100 + 200 + 300);
         assert_eq!(summary.completion_tokens, 50 + 100 + 150);
+    }
+
+    #[test]
+    fn test_usage_record_cache_tokens_builder() {
+        let r = UsageRecord::new("s", "claude-sonnet-4", "anthropic", 1000, 200)
+            .with_cache_tokens(800, 50);
+        assert_eq!(r.cache_read_tokens, 800);
+        assert_eq!(r.cache_creation_tokens, 50);
+    }
+
+    #[test]
+    fn test_usage_summary_cache_hit_ratio() {
+        // No cache data → 0.0 (provider without prompt caching).
+        let no_cache = UsageSummary::from_records(&[
+            UsageRecord::new("s", "gpt-4o", "openai", 100, 50),
+            UsageRecord::new("s", "gpt-4o", "openai", 200, 100),
+        ]);
+        assert_eq!(no_cache.cache_read_tokens, 0);
+        assert_eq!(no_cache.cache_hit_ratio(), 0.0);
+
+        // With cache: read=800, creation=50, total=1050 → 800/(850+1050).
+        let cached = UsageSummary::from_records(&[UsageRecord::new(
+            "s",
+            "claude-sonnet-4",
+            "anthropic",
+            1000,
+            50,
+        )
+        .with_cache_tokens(800, 50)]);
+        assert_eq!(cached.cache_read_tokens, 800);
+        assert_eq!(cached.cache_creation_tokens, 50);
+        // denom = (800+50) + (1000+50) = 1900; 800/1900
+        assert!((cached.cache_hit_ratio() - 800.0 / 1900.0).abs() < 1e-9);
+        assert!(cached.cache_hit_ratio() > 0.0 && cached.cache_hit_ratio() < 1.0);
+    }
+
+    #[test]
+    fn test_usage_record_cache_fields_serde_backcompat() {
+        // Old format (no cache fields) still deserializes — fields default to 0.
+        let old_json = r#"{"session_id":"s","model":"m","provider":"p","prompt_tokens":100,"completion_tokens":50,"timestamp":"2026-06-23T00:00:00Z","metadata":{}}"#;
+        let parsed: UsageRecord = serde_json::from_str(old_json).expect("old record deserializes");
+        assert_eq!(parsed.cache_read_tokens, 0);
+        assert_eq!(parsed.cache_creation_tokens, 0);
     }
 
     #[tokio::test]

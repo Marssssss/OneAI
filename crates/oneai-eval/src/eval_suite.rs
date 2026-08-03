@@ -200,6 +200,7 @@ impl SuiteRegistry {
         reg.register(crate::builtin_suites::coding_suite());
         reg.register(crate::builtin_suites::tool_use_suite());
         reg.register(crate::builtin_suites::general_suite());
+        reg.register(crate::builtin_suites::efficiency_suite());
         reg
     }
 
@@ -300,12 +301,13 @@ mod tests {
     #[test]
     fn test_suite_registry() {
         let registry = SuiteRegistry::with_builtins();
-        assert!(registry.count() >= 3); // coding, tool_use, general
+        assert!(registry.count() >= 4); // coding, tool_use, general, efficiency
 
         let names = registry.list_names();
         assert!(names.contains(&"coding_basics"));
         assert!(names.contains(&"tool_use"));
         assert!(names.contains(&"general"));
+        assert!(names.contains(&"efficiency"));
     }
 
     #[test]

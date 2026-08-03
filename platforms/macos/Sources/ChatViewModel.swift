@@ -230,6 +230,7 @@ final class StreamCallback: ChatEventCallback, @unchecked Sendable {
         case .directAnswer: return "directAnswer"
         case .complete: return "complete"
         case .error: return "error"
+        case .tokenUsage: return "tokenUsage"
         }
     }
 
@@ -345,6 +346,11 @@ final class ChatViewModel: ObservableObject {
     @Published var debriefActive: Bool = false
     /// Lightweight per-turn token estimate (chars/4) — surfaced in the top bar.
     @Published var lastTurnTokens: Int = 0
+    /// Prompt-cache hit ratio for the most recent inference (0–100), reported
+    /// by the agent loop via the `tokenUsage` event. `nil` until the provider
+    /// reports cache stats (Anthropic); stays `nil` for providers without
+    /// prompt caching so the top-bar badge only appears when meaningful.
+    @Published var lastCacheHitPct: Double? = nil
     /// Bumped whenever a session is (re)loaded so the detail view can force a
     /// scroll-to-bottom (issue 7). `onChange(of: items.count)` alone is
     /// unreliable here: a loaded session with the same message count as the
@@ -1004,6 +1010,17 @@ final class ChatViewModel: ObservableObject {
         case .directAnswer(let text, _):
             if !text.isEmpty { turn.text = text }
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
+        case .tokenUsage(let prompt, _, let cacheRead, let cacheCreation, _):
+            // Prompt-cache hit ratio from the provider (Anthropic
+            // cache_read/creation input tokens). cacheRead+cacheCreation == 0
+            // means the provider has no prompt caching → leave the badge hidden
+            // rather than flashing a misleading 0%. Visible session only — a
+            // background run must not clobber the visible bar.
+            let cached = cacheRead + cacheCreation
+            if visible && cached > 0 {
+                let denom = max(Double(cached) + Double(prompt), 1)
+                lastCacheHitPct = Double(cacheRead) / denom * 100
+            }
         case .complete(let finalText, _):
             if !finalText.isEmpty { turn.text = finalText }
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
@@ -1056,7 +1073,8 @@ final class ChatViewModel: ObservableObject {
         switch event {
         case .streamChunk(_, let s), .thinking(_, let s),
              .toolCall(_, _, _, let s), .toolResult(_, _, _, _, let s),
-             .directAnswer(_, let s), .complete(_, let s), .error(_, let s):
+             .directAnswer(_, let s), .complete(_, let s), .error(_, let s),
+             .tokenUsage(_, _, _, _, let s):
             return s
         }
     }

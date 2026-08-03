@@ -30,6 +30,18 @@ pub fn cmd_usage_report() {
         summary.completion_tokens
     );
     println!(
+        "║  Cache Read:    {:>12}                          ║",
+        summary.cache_read_tokens
+    );
+    println!(
+        "║  Cache Write:   {:>12}                          ║",
+        summary.cache_creation_tokens
+    );
+    println!(
+        "║  Cache Hit %:    {:>11.2} %                        ║",
+        summary.cache_hit_ratio() * 100.0
+    );
+    println!(
         "║  Total Calls:    {:>12}                          ║",
         summary.call_count
     );
@@ -73,22 +85,35 @@ pub fn cmd_usage_session(id: &str) {
         "║  Completion:     {:>12}                          ║",
         session_usage.completion_tokens
     );
+    println!(
+        "║  Cache Read:    {:>12}                          ║",
+        session_usage.cache_read_tokens
+    );
+    println!(
+        "║  Cache Write:   {:>12}                          ║",
+        session_usage.cache_creation_tokens
+    );
+    println!(
+        "║  Cache Hit %:    {:>11.2} %                        ║",
+        session_usage.cache_hit_ratio() * 100.0
+    );
     println!();
 
     if !by_model.is_empty() {
         println!("  Usage by Model:");
         println!(
-            "  {:<25} {:>10} {:>12} {:>12}",
-            "Model", "Calls", "Tokens", "Prompt+Comp"
+            "  {:<25} {:>10} {:>12} {:>12} {:>8}",
+            "Model", "Calls", "Tokens", "Prompt+Comp", "Cache%"
         );
         for (model, summary) in &by_model {
             println!(
-                "  {:<25} {:>10} {:>12} {}+{}",
+                "  {:<25} {:>10} {:>12} {}+{} {:>7.1}%",
                 model,
                 summary.call_count,
                 summary.total_tokens,
                 summary.prompt_tokens,
-                summary.completion_tokens
+                summary.completion_tokens,
+                summary.cache_hit_ratio() * 100.0
             );
         }
     } else {
@@ -111,17 +136,19 @@ pub fn cmd_usage_export(format: &str) {
         }
         "csv" => {
             println!(
-                "session_id,model,provider,prompt_tokens,completion_tokens,total_tokens,timestamp"
+                "session_id,model,provider,prompt_tokens,completion_tokens,total_tokens,cache_read_tokens,cache_creation_tokens,timestamp"
             );
             for record in &records {
                 println!(
-                    "{},{},{},{},{},{},{}",
+                    "{},{},{},{},{},{},{},{},{}",
                     record.session_id,
                     record.model,
                     record.provider,
                     record.prompt_tokens,
                     record.completion_tokens,
                     record.total_tokens(),
+                    record.cache_read_tokens,
+                    record.cache_creation_tokens,
                     record.timestamp
                 );
             }

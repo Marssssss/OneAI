@@ -287,6 +287,17 @@ pub enum ChatEventView {
         message: String,
         speaker: Option<String>,
     },
+    /// Per-inference token-usage breakdown, including prompt-cache tokens.
+    /// Emitted after each inference so the UI can surface the cache-hit ratio
+    /// (e.g. a "cache NN%" badge). `cache_read` / `cache_creation` are 0 for
+    /// providers without prompt caching.
+    TokenUsage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+        speaker: Option<String>,
+    },
 }
 
 // ─── ProviderConfigView ─────────────────────────────────────────────

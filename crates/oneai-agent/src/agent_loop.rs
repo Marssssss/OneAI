@@ -94,6 +94,22 @@ pub trait AgentLoopObserver: Send + Sync {
     /// Called after each inference with token usage stats.
     fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {}
 
+    /// Called after each inference with the **full** token-usage breakdown,
+    /// including prompt-cache tokens (`cache_read` / `cache_creation`). This is
+    /// the cache-aware successor to [`AgentLoopObserver::on_token_usage`]; the
+    /// default delegates to the legacy method so existing implementations keep
+    /// working. Override this to surface the cache-hit ratio in the UI.
+    fn on_token_usage_full(
+        &self,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+    ) {
+        let _ = (cache_read_tokens, cache_creation_tokens);
+        self.on_token_usage(prompt_tokens, completion_tokens);
+    }
+
     /// Called after assembling the context for each iteration, with a breakdown
     /// of how the context window is occupied. This includes the full assembled
     /// conversation (system prompt, tool defs, context sources, messages),
@@ -1934,9 +1950,11 @@ impl AgentLoop {
             }
 
             // 4b. Notify observer of token usage and cost
-            observer.on_token_usage(
+            observer.on_token_usage_full(
                 response.usage.prompt_tokens,
                 response.usage.completion_tokens,
+                response.usage.cache_read_tokens,
+                response.usage.cache_creation_tokens,
             );
 
             // Resolve the token counts to record. Providers usually report usage
@@ -1987,6 +2005,14 @@ impl AgentLoop {
                 if is_estimated {
                     record.is_estimated = true;
                 }
+                // Surface prompt-cache tokens (Anthropic cache_read/creation) so
+                // usage reports / TUI can show the cache-hit ratio. From the
+                // provider-reported usage (0 when the provider didn't report
+                // cache stats — e.g. OpenAI-compatible streams).
+                record = record.with_cache_tokens(
+                    provider_usage.cache_read_tokens,
+                    provider_usage.cache_creation_tokens,
+                );
                 let _ = usage_tracker.record_usage(record).await;
             }
 
@@ -2100,9 +2126,11 @@ impl AgentLoop {
                 };
 
                 // Notify observer of retry token usage
-                observer.on_token_usage(
+                observer.on_token_usage_full(
                     retry_response.usage.prompt_tokens,
                     retry_response.usage.completion_tokens,
+                    retry_response.usage.cache_read_tokens,
+                    retry_response.usage.cache_creation_tokens,
                 );
 
                 // Record retry usage in usage tracker (if configured)
@@ -2113,6 +2141,10 @@ impl AgentLoop {
                         self.provider_name(),
                         retry_response.usage.prompt_tokens,
                         retry_response.usage.completion_tokens,
+                    )
+                    .with_cache_tokens(
+                        retry_response.usage.cache_read_tokens,
+                        retry_response.usage.cache_creation_tokens,
                     );
                     let _ = usage_tracker.record_usage(record).await;
                 }

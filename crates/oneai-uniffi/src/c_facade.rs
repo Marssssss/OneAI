@@ -262,6 +262,24 @@ fn event_to_json(e: &ChatEventView) -> String {
             push_speaker(&mut o, speaker);
             o.push('}');
         }
+        ChatEventView::TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            speaker,
+        } => {
+            o.push_str("{\"type\":\"TokenUsage\",\"prompt_tokens\":");
+            o.push_str(&prompt_tokens.to_string());
+            o.push_str(",\"completion_tokens\":");
+            o.push_str(&completion_tokens.to_string());
+            o.push_str(",\"cache_read_tokens\":");
+            o.push_str(&cache_read_tokens.to_string());
+            o.push_str(",\"cache_creation_tokens\":");
+            o.push_str(&cache_creation_tokens.to_string());
+            push_speaker(&mut o, speaker);
+            o.push('}');
+        }
     }
     o
 }

@@ -119,7 +119,24 @@ impl AgentLoopObserver for CallbackObserver {
     }
 
     fn on_token_usage(&self, _prompt_tokens: u32, _completion_tokens: u32) {
-        // Dropped.
+        // Dropped — the cache-aware `on_token_usage_full` below emits the
+        // TokenUsage event instead. Kept for trait back-compat.
+    }
+
+    fn on_token_usage_full(
+        &self,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+    ) {
+        self.emit(ChatEventView::TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            speaker: None,
+        });
     }
 }
 

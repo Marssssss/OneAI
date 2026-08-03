@@ -795,6 +795,11 @@ private struct ChatDetail: View {
                     }
                 }
                 Spacer()
+                if let pct = vm.lastCacheHitPct {
+                    Label("cache \(Int(pct))%", systemImage: "sparkles")
+                        .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)
+                        .help("提示缓存命中率（provider 复用已缓存的输入 token 占比）")
+                }
                 if vm.lastTurnTokens > 0 {
                     Label("\(vm.lastTurnTokens) tok", systemImage: "flame")
                         .font(.oCaption).foregroundStyle(Theme.onSurfaceVar)

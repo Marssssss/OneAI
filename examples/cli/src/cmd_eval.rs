@@ -51,7 +51,7 @@ pub async fn cmd_eval_run(
     // Get the suite
     let suite = builtin_suites::get_builtin_suite(suite_name).unwrap_or_else(|| {
         eprintln!(
-            "Suite '{}' not found. Available: coding_basics, tool_use, general",
+            "Suite '{}' not found. Available: coding_basics, tool_use, general, efficiency",
             suite_name
         );
         std::process::exit(1);
@@ -302,7 +302,7 @@ pub async fn cmd_eval_replay(path: &str) {
 pub async fn cmd_eval_score(suite_name: &str) {
     let suite = builtin_suites::get_builtin_suite(suite_name).unwrap_or_else(|| {
         eprintln!(
-            "Suite '{}' not found. Available: coding_basics, tool_use, general",
+            "Suite '{}' not found. Available: coding_basics, tool_use, general, efficiency",
             suite_name
         );
         std::process::exit(1);

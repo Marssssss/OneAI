@@ -7,6 +7,8 @@
 //! - **LlmJudgeMetric**: LLM-as-judge scoring (requires provider)
 //! - **TrajectoryMetric**: Tool call sequence validation
 //! - **CompositeMetric**: Weighted combination of multiple metrics
+//! - **EfficiencyMetric**: Blended token+latency cost score (trace-derived)
+//! - **CacheHitRateMetric**: Prompt-cache hit ratio (trace-derived)
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -896,6 +898,111 @@ fn log10_1p(x: f64) -> f64 {
     }
 }
 
+// ─── CacheHitRateMetric ───────────────────────────────────────────────────
+
+/// Prompt-cache hit-rate metric — fraction of input tokens served from the
+/// provider's prompt cache (`cache_read / (cache_read + cache_creation +
+/// total_tokens)`), derived from the trace span tree.
+///
+/// Unlike [`EfficiencyMetric`] (a single blended cost score), this surfaces
+/// the cache ratio as its own first-class metric so reports can list it per
+/// case alongside quality metrics. Requires trace data — `score()` (no trace)
+/// returns 0 with a note; `score_with_trace()` is the real path.
+///
+/// `min_ratio` gates the pass flag (default 0.0 → only reports, never fails).
+/// Set it (e.g. 0.5) to enforce a minimum cache hit ratio in CI.
+pub struct CacheHitRateMetric {
+    min_ratio: f64,
+}
+
+impl CacheHitRateMetric {
+    /// Create a metric that reports the cache hit ratio but never fails
+    /// (pass regardless of value) — the default for observability-only use.
+    pub fn new() -> Self {
+        Self { min_ratio: 0.0 }
+    }
+
+    /// Create a metric that fails when the cache hit ratio drops below
+    /// `min_ratio` (0.0–1.0). Use in CI to enforce a cache-warm budget.
+    pub fn with_min_ratio(min_ratio: f64) -> Self {
+        Self {
+            min_ratio: min_ratio.clamp(0.0, 1.0),
+        }
+    }
+}
+
+impl Default for CacheHitRateMetric {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl EvalMetric for CacheHitRateMetric {
+    fn name(&self) -> &str {
+        "cache_hit_rate"
+    }
+
+    fn description(&self) -> &str {
+        "Prompt-cache hit ratio (cache_read / (cache_read+cache_creation+\
+         total_tokens)) from the trace; 0 without prompt caching"
+    }
+
+    async fn score(&self, _input: &str, _actual: &str, _expected: &ExpectedOutput) -> EvalScore {
+        EvalScore::new(
+            0.0,
+            1.0,
+            "cache_hit_rate requires trace data — run with a provider + tracing".to_string(),
+            false,
+        )
+    }
+
+    async fn score_with_trace(
+        &self,
+        _input: &str,
+        _actual: &str,
+        _expected: &ExpectedOutput,
+        tree: Option<&TraceTree>,
+    ) -> EvalScore {
+        let tree = match tree {
+            Some(t) => t,
+            None => {
+                return EvalScore::new(
+                    0.0,
+                    1.0,
+                    "no trace — cache hit rate not measurable".to_string(),
+                    false,
+                )
+            }
+        };
+
+        let tm = TraceMetrics::compute_from_tree(&tree.root_span);
+        let profile = crate::efficiency::EfficiencyProfile::from_tree(
+            &tree.root_span,
+            tm.total_session_duration_ms,
+            tm.total_tokens,
+            0,
+            0,
+            tm.avg_iterations.round() as usize,
+        );
+        let ratio = profile.cache_hit_ratio();
+        let passed = ratio >= self.min_ratio;
+        let reason = format!(
+            "cache hit {:.1}% (read {}, creation {}, total {} tokens){}",
+            ratio * 100.0,
+            profile.cache_read_tokens,
+            profile.cache_creation_tokens,
+            profile.total_tokens,
+            if self.min_ratio > 0.0 {
+                format!(" — threshold {:.1}%", self.min_ratio * 100.0)
+            } else {
+                String::new()
+            }
+        );
+        EvalScore::new(ratio, 1.0, reason, passed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,6 +1247,87 @@ mod tests {
         // With (near-)zero tokens/latency the efficiency score is near 1.0.
         assert!(s.value > 0.0, "value should be positive, got {}", s.value);
         assert!(s.reason.contains("tokens"));
+    }
+
+    #[tokio::test]
+    async fn test_cache_hit_rate_metric_requires_trace() {
+        let metric = CacheHitRateMetric::new();
+        // No trace → 0 + note.
+        let s = metric
+            .score_with_trace("in", "out", &ExpectedOutput::exact("x"), None)
+            .await;
+        assert_eq!(s.value, 0.0);
+        assert!(!s.passed, "no-trace path reports not-passed");
+        assert!(s.reason.contains("no trace"));
+    }
+
+    #[tokio::test]
+    async fn test_cache_hit_rate_metric_reads_cache_tokens_from_trace() {
+        use oneai_trace::{EventKind, Span, SpanKind, SpanStatus, TraceEvent, TraceTree};
+        use std::collections::HashMap;
+
+        // Build an LLM span carrying the llm.cache_read_tokens /
+        // llm.cache_creation_tokens events the AgentLoop stamps on InferenceEnd.
+        let mut root = Span::new(SpanKind::SESSION, "session", None);
+        root.end(SpanStatus::Ok);
+        let mut llm = Span::new(SpanKind::LLM, "llm.call", Some(&root.span_id));
+        llm.add_event(TraceEvent::with_attrs(
+            EventKind::InferenceEnd,
+            "inference.end",
+            [
+                ("llm.cache_read_tokens".to_string(), serde_json::json!(800)),
+                (
+                    "llm.cache_creation_tokens".to_string(),
+                    serde_json::json!(50),
+                ),
+                ("llm.prompt_tokens".to_string(), serde_json::json!(1000)),
+                ("llm.completion_tokens".to_string(), serde_json::json!(200)),
+            ],
+        ));
+        llm.end(SpanStatus::Ok);
+
+        let mut spans = HashMap::new();
+        spans.insert(root.span_id.clone(), root.clone());
+        spans.insert(llm.span_id.clone(), llm);
+        let tree = TraceTree::from_spans(spans, None);
+
+        let metric = CacheHitRateMetric::new();
+        let s = metric
+            .score_with_trace("in", "out", &ExpectedOutput::exact("x"), Some(&tree))
+            .await;
+        // cache_read=800 was read from the trace → ratio > 0.
+        assert!(
+            s.value > 0.0,
+            "expected non-zero cache hit ratio, got {}",
+            s.value
+        );
+        assert!(s.passed, "default min_ratio=0 → always passes");
+        assert!(s.reason.contains("cache hit"), "reason: {}", s.reason);
+        assert!(s.reason.contains("800"));
+    }
+
+    #[tokio::test]
+    async fn test_cache_hit_rate_metric_threshold_fails_when_low() {
+        // No cache data in the trace → ratio 0.0 → fails a 0.5 threshold.
+        use oneai_trace::{Span, SpanKind, SpanStatus, TraceTree};
+        use std::collections::HashMap;
+
+        let mut root = Span::new(SpanKind::SESSION, "session", None);
+        root.end(SpanStatus::Ok);
+        let mut llm = Span::new(SpanKind::LLM, "llm.call", Some(&root.span_id));
+        llm.end(SpanStatus::Ok);
+        let mut spans = HashMap::new();
+        spans.insert(root.span_id.clone(), root.clone());
+        spans.insert(llm.span_id.clone(), llm);
+        let tree = TraceTree::from_spans(spans, None);
+
+        let metric = CacheHitRateMetric::with_min_ratio(0.5);
+        let s = metric
+            .score_with_trace("in", "out", &ExpectedOutput::exact("x"), Some(&tree))
+            .await;
+        assert_eq!(s.value, 0.0);
+        assert!(!s.passed, "0.0 ratio below 0.5 threshold should fail");
+        assert!(s.reason.contains("threshold"));
     }
 
     #[tokio::test]

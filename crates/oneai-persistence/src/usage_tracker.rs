@@ -96,6 +96,8 @@ impl SqliteUsageTracker {
                 provider TEXT NOT NULL,
                 prompt_tokens INTEGER NOT NULL,
                 completion_tokens INTEGER NOT NULL,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 timestamp TEXT NOT NULL,
                 metadata_json TEXT NOT NULL DEFAULT '{}'
             );
@@ -106,6 +108,16 @@ impl SqliteUsageTracker {
         .map_err(|e| {
             OneAIError::Persistence(format!("Failed to create usage_records schema: {}", e))
         })?;
+
+        // Migrate pre-existing databases: add the cache columns if absent.
+        // SQLite has no `ADD COLUMN IF NOT EXISTS`, so run each ALTER and ignore
+        // the "duplicate column name" error for already-migrated DBs.
+        for stmt in [
+            "ALTER TABLE usage_records ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE usage_records ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = conn.execute_batch(stmt);
+        }
 
         Ok(conn)
     }
@@ -122,10 +134,11 @@ impl SqliteUsageTracker {
             serde_json::to_string(&record.metadata).unwrap_or_else(|_| "{}".to_string());
 
         conn.execute(
-            "INSERT INTO usage_records (id, session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO usage_records (id, session_id, model, provider, prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, timestamp, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![id, record.session_id, record.model, record.provider,
                 record.prompt_tokens, record.completion_tokens,
+                record.cache_read_tokens, record.cache_creation_tokens,
                 timestamp, metadata_json],
         ).map_err(|e| OneAIError::Usage(
             format!("Failed to insert usage record: {}", e)
@@ -141,7 +154,7 @@ impl SqliteUsageTracker {
         session_id: &str,
     ) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
         let mut stmt = conn.prepare(
-            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json
+            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, timestamp, metadata_json
              FROM usage_records WHERE session_id = ?1 ORDER BY timestamp ASC"
         ).map_err(|e| OneAIError::Usage(
             format!("Failed to prepare query: {}", e)
@@ -154,8 +167,10 @@ impl SqliteUsageTracker {
                 let provider: String = row.get(2)?;
                 let prompt_tokens: u32 = row.get(3)?;
                 let completion_tokens: u32 = row.get(4)?;
-                let timestamp_str: String = row.get(5)?;
-                let metadata_json: String = row.get(6)?;
+                let cache_read_tokens: u32 = row.get(5)?;
+                let cache_creation_tokens: u32 = row.get(6)?;
+                let timestamp_str: String = row.get(7)?;
+                let metadata_json: String = row.get(8)?;
 
                 let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -172,7 +187,8 @@ impl SqliteUsageTracker {
                     completion_tokens,
                     timestamp,
                     metadata,
-                );
+                )
+                .with_cache_tokens(cache_read_tokens, cache_creation_tokens);
 
                 Ok(record)
             })
@@ -189,7 +205,7 @@ impl SqliteUsageTracker {
         conn: &rusqlite::Connection,
     ) -> std::result::Result<Vec<UsageRecord>, OneAIError> {
         let mut stmt = conn.prepare(
-            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json
+            "SELECT session_id, model, provider, prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, timestamp, metadata_json
              FROM usage_records ORDER BY timestamp ASC"
         ).map_err(|e| OneAIError::Usage(
             format!("Failed to prepare query: {}", e)
@@ -202,8 +218,10 @@ impl SqliteUsageTracker {
                 let provider: String = row.get(2)?;
                 let prompt_tokens: u32 = row.get(3)?;
                 let completion_tokens: u32 = row.get(4)?;
-                let timestamp_str: String = row.get(5)?;
-                let metadata_json: String = row.get(6)?;
+                let cache_read_tokens: u32 = row.get(5)?;
+                let cache_creation_tokens: u32 = row.get(6)?;
+                let timestamp_str: String = row.get(7)?;
+                let metadata_json: String = row.get(8)?;
 
                 let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -220,7 +238,8 @@ impl SqliteUsageTracker {
                     completion_tokens,
                     timestamp,
                     metadata,
-                );
+                )
+                .with_cache_tokens(cache_read_tokens, cache_creation_tokens);
 
                 Ok(record)
             })
@@ -443,5 +462,71 @@ mod tests {
 
         let records = tracker.session_records("sess1").await.unwrap();
         assert_eq!(records.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_usage_tracker_cache_tokens_roundtrip() {
+        let (tracker, _tmp) = make_tracker();
+
+        // Record with prompt-cache tokens (Anthropic cache_read/creation).
+        tracker
+            .record_usage(
+                UsageRecord::new("sess1", "claude-sonnet-4", "anthropic", 1000, 200)
+                    .with_cache_tokens(800, 50),
+            )
+            .await
+            .unwrap();
+
+        let records = tracker.session_records("sess1").await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].cache_read_tokens, 800);
+        assert_eq!(records[0].cache_creation_tokens, 50);
+
+        // Aggregated summary surfaces the cache-hit ratio.
+        let summary = tracker.session_usage("sess1").await.unwrap();
+        assert_eq!(summary.cache_read_tokens, 800);
+        assert_eq!(summary.cache_creation_tokens, 50);
+        assert!(summary.cache_hit_ratio() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_usage_tracker_migration_from_old_schema() {
+        // Simulate a pre-migration DB: create the old (no-cache-columns) table,
+        // insert a row the old way, then open via SqliteUsageTracker (which runs
+        // the ALTER migration) and confirm the row reads back with cache=0.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("old_usage.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE usage_records (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL,
+                    completion_tokens INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO usage_records (id, session_id, model, provider, prompt_tokens, completion_tokens, timestamp, metadata_json)
+                 VALUES ('x','sess1','gpt-4o','openai',100,50,'2026-08-03T00:00:00Z','{}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let tracker = SqliteUsageTracker::new(&db_path);
+        let records = tracker.session_records("sess1").await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].prompt_tokens, 100);
+        assert_eq!(
+            records[0].cache_read_tokens, 0,
+            "migrated column defaults to 0"
+        );
+        assert_eq!(records[0].cache_creation_tokens, 0);
     }
 }

@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use crate::builtin_metrics::{
-    ContainsMatchMetric, ExactMatchMetric, RegexMatchMetric, TrajectoryMetric,
+    CacheHitRateMetric, ContainsMatchMetric, EfficiencyMetric, ExactMatchMetric, RegexMatchMetric,
+    TrajectoryMetric,
 };
 use crate::eval_case::{EvalCase, ExpectedOutput};
 use crate::eval_suite::{EvalSuite, EvalSuiteBuilder};
@@ -223,11 +224,36 @@ pub fn general_suite() -> EvalSuite {
         .build()
 }
 
+// ─── Efficiency Suite ────────────────────────────────────────────────────
+
+/// Create the efficiency evaluation suite.
+///
+/// Surfaces the trace-derived efficiency axis as first-class metrics:
+/// - [`EfficiencyMetric`]: blended token+latency cost score
+/// - [`CacheHitRateMetric`]: prompt-cache hit ratio
+///
+/// Both require a provider + tracing (they read the span tree, not the output
+/// text). In metrics-only mode they report 0 with a note. Cases reuse the
+/// general QA set so the suite is runnable without a special fixture.
+pub fn efficiency_suite() -> EvalSuite {
+    EvalSuiteBuilder::new("efficiency")
+        .description("Efficiency axis: token+latency cost + prompt-cache hit ratio")
+        .case(
+            EvalCase::with_id("eff_smoke", "What is 2+2?", ExpectedOutput::contains(["4"]))
+                .difficulty(1)
+                .domain("efficiency"),
+        )
+        // Metrics
+        .metric(Arc::new(EfficiencyMetric::new()))
+        .metric(Arc::new(CacheHitRateMetric::new()))
+        .build()
+}
+
 // ─── Suite index ─────────────────────────────────────────────────────────
 
 /// Get all built-in suite names.
 pub fn builtin_suite_names() -> Vec<&'static str> {
-    vec!["coding_basics", "tool_use", "general"]
+    vec!["coding_basics", "tool_use", "general", "efficiency"]
 }
 
 /// Get a built-in suite by name.
@@ -238,6 +264,7 @@ pub fn get_builtin_suite(name: &str) -> Option<EvalSuite> {
         "coding_basics" => Some(coding_suite()),
         "tool_use" => Some(tool_use_suite()),
         "general" => Some(general_suite()),
+        "efficiency" => Some(efficiency_suite()),
         _ => None,
     }
 }
@@ -276,12 +303,21 @@ mod tests {
     }
 
     #[test]
+    fn test_efficiency_suite_structure() {
+        let suite = efficiency_suite();
+        assert_eq!(suite.name, "efficiency");
+        assert_eq!(suite.metric_count(), 2); // efficiency + cache_hit_rate
+        assert_eq!(suite.metric_names(), vec!["efficiency", "cache_hit_rate"]);
+    }
+
+    #[test]
     fn test_builtin_suite_names() {
         let names = builtin_suite_names();
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 4);
         assert!(names.contains(&"coding_basics"));
         assert!(names.contains(&"tool_use"));
         assert!(names.contains(&"general"));
+        assert!(names.contains(&"efficiency"));
     }
 
     #[test]
@@ -289,6 +325,7 @@ mod tests {
         assert!(get_builtin_suite("coding_basics").is_some());
         assert!(get_builtin_suite("tool_use").is_some());
         assert!(get_builtin_suite("general").is_some());
+        assert!(get_builtin_suite("efficiency").is_some());
         assert!(get_builtin_suite("nonexistent").is_none());
     }
 

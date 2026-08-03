@@ -3849,6 +3849,14 @@ public enum ChatEventView: Equatable, Hashable {
      */
     case error(message: String, speaker: String?
     )
+    /**
+     * Per-inference token-usage breakdown, including prompt-cache tokens.
+     * Emitted after each inference so the UI can surface the cache-hit ratio
+     * (e.g. a "cache NN%" badge). `cache_read` / `cache_creation` are 0 for
+     * providers without prompt caching.
+     */
+    case tokenUsage(promptTokens: UInt32, completionTokens: UInt32, cacheReadTokens: UInt32, cacheCreationTokens: UInt32, speaker: String?
+    )
 
 
 
@@ -3889,6 +3897,9 @@ public struct FfiConverterTypeChatEventView: FfiConverterRustBuffer {
         )
         
         case 7: return .error(message: try FfiConverterString.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 8: return .tokenUsage(promptTokens: try FfiConverterUInt32.read(from: &buf), completionTokens: try FfiConverterUInt32.read(from: &buf), cacheReadTokens: try FfiConverterUInt32.read(from: &buf), cacheCreationTokens: try FfiConverterUInt32.read(from: &buf), speaker: try FfiConverterOptionString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -3943,6 +3954,15 @@ public struct FfiConverterTypeChatEventView: FfiConverterRustBuffer {
         case let .error(message,speaker):
             writeInt(&buf, Int32(7))
             FfiConverterString.write(message, into: &buf)
+            FfiConverterOptionString.write(speaker, into: &buf)
+            
+        
+        case let .tokenUsage(promptTokens,completionTokens,cacheReadTokens,cacheCreationTokens,speaker):
+            writeInt(&buf, Int32(8))
+            FfiConverterUInt32.write(promptTokens, into: &buf)
+            FfiConverterUInt32.write(completionTokens, into: &buf)
+            FfiConverterUInt32.write(cacheReadTokens, into: &buf)
+            FfiConverterUInt32.write(cacheCreationTokens, into: &buf)
             FfiConverterOptionString.write(speaker, into: &buf)
             
         }
