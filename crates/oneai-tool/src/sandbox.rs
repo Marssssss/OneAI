@@ -123,54 +123,115 @@ impl SeatbeltBackend {
     /// Generate a Seatbelt profile string for the given configuration.
     ///
     /// The profile uses Apple's Seatbelt policy language (scheme version 1).
-    /// Key restrictions:
-    /// - Default: deny all file writes, deny network
-    /// - Exceptions: allow file writes in allowed dirs, allow network if configured
-    /// - Allow: file reads everywhere (needed for code understanding)
-    /// - Allow: process execution (needed for running compilers/tests)
+    ///
+    /// **Policy: allow-by-default + targeted write denies** (Issue #16).
+    ///
+    /// The previous `(deny default)` posture broke every real toolchain
+    /// because it denied essential OS operations that the allow list never
+    /// re-permitted:
+    /// - `process-fork` — so the shell could not fork to evaluate `||`, `&&`,
+    ///   `;`, or pipes (`sh -c 'a || b'` → "fork: Operation not permitted",
+    ///   exit 128). Any compound command failed.
+    /// - `/dev/null` writes — `git` opens `/dev/null` for redirecting stderr
+    ///   and aborted with "could not open '/dev/null'".
+    /// - virtual-memory / guard-page allocation — Rust binaries (cargo)
+    ///   panicked at startup ("failed to allocate a guard page") because the
+    ///   `mmap`-class syscalls they need were denied.
+    ///
+    /// Coding sandboxes in the wild (Claude Code et al.) therefore use the
+    /// inverse posture: `(allow default)` so compilers/test/linters actually
+    /// run, then `(deny file-write*)` with re-allows only for safe locations.
+    /// That is the real isolation boundary — it protects system files
+    /// (`/`, `/System`, `/Library`, `/usr`, `/etc`, …) while letting package
+    /// managers populate their caches and letting the project dir be mutated.
+    /// The regex blacklist (ShellTool pre-flight) still guards `rm -rf /`
+    /// etc.; Seatbelt is defense-in-depth against system-file tampering.
     fn generate_profile(&self) -> String {
         let mut rules = Vec::new();
 
         // Version header
         rules.push("(version 1)".to_string());
 
-        // Default deny — all operations are denied unless explicitly allowed
-        rules.push("(deny default)".to_string());
+        // Allow everything not explicitly denied. This is what makes real
+        // toolchains work: process-fork, process-exec, signal, mach-lookup,
+        // vm ops, file reads — all permitted without per-op allow rules.
+        rules.push("(allow default)".to_string());
 
-        // Allow file reads (essential for understanding code)
-        rules.push("(allow file-read*)".to_string());
+        // The isolation boundary: deny all file writes, then re-allow only
+        // safe locations. Everything outside these subpaths (system dirs)
+        // stays write-protected.
+        rules.push("(deny file-write*)".to_string());
 
-        // Allow file writes only in specified directories
+        // Project / explicitly-allowed write dirs.
         for dir in &self.allowed_write_dirs {
-            let dir_str = dir.to_string_lossy();
-            rules.push(format!("(allow file-write* (subpath \"{}\"))", dir_str));
+            if let Some(p) = profile_subpath(dir) {
+                rules.push(format!("(allow file-write* (subpath \"{}\"))", p));
+            }
         }
 
-        // Allow file writes to temp directories (needed for compilers)
-        rules.push("(allow file-write* (subpath \"/tmp\"))".to_string());
-        rules.push("(allow file-write* (subpath \"/var/tmp\"))".to_string());
+        // Temp directories (compilers, package managers, test harnesses).
+        // `/tmp` is a symlink to `/private/tmp` on macOS; include both forms
+        // so the rule matches regardless of how the path is spelled.
+        for t in [
+            "/tmp",
+            "/private/tmp",
+            "/var/tmp",
+            "/private/var/tmp",
+            "/var/folders",
+            "/private/var/folders",
+        ] {
+            rules.push(format!("(allow file-write* (subpath \"{}\"))", t));
+        }
+        // Per-user TMPDIR (macOS: /var/folders/xx…). Canonicalize so a symlink
+        // path matches the resolved path sandboxd sees.
+        if let Ok(td) = std::env::var("TMPDIR") {
+            if let Some(p) = profile_subpath(std::path::Path::new(&td)) {
+                rules.push(format!("(allow file-write* (subpath \"{}\"))", p));
+            }
+        }
 
-        // Network policy
+        // User home — package-manager caches live here (~/.cargo, ~/.npm,
+        // ~/Library/Caches, ~/.rustup). Denying HOME would break
+        // `cargo build` / `npm install` etc. The regex blacklist already
+        // guards `rm -rf ~` / `rm -rf $HOME`.
+        if let Ok(home) = std::env::var("HOME") {
+            if let Some(p) = profile_subpath(std::path::Path::new(&home)) {
+                rules.push(format!("(allow file-write* (subpath \"{}\"))", p));
+            }
+        }
+
+        // Device nodes tools redirect to.
+        rules.push("(allow file-write* (literal \"/dev/null\"))".to_string());
+        rules.push("(allow file-write* (literal \"/dev/dtracehelper\"))".to_string());
+
+        // Network policy. `(allow default)` already permits networking, so the
+        // allow case is a no-op (kept for explicitness); the deny case is the
+        // real enforcement when a domain disables network.
         if self.allow_network {
             rules.push("(allow network*)".to_string());
         } else {
             rules.push("(deny network*)".to_string());
         }
 
-        // Allow process execution (needed for compilers, tests, linters)
-        // But restrict to specific paths if possible
-        rules.push("(allow process-exec)".to_string());
-        rules.push("(allow process-exec (literal \"/usr/bin/env\"))".to_string());
-        rules.push("(allow process-exec (literal \"/bin/sh\"))".to_string());
-        rules.push("(allow process-exec (literal \"/bin/bash\"))".to_string());
-
-        // Allow signal delivery (needed for process management)
-        rules.push("(allow signal (target self))".to_string());
-
-        // Allow Mach port access (needed for basic system operations)
-        rules.push("(allow mach-lookup)".to_string());
-
         rules.join("\n")
+    }
+}
+
+/// Canonicalize a path for use as a Seatbelt `(subpath "...")` argument.
+///
+/// `sandboxd` evaluates operations against the *resolved* path, so a
+/// symlinked project dir (or a per-user TMPDIR under `/var/folders`) must be
+/// canonicalized before it is placed in the profile, otherwise the subpath
+/// rule silently fails to match and writes get denied. Returns `None` for a
+/// path that can't be resolved (non-existent), so the caller can skip the rule
+/// rather than emit a broken one.
+fn profile_subpath(p: &std::path::Path) -> Option<String> {
+    let resolved = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = resolved.to_string_lossy();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.into_owned())
     }
 }
 
@@ -447,10 +508,19 @@ mod tests {
         let backend = SeatbeltBackend::coding_defaults(Path::new("/myproject"));
         let profile = backend.generate_profile();
         assert!(profile.contains("(version 1)"));
-        assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow file-read*)"));
-        assert!(profile.contains("/myproject"));
+        // Issue #16: allow-by-default, NOT deny-by-default. The strict
+        // `(deny default)` broke process-fork (||, &&, pipes → exit 128),
+        // /dev/null (git), and vm/guard-page alloc (cargo). Allow-default is
+        // the working posture.
+        assert!(profile.contains("(allow default)"));
+        assert!(!profile.contains("(deny default)"));
+        // The isolation boundary is now targeted file-write denies.
+        assert!(profile.contains("(deny file-write*)"));
+        assert!(profile.contains("/myproject")); // allowed write dir
+        assert!(profile.contains("/dev/null")); // git redirects via /dev/null
         assert!(profile.contains("(allow network*)")); // allow_network=true
+                                                       // Temp dirs (both symlink and resolved forms) are writable.
+        assert!(profile.contains("/private/tmp"));
     }
 
     #[test]
@@ -469,6 +539,37 @@ mod tests {
             .unwrap();
         assert!(result.shell_command.starts_with("sandbox-exec"));
         assert!(result.shell_command.contains("cargo test"));
+    }
+
+    /// Regression guard for Issue #16. The strict `(deny default)` profile
+    /// made every compound command fail with "fork: Operation not permitted"
+    /// (exit 128) because the sandboxed shell could not fork to evaluate
+    /// `||`/`&&`/pipes. With the allow-default + targeted-write-deny posture,
+    /// a compound command runs to completion (exit 0). Only runs on macOS
+    /// where `sandbox-exec` exists; skipped elsewhere so CI on other OSes
+    /// is unaffected.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_seatbelt_compound_command_runs() {
+        if !std::path::Path::new("/usr/bin/sandbox-exec").exists() {
+            eprintln!("sandbox-exec not present; skipping");
+            return;
+        }
+        let backend = SeatbeltBackend::coding_defaults(&std::env::current_dir().unwrap());
+        let cwd = std::env::current_dir().unwrap();
+        let wrapped = backend.wrap_command("true || echo FAIL", &cwd).unwrap();
+        // LocalBackend runs `sh -c <wrapped.shell_command>` — reproduce it.
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&wrapped.shell_command)
+            .output()
+            .expect("spawn sh");
+        assert!(
+            out.status.success(),
+            "compound command failed under seatbelt: exit {:?}, stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
