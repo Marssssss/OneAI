@@ -344,12 +344,18 @@ final class ChatViewModel: ObservableObject {
     /// "结束面试" button). Drives the top-bar button visibility + the phase
     /// label; reset on every new/loaded conversation.
     @Published var debriefActive: Bool = false
-    /// Lightweight per-turn token estimate (chars/4) — surfaced in the top bar.
+    /// Per-turn token count for the top bar. Accumulated from real API usage
+    /// (`prompt + completion` across the turn's inferences via `tokenUsage`);
+    /// falls back to a char-based estimate (`finalText`/4) only when the
+    /// provider reports no usage at all. Reset to 0 at the start of each turn.
     @Published var lastTurnTokens: Int = 0
     /// Prompt-cache hit ratio for the most recent inference (0–100), reported
-    /// by the agent loop via the `tokenUsage` event. `nil` until the provider
-    /// reports cache stats (Anthropic); stays `nil` for providers without
-    /// prompt caching so the top-bar badge only appears when meaningful.
+    /// by the agent loop via the `tokenUsage` event. Set whenever the provider
+    /// reports real usage: the ratio for caching providers (Anthropic), or `0`
+    /// for providers that report usage but no prompt caching (OpenAI) so the
+    /// badge reads "cache 0%" (caching visibly off) rather than vanishing
+    /// (which reads as broken). Stays `nil` only when the provider reports no
+    /// usage at all (e.g. GLM streaming) — no data, no badge. Reset per turn.
     @Published var lastCacheHitPct: Double? = nil
     /// Bumped whenever a session is (re)loaded so the detail view can force a
     /// scroll-to-bottom (issue 7). `onChange(of: items.count)` alone is
@@ -1010,24 +1016,38 @@ final class ChatViewModel: ObservableObject {
         case .directAnswer(let text, _):
             if !text.isEmpty { turn.text = text }
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
-        case .tokenUsage(let prompt, _, let cacheRead, let cacheCreation, _):
-            // Prompt-cache hit ratio from the provider (Anthropic
-            // cache_read/creation input tokens). cacheRead+cacheCreation == 0
-            // means the provider has no prompt caching → leave the badge hidden
-            // rather than flashing a misleading 0%. Visible session only — a
-            // background run must not clobber the visible bar.
-            let cached = cacheRead + cacheCreation
-            if visible && cached > 0 {
-                let denom = max(Double(cached) + Double(prompt), 1)
+        case .tokenUsage(let prompt, let completion, let cacheRead, let cacheCreation, _):
+            // Real per-inference token usage from the provider. This drives the
+            // top-bar token count + cache-hit badge from actual API numbers
+            // (not the char-estimate fallback in `.complete`). Visible session
+            // only — a background run must not clobber the visible bar.
+            //
+            // `prompt + completion == 0` means the provider reported no usage
+            // (e.g. GLM streaming sends none in message_delta) → leave the
+            // fields untouched so `.complete`'s char-estimate still surfaces a
+            // number and the cache badge stays hidden (no data, not "0%").
+            if visible && (prompt + completion) > 0 {
+                lastTurnTokens += Int(prompt) + Int(completion)
+                // Cache-hit ratio = cache_read / prompt_tokens, where
+                // `prompt_tokens` is the total input footprint (OpenAI reports
+                // the total directly; Anthropic normalizes input+cache_read+
+                // creation in the provider). Matches the OpenAI dashboard's
+                // cached_tokens / prompt_tokens. cacheCreation is NOT in the
+                // denominator — prompt already covers the total input.
+                let denom = max(Double(prompt), 1)
                 lastCacheHitPct = Double(cacheRead) / denom * 100
             }
         case .complete(let finalText, _):
             if !finalText.isEmpty { turn.text = finalText }
             if turn.thinkingActive { turn.thinkingActive = false; turn.thinkingDone = true }
             turn.streaming = false; turn.done = true
-            // Lightweight token estimate for the top-bar usage indicator (visible
-            // session only — a background run shouldn't clobber the visible bar).
-            if visible { lastTurnTokens = (finalText.count + turn.thinking.count) / 4 }
+            // Token count: prefer the real API total accumulated from
+            // `.tokenUsage` events. Only fall back to a char-based estimate
+            // when the provider reported no usage at all (lastTurnTokens still
+            // 0 this turn) so the indicator isn't blank for such providers.
+            if visible && lastTurnTokens == 0 {
+                lastTurnTokens = (finalText.count + turn.thinking.count) / 4
+            }
             if visible && currentScenario == nil { running = false }
         case .error(let message, _):
             turn.error = message; turn.streaming = false; turn.done = true
@@ -1093,6 +1113,11 @@ final class ChatViewModel: ObservableObject {
         items.append(.assistant(turn))
         running = true
         error = nil
+        // Reset the per-turn top-bar indicators: token count accumulates from
+        // `.tokenUsage` events during the turn, cache-hit ratio reflects the
+        // latest inference. Without this they'd carry over from the prior turn.
+        lastTurnTokens = 0
+        lastCacheHitPct = nil
 
         // Persist immediately so the new chat shows in the sidebar mid-turn.
         StreamLog.log("sess", "save pre-run id=\(s.sessionId())")
@@ -1132,6 +1157,9 @@ final class ChatViewModel: ObservableObject {
         activeSpeakerId = nil
         running = true
         error = nil
+        // Reset per-turn top-bar indicators (see runTask).
+        lastTurnTokens = 0
+        lastCacheHitPct = nil
         // Visible key matches this group's stream so its events render.
         setActiveStreamKey(groupStreamKey)
         let callback = StreamCallback(vm: self, sessionKey: groupStreamKey)

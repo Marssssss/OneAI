@@ -464,23 +464,12 @@ impl LlmProvider for OpenAIProvider {
             }
         }
 
-        let usage = json
-            .get("usage")
-            .map(|u| TokenUsage {
-                prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                completion_tokens: u
-                    .get("completion_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                ..Default::default()
-            })
-            .unwrap_or(TokenUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-                ..Default::default()
-            });
+        let usage = parse_openai_usage(&json).unwrap_or(TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            ..Default::default()
+        });
 
         Ok(InferenceResponse {
             message: Message {
@@ -636,6 +625,15 @@ impl LlmProvider for OpenAIProvider {
             let mut total_tool_calls: usize = 0;
             let mut total_events_processed: usize = 0;
             let mut total_events_skipped_json: usize = 0;
+            // Accumulated usage across chunks. OpenAI (with
+            // `stream_options.include_usage`) emits usage in a SEPARATE final
+            // chunk where `choices: []` and there is no `finish_reason` — that
+            // chunk has empty content, so the emit gate below would otherwise
+            // drop it and the `[DONE]` chunk carries `usage: None`. Hoisting
+            // the last seen usage and attaching it to the `[DONE]` chunk keeps
+            // prompt/completion AND prompt-cache (`cached_tokens`) stats flowing
+            // to the agent loop in streaming mode.
+            let mut last_usage: Option<TokenUsage> = None;
             // Per-index tool-call state: (id, name). OpenAI distinguishes
             // parallel tool calls by `index`, and emits the `id`/`name` only on
             // the first chunk for each index — subsequent chunks carry just
@@ -657,7 +655,7 @@ impl LlmProvider for OpenAIProvider {
                                 .send(InferenceStreamChunk {
                                     content: vec![],
                                     is_final: true,
-                                    usage: None,
+                                    usage: last_usage.take(),
                                     model: model_name.clone(),
                                 })
                                 .await;
@@ -711,28 +709,10 @@ impl LlmProvider for OpenAIProvider {
                                 // Extract usage data — try both the final chunk format
                                 // (OpenAI with stream_options) and the default format
                                 // (some providers include usage without stream_options).
-                                let usage = if is_final || json.get("usage").is_some() {
-                                    json.get("usage").map(|u| TokenUsage {
-                                        prompt_tokens: u
-                                            .get("prompt_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
-                                            as u32,
-                                        completion_tokens: u
-                                            .get("completion_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
-                                            as u32,
-                                        total_tokens: u
-                                            .get("total_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
-                                            as u32,
-                                        ..Default::default()
-                                    })
-                                } else {
-                                    None
-                                };
+                                let usage = parse_openai_usage(&json);
+                                if let Some(ref u) = usage {
+                                    last_usage = Some(u.clone());
+                                }
 
                                 let mut content_blocks = Vec::new();
                                 if !content.is_empty() {
@@ -916,6 +896,40 @@ impl LlmProvider for OpenAIProvider {
 /// that echo id on every chunk).
 ///
 /// Returns `None` for chunks with no actionable payload (id/name echo only).
+/// Extract OpenAI's cache-hit token count from a usage JSON object.
+///
+/// OpenAI exposes prompt-cache hits at `usage.prompt_tokens_details.cached_tokens`
+/// (the API Python SDK surfaces it as `usage.prompt_tokens_details.cached_tokens`).
+/// OpenAI caches prompts automatically and reports only cache *reads* — there
+/// is no "cache creation" counterpart — so the hit ratio reduces to
+/// `cached_tokens / prompt_tokens`. Returns 0 when the provider/endpoint
+/// doesn't report prompt-cache details (e.g. some OpenAI-compatible servers).
+fn openai_cached_tokens(u: &Value) -> u32 {
+    u.get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
+}
+
+/// Parse an OpenAI `usage` JSON object (from a chat completion or the final
+/// streaming chunk) into a [`TokenUsage`], including prompt-cache hits. Returns
+/// `None` when `usage` is absent. Shared by the non-streaming and streaming
+/// paths so both surface cache tokens identically.
+fn parse_openai_usage(u: &Value) -> Option<TokenUsage> {
+    u.get("usage").map(|u| TokenUsage {
+        prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        completion_tokens: u
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        // OpenAI prompt-cache hits (`prompt_tokens_details.cached_tokens`).
+        // No creation field → stays 0; ratio = cached / prompt_tokens.
+        cache_read_tokens: openai_cached_tokens(u),
+        ..Default::default()
+    })
+}
+
 fn translate_tool_call_delta(
     tc: &Value,
     index_state: &mut HashMap<u32, (String, String)>,
@@ -1043,6 +1057,62 @@ mod probe_tests {
         // OpenAI proper — no context-window key.
         let resp = json!({ "id": "gpt-4o", "object": "model", "owned_by": "openai" });
         assert_eq!(parse_openai_context_window(&resp), None);
+    }
+
+    #[test]
+    fn test_openai_cached_tokens_present() {
+        // Canonical OpenAI usage with prompt-cache hits. Mirrors the Python
+        // SDK's `usage.prompt_tokens_details.cached_tokens`.
+        let u = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_tokens_details": { "cached_tokens": 800 }
+        });
+        assert_eq!(openai_cached_tokens(&u), 800);
+    }
+
+    #[test]
+    fn test_openai_cached_tokens_missing() {
+        // No cache details reported → 0 (don't fabricate a hit ratio).
+        let u = json!({ "prompt_tokens": 1000, "completion_tokens": 50 });
+        assert_eq!(openai_cached_tokens(&u), 0);
+    }
+
+    #[test]
+    fn test_openai_cached_tokens_partial_details() {
+        // `prompt_tokens_details` exists but without `cached_tokens`.
+        let u = json!({ "prompt_tokens_details": { "audio_tokens": 10 } });
+        assert_eq!(openai_cached_tokens(&u), 0);
+    }
+
+    #[test]
+    fn test_parse_openai_usage_with_cache() {
+        // Final streaming chunk shape: empty `choices` + top-level `usage`
+        // carrying prompt-cache hits. This is the chunk that used to be dropped
+        // (empty content, no finish_reason) — `parse_openai_usage` must still
+        // surface its cache tokens.
+        let event = json!({
+            "id": "chatcmpl-x",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 50,
+                "total_tokens": 1050,
+                "prompt_tokens_details": { "cached_tokens": 800 }
+            }
+        });
+        let u = parse_openai_usage(&event).expect("usage must parse");
+        assert_eq!(u.prompt_tokens, 1000);
+        assert_eq!(u.completion_tokens, 50);
+        assert_eq!(u.cache_read_tokens, 800);
+        assert_eq!(u.cache_creation_tokens, 0);
+    }
+
+    #[test]
+    fn test_parse_openai_usage_missing() {
+        // No `usage` key → None (don't fabricate zero usage).
+        let event = json!({ "id": "chatcmpl-x", "choices": [] });
+        assert!(parse_openai_usage(&event).is_none());
     }
 }
 

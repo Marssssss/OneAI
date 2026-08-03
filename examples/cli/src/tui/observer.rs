@@ -127,13 +127,42 @@ impl AgentLoopObserver for TuiObserver {
     }
 
     fn on_token_usage(&self, prompt_tokens: u32, completion_tokens: u32) {
+        // The agent loop now calls `on_token_usage_full` (overridden below) which
+        // carries the cache breakdown; this legacy entry point is kept only for
+        // trait back-compat and is no longer on the hot path. Build a cache-less
+        // snapshot to preserve the old behavior should it ever be invoked.
         let usage = super::app::TokenUsage {
             prompt: prompt_tokens,
             completion: completion_tokens,
             total: prompt_tokens + completion_tokens,
             is_estimated: false,
+            cache_read: 0,
+            cache_creation: 0,
+            ..Default::default()
         };
         // Accumulate into session total
+        let _ = self.tx.send(ObserverEvent::TokenUsageUpdate(usage));
+    }
+
+    fn on_token_usage_full(
+        &self,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cache_read_tokens: u32,
+        cache_creation_tokens: u32,
+    ) {
+        let usage = super::app::TokenUsage {
+            prompt: prompt_tokens,
+            completion: completion_tokens,
+            total: prompt_tokens + completion_tokens,
+            is_estimated: false,
+            cache_read: cache_read_tokens,
+            cache_creation: cache_creation_tokens,
+            // Per-call ratio is derived by the TUI event loop (it has the full
+            // `TokenUsage`); leave 0 here — `last_hit_ratio` is recomputed in
+            // the `TokenUsageUpdate` handler from this call's fields.
+            ..Default::default()
+        };
         let _ = self.tx.send(ObserverEvent::TokenUsageUpdate(usage));
     }
 

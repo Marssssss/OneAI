@@ -6467,15 +6467,16 @@ mod dynamic_tool_prompt_tests {
     //! case).
     use super::*;
     use crate::context_assembler::ContextAssembler;
-    use crate::mock_provider::MockProvider;
+    use crate::mock_provider::{MockProvider, ScriptedResponse};
     use crate::mock_tool::MockTool;
     use crate::streaming::IncrementalStreamParser;
     use crate::sub_agent::SubAgentFactoryNone;
     use oneai_core::budget::{BudgetAllocation, ContextBudgetManager, TokenBudget};
+    use oneai_core::TokenUsage;
     use oneai_parser::ThreeLayerParser;
     use oneai_skill::SkillSelector;
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn build_loop_with(tool_names: &[&str], config: AgentLoopConfig) -> AgentLoop {
         let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -6531,6 +6532,82 @@ mod dynamic_tool_prompt_tests {
             IncrementalStreamParser::new(),
             config,
         )
+    }
+
+    /// Recording observer that captures every `on_token_usage_full` call so
+    /// tests can assert the cache-token data path end-to-end (provider usage →
+    /// agent loop → observer).
+    type UsageCalls = Arc<Mutex<Vec<(u32, u32, u32, u32)>>>;
+    struct UsageRecorder {
+        calls: UsageCalls,
+    }
+    impl UsageRecorder {
+        fn new() -> (Self, UsageCalls) {
+            let calls: UsageCalls = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+    impl AgentLoopObserver for UsageRecorder {
+        fn on_iteration_start(&self, _: usize, _: ParadigmKind) {}
+        fn on_direct_answer(&self, _: &str) {}
+        fn on_tool_calls(&self, _: &[ToolCallRequest]) {}
+        fn on_tool_result(&self, _: &str, _: &str, _: &oneai_core::ToolOutput) {}
+        fn on_delegate(&self, _: &str, _: &SubAgentKind) {}
+        fn on_paradigm_switch(&self, _: ParadigmKind) {}
+        fn on_checkpoint(&self, _: usize) {}
+        fn on_complete(&self, _: &AgentLoopResult) {}
+        fn on_thinking(&self, _: &str) {}
+        fn on_token_usage_full(
+            &self,
+            prompt_tokens: u32,
+            completion_tokens: u32,
+            cache_read_tokens: u32,
+            cache_creation_tokens: u32,
+        ) {
+            self.calls.lock().unwrap().push((
+                prompt_tokens,
+                completion_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn on_token_usage_full_propagates_provider_cache_tokens() {
+        // Script a DirectAnswer whose usage carries real cache stats (as the
+        // Anthropic/OpenAI providers now report them). The agent loop must
+        // surface them via `on_token_usage_full` — not drop them on the floor.
+        let scripted = ScriptedResponse::custom(
+            vec![ContentBlock::Text {
+                text: "done".to_string(),
+            }],
+            TokenUsage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                total_tokens: 1050,
+                cache_read_tokens: 800,
+                cache_creation_tokens: 200,
+            },
+        );
+        let provider = MockProvider::from_script(vec![scripted]);
+        let loop_ = build_loop_with_provider(Arc::new(provider), AgentLoopConfig::default());
+        let (recorder, calls) = UsageRecorder::new();
+        let _ = loop_.run_with_observer("hi", &recorder).await;
+
+        let recorded = calls.lock().unwrap().clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|(_, _, cr, cc)| *cr == 800 && *cc == 200),
+            "cache tokens not propagated to observer; got {:?}",
+            recorded
+        );
     }
 
     #[tokio::test]

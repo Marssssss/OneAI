@@ -653,24 +653,7 @@ impl AnthropicProvider {
 
         let usage = json
             .get("usage")
-            .map(|u| TokenUsage {
-                prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                    as u32,
-                total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
-                    + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                // Anthropic prompt-caching usage — populates the efficiency axis
-                // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
-                // runs. 0 when caching isn't used or the field is absent.
-                cache_read_tokens: u
-                    .get("cache_read_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                cache_creation_tokens: u
-                    .get("cache_creation_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-            })
+            .map(anthropic_usage)
             .unwrap_or(TokenUsage {
                 prompt_tokens: 0,
                 completion_tokens: 0,
@@ -931,26 +914,10 @@ impl AnthropicProvider {
                                         .unwrap_or("");
 
                                     let usage_obj = json.get("usage").unwrap_or(&Value::Null);
-                                    let output_tokens = usage_obj
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    let usage = TokenUsage {
-                                        prompt_tokens: prompt_tokens_from_start,
-                                        completion_tokens: output_tokens,
-                                        total_tokens: prompt_tokens_from_start + output_tokens,
-                                        cache_read_tokens: usage_obj
-                                            .get("cache_read_input_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
-                                            as u32,
-                                        cache_creation_tokens: usage_obj
-                                            .get("cache_creation_input_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
-                                            as u32,
-                                    };
+                                    let usage = anthropic_usage_streaming(
+                                        prompt_tokens_from_start,
+                                        usage_obj,
+                                    );
 
                                     let _ = tx
                                         .send(InferenceStreamChunk {
@@ -1113,24 +1080,7 @@ impl AnthropicProvider {
 
         let usage = json
             .get("usage")
-            .map(|u| TokenUsage {
-                prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                completion_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                    as u32,
-                total_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
-                    + u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                // Anthropic prompt-caching usage — populates the efficiency axis
-                // cache hit ratio (EfficiencyProfile.cache_read_tokens) on real
-                // runs. 0 when caching isn't used or the field is absent.
-                cache_read_tokens: u
-                    .get("cache_read_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                cache_creation_tokens: u
-                    .get("cache_creation_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-            })
+            .map(anthropic_usage)
             .unwrap_or(TokenUsage {
                 prompt_tokens: 0,
                 completion_tokens: 0,
@@ -1338,26 +1288,10 @@ impl AnthropicProvider {
                                         .get("response")
                                         .and_then(|r| r.get("usage"))
                                         .unwrap_or(&Value::Null);
-                                    let output_tokens = usage_obj
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
-                                    let usage = TokenUsage {
-                                        prompt_tokens: prompt_tokens_from_start,
-                                        completion_tokens: output_tokens,
-                                        total_tokens: prompt_tokens_from_start + output_tokens,
-                                        cache_read_tokens: usage_obj
-                                            .get("cache_read_input_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
-                                            as u32,
-                                        cache_creation_tokens: usage_obj
-                                            .get("cache_creation_input_tokens")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
-                                            as u32,
-                                    };
+                                    let usage = anthropic_usage_streaming(
+                                        prompt_tokens_from_start,
+                                        usage_obj,
+                                    );
                                     let _ = tx
                                         .send(InferenceStreamChunk {
                                             content: vec![],
@@ -1383,6 +1317,71 @@ impl AnthropicProvider {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 }
+
+// ─── Anthropic usage parser (provider-normalized) ──────────────────────────
+
+/// Build a [`TokenUsage`] from an Anthropic non-streaming `usage` JSON object.
+///
+/// **Normalization:** Anthropic's `input_tokens` field is the NON-cached input
+/// (the part NOT served from cache); `cache_read_input_tokens` and
+/// `cache_creation_input_tokens` are reported separately. OpenAI's
+/// `prompt_tokens`, by contrast, already includes the cached subset. To make
+/// the cache-hit ratio `cache_read / prompt_tokens` uniform across providers
+/// (and match the OpenAI dashboard's `cached_tokens / prompt_tokens`), we
+/// store `prompt_tokens` as the TOTAL input footprint
+/// (`input + cache_read + cache_creation`). `total_tokens` follows.
+fn anthropic_usage(u: &Value) -> TokenUsage {
+    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let cache_read = u
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cache_creation = u
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let prompt = input + cache_read + cache_creation;
+    TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: output,
+        total_tokens: prompt + output,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
+    }
+}
+
+/// Build a [`TokenUsage`] from an Anthropic streaming `message_delta` event.
+///
+/// Streaming splits the usage across events: `input_tokens` +
+/// `cache_creation_input_tokens` arrive in `message_start`, while
+/// `output_tokens` + `cache_read_input_tokens` arrive in `message_delta`. The
+/// caller captures `input_tokens` (+ creation) from `message_start` as
+/// `input_so_far`; here we merge in the delta's output/cache_read and apply the
+/// same total-input normalization as [`anthropic_usage`].
+fn anthropic_usage_streaming(input_so_far: u32, usage_obj: &Value) -> TokenUsage {
+    let output = usage_obj
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cache_read = usage_obj
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let cache_creation = usage_obj
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let prompt = input_so_far + cache_read + cache_creation;
+    TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: output,
+        total_tokens: prompt + output,
+        cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
+    }
+}
+
 // ─── Anthropic /v1/models context-window parser ──────────────────────────────
 
 /// Parse the context-window size from an Anthropic `/v1/models/{id}` response.

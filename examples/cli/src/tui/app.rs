@@ -244,11 +244,44 @@ pub struct TokenUsage {
     pub total: u32,
     /// Whether these values are estimated (from character count) rather than actual API-reported.
     pub is_estimated: bool,
+    /// Input tokens served from the provider's prompt cache (`cache_read_input_tokens`).
+    /// 0 for providers/calls without prompt caching.
+    pub cache_read: u32,
+    /// Input tokens written into the cache (`cache_creation_input_tokens`).
+    pub cache_creation: u32,
+    /// Per-call cache-hit ratio of the MOST RECENT inference (`cache_read /
+    /// prompt_tokens` for that single call). Unlike the session aggregate
+    /// (`cache_hit_ratio()`, which sums across all calls and is diluted by the
+    /// unavoidable 0%-hit cold-start call), this is the undiluted single-call
+    /// value — the metric the user actually wants ("单次推理复用 token 数 /
+    /// 单次推理 prompt token 数"). 0 until the first inference reports cache.
+    pub last_hit_ratio: f64,
 }
 
 impl TokenUsage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// **Session-aggregate** cache-hit ratio in [0, 1]: `Σcache_read /
+    /// Σprompt_tokens` across every inference this session. `prompt_tokens` is
+    /// the total input footprint per call (providers normalize it to include
+    /// cached tokens — OpenAI reports the total directly, Anthropic sums
+    /// `input + cache_read + cache_creation`). Matches the OpenAI dashboard's
+    /// `cached_tokens / prompt_tokens` and
+    /// [`oneai_core::usage::UsageSummary::cache_hit_ratio`]. Returns 0 when no
+    /// cache read is reported or no prompt tokens.
+    ///
+    /// **Caveat:** as a session aggregate this is diluted by the unavoidable
+    /// cold-start call (whose `cache_read` is 0 but whose `prompt_tokens` still
+    /// enters the denominator). For the undiluted single-call value use
+    /// [`TokenUsage::last_hit_ratio`].
+    pub fn cache_hit_ratio(&self) -> f64 {
+        if self.cache_read == 0 {
+            return 0.0;
+        }
+        let denom = (self.prompt as u64).max(1);
+        (self.cache_read as f64) / (denom as f64)
     }
 
     /// Format token count for display (e.g., "1.2k" for 1200).
@@ -2058,5 +2091,46 @@ mod tests {
         app.update_text_selection(0);
         let copied = app.copy_selection_to_clipboard();
         assert_eq!(copied, "a\nb\nc");
+    }
+
+    #[test]
+    fn token_usage_cache_hit_ratio() {
+        // No cache read → 0 (not a misleading NaN/inf).
+        let none = TokenUsage {
+            prompt: 1000,
+            completion: 50,
+            total: 1050,
+            is_estimated: false,
+            cache_read: 0,
+            cache_creation: 0,
+            ..Default::default()
+        };
+        assert_eq!(none.cache_hit_ratio(), 0.0);
+
+        // OpenAI semantics: prompt_tokens is the TOTAL input (already includes
+        // cached). cache_read=800, prompt=1000 → 800/1000 = 0.8 (matches
+        // cached_tokens / prompt_tokens on the OpenAI dashboard).
+        let cached = TokenUsage {
+            prompt: 1000,
+            completion: 50,
+            total: 1050,
+            is_estimated: false,
+            cache_read: 800,
+            cache_creation: 0,
+            ..Default::default()
+        };
+        assert!((cached.cache_hit_ratio() - 0.8).abs() < 1e-9);
+
+        // All read, nothing else → 1.0.
+        let full = TokenUsage {
+            prompt: 500,
+            completion: 0,
+            total: 500,
+            is_estimated: false,
+            cache_read: 500,
+            cache_creation: 0,
+            ..Default::default()
+        };
+        assert!((full.cache_hit_ratio() - 1.0).abs() < 1e-9);
     }
 }

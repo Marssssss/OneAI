@@ -790,10 +790,26 @@ fn handle_user_input_async(
                 } else {
                     ""
                 };
+                let cache = app.token_usage.cache_read + app.token_usage.cache_creation;
+                let cache_line = if cache > 0 || app.token_usage.last_hit_ratio > 0.0 {
+                    // Per-call (undiluted, latest inference) vs. session
+                    // aggregate (diluted by the cold-start call). The former is
+                    // the "单次推理" value; the latter the overall savings.
+                    format!(
+                        "\nCache:      {:>12} read / {} write  (hit {:.1}% last turn, {:.1}% session)",
+                        app.token_usage.cache_read,
+                        app.token_usage.cache_creation,
+                        app.token_usage.last_hit_ratio * 100.0,
+                        app.token_usage.cache_hit_ratio() * 100.0
+                    )
+                } else {
+                    String::new()
+                };
                 app.add_message(ChatRole::System, format!(
-                    "Session usage: {}{} tokens ({}prompt {}+ completion {})\nContext: {}{} / {}k tokens",
+                    "Session usage: {}{} tokens ({}prompt {}+ completion {}){}\nContext: {}{} / {}k tokens",
                     tok_est, app.token_usage.total, tok_est,
                     app.token_usage.prompt, app.token_usage.completion,
+                    cache_line,
                     ctx_est, app.context_tokens, app.context_window_size / 1000
                 ));
                 return;
@@ -842,8 +858,20 @@ fn handle_user_input_async(
                 } else {
                     ""
                 };
+                let cache = app.token_usage.cache_read + app.token_usage.cache_creation;
+                let cache_line = if cache > 0 || app.token_usage.last_hit_ratio > 0.0 {
+                    format!(
+                        "\nCache: {} read / {} write ({:.1}% last turn, {:.1}% session)",
+                        app.token_usage.cache_read,
+                        app.token_usage.cache_creation,
+                        app.token_usage.last_hit_ratio * 100.0,
+                        app.token_usage.cache_hit_ratio() * 100.0
+                    )
+                } else {
+                    String::new()
+                };
                 app.add_message(ChatRole::System, format!(
-                    "Session ID: {}\nProvider: {}\nParadigm: {}#{}\nContext: {}{} / {}k\nUsage: {}{} tokens ({}+{} prompt/completion)",
+                    "Session ID: {}\nProvider: {}\nParadigm: {}#{}\nContext: {}{} / {}k\nUsage: {}{} tokens ({}+{} prompt/completion){}",
                     app.session_id,
                     app.provider_info,
                     paradigm_display_name(&app.active_paradigm),
@@ -855,6 +883,7 @@ fn handle_user_input_async(
                     app.token_usage.total,
                     app.token_usage.prompt,
                     app.token_usage.completion,
+                    cache_line,
                 ));
                 return;
             }
@@ -2358,6 +2387,14 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.token_usage.completion += iter_completion;
             app.token_usage.total += iter_total;
             app.token_usage.is_estimated = usage.prompt == 0 && usage.completion == 0;
+            app.token_usage.cache_read += usage.cache_read;
+            app.token_usage.cache_creation += usage.cache_creation;
+            // Per-call (undiluted) ratio of THIS inference — the "单次推理"
+            // value the user wants, vs. the session-aggregate
+            // `cache_hit_ratio()` which is diluted by the cold-start call.
+            // Only meaningful when the provider reported real usage (prompt>0);
+            // for estimated-fallback calls cache_read is 0 anyway → stays 0.
+            app.token_usage.last_hit_ratio = usage.cache_hit_ratio();
 
             // Use real API prompt_tokens as context size when available.
             // This is the Claude Code approach — exact data from the API

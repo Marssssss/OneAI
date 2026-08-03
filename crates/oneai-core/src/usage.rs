@@ -315,16 +315,20 @@ impl UsageSummary {
 
     /// Fraction of input tokens served from the prompt cache.
     ///
-    /// `cache_read / (cache_read + cache_creation + total_tokens)`. Returns
-    /// 0.0 when no cache data is present (provider without prompt caching).
-    /// Mirrors `EfficiencyProfile::cache_hit_ratio` so TUI/usage reports and
-    /// the eval efficiency axis agree on one definition.
+    /// Prompt-cache hit ratio: `cache_read / prompt_tokens` where
+    /// `prompt_tokens` is the TOTAL input-token footprint (providers normalize
+    /// it to include cached tokens — OpenAI reports the total directly,
+    /// Anthropic's `input_tokens` excludes cache so the provider sums
+    /// `input + cache_read + cache_creation`). This matches the OpenAI
+    /// dashboard's `cached_tokens / prompt_tokens`. Returns 0.0 when no cache
+    /// activity is reported (provider without prompt caching) or no prompt
+    /// tokens. Mirrors `EfficiencyProfile::cache_hit_ratio` so TUI/usage
+    /// reports and the eval efficiency axis agree on one definition.
     pub fn cache_hit_ratio(&self) -> f64 {
-        let cached = self.cache_read_tokens + self.cache_creation_tokens;
-        if cached == 0 {
+        if self.cache_read_tokens == 0 {
             return 0.0;
         }
-        let denom = (cached + self.total_tokens).max(1) as f64;
+        let denom = self.prompt_tokens.max(1) as f64;
         self.cache_read_tokens as f64 / denom
     }
 }
@@ -568,7 +572,10 @@ mod tests {
         assert_eq!(no_cache.cache_read_tokens, 0);
         assert_eq!(no_cache.cache_hit_ratio(), 0.0);
 
-        // With cache: read=800, creation=50, total=1050 → 800/(850+1050).
+        // With cache: read=800, prompt=1000 (total input footprint) → 800/1000.
+        // `prompt_tokens` is normalized to include cached tokens (OpenAI reports
+        // the total directly; Anthropic sums input+cache_read+creation), so the
+        // ratio is `cache_read / prompt_tokens` — matching the OpenAI dashboard.
         let cached = UsageSummary::from_records(&[UsageRecord::new(
             "s",
             "claude-sonnet-4",
@@ -579,8 +586,8 @@ mod tests {
         .with_cache_tokens(800, 50)]);
         assert_eq!(cached.cache_read_tokens, 800);
         assert_eq!(cached.cache_creation_tokens, 50);
-        // denom = (800+50) + (1000+50) = 1900; 800/1900
-        assert!((cached.cache_hit_ratio() - 800.0 / 1900.0).abs() < 1e-9);
+        // denom = prompt_tokens = 1000; 800/1000 = 0.8
+        assert!((cached.cache_hit_ratio() - 0.8).abs() < 1e-9);
         assert!(cached.cache_hit_ratio() > 0.0 && cached.cache_hit_ratio() < 1.0);
     }
 

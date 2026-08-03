@@ -43,6 +43,14 @@ pub struct EfficiencyProfile {
     pub iterations: usize,
     /// Total tokens consumed (prompt + completion).
     pub total_tokens: u64,
+    /// Total INPUT tokens (prompt footprint), used as the denominator of
+    /// [`cache_hit_ratio`]. Extracted from `llm.prompt_tokens` span events
+    /// (each provider normalizes this to include cached tokens — OpenAI's
+    /// `prompt_tokens` is the total, Anthropic sums `input + cache_read +
+    /// creation`), so `cache_read / prompt_tokens` matches the OpenAI
+    /// dashboard. Falls back to `total_tokens` for traces without the
+    /// attribute (slightly understated — includes completion).
+    pub prompt_tokens: u64,
     /// Prompt tokens cached & read on the provider side (Anthropic
     /// `cache_read_input_tokens`). Populated by A4; 0 until then.
     pub cache_read_tokens: u64,
@@ -75,11 +83,12 @@ impl EfficiencyProfile {
         let attributed = inference_ms + tool_ms;
         let overhead_ms = dur_ms.saturating_sub(attributed);
 
-        // Sum prompt-cache usage from LLM span events (the AgentLoop stamps
-        // llm.cache_read_tokens / llm.cache_creation_tokens on the InferenceEnd
-        // event of each LLM span). Prefer tree-derived values over the caller's
-        // fallback (which is 0 when no per-call cache data was available).
-        let (mut tree_cache_read, mut tree_cache_creation) = (0u64, 0u64);
+        // Sum prompt-cache usage + prompt tokens from LLM span events (the
+        // AgentLoop stamps llm.prompt_tokens / llm.cache_read_tokens /
+        // llm.cache_creation_tokens on the InferenceEnd event of each LLM
+        // span). Prefer tree-derived values over the caller's fallback (which
+        // is 0 when no per-call data was available).
+        let (mut tree_cache_read, mut tree_cache_creation, mut tree_prompt) = (0u64, 0u64, 0u64);
         for llm in root.spans_by_kind(SpanKind::LLM) {
             for ev in &llm.events {
                 if let Some(v) = ev
@@ -96,6 +105,13 @@ impl EfficiencyProfile {
                 {
                     tree_cache_creation += v;
                 }
+                if let Some(v) = ev
+                    .attributes
+                    .get("llm.prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                {
+                    tree_prompt += v;
+                }
             }
         }
         let cache_read_tokens = if tree_cache_read > 0 {
@@ -108,6 +124,14 @@ impl EfficiencyProfile {
         } else {
             cache_creation_tokens
         };
+        // prompt_tokens: prefer the tree-summed per-call prompt footprint; fall
+        // back to total_tokens (includes completion) for traces without the
+        // attribute so the ratio is still defined (slightly understated).
+        let prompt_tokens = if tree_prompt > 0 {
+            tree_prompt
+        } else {
+            total_tokens
+        };
 
         Self {
             inference_ms,
@@ -118,6 +142,7 @@ impl EfficiencyProfile {
             dur_ms,
             iterations,
             total_tokens,
+            prompt_tokens,
             cache_read_tokens,
             cache_creation_tokens,
         }
@@ -125,14 +150,15 @@ impl EfficiencyProfile {
 
     /// Fraction of input tokens served from the prompt cache.
     ///
-    /// `cache_read / (cache_read + cache_creation + total_tokens)`. Returns
-    /// 0.0 when no cache data is present (A4 not wired).
+    /// `cache_read / prompt_tokens` where `prompt_tokens` is the total input
+    /// footprint (providers normalize it to include cached tokens). Matches
+    /// the OpenAI dashboard's `cached_tokens / prompt_tokens`. Returns 0.0
+    /// when no cache read is reported or no prompt tokens.
     pub fn cache_hit_ratio(&self) -> f64 {
-        let cached = self.cache_read_tokens + self.cache_creation_tokens;
-        if cached == 0 {
+        if self.cache_read_tokens == 0 {
             return 0.0;
         }
-        let denom = (cached + self.total_tokens).max(1) as f64;
+        let denom = self.prompt_tokens.max(1) as f64;
         self.cache_read_tokens as f64 / denom
     }
 
@@ -202,6 +228,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(p.cache_hit_ratio(), 0.0);
+    }
+
+    #[test]
+    fn cache_hit_ratio_uses_prompt_tokens_denominator() {
+        // OpenAI semantics: prompt_tokens is the total input (includes cached).
+        // cache_read=800, prompt=1000 → 0.8 (NOT the old 800/(800+1000)=0.44).
+        let p = EfficiencyProfile {
+            total_tokens: 1050,
+            prompt_tokens: 1000,
+            cache_read_tokens: 800,
+            ..Default::default()
+        };
+        assert!((p.cache_hit_ratio() - 0.8).abs() < 1e-9);
     }
 
     #[test]
