@@ -1098,18 +1098,40 @@ private class ChatViewModel(private val activity: ComponentActivity) {
             error = null
             lastUserTask = null
             val msgs = s.messages()
+            // Mirror the live-streaming fold (and macOS rebuildEntries): a
+            // single user turn often persists several assistant messages
+            // (tool-call preludes + final answer). The chat view renders the
+            // whole turn as ONE bubble, so consecutive assistant messages
+            // (no intervening user) merge here — issue #17. system / tool
+            // messages between assistants don't break a turn; an empty-text
+            // assistant (tool-call-only) renders no bubble.
+            var pending: AssistantItem? = null
             for (m in msgs) {
                 when (m.role) {
-                    "user" -> if (m.text.isNotBlank()) { items.add(UserItem(m.text, nextKey())); lastUserTask = m.text }
-                    "assistant" -> if (m.text.isNotBlank()) {
-                        val item = AssistantItem(nextKey())
-                        item.text = m.text
-                        item.done = true
-                        items.add(item)
+                    "user" -> {
+                        pending?.let { items.add(it) }
+                        pending = null
+                        if (m.text.isNotBlank()) {
+                            items.add(UserItem(m.text, nextKey())); lastUserTask = m.text
+                        }
                     }
-                    else -> { /* system / tool — not replayed */ }
+                    "assistant" -> {
+                        if (m.text.isBlank()) continue
+                        val p = pending
+                        if (p != null) {
+                            if (p.text.isNotEmpty()) p.text += "\n"
+                            p.text += m.text
+                        } else {
+                            val item = AssistantItem(nextKey())
+                            item.text = m.text
+                            item.done = true
+                            pending = item
+                        }
+                    }
+                    else -> { /* system / tool — not replayed, don't break the turn */ }
                 }
             }
+            pending?.let { items.add(it) }
             tick()
         } catch (e: Throwable) {
             Log.e(TAG, "loadSession failed", e)

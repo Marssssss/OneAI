@@ -29,6 +29,76 @@ use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::MemoryPersistence;
 use oneai_core::{Conversation, MemoryEntry, MemoryFact, SessionInfo};
 
+/// Folded "visible bubble" count for a slice of stored messages, mirroring
+/// the chat-view render fold (Swift `rebuildEntries` / Android `loadSession`
+/// / Windows `LoadSession`) and the live-streaming fold in
+/// `ChatViewModel::handle`.
+///
+/// A single user turn often persists SEVERAL assistant messages — each
+/// tool-call iteration's prelude ("Let me search…") is its own stored message,
+/// plus a final-answer message. The chat view renders the whole turn as ONE
+/// bubble (live streaming folds every `streamChunk`/`toolCall`/`toolResult`/
+/// `directAnswer` of the run into one `AssistantItem`; reload folds the same).
+/// Counting each stored assistant message therefore made the sidebar "N 条"
+/// exceed the visible bubble count — issue #17:
+/// "一轮中的多次输出也单独计算了".
+///
+/// Consecutive assistant messages with the same speaker (no intervening user
+/// message) form one bubble. `tool`/`system` messages between assistants do
+/// NOT break a group (they belong to the same turn); an empty-text assistant
+/// (tool-call-only, no prelude) is part of the current group but adds no
+/// bubble; a speaker change (group chat) or a user message starts a new group.
+/// Only non-empty-text `user` messages and assistant groups containing text
+/// are counted — matching the render filter that drops `system` / `tool` /
+/// empty rows.
+fn folded_display_count(msgs: &[oneai_core::Message]) -> usize {
+    use oneai_core::Role;
+    let mut count = 0usize;
+    let mut group_open = false; // currently building an assistant bubble
+    let mut group_speaker: Option<String> = None;
+
+    for m in msgs {
+        match m.role {
+            Role::User => {
+                if group_open {
+                    count += 1; // close the open assistant bubble
+                    group_open = false;
+                }
+                if !m.text_content().trim().is_empty() {
+                    count += 1; // the user bubble itself
+                }
+                group_speaker = None;
+            }
+            Role::Assistant => {
+                if m.text_content().trim().is_empty() {
+                    // Tool-call-only assistant (no prelude text) — belongs to
+                    // the current turn but renders no bubble of its own; do
+                    // not break the group.
+                    continue;
+                }
+                let speaker = m.metadata.get("speaker").cloned();
+                if !group_open {
+                    group_open = true;
+                    group_speaker = speaker;
+                } else if speaker != group_speaker {
+                    // Speaker changed (group chat) — flush the previous bubble
+                    // and start a new one.
+                    count += 1;
+                    group_speaker = speaker;
+                }
+                // else: same speaker, same turn — accumulate into the open
+                // bubble (its text was already counted on open).
+            }
+            // `tool` / `system` / unknown — neither break the group nor count.
+            _ => {}
+        }
+    }
+    if group_open {
+        count += 1; // close a trailing assistant bubble
+    }
+    count
+}
+
 // ─── SqliteSessionStore ─────────────────────────────────────────────────────
 
 /// SQLite-backed session store for conversations, STM, and LTM persistence.
@@ -825,93 +895,97 @@ impl MemoryPersistence for SqliteSessionStore {
 
     async fn list_conversations(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.open_connection()?;
-        // Exclude discarded-prefix archive snapshots — these are internal
-        // compression artifacts (`{session}{DISCARDED_SNAPSHOT_MARKER}{uuid}`),
-        // not user-facing conversations. Without this filter, every
-        // compression on a long conversation spawns a phantom "new session"
-        // in the foreign UI's sidebar (the discarded prefix, starting with
-        // an early user turn, shows up as a brand-new chat). `load_conversation`
-        // still resolves them by exact id for the audit / memory_search path.
-        let discard_pat = format!("%{}%", oneai_core::DISCARDED_SNAPSHOT_MARKER);
-        // `child_pat` matches a session's OWN discarded snapshots — used to
-        // sum their counts back into that session's sidebar number.
-        let child_pat = format!("{}%", oneai_core::DISCARDED_SNAPSHOT_MARKER);
-        // Count ONLY the messages a UI actually renders. The macOS/Android
-        // chat views replay user + non-empty-text assistant turns (system /
-        // tool / empty-assistant messages are filtered out — see the Swift
-        // `rebuildEntries` / Android `loadSession`). Counting every stored
-        // message here made the sidebar "N 条" diverge from the visible
-        // bubble count, especially in group-chat (multi-speaker) and
-        // tool-heavy turns. The filter below mirrors that render filter
-        // exactly: role IN (user, assistant) AND at least one non-whitespace
-        // text block (== `Message::text_content().trim().is_empty()` negated).
+        // Sidebar "N 条" must equal the number of bubbles the chat view
+        // renders. A single user turn often spans several STORED assistant
+        // messages — each tool-call iteration's prelude ("Let me search…") is
+        // persisted as its own assistant message, plus a final-answer
+        // message. The streaming UI folds all of them into ONE bubble per
+        // turn (one `AssistantItem` accumulates every `streamChunk` /
+        // `toolCall` / `toolResult` / `directAnswer` of the run — see
+        // `ChatViewModel::handle`); the reload path folds the same way (Swift
+        // `rebuildEntries`, Android `loadSession`, Windows `LoadSession`).
+        // Counting each stored assistant message made the sidebar diverge
+        // from the visible bubble count — issue #17:
+        // "会话显示的消息条数错误，多于实际对话数，可能是将一轮中的
+        //  多次输出也单独计算了".
         //
-        // CRUCIAL: a session's `messages_json` only holds the LIVE
+        // We therefore count in Rust by folding consecutive assistant
+        // messages (same speaker, no intervening user) into one group via
+        // `folded_display_count` — mirroring the render fold. (The prior
+        // pure-SQL `json_each` count counted each assistant message
+        // individually.)
+        //
+        // As in the #14 fix, a session's `messages_json` only holds the LIVE
         // (post-compression) tail; older turns live in discarded-prefix
-        // snapshots (`{id}{MARKER}{uuid}` rows). The displayed transcript
-        // merges live + snapshots (see `MemoryManager::transcript_page`),
-        // so the sidebar count must too — otherwise a long, compressed
-        // session shows only its tail count (e.g. "8 条") while the chat
-        // renders dozens of bubbles. The correlated subquery sums the
-        // bubble counts of all snapshots whose id starts with
-        // `{this_session}{MARKER}`.
+        // snapshots (`{id}{DISCARDED_SNAPSHOT_MARKER}{uuid}` rows). The
+        // displayed transcript merges live + snapshots, so the count must sum
+        // the folded counts of the live row AND its snapshots.
+        //
+        // NOTE: this display count is distinct from `snapshot_display_counts`
+        // (raw non-`system` message count) and `transcript_total` — both feed
+        // paging offset arithmetic and must stay raw to align with message
+        // positions; only the sidebar uses the folded count.
         let mut stmt = conn
             .prepare(
-                "SELECT c.id, c.created_at, c.updated_at, c.title, \
-                        (SELECT count(*) FROM json_each(c.messages_json) m \
-                         WHERE json_extract(m.value, '$.role') IN ('user', 'assistant') \
-                           AND EXISTS (SELECT 1 FROM json_each(json_extract(m.value, '$.content')) k \
-                                       WHERE json_extract(k.value, '$.type') = 'text' \
-                                         AND trim(coalesce(json_extract(k.value, '$.text'), '')) != '')) \
-                        + COALESCE((SELECT SUM( \
-                                      (SELECT count(*) FROM json_each(s.messages_json) m \
-                                       WHERE json_extract(m.value, '$.role') IN ('user', 'assistant') \
-                                         AND EXISTS (SELECT 1 FROM json_each(json_extract(m.value, '$.content')) k \
-                                                     WHERE json_extract(k.value, '$.type') = 'text' \
-                                                       AND trim(coalesce(json_extract(k.value, '$.text'), '')) != '')) \
-                                    ) \
-                                    FROM conversations s \
-                                    WHERE s.id LIKE (c.id || ?2)), 0) \
-                           AS message_count \
-                 FROM conversations c \
-                 WHERE c.id NOT LIKE ?1 \
-                 ORDER BY c.updated_at DESC",
+                "SELECT id, created_at, updated_at, title, messages_json \
+                 FROM conversations ORDER BY updated_at DESC",
             )
             .map_err(|e| {
                 OneAIError::Persistence(format!("Failed to prepare conversation list query: {}", e))
             })?;
-
         let rows = stmt
-            .query_map(rusqlite::params![discard_pat, child_pat], |row| {
+            .query_map([], |row| {
                 let id: String = row.get(0)?;
                 let created_at: String = row.get(1)?;
                 let updated_at: String = row.get(2)?;
                 let title: Option<String> = row.get(3)?;
-                let message_count: i64 = row.get(4).unwrap_or(0);
-                Ok((id, created_at, updated_at, message_count as usize, title))
+                let messages_json: String = row.get(4)?;
+                Ok((id, created_at, updated_at, title, messages_json))
             })
             .map_err(|e| {
                 OneAIError::Persistence(format!("Failed to execute conversation list query: {}", e))
             })?;
 
-        let mut sessions = Vec::new();
+        // Bucket discarded-prefix snapshots under their parent session id.
+        // A snapshot id is `{parent}{MARKER}{uuid}`; the parent is the prefix
+        // before the first marker (session ids are uuids and never contain it).
+        let mut snapshots: HashMap<String, Vec<Vec<oneai_core::Message>>> = HashMap::new();
+        // Preserve SQL order (updated_at DESC) for the returned list.
+        let mut tops: Vec<(String, String, String, Option<String>, usize)> = Vec::new();
+
         for row in rows {
-            let (id, created_at_str, updated_at_str, message_count, title) = row.map_err(|e| {
+            let (id, created_at_str, updated_at_str, title, messages_json) = row.map_err(|e| {
                 OneAIError::Persistence(format!("Failed to read conversation row: {}", e))
             })?;
+            // Tolerate legacy/corrupt blobs: an unparseable row contributes
+            // 0 rather than hiding every conversation from the sidebar.
+            let msgs: Vec<oneai_core::Message> =
+                serde_json::from_str(&messages_json).unwrap_or_default();
+            if id.contains(oneai_core::DISCARDED_SNAPSHOT_MARKER) {
+                if let Some(parent) = id.split(oneai_core::DISCARDED_SNAPSHOT_MARKER).next() {
+                    snapshots.entry(parent.to_string()).or_default().push(msgs);
+                }
+            } else {
+                let count = folded_display_count(&msgs);
+                tops.push((id, created_at_str, updated_at_str, title, count));
+            }
+        }
+
+        let mut sessions = Vec::with_capacity(tops.len());
+        for (id, created_at_str, updated_at_str, title, mut count) in tops {
+            if let Some(children) = snapshots.get(&id) {
+                for child in children {
+                    count += folded_display_count(child);
+                }
+            }
             let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
             let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
-
             sessions.push(SessionInfo::with_title(
-                id,
-                created_at,
-                updated_at,
-                message_count,
-                title,
+                id, created_at, updated_at, count, title,
             ));
         }
 
@@ -1378,6 +1452,106 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         // Most recently updated should be first
         assert_eq!(sessions[0].message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_list_folds_multi_output_round() {
+        // Regression for issue #17: a single user turn persists several
+        // assistant messages (tool-call preludes + final answer, with tool
+        // results between). The chat view folds the whole turn into ONE
+        // assistant bubble, so the sidebar "N 条" must say 2 (1 user + 1
+        // assistant), not 4 (1 user + 3 assistant messages).
+        use std::collections::HashMap;
+        let (store, _dir) = make_store();
+        let mk_asst_with_call = |text: &str, call_id: &str| oneai_core::Message {
+            role: oneai_core::Role::Assistant,
+            content: vec![
+                oneai_core::ContentBlock::Text {
+                    text: text.to_string(),
+                },
+                oneai_core::ContentBlock::ToolCall {
+                    id: call_id.to_string(),
+                    name: "search".to_string(),
+                    args: "{}".to_string(),
+                },
+            ],
+            metadata: HashMap::new(),
+        };
+        let mk_asst_empty_call = |call_id: &str| oneai_core::Message {
+            role: oneai_core::Role::Assistant,
+            content: vec![oneai_core::ContentBlock::ToolCall {
+                id: call_id.to_string(),
+                name: "search".to_string(),
+                args: "{}".to_string(),
+            }],
+            metadata: HashMap::new(),
+        };
+
+        // Round 1: user + two text preludes (with tool calls) + final answer,
+        // tool results between. Renders as 1 user + 1 assistant bubble = 2.
+        let mut conv = Conversation::with_id("sess17".to_string());
+        conv.add_message(oneai_core::Message::user("please summarize X".to_string()));
+        conv.add_message(mk_asst_with_call("Let me look that up.", "c1"));
+        conv.add_message(oneai_core::Message::tool_result("c1".into(), "...".into()));
+        conv.add_message(mk_asst_with_call("Checking another source.", "c2"));
+        conv.add_message(oneai_core::Message::tool_result("c2".into(), "...".into()));
+        conv.add_message(oneai_core::Message::assistant(
+            "Here is the summary.".to_string(),
+        ));
+        // Round 2: a tool-call-only (empty-text) prelude before the final
+        // answer — must not open an extra bubble.
+        conv.add_message(oneai_core::Message::user("and Y?".to_string()));
+        conv.add_message(mk_asst_empty_call("c3"));
+        conv.add_message(oneai_core::Message::tool_result("c3".into(), "...".into()));
+        conv.add_message(oneai_core::Message::assistant("Y summary".to_string()));
+        store.save_conversation("sess17", &conv).await.unwrap();
+
+        let sessions = store.list_conversations().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        // 2 rounds × (1 user + 1 folded assistant) = 4, NOT the 8 stored
+        // assistant/user messages.
+        assert_eq!(
+            sessions[0].message_count, 4,
+            "one round's multiple assistant outputs must fold into one bubble"
+        );
+
+        // Direct unit check of the fold helper.
+        assert_eq!(folded_display_count(&conv.messages), 4);
+    }
+
+    #[test]
+    fn folded_display_count_groups_by_speaker() {
+        // Group chat: same-speaker consecutive assistants merge; a speaker
+        // change opens a new bubble (mirrors live `ChatViewModel::handle`
+        // creating a new `AssistantItem` on speaker change).
+        use std::collections::HashMap;
+        let asst = |speaker: Option<&str>, text: &str| oneai_core::Message {
+            role: oneai_core::Role::Assistant,
+            content: vec![oneai_core::ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            metadata: match speaker {
+                Some(s) => HashMap::from([("speaker".to_string(), s.to_string())]),
+                None => HashMap::new(),
+            },
+        };
+        // user, A, B, A  → 1 user + 3 assistant bubbles = 4
+        let msgs = vec![
+            oneai_core::Message::user("topic".to_string()),
+            asst(Some("A"), "idea"),
+            asst(Some("B"), "critique"),
+            asst(Some("A"), "revise"),
+        ];
+        assert_eq!(folded_display_count(&msgs), 4);
+
+        // user, A, A, A (same speaker) → 1 user + 1 assistant bubble = 2
+        let msgs2 = vec![
+            oneai_core::Message::user("topic".to_string()),
+            asst(Some("A"), "p1"),
+            asst(Some("A"), "p2"),
+            asst(Some("A"), "p3"),
+        ];
+        assert_eq!(folded_display_count(&msgs2), 2);
     }
 
     #[tokio::test]

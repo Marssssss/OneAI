@@ -868,33 +868,64 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Build a `[ChatEntry]` from a page of `MessageView`s, mirroring the
-    /// render filter: only non-empty `user` / `assistant` rows are replayed
-    // (system / tool / empty-text messages are dropped). `lastTask` is bumped
-    /// to the last user message seen, for `retryLast`.
+    /// live-streaming fold: a single user turn often persists several
+    /// assistant messages (tool-call preludes + final answer), but live
+    /// `handle(_:)` folds the whole run into ONE `AssistantItem` (one turn
+    /// accumulates every `streamChunk` / `toolCall` / `toolResult` /
+    /// `directAnswer`). Replay the same fold here so a reloaded session shows
+    /// the same bubble count the user saw live — and the same number the
+    /// sidebar reports (issue #17: 一轮中的多次输出不应单独成泡). Consecutive
+    /// assistant messages with the same speaker merge into one bubble (text
+    /// concatenated with a newline); a speaker change or a user message
+    /// starts a new bubble. `tool` / `system` messages between assistants
+    /// don't break a turn. `lastTask` is bumped to the last user message.
     private static func rebuildEntries(
         from msgs: [MessageView],
         lastTask: inout String?
     ) -> [ChatEntry] {
         var rebuilt: [ChatEntry] = []
         rebuilt.reserveCapacity(msgs.count)
+        var pending: AssistantItem? = nil
+        // Flush the in-progress assistant bubble (if any) before a user
+        // message, a speaker change, or the end of the list.
+        func flushPending() {
+            if let item = pending {
+                rebuilt.append(.assistant(item))
+                pending = nil
+            }
+        }
         for m in msgs {
             switch m.role {
             case "user":
+                flushPending()
                 if !m.text.isEmpty {
                     rebuilt.append(.user(UserItem(text: m.text)))
                     lastTask = m.text
                 }
             case "assistant":
-                if !m.text.isEmpty {
+                if m.text.isEmpty {
+                    // Tool-call-only assistant (no prelude) — part of the
+                    // current turn, renders no bubble of its own; don't break it.
+                    break
+                }
+                if let item = pending, item.speakerId == m.speaker {
+                    // Same turn, same speaker — accumulate the text.
+                    if !item.text.isEmpty { item.text += "\n" }
+                    item.text += m.text
+                } else {
+                    // New turn or speaker change — flush the previous bubble
+                    // and start a fresh one.
+                    flushPending()
                     let item = AssistantItem()
                     item.speakerId = m.speaker   // nil for single-agent
                     item.text = m.text
                     item.done = true
-                    rebuilt.append(.assistant(item))
+                    pending = item
                 }
-            default: break // system / tool — not replayed
+            default: break // system / tool — not replayed, don't break the turn
             }
         }
+        flushPending()
         return rebuilt
     }
 

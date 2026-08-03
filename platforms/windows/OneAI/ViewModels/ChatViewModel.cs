@@ -333,19 +333,45 @@ public class ChatViewModel : ObservableObject
         Error = null;
         _lastUserTask = null;
         var json = OneAiNative.PtrToUtf8(OneAiNative.SessionMessages(_session));
+        // Fold consecutive same-speaker assistant messages into one bubble —
+        // a single user turn persists several assistant messages (tool-call
+        // preludes + final answer), but the chat view renders the whole turn
+        // as ONE bubble (issue #17, mirrors macOS rebuildEntries / Android
+        // loadSession). system / tool messages between assistants don't break
+        // a turn; an empty-text (tool-call-only) assistant renders no bubble.
+        AssistantItem? pending = null;
         foreach (var m in ChatMessage.ParseArray(json))
         {
-            if (m.Role == "user" && !string.IsNullOrWhiteSpace(m.Text))
-            { Items.Add(new UserItem(m.Text)); _lastUserTask = m.Text; }
-            else if (m.Role == "assistant" && !string.IsNullOrWhiteSpace(m.Text))
+            if (m.Role == "user")
             {
-                // Group-chat resume isn't fully wired in v1 (matches macOS); for
-                // replayed assistant messages, surface the speaker id as the name.
-                var (nm, col, av) = ScenarioStore.SpeakerMeta(m.Speaker ?? "", null);
-                var a = new AssistantItem { Text = m.Text, Done = true, SpeakerId = m.Speaker, SpeakerName = nm, SpeakerColor = col, SpeakerAvatar = av };
-                Items.Add(a);
+                if (pending != null) { Items.Add(pending); pending = null; }
+                if (!string.IsNullOrWhiteSpace(m.Text))
+                { Items.Add(new UserItem(m.Text)); _lastUserTask = m.Text; }
             }
+            else if (m.Role == "assistant")
+            {
+                if (string.IsNullOrWhiteSpace(m.Text)) continue; // tool-call-only, no bubble
+                if (pending != null && pending.SpeakerId == m.Speaker)
+                {
+                    // Same turn, same speaker — accumulate the text.
+                    if (!string.IsNullOrEmpty(pending.Text)) pending.Text += "\n";
+                    pending.Text += m.Text;
+                }
+                else
+                {
+                    // New turn or speaker change — flush the previous bubble.
+                    if (pending != null) Items.Add(pending);
+                    var (nm, col, av) = ScenarioStore.SpeakerMeta(m.Speaker ?? "", null);
+                    pending = new AssistantItem
+                    {
+                        Text = m.Text, Done = true, SpeakerId = m.Speaker,
+                        SpeakerName = nm, SpeakerColor = col, SpeakerAvatar = av,
+                    };
+                }
+            }
+            // else: empty assistant / system / tool — don't break the turn
         }
+        if (pending != null) Items.Add(pending);
         StreamTick++;
     }
 
