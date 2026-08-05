@@ -1,5 +1,7 @@
 # OneAI Working-State 与跨 Session 续接机制白皮书
 
+> 事件溯源的 per-task 文件日志 + 内存投影 + 每步增量持久化 + 跨 session index 发现的工作状态引擎：任务目标/步骤/决策/卡点作为 append-only JSONL 事件流落盘，热路径零文件 IO 读内存投影，新 session 读一次 index 即 surface 上次未完成工作；行为由 DomainPack 第 7 层 `MemoryProfile.working_state` 声明。
+
 > 版本：对应代码库 1.1.0 线。本文基于对 `crates/oneai-core`、`oneai-persistence`、`oneai-agent`、`oneai-app`、`oneai-domain` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。设计依据见同目录 `docs/agent-working-state-and-cross-session-resume.md`（调研参考）与 `~/.claude/plans/vectorized-hopping-willow.md`（落地方案）。
 
 ---
@@ -203,3 +205,28 @@ OneAI 的工作状态管理是一个 **「事件溯源的 per-task 文件日志 
 - **原则派 + 投影可重建**：append-only 事件日志是 source of truth；内存 working state 是从事件 derive 的 projection，随时可 rebuild。读路径走内存缓存（不每次 replay），崩溃后用事件重建。
 
 参考来源：Claude Code session storage（JSONL append-only）、TASKS.md pattern（RALPH / agent-session-resume）、参考文档 §7.1 state derived from events、§8.1/8.2/8.4 失败模式、§10.2-10.3 working-state 文件启动注入。完整调研见 `docs/agent-working-state-and-cross-session-resume.md`。
+
+---
+
+## 依赖关系
+
+| 方向 | 谁 | 内容 |
+|---|---|---|
+| 上游 | `oneai-core` | `TaskEvent`/`TaskEventType`/`WorkingState`/`TaskId` 共享类型 |
+| 上游 | `oneai-persistence` | `FileWorkingStateStore`（append-only JSONL + `tasks.index.json` + compaction）|
+| 上游 | `oneai-domain` | `MemoryProfile.working_state` 策略（折进第 7 层，不新增 DomainPack 层）|
+| 下游 | `oneai-agent` | `LoopState.working_state` 内存投影（热读路径零 IO）+ `OnResume` 对账 + cadence hydrate |
+| 下游 | `oneai-app` | `AppSession` 启动 surface `[Unfinished Work From Previous Sessions]` + `tasks continue <id>` 绑定 |
+| 横切接入 | DomainPack 第⑦层 | `MemoryProfile.working_state` 声明持久化策略 |
+
+---
+
+## 深入阅读
+
+- [memory-mechanism.md](memory-mechanism.md) —— 记忆通路（事实/召回），与 working-state 分属不同持久化通路
+- [persistence-mechanism.md](persistence-mechanism.md) —— SQLite（会话/LTM）+ 文件事件日志双通路
+- [domain-pack-mechanism.md](domain-pack-mechanism.md) —— 第 7 层 `MemoryProfile.working_state` 声明
+- [multi-agent-mechanism.md](multi-agent-mechanism.md) —— `LoopState` 投影在 AgentLoop 中的消费
+- 调研参考：`docs/agent-working-state-and-cross-session-resume.md`
+- 源码：`crates/oneai-persistence/src/`（文件事件日志）+ `crates/oneai-agent/src/loop_state.rs`（投影）
+- [CLAUDE.md — Working state & cross-session resume](../CLAUDE.md)

@@ -1,5 +1,7 @@
 # OneAI Multi-Agent Mechanism (Whitepaper)
 
+> A Claude-Code-style dynamic Agentic Loop + model-driven delegate/switch_paradigm meta-tools + LangGraph-style cyclic StateGraph closed-loop + engine-level GroupChat primitive + compression-coupled memory multi-agent engine: each turn the model decides direct-answer / tool-call / delegate-to-sub-agent / switch-paradigm — not a fixed pipeline; orchestration behavior is declared by DomainPack.
+
 > Version: corresponds to the 1.1.0 line of the codebase. This document is written from a file-by-file review of the source of `crates/oneai-agent`, `oneai-workflow`, `oneai-domain`, `oneai-memory`, and `oneai-core`; mechanisms are annotated with `file:line` for verification. At the end, it is benchmarked against state-of-the-art multi-agent systems (LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code subagents / Google A2A / MCP).
 >
 > Note: At the time of writing this environment could not access the internet for retrieval; the state-of-the-art benchmarking section is based on training knowledge up to early 2025, and checkable paper/project names are marked where possible; exact version numbers are subject to each project's latest release.
@@ -394,3 +396,31 @@ Synthesizing the benchmarking, OneAI has independent designs versus the state of
 | DomainPack | `crates/oneai-domain/src/domain_pack.rs:50` |
 
 *This document is kept in sync with the `0.2.0`/1.0.0 code line. When mechanisms change, update the file:line index accordingly.*
+
+---
+
+## Dependencies
+
+| Direction | Who | What |
+|---|---|---|
+| Upstream | `oneai-core` | `LlmProvider`/`Tool`/`InteractionGate`/`GraphDecision`/`Conversation`/`Budget` |
+| Upstream | `oneai-workflow` | `StateGraph` + `StateGraphExecutor` + `GraphActionExecutor` trait (graph closed-loop seam) |
+| Upstream | `oneai-memory` | `MemoryManager` (recall injection) + compression-coupled extraction |
+| Upstream | `oneai-domain` | `ParadigmStrategies`/`DomainPack`/`GroupChat` presets |
+| Downstream | `oneai-app` | `AppBuilder` wires `AgentLoop` + paradigm config + GroupChat session |
+| Downstream | `oneai-platform-*` | exposes AgentLoop + GroupChat to native targets via FFI |
+| Cross-cutting | DomainPack layer 4 | `ParadigmStrategies` declares Plan/ReAct/Reflect/Explore graph flows |
+| Cross-cutting | meta-tool | `delegate`/`switch_paradigm` injected into the model; model-driven delegation and paradigm switch |
+
+---
+
+## Further reading
+
+- [workflow-mechanism](workflow-mechanism_EN.md) — StateGraph ↔ AgentLoop closed loop, `GraphActionExecutor` reverse bridge
+- [context-management-mechanism](context-management-mechanism_EN.md) — sub-agent context isolation + parallel dependency-aware summary injection
+- [domain-pack-mechanism](domain-pack-mechanism_EN.md) — layer 4 ParadigmStrategies, GroupChat presets
+- [memory-mechanism](memory-mechanism_EN.md) — recall injection + compression-coupled extraction
+- [tool-mechanism](tool-mechanism_EN.md) — `execute_tool_calls` + domain permission resolution
+- [a2a-mechanism](a2a-mechanism_EN.md) — cross-process inter-agent collaboration (the out-of-process peer of GroupChat)
+- Source: `crates/oneai-agent/src/` (27 files / ~23.8K LOC)
+- [CLAUDE.md — Architecture: AgentLoop](../CLAUDE.md)

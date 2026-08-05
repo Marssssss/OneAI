@@ -74,7 +74,7 @@ flowchart TB
             Parser["oneai-parser<br/>3-layer output defense: constrained decode → fuzzy repair → self-correct re-prompt"]
         end
         subgraph F2 ["Tools · skills · RAG"]
-            Tool["oneai-tool<br/>Registry + 15 built-in tools + MCP client + InteractionGate"]
+            Tool["oneai-tool<br/>Registry + 16 built-in tools + MCP client + InteractionGate"]
             Skill["oneai-skill<br/>selector + registry + convention-dir discovery"]
             Rag["oneai-rag<br/>EmbeddingService + hybrid retrieval + auto embedding"]
         end
@@ -119,7 +119,7 @@ flowchart TB
 | `oneai-provider` | LLM provider (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter |
 | `oneai-parser` | 3-layer output-parser defense |
 | `oneai-memory` | Memory system (3 tiers + compression-coupled extraction + persistence, wired to the `oneai-vector` default stack) |
-| `oneai-tool` | Tool registry, MCP client, InteractionGate, executor, 15 built-in tools |
+| `oneai-tool` | Tool registry, MCP client, InteractionGate, executor, 16 built-in tools |
 | `oneai-skill` | Skill selector + registry + built-in domain skills + lifecycle |
 | `oneai-domain` | DomainPack system (7 layers), CodingPack, market, spec validator |
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect/Explore + delegate/switch_paradigm meta-tools + GroupChat |
@@ -155,12 +155,19 @@ flowchart TB
 | Working state | [working-state-mechanism_EN.md](working-state-mechanism_EN.md) | File event log + projection + cross-session continuation |
 | DomainPack | [domain-pack-mechanism_EN.md](domain-pack-mechanism_EN.md) | 7-layer declarative domain config, one-line switch |
 | Permissions / InteractionGate | [permission-mechanism_EN.md](permission-mechanism_EN.md) | 3-tier permissions + unified 5-point gate |
-| Tool system | [tool-mechanism_EN.md](tool-mechanism_EN.md) | Tool trait + 15 tools + Footprint ladder |
+| Tool system | [tool-mechanism_EN.md](tool-mechanism_EN.md) | Tool trait + 16 tools + Footprint ladder |
+| Skill | [skill-mechanism_EN.md](skill-mechanism_EN.md) | Progressive disclosure + convention discovery + lifecycle + curator |
 | Provider / routing / parser | [provider-mechanism_EN.md](provider-mechanism_EN.md) | Provider abstraction + fallback pool + SmartRouter + 3-layer parser |
 | RAG / Embedding | [rag-mechanism_EN.md](rag-mechanism_EN.md) | EmbeddingService + auto-probe + default retrieval stack |
 | Workflow / StateGraph | [workflow-mechanism_EN.md](workflow-mechanism_EN.md) | DAG + cyclic graph, closed-loop with AgentLoop |
 | Eval | [eval-mechanism_EN.md](eval-mechanism_EN.md) | Eval framework + SWE-bench three-axis |
-| Extensions (A2A/WASM/Studio/MCP/Scheduler/Gateway/Supervisor) | [extension-mechanism_EN.md](extension-mechanism_EN.md) | Outward exposure / sandbox / visualization / scheduling / message intake |
+| A2A | [a2a-mechanism_EN.md](a2a-mechanism_EN.md) | Inter-agent protocol SDK (client + server + DomainPack→AgentCard) |
+| WASM sandbox | [wasm-mechanism_EN.md](wasm-mechanism_EN.md) | Wasmtime sandbox + WasmTool + fuel/epoch limiting |
+| MCP | [mcp-mechanism_EN.md](mcp-mechanism_EN.md) | Server host + client + plugin registry (bidirectional peer) |
+| Studio | [studio-mechanism_EN.md](studio-mechanism_EN.md) | axum HTTP+WS + D3 visualization + checkpoint time-travel |
+| Scheduler | [scheduler-mechanism_EN.md](scheduler-mechanism_EN.md) | In-memory timers + durable cron + CAS at-most-once |
+| Gateway | [gateway-mechanism_EN.md](gateway-mechanism_EN.md) | Message-platform bridge (Feishu/WeChat/Loopback) + streaming coalescer |
+| Supervisor | [supervisor-mechanism_EN.md](supervisor-mechanism_EN.md) | Headless daemon + instance registry + crash recovery + IPC |
 | Tracing | [trace-mechanism_EN.md](trace-mechanism_EN.md) | OpenInference-compatible + OTEL export |
 | Persistence | [persistence-mechanism_EN.md](persistence-mechanism_EN.md) | SQLite + file event log, two paths |
 | Cross-platform | [cross-platform-mechanism_EN.md](cross-platform-mechanism_EN.md) | UniFFI + extern C facade, one core six targets |

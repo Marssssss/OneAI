@@ -1,5 +1,7 @@
 # OneAI 上下文管理机制白皮书
 
+> 持久日志/瞬时装配分离 + 抗压缩重注入 + token-预算驱动终止 + 三层模型上下文解析 + 四策略裁剪 + 压缩耦合抽取 + 缓存感知装配的上下文引擎：`state.conversation` 是唯一持久日志，每轮在其克隆上瞬时重建装配，被压缩掉的状态靠下一轮重注入而非靠压缩器保留。
+
 > 版本：对应代码库 `0.2.0` / 1.0.0 线。本文基于对 `crates/oneai-core`（`budget.rs`/`context_manager.rs`/`context_accounting.rs`/`token_counter.rs`/`model_context.rs`）、`crates/oneai-agent`（`agent_loop.rs`/`context_assembler.rs`/`sub_agent.rs`）、`crates/oneai-memory`（`compression.rs`/`core_memory_source.rs`）、`crates/oneai-domain`（`context_source.rs`/`compression_template.rs`）、`crates/oneai-provider`（`anthropic.rs`）源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。姊妹篇《记忆机制白皮书》(`docs/memory-mechanism.md`) 聚焦记忆三层与召回，本文聚焦**上下文窗口的装配、预算、解析、裁剪、压缩、锚定、缓存与多代理隔离**。
 
 ---
@@ -402,3 +404,29 @@ OneAI 的上下文管理**在工程闭环上达到一线 agent 框架水平**，
 | 并行依赖感知调度 | `crates/oneai-agent/src/parallel_executor.rs` |
 | 范式/委托 meta-tool | `crates/oneai-agent/src/meta_tool.rs` |
 | 姊妹篇 | `docs/memory-mechanism.md` |
+
+---
+
+## 依赖关系
+
+| 方向 | 谁 | 内容 |
+|---|---|---|
+| 上游 | `oneai-core` | `ContextBudgetManager`/`ContextManager`/`ContextAccounting`/`ModelContextResolver`/`TokenCounter`/`ContextCompressorTrait`（依赖反转 trait）|
+| 上游 | `oneai-memory` | `ContextCompressor` + `FactExtractor`（压缩耦合抽取）+ `CoreMemorySource`（抗压缩注入源）|
+| 上游 | `oneai-domain` | `ContextSource` trait + `RefreshPolicy`、`CompressionTemplate` |
+| 上游 | `oneai-provider` | Anthropic prompt cache 断点（`anthropic.rs:179-262`）|
+| 下游 | `oneai-agent` | `AgentLoop` 每轮装配管线（`context_assembler.rs`）、sub-agent 上下文隔离、并行依赖感知摘要注入 |
+| 下游 | `oneai-app` | `AppBuilder` 装配默认 `ModelContextResolver` + 三层解析 |
+| 横切接入 | DomainPack 第⑤层 | `CompressionTemplate` 声明压缩策略；第②层 `ContextSource` 按 `RefreshPolicy` 注入 |
+
+---
+
+## 深入阅读
+
+- [memory-mechanism.md](memory-mechanism.md) —— 压缩耦合抽取的下游：被丢弃的轮次提炼为 `MemoryFact`
+- [multi-agent-mechanism.md](multi-agent-mechanism.md) —— sub-agent 上下文隔离 + 并行委托的摘要注入
+- [domain-pack-mechanism.md](domain-pack-mechanism.md) —— 第②层 ContextSource / 第⑤层 CompressionTemplate
+- [provider-mechanism.md](provider-mechanism.md) —— 模型上下文三层解析（L2 服务商 API 探测）+ prompt cache
+- [working-state-mechanism.md](working-state-mechanism.md) —— 任务级状态持久化（与上下文窗口分属不同通路）
+- 源码：`crates/oneai-core/src/{budget,context_manager,context_accounting,token_counter,model_context}.rs` + `crates/oneai-agent/src/context_assembler.rs` + `crates/oneai-memory/src/compression.rs`
+- [CLAUDE.md — Architecture: 上下文管理](../CLAUDE.md)

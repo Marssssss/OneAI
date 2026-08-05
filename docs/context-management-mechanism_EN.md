@@ -1,5 +1,7 @@
 # OneAI Context Management Mechanism (Whitepaper)
 
+> A durable-log / ephemeral-assembly separation + anti-compression re-injection + token-budget-driven termination + 3-layer model-context resolution + four trimming strategies + compression-coupled extraction + cache-aware assembly context engine: `state.conversation` is the only durable log, the assembly is rebuilt ephemerally each turn on a clone, and compressed-away state is re-injected next turn rather than retained by the compressor.
+
 > Version: corresponds to codebase `0.2.0` / 1.0.0 line. This document is written from a file-by-file review of the source code of `crates/oneai-core` (`budget.rs`/`context_manager.rs`/`context_accounting.rs`/`token_counter.rs`/`model_context.rs`), `crates/oneai-agent` (`agent_loop.rs`/`context_assembler.rs`/`sub_agent.rs`), `crates/oneai-memory` (`compression.rs`/`core_memory_source.rs`), `crates/oneai-domain` (`context_source.rs`/`compression_template.rs`), `crates/oneai-provider` (`anthropic.rs`); every mechanism is annotated with `file:line` for verification. The sister document *Memory Mechanism Whitepaper* (`docs/memory-mechanism_EN.md`) focuses on the three memory tiers and recall, while this document focuses on **the assembly, budgeting, resolution, trimming, compression, pinning, caching, and multi-agent isolation of the context window**.
 
 ---
@@ -402,3 +404,29 @@ In one sentence: **OneAI gets "context as compression-resistant, budget-driven, 
 | Parallel dependency-aware scheduling | `crates/oneai-agent/src/parallel_executor.rs` |
 | Paradigm/delegate meta-tool | `crates/oneai-agent/src/meta_tool.rs` |
 | Sister document | `docs/memory-mechanism_EN.md` |
+
+---
+
+## Dependencies
+
+| Direction | Who | What |
+|---|---|---|
+| Upstream | `oneai-core` | `ContextBudgetManager`/`ContextManager`/`ContextAccounting`/`ModelContextResolver`/`TokenCounter`/`ContextCompressorTrait` (dependency-inversion trait) |
+| Upstream | `oneai-memory` | `ContextCompressor` + `FactExtractor` (compression-coupled extraction) + `CoreMemorySource` (anti-compression injection source) |
+| Upstream | `oneai-domain` | `ContextSource` trait + `RefreshPolicy`, `CompressionTemplate` |
+| Upstream | `oneai-provider` | Anthropic prompt-cache breakpoints (`anthropic.rs:179-262`) |
+| Downstream | `oneai-agent` | `AgentLoop` per-turn assembly pipeline (`context_assembler.rs`), sub-agent context isolation, parallel dependency-aware summary injection |
+| Downstream | `oneai-app` | `AppBuilder` wires the default `ModelContextResolver` + 3-layer resolution |
+| Cross-cutting | DomainPack layer 5 | `CompressionTemplate` declares compression policy; layer 2 `ContextSource` injects by `RefreshPolicy` |
+
+---
+
+## Further reading
+
+- [memory-mechanism](memory-mechanism_EN.md) — the downstream of compression-coupled extraction: discarded turns are refined into `MemoryFact`s
+- [multi-agent-mechanism](multi-agent-mechanism_EN.md) — sub-agent context isolation + parallel-delegation summary injection
+- [domain-pack-mechanism](domain-pack-mechanism_EN.md) — layer 2 ContextSource / layer 5 CompressionTemplate
+- [provider-mechanism](provider-mechanism_EN.md) — 3-layer model-context resolution (L2 provider API probe) + prompt cache
+- [working-state-mechanism](working-state-mechanism_EN.md) — task-level state persistence (a separate path from the context window)
+- Source: `crates/oneai-core/src/{budget,context_manager,context_accounting,token_counter,model_context}.rs` + `crates/oneai-agent/src/context_assembler.rs` + `crates/oneai-memory/src/compression.rs`
+- [CLAUDE.md — Architecture: Context management](../CLAUDE.md)

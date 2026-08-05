@@ -146,7 +146,7 @@ oneai cron fire <id>                   # 手动触发（force，绕过 due 窗�
 oneai cron serve [--cron-bind 0.0.0.0:9091] [--gateway-bind 0.0.0.0:9090] [--domain ...] [--model ...] [--user <id>]  # 启动 orchestrator + 外部 /cron/fire 接收
 ```
 
-机制：[extension-mechanism.md](extension-mechanism.md)（Scheduler）。
+机制：[scheduler-mechanism.md](scheduler-mechanism.md)（Scheduler）。
 
 ## Terminal（终端后端）
 
@@ -181,7 +181,7 @@ oneai wasm health [--name <name>]      # 模块健康检查
 oneai wasm unload <name>              # 卸载模块
 ```
 
-（另有 `oneai wasm stats` 资源监控统计。）机制：[extension-mechanism.md](extension-mechanism.md)（WASM）。
+（另有 `oneai wasm stats` 资源监控统计。）机制：[wasm-mechanism.md](wasm-mechanism.md)（WASM）。
 
 ## MCP（客户端 + 服务端）
 
@@ -193,7 +193,7 @@ oneai mcp remove <name>                # 移除 MCP 服务器
 oneai mcp connect <name>              # 测试连接并展示发现的工具
 ```
 
-机制：[extension-mechanism.md](extension-mechanism.md)（MCP）。
+机制：[mcp-mechanism.md](mcp-mechanism.md)（MCP）。
 
 ## A2A（Agent-to-Agent 协议）
 
@@ -204,7 +204,7 @@ oneai a2a list                         # 列出已配置 A2A 端点
 oneai a2a send <url> "<任务消息>"      # 向远程 A2A agent 发送任务
 ```
 
-机制：[extension-mechanism.md](extension-mechanism.md)（A2A）。
+机制：[a2a-mechanism.md](a2a-mechanism.md)（A2A）。
 
 ## Gateway（消息网关）
 
@@ -214,7 +214,7 @@ oneai gateway channels                 # 列出已绑定通道（platform → se
 oneai gateway autostart {install|uninstall|status}  # 管理 macOS LaunchAgent（登录即自启 supervisor+gateway）
 ```
 
-机制：[extension-mechanism.md](extension-mechanism.md)（Gateway）。
+机制：[gateway-mechanism.md](gateway-mechanism.md)（Gateway）。
 
 ## Supervisor（headless 监督 daemon）
 
@@ -228,7 +228,7 @@ oneai supervisor rpc <id> "<json>" [--socket <path>]   # 单次 RPC
 oneai supervisor rpc-stream <id> [--socket <path>]     # 流式 RPC
 ```
 
-机制：[extension-mechanism.md](extension-mechanism.md)（Supervisor）。
+机制：[supervisor-mechanism.md](supervisor-mechanism.md)（Supervisor）。
 
 ## Web UI
 
@@ -236,7 +236,7 @@ oneai supervisor rpc-stream <id> [--socket <path>]     # 流式 RPC
 oneai studio [--port 3000] [--domain coding] [--model ...] [--user <id>]  # 启动 Studio Web UI（StateGraph 可视化 + Checkpoint 时间旅行）
 ```
 
-机制：[extension-mechanism.md](extension-mechanism.md)（Studio）。
+机制：[studio-mechanism.md](studio-mechanism.md)（Studio）。
 
 ## 配置
 

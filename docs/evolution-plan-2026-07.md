@@ -21,10 +21,10 @@
 | gap P0 #4 | OTEL 真导出 OTLP + metrics 接 AgentLoop | ✅ 已修 | `83e7daf`；`HttpOtlpExporter` + `OtlMetricsProvider` 接线 |
 | gap P0 #5/#6/#10 | RecoveryManager 真重试 / DegradationRule / Custom 边条件 | ✅ 已修 | `d35671e`/`22a4764`/`183d835` |
 | **gap P1 — 退避 jitter** | RecoveryManager 退避加 jitter | ✅ 已修 | `error_recovery.rs:167-186` `compute_delay` 含 0..25% 抖动 |
-| **gap P1 — ToolExecutor 输出尺寸上限** | 统一 tool-result 截断守卫 | ❌ 未做 | `executor.rs` 无 truncat/max_output，仍各工具 ad-hoc |
-| **gap P1 — ShellTool 默认沙箱** | `ShellTool::new()` 默认接 sandbox backend | ❌ 未做 | `tool_interfaces.rs:112` `new()` 仍 regex-only |
-| **gap P1 — ToolExecutor 接 PermissionProfile** | 统一权限路径（修 workflow 绕过 deny） | ❌ 未做 | `executor.rs:139-219` 仍只看 `risk_level()`，无 `PermissionProfile`/`deny_by_default` |
-| **gap P1 — ThresholdGate 迁 PermissionLevel** |  | ❌ 未做 | `interaction_gate.rs:227,235,327` 仍 `RiskLevel` |
+| **gap P1 — ToolExecutor 输出尺寸上限** | 统一 tool-result 截断守卫 | ✅ 已修 | `executor.rs:47,326` `max_output_bytes` + `enforce_output_limit`（1.4-a，commit `df96063`）|
+| **gap P1 — ShellTool 默认沙箱** | `ShellTool::new()` 默认接 sandbox backend | ✅ 已修 | `coding_pack.rs:198` `ShellTool::with_sandbox_backend(default_sandbox_backend(...))`（1.4-c）；`new()` 仍 regex-only 供测试 |
+| **gap P1 — ToolExecutor 接 PermissionProfile** | 统一权限路径（修 workflow 绕过 deny） | ✅ 已修 | `executor.rs:85` `permission_resolver` + 4 分支解析 honour `deny_by_default`（1.4-b）|
+| **gap P1 — ThresholdGate 迁 PermissionLevel** |  | ✅ 已修 | `interaction_gate.rs:232` `auto_approve_threshold: Option<PermissionLevel>` + `new_with_permission_threshold`（1.4-d）|
 | **inspiration P0-1 — cache-stable prompt** | 范式后缀化，不重写 system prompt | ✅ 已修 | `apply_paradigm_switch` 标记范式尾部 + 仅 retain 被标记块，保留稳定前缀 |
 | **inspiration P0-2 — check_fn Footprint gate** | 前置缺失则工具从 schema 零足迹排除 | ✅ 已修 | `Tool::service_available()` 默认方法 + `GatedTool`/`register_gated` + 三路径 `.filter` |
 | **inspiration P0-3 — 供应链纪律** | 精确锁定 / cargo audit-deny / lockfile 闸 / OIDC / 隔离冒烟 | ✅ 已修 | `deny.toml`+`audit.yml`+lockfile-gate+`publish.yml`+`release-local.sh` |
@@ -75,7 +75,7 @@ Phase 4  精细化               ← inspiration-P3 行级diff/Gondolin/Api-Prov
 
 ### 1.4 安全护栏补齐（gap P1 剩余）✅
 
-> **进度**：1.4-a（ToolExecutor 输出尺寸上限，commit df96063）✅；1.4-b（ToolExecutor/workflow 接 PermissionProfile，关闭 workflow 绕过 deny_by_default 洞）✅；1.4-c/1.4-d 待做。
+> **进度**：1.4-a（ToolExecutor 输出尺寸上限，commit df96063）✅；1.4-b（ToolExecutor/workflow 接 PermissionProfile，关闭 workflow 绕过 deny_by_default 洞）✅；1.4-c（ShellTool 默认沙箱 + 黑名单规范化 + 文件工具 `..` canonical-path）✅；1.4-d（ThresholdInteractionGate 迁 PermissionLevel）✅。**4/4 全部完成**，详见下方各子项。
 
 - **What**：
   1. ✅ **ToolExecutor 级输出尺寸上限**——`executor.rs` 加 `max_output_bytes`（默认 1MiB）+ `enforce_output_limit`，统一 tool-result 截断守卫。3 测。

@@ -146,7 +146,7 @@ oneai cron fire <id>                   # fire manually (force, bypasses the due 
 oneai cron serve [--cron-bind 0.0.0.0:9091] [--gateway-bind 0.0.0.0:9090] [--domain ...] [--model ...] [--user <id>]  # start the orchestrator + external /cron/fire receiver
 ```
 
-Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (Scheduler).
+Mechanism: [scheduler-mechanism_EN.md](scheduler-mechanism_EN.md) (Scheduler).
 
 ## Terminal (terminal backends)
 
@@ -181,7 +181,7 @@ oneai wasm health [--name <name>]      # module health check
 oneai wasm unload <name>              # unload a module
 ```
 
-(Plus `oneai wasm stats` for resource-monitoring stats.) Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (WASM).
+(Plus `oneai wasm stats` for resource-monitoring stats.) Mechanism: [wasm-mechanism_EN.md](wasm-mechanism_EN.md) (WASM).
 
 ## MCP (client and server)
 
@@ -193,7 +193,7 @@ oneai mcp remove <name>                # remove an MCP server
 oneai mcp connect <name>              # test a connection and show discovered tools
 ```
 
-Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (MCP).
+Mechanism: [mcp-mechanism_EN.md](mcp-mechanism_EN.md) (MCP).
 
 ## A2A (Agent-to-Agent protocol)
 
@@ -204,7 +204,7 @@ oneai a2a list                         # list configured A2A endpoints
 oneai a2a send <url> "<task message>"  # send a task to a remote A2A agent
 ```
 
-Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (A2A).
+Mechanism: [a2a-mechanism_EN.md](a2a-mechanism_EN.md) (A2A).
 
 ## Gateway (message gateway)
 
@@ -214,7 +214,7 @@ oneai gateway channels                 # list bound channels (platform → sessi
 oneai gateway autostart {install|uninstall|status}  # manage the macOS LaunchAgent (auto-starts supervisor+gateway at login)
 ```
 
-Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (Gateway).
+Mechanism: [gateway-mechanism_EN.md](gateway-mechanism_EN.md) (Gateway).
 
 ## Supervisor (headless daemon)
 
@@ -228,7 +228,7 @@ oneai supervisor rpc <id> "<json>" [--socket <path>]   # one-shot RPC
 oneai supervisor rpc-stream <id> [--socket <path>]     # streaming RPC
 ```
 
-Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (Supervisor).
+Mechanism: [supervisor-mechanism_EN.md](supervisor-mechanism_EN.md) (Supervisor).
 
 ## Web UI
 
@@ -236,7 +236,7 @@ Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (Supervisor).
 oneai studio [--port 3000] [--domain coding] [--model ...] [--user <id>]  # launch the Studio Web UI (StateGraph visualization + Checkpoint time-travel)
 ```
 
-Mechanism: [extension-mechanism_EN.md](extension-mechanism_EN.md) (Studio).
+Mechanism: [studio-mechanism_EN.md](studio-mechanism_EN.md) (Studio).
 
 ## Config
 

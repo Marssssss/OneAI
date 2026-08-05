@@ -74,7 +74,7 @@ flowchart TB
             Parser["oneai-parser<br/>3 层输出防御：约束解码→模糊修复→自纠重提示"]
         end
         subgraph F2 ["工具 · 技能 · RAG"]
-            Tool["oneai-tool<br/>Registry + 15 内置工具 + MCP 客户端 + InteractionGate"]
+            Tool["oneai-tool<br/>Registry + 16 内置工具 + MCP 客户端 + InteractionGate"]
             Skill["oneai-skill<br/>选择器 + 注册 + 约定目录发现"]
             Rag["oneai-rag<br/>EmbeddingService + 混合检索 + 自动 embedding"]
         end
@@ -119,7 +119,7 @@ flowchart TB
 | `oneai-provider` | LLM Provider（OpenAI/Anthropic/Gemini/Ollama）+ ProviderPool + SmartRouter |
 | `oneai-parser` | 3 层输出解析防御 |
 | `oneai-memory` | 记忆系统（三层 + 压缩增量抽取 + 持久化，接 `oneai-vector` 默认栈） |
-| `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、15 内置工具 |
+| `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、16 内置工具 |
 | `oneai-skill` | 技能选择器 + 注册 + 内置领域技能 + 生命周期 |
 | `oneai-domain` | DomainPack 系统（7 层）、CodingPack、市场、规范校验器 |
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect/Explore + delegate/switch_paradigm 元工具 + GroupChat |
@@ -155,12 +155,19 @@ flowchart TB
 | Working State | [working-state-mechanism.md](working-state-mechanism.md) | 文件事件日志 + 投影 + 跨 session 续接 |
 | DomainPack | [domain-pack-mechanism.md](domain-pack-mechanism.md) | 7 层声明式领域配置，一行切换 |
 | 权限 / InteractionGate | [permission-mechanism.md](permission-mechanism.md) | 三级权限 + 5 决策点统一 gate |
-| 工具系统 | [tool-mechanism.md](tool-mechanism.md) | Tool trait + 15 工具 + Footprint ladder |
+| 工具系统 | [tool-mechanism.md](tool-mechanism.md) | Tool trait + 16 工具 + Footprint ladder |
+| 技能 | [skill-mechanism.md](skill-mechanism.md) | 渐进式披露 + 约定目录发现 + 生命周期 + curator |
 | Provider / 路由 / 解析器 | [provider-mechanism.md](provider-mechanism.md) | Provider 抽象 + 降级池 + SmartRouter + 3 层解析 |
 | RAG / Embedding | [rag-mechanism.md](rag-mechanism.md) | EmbeddingService + auto 探测 + 默认检索栈 |
 | 工作流 / StateGraph | [workflow-mechanism.md](workflow-mechanism.md) | DAG + 有环图，与 AgentLoop 闭环 |
 | 评测 | [eval-mechanism.md](eval-mechanism.md) | Eval 框架 + SWE-bench 三轴 |
-| 扩展（A2A/WASM/Studio/MCP/Scheduler/Gateway/Supervisor） | [extension-mechanism.md](extension-mechanism.md) | 对外暴露 / 沙箱 / 可视化 / 调度 / 消息接入 |
+| A2A | [a2a-mechanism.md](a2a-mechanism.md) | Agent 间协议 SDK（客户端 + 服务端 + DomainPack→AgentCard） |
+| WASM 沙箱 | [wasm-mechanism.md](wasm-mechanism.md) | Wasmtime 沙箱 + WasmTool + fuel/epoch 限量 |
+| MCP | [mcp-mechanism.md](mcp-mechanism.md) | 服务宿主 + 客户端 + 插件注册（双向对等） |
+| Studio | [studio-mechanism.md](studio-mechanism.md) | axum HTTP+WS + D3 可视化 + 检查点时间旅行 |
+| Scheduler | [scheduler-mechanism.md](scheduler-mechanism.md) | 内存计时器 + 持久 cron + CAS at-most-once |
+| Gateway | [gateway-mechanism.md](gateway-mechanism.md) | 消息平台桥接（飞书/企微/Loopback）+ 流式 coalescer |
+| Supervisor | [supervisor-mechanism.md](supervisor-mechanism.md) | headless daemon + 实例注册表 + 崩溃恢复 + IPC |
 | 轨迹日志 | [trace-mechanism.md](trace-mechanism.md) | OpenInference 兼容 + OTEL 导出 |
 | 持久化 | [persistence-mechanism.md](persistence-mechanism.md) | SQLite + 文件事件日志双通路 |
 | 跨平台 | [cross-platform-mechanism.md](cross-platform-mechanism.md) | UniFFI + extern C facade，一套内核六端 |

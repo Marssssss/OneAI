@@ -138,33 +138,35 @@ OneAI 的**结构宽度**（DomainPack 7 层、范式、StateGraph、多 agent �
 
 按"稳定性 > 可靠 > 能力 > 易集成"排序，且优先修"已宣称但没真生效"的（这些是最危险的，因为用户和开发者会信任它们工作）。
 
+> **状态注记（截至 2026-08-05）**：本路线图为 2026-07-21 快照。P0 全部通电、P1 大部分闭合（见 [evolution-plan-2026-07.md](evolution-plan-2026-07.md) §0 实测核对表 + §1.4/§1.5）；P2/P3 见 evolution-plan §2-§4。下文每条前置 ✅/⚠️/❌ 标当前状态，evolution-plan §X 给实证。
+
 ### P0 把已宣称的脊梁通电（最高优先，修"虚假安全感"）
-1. **接线三层解析器到 `parse_decision`**：畸形 tool args 走 fuzzy→self-correct 并回喂模型（而不是 `unwrap_or(json!({}))`）。"稳定"单点最大杠杆。
-2. **实现 TokenBudget 真终止**：主循环每轮检查 `budget.remaining()`，超阈值 break。默认 `hard_max_iterations=None` 必须改为有预算或硬上限兜底。
-3. **修压缩抽取事实路径**：让 `extract_and_archive` 走 `MemoryManager::archive_facts`（嵌入+落 SQLite），兑现 §12.1 的真实承诺。
-4. **真接 OTEL**：`OtlpCollector` 接真 `opentelemetry-otlp` exporter；`OtelMetricsProvider` 接入 AgentLoop；给 sub_agent/A2A 传 `trace_context`/traceparent 实现分布式追踪。
-5. **RecoveryManager 真生效**：工具失败时程序性重试（带 jitter 退避），不只是塞 system message。
+1. ✅ **接线三层解析器到 `parse_decision`**：畸形 tool args 走 fuzzy→self-correct 并回喂模型（而不是 `unwrap_or(json!({}))`）。"稳定"单点最大杠杆。——evolution §0（`74e375d`）+ §1.5。
+2. ✅ **实现 TokenBudget 真终止**：主循环每轮检查 `budget.remaining()`，超阈值 break。默认 `hard_max_iterations=None` 必须改为有预算或硬上限兜底。——evolution §0（`0416f19`）。
+3. ✅ **修压缩抽取事实路径**：让 `extract_and_archive` 走 `MemoryManager::archive_facts`（嵌入+落 SQLite），兑现 §12.1 的真实承诺。——evolution §0 gap P0 #8（`8bc0e6f`，`FactSink` trait）。
+4. ✅ **真接 OTEL**：`OtlpCollector` 接真 `opentelemetry-otlp` exporter；`OtelMetricsProvider` 接入 AgentLoop；给 sub_agent/A2A 传 `trace_context`/traceparent 实现分布式追踪。——evolution §0（`83e7daf`，`HttpOtlpExporter` 真导出 + metrics 接 AgentLoop）。**注**：sub_agent/A2A 分布式 traceparent 传播仍未做（evolution 未标完成）。
+5. ✅ **RecoveryManager 真生效**：工具失败时程序性重试（带 jitter 退避），不只是塞 system message。——evolution §0（`d35671e`）+ §1.4（jitter `error_recovery.rs:167`）。
 
 ### P1 安全护栏补齐
-6. **退避加 jitter**；Gemini/Ollama 接 `send_with_retry`。
-7. **ToolExecutor 级输出尺寸上限**（统一的 tool-result 截断守卫，而非各工具 ad-hoc）。
-8. **`ShellTool::new()` 默认接 `default_sandbox_backend`**；黑名单改用规范化命令解析；文件工具 `..` 改 canonical-path 校验。
-9. **统一权限路径**：`ToolExecutor` 接 `PermissionProfile`（修 workflow 绕过 deny 的洞）；加权限决策审计日志；`ThresholdInteractionGate` 迁到 `PermissionLevel`。
-10. **`apply_paradigm_switch` 只删范式 prompt**，保留 runtime_context 与 domain system block。
+6. ⚠️ **退避加 jitter**；Gemini/Ollama 接 `send_with_retry`。——jitter ✅（`error_recovery.rs:167`）；**Gemini/Ollama 仍未接 `send_with_retry`**（仅 OpenAI/Anthropic 调，2026-08-05 核实），属 evolution 未覆盖项。
+7. ✅ **ToolExecutor 级输出尺寸上限**（统一的 tool-result 截断守卫，而非各工具 ad-hoc）。——evolution §1.4-a（`executor.rs:47,326` `max_output_bytes`+`enforce_output_limit`）。
+8. ✅ **`ShellTool::new()` 默认接 `default_sandbox_backend`**；黑名单改用规范化命令解析；文件工具 `..` 改 canonical-path 校验。——evolution §1.4-c（`coding_pack.rs:198` + 黑名单 + `path_has_traversal`）。
+9. ⚠️ **统一权限路径**：`ToolExecutor` 接 `PermissionProfile`（修 workflow 绕过 deny 的洞）；加权限决策审计日志；`ThresholdInteractionGate` 迁到 `PermissionLevel`。——PermissionProfile ✅（§1.4-b `executor.rs:85`）；ThresholdGate ✅（§1.4-d）；**权限决策审计日志仍未加**（2026-08-05 核实，仅 best-effort `tracing::warn!`）。
+10. ✅ **`apply_paradigm_switch` 只删范式 prompt**，保留 runtime_context 与 domain system block。——evolution §1.1（范式尾部标记 + `retain` 仅删被标记块，保留稳定前缀含 runtime_context）。
 
 ### P2 能力补齐（对标 SWE-agent/computer-use/Letta）
-11. **沙箱代码执行工具**（独立于 shell，Standard 权限，有输出上限+超时）。
-12. **`apply_patch` 加 backup/undo 栈**（多文件 patch 失败可回滚）。
-13. **真 tokenizer**（tiktoken-rs / huggingface-tokenizers），让 `truncate_tool_results` 真用 TokenCounter。
-14. **StateGraph resume API** + 中途持久化 walk state（向 durable execution 走第一步）。
-15. **A2A server 接 axum** + `handle_send_task` 真跑 AgentLoop（补 streaming/push/auth）。
-16. **记忆衰减 + 递归反思**：importance 阈值驱逐 archival；反思按相关性检索 prior 而非最近 N 条。
+11. ✅ **沙箱代码执行工具**（独立于 shell，Standard 权限，有输出上限+超时）。——经 `oneai-wasm` 覆盖（`WasmTool` impl `Tool` + fuel/epoch 超时 + 经 `ToolExecutor` 输出上限；risk 可配，见 [wasm-mechanism](wasm-mechanism.md)）。
+12. ❌ **`apply_patch` 加 backup/undo 栈**（多文件 patch 失败可回滚）。——未做（2026-08-05 核实 `apply_patch.rs` 无 backup/undo）。
+13. ❌ **真 tokenizer**（tiktoken-rs / huggingface-tokenizers），让 `truncate_tool_results` 真用 TokenCounter。——未做（`token_counter.rs` 仍 4 chars/token 启发式，workspace 无 tiktoken/tokenizers 依赖）。
+14. ❌ **StateGraph resume API** + 中途持久化 walk state（向 durable execution 走第一步）。——未做（`state_executor.rs` 无 resume/restore/durable；evolution §4 未标完成，durable execution 推迟）。
+15. ✅ **A2A server 接 axum** + `handle_send_task` 真跑 AgentLoop（补 streaming/push/auth）。——evolution §3.5（`db7b384`，axum server + 真跑 AgentLoop + SSE streaming + shared-secret Bearer auth）。**注**：`tasks/resubscribe` + push-notification 投递 + TaskStore 磁盘持久化按戒律#3 推迟。
+16. ✅ **记忆衰减 + 递归反思**：importance 阈值驱逐 archival；反思按相关性检索 prior 而非最近 N 条。——evolution §2.4（`DecayPolicy` + `evict_below_salience` + `run_decay` + `reflect_if_threshold` 改 `search_hybrid` relevance）。
 
 ### P3 易集成 / 收尾
-17. **Team/Swarm/Handoff 接入 AppBuilder**（CLI 注释自认未接，补工厂方法）。
-18. **删死代码**：`mcp_tools.rs`、`ltm_entries`/`ShortTermMemory`/`LongTermMemory`（或在 P3-1 稳定性承诺下显式 deprecate 标注）。
-19. **SkillSelector embedding 真工作** + skill 版本/依赖/trust 边界。
-20. **`Custom` 边条件注册机制**；StateGraph 并行分支；WorkflowDag 改 BTreeMap 恢复确定性。
+17. ✅ **Team/Swarm/Handoff 接入 AppBuilder**（CLI 注释自认未接，补工厂方法）。——改为**整层移除**（`c8bedbe`，evolution §4.6）；编排模式由 `delegate` + StateGraph 表达，不再接入。
+18. ✅ **删死代码**：`mcp_tools.rs`、`ltm_entries`/`ShortTermMemory`/`LongTermMemory`（或在 P3-1 稳定性承诺下显式 deprecate 标注）。——evolution §4.6(a)：`mcp_tools.rs` 已删；`LongTermMemory` `#[deprecated]`；`ltm_entries` 经核实为活表非死代码；`ShortTermMemory` 仍为活滑动窗口。
+19. ✅ **SkillSelector embedding 真工作** + skill 版本/依赖/trust 边界。——evolution §4.6(b)(b′)：`with_embedding_service` + `SkillDescriptor{version,depends_on,trust}` + trust 按目录反伪造。
+20. ✅ **`Custom` 边条件注册机制**；StateGraph 并行分支；WorkflowDag 改 BTreeMap 恢复确定性。——evolution §0（`183d835` Custom 边条件）+ §4.6(c)(c′)（BTreeMap + frontier 并行 `route_next_nodes`）。
 
 ---
 

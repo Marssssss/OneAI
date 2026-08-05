@@ -1,5 +1,7 @@
 # OneAI Working-State & Cross-Session Continuation Mechanism (Whitepaper)
 
+> An event-sourced per-task file log + in-memory projection + per-step incremental persistence + cross-session index discovery working-state engine: a task's goal/steps/decisions/blockers land as an append-only JSONL event stream in `<root>/tasks/{task_id}.jsonl`; the hot path reads only the `LoopState` in-memory projection (zero file IO); a new session reads the lightweight `tasks.index.json` once to surface the previous session's unfinished work; behavior is declared by DomainPack layer 7 `MemoryProfile.working_state`.
+
 > Version: corresponds to the 1.1.0 line of the codebase. This document is written based on a file-by-file review of the `crates/oneai-core`, `oneai-persistence`, `oneai-agent`, `oneai-app`, and `oneai-domain` source code; every mechanism is annotated with `file:line` for verification. The design rationale is in the sibling `docs/agent-working-state-and-cross-session-resume.md` (Chinese research reference) and `~/.claude/plans/vectorized-hopping-willow.md` (implementation plan).
 
 ---
@@ -209,3 +211,28 @@ The `Snapshot` is an **event inside the log**, not a parallel state outside the 
 - **Principle-driven + projection-rebuildable**: the append-only event log is the source of truth; the in-memory working state is a projection derived from events and can be rebuilt at any time. The read path goes through the in-memory cache (no replay every time); after a crash it is rebuilt from the events.
 
 Reference sources: Claude Code session storage (JSONL append-only), the TASKS.md pattern (RALPH / agent-session-resume), reference doc §7.1 state derived from events, §8.1/8.2/8.4 failure modes, §10.2-10.3 working-state file startup injection. The full research is in `docs/agent-working-state-and-cross-session-resume.md` (Chinese).
+
+---
+
+## Dependencies
+
+| Direction | Who | What |
+|---|---|---|
+| Upstream | `oneai-core` | `TaskEvent`/`TaskEventType`/`WorkingState`/`TaskId` shared types |
+| Upstream | `oneai-persistence` | `FileWorkingStateStore` (append-only JSONL + `tasks.index.json` + compaction) |
+| Upstream | `oneai-domain` | `MemoryProfile.working_state` policy (folds into layer 7, no new DomainPack layer) |
+| Downstream | `oneai-agent` | `LoopState.working_state` in-memory projection (zero-IO hot read) + `OnResume` reconciliation + cadence hydrate |
+| Downstream | `oneai-app` | `AppSession` startup surfaces `[Unfinished Work From Previous Sessions]` + `tasks continue <id>` binds |
+| Cross-cutting | DomainPack layer 7 | `MemoryProfile.working_state` declares the persistence policy |
+
+---
+
+## Further reading
+
+- [memory-mechanism](memory-mechanism_EN.md) — the memory path (facts/recall), a separate persistence path from working-state
+- [persistence-mechanism](persistence-mechanism_EN.md) — SQLite (sessions/LTM) + file event log, two paths
+- [domain-pack-mechanism](domain-pack-mechanism_EN.md) — layer 7 `MemoryProfile.working_state` declaration
+- [multi-agent-mechanism](multi-agent-mechanism_EN.md) — `LoopState` projection consumption in the AgentLoop
+- Research reference: `docs/agent-working-state-and-cross-session-resume.md`
+- Source: `crates/oneai-persistence/src/` (file event log) + `crates/oneai-agent/src/loop_state.rs` (projection)
+- [CLAUDE.md — Working state & cross-session resume](../CLAUDE.md)

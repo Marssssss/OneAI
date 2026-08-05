@@ -1,5 +1,7 @@
 # OneAI 记忆机制白皮书
 
+> Letta 式三层 + Mem0 式冲突更新 + 三因子召回 + 压缩耦合抽取的声明式记忆引擎：工作记忆单源在 `Conversation`，长期记忆按 `(user_id, subject, predicate)` 原子冲突更新，压缩掉的信息被抽取成事实落档——「压缩即丢失」被闭环堵死；行为由 DomainPack 第 7 层 `MemoryProfile` 声明。
+
 > 版本：对应代码库 `0.2.0` / 1.0.0 线。本文基于对 `crates/oneai-memory`、`oneai-rag`、`oneai-persistence`、`oneai-domain`、`oneai-app` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。文末与业界前沿记忆系统（Mem0 / Letta / Generative Agents / Zep-Graphiti / A-MEM / Cognee）对标。
 
 ---
@@ -434,3 +436,16 @@ OneAI 的记忆系统**在工程闭环上已达到一线开源框架水平**，�
 | 内置套件+JSONL 加载 | `crates/oneai-eval/src/memory/suite.rs` |
 | Runner + 确定性 embedding | `crates/oneai-eval/src/memory/runner.rs` |
 | CLI 子命令 | `examples/cli/src/cmd_eval.rs::cmd_eval_memory` |
+
+---
+
+## 深入阅读
+
+- [context-management-mechanism.md](context-management-mechanism.md) —— 上下文装配/压缩与记忆抽取的耦合闭环
+- [working-state-mechanism.md](working-state-mechanism.md) —— 任务级工作状态持久化（与记忆分属不同通路）
+- [domain-pack-mechanism.md](domain-pack-mechanism.md) —— 第 7 层 `MemoryProfile` 声明式记忆策略
+- [rag-mechanism.md](rag-mechanism.md) —— `EmbeddingService` 与语义召回后端
+- [persistence-mechanism.md](persistence-mechanism.md) —— SQLite 持久化（memories 表 / 事实 / 用量）
+- [eval-mechanism.md](eval-mechanism.md) —— `oneai-eval::memory` 评测套件（LongMemEval 5 能力）
+- 源码：`crates/oneai-memory/src/`（13 文件 / ~7.7K LOC）+ `crates/oneai-rag` + `crates/oneai-persistence`
+- [CLAUDE.md — Architecture: 记忆/持久化](../CLAUDE.md)

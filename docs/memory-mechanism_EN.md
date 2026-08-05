@@ -1,5 +1,7 @@
 # OneAI Memory Mechanism (Whitepaper)
 
+> A declarative memory engine — Letta-style 3 tiers + Mem0-style conflict updates + Generative-Agents-style 3-factor recall + compression-coupled extraction: working memory is single-sourced on `Conversation`, long-term memory updates atomically per `(user_id, subject, predicate)`, and compressed-away turns are extracted into facts on file — closing the "compression-equals-loss" hole; behavior is declared by DomainPack layer 7 `MemoryProfile`.
+
 > Version: corresponds to codebase `0.2.0` / 1.0.0 line. This document is written from a file-by-file review of the `crates/oneai-memory`, `oneai-rag`, `oneai-persistence`, `oneai-domain`, and `oneai-app` sources; every mechanism is annotated with `file:line` for verification. The end benchmarks against industry-frontier memory systems (Mem0 / Letta / Generative Agents / Zep-Graphiti / A-MEM / Cognee).
 
 ---
@@ -434,3 +436,16 @@ How to run: `oneai eval memory --suite builtin` vs `--no-embedding` to compare t
 | built-in suite + JSONL loading | `crates/oneai-eval/src/memory/suite.rs` |
 | Runner + deterministic embedding | `crates/oneai-eval/src/memory/runner.rs` |
 | CLI subcommand | `examples/cli/src/cmd_eval.rs::cmd_eval_memory` |
+
+---
+
+## Further reading
+
+- [context-management-mechanism](context-management-mechanism_EN.md) — the assembly/compression loop coupled to memory extraction
+- [working-state-mechanism](working-state-mechanism_EN.md) — task-level working-state persistence (a separate path from memory)
+- [domain-pack-mechanism](domain-pack-mechanism_EN.md) — layer 7 `MemoryProfile` declarative memory policy
+- [rag-mechanism](rag-mechanism_EN.md) — `EmbeddingService` and the semantic-recall backend
+- [persistence-mechanism](persistence-mechanism_EN.md) — SQLite persistence (memories table / facts / usage)
+- [eval-mechanism](eval-mechanism_EN.md) — the `oneai-eval::memory` eval suite (LongMemEval 5 abilities)
+- Source: `crates/oneai-memory/src/` (13 files / ~7.7K LOC) + `crates/oneai-rag` + `crates/oneai-persistence`
+- [CLAUDE.md — Architecture: Memory/Persistence](../CLAUDE.md)

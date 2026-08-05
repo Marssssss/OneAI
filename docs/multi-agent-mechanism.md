@@ -1,5 +1,7 @@
 # OneAI 多 Agent 机制白皮书
 
+> Claude-Code 式动态 Agentic Loop + 模型驱动 delegate/switch_paradigm 元工具 + LangGraph 式可循环 StateGraph 闭环 + 引擎级 GroupChat 原语 + 压缩耦合记忆的多 Agent 引擎：每轮由模型决定直接作答/调工具/委托子 Agent/切换范式，非固定管线；编排行为由 DomainPack 声明。
+
 > 版本：对应代码库 1.1.0 线。本文基于对 `crates/oneai-agent`、`oneai-workflow`、`oneai-domain`、`oneai-memory`、`oneai-core` 源码的逐文件审阅撰写，机制均标注 `file:line` 以便核对。文末与业界前沿多 Agent 系统（LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code 子代理 / Google A2A / MCP）对标。
 >
 > 说明：撰写时本环境无法联网检索，前沿对标部分基于截至 2025 年初的训练知识，已尽量标注可核对的论文/项目名；具体版本号以各项目最新发布为准。
@@ -389,3 +391,31 @@ OneAI 既实现 **Google A2A 协议**（`oneai-a2a`：P2-5 客户端 SDK + P4-1 
 | DomainPack | `crates/oneai-domain/src/domain_pack.rs:50` |
 
 *本文随 `0.2.0`/1.0.0 线代码同步。机制变更请同步更新文件:行索引。*
+
+---
+
+## 依赖关系
+
+| 方向 | 谁 | 内容 |
+|---|---|---|
+| 上游 | `oneai-core` | `LlmProvider`/`Tool`/`InteractionGate`/`GraphDecision`/`Conversation`/`Budget` |
+| 上游 | `oneai-workflow` | `StateGraph` + `StateGraphExecutor` + `GraphActionExecutor` trait（图流闭环 seam）|
+| 上游 | `oneai-memory` | `MemoryManager`（recall 注入）+ 压缩耦合抽取 |
+| 上游 | `oneai-domain` | `ParadigmStrategies`/`DomainPack`/`GroupChat` 预设 |
+| 下游 | `oneai-app` | `AppBuilder` 装配 `AgentLoop` + 范式配置 + GroupChat session |
+| 下游 | `oneai-platform-*` | 经 FFI 把 AgentLoop + GroupChat 暴露给原生端 |
+| 横切接入 | DomainPack 第④层 | `ParadigmStrategies` 声明 Plan/ReAct/Reflect/Explore 图流 |
+| 横切接入 | meta-tool | `delegate`/`switch_paradigm` 注入模型，模型驱动委托与范式切换 |
+
+---
+
+## 深入阅读
+
+- [workflow-mechanism.md](workflow-mechanism.md) —— StateGraph ↔ AgentLoop 闭环、`GraphActionExecutor` 反向桥
+- [context-management-mechanism.md](context-management-mechanism.md) —— sub-agent 上下文隔离 + 并行依赖感知摘要注入
+- [domain-pack-mechanism.md](domain-pack-mechanism.md) —— 第④层 ParadigmStrategies、GroupChat 预设
+- [memory-mechanism.md](memory-mechanism.md) —— recall 注入 + 压缩耦合抽取
+- [tool-mechanism.md](tool-mechanism.md) —— `execute_tool_calls` + 域权限解析
+- [a2a-mechanism.md](a2a-mechanism.md) —— 跨进程 Agent 间协作（GroupChat 的进程外对等）
+- 源码：`crates/oneai-agent/src/`（27 文件 / ~23.8K LOC）
+- [CLAUDE.md — Architecture: AgentLoop](../CLAUDE.md)
