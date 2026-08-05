@@ -146,29 +146,110 @@ cargo add oneai-app
 cargo add tokio --features full
 ```
 
+The integration point is `AppBuilder` in `crates/oneai-app/src/builder.rs` — every subsystem is optional and plugged in via builder methods (**the LLM provider is optional too**; tool-only or workflow-only usage needs no provider). On top of `App` you call `create_session()` to get an `AppSession`; **the inference entry that drives the AgentLoop is `session.run_agent(task, observer, interrupt_slot)`** — pass the user input as the `task` string and the loop adds it to the conversation itself. You do *not* call `send_user_message` first.
+
+#### Minimal (silent inference)
+
 ```rust
 use oneai_app::AppBuilder;
-use oneai_domain::coding_pack;
+use oneai_core::ModelConfig;
+use oneai_provider::OpenAIProvider;
 
 #[tokio::main]
-async fn main() {
-    let app = AppBuilder::new()
-        .noop_interaction_gate()
-        .default_parser()
-        .domain_pack(coding_pack("/project/dir"))  // ← switch domain in one line
-        .build()
-        .expect("App built");
+async fn main() -> anyhow::Result<()> {
+    // Provider is required for inference — without one, run_agent returns a
+    // Provider error. ONEAI_API_KEY / ONEAI_BASE_URL / ONEAI_MODEL are the env
+    // vars the CLI reads; in SDK code you can read env, hardcode, or load a config.
+    let provider = OpenAIProvider::new(ModelConfig {
+        api_key: std::env::var("ONEAI_API_KEY").ok(),
+        base_url: std::env::var("ONEAI_BASE_URL").ok(),
+        model_name: Some("gpt-4o".to_string()),
+        ..ModelConfig::default()
+    });
 
-    let session = app.create_session();
-    let result = session
-        .execute_tool("calculator", serde_json::json!({"expression": "2+3"}))
-        .await
-        .unwrap();
-    println!("Result: {}", result.content); // → "5"
+    let app = AppBuilder::new()
+        .provider(std::sync::Arc::new(provider))
+        .noop_interaction_gate()        // no approval UI → no-op gate (also the default)
+        .default_parser()                // 3-layer output parser, defends unreliable LLM output
+        .build()?;
+
+    let mut session = app.create_session();   // sync; for resumed chat use create_session_with_id(id).await
+
+    // run_agent_silent = run_agent + a no-op observer + a throwaway interrupt slot.
+    // Ideal for backend batch jobs / one-shot Q&A: just get the final answer.
+    let result = session.run_agent_silent("Summarize the role of src/main.rs").await?;
+    println!("{}", result.final_answer);   // → the model's final answer
+    println!("Iterations: {}, completed={}", result.iterations, result.completed);
+    Ok(())
 }
 ```
 
-The integration point is `AppBuilder` in `crates/oneai-app/src/builder.rs` — every subsystem is optional and plugged in via builder methods (**the LLM provider is optional too**; tool-only or workflow-only usage needs no provider). Plain integration only needs `oneai-app`; to shrink your dependency surface, pull individual crates (`oneai-core` / `-provider` / `-domain` / `-tool` / `-memory` / `-rag` …) — full list in [Architecture — Crate map](docs/architecture_EN.md#crate-map). For a deeper architectural read see [CLAUDE.md](CLAUDE.md); to drive each subsystem end-to-end see the [CLI reference](docs/cli-reference_EN.md).
+#### Streaming + tool-call callbacks
+
+For a chat UI (typewriter effect, tool-call bubbles), implement `AgentLoopObserver` — the loop calls it at every key point:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use oneai_agent::{AgentLoopObserver, AgentLoopResult, ToolCallRequest, ParadigmKind};
+use oneai_core::ToolOutput;
+
+struct UiObserver { tx: mpsc::UnboundedSender<String> }
+
+impl AgentLoopObserver for UiObserver {
+    fn on_iteration_start(&self, iter: usize, _p: ParadigmKind) {
+        let _ = self.tx.send(format!("[iter {iter}]"));
+    }
+    fn on_stream_chunk(&self, text: &str) {            // streaming token → typewriter
+        let _ = self.tx.send(text.to_string());
+    }
+    fn on_tool_calls(&self, calls: &[ToolCallRequest]) {/* render tool-call bubbles */}
+    fn on_tool_result(&self, _id: &str, name: &str, out: &ToolOutput) {
+        let _ = self.tx.send(format!("→ {name}: {:?}", out.content));
+    }
+    fn on_direct_answer(&self, text: &str) {            // model decided to wrap up
+        let _ = self.tx.send(text.to_string());
+    }
+    fn on_complete(&self, _r: &AgentLoopResult) { /* finalize */ }
+    // Also on_thinking / on_token_usage_full / on_context_accounting /
+    // on_delegate / on_interrupt / on_resume … override as needed (all default empty).
+}
+
+// interrupt_slot: cross-thread interrupt / resume of the loop
+let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
+    Arc::new(tokio::sync::Mutex::new(None));
+
+let (tx, mut rx) = mpsc::unbounded_channel();
+let observer = UiObserver { tx };
+
+// This is the line that starts the AgentLoop:
+let result = session
+    .run_agent("User input goes here", &observer, interrupt_slot.clone())
+    .await?;
+
+// On another tokio task, drain `rx` and render chunks to the UI.
+while let Some(chunk) = rx.recv().await { /* render */ }
+```
+
+#### Key conventions
+
+- **`task` *is* the user input**: do not `send_user_message` then `run_agent` — that double-adds the message. `run_agent` adds the task to the conversation internally (see the comment in `session.rs`).
+- **Multi-turn chat**: call `run_agent` repeatedly within one session; the conversation accumulates history and the AgentLoop auto-compresses when context exceeds the token budget (`ContextBudgetManager` gates it, budget scales with the model's real window). Manual compression: `session.compact(keep_recent_turns)`.
+- **Interrupt / resume**: clone `interrupt_slot` to the UI thread, take the `AgentLoop` handle inside and call `interrupt()` — takes effect at iteration boundaries. The `ChannelInteractionGate` / `ThresholdInteractionGate` also intercept 5 decision points (tool approval, plan decision, …) — see `AppBuilder::channel_interaction_gate` / `threshold_interaction_gate`.
+- **Cross-session resume**: `app.create_session_with_id(id).await` replays history from SQLite; to bind to a working-state task use `session.continue_task(task_id)` (crash recovery + cross-session task continuation).
+- **Domain switch**: `.domain_pack(coding_pack("/dir"))` on the builder switches domain in one line — the AgentLoop uses the corresponding system prompt + tool whitelist + paradigm strategies; merge multiple with `.domain_packs(vec![...])` (permissions strictest-wins).
+- **Tool-only / workflow-only (no provider)**: skip `.provider(...)`, call `session.execute_tool("calculator", json!({"expression":"2+3"})).await` directly (returns `ToolOutput.content`), or `session.execute_workflow(&config).await` to run a StateGraph — see the "no LLM needed" example below:
+
+```rust
+let app = AppBuilder::new().noop_interaction_gate().default_parser().build()?;
+let session = app.create_session();
+let r = session
+    .execute_tool("calculator", serde_json::json!({"expression": "2+3"}))
+    .await?;
+println!("{}", r.content); // → "5"
+```
+
+Plain integration only needs `oneai-app`; to shrink your dependency surface, pull individual crates (`oneai-core` / `-provider` / `-domain` / `-tool` / `-memory` / `-rag` …) — full list in [Architecture — Crate map](docs/architecture_EN.md#crate-map). For a deeper architectural read see [CLAUDE.md](CLAUDE.md); to drive each subsystem end-to-end see the [CLI reference](docs/cli-reference_EN.md) — the `chat` subcommand in `examples/cli` is a complete reference implementation of `run_agent` + a custom observer + an interrupt slot, ready to copy.
 
 ---
 

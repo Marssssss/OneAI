@@ -146,29 +146,110 @@ cargo add oneai-app
 cargo add tokio --features full
 ```
 
+集成入口是 `crates/oneai-app/src/builder.rs` 的 `AppBuilder`——每个子系统都可选、通过 builder 方法插装（**LLM Provider 也是可选的**，纯工具 / 纯工作流用法无需 Provider）。`App` 之上用 `create_session()` 拿到 `AppSession`，之后**让 AgentLoop 跑起来的推理入口就是 `session.run_agent(task, observer, interrupt_slot)`**——把用户输入作为 `task` 字符串直接传进去，循环自己会把这条 user message 加进 conversation，不需要先 `send_user_message`。
+
+#### 最小可跑（静默推理）
+
 ```rust
 use oneai_app::AppBuilder;
-use oneai_domain::coding_pack;
+use oneai_core::ModelConfig;
+use oneai_provider::OpenAIProvider;
 
 #[tokio::main]
-async fn main() {
-    let app = AppBuilder::new()
-        .noop_interaction_gate()
-        .default_parser()
-        .domain_pack(coding_pack("/project/dir"))  // ← 一行领域切换
-        .build()
-        .expect("App 构建成功");
+async fn main() -> anyhow::Result<()> {
+    // Provider 必填——跑推理时没 provider 会返回 Provider 错误。
+    // ONEAI_API_KEY / ONEAI_BASE_URL / ONEAI_MODEL 是 CLI 读取的环境变量，
+    // SDK 集成时你可以直接从 env 取，也可以硬编码或读配置文件。
+    let provider = OpenAIProvider::new(ModelConfig {
+        api_key: std::env::var("ONEAI_API_KEY").ok(),
+        base_url: std::env::var("ONEAI_BASE_URL").ok(),
+        model_name: Some("gpt-4o".to_string()),
+        ..ModelConfig::default()
+    });
 
-    let session = app.create_session();
-    let result = session
-        .execute_tool("calculator", serde_json::json!({"expression": "2+3"}))
-        .await
-        .unwrap();
-    println!("结果: {}", result.content); // → "5"
+    let app = AppBuilder::new()
+        .provider(std::sync::Arc::new(provider))
+        .noop_interaction_gate()        // 无审批 UI 时用 no-op 门（默认即此）
+        .default_parser()               // 3 层输出解析器，防 LLM 不可靠输出
+        .build()?;
+
+    let mut session = app.create_session();   // 同步；带持久化续聊用 create_session_with_id(id).await
+
+    // run_agent_silent = run_agent + 空 observer + 一次性 interrupt slot。
+    // 适合后端批处理 / 一次性问答：拿最终答案就完事。
+    let result = session.run_agent_silent("帮我总结 src/main.rs 的作用").await?;
+    println!("{}", result.final_answer);   // → 模型的最终回答
+    println!("迭代 {} 轮, 完成={}", result.iterations, result.completed);
+    Ok(())
 }
 ```
 
-集成入口是 `crates/oneai-app/src/builder.rs` 的 `AppBuilder`——每个子系统都可选、通过 builder 方法插装（**LLM Provider 也是可选的**，纯工具 / 纯工作流用法无需 Provider）。一般集成只需 `oneai-app`；想缩小依赖面时按需单独依赖 `oneai-core` / `-provider` / `-domain` / `-tool` / `-memory` / `-rag` 等，完整列表见 [架构 — Crate 总览](docs/architecture.md#crate-总览)。深入理解架构读 [CLAUDE.md](CLAUDE.md)，驱动各子系统跑一遍见 [CLI 参考](docs/cli-reference.md)。
+#### 流式 + 工具调用过程回调
+
+要做聊天 UI（打字机效果、工具调用气泡），实现 `AgentLoopObserver`——循环在每个关键节点回调它：
+
+```rust
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use oneai_agent::{AgentLoopObserver, AgentLoopResult, ToolCallRequest, ParadigmKind};
+use oneai_core::ToolOutput;
+
+struct UiObserver { tx: mpsc::UnboundedSender<String> }
+
+impl AgentLoopObserver for UiObserver {
+    fn on_iteration_start(&self, iter: usize, _p: ParadigmKind) {
+        let _ = self.tx.send(format!("[iter {iter}]"));
+    }
+    fn on_stream_chunk(&self, text: &str) {            // 流式 token —— 推给打字机
+        let _ = self.tx.send(text.to_string());
+    }
+    fn on_tool_calls(&self, calls: &[ToolCallRequest]) {/* 渲染工具调用气泡 */}
+    fn on_tool_result(&self, _id: &str, name: &str, out: &ToolOutput) {
+        let _ = self.tx.send(format!("→ {name}: {:?}", out.content));
+    }
+    fn on_direct_answer(&self, text: &str) {            // 模型决定收尾时的最终回答
+        let _ = self.tx.send(text.to_string());
+    }
+    fn on_complete(&self, _r: &AgentLoopResult) { /* 收尾 */ }
+    // 还有 on_thinking / on_token_usage_full / on_context_accounting /
+    // on_delegate / on_interrupt / on_resume …… 按需 override，均有默认空实现。
+}
+
+// interrupt_slot：跨线程中断 / 恢复循环
+let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
+    Arc::new(tokio::sync::Mutex::new(None));
+
+let (tx, mut rx) = mpsc::unbounded_channel();
+let observer = UiObserver { tx };
+
+// 这一行让 AgentLoop 起飞：
+let result = session
+    .run_agent("用户输入放这里", &observer, interrupt_slot.clone())
+    .await?;
+
+// 另一条 tokio task drain `rx`，把 chunk 渲染到 UI
+while let Some(chunk) = rx.recv().await { /* render */ }
+```
+
+#### 关键约定
+
+- **`task` 就是用户输入**：不要先 `send_user_message` 再 `run_agent`——会重复入消息。`run_agent` 内部已把 task 加进 conversation（`session.rs` 注释说明）。
+- **多轮对话**：一个 session 内连续调多次 `run_agent`，conversation 累积历史；上下文超 token 预算时 AgentLoop 自动压缩（`ContextBudgetManager` 门控，预算按模型真实窗口缩放），无需你管。手动压缩走 `session.compact(keep_recent_turns)`。
+- **中断 / 恢复**：把 `interrupt_slot` clone 到 UI 线程，取其中的 `AgentLoop` 句柄调 `interrupt()`，在迭代边界生效；`InteractionGate` 的 `ChannelInteractionGate` / `ThresholdInteractionGate` 还能拦截工具审批、Plan 决策等 5 个决策点（见 `AppBuilder::channel_interaction_gate` / `threshold_interaction_gate`）。
+- **跨 session 续聊**：`app.create_session_with_id(id).await` 从 SQLite 回放历史；要绑定到 working-state 任务用 `session.continue_task(task_id)`（崩溃恢复 + 跨 session 任务续跑）。
+- **领域切换**：builder 上 `.domain_pack(coding_pack("/dir"))` 一行切领域，AgentLoop 用对应 system prompt + 工具白名单 + 范式策略；多领域合并 `.domain_packs(vec![...])`（权限 strictest-wins）。
+- **纯工具 / 纯工作流（无 Provider）**：跳过 `.provider(...)`，直接 `session.execute_tool("calculator", json!({"expression":"2+3"})).await`（返回 `ToolOutput.content`），或 `session.execute_workflow(&config).await` 跑 StateGraph——见下面「无 LLM 也能用」示例：
+
+```rust
+let app = AppBuilder::new().noop_interaction_gate().default_parser().build()?;
+let session = app.create_session();
+let r = session
+    .execute_tool("calculator", serde_json::json!({"expression": "2+3"}))
+    .await?;
+println!("{}", r.content); // → "5"
+```
+
+一般集成只需 `oneai-app`；想缩小依赖面时按需单独依赖 `oneai-core` / `-provider` / `-domain` / `-tool` / `-memory` / `-rag` 等，完整列表见 [架构 — Crate 总览](docs/architecture.md#crate-总览)。深入理解架构读 [CLAUDE.md](CLAUDE.md)，驱动各子系统跑一遍见 [CLI 参考](docs/cli-reference.md)——`examples/cli` 的 `chat` 子命令就是 `run_agent` + 自定义 observer + interrupt slot 的完整参考实现，照抄即可。
 
 ---
 
