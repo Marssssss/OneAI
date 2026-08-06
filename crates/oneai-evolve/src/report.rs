@@ -104,6 +104,47 @@ impl CaseRecord {
     }
 }
 
+/// One variation candidate's Pareto axes + outcome — the report-facing
+/// summary of an E3 [`ScoredCandidate`](crate::gepa::ScoredCandidate). Only
+/// surviving (validated) candidates appear; dropped ones are logged via
+/// `tracing::warn` and counted implicitly as `population - len(candidate_scores)`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateScoreRecord {
+    /// 1-based index among the K variation candidates this generation.
+    pub index: usize,
+    /// Fraction of subset cases that passed.
+    pub pass_rate: f64,
+    /// Prompt + completion tokens summed across subset cases.
+    pub total_tokens: u64,
+    /// Wall-clock latency summed across subset cases (ms).
+    pub total_latency_ms: u64,
+    /// Cases passed on the subset.
+    pub passed: usize,
+    /// Total subset cases.
+    pub total_cases: usize,
+}
+
+/// The generation's Pareto-frontier best — folded into the report so a reader
+/// of `report.json` sees the recommended next-gen config + its axes without
+/// opening a separate file.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontierRecord {
+    /// Frontier-best pass rate (on the subset).
+    pub pass_rate: f64,
+    /// Frontier-best total tokens.
+    pub total_tokens: u64,
+    /// Frontier-best total latency (ms).
+    pub total_latency_ms: u64,
+    /// Path to the persisted frontier config (`frontier-gen<n>.json`),
+    /// relative to `EvolutionReport.run_dir`. `None` if the frontier best
+    /// is the seed (no improvement → nothing new to persist).
+    pub config_file: Option<PathBuf>,
+    /// True iff the frontier best is the seed (no candidate improved on it).
+    pub is_seed: bool,
+}
+
 /// Aggregate report for one evolution generation.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +160,12 @@ pub struct EvolutionReport {
     /// Per-failed-case diagnoses (E2). Empty for E1 runs with no failures.
     #[serde(default)]
     pub diagnoses: Vec<DiagnosisRecord>,
+    /// E3: per-candidate scores on the subset. Empty for `no_optimize` runs.
+    #[serde(default)]
+    pub candidate_scores: Vec<CandidateScoreRecord>,
+    /// E3: the Pareto-frontier best, if optimization ran.
+    #[serde(default)]
+    pub frontier: Option<FrontierRecord>,
     /// Fraction of cases that passed.
     pub pass_rate: f64,
     /// Total prompt + completion tokens across all cases.
@@ -129,6 +176,8 @@ pub struct EvolutionReport {
 
 impl EvolutionReport {
     /// Compute the report from per-case records (called after persistence).
+    /// E3's `candidate_scores` + `frontier` are empty/None here; the optimized
+    /// path mutates them in before `persist_report`.
     pub fn from_records(
         suite_name: &str,
         generation: usize,
@@ -154,10 +203,23 @@ impl EvolutionReport {
             no_optimize,
             case_records,
             diagnoses,
+            candidate_scores: Vec::new(),
+            frontier: None,
             pass_rate,
             total_tokens,
             run_dir,
         }
+    }
+
+    /// Attach E3 optimization results (candidate scores + frontier) in place.
+    /// Called by the optimized `run()` path before persisting.
+    pub fn with_optimization(
+        &mut self,
+        candidate_scores: Vec<CandidateScoreRecord>,
+        frontier: Option<FrontierRecord>,
+    ) {
+        self.candidate_scores = candidate_scores;
+        self.frontier = frontier;
     }
 
     /// Render a compact human-readable summary (for CLI output).
@@ -212,6 +274,38 @@ impl EvolutionReport {
                     s.push_str(&format!("      {}\n", line));
                 }
             }
+        }
+        if !self.candidate_scores.is_empty() {
+            s.push_str(&format!(
+                "  candidates ({} scored):\n",
+                self.candidate_scores.len()
+            ));
+            for c in &self.candidate_scores {
+                s.push_str(&format!(
+                    "    #{} | pass {}/{} ({:.0}%) | tokens {} | latency {}ms\n",
+                    c.index,
+                    c.passed,
+                    c.total_cases,
+                    c.pass_rate * 100.0,
+                    c.total_tokens,
+                    c.total_latency_ms
+                ));
+            }
+        }
+        if let Some(f) = &self.frontier {
+            s.push_str(&format!(
+                "  frontier: pass {:.0}% | tokens {} | latency {}ms | {}\n",
+                f.pass_rate * 100.0,
+                f.total_tokens,
+                f.total_latency_ms,
+                if f.is_seed {
+                    "seed (no improvement)".to_string()
+                } else if let Some(p) = &f.config_file {
+                    p.display().to_string()
+                } else {
+                    "(no config)".to_string()
+                }
+            ));
         }
         s
     }

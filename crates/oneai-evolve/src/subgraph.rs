@@ -132,6 +132,30 @@ impl ParamRef {
             Self::SkillText(n) => format!("skill[{n}]"),
         }
     }
+
+    /// Inverse of [`path`](Self::path) for the E3 first-axis params only
+    /// (`pack.system_prompt` / `pack.tool_decorators[<name>]` /
+    /// `pack.tools[<name>]`). Returns `None` for any other string — the
+    /// `VariationOperator` drops patches it can't address (with a `warn` log)
+    /// rather than guessing. This is the parse side of the LLM patch
+    /// contract (design §4 E3): the LLM emits `path()` strings, Rust resolves
+    /// them back to typed `ParamRef`s.
+    pub fn from_path(path: &str) -> Option<Self> {
+        if path == "pack.system_prompt" {
+            return Some(Self::PackSystemPrompt);
+        }
+        if let Some(rest) = path.strip_prefix("pack.tool_decorators[") {
+            if let Some(name) = rest.strip_suffix(']') {
+                return Some(Self::PackToolDecorator(name.to_string()));
+            }
+        }
+        if let Some(rest) = path.strip_prefix("pack.tools[") {
+            if let Some(name) = rest.strip_suffix(']') {
+                return Some(Self::PackTool(name.to_string()));
+            }
+        }
+        None
+    }
 }
 
 // ─── TraceSlice ──────────────────────────────────────────────────────────
@@ -800,5 +824,26 @@ mod tests {
             "pack.tools[calculator]"
         );
         assert_eq!(ParamRef::LoopTokenBudget.path(), "loop.token_budget");
+    }
+
+    #[test]
+    fn paramref_from_path_roundtrips_first_axis() {
+        // E3 first-axis paths round-trip.
+        assert_eq!(
+            ParamRef::from_path("pack.system_prompt"),
+            Some(ParamRef::PackSystemPrompt)
+        );
+        assert_eq!(
+            ParamRef::from_path("pack.tool_decorators[calculator]"),
+            Some(ParamRef::PackToolDecorator("calculator".into()))
+        );
+        assert_eq!(
+            ParamRef::from_path("pack.tools[read_file]"),
+            Some(ParamRef::PackTool("read_file".into()))
+        );
+        // Non-first-axis + garbage → None (operator drops the patch).
+        assert_eq!(ParamRef::from_path("pack.memory.recall"), None);
+        assert_eq!(ParamRef::from_path("pack.tools["), None);
+        assert_eq!(ParamRef::from_path("nonsense"), None);
     }
 }

@@ -36,6 +36,7 @@
 pub mod candidate;
 pub mod cli;
 pub mod failure_extractor;
+pub mod gepa;
 pub mod loop_runner;
 pub mod report;
 pub mod subgraph;
@@ -44,8 +45,15 @@ pub mod trajectory_collector;
 pub use candidate::{AgentLoopOverlay, AppHandle, CandidateConfig};
 pub use cli::{run_evolve, EvolveRunArgs};
 pub use failure_extractor::{extract_failures, FailedCase, FailureExtractor};
+pub use gepa::{
+    apply_patch, apply_patches, select_case_subset, semantic_guard_decoration, validate_candidate,
+    GepaConfig, GepaOptimizer, LlmVariationOperator, NonDominatedSelector, OptimizationResult,
+    ParetoSelector, Patch, PatchOp, ScoredCandidate, VariationOperator,
+};
 pub use loop_runner::{AppBaseline, EvolutionConfig, EvolutionLoop};
-pub use report::{CaseRecord, DiagnosisRecord, EvolutionReport};
+pub use report::{
+    CandidateScoreRecord, CaseRecord, DiagnosisRecord, EvolutionReport, FrontierRecord,
+};
 pub use subgraph::{
     diagnose_heuristic, Diagnosis, HeuristicDiagnostician, LlmDiagnostician, ParamRef, SpanSummary,
     SubgraphDiagnostician, TraceSlice,

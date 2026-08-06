@@ -19,9 +19,12 @@ use oneai_eval::{EvalSuite, RecordingProvider};
 
 use crate::candidate::{AppHandle, CandidateConfig};
 use crate::failure_extractor::{extract_failures, FailedCase};
-use crate::report::{CaseRecord, DiagnosisRecord, EvolutionReport};
+use crate::gepa::{select_case_subset, GepaOptimizer, ScoredCandidate};
+use crate::report::{
+    CandidateScoreRecord, CaseRecord, DiagnosisRecord, EvolutionReport, FrontierRecord,
+};
 use crate::subgraph::{Diagnosis, HeuristicDiagnostician, SubgraphDiagnostician};
-use crate::trajectory_collector::TrajectoryCollector;
+use crate::trajectory_collector::{CaseRun, TrajectoryCollector};
 
 /// The baseline an evolution run is rooted in: the provider to wrap in a
 /// recorder + the project dir the seed pack resolves against.
@@ -116,6 +119,9 @@ pub struct EvolutionLoop {
     /// [`LlmDiagnostician`](crate::subgraph::LlmDiagnostician) with a
     /// stronger/different-family judge.
     pub diagnostician: Arc<dyn SubgraphDiagnostician>,
+    /// E3 GEPA optimizer (variation + Pareto). `None` (or `no_optimize=true`)
+    /// → the E1/E2 degenerate path. Set via [`with_optimizer`](Self::with_optimizer).
+    pub optimizer: Option<Arc<GepaOptimizer>>,
 }
 
 impl EvolutionLoop {
@@ -126,6 +132,7 @@ impl EvolutionLoop {
             baseline,
             config: EvolutionConfig::default(),
             diagnostician: Arc::new(HeuristicDiagnostician),
+            optimizer: None,
         }
     }
 
@@ -143,6 +150,15 @@ impl EvolutionLoop {
         self
     }
 
+    /// Wire the E3 GEPA optimizer (variation operator + Pareto selector +
+    /// config). Only consulted when `config.no_optimize == false`; otherwise
+    /// the loop runs the E1/E2 degenerate path regardless.
+    #[must_use]
+    pub fn with_optimizer(mut self, optimizer: Arc<GepaOptimizer>) -> Self {
+        self.optimizer = Some(optimizer);
+        self
+    }
+
     /// Run generation 0 against `suite`, persist a report + per-case
     /// trajectories + per-failed-case diagnoses, and return the report.
     ///
@@ -154,32 +170,18 @@ impl EvolutionLoop {
     /// resulting [`Diagnosis`] (suspect params + subtrace + critique) is
     /// persisted to `run-<ts>/diagnosis-<id>.json` and summarized in the report.
     pub async fn run(&self, seed: &CandidateConfig, suite: &EvalSuite) -> Result<EvolutionReport> {
-        // Wrap the baseline provider in a recorder so every infer() response is
-        // captured for per-case trajectory slicing.
-        let recorder = Arc::new(RecordingProvider::new(self.baseline.provider.clone()));
-        let provider_for_app: Arc<dyn LlmProvider> = recorder.clone();
-
-        // Hot-load the seed: validate → build DomainPack → AppBuilder.domain_pack.
-        let AppHandle(app) = seed
-            .build_app(provider_for_app, &self.baseline.project_dir)
-            .await?;
-        let app = Arc::new(app);
-        let collector = TrajectoryCollector::new(app, recorder);
-
-        // Run dir: <root>/evolve/run-<timestamp>/.
+        // Run dir: <root>/evolve/run-<timestamp>/. Created first so collect_runs
+        // (which may persist trajectories) + the optimization path share it.
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
         let run_dir = self.config.root.join("evolve").join(format!("run-{ts}"));
         fs::create_dir_all(&run_dir).map_err(|e| {
             OneAIError::Config(format!("create run_dir {}: {}", run_dir.display(), e))
         })?;
 
-        // Drive the loop per case, capturing (Trajectory, TraceTree) + result.
-        let mut runs: Vec<crate::trajectory_collector::CaseRun> =
-            Vec::with_capacity(suite.cases.len());
-        for case in &suite.cases {
-            let run = collector.run_case(case, &suite.metrics).await;
-            runs.push(run);
-        }
+        // Drive the loop per case on the FULL suite, capturing runs. (E1/E2
+        // plumbing; the seed's full-suite runs also feed the optimization
+        // path's subset score, so they're reused, not re-run.)
+        let runs = self.collect_runs(seed, suite).await?;
 
         // Persist per-case trajectories + build records. `suite.cases` and
         // `runs` are parallel (same order); zip borrows both.
@@ -196,30 +198,165 @@ impl EvolutionLoop {
         // E2: diagnose failures. FailedCase borrows the run's result +
         // trajectory + trace_tree + the seed candidate. The diagnostician
         // always returns a Diagnosis (tail-N fallback); failures only (no
-        // wasted work on passing cases).
+        // wasted work on passing cases). Diagnoses are kept (owned) so the
+        // E3 optimizer can read them.
         let failed: Vec<FailedCase<'_>> = extract_failures(&suite.cases, &runs, seed);
-        let mut diagnoses = Vec::with_capacity(failed.len());
+        let failed_ids: Vec<String> = failed.iter().map(|f| f.case.id.clone()).collect();
+        let mut diag_records = Vec::with_capacity(failed.len());
+        let mut diagnoses: Vec<Diagnosis> = Vec::with_capacity(failed.len());
         for fc in &failed {
             let d = self.diagnostician.diagnose(fc).await;
             let diag_rel = persist_diagnosis(&run_dir, &fc.case.id, &d)?;
-            diagnoses.push(DiagnosisRecord {
+            diag_records.push(DiagnosisRecord {
                 case_id: fc.case.id.clone(),
                 suspect_params: d.suspect_params.clone(),
                 critique: d.critique.clone(),
                 diagnosis_file: Some(diag_rel),
             });
+            diagnoses.push(d);
         }
 
-        let report = EvolutionReport::from_records(
+        let mut report = EvolutionReport::from_records(
             &suite.name,
             0,
             self.config.no_optimize,
             records,
-            diagnoses,
+            diag_records,
             run_dir.clone(),
         );
+
+        // E3: optimization step (single generation). Only when an optimizer is
+        // wired AND the run isn't no-optimize. The seed scored on the subset
+        // reuses the full-suite runs already collected (subset ⊆ full).
+        if !self.config.no_optimize {
+            if let Some(optimizer) = &self.optimizer {
+                let ratio = optimizer.config.case_subset_ratio;
+                let subset = select_case_subset(suite, ratio, &failed_ids);
+                let subset_ids: std::collections::HashSet<String> =
+                    subset.cases.iter().map(|c| c.id.clone()).collect();
+                // Filter the seed's full-suite runs down to the subset
+                // (parallel with suite.cases). Clone — ScoredCandidate owns.
+                let seed_subset_runs: Vec<CaseRun> = suite
+                    .cases
+                    .iter()
+                    .zip(&runs)
+                    .filter(|(c, _)| subset_ids.contains(&c.id))
+                    .map(|(_, r)| r.clone())
+                    .collect();
+                let seed_scored = ScoredCandidate::from_runs(seed.clone(), &seed_subset_runs);
+                let (candidate_scores, frontier) = self
+                    .run_optimization(seed, seed_scored, &diagnoses, &subset, &run_dir)
+                    .await?;
+                report.with_optimization(candidate_scores, frontier);
+            }
+        }
+
         persist_report(&run_dir, &report)?;
         Ok(report)
+    }
+
+    /// Build a fresh `App` per `candidate` (separate recorder + provider
+    /// wrap) and drive the loop per case, returning the captured `CaseRun`s.
+    /// Shared by the seed's gen-0 run + each variation candidate's scoring.
+    /// Live (not replayed) — semantic-variation candidates can't be replayed
+    /// (design §3.3 难点 C).
+    async fn collect_runs(
+        &self,
+        candidate: &CandidateConfig,
+        suite: &EvalSuite,
+    ) -> Result<Vec<CaseRun>> {
+        let recorder = Arc::new(RecordingProvider::new(self.baseline.provider.clone()));
+        let provider_for_app: Arc<dyn LlmProvider> = recorder.clone();
+        let AppHandle(app) = candidate
+            .build_app(provider_for_app, &self.baseline.project_dir)
+            .await?;
+        let app = Arc::new(app);
+        let collector = TrajectoryCollector::new(app, recorder);
+        let mut runs = Vec::with_capacity(suite.cases.len());
+        for case in &suite.cases {
+            let run = collector.run_case(case, &suite.metrics).await;
+            runs.push(run);
+        }
+        Ok(runs)
+    }
+
+    /// The E3 single-generation optimization: vary K candidates → score on the
+    /// subset → Pareto select → persist the frontier config. Returns the
+    /// candidate-score records + the frontier record to fold into the report.
+    async fn run_optimization(
+        &self,
+        seed: &CandidateConfig,
+        seed_scored: ScoredCandidate,
+        diagnoses: &[Diagnosis],
+        subset: &EvalSuite,
+        run_dir: &Path,
+    ) -> Result<(Vec<CandidateScoreRecord>, Option<FrontierRecord>)> {
+        let optimizer = self
+            .optimizer
+            .as_ref()
+            .expect("optimizer set (caller checks no_optimize)");
+
+        // Vary K candidates (operator drops invalid/cheat ones with a warn).
+        let candidates = optimizer.vary(diagnoses, seed).await;
+
+        let mut candidate_scores: Vec<CandidateScoreRecord> = Vec::with_capacity(candidates.len());
+        let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(candidates.len() + 1);
+        // Seed as candidate 0 so Pareto can compare "do nothing" against the
+        // variations — the frontier may be the seed itself (no improvement).
+        scored.push(seed_scored.clone());
+
+        for (i, cand) in candidates.iter().enumerate() {
+            let runs = self.collect_runs(cand, subset).await?;
+            let passed = runs.iter().filter(|r| r.result.passed()).count();
+            let total = runs.len();
+            let sc = ScoredCandidate::from_runs(cand.clone(), &runs);
+            candidate_scores.push(CandidateScoreRecord {
+                index: i + 1,
+                pass_rate: sc.pass_rate,
+                total_tokens: sc.total_tokens,
+                total_latency_ms: sc.total_latency_ms,
+                passed,
+                total_cases: total,
+            });
+            scored.push(sc);
+        }
+
+        let frontier = optimizer.select(&scored);
+        let frontier_rec = match frontier.first() {
+            Some(b) => {
+                // Is the frontier-best the seed? Compare the three axes —
+                // an exact match means no candidate improved on the seed, so
+                // nothing new to persist. (Collision only when a candidate
+                // matches the seed on all axes — then not persisting is
+                // harmless: it's the same quality.)
+                let is_seed = b.pass_rate == seed_scored.pass_rate
+                    && b.total_tokens == seed_scored.total_tokens
+                    && b.total_latency_ms == seed_scored.total_latency_ms;
+                let config_file = if is_seed {
+                    None
+                } else {
+                    let name = PathBuf::from("frontier-gen0.json");
+                    let path = run_dir.join(&name);
+                    let json =
+                        serde_json::to_string_pretty(&b.candidate.pack_config).map_err(|e| {
+                            OneAIError::Config(format!("serialize frontier config: {e}"))
+                        })?;
+                    fs::write(&path, json).map_err(|e| {
+                        OneAIError::Config(format!("write {}: {}", path.display(), e))
+                    })?;
+                    Some(name)
+                };
+                Some(FrontierRecord {
+                    pass_rate: b.pass_rate,
+                    total_tokens: b.total_tokens,
+                    total_latency_ms: b.total_latency_ms,
+                    config_file,
+                    is_seed,
+                })
+            }
+            None => None,
+        };
+        Ok((candidate_scores, frontier_rec))
     }
 }
 
