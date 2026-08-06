@@ -99,6 +99,40 @@ impl LessonsLog {
         }
     }
 
+    /// Load an existing `lessons.jsonl` into memory (E5 `step` resume — the
+    /// stagnation counter must span the generation boundary). Missing file →
+    /// empty log (fresh run). Malformed line → `Err` (don't silently drop
+    /// cross-generation state).
+    pub fn load(path: PathBuf) -> Result<Self> {
+        let mut log = Self::new(path);
+        match std::fs::read_to_string(&log.path) {
+            Ok(body) => {
+                for (i, line) in body.lines().enumerate() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let entry: LessonEntry = serde_json::from_str(line).map_err(|e| {
+                        OneAIError::Config(format!(
+                            "parse {} line {}: {e}",
+                            log.path.display(),
+                            i + 1
+                        ))
+                    })?;
+                    log.entries.push(entry);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(OneAIError::Config(format!(
+                    "read {}: {}",
+                    log.path.display(),
+                    e
+                )))
+            }
+        }
+        Ok(log)
+    }
+
     /// Append a generation's lesson. The loop calls this once per generation
     /// after the optimization + merge step.
     pub fn record(&mut self, entry: LessonEntry) {

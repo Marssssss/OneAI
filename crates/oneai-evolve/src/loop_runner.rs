@@ -1,9 +1,11 @@
 //! `EvolutionLoop` — the outer driver. E1's degenerate form runs generation 0
 //! only (no diagnosis / variation / Pareto) and persists a report + per-case
 //! trajectories. E2 adds diagnosis between the collect and report steps; E3
-//! wraps variation around a single generation; **E4 loops generations to
-//! convergence**, carrying the frontier forward as the next-gen base via a
-//! `LessonMerger` and persisting a cross-generation `lessons.jsonl`.
+//! wraps variation around a single generation; E4 loops generations to
+//! convergence, carrying the frontier forward as the next-gen base via a
+//! `LessonMerger` and persisting a cross-generation `lessons.jsonl`. **E5**
+//! adds the two regression gates (held-out full-suite + replay determinism),
+//! persists `seed.json` for `diff`, and exposes `run_one_more` for `step`.
 //!
 //! With `max_generations == 1` (the E1/E2/E3 default) the loop runs once and
 //! the report is identical to E3's — backward compatible. `max_generations >
@@ -14,8 +16,9 @@
 //! the generation cap, the cumulative-token cap, or stagnation
 //! (`early_stop_patience` consecutive generations with no improvement).
 //!
-//! `EvolutionConfig` fields (`max_generations`, `no_optimize`) are stable
-//! across phases; E4 finally consumes `max_generations`.
+//! The per-generation body is extracted into [`run_single_generation`] so
+//! [`run_one_more`] (E5 `step`) can resume an existing run-dir for one more
+//! generation without re-running from gen 0.
 
 use std::collections::HashSet;
 use std::fs;
@@ -25,6 +28,7 @@ use std::sync::Arc;
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::LlmProvider;
 use oneai_eval::{EvalSuite, RecordingProvider};
+use tracing::warn;
 
 use crate::candidate::{AppHandle, CandidateConfig};
 use crate::failure_extractor::{extract_failures, FailedCase};
@@ -186,13 +190,17 @@ impl EvolutionLoop {
     /// variation candidates can't be replayed; design §3.3 难点 C). Only the
     /// **final** generation's trajectories + diagnoses are persisted to disk
     /// (intermediate gens keep their lessons row only — saves disk + the
-    /// in-memory diagnoses still feed the next gen's variation).
+    /// in-memory diagnoses still feed the next gen's variation). The E5
+    /// held-out + replay gates also run only on the final generation.
     pub async fn run(&self, seed: &CandidateConfig, suite: &EvalSuite) -> Result<EvolutionReport> {
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
         let run_dir = self.config.root.join("evolve").join(format!("run-{ts}"));
         fs::create_dir_all(&run_dir).map_err(|e| {
             OneAIError::Config(format!("create run_dir {}: {}", run_dir.display(), e))
         })?;
+        // E5: persist the seed config so `evolve diff <run-dir>` can compare
+        // the frontier against the seed without re-passing `--seed`.
+        persist_seed(&run_dir, seed)?;
 
         let optimizer = if !self.config.no_optimize {
             self.optimizer.clone()
@@ -223,115 +231,49 @@ impl EvolutionLoop {
 
         for gen in 0..self.config.max_generations {
             final_gen = gen;
-            // ① full-suite runs of this generation's base.
-            let runs = self.collect_runs(&base, suite).await?;
-            let gen_tokens: u64 = runs
-                .iter()
-                .map(|r| r.result.prompt_tokens + r.result.completion_tokens)
-                .sum();
-            total_tokens += gen_tokens;
+            let is_final = gen + 1 == self.config.max_generations;
+            let exec = self
+                .run_single_generation(&base, suite, &run_dir, gen, is_final)
+                .await?;
+            total_tokens += exec.gen_tokens;
 
-            let mut case_records = Vec::with_capacity(runs.len());
-            for (_case, run) in suite.cases.iter().zip(&runs) {
-                case_records.push(CaseRecord::from_run(&run.result, &run.trajectory, None));
-            }
-            let total_cases = case_records.len();
-            let passed = case_records.iter().filter(|c| c.passed).count();
-            let base_pass_rate = if total_cases == 0 {
-                0.0
-            } else {
-                passed as f64 / total_cases as f64
-            };
-
-            // ③ diagnose failures (in-memory diagnoses feed the next step's
-            // variation; only the final gen's diagnoses are persisted).
-            let failed: Vec<FailedCase<'_>> = extract_failures(&suite.cases, &runs, &base);
-            let failed_ids: Vec<String> = failed.iter().map(|f| f.case.id.clone()).collect();
-            let mut diagnoses: Vec<Diagnosis> = Vec::with_capacity(failed.len());
-            let mut diag_records = Vec::with_capacity(failed.len());
-            for fc in &failed {
-                let d = self.diagnostician.diagnose(fc).await;
-                diag_records.push(DiagnosisRecord {
-                    case_id: fc.case.id.clone(),
-                    suspect_params: d.suspect_params.clone(),
-                    critique: d.critique.clone(),
-                    diagnosis_file: None,
-                });
-                diagnoses.push(d);
-            }
-
-            // ④ optimization: vary K → score subset → Pareto. The base is
-            // always candidate 0 so the frontier can be the base itself.
-            let (candidate_scores, frontier_rec, frontier_scored) = match &optimizer {
-                Some(opt) => {
-                    let ratio = opt.config.case_subset_ratio;
-                    let subset = select_case_subset(suite, ratio, &failed_ids);
-                    let subset_ids: HashSet<String> =
-                        subset.cases.iter().map(|c| c.id.clone()).collect();
-                    let base_subset_runs: Vec<CaseRun> = suite
-                        .cases
-                        .iter()
-                        .zip(&runs)
-                        .filter(|(c, _)| subset_ids.contains(&c.id))
-                        .map(|(_, r)| r.clone())
-                        .collect();
-                    let base_scored = ScoredCandidate::from_runs(base.clone(), &base_subset_runs);
-                    let step = self
-                        .run_optimization(&base, base_scored, &diagnoses, &subset, &run_dir, gen)
-                        .await?;
-                    (
-                        step.candidate_scores,
-                        step.frontier_rec,
-                        step.frontier_scored,
-                    )
-                }
-                None => (Vec::new(), None, Vec::new()),
-            };
-
-            // Frontier-best axes (subset) for the lesson + convergence.
-            let (frontier_pass, frontier_tok, frontier_lat, frontier_is_seed) = match &frontier_rec
-            {
-                Some(f) => (f.pass_rate, f.total_tokens, f.total_latency_ms, f.is_seed),
-                None => (base_pass_rate, gen_tokens, 0, true),
-            };
-            let frontier_cfg_file = frontier_rec.as_ref().and_then(|f| f.config_file.clone());
-
-            // Merge the frontier into the next-gen base + lessons text. With
-            // no optimizer, the base carries forward unchanged.
-            let (next_base, lessons_text) = match &optimizer {
-                Some(opt) => opt.merge(&frontier_scored, &base).await,
-                None => (
-                    base.clone(),
-                    "no optimization — base carried forward unchanged".into(),
-                ),
-            };
+            let (frontier_pass, frontier_tok, frontier_lat, frontier_is_seed) =
+                match &exec.frontier_rec {
+                    Some(f) => (f.pass_rate, f.total_tokens, f.total_latency_ms, f.is_seed),
+                    None => (exec.base_pass_rate, exec.gen_tokens, 0, true),
+                };
+            let frontier_cfg_file = exec
+                .frontier_rec
+                .as_ref()
+                .and_then(|f| f.config_file.clone());
 
             // Record the lesson + generation summary.
             lessons.record(LessonEntry {
                 generation: gen,
-                base_pass_rate,
+                base_pass_rate: exec.base_pass_rate,
                 frontier_pass_rate: frontier_pass,
                 frontier_total_tokens: frontier_tok,
                 frontier_total_latency_ms: frontier_lat,
                 frontier_is_seed,
-                lessons_text: lessons_text.clone(),
+                lessons_text: exec.lessons_text.clone(),
             });
             generations.push(GenerationSummary {
                 generation: gen,
-                base_pass_rate,
+                base_pass_rate: exec.base_pass_rate,
                 frontier_pass_rate: frontier_pass,
                 frontier_total_tokens: frontier_tok,
                 frontier_total_latency_ms: frontier_lat,
                 frontier_is_seed,
-                candidate_scores: candidate_scores.clone(),
+                candidate_scores: exec.candidate_scores.clone(),
                 frontier_config_file: frontier_cfg_file.clone(),
-                lessons_text,
+                lessons_text: exec.lessons_text.clone(),
+                held_out_pass_rate: exec.held_out_pass_rate,
             });
 
             // Lift this generation's final-gen accumulators (overwritten each
             // gen so the last one wins).
-            final_candidate_scores = candidate_scores;
-            final_frontier = frontier_rec.clone();
+            final_candidate_scores = exec.candidate_scores;
+            final_frontier = exec.frontier_rec.clone();
 
             // Convergence / stop checks (design §4 E4).
             if frontier_pass >= target {
@@ -352,7 +294,7 @@ impl EvolutionLoop {
                 ));
             }
             let mut stopping = stop_reason.is_some();
-            if gen + 1 == self.config.max_generations {
+            if is_final {
                 // Reached the cap — record it if no other reason fired first.
                 if stop_reason.is_none() {
                     stop_reason = Some(format!("max_generations {gen} reached"));
@@ -362,18 +304,16 @@ impl EvolutionLoop {
 
             if stopping {
                 // Persist the final generation's trajectories + diagnoses
-                // (intermediate gens only record their lesson row). `case_records`
-                // + `diag_records` are owned here; `runs` is borrowed immutably
-                // alongside `failed`'s borrow (both read-only — fine).
-                final_case_records = persist_case_records(&run_dir, case_records, &runs)?;
-                final_diagnoses = persist_diagnoses(&run_dir, diag_records, &diagnoses)?;
+                // (intermediate gens only record their lesson row).
+                final_case_records = persist_case_records(&run_dir, exec.case_records, &exec.runs)?;
+                final_diagnoses = persist_diagnoses(&run_dir, exec.diag_records, &exec.diagnoses)?;
                 break;
             }
 
             // Next-gen base + carry the final-gen accumulators forward. Only
             // the final generation persists trajectories; intermediate gens
             // just record their lesson row.
-            base = next_base;
+            base = exec.next_base;
         }
 
         let lessons_file = if lessons.is_empty() {
@@ -399,6 +339,267 @@ impl EvolutionLoop {
         );
         persist_report(&run_dir, &report)?;
         Ok(report)
+    }
+
+    /// E5 `evolve step`: resume an existing run-dir for **one more**
+    /// generation. Reads the prior `report.json` to pick up the generation
+    /// index + `no_optimize` flag, loads the latest `frontier-gen{N}.json`
+    /// (or `seed.json` when no frontier was ever persisted) as the new base,
+    /// reconstructs the `LessonsLog` across the boundary (so the stagnation
+    /// counter spans gens), runs a single generation in the SAME run-dir,
+    /// and rewrites `report.json` + appends `lessons.jsonl`.
+    ///
+    /// The held-out + replay gates run (this is the final generation of the
+    /// resumed run). Cumulative-token-budget tracking does NOT carry across
+    /// `step` (the budget cap governed the original run; a manual resume
+    /// starts a fresh token tally — documented).
+    pub async fn run_one_more(&self, run_dir: &Path, suite: &EvalSuite) -> Result<EvolutionReport> {
+        let report_path = run_dir.join("report.json");
+        let prev: EvolutionReport =
+            serde_json::from_str(&fs::read_to_string(&report_path).map_err(|e| {
+                OneAIError::Config(format!("read {}: {}", report_path.display(), e))
+            })?)
+            .map_err(|e| OneAIError::Config(format!("parse {}: {}", report_path.display(), e)))?;
+        let next_gen = prev.generation + 1;
+
+        let base = load_resume_base(run_dir)?;
+
+        let lessons_path = run_dir.join("lessons.jsonl");
+        let mut lessons = LessonsLog::load(lessons_path.clone())?;
+
+        let exec = self
+            .run_single_generation(&base, suite, run_dir, next_gen, true)
+            .await?;
+
+        let (frontier_pass, frontier_tok, frontier_lat, frontier_is_seed) = match &exec.frontier_rec
+        {
+            Some(f) => (f.pass_rate, f.total_tokens, f.total_latency_ms, f.is_seed),
+            None => (exec.base_pass_rate, exec.gen_tokens, 0, true),
+        };
+        let frontier_cfg_file = exec
+            .frontier_rec
+            .as_ref()
+            .and_then(|f| f.config_file.clone());
+
+        lessons.record(LessonEntry {
+            generation: next_gen,
+            base_pass_rate: exec.base_pass_rate,
+            frontier_pass_rate: frontier_pass,
+            frontier_total_tokens: frontier_tok,
+            frontier_total_latency_ms: frontier_lat,
+            frontier_is_seed,
+            lessons_text: exec.lessons_text.clone(),
+        });
+
+        let case_records = persist_case_records(run_dir, exec.case_records, &exec.runs)?;
+        let diag_records = persist_diagnoses(run_dir, exec.diag_records, &exec.diagnoses)?;
+
+        let mut generations = prev.generations.clone();
+        generations.push(GenerationSummary {
+            generation: next_gen,
+            base_pass_rate: exec.base_pass_rate,
+            frontier_pass_rate: frontier_pass,
+            frontier_total_tokens: frontier_tok,
+            frontier_total_latency_ms: frontier_lat,
+            frontier_is_seed,
+            candidate_scores: exec.candidate_scores.clone(),
+            frontier_config_file: frontier_cfg_file,
+            lessons_text: exec.lessons_text.clone(),
+            held_out_pass_rate: exec.held_out_pass_rate,
+        });
+
+        let lessons_file = if lessons.is_empty() {
+            None
+        } else {
+            let rel = PathBuf::from("lessons.jsonl");
+            lessons.persist()?;
+            Some(rel)
+        };
+
+        let report = EvolutionReport::for_run(
+            &prev.suite_name,
+            prev.no_optimize,
+            run_dir.to_path_buf(),
+            generations,
+            next_gen,
+            case_records,
+            diag_records,
+            exec.candidate_scores,
+            exec.frontier_rec,
+            lessons_file,
+            Some(format!("step: resumed at gen {next_gen}")),
+        );
+        persist_report(run_dir, &report)?;
+        Ok(report)
+    }
+
+    /// Execute one generation: collect full-suite base runs, diagnose
+    /// failures, optimize on the subset, (final gen only) run the held-out
+    /// and replay gates, and merge the frontier into the next-gen base.
+    /// Returns the full per-gen state for the caller to record and lift
+    /// into the report.
+    ///
+    /// Extracted from `run` so `run_one_more` reuses the identical body.
+    /// `is_final` toggles the two E5 gates + trajectory/diagnosis
+    /// persistence handoff (the caller persists; intermediate gens skip
+    /// disk).
+    async fn run_single_generation(
+        &self,
+        base: &CandidateConfig,
+        suite: &EvalSuite,
+        run_dir: &Path,
+        gen: usize,
+        is_final: bool,
+    ) -> Result<GenExec> {
+        let optimizer = if !self.config.no_optimize {
+            self.optimizer.clone()
+        } else {
+            None
+        };
+
+        // ① full-suite runs of this generation's base.
+        let runs = self.collect_runs(base, suite).await?;
+        let gen_tokens: u64 = runs
+            .iter()
+            .map(|r| r.result.prompt_tokens + r.result.completion_tokens)
+            .sum();
+
+        let mut case_records = Vec::with_capacity(runs.len());
+        for (_case, run) in suite.cases.iter().zip(&runs) {
+            case_records.push(CaseRecord::from_run(&run.result, &run.trajectory, None));
+        }
+        let total_cases = case_records.len();
+        let passed = case_records.iter().filter(|c| c.passed).count();
+        let base_pass_rate = if total_cases == 0 {
+            0.0
+        } else {
+            passed as f64 / total_cases as f64
+        };
+
+        // ③ diagnose failures (in-memory diagnoses feed the next step's
+        // variation; only the final gen's diagnoses are persisted).
+        let failed: Vec<FailedCase<'_>> = extract_failures(&suite.cases, &runs, base);
+        let failed_ids: Vec<String> = failed.iter().map(|f| f.case.id.clone()).collect();
+        let mut diagnoses: Vec<Diagnosis> = Vec::with_capacity(failed.len());
+        let mut diag_records = Vec::with_capacity(failed.len());
+        for fc in &failed {
+            let d = self.diagnostician.diagnose(fc).await;
+            diag_records.push(DiagnosisRecord {
+                case_id: fc.case.id.clone(),
+                suspect_params: d.suspect_params.clone(),
+                critique: d.critique.clone(),
+                diagnosis_file: None,
+            });
+            diagnoses.push(d);
+        }
+
+        // ④ optimization: vary K → score subset → Pareto. The base is
+        // always candidate 0 so the frontier can be the base itself.
+        let (candidate_scores, mut frontier_rec, frontier_scored) = match &optimizer {
+            Some(opt) => {
+                let ratio = opt.config.case_subset_ratio;
+                let subset = select_case_subset(suite, ratio, &failed_ids);
+                let subset_ids: HashSet<String> =
+                    subset.cases.iter().map(|c| c.id.clone()).collect();
+                let base_subset_runs: Vec<CaseRun> = suite
+                    .cases
+                    .iter()
+                    .zip(&runs)
+                    .filter(|(c, _)| subset_ids.contains(&c.id))
+                    .map(|(_, r)| r.clone())
+                    .collect();
+                let base_scored = ScoredCandidate::from_runs(base.clone(), &base_subset_runs);
+                let step = self
+                    .run_optimization(base, base_scored, &diagnoses, &subset, run_dir, gen)
+                    .await?;
+                (
+                    step.candidate_scores,
+                    step.frontier_rec,
+                    step.frontier_scored,
+                )
+            }
+            None => (Vec::new(), None, Vec::new()),
+        };
+
+        // E5 regression gates (final generation only). Both gate on a
+        // non-seed frontier (a seed frontier trivially has no overfit /
+        // drift signal — it's the base).
+        let mut held_out_pass_rate = None;
+        if is_final && optimizer.is_some() {
+            if let Some(rec) = frontier_rec.as_mut() {
+                if !rec.is_seed {
+                    if let Some(best) = frontier_scored.first() {
+                        // ⑤a held-out: re-run the frontier on the FULL suite
+                        // (variation scored it on the subset only). held_out <
+                        // frontier subset pass_rate flags overfitting to the
+                        // train subset (design §4 E5).
+                        let ho_runs = self.collect_runs(&best.candidate, suite).await?;
+                        let ho_passed = ho_runs.iter().filter(|r| r.result.passed()).count();
+                        let ho_total = ho_runs.len();
+                        held_out_pass_rate = Some(if ho_total == 0 {
+                            0.0
+                        } else {
+                            ho_passed as f64 / ho_total as f64
+                        });
+
+                        // ⑤b replay gate: replay the frontier's recorded
+                        // trajectory with frozen responses, assert the loop's
+                        // tool-call sequence didn't drift (design §6.4 — only
+                        // meaningful for non-semantic mutations; the existing
+                        // `replay_trajectory_with` builds a no-pack app, so it
+                        // only reproduces direct-answer trajectories — tool-call
+                        // trajectories are skipped to avoid false positives).
+                        if is_replay_eligible(base, &best.candidate) {
+                            let traj = &ho_runs[0].trajectory;
+                            if traj.recorded_tool_calls.is_empty() {
+                                match oneai_eval::replay_trajectory_with(traj.clone()).await {
+                                    Ok(rr) => {
+                                        rec.replay_deterministic = Some(rr.tool_calls_match());
+                                    }
+                                    Err(e) => {
+                                        warn!("evolve: replay gate errored: {e:?}");
+                                    }
+                                }
+                            } else {
+                                warn!(
+                                    "evolve: replay skipped (tool-call trajectory; \
+                                     no-pack replay can't reproduce tools)"
+                                );
+                            }
+                        } else {
+                            warn!(
+                                "evolve: replay skipped \
+                                 (semantic mutation — system_prompt/decorators changed)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge the frontier into the next-gen base + lessons text. With no
+        // optimizer, the base carries forward unchanged.
+        let (next_base, lessons_text) = match &optimizer {
+            Some(opt) => opt.merge(&frontier_scored, base).await,
+            None => (
+                base.clone(),
+                "no optimization — base carried forward unchanged".into(),
+            ),
+        };
+
+        Ok(GenExec {
+            base_pass_rate,
+            gen_tokens,
+            runs,
+            case_records,
+            diag_records,
+            diagnoses,
+            candidate_scores,
+            frontier_rec,
+            next_base,
+            lessons_text,
+            held_out_pass_rate,
+        })
     }
 
     /// Build a fresh `App` per `candidate` (separate recorder + provider
@@ -501,6 +702,7 @@ impl EvolutionLoop {
                     total_latency_ms: b.total_latency_ms,
                     config_file,
                     is_seed,
+                    replay_deterministic: None,
                 })
             }
             None => None,
@@ -513,12 +715,90 @@ impl EvolutionLoop {
     }
 }
 
+/// One generation's execution output — the caller records the lesson + lifts
+/// the final-gen accumulators into the report.
+struct GenExec {
+    base_pass_rate: f64,
+    gen_tokens: u64,
+    /// Base full-suite runs (used to persist per-case trajectories on the
+    /// final gen).
+    runs: Vec<CaseRun>,
+    case_records: Vec<CaseRecord>,
+    diag_records: Vec<DiagnosisRecord>,
+    diagnoses: Vec<Diagnosis>,
+    candidate_scores: Vec<CandidateScoreRecord>,
+    frontier_rec: Option<FrontierRecord>,
+    next_base: CandidateConfig,
+    lessons_text: String,
+    /// E5 held-out gate result (final gen, non-seed frontier only).
+    held_out_pass_rate: Option<f64>,
+}
+
 /// One generation's optimization output — folded into the loop's lesson +
 /// report by the caller.
 struct OptStep {
     candidate_scores: Vec<CandidateScoreRecord>,
     frontier_rec: Option<FrontierRecord>,
     frontier_scored: Vec<ScoredCandidate>,
+}
+
+/// Whether a frontier is eligible for the replay gate. Per design §6.4 replay
+/// only validates non-semantic (numeric) mutations — a frontier that changed
+/// `system_prompt` or `tool_decorators` (free-text axes) is skipped, since
+/// the recorded trajectory's decisions were shaped by the OLD prompt and a
+/// replay can't isolate the numeric change's effect.
+fn is_replay_eligible(base: &CandidateConfig, frontier: &CandidateConfig) -> bool {
+    base.pack_config.system_prompt == frontier.pack_config.system_prompt
+        && base.pack_config.tool_decorators == frontier.pack_config.tool_decorators
+}
+
+/// Load the resume base config for `step`: the latest `frontier-gen{N}.json`
+/// in the run-dir (the most recent DISTINCT frontier — the loop carries it
+/// forward as the next-gen base via the merger), falling back to `seed.json`
+/// when no frontier was ever persisted (a `no_optimize` run, or every gen's
+/// frontier was the seed).
+fn load_resume_base(run_dir: &Path) -> Result<CandidateConfig> {
+    let mut max_gen: Option<usize> = None;
+    if let Ok(entries) = fs::read_dir(run_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(rest) = name.strip_prefix("frontier-gen") {
+                if let Some(num) = rest.strip_suffix(".json") {
+                    if let Ok(n) = num.parse::<usize>() {
+                        max_gen = Some(max_gen.map_or(n, |m| m.max(n)));
+                    }
+                }
+            }
+        }
+    }
+    let cfg = if let Some(n) = max_gen {
+        let path = run_dir.join(format!("frontier-gen{n}.json"));
+        serde_json::from_str(
+            &fs::read_to_string(&path)
+                .map_err(|e| OneAIError::Config(format!("read {}: {}", path.display(), e)))?,
+        )
+        .map_err(|e| OneAIError::Config(format!("parse {}: {}", path.display(), e)))?
+    } else {
+        let path = run_dir.join("seed.json");
+        serde_json::from_str(
+            &fs::read_to_string(&path)
+                .map_err(|e| OneAIError::Config(format!("read {}: {}", path.display(), e)))?,
+        )
+        .map_err(|e| OneAIError::Config(format!("parse {}: {}", path.display(), e)))?
+    };
+    Ok(CandidateConfig::from_pack_config(cfg))
+}
+
+/// Write the seed config to `run_dir/seed.json` (E5 — `evolve diff` reads it
+/// to compare the frontier against the seed without re-passing `--seed`).
+fn persist_seed(run_dir: &Path, seed: &CandidateConfig) -> Result<()> {
+    let path = run_dir.join("seed.json");
+    let json = serde_json::to_string_pretty(&seed.pack_config)
+        .map_err(|e| OneAIError::Config(format!("serialize seed config: {e}")))?;
+    fs::write(&path, json)
+        .map_err(|e| OneAIError::Config(format!("write {}: {}", path.display(), e)))?;
+    Ok(())
 }
 
 /// Write the per-case trajectory to `run_dir/case-<id>.jsonl` (one JSON line).

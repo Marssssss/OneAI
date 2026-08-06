@@ -1,7 +1,7 @@
 # OneAI 自我演进系统实施计划
 
 > 日期：2026-08-06
-> 状态：E0–E4 已落地（E5 待做）；设计稿与实现同步
+> 状态：E0–E5 全部落地（E5 = CLI 全套 + 安全护栏 + held-out/replay 回归闸 + 文档）；设计稿与实现同步
 > 范围：在 OneAI 中实现"轨迹采集 → EDD 评分 → Minimal Subgraph 诊断 → GEPA Pareto 合并优化 → 重新跑轨迹"的闭环自演进系统
 > 前置调研：见上一轮 deep-research 结论（DSPy/GEPA/TextGrad/Trace/ADAS/Voyager/Reflexion 六家先验）。本计划只落地与 OneAI 现有架构对齐的子集。
 

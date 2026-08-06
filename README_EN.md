@@ -302,6 +302,26 @@ Prerequisites, batch / full runs, artifact schema, and the memory eval in [Eval 
 
 ---
 
+## Self-evolution system
+
+OneAI ships a **GEPA-style outer evolution loop** (`oneai-evolve` crate): it doesn't touch model weights — it only mutates the `DomainPackConfig` (7-layer declarative pack) + `AgentLoopConfig`'s text/numeric knobs. Each generation scores candidates against a real eval suite, Pareto-selects the frontier on multiple objectives, and a lesson-merge carries the frontier into the next generation, looping until convergence / budget / stagnation. E5 adds three safety gates (`DomainPackValidator` + a PermissionResolver static gate + judge/candidate model separation) and two regression gates (held-out full-suite overfit detection + replay determinism-drift detection).
+
+```bash
+# Run a single/multi-generation loop (variation scored against a builtin suite)
+cargo run -p oneai-cli-demo -- evolve run \
+    --seed ./my-pack.yaml --suite coding_basics \
+    --max-generations 3 --target 0.85 --patience 2
+# Inspect artifacts offline
+cargo run -p oneai-cli-demo -- evolve report ~/.oneai/evolve/run-<ts>
+cargo run -p oneai-cli-demo -- evolve diff   ~/.oneai/evolve/run-<ts>   # seed-vs-frontier config diff
+cargo run -p oneai-cli-demo -- evolve lesson ~/.oneai/evolve/run-<ts>  # cross-generation lesson log
+cargo run -p oneai-cli-demo -- evolve step  ~/.oneai/evolve/run-<ts> --suite coding_basics  # resume one gen
+```
+
+The full mechanism (five-stage loop / variation-substrate map / safety gates / layered reward-hacking defense / replay applicability) is in the [Self-evolution mechanism whitepaper](docs/self-evolution-mechanism.md); design rationale in the [implementation plan](docs/self-evolution-system-2026-08.md).
+
+---
+
 ## Contributing
 
 Contributions welcome! Whether fixing bugs, improving docs, cleaning clippy lints, or adding subsystems, please first read [CONTRIBUTING.md](CONTRIBUTING.md) — it covers local build / test commands, crate layering rules, the "don't bypass" conventions (3-layer parser / permission model), and a pre-PR self-check. For easy picks, claim a [`good first issue`](https://github.com/Marssssss/OneAI/labels/good%20first%20issue); design discussions go to [GitHub Discussions](https://github.com/Marssssss/OneAI/discussions). Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

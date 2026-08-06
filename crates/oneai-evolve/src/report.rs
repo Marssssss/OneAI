@@ -51,6 +51,13 @@ pub struct GenerationSummary {
     /// Natural-language lessons note (the merger's output).
     #[serde(default)]
     pub lessons_text: String,
+    /// E5 held-out gate: the frontier's pass rate on the **full suite**
+    /// (vs. `frontier_pass_rate` which is subset-only). `None` for
+    /// intermediate generations (the gate only runs on the final generation)
+    /// or `no_optimize` runs. `Some(rate) < frontier_pass_rate` flags
+    /// overfitting to the train subset (design §4 E5).
+    #[serde(default)]
+    pub held_out_pass_rate: Option<f64>,
 }
 
 /// One case's record in an [`EvolutionReport`].
@@ -177,6 +184,13 @@ pub struct FrontierRecord {
     pub config_file: Option<PathBuf>,
     /// True iff the frontier best is the seed (no candidate improved on it).
     pub is_seed: bool,
+    /// E5 replay regression gate: whether replaying the frontier's recorded
+    /// trajectory reproduced the same tool-call sequence (design §6.4 — replay
+    /// only validates numeric-axis mutations; semantic mutations skip with
+    /// `None`). `Some(true)` = behavior determinism confirmed; `Some(false)` =
+    /// drift detected; `None` = gate skipped (semantic mutation or no frontier).
+    #[serde(default)]
+    pub replay_deterministic: Option<bool>,
 }
 
 /// Aggregate report for one evolution run. With `max_generations == 1`
@@ -372,6 +386,19 @@ impl EvolutionReport {
                         "frontier".to_string()
                     },
                 ));
+                if let Some(held) = g.held_out_pass_rate {
+                    let flag = if held + 1e-9 < g.frontier_pass_rate {
+                        "  ⚠ overfit: held-out < train subset"
+                    } else {
+                        "  held-out ok"
+                    };
+                    s.push_str(&format!(
+                        "      held-out {:.0}% vs train {:.0}%{}\n",
+                        held * 100.0,
+                        g.frontier_pass_rate * 100.0,
+                        flag
+                    ));
+                }
             }
         }
         for c in &self.case_records {
@@ -427,8 +454,13 @@ impl EvolutionReport {
             }
         }
         if let Some(f) = &self.frontier {
+            let replay = match f.replay_deterministic {
+                Some(true) => " | replay: deterministic",
+                Some(false) => " | replay: ⚠ DRIFT",
+                None => " | replay: skipped",
+            };
             s.push_str(&format!(
-                "  frontier: pass {:.0}% | tokens {} | latency {}ms | {}\n",
+                "  frontier: pass {:.0}% | tokens {} | latency {}ms | {}{}\n",
                 f.pass_rate * 100.0,
                 f.total_tokens,
                 f.total_latency_ms,
@@ -438,7 +470,8 @@ impl EvolutionReport {
                     p.display().to_string()
                 } else {
                     "(no config)".to_string()
-                }
+                },
+                replay
             ));
         }
         s

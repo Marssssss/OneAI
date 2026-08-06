@@ -544,6 +544,59 @@ enum EvolveAction {
         /// Output root (default ~/.oneai/evolve).
         #[arg(long)]
         root: Option<String>,
+        /// E5: dedicated variation/judge model name (design §6.3 separation).
+        /// Absent → the candidate provider doubles as the variation provider
+        /// (single-model smoke harness).
+        #[arg(long)]
+        judge_model: Option<String>,
+        /// Output format (markdown, json).
+        #[arg(long, default_value = "markdown")]
+        format: String,
+    },
+    /// E5: resume an existing run-dir for one more generation. Reads
+    /// `report.json` for the gen index + no_optimize flag, loads the latest
+    /// frontier config (or seed.json) as the new base, appends a lesson row.
+    Step {
+        /// Run directory (the `run-<ts>` under `~/.oneai/evolve`).
+        run_dir: String,
+        /// Builtin suite name (must match the original run).
+        #[arg(long)]
+        suite: String,
+        /// E5: dedicated variation/judge model (only used if the original run
+        /// was optimized).
+        #[arg(long)]
+        judge_model: Option<String>,
+        /// Output format (markdown, json).
+        #[arg(long, default_value = "markdown")]
+        format: String,
+    },
+    /// E5: pretty-print a persisted run's `report.json`.
+    Report {
+        /// Run directory.
+        run_dir: String,
+        /// Output format (markdown, json).
+        #[arg(long, default_value = "markdown")]
+        format: String,
+    },
+    /// E5: structured config diff between the seed and a generation's frontier
+    /// (`frontier-gen<N>.json` vs `seed.json`).
+    Diff {
+        /// Run directory.
+        run_dir: String,
+        /// Frontier generation index (default: the latest persisted).
+        #[arg(long)]
+        gen: Option<usize>,
+        /// Override the seed config file (default: `<run-dir>/seed.json`).
+        #[arg(long)]
+        seed: Option<String>,
+        /// Output format (markdown, json).
+        #[arg(long, default_value = "markdown")]
+        format: String,
+    },
+    /// E5: print the cross-generation `lessons.jsonl`.
+    Lesson {
+        /// Run directory.
+        run_dir: String,
         /// Output format (markdown, json).
         #[arg(long, default_value = "markdown")]
         format: String,
@@ -1548,6 +1601,7 @@ fn main() {
                 patience,
                 max_tokens,
                 root,
+                judge_model,
                 format,
             } => {
                 let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
@@ -1560,8 +1614,37 @@ fn main() {
                     patience,
                     max_tokens,
                     root.as_deref(),
+                    judge_model.as_deref(),
                     &format,
                 ));
+            }
+            EvolveAction::Step {
+                run_dir,
+                suite,
+                judge_model,
+                format,
+            } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_evolve::cmd_evolve_step(
+                    &run_dir,
+                    &suite,
+                    judge_model.as_deref(),
+                    &format,
+                ));
+            }
+            EvolveAction::Report { run_dir, format } => {
+                cmd_evolve::cmd_evolve_report(&run_dir, &format);
+            }
+            EvolveAction::Diff {
+                run_dir,
+                gen,
+                seed,
+                format,
+            } => {
+                cmd_evolve::cmd_evolve_diff(&run_dir, gen, seed.as_deref(), &format);
+            }
+            EvolveAction::Lesson { run_dir, format } => {
+                cmd_evolve::cmd_evolve_lesson(&run_dir, &format);
             }
         },
         Some(Commands::Config { action }) => match action {

@@ -36,6 +36,7 @@
 
 pub mod candidate;
 pub mod cli;
+pub mod diff;
 pub mod failure_extractor;
 pub mod gepa;
 pub mod lessons;
@@ -46,11 +47,13 @@ pub mod trajectory_collector;
 
 pub use candidate::{AgentLoopOverlay, AppHandle, CandidateConfig};
 pub use cli::{run_evolve, EvolveRunArgs};
+pub use diff::{config_diff, ConfigDiff, DiffEntry};
 pub use failure_extractor::{extract_failures, FailedCase, FailureExtractor};
 pub use gepa::{
-    apply_patch, apply_patches, select_case_subset, semantic_guard_decoration, validate_candidate,
-    GepaConfig, GepaOptimizer, LlmVariationOperator, NonDominatedSelector, OptimizationResult,
-    ParetoSelector, Patch, PatchOp, ScoredCandidate, VariationOperator, MAX_RECALL_TOP_K,
+    apply_patch, apply_patches, permission_safety_check, select_case_subset,
+    semantic_guard_decoration, validate_candidate, GepaConfig, GepaOptimizer, LlmVariationOperator,
+    NonDominatedSelector, OptimizationResult, ParetoSelector, Patch, PatchOp, ScoredCandidate,
+    VariationOperator, MAX_RECALL_TOP_K,
 };
 pub use lessons::{BestFrontierMerger, LessonEntry, LessonMerger, LessonsLog};
 pub use loop_runner::{AppBaseline, EvolutionConfig, EvolutionLoop};

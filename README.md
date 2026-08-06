@@ -302,6 +302,26 @@ cargo run -p oneai-cli-demo -- eval swebench \
 
 ---
 
+## 自演进系统
+
+OneAI 自带一个 **GEPA 式外层演化循环**（`oneai-evolve` crate）：不动模型权重，只在 `DomainPackConfig`（7 层声明式 pack）+ `AgentLoopConfig` 的文本/数值旋钮空间里变异——每代用真实 eval suite 打分、Pareto 多目标选前沿、lesson 合并携带前沿进下一代，跑到收敛/预算/停滞。E5 叠了三道安全闸（`DomainPackValidator` + PermissionResolver 静态闸 + judge/candidate 模型分离）+ 两道回归闸（held-out 全 suite 过拟合检测 + replay 确定性漂移检测）。
+
+```bash
+# 跑一代/多代闭环（变异在 builtin suite 上打分）
+cargo run -p oneai-cli-demo -- evolve run \
+    --seed ./my-pack.yaml --suite coding_basics \
+    --max-generations 3 --target 0.85 --patience 2
+# 离线检视产物
+cargo run -p oneai-cli-demo -- evolve report ~/.oneai/evolve/run-<ts>
+cargo run -p oneai-cli-demo -- evolve diff   ~/.oneai/evolve/run-<ts>   # seed vs frontier 配置 diff
+cargo run -p oneai-cli-demo -- evolve lesson ~/.oneai/evolve/run-<ts>  # 跨代 lesson 日志
+cargo run -p oneai-cli-demo -- evolve step  ~/.oneai/evolve/run-<ts> --suite coding_basics  # 续跑一代
+```
+
+完整机制（五段闭环 / 变异基质全图 / 安全闸 / reward-hacking 分层防护 / replay 适用边界）见 [自演进系统机制白皮书](docs/self-evolution-mechanism.md)，设计依据见 [实施计划](docs/self-evolution-system-2026-08.md)。
+
+---
+
 ## 贡献
 
 欢迎贡献！无论是修 bug、补文档、清理 clippy lint，还是新增子系统，都请先读 [CONTRIBUTING.md](CONTRIBUTING.md)——它说明了本地构建 / 测试命令、crate 分层规则、3 层解析器 / 权限模型等「别绕过」的约定，以及提 PR 前的自查清单。想找容易上手的，认领一个标了 [`good first issue`](https://github.com/Marssssss/OneAI/labels/good%20first%20issue) 的 issue；设计讨论走 [GitHub Discussions](https://github.com/Marssssss/OneAI/discussions)。行为准则见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。

@@ -439,7 +439,60 @@ impl LlmVariationOperator {
         let cfg = apply_patches(&parsed.patches, base)
             .map_err(|e| format!("variation #{index} apply failed: {e}"))?;
         validate_candidate(&cfg).map_err(|e| format!("variation #{index} invalid: {e}"))?;
+        permission_safety_check(base, &cfg)
+            .map_err(|e| format!("variation #{index} permission regression: {e}"))?;
         Ok(cfg)
+    }
+}
+
+/// E5 PermissionResolver safety gate: a variation must not *widen* the
+/// permission surface — i.e. it may not move a tool the seed gates behind
+/// `require_confirmation` or `deny_by_default` into `auto_approve`. Mirrors
+/// the three resolution paths (deny → overrides → auto-approve) from
+/// phase1-1p4's `PermissionResolver` as a static pack-level check: the
+/// candidate's `auto_approve` set must not include any tool the seed held in
+/// a stricter tier. (A mutation that *tightens* — moving a tool from
+/// `auto_approve` to `require_confirmation` — is allowed; only widening is
+/// rejected, since it can silently auto-run a tool the seed author wanted
+/// gated.)
+///
+/// `deny_by_default` entries are pattern structs (`DenyPatternConfig` with a
+/// `tool` field); a candidate that auto-approves a tool the seed denies is a
+/// hard regression.
+pub fn permission_safety_check(
+    seed: &CandidateConfig,
+    candidate: &CandidateConfig,
+) -> std::result::Result<(), String> {
+    let seed_pc = &seed.pack_config.permission_profile;
+    let cand_pc = &candidate.pack_config.permission_profile;
+
+    // The tools the seed gated strictly: require_confirmation ∪
+    // deny_by_default.tool. A candidate auto-approving any of these is a
+    // safety regression.
+    let mut strictly_gated: std::collections::HashSet<&str> = seed_pc
+        .require_confirmation
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    for d in &seed_pc.deny_by_default {
+        strictly_gated.insert(d.tool.as_str());
+    }
+    if strictly_gated.is_empty() {
+        return Ok(());
+    }
+    let regressions: Vec<&str> = cand_pc
+        .auto_approve
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|t| strictly_gated.contains(t))
+        .collect();
+    if regressions.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "candidate auto-approves tool(s) the seed gates strictly: {}",
+            regressions.join(", ")
+        ))
     }
 }
 
