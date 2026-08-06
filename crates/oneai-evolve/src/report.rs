@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use oneai_eval::MetricScore;
 use serde::{Deserialize, Serialize};
 
+use crate::subgraph::ParamRef;
+
 /// One case's record in an [`EvolutionReport`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +50,28 @@ pub struct CaseRecord {
     pub trajectory_file: Option<PathBuf>,
     /// Execution error, if any.
     pub error: Option<String>,
+}
+
+/// A diagnosis record for one failed case — the report-facing summary of an
+/// E2 [`Diagnosis`](crate::subgraph::Diagnosis). The full diagnosis (with
+/// `subtrace`) is persisted to `diagnosis_file`; this record keeps the
+/// `suspect_params` + `critique` inline so a reader of `report.json` sees the
+/// attribution without opening the per-case file.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosisRecord {
+    /// The case ID (matches `EvalCase.id`).
+    pub case_id: String,
+    /// Suspect variation params (the full candidate universe if the
+    /// diagnostician fell back to tail-N-rounds — see `Diagnosis.subtrace`).
+    pub suspect_params: Vec<ParamRef>,
+    /// Natural-language attribution (heuristic-templated, or judge-rewritten
+    /// if an `LlmDiagnostician` was wired).
+    pub critique: String,
+    /// Path to the per-case diagnosis file (`diagnosis-<id>.json`), relative
+    /// to `EvolutionReport.run_dir`. `None` if diagnosis was skipped (E1
+    /// no-failure runs, or `--no-optimize` paths that opt out).
+    pub diagnosis_file: Option<PathBuf>,
 }
 
 impl CaseRecord {
@@ -92,6 +116,9 @@ pub struct EvolutionReport {
     pub no_optimize: bool,
     /// Per-case records.
     pub case_records: Vec<CaseRecord>,
+    /// Per-failed-case diagnoses (E2). Empty for E1 runs with no failures.
+    #[serde(default)]
+    pub diagnoses: Vec<DiagnosisRecord>,
     /// Fraction of cases that passed.
     pub pass_rate: f64,
     /// Total prompt + completion tokens across all cases.
@@ -107,6 +134,7 @@ impl EvolutionReport {
         generation: usize,
         no_optimize: bool,
         case_records: Vec<CaseRecord>,
+        diagnoses: Vec<DiagnosisRecord>,
         run_dir: PathBuf,
     ) -> Self {
         let total_cases = case_records.len();
@@ -125,6 +153,7 @@ impl EvolutionReport {
             generation,
             no_optimize,
             case_records,
+            diagnoses,
             pass_rate,
             total_tokens,
             run_dir,
@@ -160,6 +189,29 @@ impl EvolutionReport {
                 c.prompt_tokens + c.completion_tokens,
                 c.latency_ms
             ));
+        }
+        if !self.diagnoses.is_empty() {
+            s.push_str(&format!(
+                "  diagnoses ({} failed case{}):\n",
+                self.diagnoses.len(),
+                if self.diagnoses.len() == 1 { "" } else { "s" }
+            ));
+            for d in &self.diagnoses {
+                let params: Vec<String> = d.suspect_params.iter().map(|p| p.path()).collect();
+                s.push_str(&format!(
+                    "    ✗ {} | suspect: {}\n",
+                    d.case_id,
+                    if params.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        params.join(", ")
+                    }
+                ));
+                // Indent the critique under the case.
+                for line in d.critique.lines().take(1) {
+                    s.push_str(&format!("      {}\n", line));
+                }
+            }
         }
         s
     }

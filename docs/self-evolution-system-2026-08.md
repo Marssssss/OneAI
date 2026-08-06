@@ -279,13 +279,15 @@ impl EvolutionLoop {
 - **测试**：mock provider + CodingPack seed + 3 case suite → 报告含 3 个 EvalResult + 3 个 Trajectory 文件。绿。✅（`tests/e2e_e1.rs`，3 unit + 1 e2e 绿）
 - **不做**：诊断、变异、Pareto。✅
 
-### Phase E2 — Minimal Subgraph 诊断
+### Phase E2 — Minimal Subgraph 诊断 ✅ 已落地
 **目标**：对每个 FailedCase 输出 `Diagnosis{suspect_params, subtrace, critique}`。
-- `ParamRef` 枚举 + "参数→影响 span 映射"注册表（`subgraph.rs`）。
-- 子图提取：反向 BFS + 影响映射裁剪；兜底退化为尾 N 轮。
-- `SubgraphDiagnostician` trait + 默认实现 `LlmDiagnostician`（用 `LlmJudgeMetric` 已有的 judge provider，对齐 `builtin_metrics.rs:455`）。
-- 诊断结果落盘 + 在 report 里渲染。
-- **测试**：构造一个"system_prompt 缺关键指引 → 模型不调工具 → 失败"的 case，断言 `Diagnosis.suspect_params` 含 `PackSystemPrompt`。绿。
+- `ParamRef` 枚举 + "参数→影响 span 映射"注册表（`subgraph.rs`）。✅
+- 子图提取：反向 BFS + 影响映射裁剪；兜底退化为尾 N 轮。✅（`failure_span` = 最后一个 `LLM` span 的 ancestry；`suspect = affected_spans ∩ failure_path`；空集退化为 tail-N 轮 + 全候选 suspect）
+- `SubgraphDiagnostician` trait + 默认实现 `LlmDiagnostician`（用 `LlmJudgeMetric` 已有的 judge provider，对齐 `builtin_metrics.rs:455`）。✅（`HeuristicDiagnostician` 确定性默认 + `LlmDiagnostician` 复用同形 judge 调用只重写 critique；judge 无则退化启发式）
+- 诊断结果落盘 + 在 report 里渲染。✅（`run-<ts>/diagnosis-<id>.json` + `EvolutionReport.diagnoses` 内联 summary）
+- **测试**：构造一个"system_prompt 缺关键指引 → 模型不调工具 → 失败"的 case，断言 `Diagnosis.suspect_params` 含 `PackSystemPrompt`。绿。✅（`tests/e2e_e2.rs`：错答 case → suspect 含 PackSystemPrompt、tools 非 suspect、diagnosis 文件 round-trip；+全通过零诊断、+trait 覆盖 seam 三测；subgraph.rs 5 unit）
+
+> **实现取舍**（与设计稿微调，记入 memory）：默认 diagnostician 用 `HeuristicDiagnostician`（纯启发式、确定性、无需 LLM），而非设计稿的"`LlmDiagnostician` 默认"。理由：eval 测必须确定性；judge provider 在 E2 测试阶段未注入。`LlmDiagnostician` 仍提供，复用启发式核心的 `suspect_params`+`subtrace`，仅用 judge 重写 `critique` 文本——E5 注入更强/异家 judge。`Diagnosis::new` 构造器因 `#[non_exhaustive]` 提供。
 
 ### Phase E3 — GEPA 变异 + Pareto 选择
 **目标**：单代"变异 K → 评分 → Pareto 选前沿"，首批轴 = **工具三件套（system_prompt + tool_decorators + tools）**，次轴 = compression/context/thinking_budget。

@@ -18,7 +18,9 @@ use oneai_core::traits::LlmProvider;
 use oneai_eval::{EvalSuite, RecordingProvider};
 
 use crate::candidate::{AppHandle, CandidateConfig};
-use crate::report::{CaseRecord, EvolutionReport};
+use crate::failure_extractor::{extract_failures, FailedCase};
+use crate::report::{CaseRecord, DiagnosisRecord, EvolutionReport};
+use crate::subgraph::{Diagnosis, HeuristicDiagnostician, SubgraphDiagnostician};
 use crate::trajectory_collector::TrajectoryCollector;
 
 /// The baseline an evolution run is rooted in: the provider to wrap in a
@@ -109,14 +111,21 @@ pub struct EvolutionLoop {
     pub baseline: AppBaseline,
     /// Run configuration.
     pub config: EvolutionConfig,
+    /// Diagnoses failed cases into suspect `ParamRef`s (E2). Defaults to the
+    /// deterministic [`HeuristicDiagnostician`]; E5 wires an
+    /// [`LlmDiagnostician`](crate::subgraph::LlmDiagnostician) with a
+    /// stronger/different-family judge.
+    pub diagnostician: Arc<dyn SubgraphDiagnostician>,
 }
 
 impl EvolutionLoop {
-    /// Construct with a baseline + default config.
+    /// Construct with a baseline + default config + the heuristic
+    /// diagnostician (no LLM judge — deterministic, safe for tests).
     pub fn new(baseline: AppBaseline) -> Self {
         Self {
             baseline,
             config: EvolutionConfig::default(),
+            diagnostician: Arc::new(HeuristicDiagnostician),
         }
     }
 
@@ -127,14 +136,23 @@ impl EvolutionLoop {
         self
     }
 
+    /// Override the diagnostician (E5 injects an `LlmDiagnostician`).
+    #[must_use]
+    pub fn with_diagnostician(mut self, diagnostician: Arc<dyn SubgraphDiagnostician>) -> Self {
+        self.diagnostician = diagnostician;
+        self
+    }
+
     /// Run generation 0 against `suite`, persist a report + per-case
-    /// trajectories, and return the report.
+    /// trajectories + per-failed-case diagnoses, and return the report.
     ///
-    /// E1 degenerate path — no diagnosis, no variation, no Pareto. Each case
-    /// is run live (semantic-variation candidates can't be replayed; design
-    /// §3.3 难点 C), its trajectory + tree captured by
-    /// [`TrajectoryCollector`], and the trajectory written to
-    /// `run-<ts>/case-<id>.jsonl`.
+    /// E1 degenerate path — no variation, no Pareto. Each case is run live
+    /// (semantic-variation candidates can't be replayed; design §3.3 难点 C),
+    /// its trajectory + tree captured by [`TrajectoryCollector`], the
+    /// trajectory written to `run-<ts>/case-<id>.jsonl`. E2 adds a diagnosis
+    /// pass: failed cases are fed to [`SubgraphDiagnostician`] and the
+    /// resulting [`Diagnosis`] (suspect params + subtrace + critique) is
+    /// persisted to `run-<ts>/diagnosis-<id>.json` and summarized in the report.
     pub async fn run(&self, seed: &CandidateConfig, suite: &EvalSuite) -> Result<EvolutionReport> {
         // Wrap the baseline provider in a recorder so every infer() response is
         // captured for per-case trajectory slicing.
@@ -155,11 +173,18 @@ impl EvolutionLoop {
             OneAIError::Config(format!("create run_dir {}: {}", run_dir.display(), e))
         })?;
 
-        let mut records = Vec::with_capacity(suite.cases.len());
+        // Drive the loop per case, capturing (Trajectory, TraceTree) + result.
+        let mut runs: Vec<crate::trajectory_collector::CaseRun> =
+            Vec::with_capacity(suite.cases.len());
         for case in &suite.cases {
             let run = collector.run_case(case, &suite.metrics).await;
+            runs.push(run);
+        }
 
-            // Persist the per-case trajectory as one JSON line.
+        // Persist per-case trajectories + build records. `suite.cases` and
+        // `runs` are parallel (same order); zip borrows both.
+        let mut records = Vec::with_capacity(runs.len());
+        for (case, run) in suite.cases.iter().zip(&runs) {
             let traj_rel = persist_trajectory(&run_dir, &case.id, &run.trajectory)?;
             records.push(CaseRecord::from_run(
                 &run.result,
@@ -168,11 +193,29 @@ impl EvolutionLoop {
             ));
         }
 
+        // E2: diagnose failures. FailedCase borrows the run's result +
+        // trajectory + trace_tree + the seed candidate. The diagnostician
+        // always returns a Diagnosis (tail-N fallback); failures only (no
+        // wasted work on passing cases).
+        let failed: Vec<FailedCase<'_>> = extract_failures(&suite.cases, &runs, seed);
+        let mut diagnoses = Vec::with_capacity(failed.len());
+        for fc in &failed {
+            let d = self.diagnostician.diagnose(fc).await;
+            let diag_rel = persist_diagnosis(&run_dir, &fc.case.id, &d)?;
+            diagnoses.push(DiagnosisRecord {
+                case_id: fc.case.id.clone(),
+                suspect_params: d.suspect_params.clone(),
+                critique: d.critique.clone(),
+                diagnosis_file: Some(diag_rel),
+            });
+        }
+
         let report = EvolutionReport::from_records(
             &suite.name,
             0,
             self.config.no_optimize,
             records,
+            diagnoses,
             run_dir.clone(),
         );
         persist_report(&run_dir, &report)?;
@@ -193,6 +236,19 @@ fn persist_trajectory(
     let line = serde_json::to_string(trajectory)
         .map_err(|e| OneAIError::Config(format!("serialize trajectory {case_id}: {e}")))?;
     fs::write(&path, format!("{line}\n"))
+        .map_err(|e| OneAIError::Config(format!("write {}: {}", path.display(), e)))?;
+    Ok(name)
+}
+
+/// Write the per-case diagnosis to `run_dir/diagnosis-<id>.json`. Returns the
+/// relative filename (stored in `DiagnosisRecord.diagnosis_file`).
+fn persist_diagnosis(run_dir: &Path, case_id: &str, diagnosis: &Diagnosis) -> Result<PathBuf> {
+    let safe = sanitize_filename(case_id);
+    let name = PathBuf::from(format!("diagnosis-{safe}.json"));
+    let path = run_dir.join(&name);
+    let json = serde_json::to_string_pretty(diagnosis)
+        .map_err(|e| OneAIError::Config(format!("serialize diagnosis {case_id}: {e}")))?;
+    fs::write(&path, json)
         .map_err(|e| OneAIError::Config(format!("write {}: {}", path.display(), e)))?;
     Ok(name)
 }
