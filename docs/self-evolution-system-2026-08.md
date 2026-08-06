@@ -269,15 +269,15 @@ impl EvolutionLoop {
 - **测试**：spec → validate → build → 与 `MemoryProfile::coding()` 字段级相等；非法 decay 值被 validator 拒。绿。
 - **不改 E1+ 逻辑**：纯 schema 扩展，向后兼容（`#[serde(default)]`）。
 
-### Phase E1 — 闭环骨架 + EDD 接线（无优化，先通水管）
+### Phase E1 — 闭环骨架 + EDD 接线（无优化，先通水管） ✅ 已落地
 **目标**：`oneai evolve run --seed <pack> --suite <s>` 能跑出"baseline 评分 + 失败 case + 其 Trajectory/TraceTree"的报告，不做任何变异。
-- 新建 `oneai-evolve` crate（lib + workspace 注册）。
-- `CandidateConfig` + `build_app()`：经 `DomainPackSpecFile::from_config(cfg).validate_and_build(project_dir)` → `AppBuilder.domain_pack(pack)`。验证 seed pack 能热加载。
-- `TrajectoryCollector`：包 `RecordingProvider` + `trace_in_memory()`，每 case 产出 `(Trajectory, TraceTree)`。
-- `EvolutionLoop.run()` 退化版：只跑①②，`EvolutionReport` 含 per-case EvalResult + Trajectory 落盘（`<root>/evolve/run-<ts>/case-<id>.jsonl`）。
-- CLI：`oneai evolve run --seed --suite --no-optimize`。
-- **测试**：mock provider + CodingPack seed + 3 case suite → 报告含 3 个 EvalResult + 3 个 Trajectory 文件。绿。
-- **不做**：诊断、变异、Pareto。
+- 新建 `oneai-evolve` crate（lib + workspace 注册）。✅
+- `CandidateConfig` + `build_app()`：经 `DomainPackSpecFile::from_config(cfg).validate_and_build(project_dir)` → `AppBuilder.domain_pack(pack)`。验证 seed pack 能热加载。✅
+- `TrajectoryCollector`：包 `RecordingProvider` + `trace_in_memory()`，每 case 产出 `(Trajectory, TraceTree)`。✅（复刻 `EvalRunner::run_agent_for_case`，补 EvalRunner 丢弃的 per-case Trajectory/TraceTree；`recorded_tool_calls` 从 `SpanKind::TOOL` 的 `tool.name` attr 真取）
+- `EvolutionLoop.run()` 退化版：只跑①②，`EvolutionReport` 含 per-case EvalResult + Trajectory 落盘（`<root>/evolve/run-<ts>/case-<id>.jsonl`）。✅
+- CLI：`oneai evolve run --seed --suite --no-optimize`。✅
+- **测试**：mock provider + CodingPack seed + 3 case suite → 报告含 3 个 EvalResult + 3 个 Trajectory 文件。绿。✅（`tests/e2e_e1.rs`，3 unit + 1 e2e 绿）
+- **不做**：诊断、变异、Pareto。✅
 
 ### Phase E2 — Minimal Subgraph 诊断
 **目标**：对每个 FailedCase 输出 `Diagnosis{suspect_params, subtrace, critique}`。

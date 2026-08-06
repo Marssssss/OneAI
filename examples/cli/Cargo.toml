@@ -51,6 +51,7 @@ oneai-a2a = { workspace = true }
 oneai-wasm = { workspace = true }
 oneai-gateway = { workspace = true, features = ["feishu", "wechat"] }
 oneai-scheduler = { workspace = true }
+oneai-evolve = { workspace = true }
 syntect = "5.2"
 pulldown-cmark = "0.11"
 unicode-width = "0.2"

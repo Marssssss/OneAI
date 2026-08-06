@@ -175,6 +175,15 @@ impl RecordingProvider {
             recorded_iterations: iterations,
         }
     }
+
+    /// Snapshot the recorded responses so far (without wrapping in a
+    /// [`Trajectory`]). Used by the self-evolution `TrajectoryCollector`, which
+    /// drives the loop per-case on a *shared* recorder and needs the responses
+    /// that belong to *this* case = `responses[cursor..]`. Cheap `Mutex<Vec>`
+    /// clone.
+    pub async fn recorded_responses(&self) -> Vec<InferenceResponse> {
+        self.recorded.lock().await.clone()
+    }
 }
 
 #[async_trait]

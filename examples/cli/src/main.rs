@@ -74,6 +74,7 @@ mod cmd_cron;
 mod cmd_curator;
 mod cmd_embed;
 mod cmd_eval;
+mod cmd_evolve;
 mod cmd_gateway;
 mod cmd_init;
 mod cmd_mcp;
@@ -290,6 +291,12 @@ enum Commands {
         #[command(subcommand)]
         action: GraphAction,
     },
+    /// Self-evolution loop — trajectory collection + EDD scoring (E1: run only;
+    /// diagnosis/variation/Pareto land in E2–E3).
+    Evolve {
+        #[command(subcommand)]
+        action: EvolveAction,
+    },
     /// Show version information
     Version,
     /// Generate a project-instruction file (ONEAI.md / AGENTS.md / CLAUDE.md)
@@ -500,6 +507,29 @@ enum EvalAction {
         #[arg(long, default_value_t = 5)]
         k: usize,
         /// Output format (markdown, json, compact).
+        #[arg(long, default_value = "markdown")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvolveAction {
+    /// Run generation 0 (E1): hot-load the seed pack, score against a builtin
+    /// suite, persist a report + per-case trajectories. No optimization.
+    Run {
+        /// Path to the seed DomainPack config (YAML/TOML).
+        #[arg(long)]
+        seed: String,
+        /// Builtin suite name (coding_basics, tool_use, general, efficiency).
+        #[arg(long)]
+        suite: String,
+        /// Skip variation (E1 default; the only mode until E3 lands).
+        #[arg(long, default_value = "true")]
+        no_optimize: bool,
+        /// Output root (default ~/.oneai/evolve).
+        #[arg(long)]
+        root: Option<String>,
+        /// Output format (markdown, json).
         #[arg(long, default_value = "markdown")]
         format: String,
     },
@@ -1489,6 +1519,24 @@ fn main() {
                     &metrics,
                     no_embedding,
                     k,
+                    &format,
+                ));
+            }
+        },
+        Some(Commands::Evolve { action }) => match action {
+            EvolveAction::Run {
+                seed,
+                suite,
+                no_optimize,
+                root,
+                format,
+            } => {
+                let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+                rt.block_on(cmd_evolve::cmd_evolve_run(
+                    &seed,
+                    &suite,
+                    no_optimize,
+                    root.as_deref(),
                     &format,
                 ));
             }

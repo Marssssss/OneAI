@@ -1,0 +1,37 @@
+[package]
+name = "oneai-evolve"
+description = "OneAI Evolve — self-evolution loop: trajectory collection → EDD scoring → (E2+) subgraph diagnosis → (E3+) GEPA Pareto optimization. CLI-driven outer driver, sits under oneai-app alongside studio/supervisor — does not add AppBuilder methods."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+# Internal crates (zero new external deps)
+oneai-core = { workspace = true }
+oneai-trace = { workspace = true, features = ["trace"] }
+oneai-domain = { workspace = true }
+oneai-eval = { workspace = true }
+oneai-skill = { workspace = true }
+oneai-app = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }
+async-trait = { workspace = true }
+oneai-core = { workspace = true }
+oneai-agent = { workspace = true }
+
+[features]
+default = ["evolve"]
+evolve = []
