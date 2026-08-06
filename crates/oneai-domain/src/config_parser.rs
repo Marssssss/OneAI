@@ -56,9 +56,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use oneai_core::traits::Tool;
-use oneai_core::PermissionLevel;
+use oneai_core::{DecayPolicy, FactType, PermissionLevel, RecallConfig};
 use oneai_tool::{
     ApplyPatchTool, CalculatorTool, EnvironmentTool, FileEditTool, FileListTool, FileReadTool,
     GlobTool, GrepTool, NotebookEditTool, ShellTool, WebFetchTool, WebSearchTool,
@@ -72,6 +73,7 @@ use crate::builtin_sources::{
 use crate::compression_template::CompressionTemplate;
 use crate::context_source::ContextSource;
 use crate::domain_pack::DomainPack;
+use crate::memory_profile::{MemoryProfile, SkillLifecyclePolicy, WorkingStatePolicy};
 use crate::paradigm_strategy::{DomainParadigmKind, ParadigmStrategy, SubAgentTypeDefinition};
 use crate::permission_profile::{DenyPattern, PermissionProfile};
 use crate::tool_decorator::ToolDecorator;
@@ -123,6 +125,14 @@ pub struct DomainPackConfig {
     /// System prompt template.
     #[serde(default)]
     pub system_prompt: String,
+
+    /// Memory profile configuration (layer 7) — what to extract as durable
+    /// facts, how to recall them, decay/forgetting, working-state persistence,
+    /// and skill lifecycle. Spec-ified in E0 so the self-evolution loop can
+    /// mutate memory strategy through the same validate→build→hot-load path as
+    /// the other layers.
+    #[serde(default)]
+    pub memory_profile: MemoryProfileConfig,
 }
 
 /// Permission profile in config format (all string-based).
@@ -216,6 +226,197 @@ pub struct CompressionTemplateConfig {
     pub truncate_rules: HashMap<String, usize>,
 }
 
+/// Memory profile in config format (layer 7).
+///
+/// Mirrors `MemoryProfile` but uses serde-friendly primitives: `Vec<String>`
+/// for fact-type lists (built via `FactType::new` on resolve), and
+/// `WorkingStatePolicyConfig` / `SkillLifecyclePolicyConfig` for the two
+/// sub-policies that carry `Duration` fields (Duration isn't serde-able, so
+/// they're mirrored with `u64` secs). `recall` and `decay` have no Duration
+/// and are already serde in `oneai-core`, so they're embedded directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryProfileConfig {
+    /// Profile name (e.g. "coding", "research").
+    #[serde(default)]
+    pub name: String,
+
+    /// Fact categories this domain extracts (→ `FactType` on resolve).
+    #[serde(default)]
+    pub extraction_schema: Vec<String>,
+
+    /// How facts are recalled each turn (embedded — already serde in core).
+    #[serde(default)]
+    pub recall: RecallConfig,
+
+    /// Token budget for the always-in-context core memory tier.
+    #[serde(default = "default_core_budget_tokens")]
+    pub core_budget_tokens: usize,
+
+    /// Whether to expose self-managed memory tools to the agent.
+    #[serde(default = "default_enable_memory_tools")]
+    pub enable_memory_tools: bool,
+
+    /// Fact types persisted under the user namespace (cross-session habits).
+    #[serde(default)]
+    pub habit_fact_types: Vec<String>,
+
+    /// Memory decay / forgetting policy (embedded — already serde in core).
+    #[serde(default)]
+    pub decay: DecayPolicy,
+
+    /// Working-state persistence + reconciliation policy.
+    #[serde(default)]
+    pub working_state: WorkingStatePolicyConfig,
+
+    /// Skill lifecycle policy (retirement + backups).
+    #[serde(default)]
+    pub skill_lifecycle: SkillLifecyclePolicyConfig,
+}
+
+fn default_core_budget_tokens() -> usize {
+    2048
+}
+
+fn default_enable_memory_tools() -> bool {
+    true
+}
+
+/// Working-state policy in config format — `Duration` fields become `u64` secs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkingStatePolicyConfig {
+    #[serde(default = "default_storage_root")]
+    pub storage_root: String,
+    #[serde(default = "default_checkpoint_granularity")]
+    pub checkpoint_granularity: String,
+    #[serde(default = "default_ground_truth_reconciliation")]
+    pub ground_truth_reconciliation: String,
+    #[serde(default = "default_cross_session_surface")]
+    pub cross_session_surface: String,
+    #[serde(default = "default_retention")]
+    pub retention: String,
+    #[serde(default = "default_thickness")]
+    pub thickness: String,
+    #[serde(default = "default_compaction_event_threshold")]
+    pub compaction_event_threshold: usize,
+    #[serde(default = "default_compaction_keep_recent")]
+    pub compaction_keep_recent: usize,
+    #[serde(default = "default_max_age_before_archive_secs")]
+    pub max_age_before_archive_secs: u64,
+}
+
+/// Skill lifecycle policy in config format — `Duration` fields become `u64` secs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillLifecyclePolicyConfig {
+    #[serde(default = "default_stale_after_secs")]
+    pub stale_after_secs: u64,
+    #[serde(default = "default_archive_after_secs")]
+    pub archive_after_secs: u64,
+    #[serde(default = "default_auto_transitions")]
+    pub auto_transitions: bool,
+    #[serde(default = "default_backup_count")]
+    pub backup_count: usize,
+    #[serde(default = "default_skill_storage_root")]
+    pub storage_root: String,
+    #[serde(default = "default_grace_unused_secs")]
+    pub grace_unused_secs: u64,
+}
+
+// ── default string/numeric constants for the WorkingState/SkillLifecycle configs
+fn default_storage_root() -> String {
+    "in_repo".to_string()
+}
+fn default_checkpoint_granularity() -> String {
+    "every_step".to_string()
+}
+fn default_ground_truth_reconciliation() -> String {
+    "git".to_string()
+}
+fn default_cross_session_surface() -> String {
+    "auto_inject".to_string()
+}
+fn default_retention() -> String {
+    "archive_on_complete".to_string()
+}
+fn default_thickness() -> String {
+    "thin".to_string()
+}
+fn default_compaction_event_threshold() -> usize {
+    200
+}
+fn default_compaction_keep_recent() -> usize {
+    50
+}
+fn default_max_age_before_archive_secs() -> u64 {
+    30 * 24 * 3600
+}
+fn default_stale_after_secs() -> u64 {
+    30 * 24 * 3600
+}
+fn default_archive_after_secs() -> u64 {
+    90 * 24 * 3600
+}
+fn default_auto_transitions() -> bool {
+    true
+}
+fn default_backup_count() -> usize {
+    5
+}
+fn default_skill_storage_root() -> String {
+    "home_dir".to_string()
+}
+fn default_grace_unused_secs() -> u64 {
+    7 * 24 * 3600
+}
+
+// Manual Default impls — must agree with the serde `default = "..."` fns above
+// (derive(Default) would zero-fill numeric fields, violating the ordering
+// constraints checked by the validator: keep_recent<event_threshold,
+// stale_after<archive_after).
+impl Default for WorkingStatePolicyConfig {
+    fn default() -> Self {
+        Self {
+            storage_root: default_storage_root(),
+            checkpoint_granularity: default_checkpoint_granularity(),
+            ground_truth_reconciliation: default_ground_truth_reconciliation(),
+            cross_session_surface: default_cross_session_surface(),
+            retention: default_retention(),
+            thickness: default_thickness(),
+            compaction_event_threshold: default_compaction_event_threshold(),
+            compaction_keep_recent: default_compaction_keep_recent(),
+            max_age_before_archive_secs: default_max_age_before_archive_secs(),
+        }
+    }
+}
+
+impl Default for SkillLifecyclePolicyConfig {
+    fn default() -> Self {
+        Self {
+            stale_after_secs: default_stale_after_secs(),
+            archive_after_secs: default_archive_after_secs(),
+            auto_transitions: default_auto_transitions(),
+            backup_count: default_backup_count(),
+            storage_root: default_skill_storage_root(),
+            grace_unused_secs: default_grace_unused_secs(),
+        }
+    }
+}
+
+impl Default for MemoryProfileConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            extraction_schema: Vec::new(),
+            recall: RecallConfig::default(),
+            core_budget_tokens: default_core_budget_tokens(),
+            enable_memory_tools: default_enable_memory_tools(),
+            habit_fact_types: Vec::new(),
+            decay: DecayPolicy::default(),
+            working_state: WorkingStatePolicyConfig::default(),
+            skill_lifecycle: SkillLifecyclePolicyConfig::default(),
+        }
+    }
+}
+
 // ─── Resolution: Config → DomainPack ───────────────────────────────────────────
 
 /// Resolve a DomainPackConfig into an actual DomainPack.
@@ -262,7 +463,7 @@ pub fn resolve_config(config: &DomainPackConfig, project_dir: &str) -> DomainPac
         permission_profile,
         paradigm_strategies,
         compression_template,
-        memory_profile: crate::memory_profile::MemoryProfile::default(),
+        memory_profile: resolve_memory_profile(&config.memory_profile),
         system_prompt_template: config.system_prompt.clone(),
         workflows: Vec::new(),
         state_graphs: Vec::new(),
@@ -445,6 +646,54 @@ fn resolve_compression_template(config: &CompressionTemplateConfig) -> Compressi
         template: String::new(), // Will use default if not specified
         truncate_rules: config.truncate_rules.clone(),
         default_variables: HashMap::new(),
+    }
+}
+
+// ─── Memory Profile Resolution ─────────────────────────────────────────────────
+
+fn resolve_memory_profile(config: &MemoryProfileConfig) -> MemoryProfile {
+    MemoryProfile::new(&config.name)
+        .extraction_schema(config.extraction_schema.iter().map(FactType::new).collect())
+        .recall(config.recall.clone())
+        .core_budget_tokens(config.core_budget_tokens)
+        .enable_memory_tools(config.enable_memory_tools)
+        .habit_fact_types(config.habit_fact_types.iter().map(FactType::new).collect())
+        .decay(config.decay.clone())
+        .working_state(resolve_working_state(&config.working_state))
+        .skill_lifecycle(resolve_skill_lifecycle(&config.skill_lifecycle))
+}
+
+fn resolve_working_state(c: &WorkingStatePolicyConfig) -> WorkingStatePolicy {
+    use crate::memory_profile::{
+        CheckpointGranularity, CrossSessionSurface, GroundTruthReconciliation, Retention,
+        StorageRoot, WorkingStateThickness,
+    };
+    WorkingStatePolicy {
+        storage_root: StorageRoot::from_str(&c.storage_root),
+        checkpoint_granularity: CheckpointGranularity::from_str(&c.checkpoint_granularity),
+        ground_truth_reconciliation: GroundTruthReconciliation::from_str(
+            &c.ground_truth_reconciliation,
+        ),
+        cross_session_surface: CrossSessionSurface::from_str(&c.cross_session_surface),
+        retention: Retention::from_str(&c.retention),
+        thickness: WorkingStateThickness::from_str(&c.thickness),
+        compaction: crate::memory_profile::CompactionConfig {
+            event_threshold: c.compaction_event_threshold,
+            keep_recent: c.compaction_keep_recent,
+        },
+        max_age_before_archive: Duration::from_secs(c.max_age_before_archive_secs),
+    }
+}
+
+fn resolve_skill_lifecycle(c: &SkillLifecyclePolicyConfig) -> SkillLifecyclePolicy {
+    use crate::memory_profile::StorageRoot;
+    SkillLifecyclePolicy {
+        stale_after: Duration::from_secs(c.stale_after_secs),
+        archive_after: Duration::from_secs(c.archive_after_secs),
+        auto_transitions: c.auto_transitions,
+        backup_count: c.backup_count,
+        storage_root: StorageRoot::from_str(&c.storage_root),
+        grace_unused: Duration::from_secs(c.grace_unused_secs),
     }
 }
 
@@ -643,6 +892,7 @@ preserve_fields = ["critical_files", "progress_status"]
                 truncate_rules: HashMap::new(),
             },
             system_prompt: "You are a test agent".to_string(),
+            memory_profile: MemoryProfileConfig::default(),
         };
 
         let pack = resolve_config(&config, "/tmp/test_project");
@@ -677,6 +927,7 @@ preserve_fields = ["critical_files", "progress_status"]
                 truncate_rules: HashMap::new(),
             },
             system_prompt: String::new(),
+            memory_profile: MemoryProfileConfig::default(),
         };
 
         let pack = resolve_config(&config, "/tmp/test");
@@ -749,5 +1000,134 @@ preserve_fields = ["critical_files", "progress_status"]
 
         let toml_path = Path::new("ONEAI.domain.toml");
         assert_eq!(toml_path.extension().unwrap(), "toml");
+    }
+
+    #[test]
+    fn test_resolve_memory_profile_round_trip() {
+        use oneai_core::{FactType, RecallStrategy};
+        use std::time::Duration;
+
+        // Config equivalent to MemoryProfile::coding()
+        let cfg = MemoryProfileConfig {
+            name: "coding".to_string(),
+            extraction_schema: vec![
+                "user_tooling_pref".to_string(),
+                "decision".to_string(),
+                "open_task".to_string(),
+                "critical_file".to_string(),
+            ],
+            recall: oneai_core::RecallConfig {
+                strategy: RecallStrategy::Hybrid,
+                top_k: 5,
+                time_decay: true,
+                ..Default::default()
+            },
+            core_budget_tokens: 2048,
+            enable_memory_tools: true,
+            habit_fact_types: vec!["user_tooling_pref".to_string()],
+            decay: oneai_core::DecayPolicy::default(),
+            working_state: WorkingStatePolicyConfig {
+                storage_root: "in_repo".to_string(),
+                checkpoint_granularity: "every_step".to_string(),
+                ground_truth_reconciliation: "git".to_string(),
+                cross_session_surface: "auto_inject".to_string(),
+                retention: "archive_on_complete".to_string(),
+                thickness: "thin".to_string(),
+                compaction_event_threshold: 200,
+                compaction_keep_recent: 50,
+                max_age_before_archive_secs: 30 * 24 * 3600,
+            },
+            skill_lifecycle: SkillLifecyclePolicyConfig {
+                stale_after_secs: 30 * 24 * 3600,
+                archive_after_secs: 90 * 24 * 3600,
+                auto_transitions: true,
+                backup_count: 5,
+                storage_root: "home_dir".to_string(),
+                grace_unused_secs: 7 * 24 * 3600,
+            },
+        };
+
+        let mp = resolve_memory_profile(&cfg);
+        assert_eq!(mp.name, "coding");
+        assert_eq!(mp.extraction_schema.len(), 4);
+        assert!(mp.extraction_schema.contains(&FactType::new("decision")));
+        assert_eq!(mp.recall.strategy, RecallStrategy::Hybrid);
+        assert_eq!(mp.recall.top_k, 5);
+        assert!(mp.recall.time_decay);
+        assert_eq!(mp.core_budget_tokens, 2048);
+        assert!(mp.enable_memory_tools);
+        assert_eq!(
+            mp.habit_fact_types,
+            vec![FactType::new("user_tooling_pref")]
+        );
+        assert!(!mp.decay.enabled);
+        assert_eq!(mp.working_state.compaction.event_threshold, 200);
+        assert_eq!(mp.working_state.compaction.keep_recent, 50);
+        assert_eq!(
+            mp.working_state.storage_root,
+            crate::memory_profile::StorageRoot::InRepo
+        );
+        assert_eq!(
+            mp.skill_lifecycle.stale_after,
+            Duration::from_secs(30 * 24 * 3600)
+        );
+    }
+
+    #[test]
+    fn test_memory_profile_yaml_round_trip() {
+        use oneai_core::RecallStrategy;
+
+        let yaml = r#"
+name: coding
+description: "Coding pack with memory profile"
+tools: [read_file, calculator]
+context_sources: [date]
+permission_profile:
+  auto_approve: [read_file, calculator]
+  require_confirmation: []
+  deny_by_default: []
+compression_template:
+  name: coding
+  preserve_fields: [critical_files]
+memory_profile:
+  name: coding
+  extraction_schema: [user_tooling_pref, decision]
+  recall:
+    strategy: hybrid
+    top_k: 5
+    time_decay: true
+  core_budget_tokens: 2048
+  enable_memory_tools: true
+  habit_fact_types: [user_tooling_pref]
+  working_state:
+    storage_root: in_repo
+    compaction_event_threshold: 200
+    compaction_keep_recent: 50
+  skill_lifecycle:
+    stale_after_secs: 2592000
+    archive_after_secs: 7776000
+system_prompt: "You are a coding agent"
+"#;
+
+        let config: DomainPackConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.memory_profile.name, "coding");
+        assert_eq!(config.memory_profile.extraction_schema.len(), 2);
+        assert_eq!(
+            config.memory_profile.recall.strategy,
+            RecallStrategy::Hybrid
+        );
+        assert_eq!(config.memory_profile.recall.top_k, 5);
+        assert_eq!(config.memory_profile.core_budget_tokens, 2048);
+        assert_eq!(
+            config
+                .memory_profile
+                .working_state
+                .compaction_event_threshold,
+            200
+        );
+        assert_eq!(
+            config.memory_profile.skill_lifecycle.archive_after_secs,
+            7_776_000
+        );
     }
 }

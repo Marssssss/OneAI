@@ -345,6 +345,105 @@ impl DomainPackValidator {
         {
             issues.push(ValidationIssue::warning("compression", "Compression template has name but no preserve_fields — no fields will be prioritized during compression"));
         }
+
+        // Memory profile (layer 7)
+        Self::validate_memory(config, issues);
+    }
+
+    /// Validate memory-profile layer (decay bounds, compaction thresholds,
+    /// skill-lifecycle ordering, habit⊆schema, recall sane).
+    fn validate_memory(config: &DomainPackConfig, issues: &mut Vec<ValidationIssue>) {
+        let mp = &config.memory_profile;
+
+        // decay salience bounds
+        if !(0.0..=1.0).contains(&mp.decay.min_salience) {
+            issues.push(ValidationIssue::error_at(
+                "memory",
+                format!(
+                    "decay.min_salience {} out of range [0.0, 1.0]",
+                    mp.decay.min_salience
+                ),
+                "memory_profile.decay.min_salience",
+            ));
+        }
+        if !(0.0..=1.0).contains(&mp.decay.archive_forget_salience) {
+            issues.push(ValidationIssue::error_at(
+                "memory",
+                format!(
+                    "decay.archive_forget_salience {} out of range [0.0, 1.0]",
+                    mp.decay.archive_forget_salience
+                ),
+                "memory_profile.decay.archive_forget_salience",
+            ));
+        }
+        if mp.decay.enabled && mp.decay.archive_forget_salience > mp.decay.min_salience {
+            issues.push(ValidationIssue::error_at(
+                "memory",
+                "decay.archive_forget_salience must be ≤ decay.min_salience (forget threshold below eviction threshold)",
+                "memory_profile.decay.archive_forget_salience",
+            ));
+        }
+
+        // core budget sane
+        if mp.core_budget_tokens == 0 {
+            issues.push(ValidationIssue::warning(
+                "memory",
+                "core_budget_tokens is 0 — no always-in-context core memory",
+            ));
+        } else if mp.core_budget_tokens > 32_768 {
+            issues.push(ValidationIssue::warning_at(
+                "memory",
+                format!(
+                    "core_budget_tokens {} is large — core tier may crowd the context window",
+                    mp.core_budget_tokens
+                ),
+                "memory_profile.core_budget_tokens",
+            ));
+        }
+
+        // compaction ordering
+        let ws = &mp.working_state;
+        if ws.compaction_keep_recent >= ws.compaction_event_threshold {
+            issues.push(ValidationIssue::error_at(
+                "memory",
+                "working_state.compaction_keep_recent must be < compaction_event_threshold",
+                "memory_profile.working_state",
+            ));
+        }
+
+        // skill lifecycle ordering
+        let sl = &mp.skill_lifecycle;
+        if sl.stale_after_secs >= sl.archive_after_secs {
+            issues.push(ValidationIssue::error_at(
+                "memory",
+                "skill_lifecycle.stale_after_secs must be < archive_after_secs",
+                "memory_profile.skill_lifecycle",
+            ));
+        }
+
+        // recall sane
+        if mp.recall.top_k == 0 {
+            issues.push(ValidationIssue::warning_at(
+                "memory",
+                "recall.top_k is 0 — no facts will be recalled",
+                "memory_profile.recall.top_k",
+            ));
+        }
+
+        // habits should be a subset of extraction_schema
+        let schema: HashSet<&str> = mp.extraction_schema.iter().map(|s| s.as_str()).collect();
+        for h in &mp.habit_fact_types {
+            if !schema.contains(h.as_str()) {
+                issues.push(ValidationIssue::warning_at(
+                    "memory",
+                    format!(
+                        "habit_fact_type '{}' is not in extraction_schema — it will be extracted but not persisted as a user habit",
+                        h
+                    ),
+                    "memory_profile.habit_fact_types",
+                ));
+            }
+        }
     }
 
     /// Validate semantic aspects (cross-layer consistency, reference integrity).
@@ -558,6 +657,7 @@ mod tests {
                 truncate_rules: HashMap::new(),
             },
             system_prompt: "You are a coding agent".to_string(),
+            memory_profile: MemoryProfileConfig::default(),
         }
     }
 
@@ -781,5 +881,46 @@ mod tests {
         assert_eq!(format!("{}", ValidationSeverity::Error), "ERROR");
         assert_eq!(format!("{}", ValidationSeverity::Warning), "WARNING");
         assert_eq!(format!("{}", ValidationSeverity::Info), "INFO");
+    }
+
+    #[test]
+    fn test_invalid_decay_salience_is_error() {
+        let mut config = make_valid_config();
+        config.memory_profile.decay.min_salience = 1.5; // out of [0,1]
+        let result = DomainPackValidator::validate(&config);
+        assert!(!result.is_valid());
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("out of range") && e.layer == "memory"));
+    }
+
+    #[test]
+    fn test_skill_stale_after_ge_archive_after_is_error() {
+        let mut config = make_valid_config();
+        // make stale_after == archive_after (>= → error)
+        config.memory_profile.skill_lifecycle.stale_after_secs =
+            config.memory_profile.skill_lifecycle.archive_after_secs;
+        let result = DomainPackValidator::validate(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors().iter().any(|e| e
+            .message
+            .contains("stale_after_secs must be < archive_after_secs")));
+    }
+
+    #[test]
+    fn test_habits_not_subset_of_schema_is_warning() {
+        let mut config = make_valid_config();
+        // default extraction_schema is empty → any habit is not in schema
+        config
+            .memory_profile
+            .habit_fact_types
+            .push("nonexistent_habit".to_string());
+        let result = DomainPackValidator::validate(&config);
+        assert!(result.is_valid()); // Warning doesn't block
+        assert!(result
+            .warnings()
+            .iter()
+            .any(|w| w.message.contains("not in extraction_schema")));
     }
 }

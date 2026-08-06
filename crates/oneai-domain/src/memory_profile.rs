@@ -103,6 +103,80 @@ pub enum WorkingStateThickness {
     Thick,
 }
 
+// ─── from_str (config parsing) ─────────────────────────────────────────────────
+//
+// Config-layer (config_parser.rs) stores these enums as `String` so an
+// LLM-authored/mutated spec can't hard-fail serde on an unknown variant — the
+// parse normalizes (case-insensitive, accepts snake/kebab) and falls back to a
+// safe default. Mirrors `DomainParadigmKind::from_str` (paradigm_strategy.rs).
+
+impl StorageRoot {
+    #[allow(clippy::should_implement_trait)] // infallible (defaults on unknown)
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "in_repo" | "inrepo" => Self::InRepo,
+            "home_dir" | "homedir" | "home" => Self::HomeDir,
+            _ => Self::InRepo,
+        }
+    }
+}
+
+impl CheckpointGranularity {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "every_step" | "everystep" => Self::EveryStep,
+            "on_task_boundary" | "ontaskboundary" => Self::OnTaskBoundary,
+            "critical_nodes" | "criticalnodes" => Self::CriticalNodes,
+            _ => Self::EveryStep,
+        }
+    }
+}
+
+impl GroundTruthReconciliation {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "none" => Self::None,
+            "git" => Self::Git,
+            _ => Self::None,
+        }
+    }
+}
+
+impl CrossSessionSurface {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "auto_inject" | "autoinject" | "auto" => Self::AutoInject,
+            "on_demand" | "ondemand" => Self::OnDemand,
+            _ => Self::AutoInject,
+        }
+    }
+}
+
+impl Retention {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "archive_on_complete" | "archiveoncomplete" => Self::ArchiveOnComplete,
+            "keep" => Self::Keep,
+            _ => Self::ArchiveOnComplete,
+        }
+    }
+}
+
+impl WorkingStateThickness {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "thin" => Self::Thin,
+            "thick" => Self::Thick,
+            _ => Self::Thin,
+        }
+    }
+}
+
 /// Compaction thresholds for the per-task event log (reference doc §7.3 /
 /// §8.4 — bounded growth via in-log snapshot events).
 #[derive(Debug, Clone, PartialEq, Eq)]

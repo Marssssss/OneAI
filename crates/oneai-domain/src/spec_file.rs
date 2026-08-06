@@ -173,6 +173,7 @@ mod tests {
                 truncate_rules: HashMap::new(),
             },
             system_prompt: "You are a test agent".to_string(),
+            memory_profile: crate::config_parser::MemoryProfileConfig::default(),
         }
     }
 
