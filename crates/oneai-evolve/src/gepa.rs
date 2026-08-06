@@ -1,12 +1,16 @@
-//! `gepa.rs` — ④ GEPA variation + Pareto selection (the E3 core).
+//! `gepa.rs` — ④ GEPA variation + Pareto selection (the E3 core; E4 widens
+//! the variation axes + carries the frontier forward).
 //!
 //! Turns E2's `Diagnosis` set into "vary K candidates → score → Pareto select
 //! the non-dominated frontier" for a single generation. The first-axis
 //! variation params are the tool triad — `PackSystemPrompt` /
 //! `PackToolDecorator` / `PackTool` (design §3.0/E3 首选: the user's original
 //! diagnostic goal "which tools were needless / mis-used" names the latter two
-//! verbatim; `system_prompt` is the highest-leverage free text). Secondary
-//! axes (compression / context / thinking_budget) land later in E3 / E4.
+//! verbatim; `system_prompt` is the highest-leverage free text). E4 adds the
+//! first concrete MemoryProfile axis — `PackRecallTopK` + `PackExtractionSchema`
+//! (design §3.0/E4: long-horizon suites surface recall/extraction effects;
+//! short suites don't). Secondary axes (compression / context /
+//! thinking_budget) remain tags for a later pass.
 //!
 //! ## Variation contract (LLM ↔ Rust)
 //!
@@ -53,6 +57,12 @@ use oneai_eval::EvalSuite;
 use crate::candidate::CandidateConfig;
 use crate::subgraph::{Diagnosis, ParamRef};
 use crate::trajectory_collector::CaseRun;
+
+/// Upper bound on a `recall.top_k` variation. Guards a bad LLM value from
+/// either zeroing recall (top_k=0) or saturating the context budget (a
+/// huge top_k recalls facts that crowd out the user's turn). 128 is a sane
+/// cap well above any realistic per-turn recall count.
+pub const MAX_RECALL_TOP_K: usize = 128;
 
 // ─── Patch recipe ─────────────────────────────────────────────────────────
 
@@ -137,6 +147,41 @@ pub fn apply_patch(patch: &Patch, cfg: &mut CandidateConfig) -> std::result::Res
                 .deny_by_default
                 .retain(|d| d.tool != *name);
             pc.tool_decorators.remove(name);
+        }
+        // ── E4 MemoryProfile axis ───────────────────────────────────────
+        // recall.top_k — numeric Set. Bound-checked (≥1, ≤ cap) so a bad
+        // LLM value can't zero out recall or blow the context budget.
+        (ParamRef::PackRecallTopK, PatchOp::Set) => {
+            let val: usize = patch
+                .value
+                .trim()
+                .parse()
+                .map_err(|_| format!("recall.top_k not a usize: {:?}", patch.value))?;
+            if !(1..=MAX_RECALL_TOP_K).contains(&val) {
+                return Err(format!(
+                    "recall.top_k out of range [1, {MAX_RECALL_TOP_K}]: {val} — rejected"
+                ));
+            }
+            pc.memory_profile.recall.top_k = val;
+        }
+        // extraction_schema — Add/Remove a fact-type entry (Set is
+        // ill-defined for a list; only Add/Remove apply).
+        (ParamRef::PackExtractionSchema, PatchOp::Add) => {
+            if !pc
+                .memory_profile
+                .extraction_schema
+                .iter()
+                .any(|t| t == &patch.value)
+            {
+                pc.memory_profile
+                    .extraction_schema
+                    .push(patch.value.clone());
+            }
+        }
+        (ParamRef::PackExtractionSchema, PatchOp::Remove) => {
+            pc.memory_profile
+                .extraction_schema
+                .retain(|t| t != &patch.value);
         }
         _ => {
             return Err(format!(
@@ -427,11 +472,19 @@ fn variation_prompt(diagnoses: &[Diagnosis], base: &CandidateConfig, index: usiz
             .collect::<Vec<_>>()
             .join("; ")
     };
+    let recall_top_k = pc.memory_profile.recall.top_k;
+    let extraction_schema = if pc.memory_profile.extraction_schema.is_empty() {
+        "(none)".to_string()
+    } else {
+        pc.memory_profile.extraction_schema.join(", ")
+    };
     format!(
         "You are optimizing an AI agent's domain-pack config. Propose one candidate variation \
-         (attempt {index}) that fixes the diagnosed failures. Only touch the first-axis params: \
-         pack.system_prompt, pack.tool_decorators[<name>], pack.tools[<name>].\n\n\
-         Current system_prompt: {:?}\nCurrent tools: {:?}\nCurrent tool_decorators: {decorators}\n\n\
+         (attempt {index}) that fixes the diagnosed failures. You may touch: \
+         pack.system_prompt, pack.tool_decorators[<name>], pack.tools[<name>], \
+         pack.memory.recall.top_k, pack.memory.extraction_schema.\n\n\
+         Current system_prompt: {:?}\nCurrent tools: {:?}\nCurrent tool_decorators: {decorators}\n\
+         Current recall.top_k: {recall_top_k}\nCurrent extraction_schema: {extraction_schema}\n\n\
          Diagnoses — suspect params: {}\nCritiques:\n{critiques}\n\n\
          Respond with ONLY a JSON object: {{\"patches\":[{{\"param\":\"pack.system_prompt\",\
          \"op\":\"set\",\"value\":\"...\"}}]}}. op ∈ set|add|remove. No prose outside the JSON.",
@@ -494,7 +547,7 @@ impl ParetoSelector for NonDominatedSelector {
 
 // ─── GepaConfig + GepaOptimizer + OptimizationResult ────────────────────
 
-/// GEPA-loop configuration (design §3.2).
+/// GEPA-loop configuration (design §3.2 + §4 E4 convergence/budget).
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct GepaConfig {
@@ -503,8 +556,16 @@ pub struct GepaConfig {
     /// Fraction of the suite used for variation evaluation (≤1.0 = full).
     /// Default 0.4 (design §3.3 难点 C "35x fewer rollouts" — graded sampling).
     pub case_subset_ratio: f64,
-    /// Convergence target pass rate (used by E4; E3 just records it).
+    /// Convergence target pass rate (subset frontier-best). The loop stops
+    /// once the frontier-best reaches this. Default 0.85.
     pub target_pass_rate: f64,
+    /// Cumulative token cap across all generations (E4 budget hard-stop,
+    /// design §3.3 难点 C). `None` = no cap (tests / dry runs). Default `None`.
+    pub max_total_tokens: Option<u64>,
+    /// Early-stop patience: consecutive generations with no strict
+    /// improvement in the frontier-best pass rate (design §4 E4 "连续2代无提升→停").
+    /// Default 2. Set ≥ `max_generations` to disable.
+    pub early_stop_patience: usize,
 }
 
 impl Default for GepaConfig {
@@ -513,12 +574,14 @@ impl Default for GepaConfig {
             population: 4,
             case_subset_ratio: 0.4,
             target_pass_rate: 0.85,
+            max_total_tokens: None,
+            early_stop_patience: 2,
         }
     }
 }
 
 impl GepaConfig {
-    /// Construct with E3 defaults.
+    /// Construct with E3/E4 defaults.
     pub fn new() -> Self {
         Self::default()
     }
@@ -534,43 +597,74 @@ impl GepaConfig {
         self.case_subset_ratio = r;
         self
     }
+    /// Set the convergence target pass rate.
+    #[must_use]
+    pub fn with_target_pass_rate(mut self, t: f64) -> Self {
+        self.target_pass_rate = t;
+        self
+    }
+    /// Set the cumulative token cap (budget hard-stop).
+    #[must_use]
+    pub fn with_max_total_tokens(mut self, t: u64) -> Self {
+        self.max_total_tokens = Some(t);
+        self
+    }
+    /// Set the early-stop patience (consecutive no-improvement generations).
+    #[must_use]
+    pub fn with_early_stop_patience(mut self, p: usize) -> Self {
+        self.early_stop_patience = p;
+        self
+    }
 }
 
-/// Wires a variation operator + Pareto selector + config. Owned by the
-/// `EvolutionLoop`; the loop drives scoring (it has `collect_runs`), so the
-/// optimizer only exposes `vary` + `select` — no circular dependency on the
-/// loop type.
+/// Wires a variation operator + Pareto selector + lesson merger + config.
+/// Owned by the `EvolutionLoop`; the loop drives scoring (it has
+/// `collect_runs`), so the optimizer only exposes `vary` / `select` /
+/// `merge` — no circular dependency on the loop type.
 pub struct GepaOptimizer {
     /// The variation operator (default `LlmVariationOperator`).
     pub operator: Arc<dyn VariationOperator>,
     /// The Pareto selector (default `NonDominatedSelector`).
     pub selector: Arc<dyn ParetoSelector>,
+    /// The lesson merger (default `BestFrontierMerger`). E4 carries the
+    /// frontier forward as the next-gen base via this.
+    pub merger: Arc<dyn crate::lessons::LessonMerger>,
     /// GEPA config.
     pub config: GepaConfig,
 }
 
 impl GepaOptimizer {
-    /// Construct with an operator + selector + config.
+    /// Construct with an operator + selector + merger + config.
     pub fn new(
         operator: Arc<dyn VariationOperator>,
         selector: Arc<dyn ParetoSelector>,
+        merger: Arc<dyn crate::lessons::LessonMerger>,
         config: GepaConfig,
     ) -> Self {
         Self {
             operator,
             selector,
+            merger,
             config,
         }
     }
 
     /// Construct with the default LLM operator (separate variation provider)
-    /// + non-dominated selector + given config.
+    /// + non-dominated selector + best-frontier merger + given config.
     pub fn with_llm_operator(variation_provider: Arc<dyn LlmProvider>, config: GepaConfig) -> Self {
         Self::new(
             Arc::new(LlmVariationOperator::new(variation_provider)),
             Arc::new(NonDominatedSelector),
+            Arc::new(crate::lessons::BestFrontierMerger::new()),
             config,
         )
+    }
+
+    /// Override the lesson merger (builder-style; for a richer stitcher).
+    #[must_use]
+    pub fn with_merger(mut self, merger: Arc<dyn crate::lessons::LessonMerger>) -> Self {
+        self.merger = merger;
+        self
     }
 
     /// Produce K candidates from the seed + diagnoses (delegates to operator).
@@ -587,6 +681,16 @@ impl GepaOptimizer {
     /// Select the frontier from scored candidates (delegates to selector).
     pub fn select(&self, scored: &[ScoredCandidate]) -> Vec<ScoredCandidate> {
         self.selector.select(scored, scored.len())
+    }
+
+    /// Merge the frontier into the next-gen base + lessons text (delegates to
+    /// merger). E4.
+    pub async fn merge(
+        &self,
+        frontier: &[ScoredCandidate],
+        current_base: &CandidateConfig,
+    ) -> (CandidateConfig, String) {
+        self.merger.merge(frontier, current_base).await
     }
 }
 
@@ -738,11 +842,108 @@ mod tests {
     fn apply_unknown_path_errors() {
         let base = CandidateConfig::from_pack_config(coding_cfg("p"));
         let patches = vec![Patch {
-            param: "pack.memory.recall".into(), // not first-axis
+            param: "pack.memory.recall".into(), // not addressable (only .top_k is)
             op: PatchOp::Set,
             value: "x".into(),
         }];
         assert!(apply_patches(&patches, &base).is_err());
+    }
+
+    #[test]
+    fn apply_recall_top_k_set_mutates_and_validates() {
+        let base = CandidateConfig::from_pack_config(coding_cfg("p"));
+        assert_eq!(base.pack_config.memory_profile.recall.top_k, 5); // default
+        let patches = vec![Patch {
+            param: "pack.memory.recall.top_k".into(),
+            op: PatchOp::Set,
+            value: "8".into(),
+        }];
+        let cfg = apply_patches(&patches, &base).expect("apply");
+        assert_eq!(cfg.pack_config.memory_profile.recall.top_k, 8);
+        validate_candidate(&cfg).expect("patched recall.top_k validates");
+    }
+
+    #[test]
+    fn apply_recall_top_k_out_of_range_rejected() {
+        let base = CandidateConfig::from_pack_config(coding_cfg("p"));
+        // 0 is below the floor [1, MAX].
+        let patches = vec![Patch {
+            param: "pack.memory.recall.top_k".into(),
+            op: PatchOp::Set,
+            value: "0".into(),
+        }];
+        let err = apply_patches(&patches, &base).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
+        // Over the cap.
+        let over = format!("{}", MAX_RECALL_TOP_K as u64 + 1);
+        let patches = vec![Patch {
+            param: "pack.memory.recall.top_k".into(),
+            op: PatchOp::Set,
+            value: over,
+        }];
+        let err = apply_patches(&patches, &base).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn apply_recall_top_k_non_numeric_rejected() {
+        let base = CandidateConfig::from_pack_config(coding_cfg("p"));
+        let patches = vec![Patch {
+            param: "pack.memory.recall.top_k".into(),
+            op: PatchOp::Set,
+            value: "many".into(),
+        }];
+        assert!(apply_patches(&patches, &base).is_err());
+    }
+
+    #[test]
+    fn apply_extraction_schema_add_remove() {
+        let base = CandidateConfig::from_pack_config(coding_cfg("p"));
+        assert!(base.pack_config.memory_profile.extraction_schema.is_empty());
+        // Add a fact type.
+        let add = vec![Patch {
+            param: "pack.memory.extraction_schema".into(),
+            op: PatchOp::Add,
+            value: "user_pref".into(),
+        }];
+        let cfg = apply_patches(&add, &base).expect("add");
+        assert_eq!(
+            cfg.pack_config.memory_profile.extraction_schema,
+            vec!["user_pref"]
+        );
+        // Adding the same type is idempotent.
+        let cfg = apply_patches(&add, &cfg).expect("add again");
+        assert_eq!(
+            cfg.pack_config.memory_profile.extraction_schema.len(),
+            1,
+            "duplicate add is a no-op"
+        );
+        // Remove.
+        let rm = vec![Patch {
+            param: "pack.memory.extraction_schema".into(),
+            op: PatchOp::Remove,
+            value: "user_pref".into(),
+        }];
+        let cfg = apply_patches(&rm, &cfg).expect("remove");
+        assert!(cfg.pack_config.memory_profile.extraction_schema.is_empty());
+    }
+
+    #[test]
+    fn from_path_roundtrips_memory_axis() {
+        use crate::subgraph::ParamRef;
+        assert_eq!(
+            ParamRef::from_path("pack.memory.recall.top_k"),
+            Some(ParamRef::PackRecallTopK)
+        );
+        assert_eq!(
+            ParamRef::from_path("pack.memory.extraction_schema"),
+            Some(ParamRef::PackExtractionSchema)
+        );
+        // The bare recall tag (no .top_k) stays unaddressable — only the
+        // numeric field is operator-addressable; the tag is for the
+        // diagnostician.
+        assert_eq!(ParamRef::from_path("pack.memory.recall"), None);
+        assert_eq!(ParamRef::from_path("pack.memory.decay"), None);
     }
 
     #[test]

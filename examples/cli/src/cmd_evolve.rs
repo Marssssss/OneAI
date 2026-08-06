@@ -1,27 +1,35 @@
 //! `oneai evolve` subcommand — self-evolution loop driver.
 //!
-//! Phase E1 ships only `run`:
-//!   oneai evolve run --seed <pack.yaml> --suite <name> [--no-optimize] [--root <dir>]
+//! `oneai evolve run --seed <pack.yaml> --suite <name> [--no-optimize]
+//! [--max-generations N] [--target 0.85] [--patience 2] [--max-tokens N]
+//! [--root <dir>]`
 //!
 //! It hot-loads a seed DomainPack from `--seed`, scores it against a builtin
-//! eval suite, and persists a generation-0 report + per-case trajectories under
-//! `<root>/evolve/run-<ts>/`. No diagnosis / variation / Pareto (E2–E3). The
-//! crate is provider-agnostic; this command wires the real provider (mirroring
-//! `cmd_eval_run`) from `OneaiConfig` / `ONEAI_API_KEY`.
+//! eval suite, and persists a report + per-case trajectories + (E4)
+//! `lessons.jsonl` under `<root>/evolve/run-<ts>/`. `--no-optimize` runs the
+//! E1/E2 degenerate path; otherwise an E3 single-gen or E4 multi-gen run
+//! (when `--max-generations > 1`). The crate is provider-agnostic; this
+//! command wires the real provider (mirroring `cmd_eval_run`) from
+//! `OneaiConfig` / `ONEAI_API_KEY`.
 
 use std::sync::Arc;
 
 use oneai_domain::DomainPackSpecFile;
 use oneai_eval::builtin_suites;
-use oneai_evolve::{run_evolve, EvolveRunArgs};
+use oneai_evolve::{run_evolve, EvolveRunArgs, GepaConfig};
 
 use crate::config::OneaiConfig;
 
-/// `oneai evolve run` — generation-0 (degenerate, no optimization) run.
+/// `oneai evolve run` — E1 degenerate, E3 single-gen, or E4 multi-gen run.
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_evolve_run(
     seed: &str,
     suite: &str,
     no_optimize: bool,
+    max_generations: usize,
+    target: f64,
+    patience: usize,
+    max_tokens: Option<u64>,
     root: Option<&str>,
     format: &str,
 ) {
@@ -43,7 +51,8 @@ pub async fn cmd_evolve_run(
     });
 
     println!(
-        "Evolve run (E1, no-optimize): seed={seed} suite={suite_name}",
+        "Evolve run: seed={seed} suite={suite_name} | no_optimize={no_optimize} | \
+         max_generations={max_generations} | target={target} | patience={patience}",
         suite_name = suite.name
     );
     println!(
@@ -64,7 +73,24 @@ pub async fn cmd_evolve_run(
     let real_provider = oneai_provider::ProviderFactory::create(model_config);
     let provider: Arc<dyn oneai_core::traits::LlmProvider> = Arc::from(real_provider);
 
-    let args = EvolveRunArgs::new(seed_config, suite).with_no_optimize(no_optimize);
+    let mut args = EvolveRunArgs::new(seed_config, suite)
+        .with_no_optimize(no_optimize)
+        .with_max_generations(max_generations);
+    // When optimizing, the variation provider == the candidate provider here
+    // (the CLI is a single-model smoke harness; design §6.3 wants a separate
+    // stronger judge — wire that via the library API for real runs). Pass the
+    // GEPA config through so the CLI flags take effect.
+    if !no_optimize {
+        let mut gepa = GepaConfig::new()
+            .with_target_pass_rate(target)
+            .with_early_stop_patience(patience);
+        if let Some(t) = max_tokens {
+            gepa = gepa.with_max_total_tokens(t);
+        }
+        args = args
+            .with_variation_provider(provider.clone())
+            .with_gepa_config(gepa);
+    }
     let args = if let Some(r) = root {
         args.with_root(std::path::PathBuf::from(r))
     } else {

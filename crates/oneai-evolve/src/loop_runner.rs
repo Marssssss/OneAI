@@ -1,14 +1,23 @@
 //! `EvolutionLoop` — the outer driver. E1's degenerate form runs generation 0
 //! only (no diagnosis / variation / Pareto) and persists a report + per-case
-//! trajectories. This is the "plumbing" pass: prove the seed hot-loads, the
-//! trajectory collector captures per-case `(Trajectory, TraceTree)`, and the
-//! report round-trips to disk.
+//! trajectories. E2 adds diagnosis between the collect and report steps; E3
+//! wraps variation around a single generation; **E4 loops generations to
+//! convergence**, carrying the frontier forward as the next-gen base via a
+//! `LessonMerger` and persisting a cross-generation `lessons.jsonl`.
 //!
-//! E2 adds diagnosis between the collect and report steps; E3 wraps variation
-//! around this degenerate `run`; E4 loops generations to convergence. The
-//! `EvolutionConfig` fields (`max_generations`, `no_optimize`) are forward-declared
-//! so the type is stable — E1 always passes `no_optimize=true` and stops at gen 0.
+//! With `max_generations == 1` (the E1/E2/E3 default) the loop runs once and
+//! the report is identical to E3's — backward compatible. `max_generations >
+//! 1` activates the multi-gen path: per generation it collects the base's
+//! full-suite runs → diagnoses failures → varies K candidates on a subset →
+//! Pareto-selects the frontier → merges the frontier into the next-gen base
+//! → records a lesson. It stops on convergence (`frontier_pass ≥ target`),
+//! the generation cap, the cumulative-token cap, or stagnation
+//! (`early_stop_patience` consecutive generations with no improvement).
+//!
+//! `EvolutionConfig` fields (`max_generations`, `no_optimize`) are stable
+//! across phases; E4 finally consumes `max_generations`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,8 +29,10 @@ use oneai_eval::{EvalSuite, RecordingProvider};
 use crate::candidate::{AppHandle, CandidateConfig};
 use crate::failure_extractor::{extract_failures, FailedCase};
 use crate::gepa::{select_case_subset, GepaOptimizer, ScoredCandidate};
+use crate::lessons::{LessonEntry, LessonsLog};
 use crate::report::{
     CandidateScoreRecord, CaseRecord, DiagnosisRecord, EvolutionReport, FrontierRecord,
+    GenerationSummary,
 };
 use crate::subgraph::{Diagnosis, HeuristicDiagnostician, SubgraphDiagnostician};
 use crate::trajectory_collector::{CaseRun, TrajectoryCollector};
@@ -159,98 +170,233 @@ impl EvolutionLoop {
         self
     }
 
-    /// Run generation 0 against `suite`, persist a report + per-case
-    /// trajectories + per-failed-case diagnoses, and return the report.
+    /// Run the evolution loop against `suite`, persisting a report + the
+    /// final generation's per-case trajectories + diagnoses + a
+    /// cross-generation `lessons.jsonl`. Returns the report.
     ///
-    /// E1 degenerate path — no variation, no Pareto. Each case is run live
-    /// (semantic-variation candidates can't be replayed; design §3.3 难点 C),
-    /// its trajectory + tree captured by [`TrajectoryCollector`], the
-    /// trajectory written to `run-<ts>/case-<id>.jsonl`. E2 adds a diagnosis
-    /// pass: failed cases are fed to [`SubgraphDiagnostician`] and the
-    /// resulting [`Diagnosis`] (suspect params + subtrace + critique) is
-    /// persisted to `run-<ts>/diagnosis-<id>.json` and summarized in the report.
+    /// With `max_generations == 1` (E1/E2/E3 default) this is a single
+    /// generation — identical to E3's behavior. With `max_generations > 1`
+    /// (E4) the loop carries the frontier forward as the next-gen base via
+    /// the optimizer's `LessonMerger` and stops on convergence / cap /
+    /// budget / stagnation. The `no_optimize` path skips variation + Pareto
+    /// (E1/E2); a non-`no_optimize` run without a wired optimizer also
+    /// degrades to the no-optimize path.
+    ///
+    /// Each generation's base is run live on the FULL suite (semantic-
+    /// variation candidates can't be replayed; design §3.3 难点 C). Only the
+    /// **final** generation's trajectories + diagnoses are persisted to disk
+    /// (intermediate gens keep their lessons row only — saves disk + the
+    /// in-memory diagnoses still feed the next gen's variation).
     pub async fn run(&self, seed: &CandidateConfig, suite: &EvalSuite) -> Result<EvolutionReport> {
-        // Run dir: <root>/evolve/run-<timestamp>/. Created first so collect_runs
-        // (which may persist trajectories) + the optimization path share it.
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
         let run_dir = self.config.root.join("evolve").join(format!("run-{ts}"));
         fs::create_dir_all(&run_dir).map_err(|e| {
             OneAIError::Config(format!("create run_dir {}: {}", run_dir.display(), e))
         })?;
 
-        // Drive the loop per case on the FULL suite, capturing runs. (E1/E2
-        // plumbing; the seed's full-suite runs also feed the optimization
-        // path's subset score, so they're reused, not re-run.)
-        let runs = self.collect_runs(seed, suite).await?;
+        let optimizer = if !self.config.no_optimize {
+            self.optimizer.clone()
+        } else {
+            None
+        };
+        let target = optimizer
+            .as_ref()
+            .map(|o| o.config.target_pass_rate)
+            .unwrap_or(1.0);
+        let patience = optimizer
+            .as_ref()
+            .map(|o| o.config.early_stop_patience)
+            .unwrap_or(usize::MAX);
+        let token_cap = optimizer.as_ref().and_then(|o| o.config.max_total_tokens);
 
-        // Persist per-case trajectories + build records. `suite.cases` and
-        // `runs` are parallel (same order); zip borrows both.
-        let mut records = Vec::with_capacity(runs.len());
-        for (case, run) in suite.cases.iter().zip(&runs) {
-            let traj_rel = persist_trajectory(&run_dir, &case.id, &run.trajectory)?;
-            records.push(CaseRecord::from_run(
-                &run.result,
-                &run.trajectory,
-                Some(traj_rel),
-            ));
-        }
+        let mut lessons = LessonsLog::new(run_dir.join("lessons.jsonl"));
+        let mut base = seed.clone();
+        let mut total_tokens: u64 = 0;
+        let mut generations: Vec<GenerationSummary> = Vec::new();
+        // Final-gen accumulators (lifted to the report top level).
+        let mut final_gen = 0usize;
+        let mut final_case_records = Vec::new();
+        let mut final_diagnoses = Vec::new();
+        let mut final_candidate_scores = Vec::new();
+        let mut final_frontier: Option<FrontierRecord> = None;
+        let mut stop_reason: Option<String> = None;
 
-        // E2: diagnose failures. FailedCase borrows the run's result +
-        // trajectory + trace_tree + the seed candidate. The diagnostician
-        // always returns a Diagnosis (tail-N fallback); failures only (no
-        // wasted work on passing cases). Diagnoses are kept (owned) so the
-        // E3 optimizer can read them.
-        let failed: Vec<FailedCase<'_>> = extract_failures(&suite.cases, &runs, seed);
-        let failed_ids: Vec<String> = failed.iter().map(|f| f.case.id.clone()).collect();
-        let mut diag_records = Vec::with_capacity(failed.len());
-        let mut diagnoses: Vec<Diagnosis> = Vec::with_capacity(failed.len());
-        for fc in &failed {
-            let d = self.diagnostician.diagnose(fc).await;
-            let diag_rel = persist_diagnosis(&run_dir, &fc.case.id, &d)?;
-            diag_records.push(DiagnosisRecord {
-                case_id: fc.case.id.clone(),
-                suspect_params: d.suspect_params.clone(),
-                critique: d.critique.clone(),
-                diagnosis_file: Some(diag_rel),
-            });
-            diagnoses.push(d);
-        }
+        for gen in 0..self.config.max_generations {
+            final_gen = gen;
+            // ① full-suite runs of this generation's base.
+            let runs = self.collect_runs(&base, suite).await?;
+            let gen_tokens: u64 = runs
+                .iter()
+                .map(|r| r.result.prompt_tokens + r.result.completion_tokens)
+                .sum();
+            total_tokens += gen_tokens;
 
-        let mut report = EvolutionReport::from_records(
-            &suite.name,
-            0,
-            self.config.no_optimize,
-            records,
-            diag_records,
-            run_dir.clone(),
-        );
-
-        // E3: optimization step (single generation). Only when an optimizer is
-        // wired AND the run isn't no-optimize. The seed scored on the subset
-        // reuses the full-suite runs already collected (subset ⊆ full).
-        if !self.config.no_optimize {
-            if let Some(optimizer) = &self.optimizer {
-                let ratio = optimizer.config.case_subset_ratio;
-                let subset = select_case_subset(suite, ratio, &failed_ids);
-                let subset_ids: std::collections::HashSet<String> =
-                    subset.cases.iter().map(|c| c.id.clone()).collect();
-                // Filter the seed's full-suite runs down to the subset
-                // (parallel with suite.cases). Clone — ScoredCandidate owns.
-                let seed_subset_runs: Vec<CaseRun> = suite
-                    .cases
-                    .iter()
-                    .zip(&runs)
-                    .filter(|(c, _)| subset_ids.contains(&c.id))
-                    .map(|(_, r)| r.clone())
-                    .collect();
-                let seed_scored = ScoredCandidate::from_runs(seed.clone(), &seed_subset_runs);
-                let (candidate_scores, frontier) = self
-                    .run_optimization(seed, seed_scored, &diagnoses, &subset, &run_dir)
-                    .await?;
-                report.with_optimization(candidate_scores, frontier);
+            let mut case_records = Vec::with_capacity(runs.len());
+            for (_case, run) in suite.cases.iter().zip(&runs) {
+                case_records.push(CaseRecord::from_run(&run.result, &run.trajectory, None));
             }
+            let total_cases = case_records.len();
+            let passed = case_records.iter().filter(|c| c.passed).count();
+            let base_pass_rate = if total_cases == 0 {
+                0.0
+            } else {
+                passed as f64 / total_cases as f64
+            };
+
+            // ③ diagnose failures (in-memory diagnoses feed the next step's
+            // variation; only the final gen's diagnoses are persisted).
+            let failed: Vec<FailedCase<'_>> = extract_failures(&suite.cases, &runs, &base);
+            let failed_ids: Vec<String> = failed.iter().map(|f| f.case.id.clone()).collect();
+            let mut diagnoses: Vec<Diagnosis> = Vec::with_capacity(failed.len());
+            let mut diag_records = Vec::with_capacity(failed.len());
+            for fc in &failed {
+                let d = self.diagnostician.diagnose(fc).await;
+                diag_records.push(DiagnosisRecord {
+                    case_id: fc.case.id.clone(),
+                    suspect_params: d.suspect_params.clone(),
+                    critique: d.critique.clone(),
+                    diagnosis_file: None,
+                });
+                diagnoses.push(d);
+            }
+
+            // ④ optimization: vary K → score subset → Pareto. The base is
+            // always candidate 0 so the frontier can be the base itself.
+            let (candidate_scores, frontier_rec, frontier_scored) = match &optimizer {
+                Some(opt) => {
+                    let ratio = opt.config.case_subset_ratio;
+                    let subset = select_case_subset(suite, ratio, &failed_ids);
+                    let subset_ids: HashSet<String> =
+                        subset.cases.iter().map(|c| c.id.clone()).collect();
+                    let base_subset_runs: Vec<CaseRun> = suite
+                        .cases
+                        .iter()
+                        .zip(&runs)
+                        .filter(|(c, _)| subset_ids.contains(&c.id))
+                        .map(|(_, r)| r.clone())
+                        .collect();
+                    let base_scored = ScoredCandidate::from_runs(base.clone(), &base_subset_runs);
+                    let step = self
+                        .run_optimization(&base, base_scored, &diagnoses, &subset, &run_dir, gen)
+                        .await?;
+                    (
+                        step.candidate_scores,
+                        step.frontier_rec,
+                        step.frontier_scored,
+                    )
+                }
+                None => (Vec::new(), None, Vec::new()),
+            };
+
+            // Frontier-best axes (subset) for the lesson + convergence.
+            let (frontier_pass, frontier_tok, frontier_lat, frontier_is_seed) = match &frontier_rec
+            {
+                Some(f) => (f.pass_rate, f.total_tokens, f.total_latency_ms, f.is_seed),
+                None => (base_pass_rate, gen_tokens, 0, true),
+            };
+            let frontier_cfg_file = frontier_rec.as_ref().and_then(|f| f.config_file.clone());
+
+            // Merge the frontier into the next-gen base + lessons text. With
+            // no optimizer, the base carries forward unchanged.
+            let (next_base, lessons_text) = match &optimizer {
+                Some(opt) => opt.merge(&frontier_scored, &base).await,
+                None => (
+                    base.clone(),
+                    "no optimization — base carried forward unchanged".into(),
+                ),
+            };
+
+            // Record the lesson + generation summary.
+            lessons.record(LessonEntry {
+                generation: gen,
+                base_pass_rate,
+                frontier_pass_rate: frontier_pass,
+                frontier_total_tokens: frontier_tok,
+                frontier_total_latency_ms: frontier_lat,
+                frontier_is_seed,
+                lessons_text: lessons_text.clone(),
+            });
+            generations.push(GenerationSummary {
+                generation: gen,
+                base_pass_rate,
+                frontier_pass_rate: frontier_pass,
+                frontier_total_tokens: frontier_tok,
+                frontier_total_latency_ms: frontier_lat,
+                frontier_is_seed,
+                candidate_scores: candidate_scores.clone(),
+                frontier_config_file: frontier_cfg_file.clone(),
+                lessons_text,
+            });
+
+            // Lift this generation's final-gen accumulators (overwritten each
+            // gen so the last one wins).
+            final_candidate_scores = candidate_scores;
+            final_frontier = frontier_rec.clone();
+
+            // Convergence / stop checks (design §4 E4).
+            if frontier_pass >= target {
+                stop_reason = Some(format!(
+                    "converged: frontier pass_rate {frontier_pass:.2} ≥ target {target:.2} (gen {gen})"
+                ));
+            }
+            if let Some(cap) = token_cap {
+                if total_tokens >= cap {
+                    stop_reason = Some(format!(
+                        "budget cap: cumulative tokens {total_tokens} ≥ {cap} (gen {gen})"
+                    ));
+                }
+            }
+            if gen > 0 && lessons.gens_without_improvement() >= patience {
+                stop_reason = Some(format!(
+                    "stagnation: {patience} consecutive generation(s) with no improvement (gen {gen})"
+                ));
+            }
+            let mut stopping = stop_reason.is_some();
+            if gen + 1 == self.config.max_generations {
+                // Reached the cap — record it if no other reason fired first.
+                if stop_reason.is_none() {
+                    stop_reason = Some(format!("max_generations {gen} reached"));
+                }
+                stopping = true;
+            }
+
+            if stopping {
+                // Persist the final generation's trajectories + diagnoses
+                // (intermediate gens only record their lesson row). `case_records`
+                // + `diag_records` are owned here; `runs` is borrowed immutably
+                // alongside `failed`'s borrow (both read-only — fine).
+                final_case_records = persist_case_records(&run_dir, case_records, &runs)?;
+                final_diagnoses = persist_diagnoses(&run_dir, diag_records, &diagnoses)?;
+                break;
+            }
+
+            // Next-gen base + carry the final-gen accumulators forward. Only
+            // the final generation persists trajectories; intermediate gens
+            // just record their lesson row.
+            base = next_base;
         }
 
+        let lessons_file = if lessons.is_empty() {
+            None
+        } else {
+            let rel = PathBuf::from("lessons.jsonl");
+            lessons.persist()?;
+            Some(rel)
+        };
+
+        let report = EvolutionReport::for_run(
+            &suite.name,
+            self.config.no_optimize,
+            run_dir.clone(),
+            generations,
+            final_gen,
+            final_case_records,
+            final_diagnoses,
+            final_candidate_scores,
+            final_frontier,
+            lessons_file,
+            stop_reason,
+        );
         persist_report(&run_dir, &report)?;
         Ok(report)
     }
@@ -280,30 +426,33 @@ impl EvolutionLoop {
         Ok(runs)
     }
 
-    /// The E3 single-generation optimization: vary K candidates → score on the
+    /// The single-generation optimization: vary K candidates → score on the
     /// subset → Pareto select → persist the frontier config. Returns the
-    /// candidate-score records + the frontier record to fold into the report.
+    /// candidate-score records + the frontier record + the scored frontier
+    /// (the merger carries the frontier forward as the next-gen base in E4).
+    /// `gen` parameterizes the persisted config filename (`frontier-gen<n>.json`).
     async fn run_optimization(
         &self,
-        seed: &CandidateConfig,
-        seed_scored: ScoredCandidate,
+        base: &CandidateConfig,
+        base_scored: ScoredCandidate,
         diagnoses: &[Diagnosis],
         subset: &EvalSuite,
         run_dir: &Path,
-    ) -> Result<(Vec<CandidateScoreRecord>, Option<FrontierRecord>)> {
+        gen: usize,
+    ) -> Result<OptStep> {
         let optimizer = self
             .optimizer
             .as_ref()
             .expect("optimizer set (caller checks no_optimize)");
 
         // Vary K candidates (operator drops invalid/cheat ones with a warn).
-        let candidates = optimizer.vary(diagnoses, seed).await;
+        let candidates = optimizer.vary(diagnoses, base).await;
 
         let mut candidate_scores: Vec<CandidateScoreRecord> = Vec::with_capacity(candidates.len());
         let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(candidates.len() + 1);
-        // Seed as candidate 0 so Pareto can compare "do nothing" against the
-        // variations — the frontier may be the seed itself (no improvement).
-        scored.push(seed_scored.clone());
+        // Base as candidate 0 so Pareto can compare "do nothing" against the
+        // variations — the frontier may be the base itself (no improvement).
+        scored.push(base_scored.clone());
 
         for (i, cand) in candidates.iter().enumerate() {
             let runs = self.collect_runs(cand, subset).await?;
@@ -324,18 +473,18 @@ impl EvolutionLoop {
         let frontier = optimizer.select(&scored);
         let frontier_rec = match frontier.first() {
             Some(b) => {
-                // Is the frontier-best the seed? Compare the three axes —
-                // an exact match means no candidate improved on the seed, so
+                // Is the frontier-best the base? Compare the three axes —
+                // an exact match means no candidate improved on the base, so
                 // nothing new to persist. (Collision only when a candidate
-                // matches the seed on all axes — then not persisting is
+                // matches the base on all axes — then not persisting is
                 // harmless: it's the same quality.)
-                let is_seed = b.pass_rate == seed_scored.pass_rate
-                    && b.total_tokens == seed_scored.total_tokens
-                    && b.total_latency_ms == seed_scored.total_latency_ms;
+                let is_seed = b.pass_rate == base_scored.pass_rate
+                    && b.total_tokens == base_scored.total_tokens
+                    && b.total_latency_ms == base_scored.total_latency_ms;
                 let config_file = if is_seed {
                     None
                 } else {
-                    let name = PathBuf::from("frontier-gen0.json");
+                    let name = PathBuf::from(format!("frontier-gen{gen}.json"));
                     let path = run_dir.join(&name);
                     let json =
                         serde_json::to_string_pretty(&b.candidate.pack_config).map_err(|e| {
@@ -356,8 +505,20 @@ impl EvolutionLoop {
             }
             None => None,
         };
-        Ok((candidate_scores, frontier_rec))
+        Ok(OptStep {
+            candidate_scores,
+            frontier_rec,
+            frontier_scored: frontier,
+        })
     }
+}
+
+/// One generation's optimization output — folded into the loop's lesson +
+/// report by the caller.
+struct OptStep {
+    candidate_scores: Vec<CandidateScoreRecord>,
+    frontier_rec: Option<FrontierRecord>,
+    frontier_scored: Vec<ScoredCandidate>,
 }
 
 /// Write the per-case trajectory to `run_dir/case-<id>.jsonl` (one JSON line).
@@ -388,6 +549,37 @@ fn persist_diagnosis(run_dir: &Path, case_id: &str, diagnosis: &Diagnosis) -> Re
     fs::write(&path, json)
         .map_err(|e| OneAIError::Config(format!("write {}: {}", path.display(), e)))?;
     Ok(name)
+}
+
+/// Persist the final generation's per-case trajectories + fill the
+/// `trajectory_file` pointer on each [`CaseRecord`] (parallel to `runs`).
+/// Returns the records with paths filled. Called once per run, on the final
+/// generation (intermediate gens skip disk — their data stays in-memory).
+fn persist_case_records(
+    run_dir: &Path,
+    mut case_records: Vec<CaseRecord>,
+    runs: &[CaseRun],
+) -> Result<Vec<CaseRecord>> {
+    for (rec, run) in case_records.iter_mut().zip(runs) {
+        let traj_rel = persist_trajectory(run_dir, &rec.case_id, &run.trajectory)?;
+        rec.trajectory_file = Some(traj_rel);
+    }
+    Ok(case_records)
+}
+
+/// Persist the final generation's per-failed-case diagnoses + fill the
+/// `diagnosis_file` pointer on each [`DiagnosisRecord`] (parallel to
+/// `diagnoses`). Called once per run, on the final generation.
+fn persist_diagnoses(
+    run_dir: &Path,
+    mut diag_records: Vec<DiagnosisRecord>,
+    diagnoses: &[Diagnosis],
+) -> Result<Vec<DiagnosisRecord>> {
+    for (rec, d) in diag_records.iter_mut().zip(diagnoses) {
+        let rel = persist_diagnosis(run_dir, &rec.case_id, d)?;
+        rec.diagnosis_file = Some(rel);
+    }
+    Ok(diag_records)
 }
 
 /// Write the aggregate report to `run_dir/report.json`.

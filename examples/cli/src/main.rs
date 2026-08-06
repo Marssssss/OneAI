@@ -523,9 +523,24 @@ enum EvolveAction {
         /// Builtin suite name (coding_basics, tool_use, general, efficiency).
         #[arg(long)]
         suite: String,
-        /// Skip variation (E1 default; the only mode until E3 lands).
+        /// Skip variation (E1/E2 degenerate path; default true).
         #[arg(long, default_value = "true")]
         no_optimize: bool,
+        /// E4: generation cap. 1 = single-gen (E3); >1 = multi-gen loop to
+        /// convergence.
+        #[arg(long, default_value = "1")]
+        max_generations: usize,
+        /// E4: convergence target pass rate (0.0–1.0). Loop stops once the
+        /// frontier-best reaches it.
+        #[arg(long, default_value = "0.85")]
+        target: f64,
+        /// E4: early-stop patience — consecutive generations with no frontier
+        /// improvement before stopping.
+        #[arg(long, default_value = "2")]
+        patience: usize,
+        /// E4: cumulative token cap across all generations (budget hard-stop).
+        #[arg(long)]
+        max_tokens: Option<u64>,
         /// Output root (default ~/.oneai/evolve).
         #[arg(long)]
         root: Option<String>,
@@ -1528,6 +1543,10 @@ fn main() {
                 seed,
                 suite,
                 no_optimize,
+                max_generations,
+                target,
+                patience,
+                max_tokens,
                 root,
                 format,
             } => {
@@ -1536,6 +1555,10 @@ fn main() {
                     &seed,
                     &suite,
                     no_optimize,
+                    max_generations,
+                    target,
+                    patience,
+                    max_tokens,
                     root.as_deref(),
                     &format,
                 ));

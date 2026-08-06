@@ -19,6 +19,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::subgraph::ParamRef;
 
+/// One generation's compact summary — E4's multi-generation loop records one
+/// `GenerationSummary` per generation in [`EvolutionReport::generations`].
+/// The full per-case detail lives only for the **final** generation
+/// (`case_records`); earlier generations keep just the axes + the frontier
+/// outcome so the report stays readable + cheap to serialize.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationSummary {
+    /// 0-based generation index.
+    pub generation: usize,
+    /// The base config's full-suite pass rate this generation.
+    pub base_pass_rate: f64,
+    /// The frontier-best **subset** pass rate this generation.
+    pub frontier_pass_rate: f64,
+    /// Frontier-best total tokens (subset).
+    pub frontier_total_tokens: u64,
+    /// Frontier-best total latency ms (subset).
+    pub frontier_total_latency_ms: u64,
+    /// True iff the frontier-best is the base (no candidate improved on it).
+    pub frontier_is_seed: bool,
+    /// Per-candidate subset scores this generation (E3 shape; empty for
+    /// `no_optimize` generations).
+    #[serde(default)]
+    pub candidate_scores: Vec<CandidateScoreRecord>,
+    /// The frontier config file persisted this generation
+    /// (`frontier-gen<n>.json`), relative to `run_dir`. `None` when the
+    /// frontier is the base (nothing new persisted).
+    #[serde(default)]
+    pub frontier_config_file: Option<PathBuf>,
+    /// Natural-language lessons note (the merger's output).
+    #[serde(default)]
+    pub lessons_text: String,
+}
+
 /// One case's record in an [`EvolutionReport`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,30 +179,51 @@ pub struct FrontierRecord {
     pub is_seed: bool,
 }
 
-/// Aggregate report for one evolution generation.
+/// Aggregate report for one evolution run. With `max_generations == 1`
+/// (E1/E2/E3) `generations` has one entry and `case_records` /
+/// `candidate_scores` / `frontier` are that single generation's — the shape
+/// E3 asserts on. With `max_generations > 1` (E4) `generations` carries the
+/// per-generation summaries and the top-level `case_records` /
+/// `candidate_scores` / `frontier` mirror the **final** generation (so a
+/// reader that doesn't iterate `generations` still sees the run's outcome).
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvolutionReport {
     /// Suite name.
     pub suite_name: String,
-    /// Generation index (0 for E1's degenerate single-gen run).
+    /// Final generation index reached (0 for E1's single-gen run).
     pub generation: usize,
     /// Whether optimization was skipped (`--no-optimize`, the E1 default).
     pub no_optimize: bool,
-    /// Per-case records.
+    /// Per-case records for the **final** generation.
     pub case_records: Vec<CaseRecord>,
-    /// Per-failed-case diagnoses (E2). Empty for E1 runs with no failures.
+    /// Per-failed-case diagnoses for the final generation (E2). Empty for E1
+    /// runs with no failures.
     #[serde(default)]
     pub diagnoses: Vec<DiagnosisRecord>,
-    /// E3: per-candidate scores on the subset. Empty for `no_optimize` runs.
+    /// E3: per-candidate scores on the subset, for the final generation.
+    /// Empty for `no_optimize` runs.
     #[serde(default)]
     pub candidate_scores: Vec<CandidateScoreRecord>,
-    /// E3: the Pareto-frontier best, if optimization ran.
+    /// E3: the Pareto-frontier best, for the final generation, if
+    /// optimization ran.
     #[serde(default)]
     pub frontier: Option<FrontierRecord>,
-    /// Fraction of cases that passed.
+    /// E4: per-generation summaries (one per generation that ran). Empty for
+    /// reports serialized by older versions (`#[serde(default)]`).
+    #[serde(default)]
+    pub generations: Vec<GenerationSummary>,
+    /// E4: path to the cross-generation `lessons.jsonl`, relative to
+    /// `run_dir`. `None` only when no generations recorded.
+    #[serde(default)]
+    pub lessons_file: Option<PathBuf>,
+    /// E4: why the loop stopped (converged / max-generations / budget /
+    /// stagnation). `None` for E1/E2/E3 single-gen runs (no stop decision).
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    /// Fraction of cases that passed (final generation, full suite).
     pub pass_rate: f64,
-    /// Total prompt + completion tokens across all cases.
+    /// Total prompt + completion tokens across all cases (final generation).
     pub total_tokens: u64,
     /// Run directory (absolute) where per-case trajectories + report live.
     pub run_dir: PathBuf,
@@ -177,7 +232,9 @@ pub struct EvolutionReport {
 impl EvolutionReport {
     /// Compute the report from per-case records (called after persistence).
     /// E3's `candidate_scores` + `frontier` are empty/None here; the optimized
-    /// path mutates them in before `persist_report`.
+    /// path mutates them in before `persist_report`. E4's multi-gen fields
+    /// (`generations` / `lessons_file` / `stop_reason`) are also empty here —
+    /// the multi-gen loop builds via [`Self::for_run`].
     pub fn from_records(
         suite_name: &str,
         generation: usize,
@@ -205,6 +262,55 @@ impl EvolutionReport {
             diagnoses,
             candidate_scores: Vec::new(),
             frontier: None,
+            generations: Vec::new(),
+            lessons_file: None,
+            stop_reason: None,
+            pass_rate,
+            total_tokens,
+            run_dir,
+        }
+    }
+
+    /// Build the report for a multi-generation run (E4). The final
+    /// generation's `case_records` / `diagnoses` / `candidate_scores` /
+    /// `frontier` are lifted to the top level (so non-iterating readers see
+    /// the outcome); `generations` carries the per-gen summaries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_run(
+        suite_name: &str,
+        no_optimize: bool,
+        run_dir: PathBuf,
+        generations: Vec<GenerationSummary>,
+        final_generation: usize,
+        final_case_records: Vec<CaseRecord>,
+        final_diagnoses: Vec<DiagnosisRecord>,
+        final_candidate_scores: Vec<CandidateScoreRecord>,
+        final_frontier: Option<FrontierRecord>,
+        lessons_file: Option<PathBuf>,
+        stop_reason: Option<String>,
+    ) -> Self {
+        let total_cases = final_case_records.len();
+        let passed = final_case_records.iter().filter(|c| c.passed).count();
+        let pass_rate = if total_cases == 0 {
+            0.0
+        } else {
+            passed as f64 / total_cases as f64
+        };
+        let total_tokens = final_case_records
+            .iter()
+            .map(|c| c.prompt_tokens + c.completion_tokens)
+            .sum();
+        Self {
+            suite_name: suite_name.to_string(),
+            generation: final_generation,
+            no_optimize,
+            case_records: final_case_records,
+            diagnoses: final_diagnoses,
+            candidate_scores: final_candidate_scores,
+            frontier: final_frontier,
+            generations,
+            lessons_file,
+            stop_reason,
             pass_rate,
             total_tokens,
             run_dir,
@@ -240,6 +346,34 @@ impl EvolutionReport {
             self.total_tokens,
             self.run_dir.display()
         );
+        if let Some(reason) = &self.stop_reason {
+            s.push_str(&format!("  stop: {reason}\n"));
+        }
+        if let Some(lf) = &self.lessons_file {
+            s.push_str(&format!("  lessons: {}\n", lf.display()));
+        }
+        // Multi-generation table (E4). Omitted when only one generation ran
+        // (avoids duplicating the per-case + frontier blocks below).
+        if self.generations.len() > 1 {
+            s.push_str(&format!("  generations ({}):\n", self.generations.len()));
+            for g in &self.generations {
+                s.push_str(&format!(
+                    "    gen {} | base {:.0}% | frontier {:.0}% (tok {} lat {}ms) | {}\n",
+                    g.generation,
+                    g.base_pass_rate * 100.0,
+                    g.frontier_pass_rate * 100.0,
+                    g.frontier_total_tokens,
+                    g.frontier_total_latency_ms,
+                    if g.frontier_is_seed {
+                        "seed".to_string()
+                    } else if let Some(p) = &g.frontier_config_file {
+                        p.display().to_string()
+                    } else {
+                        "frontier".to_string()
+                    },
+                ));
+            }
+        }
         for c in &self.case_records {
             let mark = if c.passed { "✓" } else { "✗" };
             s.push_str(&format!(

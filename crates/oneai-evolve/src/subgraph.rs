@@ -94,10 +94,16 @@ pub enum ParamRef {
     /// `loop_overlay.token_budget`.
     LoopTokenBudget,
     // ── E0 spec化 + E3后期 / E4 ────────────────────────────────
-    /// `memory_profile.extraction_schema`.
+    /// `memory_profile.extraction_schema` — add/remove a fact-type entry (E4).
     PackExtractionSchema,
-    /// `memory_profile.recall` (strategy / top_k / time_decay).
+    /// `memory_profile.recall` (strategy / top_k / time_decay) — suspect tag
+    /// used by the diagnostician; the variation operator addresses the
+    /// concrete numeric field via [`PackRecallTopK`].
     PackRecall,
+    /// `memory_profile.recall.top_k` — the numeric recall cap (E4 first
+    /// concrete MemoryProfile axis; long-horizon suites surface its effect,
+    /// short suites don't — design §3.0/E4).
+    PackRecallTopK,
     /// `memory_profile.decay` (enabled / thresholds / ttl / half_life).
     PackDecay,
     /// `memory_profile.working_state` (compaction + retention).
@@ -126,6 +132,7 @@ impl ParamRef {
             Self::LoopTokenBudget => "loop.token_budget".into(),
             Self::PackExtractionSchema => "pack.memory.extraction_schema".into(),
             Self::PackRecall => "pack.memory.recall".into(),
+            Self::PackRecallTopK => "pack.memory.recall.top_k".into(),
             Self::PackDecay => "pack.memory.decay".into(),
             Self::PackWorkingStateCompaction => "pack.memory.working_state".into(),
             Self::PackPermission(n) => format!("pack.permission[{n}]"),
@@ -133,13 +140,15 @@ impl ParamRef {
         }
     }
 
-    /// Inverse of [`path`](Self::path) for the E3 first-axis params only
-    /// (`pack.system_prompt` / `pack.tool_decorators[<name>]` /
-    /// `pack.tools[<name>]`). Returns `None` for any other string — the
-    /// `VariationOperator` drops patches it can't address (with a `warn` log)
-    /// rather than guessing. This is the parse side of the LLM patch
-    /// contract (design §4 E3): the LLM emits `path()` strings, Rust resolves
-    /// them back to typed `ParamRef`s.
+    /// Inverse of [`path`](Self::path) for the params the `VariationOperator`
+    /// can address: the E3 first-axis (`pack.system_prompt` /
+    /// `pack.tool_decorators[<name>]` / `pack.tools[<name>]`) **plus** the E4
+    /// MemoryProfile axis (`pack.memory.recall.top_k` /
+    /// `pack.memory.extraction_schema`). Returns `None` for any other string —
+    /// the `VariationOperator` drops patches it can't address (with a `warn`
+    /// log) rather than guessing. This is the parse side of the LLM patch
+    /// contract (design §4 E3/E4): the LLM emits `path()` strings, Rust
+    /// resolves them back to typed `ParamRef`s.
     pub fn from_path(path: &str) -> Option<Self> {
         if path == "pack.system_prompt" {
             return Some(Self::PackSystemPrompt);
@@ -153,6 +162,12 @@ impl ParamRef {
             if let Some(name) = rest.strip_suffix(']') {
                 return Some(Self::PackTool(name.to_string()));
             }
+        }
+        if path == "pack.memory.recall.top_k" {
+            return Some(Self::PackRecallTopK);
+        }
+        if path == "pack.memory.extraction_schema" {
+            return Some(Self::PackExtractionSchema);
         }
         None
     }
@@ -413,6 +428,7 @@ pub fn candidate_params(cfg: &CandidateConfig) -> Vec<ParamRef> {
             v.push(ParamRef::PackExtractionSchema);
         }
         v.push(ParamRef::PackRecall);
+        v.push(ParamRef::PackRecallTopK);
         v.push(ParamRef::PackDecay);
         v.push(ParamRef::PackWorkingStateCompaction);
     }
@@ -455,6 +471,7 @@ fn affected_spans<'a>(param: &ParamRef, tree: &'a TraceTree) -> Vec<&'a Span> {
 
         ParamRef::PackExtractionSchema
         | ParamRef::PackRecall
+        | ParamRef::PackRecallTopK
         | ParamRef::PackDecay
         | ParamRef::PackWorkingStateCompaction => root.spans_by_kind(SpanKind::RETRIEVER),
 

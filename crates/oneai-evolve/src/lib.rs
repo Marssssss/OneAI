@@ -24,7 +24,8 @@
 //!   walking the span tree (minimal-subgraph reverse-BFS + tail-N fallback).
 //!   Diagnoses are persisted + rendered in the report. No variation yet.
 //! - **E3** (GEPA variation + Pareto) → `gepa.rs`.
-//! - **E4** (lesson merge + cross-gen memory) → `lessons.rs`.
+//! - **E4** (lesson merge + cross-gen memory + convergence) → `lessons.rs`
+//!   + the multi-generation `run` in `loop_runner.rs`.
 //!
 //! Design doc: `docs/self-evolution-system-2026-08.md`.
 //!
@@ -37,6 +38,7 @@ pub mod candidate;
 pub mod cli;
 pub mod failure_extractor;
 pub mod gepa;
+pub mod lessons;
 pub mod loop_runner;
 pub mod report;
 pub mod subgraph;
@@ -48,11 +50,13 @@ pub use failure_extractor::{extract_failures, FailedCase, FailureExtractor};
 pub use gepa::{
     apply_patch, apply_patches, select_case_subset, semantic_guard_decoration, validate_candidate,
     GepaConfig, GepaOptimizer, LlmVariationOperator, NonDominatedSelector, OptimizationResult,
-    ParetoSelector, Patch, PatchOp, ScoredCandidate, VariationOperator,
+    ParetoSelector, Patch, PatchOp, ScoredCandidate, VariationOperator, MAX_RECALL_TOP_K,
 };
+pub use lessons::{BestFrontierMerger, LessonEntry, LessonMerger, LessonsLog};
 pub use loop_runner::{AppBaseline, EvolutionConfig, EvolutionLoop};
 pub use report::{
     CandidateScoreRecord, CaseRecord, DiagnosisRecord, EvolutionReport, FrontierRecord,
+    GenerationSummary,
 };
 pub use subgraph::{
     diagnose_heuristic, Diagnosis, HeuristicDiagnostician, LlmDiagnostician, ParamRef, SpanSummary,

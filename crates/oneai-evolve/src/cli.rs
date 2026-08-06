@@ -37,9 +37,12 @@ pub struct EvolveRunArgs {
     /// even if `no_optimize == false`.
     /// Not part of the `Debug` impl (a `dyn LlmProvider` has no Debug).
     pub variation_provider: Option<Arc<dyn LlmProvider>>,
-    /// E3: GEPA config (population K, case_subset_ratio, target). Defaults
-    /// applied when `None`.
+    /// E3/E4: GEPA config (population K, case_subset_ratio, target,
+    /// max_total_tokens, early_stop_patience). Defaults applied when `None`.
     pub gepa_config: Option<GepaConfig>,
+    /// E4: generation cap (`max_generations`). Default 1 (E1/E2/E3
+    /// single-generation behavior). `> 1` activates the multi-gen loop.
+    pub max_generations: usize,
 }
 
 impl std::fmt::Debug for EvolveRunArgs {
@@ -54,13 +57,14 @@ impl std::fmt::Debug for EvolveRunArgs {
                 &self.variation_provider.as_ref().map(|_| "<set>"),
             )
             .field("gepa_config", &self.gepa_config)
+            .field("max_generations", &self.max_generations)
             .finish()
     }
 }
 
 impl EvolveRunArgs {
     /// Construct with a seed config + suite; E1 defaults (`no_optimize=true`,
-    /// `root=None`, no variation provider).
+    /// `root=None`, no variation provider, `max_generations=1`).
     pub fn new(seed_config: DomainPackConfig, suite: EvalSuite) -> Self {
         Self {
             seed_config,
@@ -69,6 +73,7 @@ impl EvolveRunArgs {
             root: None,
             variation_provider: None,
             gepa_config: None,
+            max_generations: 1,
         }
     }
 
@@ -94,23 +99,34 @@ impl EvolveRunArgs {
         self
     }
 
-    /// Override the GEPA config (population K, case-subset ratio, target).
+    /// Override the GEPA config (population K, case-subset ratio, target,
+    /// token cap, early-stop patience).
     #[must_use]
     pub fn with_gepa_config(mut self, cfg: GepaConfig) -> Self {
         self.gepa_config = Some(cfg);
         self
     }
+
+    /// Set the generation cap (E4 multi-generation loop). `1` = E1/E2/E3
+    /// single-generation behavior.
+    #[must_use]
+    pub fn with_max_generations(mut self, n: usize) -> Self {
+        self.max_generations = n.max(1);
+        self
+    }
 }
 
-/// Run generation 0 (E1 degenerate, or E3 single-gen optimized if a variation
-/// provider is wired and `no_optimize == false`): hot-load the seed, run the
-/// suite live, capture per-case trajectories, persist a report. Returns the
-/// report.
+/// Run the evolution loop: generation 0 (E1 degenerate), an E3 single-gen
+/// optimized run, **or** an E4 multi-generation run that loops to
+/// convergence. Hot-loads the seed, runs the suite live per generation,
+/// captures per-case trajectories, persists a report + (E4) `lessons.jsonl`.
+/// Returns the report.
 ///
 /// The candidate `provider` is injected by the caller. The crate wraps it in a
 /// [`oneai_eval::RecordingProvider`] internally so trajectories are captured
 /// without the caller wiring a recorder. The variation provider (if any) is a
-/// *separate* provider — the caller passes it via [`EvolveRunArgs::with_variation_provider`].
+/// *separate* provider — the caller passes it via
+/// [`EvolveRunArgs::with_variation_provider`].
 pub async fn run_evolve(
     args: EvolveRunArgs,
     provider: Arc<dyn LlmProvider>,
@@ -119,12 +135,12 @@ pub async fn run_evolve(
     let seed = CandidateConfig::from_pack_config(args.seed_config);
     let config = EvolutionConfig {
         root: args.root.unwrap_or_else(crate::loop_runner::default_root),
-        max_generations: 1,
+        max_generations: args.max_generations.max(1),
         no_optimize: args.no_optimize,
     };
     let baseline = AppBaseline::new(provider, project_dir);
     let mut loop_runner = EvolutionLoop::new(baseline).with_config(config);
-    // E3: wire the optimizer when a variation provider is present and
+    // E3/E4: wire the optimizer when a variation provider is present and
     // optimization is on. Without a variation provider, the loop silently
     // degrades to the E1/E2 no-optimize path (the caller forgot the seam).
     if !args.no_optimize {

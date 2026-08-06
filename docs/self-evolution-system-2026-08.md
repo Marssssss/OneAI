@@ -1,7 +1,7 @@
 # OneAI 自我演进系统实施计划
 
 > 日期：2026-08-06
-> 状态：设计稿（待评审）
+> 状态：E0–E4 已落地（E5 待做）；设计稿与实现同步
 > 范围：在 OneAI 中实现"轨迹采集 → EDD 评分 → Minimal Subgraph 诊断 → GEPA Pareto 合并优化 → 重新跑轨迹"的闭环自演进系统
 > 前置调研：见上一轮 deep-research 结论（DSPy/GEPA/TextGrad/Trace/ADAS/Voyager/Reflexion 六家先验）。本计划只落地与 OneAI 现有架构对齐的子集。
 
@@ -301,14 +301,19 @@ impl EvolutionLoop {
 - 单代 `step()`：seed → diagnose → vary → score → select。
 - **测试**：mock provider + 一个"system_prompt 不够好 / 工具描述误导选错工具"的 seed → 一代后 frontier 的 pass_rate ≥ seed；构造一个"装饰器描述与 schema 矛盾"的负测断言被拒。绿（mock 下确定性）。
 
-### Phase E4 — lesson 合并 + 跨代记忆 + 收敛 + MemoryProfile 轴接入
+### Phase E4 — lesson 合并 + 跨代记忆 + 收敛 + MemoryProfile 轴接入 ✅ 已落地
 **目标**：多代闭环跑到收敛或 max_generations；MemoryProfile 轴（extraction_schema/recall/decay）在长 horizon case suite 上接入。
-- `LessonMerger` 默认实现：前沿互补 lesson 拼下一代 base（GEPA 核心）。
-- `LessonsLog`：跨代持久化（`<root>/evolve/lessons.jsonl`），每代记 `(generation, frontier_configs, lessons_text, metrics)`。
-- 收敛判定：`pass_rate ≥ target` OR `max_generations` OR `budget.remaining() < 阈值`。
-- 早停：连续 2 代 frontier 无提升 → 停（防震荡）。
-- **MemoryProfile 轴接入**：新建长 horizon case suite（50+ 轮任务，验证 recall/decay/extraction 效果），E0 的 `MemoryProfileConfig` 在此轴被 `VariationOperator` 改写。短 case suite 不动这条轴（看不出差别）。
-- **测试**：mock 下跑 3 代，断言每代 frontier pass_rate 单调不降 + lessons.jsonl 落盘；长 horizon suite 上改 `recall.top_k` 召回集变化。绿。
+- `LessonMerger` 默认实现：`BestFrontierMerger`（前沿最优=下一代 base；互补 lesson 拼接的 seam 留给更丰富实现，mock 下不可确定测试故首版取前沿最优）。✅（`lessons.rs`，trait + `BestFrontierMerger`）
+- `LessonsLog`：跨代持久化（`<run_dir>/lessons.jsonl`），每代记 `(generation, base_pass_rate, frontier_pass_rate, frontier_axes, is_seed, lessons_text)`。✅
+- 收敛判定：`frontier_pass_rate ≥ target` OR `max_generations` OR `max_total_tokens` 预算硬顶。✅
+- 早停：连续 `early_stop_patience`（默认2）代 frontier 无提升 → 停（防震荡）。✅（`LessonsLog::gens_without_improvement`）
+- **MemoryProfile 轴接入**：`ParamRef::PackRecallTopK`（`pack.memory.recall.top_k`，Set+界检查 [1,128]）+ `PackExtractionSchema`（Add/Remove）经 `from_path`/`apply_patch` 落地，经 `validate_and_build` 校验。✅
+- **实现取舍**（与设计稿微调，记入 memory）：
+  - 收敛判定用 **subset** frontier-best pass_rate（held-out 全 suite 收敛闸是 E5，非 E4——保持 E3 单代成本不变）。
+  - `LessonMerger` 默认取前沿最优而非"互补 lesson 拼接"——拼接需 patch provenance（`ScoredCandidate` 只带完整 config 不带 patch 列表），且 mock 下不可确定测试。trait 是 seam，E5+ 可换更丰富 stitcher。
+  - `GepaConfig` 新增 `max_total_tokens: Option<u64>` + `early_stop_patience: usize`（设计 §3.2 的 budget/patience 落点）。
+  - 长 horizon suite 的"召回集行为变化"需 live embedding-backed memory，属 E5 live smoke；E4 在 config 级断言 `recall.top_k` 端到端流转（patch→validate→persist round-trip）。
+- **测试**：mock 下跑 3 代，断言每代 frontier pass_rate 单调不降 + `lessons.jsonl` 3 行落盘 + `stop_reason="max_generations"`；`recall.top_k` patch 端到端到持久化 frontier config。绿（`tests/e2e_e4.rs` 2 e2e + gepa 5 unit MemoryProfile 轴）。
 
 ### Phase E5 — CLI 打磨 + 安全护栏 + 回归闸 + 文档
 - CLI 全套：`oneai evolve run/step/report/diff/lesson`（diff = 当代 best vs seed 的 config diff）。
