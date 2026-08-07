@@ -31,7 +31,9 @@ pub mod tool_interfaces;
 // (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
 pub use apply_patch::{parse_unified_diff, ApplyPatchTool, DiffHunk, DiffLine};
 pub use executor::*;
-pub use file_ops::{DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps};
+pub use file_ops::{
+    DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps, SandboxedFileOps,
+};
 pub use interaction_gate::*;
 pub use local_tools::{CalculatorTool, FileWriteTool};
 pub use mcp_real::McpServerManager as RealMcpServerManager;

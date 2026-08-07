@@ -20,8 +20,8 @@ use oneai_core::traits::Tool;
 use oneai_core::PermissionLevel;
 use oneai_tool::{
     default_sandbox_backend, ApplyPatchTool, EnvironmentTool, FileEditTool, FileListTool,
-    FileReadTool, FileWriteTool, GlobTool, GrepTool, NotebookEditTool, ShellTool, WebFetchTool,
-    WebSearchTool,
+    FileReadTool, FileWriteTool, GlobTool, GrepTool, LocalFileOps, NotebookEditTool,
+    SandboxedFileOps, ShellTool, WebFetchTool, WebSearchTool,
 };
 
 use oneai_workflow::{
@@ -179,17 +179,37 @@ fn coding_sub_agent_types() -> Vec<SubAgentTypeDefinition> {
 /// - Coding compression template (preserve file paths, progress, decisions)
 /// - Coding system prompt
 pub fn coding_pack(project_dir: &str) -> DomainPack {
+    // File-tool sandbox: route read/edit/write/list through SandboxedFileOps,
+    // which enforces a path allowlist (the project dir) before delegating to
+    // LocalFileOps. This closes the hole where the file tools wrote directly
+    // via tokio::fs and bypassed the shell seatbelt/bwrap sandbox — the
+    // classic prompt-injection vector (write_file to ~/.ssh/authorized_keys,
+    // read_file of ~/.aws/credentials). Mirrors how ContainerizedCodingPack
+    // routes its file tools through RemoteFileOps; here the backend is local
+    // and the boundary is an in-process path-containment check (kernel-
+    // enforced file isolation via a sandboxed shell is follow-up B).
+    //
+    // apply_patch keeps its local multi-file write path for now —
+    // ContainerizedCodingPack also leaves apply_patch local (its doc-note says
+    // routing it through a sandboxed fs backend is a follow-up).
+    let project_root = std::fs::canonicalize(project_dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(project_dir));
+    let file_ops = Arc::new(SandboxedFileOps::new(
+        Arc::new(LocalFileOps::new()),
+        vec![project_root],
+    ));
+
     DomainPack {
         name: "coding".to_string(),
         description: "Coding domain pack — provides tools, context, permissions, and strategies for software development tasks".to_string(),
 
         // Layer 1: Domain-specific tools
         tools: vec![
-            Arc::new(FileReadTool::new()) as Arc<dyn Tool>,
-            Arc::new(FileEditTool::new()) as Arc<dyn Tool>,
-            Arc::new(FileWriteTool::new()) as Arc<dyn Tool>,
+            Arc::new(FileReadTool::with_file_ops(file_ops.clone())) as Arc<dyn Tool>,
+            Arc::new(FileEditTool::with_file_ops(file_ops.clone())) as Arc<dyn Tool>,
+            Arc::new(FileWriteTool::with_file_ops(file_ops.clone())) as Arc<dyn Tool>,
             Arc::new(ApplyPatchTool::new()) as Arc<dyn Tool>,
-            // Wire the real sandbox backend (Seatbelt on macOS, Docker on
+            // Wire the real sandbox backend (Seatbelt on macOS, Bubblewrap on
             // Linux, regex fallback) so the default CodingPack gets actual
             // process-level isolation in production — not just regex blocking.
             // Gap-analysis P1: ShellTool::new() left the backend None, so the

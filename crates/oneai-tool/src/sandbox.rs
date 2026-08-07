@@ -7,7 +7,7 @@
 //!
 //! The SandboxBackend trait provides platform-specific isolation:
 //! - macOS: Seatbelt (sandbox-exec) — the same mechanism used by Claude Code
-//! - Linux: Docker container — the same mechanism used by Codex CLI, OpenHands
+//! - Linux: Bubblewrap (bwrap) — the same mechanism used by Codex CLI
 //! - Default: Enhanced regex + working directory restriction (improved baseline)
 //!
 //! The design follows the principle of "configuration most flexible, execution strongest":
@@ -124,48 +124,86 @@ impl SeatbeltBackend {
     ///
     /// The profile uses Apple's Seatbelt policy language (scheme version 1).
     ///
-    /// **Policy: allow-by-default + targeted write denies** (Issue #16).
+    /// **Policy: deny-default + explicit allow-list** (codex-style, replaces
+    /// the Issue #16 allow-default posture).
     ///
-    /// The previous `(deny default)` posture broke every real toolchain
-    /// because it denied essential OS operations that the allow list never
-    /// re-permitted:
-    /// - `process-fork` — so the shell could not fork to evaluate `||`, `&&`,
-    ///   `;`, or pipes (`sh -c 'a || b'` → "fork: Operation not permitted",
-    ///   exit 128). Any compound command failed.
-    /// - `/dev/null` writes — `git` opens `/dev/null` for redirecting stderr
-    ///   and aborted with "could not open '/dev/null'".
-    /// - virtual-memory / guard-page allocation — Rust binaries (cargo)
-    ///   panicked at startup ("failed to allocate a guard page") because the
-    ///   `mmap`-class syscalls they need were denied.
+    /// `(deny default)` makes unknown operations blocked-by-default rather
+    /// than allowed-by-default — the stricter posture the threat model
+    /// (prompt-injection) demands. The allow list re-permits what real
+    /// toolchains need; the prior `(deny default)` profile broke only because
+    /// its allow list was incomplete. The three Issue #16 failures are all
+    /// covered here:
+    /// - `process-fork` / `process-exec` — so the shell can fork for `||`,
+    ///   `&&`, `;`, and pipes (the bare `deny default` profile made every
+    ///   compound command exit 128 with "fork: Operation not permitted").
+    /// - `/dev/null` + `/dev/dtracehelper` writes — `git` opens `/dev/null`
+    ///   to redirect stderr; cargo/dyld touch dtracehelper.
+    /// - mach / sysctl / iokit / ipc — dyld, library loading, runtime
+    ///   introspection; denying these panics binaries at startup (the
+    ///   "failed to allocate a guard page" class of failure).
     ///
-    /// Coding sandboxes in the wild (Claude Code et al.) therefore use the
-    /// inverse posture: `(allow default)` so compilers/test/linters actually
-    /// run, then `(deny file-write*)` with re-allows only for safe locations.
-    /// That is the real isolation boundary — it protects system files
-    /// (`/`, `/System`, `/Library`, `/usr`, `/etc`, …) while letting package
-    /// managers populate their caches and letting the project dir be mutated.
-    /// The regex blacklist (ShellTool pre-flight) still guards `rm -rf /`
-    /// etc.; Seatbelt is defense-in-depth against system-file tampering.
+    /// The isolation boundary remains targeted file-write denies (system
+    /// files stay write-protected) **plus** a best-effort read-deny on a
+    /// small secret set (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.gnupg`) —
+    /// the classic prompt-injection exfil target. Network is blanket
+    /// allow/deny: LLM-API egress filtering needs a local proxy
+    /// (codex-style `NetworkProxy`, future work, out of scope here).
     fn generate_profile(&self) -> String {
-        let mut rules = Vec::new();
+        // Unconditional literal rules (version + posture + the process/mach/
+        // read allows that every toolchain needs) — `vec![]` macro per clippy
+        // `vec_init_then_push`. Conditional pushes (secrets, write dirs, temp,
+        // network) follow below.
+        let mut rules = vec![
+            // Version header + deny-default posture.
+            "(version 1)".to_string(),
+            "(deny default)".to_string(),
+            // Process operations — without these, compound commands fail with
+            // "fork: Operation not permitted" (exit 128), the Issue #16
+            // regression. process-exec is left broad (not path-restricted) so
+            // the shell can run the user's toolchain binaries without an
+            // ever-growing allow list.
+            "(allow process-fork)".to_string(),
+            "(allow process-exec)".to_string(),
+            "(allow process-info* (target self))".to_string(),
+            "(allow signal (target self))".to_string(),
+            // Mach / sysctl / iokit — needed for dyld, library loading, sysctl
+            // queries, runtime introspection. Deny-default would block these
+            // and break binary startup.
+            "(allow mach-lookup)".to_string(),
+            "(allow mach-task* (target self))".to_string(),
+            "(allow sysctl*)".to_string(),
+            "(allow iokit*)".to_string(),
+            // Reads — broad allow (toolchains read system libs, the binary's
+            // own text, project sources, package caches). Best-effort deny on a
+            // small secret set: the classic prompt-injection exfil target is
+            // the user's private key. SSH-over-git pushes aren't part of
+            // sandboxed local coding ops (and network is denied by default
+            // below when allow_network=false), so denying ~/.ssh reads is safe
+            // and high-value.
+            "(allow file-read*)".to_string(),
+        ];
 
-        // Version header
-        rules.push("(version 1)".to_string());
+        let mut secrets: Vec<PathBuf> = Vec::new();
+        if let Ok(home) = std::env::var("HOME") {
+            for s in [".ssh", ".aws", ".config/gh", ".gnupg"] {
+                secrets.push(PathBuf::from(&home).join(s));
+            }
+        }
+        for secret in &secrets {
+            if let Some(p) = profile_subpath(secret) {
+                rules.push(format!("(deny file-read* (subpath \"{p}\"))",));
+            }
+        }
 
-        // Allow everything not explicitly denied. This is what makes real
-        // toolchains work: process-fork, process-exec, signal, mach-lookup,
-        // vm ops, file reads — all permitted without per-op allow rules.
-        rules.push("(allow default)".to_string());
-
-        // The isolation boundary: deny all file writes, then re-allow only
-        // safe locations. Everything outside these subpaths (system dirs)
-        // stays write-protected.
+        // Writes — the isolation boundary. Deny all writes, then re-allow
+        // only safe locations (everything outside these subpaths — system
+        // dirs — stays write-protected).
         rules.push("(deny file-write*)".to_string());
 
         // Project / explicitly-allowed write dirs.
         for dir in &self.allowed_write_dirs {
             if let Some(p) = profile_subpath(dir) {
-                rules.push(format!("(allow file-write* (subpath \"{}\"))", p));
+                rules.push(format!("(allow file-write* (subpath \"{p}\"))",));
             }
         }
 
@@ -180,13 +218,13 @@ impl SeatbeltBackend {
             "/var/folders",
             "/private/var/folders",
         ] {
-            rules.push(format!("(allow file-write* (subpath \"{}\"))", t));
+            rules.push(format!("(allow file-write* (subpath \"{t}\"))",));
         }
         // Per-user TMPDIR (macOS: /var/folders/xx…). Canonicalize so a symlink
         // path matches the resolved path sandboxd sees.
         if let Ok(td) = std::env::var("TMPDIR") {
             if let Some(p) = profile_subpath(std::path::Path::new(&td)) {
-                rules.push(format!("(allow file-write* (subpath \"{}\"))", p));
+                rules.push(format!("(allow file-write* (subpath \"{p}\"))",));
             }
         }
 
@@ -196,7 +234,7 @@ impl SeatbeltBackend {
         // guards `rm -rf ~` / `rm -rf $HOME`.
         if let Ok(home) = std::env::var("HOME") {
             if let Some(p) = profile_subpath(std::path::Path::new(&home)) {
-                rules.push(format!("(allow file-write* (subpath \"{}\"))", p));
+                rules.push(format!("(allow file-write* (subpath \"{p}\"))",));
             }
         }
 
@@ -204,9 +242,9 @@ impl SeatbeltBackend {
         rules.push("(allow file-write* (literal \"/dev/null\"))".to_string());
         rules.push("(allow file-write* (literal \"/dev/dtracehelper\"))".to_string());
 
-        // Network policy. `(allow default)` already permits networking, so the
-        // allow case is a no-op (kept for explicitness); the deny case is the
-        // real enforcement when a domain disables network.
+        // Network policy. LLM API IPs vary, so egress can't be path-filtered
+        // without a local proxy (future NetworkProxy work, out of scope);
+        // allow_network toggles blanket allow/deny.
         if self.allow_network {
             rules.push("(allow network*)".to_string());
         } else {
@@ -376,6 +414,134 @@ impl SandboxBackend for DockerBackend {
     }
 }
 
+// ─── BubblewrapBackend (Linux) ───────────────────────────────────────────────
+
+/// Linux bubblewrap (bwrap) sandbox backend — unprivileged user-namespace
+/// isolation, the same mechanism Codex CLI uses on Linux (the DockerBackend
+/// doc-comment claiming Codex uses Docker was wrong).
+///
+/// vs Docker (the previous Linux default): bwrap has no root daemon, starts in
+/// milliseconds, and — critically — maps the calling uid into the namespace so
+/// files written through bind mounts land with the **real owner**, not root
+/// (Docker's `root`-in-container + `-v` bind is the classic "host files become
+/// un-deletable" footgun). bwrap also has a far smaller escape surface (no
+/// runc/containerd CVE history). It is the right default for a coding agent
+/// that runs the host toolchain per command.
+///
+/// Posture: the host filesystem is mounted **read-only** at `/`, then `--dev`
+/// / `--proc` provide device/proc filesystems, then each allowed dir is
+/// overlaid as a read-write `--bind` (project, system temp, HOME caches). All
+/// namespaces are unshared; network is shared with the host only when
+/// `allow_network` (else the sandbox netns is loopback-only).
+pub struct BubblewrapBackend {
+    /// Directory paths the sandboxed process may write to (read-write bind).
+    allowed_write_dirs: Vec<PathBuf>,
+
+    /// Whether network access is allowed (shares the host netns).
+    allow_network: bool,
+}
+
+impl BubblewrapBackend {
+    /// Create a new BubblewrapBackend with the given allowed directories.
+    pub fn new(allowed_write_dirs: Vec<PathBuf>, allow_network: bool) -> Self {
+        Self {
+            allowed_write_dirs,
+            allow_network,
+        }
+    }
+
+    /// Create a basic BubblewrapBackend for coding tasks. Project dir is the
+    /// writable root; network defaults off (mirrors the CodingPack seatbelt
+    /// default). Extra writable roots (temp, HOME caches) are added by
+    /// [`Self::writable_roots`] so cargo/npm/rustup caches keep working.
+    pub fn coding_defaults(project_dir: &Path) -> Self {
+        Self::new(vec![project_dir.to_path_buf()], false)
+    }
+
+    /// The full writable set: the caller's allowed dirs plus system temp and
+    /// HOME (package-manager / compiler caches live there). Mirrors the
+    /// SeatbeltBackend write-allow set so the two backends grant the same
+    /// writable surface.
+    fn writable_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self.allowed_write_dirs.clone();
+        roots.push(PathBuf::from("/tmp"));
+        roots.push(PathBuf::from("/var/tmp"));
+        if let Ok(td) = std::env::var("TMPDIR") {
+            roots.push(PathBuf::from(td));
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            roots.push(PathBuf::from(home));
+        }
+        roots
+    }
+}
+
+impl SandboxBackend for BubblewrapBackend {
+    fn wrap_command(&self, command: &str, working_dir: &Path) -> Result<WrappedCommand> {
+        let mut args: Vec<String> = vec!["bwrap".into(), "--unshare-all".into()];
+
+        // --unshare-all includes --unshare-net; re-share only when allowed.
+        if self.allow_network {
+            args.push("--share-net".into());
+        }
+
+        // Host fs read-only at /, then dev/proc filesystems (these override
+        // the ro-bind at those paths so device nodes + proc are usable).
+        args.extend(["--ro-bind".into(), "/".into(), "/".into()]);
+        args.extend(["--dev".into(), "/dev".into()]);
+        args.extend(["--proc".into(), "/proc".into()]);
+
+        // Overlay read-write binds for each existing allowed root. Canonicalize
+        // so a symlinked project/TMPDIR matches the resolved path bwrap sees
+        // (bwrap compares the host source path literally).
+        let roots = self.writable_roots();
+        for dir in &roots {
+            let resolved = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+            if resolved.exists() {
+                let s = resolved.to_string_lossy().into_owned();
+                // same path as host source and in-sandbox target (no remap)
+                args.push("--bind".into());
+                args.push(s.clone());
+                args.push(s);
+            }
+        }
+
+        // Ensure the requested working dir is writable inside the sandbox.
+        let wd = std::fs::canonicalize(working_dir).unwrap_or_else(|_| working_dir.to_path_buf());
+        let wd_known = roots.iter().any(|r| {
+            let r = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+            wd == r || wd.starts_with(&r)
+        });
+        if wd.exists() && !wd_known {
+            let s = wd.to_string_lossy().into_owned();
+            args.extend(["--bind".into(), s.clone(), s]);
+        }
+
+        args.extend(["sh".into(), "-c".into()]);
+        let escaped = command.replace("'", "'\\''");
+        args.push(format!("'{escaped}'"));
+
+        Ok(WrappedCommand {
+            shell_command: args.join(" "),
+            env_vars: HashMap::new(),
+            working_dir: working_dir.to_path_buf(),
+            allow_network: self.allow_network,
+        })
+    }
+
+    fn name(&self) -> &str {
+        "bwrap"
+    }
+
+    fn is_available(&self) -> bool {
+        if !cfg!(target_os = "linux") {
+            return false;
+        }
+        std::path::Path::new("/usr/bin/bwrap").exists()
+            || std::path::Path::new("/usr/local/bin/bwrap").exists()
+    }
+}
+
 // ─── RegexBackend (Default) ──────────────────────────────────────────────────
 
 /// Regex-based sandbox backend — enhanced baseline for when platform-specific
@@ -452,8 +618,9 @@ impl SandboxBackend for RegexBackend {
 ///
 /// Priority order:
 /// 1. macOS → SeatbeltBackend (if sandbox-exec available)
-/// 2. Linux → DockerBackend (if Docker available)
-/// 3. Fallback → RegexBackend (always available)
+/// 2. Linux → BubblewrapBackend (if bwrap available) — the Codex-CLI mechanism
+/// 3. Linux → DockerBackend (if Docker available) — bwrap-unavailable fallback
+/// 4. Fallback → RegexBackend (always available)
 ///
 /// This is used by ShellTool to automatically select the appropriate
 /// sandbox backend based on the platform.
@@ -470,9 +637,15 @@ pub fn default_sandbox_backend(
     }
 
     if cfg!(target_os = "linux") {
+        let bwrap = BubblewrapBackend::coding_defaults(project_dir);
+        if bwrap.is_available() {
+            tracing::info!("Using Bubblewrap sandbox backend on Linux");
+            return Arc::new(bwrap);
+        }
+        // bwrap unavailable (rare on modern distros) — fall back to Docker.
         let docker = DockerBackend::coding_defaults(project_dir);
         if docker.is_available() {
-            tracing::info!("Using Docker sandbox backend on Linux");
+            tracing::info!("Using Docker sandbox backend on Linux (bwrap unavailable)");
             return Arc::new(docker);
         }
     }
@@ -508,18 +681,24 @@ mod tests {
         let backend = SeatbeltBackend::coding_defaults(Path::new("/myproject"));
         let profile = backend.generate_profile();
         assert!(profile.contains("(version 1)"));
-        // Issue #16: allow-by-default, NOT deny-by-default. The strict
-        // `(deny default)` broke process-fork (||, &&, pipes → exit 128),
-        // /dev/null (git), and vm/guard-page alloc (cargo). Allow-default is
-        // the working posture.
-        assert!(profile.contains("(allow default)"));
-        assert!(!profile.contains("(deny default)"));
-        // The isolation boundary is now targeted file-write denies.
+        // deny-default posture (codex-style) — replaces the Issue #16
+        // allow-default posture. Unknown operations are blocked, not allowed.
+        assert!(profile.contains("(deny default)"));
+        assert!(!profile.contains("(allow default)"));
+        // The three Issue #16 must-haves: process-fork/exec (compound
+        // commands), /dev/null (git), and the file-write isolation boundary.
+        assert!(profile.contains("(allow process-fork)"));
+        assert!(profile.contains("(allow process-exec)"));
         assert!(profile.contains("(deny file-write*)"));
         assert!(profile.contains("/myproject")); // allowed write dir
         assert!(profile.contains("/dev/null")); // git redirects via /dev/null
         assert!(profile.contains("(allow network*)")); // allow_network=true
-                                                       // Temp dirs (both symlink and resolved forms) are writable.
+                                                       // Best-effort secret read-deny (~/.ssh et al.) — expand HOME.
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            assert!(profile.contains(&format!("{home}/.ssh")));
+        }
+        // Temp dirs (both symlink and resolved forms) are writable.
         assert!(profile.contains("/private/tmp"));
     }
 
@@ -541,13 +720,41 @@ mod tests {
         assert!(result.shell_command.contains("cargo test"));
     }
 
+    /// Regression guard for the deny-default profile: `sandbox-exec` must
+    /// **parse** the generated profile without error (an invalid operation
+    /// name or syntax makes sandbox-exec reject the whole profile and every
+    /// command fails). Runs `/bin/true` under the profile — if the profile
+    /// is malformed, sandbox-exit exits non-zero with a parse error on stderr.
+    /// macOS-only; skipped elsewhere.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_seatbelt_profile_parses() {
+        if !std::path::Path::new("/usr/bin/sandbox-exec").exists() {
+            eprintln!("sandbox-exec not present; skipping");
+            return;
+        }
+        let backend = SeatbeltBackend::coding_defaults(&std::env::current_dir().unwrap());
+        let profile = backend.generate_profile();
+        let out = std::process::Command::new("sandbox-exec")
+            .arg("-p")
+            .arg(&profile)
+            .arg("/usr/bin/true")
+            .output()
+            .expect("spawn sandbox-exec");
+        assert!(
+            out.status.success(),
+            "sandbox-exec rejected the profile (parse error): stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// Regression guard for Issue #16. The strict `(deny default)` profile
     /// made every compound command fail with "fork: Operation not permitted"
     /// (exit 128) because the sandboxed shell could not fork to evaluate
-    /// `||`/`&&`/pipes. With the allow-default + targeted-write-deny posture,
-    /// a compound command runs to completion (exit 0). Only runs on macOS
-    /// where `sandbox-exec` exists; skipped elsewhere so CI on other OSes
-    /// is unaffected.
+    /// `||`/`&&`/pipes. With the deny-default + allow-list posture
+    /// (process-fork re-permitted), a compound command runs to completion
+    /// (exit 0). Only runs on macOS where `sandbox-exec` exists; skipped
+    /// elsewhere so CI on other OSes is unaffected.
     #[cfg(target_os = "macos")]
     #[test]
     fn test_seatbelt_compound_command_runs() {
@@ -595,6 +802,86 @@ mod tests {
             .wrap_command("npm install", Path::new("/project"))
             .unwrap();
         assert!(result.shell_command.contains("--network none"));
+    }
+
+    #[test]
+    fn test_bwrap_backend_wrapping() {
+        // Use a real existing dir so binds are actually emitted (bwrap skips
+        // non-existent sources). A temp dir is fine: it's under TMPDIR, so it
+        // is covered by the TMPDIR --bind rather than an explicit one — the
+        // structural assertions below don't depend on the project being its
+        // own bind.
+        let tmp = std::env::temp_dir().join(format!(
+            "oneai_bwrap_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let backend = BubblewrapBackend::coding_defaults(&tmp);
+        let result = backend.wrap_command("cargo test", &tmp).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(result.shell_command.starts_with("bwrap --unshare-all"));
+        // Host fs is read-only at /.
+        assert!(result.shell_command.contains("--ro-bind / /"));
+        // dev/proc filesystems are provisioned.
+        assert!(result.shell_command.contains("--dev /dev"));
+        assert!(result.shell_command.contains("--proc /proc"));
+        // Command runs via sh -c.
+        assert!(result.shell_command.contains("sh -c"));
+        assert!(result.shell_command.contains("cargo test"));
+    }
+
+    #[test]
+    fn test_bwrap_no_network_by_default() {
+        // coding_defaults → allow_network=false → no --share-net.
+        let backend = BubblewrapBackend::coding_defaults(Path::new("/project"));
+        let result = backend
+            .wrap_command("curl evil.com", Path::new("/project"))
+            .unwrap();
+        assert!(!result.shell_command.contains("--share-net"));
+        assert!(result.shell_command.contains("--unshare-all"));
+    }
+
+    #[test]
+    fn test_bwrap_share_net_when_allowed() {
+        let backend = BubblewrapBackend::new(vec![PathBuf::from("/project")], true);
+        let result = backend
+            .wrap_command("cargo fetch", Path::new("/project"))
+            .unwrap();
+        assert!(result.shell_command.contains("--share-net"));
+    }
+
+    /// Regression guard mirroring `test_seatbelt_compound_command_runs`: a
+    /// compound command (`||`) must run to completion under bwrap, not be
+    /// killed by namespace restrictions. Only runs on Linux where `bwrap`
+    /// exists; skipped elsewhere so CI on other OSes is unaffected.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_bwrap_compound_command_runs() {
+        if !std::path::Path::new("/usr/bin/bwrap").exists()
+            && !std::path::Path::new("/usr/local/bin/bwrap").exists()
+        {
+            eprintln!("bwrap not present; skipping");
+            return;
+        }
+        let backend = BubblewrapBackend::coding_defaults(&std::env::current_dir().unwrap());
+        let cwd = std::env::current_dir().unwrap();
+        let wrapped = backend.wrap_command("true || echo FAIL", &cwd).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&wrapped.shell_command)
+            .output()
+            .expect("spawn sh");
+        assert!(
+            out.status.success(),
+            "compound command failed under bwrap: exit {:?}, stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

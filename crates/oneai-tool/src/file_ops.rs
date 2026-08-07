@@ -32,7 +32,7 @@
 //!   design: that guard only blocks the *model* authoring `cat >`/heredocs;
 //!   `RemoteFileOps` IS the write_file tool's own backend.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -174,6 +174,76 @@ mod quote_tests {
         assert!(q.ends_with('\''));
         assert_eq!(q.matches('\'').count() % 2, 0);
     }
+}
+
+// ─── Path containment (file-tool sandbox) ───────────────────────────────────
+
+/// Lexically normalize `.` and `..` components **without touching the
+/// filesystem**. `std::fs::canonicalize` resolves symlinks but fails on
+/// not-yet-created paths; this collapses `..` so a path like
+/// `/root/sub/../etc` is recognized as `/root/etc`-ish (and, when it escapes
+/// the root, `/etc`) for the containment check — otherwise a literal
+/// `starts_with` would admit `/root/../etc/passwd` as "under /root".
+fn lexical_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop the last Normal; never pop past a RootDir/Prefix.
+                if let Some(&Component::Normal(_)) = out.last() {
+                    out.pop();
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out.iter().fold(PathBuf::new(), |mut acc, c| {
+        acc.push(c.as_os_str());
+        acc
+    })
+}
+
+/// Resolve `p` to the canonical path of its longest existing ancestor, then
+/// lexically normalize `..`.
+///
+/// `std::fs::canonicalize` fails on a not-yet-created path (a file the tool
+/// is about to write), so a naive canonicalize-then-starts_with check would
+/// reject every new file. This walks up to the first existing ancestor,
+/// canonicalizes *that* (resolving symlinks for the real part), re-attaches
+/// the non-existent tail, and normalizes `..` — so `/project/new.txt` (new
+/// file) resolves under `/project` (real root), while
+/// `/project/../etc/passwd` resolves to `/etc/passwd` and is rejected.
+fn resolve_longest_existing(p: &Path) -> PathBuf {
+    if p.exists() {
+        return lexical_normalize(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+    }
+    let mut ancestor = p.parent();
+    while let Some(anc) = ancestor {
+        if anc.as_os_str().is_empty() {
+            break;
+        }
+        if anc.exists() {
+            let canon = std::fs::canonicalize(anc).unwrap_or_else(|_| anc.to_path_buf());
+            let tail = p.strip_prefix(anc).unwrap_or(p);
+            return lexical_normalize(&canon.join(tail));
+        }
+        ancestor = anc.parent();
+    }
+    lexical_normalize(p)
+}
+
+/// Whether `needle` (resolved + normalized) is at or under one of `haystacks`
+/// (also resolved + normalized). The containment predicate backing
+/// [`SandboxedFileOps`] — a single source of truth so the file-tool
+/// write/read allow set matches the shell sandbox's intent.
+pub(crate) fn path_within(needle: &Path, haystacks: &[PathBuf]) -> bool {
+    let n = resolve_longest_existing(needle);
+    haystacks.iter().any(|h| {
+        let h = resolve_longest_existing(h);
+        n == h || n.starts_with(&h)
+    })
 }
 
 // ─── LocalFileOps ────────────────────────────────────────────────────────────
@@ -460,6 +530,95 @@ impl FileOperations for RemoteFileOps {
     }
 }
 
+// ─── SandboxedFileOps ───────────────────────────────────────────────────────
+
+/// File-operations wrapper that enforces a path allowlist before delegating
+/// to an inner backend (usually [`LocalFileOps`]). This is the file-tool
+/// analogue of the shell [`crate::sandbox::SandboxBackend`]: it closes the
+/// hole where `FileWriteTool`/`FileEditTool`/`FileReadTool`/`FileListTool`
+/// write directly via `tokio::fs` and bypass the seatbelt/bwrap shell sandbox.
+///
+/// Mirrors how [`ContainerizedCodingPack`] routes file tools through
+/// [`RemoteFileOps`] — `SandboxedFileOps` is the local, non-VM variant: same
+/// `Arc<dyn FileOperations>` seam, an in-process path-containment check
+/// instead of a remote terminal.
+///
+/// Enforcement is **application-level** (a Rust path-containment check), not
+/// kernel-level. It is the cross-platform baseline that works on every host
+/// (CLI, desktop app, embedded); kernel-enforced file isolation via a
+/// sandboxed shell (`RemoteFileOps` over a sandboxed `TerminalBackend`) is
+/// the stronger follow-up, blocked on macOS by GNU-coreutils assumptions in
+/// `RemoteFileOps` (see the sandbox-hardening plan, follow-up B).
+pub struct SandboxedFileOps {
+    inner: Arc<dyn FileOperations>,
+    /// Roots; any target must resolve at or under one of these. Given
+    /// non-canonical / symlinked / not-yet-existing — resolved at check time.
+    allowed_roots: Vec<PathBuf>,
+}
+
+impl SandboxedFileOps {
+    /// Wrap `inner` with a path allowlist.
+    pub fn new(inner: Arc<dyn FileOperations>, allowed_roots: Vec<PathBuf>) -> Self {
+        Self {
+            inner,
+            allowed_roots,
+        }
+    }
+
+    /// Reject any target not under an allowed root. This runs **before**
+    /// delegating to the inner backend, so it applies uniformly regardless of
+    /// which FileOperations impl does the actual IO — complementing (not
+    /// replacing) each tool's own `path_has_traversal` pre-flight.
+    fn check(&self, path: &str) -> Result<()> {
+        if path_within(Path::new(path), &self.allowed_roots) {
+            Ok(())
+        } else {
+            Err(OneAIError::Other(format!(
+                "path '{path}' is outside the file-tool sandbox (not under any allowed root)"
+            )))
+        }
+    }
+}
+
+#[async_trait]
+impl FileOperations for SandboxedFileOps {
+    fn name(&self) -> &str {
+        "sandboxed"
+    }
+
+    async fn read(&self, path: &str) -> Result<FileReadResult> {
+        self.check(path)?;
+        self.inner.read(path).await
+    }
+
+    async fn write(&self, path: &str, content: &str, append: bool) -> Result<()> {
+        self.check(path)?;
+        self.inner.write(path, content, append).await
+    }
+
+    async fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        self.check(path)?;
+        self.inner.list_dir(path).await
+    }
+
+    async fn exists(&self, path: &str) -> bool {
+        // exists() returns bool (no Result); a sandbox violation is reported
+        // as "does not exist" — the safe answer for a path the agent may not
+        // even see.
+        if self.check(path).is_err() {
+            return false;
+        }
+        self.inner.exists(path).await
+    }
+
+    async fn metadata_size(&self, path: &str) -> Option<u64> {
+        if self.check(path).is_err() {
+            return None;
+        }
+        self.inner.metadata_size(path).await
+    }
+}
+
 // ─── base64 helpers (no new dependency — workspace already pulls `base64`) ───
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -726,5 +885,124 @@ mod tests {
         // The dangerous tail must be inert inside single quotes — no bare `;`.
         assert!(cmd.contains("'/tmp/a b; rm -rf /'"));
         assert!(!cmd.contains("'; '"));
+    }
+
+    // ─── SandboxedFileOps ──────────────────────────────────────────────────
+
+    /// Build a SandboxedFileOps over LocalFileOps with `root` as the only
+    /// allowed root.
+    fn sandboxed(root: &Path) -> SandboxedFileOps {
+        SandboxedFileOps::new(Arc::new(LocalFileOps::new()), vec![root.to_path_buf()])
+    }
+
+    #[tokio::test]
+    async fn sandboxed_rejects_write_outside_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "oneai_sb_root_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = sandboxed(&root);
+
+        // Outside the root → rejected, even if the parent dir exists.
+        let outside = std::env::temp_dir().join("oneai_sb_outside_marker");
+        let err = ops
+            .write(outside.to_str().unwrap(), "x", false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside the file-tool sandbox"));
+        assert!(!outside.exists(), "no file should have been written");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn sandboxed_allows_write_inside_root() {
+        let root = std::env::temp_dir().join(format!(
+            "oneai_sb_in_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = sandboxed(&root);
+
+        // A new file (not-yet-existing) under the root is allowed — this is
+        // the resolve_longest_existing path the whole design exists for.
+        let target = root.join("sub/new.txt");
+        ops.write(target.to_str().unwrap(), "hello", false)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+        let r = ops.read(target.to_str().unwrap()).await.unwrap();
+        assert_eq!(r.text.as_deref(), Some("hello"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn sandboxed_rejects_traversal_escape() {
+        let root = std::env::temp_dir().join(format!(
+            "oneai_sb_trav_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = sandboxed(&root);
+
+        // /root/../escape must NOT be admitted as "under /root" — the literal
+        // starts_with check would be fooled; lexical normalization fixes it.
+        let escape = root.join("../oneai_sb_escape_marker");
+        let err = ops
+            .write(escape.to_str().unwrap(), "x", false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside the file-tool sandbox"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn sandboxed_exists_reports_false_outside_root() {
+        let root = std::env::temp_dir().join(format!(
+            "oneai_sb_ex_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = sandboxed(&root);
+        std::fs::write(root.join("inside.txt"), "y").unwrap();
+        assert!(ops.exists(root.join("inside.txt").to_str().unwrap()).await);
+        // A real file outside the root still reports as non-existent from the
+        // sandbox's perspective (the agent must not learn it exists).
+        let outside = std::env::temp_dir().join("oneai_sb_outside_exists_marker");
+        std::fs::write(&outside, "z").unwrap();
+        assert!(!ops.exists(outside.to_str().unwrap()).await);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn path_within_traversal_normalized() {
+        // Direct unit check of the containment predicate: `..` escape must be
+        // rejected even when the literal string starts with the root.
+        let root = std::env::temp_dir(); // a real existing root
+        assert!(path_within(
+            &root.join("a.txt"),
+            std::slice::from_ref(&root)
+        ));
+        assert!(!path_within(
+            &root.join("..").join("escape"),
+            std::slice::from_ref(&root)
+        ));
     }
 }
