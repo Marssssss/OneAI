@@ -1967,6 +1967,24 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             }
         }
         ObserverEvent::ToolCalls(calls) => {
+            // Flush any buffered stream text BEFORE appending the tool cards.
+            //
+            // Stream chunks (on_stream_chunk) accumulate in `stream_buffer` and
+            // are normally applied during the debounced draw. But tool-call
+            // events (on_tool_calls) add cards with `request_render()` (immediate),
+            // so the next draw can fire AFTER the cards are already in
+            // `messages`. At that draw `flush_stream_buffer` sees the LAST
+            // message is a ToolInvocation (not Assistant) and falls through to
+            // "create a NEW assistant message from buffer" — landing the
+            // preamble text bubble BELOW the tool cards it precedes. With
+            // multiple tool calls the misplacement is "基本必现" and reads as
+            // rendering residue (old content still there in the wrong place).
+            //
+            // Flushing here — before the cards are appended — places the
+            // streamed preamble in an assistant bubble ABOVE the cards,
+            // matching the DirectAnswer handler's existing flush-first pattern.
+            app.flush_stream_buffer();
+
             for call in calls {
                 let args_str = serde_json::to_string_pretty(&call.args)
                     .unwrap_or_else(|_| call.args.to_string());
@@ -2962,5 +2980,542 @@ fn update_search_results(app: &mut App) {
         if msg.content.to_lowercase().contains(&query_lower) {
             app.search_results.push(i);
         }
+    }
+}
+
+#[cfg(test)]
+mod issue18_tests {
+    //! Reproduction harness for issue #18: TUI rendering residue when the model
+    //! emits multiple tool calls in one turn. Drives the *real* observer event
+    //! sequence (streaming `on_tool_calls` per call + the post-stream re-emit of
+    //! the full call list, then per-call `on_tool_result`) through
+    //! `process_observer_event` and asserts no stale pending ⏳ card survives.
+
+    use super::observer::ObserverEvent;
+    use super::process_observer_event;
+    use crate::tui::app::{App, ChatRole};
+    use oneai_agent::ToolCallRequest;
+    use oneai_core::ToolOutput;
+    use std::sync::Arc;
+
+    fn test_app() -> App {
+        App::new(
+            "test".to_string(),
+            "test-model".to_string(),
+            Vec::new(),
+            "session1234567".to_string(),
+            Arc::new(oneai_skill::SkillRegistry::new()),
+        )
+    }
+
+    /// Count messages that are ToolInvocation cards still in the pending ⏳
+    /// state (result == None). Any of these after a turn completes is exactly
+    /// the "old content still there" residue of issue #18.
+    fn pending_card_count(app: &App) -> usize {
+        app.messages
+            .iter()
+            .filter(|m| matches!(&m.role, ChatRole::ToolInvocation { result: None, .. }))
+            .count()
+    }
+
+    fn tool_call(id: &str, name: &str, args: &serde_json::Value) -> ToolCallRequest {
+        ToolCallRequest {
+            id: id.to_string(),
+            name: name.to_string(),
+            args: args.clone(),
+        }
+    }
+
+    fn ok_output(content: &str) -> ToolOutput {
+        ToolOutput {
+            success: true,
+            content: content.to_string(),
+            error: None,
+            ..Default::default()
+        }
+    }
+
+    /// Render `app` to a fresh TestBackend of the given size and return the
+    /// visible cell grid (each row joined, trailing spaces trimmed) so we can
+    /// visually inspect what actually lands on screen.
+    fn render_to_strings(app: &mut App, w: u16, h: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::tui::render::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..h)
+            .map(|y| {
+                let row: String = (0..w)
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        if cell.symbol().is_empty() {
+                            ' '
+                        } else {
+                            cell.symbol().chars().next().unwrap_or(' ')
+                        }
+                    })
+                    .collect();
+                row.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Add a resolved tool invocation card (args + result already set).
+    fn add_resolved_tool(app: &mut App, call_id: &str, tool_name: &str, args: &str, result: &str) {
+        use crate::tui::app::ChatRole;
+        app.add_collapsed_message(
+            ChatRole::ToolInvocation {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                args: args.to_string(),
+                result: Some((true, result.to_string())),
+            },
+            result.to_string(),
+        );
+    }
+
+    #[test]
+    fn multi_tool_render_visual_dump() {
+        // Snapshot the multi-tool turn rendering so any residue (overlapping
+        // cards, stale glyphs, missing separators) is visible in the dump.
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "read three files".to_string());
+        app.add_message(ChatRole::Assistant, "I'll read all three.".to_string());
+        add_resolved_tool(
+            &mut app,
+            "c1",
+            "read_file",
+            r#"{"path":"/tmp/a.txt"}"#,
+            "content of a",
+        );
+        add_resolved_tool(
+            &mut app,
+            "c2",
+            "read_file",
+            r#"{"path":"/tmp/b.txt"}"#,
+            "content of b",
+        );
+        add_resolved_tool(
+            &mut app,
+            "c3",
+            "read_file",
+            r#"{"path":"/tmp/c.txt"}"#,
+            "content of c",
+        );
+        app.stop_thinking();
+
+        let rows = render_to_strings(&mut app, 100, 30);
+        for (i, r) in rows.iter().enumerate() {
+            eprintln!("{i:02}: {r}");
+        }
+        // All three results render, in order (a before b before c).
+        let a = rows.iter().position(|r| r.contains("content of a"));
+        let b = rows.iter().position(|r| r.contains("content of b"));
+        let c = rows.iter().position(|r| r.contains("content of c"));
+        assert!(
+            a.is_some() && b.is_some() && c.is_some(),
+            "all three results render"
+        );
+        assert!(a < b && b < c, "results render in order a<b<c");
+    }
+
+    #[test]
+    fn streaming_multi_tool_leaves_no_stale_pending_card() {
+        //   1. ToolCalls([A])     — streaming emit when call A is assembled
+        //   2. ToolCalls([B])     — streaming emit when call B is assembled
+        //   3. ToolCalls([A, B])  — post-stream re-emit (must dedup, not dup)
+        //   4. ToolResult(A)      — updates card A with its result
+        //   5. ToolResult(B)      — updates card B with its result
+        // After this, both cards must be resolved — zero pending ⏳ cards.
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "read both files".to_string());
+        app.start_thinking();
+
+        let args_a = serde_json::json!({ "path": "/tmp/a.txt" });
+        let args_b = serde_json::json!({ "path": "/tmp/b.txt" });
+
+        // 1. streaming emit A
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![tool_call("call_A", "read_file", &args_a)]),
+        );
+        // 2. streaming emit B
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![tool_call("call_B", "read_file", &args_b)]),
+        );
+        assert_eq!(pending_card_count(&app), 2, "both streaming cards pending");
+
+        // 3. post-stream re-emit of the FULL list — must NOT create duplicates
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![
+                tool_call("call_A", "read_file", &args_a),
+                tool_call("call_B", "read_file", &args_b),
+            ]),
+        );
+        assert_eq!(
+            pending_card_count(&app),
+            2,
+            "post-stream re-emit must dedup, not add stale ⏳ duplicates"
+        );
+
+        // 4. result for A
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult(
+                "call_A".to_string(),
+                "read_file".to_string(),
+                ok_output("AAA"),
+            ),
+        );
+        assert_eq!(pending_card_count(&app), 1, "card A resolved");
+
+        // 5. result for B
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult(
+                "call_B".to_string(),
+                "read_file".to_string(),
+                ok_output("BBB"),
+            ),
+        );
+        assert_eq!(
+            pending_card_count(&app),
+            0,
+            "no stale pending ⏳ card should remain after all results land — \
+             this is the issue #18 residue (old content still there)"
+        );
+    }
+
+    /// Simulate a full streaming multi-tool turn EVENT-BY-EVENT, rendering a
+    /// frame after each event (exactly what the main loop does), and dump every
+    /// frame. Any residue — a stale ⏳ card, a card showing another card's
+    /// content, or un-cleared glyphs from a previous frame — shows up here.
+    #[test]
+    fn streaming_multi_tool_frame_by_frame_dump() {
+        let mut app = test_app();
+        app.show_sidebar = false; // widen chat area for a clearer dump
+        app.add_message(ChatRole::User, "read both files".to_string());
+        app.start_thinking();
+
+        let args_a = serde_json::json!({ "path": "/tmp/a.txt" });
+        let args_b = serde_json::json!({ "path": "/tmp/b.txt" });
+
+        let mut frame = 0;
+        let mut dump = |app: &mut App, label: &str| {
+            let rows = render_to_strings(app, 90, 24);
+            eprintln!(
+                "===== frame {frame}: {label} (pending={} msgs={}) =====",
+                pending_card_count(app),
+                app.messages.len()
+            );
+            for (i, r) in rows.iter().enumerate() {
+                if !r.is_empty() {
+                    eprintln!("{i:02}: {r}");
+                }
+            }
+            frame += 1;
+        };
+
+        // Iteration start + thinking placeholder
+        process_observer_event(
+            &mut app,
+            ObserverEvent::IterationStart(0, oneai_agent::ParadigmKind::ReAct),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::Thinking("let me check".to_string()),
+        );
+        dump(&mut app, "thinking");
+
+        // Stream preamble text
+        process_observer_event(&mut app, ObserverEvent::StreamChunk("Reading ".to_string()));
+        process_observer_event(
+            &mut app,
+            ObserverEvent::StreamChunk("the files".to_string()),
+        );
+        app.flush_stream_buffer();
+        dump(&mut app, "preamble streamed");
+
+        // Streaming tool-call emits (one per call) + post-stream re-emit
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![tool_call("call_A", "read_file", &args_a)]),
+        );
+        dump(&mut app, "call A streamed (pending)");
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![tool_call("call_B", "read_file", &args_b)]),
+        );
+        dump(&mut app, "call B streamed (2 pending)");
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![
+                tool_call("call_A", "read_file", &args_a),
+                tool_call("call_B", "read_file", &args_b),
+            ]),
+        );
+        dump(&mut app, "post-stream re-emit (should dedup)");
+
+        // Results land
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult(
+                "call_A".to_string(),
+                "read_file".to_string(),
+                ok_output("AAA output"),
+            ),
+        );
+        dump(&mut app, "result A");
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult(
+                "call_B".to_string(),
+                "read_file".to_string(),
+                ok_output("BBB output"),
+            ),
+        );
+        dump(&mut app, "result B");
+
+        // Final assertion: no stale pending card survives the full turn.
+        assert_eq!(
+            pending_card_count(&app),
+            0,
+            "no stale ⏳ card after full turn"
+        );
+    }
+
+    /// Full multi-ITERATION flow: iter1 (text + 2 tools + results), then iter2
+    /// (text + 2 MORE tools + results), DirectAnswer, Complete. Renders + dumps
+    /// after every event. This exercises the iteration boundary where the
+    /// cache/scroll math is most likely to leave residue.
+    #[test]
+    fn multi_iteration_multi_tool_frame_dump() {
+        let mut app = test_app();
+        app.show_sidebar = false;
+        app.add_message(ChatRole::User, "do a multi-step task".to_string());
+        app.start_thinking();
+
+        let args_a = serde_json::json!({ "path": "/tmp/a.txt" });
+        let args_b = serde_json::json!({ "path": "/tmp/b.txt" });
+        let args_c = serde_json::json!({ "pattern": "foo", "path": "/tmp" });
+        let args_d = serde_json::json!({ "pattern": "bar", "path": "/tmp" });
+
+        let mut frame = 0;
+        let mut dump = |app: &mut App, label: &str| {
+            let rows = render_to_strings(app, 90, 24);
+            eprintln!(
+                "===== frame {frame}: {label} (pending={} msgs={}) =====",
+                pending_card_count(app),
+                app.messages.len()
+            );
+            for (i, r) in rows.iter().enumerate() {
+                if !r.is_empty() {
+                    eprintln!("{i:02}: {r}");
+                }
+            }
+            frame += 1;
+        };
+
+        // ── Iteration 1 ──
+        process_observer_event(
+            &mut app,
+            ObserverEvent::IterationStart(0, oneai_agent::ParadigmKind::ReAct),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::StreamChunk("Step 1: read ".to_string()),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::StreamChunk("two files".to_string()),
+        );
+        app.flush_stream_buffer();
+        dump(&mut app, "iter1 preamble");
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![
+                tool_call("c1", "read_file", &args_a),
+                tool_call("c2", "read_file", &args_b),
+            ]),
+        );
+        dump(&mut app, "iter1 two pending cards");
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult("c1".into(), "read_file".into(), ok_output("AAA")),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult("c2".into(), "read_file".into(), ok_output("BBB")),
+        );
+        dump(&mut app, "iter1 both resolved");
+
+        // ── Iteration 2 ──
+        process_observer_event(
+            &mut app,
+            ObserverEvent::IterationStart(1, oneai_agent::ParadigmKind::ReAct),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::StreamChunk("Step 2: grep ".to_string()),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::StreamChunk("two patterns".to_string()),
+        );
+        app.flush_stream_buffer();
+        dump(&mut app, "iter2 preamble");
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![
+                tool_call("c3", "grep", &args_c),
+                tool_call("c4", "grep", &args_d),
+            ]),
+        );
+        dump(&mut app, "iter2 two pending cards");
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult("c3".into(), "grep".into(), ok_output("CCC")),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolResult("c4".into(), "grep".into(), ok_output("DDD")),
+        );
+        dump(&mut app, "iter2 both resolved");
+
+        // ── Final answer + complete ──
+        process_observer_event(
+            &mut app,
+            ObserverEvent::DirectAnswer("Done — here's the summary.".to_string()),
+        );
+        process_observer_event(
+            &mut app,
+            ObserverEvent::Complete(oneai_agent::AgentLoopResult {
+                conversation: oneai_core::Conversation::new(),
+                final_answer: "Done".to_string(),
+                global_state: oneai_core::GlobalState::default(),
+                iterations: 2,
+                completed: true,
+                active_paradigm: oneai_agent::ParadigmKind::ReAct,
+                sub_agent_results: Vec::new(),
+            }),
+        );
+        dump(&mut app, "complete");
+
+        assert_eq!(
+            pending_card_count(&app),
+            0,
+            "no stale ⏳ card after multi-iteration turn"
+        );
+    }
+
+    /// Directly test the residue mechanism: render frame 1 with TALL content,
+    /// then frame 2 with SHORT content, and assert the rows below the short
+    /// content are blank (no stale frame-1 glyphs survive). This is exactly
+    /// the "old content still there" symptom of issue #18.
+    #[test]
+    fn shorter_frame_leaves_no_residue_below() {
+        let mut app = test_app();
+        app.show_sidebar = false;
+        // Frame 1: a tall resolved card (result with many lines).
+        let long_result = (0..15)
+            .map(|i| format!("STALEMARK_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        add_resolved_tool(
+            &mut app,
+            "c1",
+            "shell",
+            r#"{"command":"cat big"}"#,
+            &long_result,
+        );
+        let rows_tall = render_to_strings(&mut app, 80, 24);
+        let tall_nonblank: usize = rows_tall.iter().filter(|r| !r.is_empty()).count();
+        assert!(tall_nonblank > 10, "frame 1 should have tall content");
+        assert!(
+            rows_tall.iter().any(|r| r.contains("STALEMARK_0")),
+            "frame 1 should show the tall content"
+        );
+
+        // Frame 2: replace with a SHORT card (1-line result). The area below
+        // the short card must be blank — no stale STALEMARK glyphs.
+        app.messages.clear();
+        app.render_cache.invalidate_all();
+        add_resolved_tool(
+            &mut app,
+            "c2",
+            "shell",
+            r#"{"command":"echo hi"}"#,
+            "fresh hi",
+        );
+        let rows_short = render_to_strings(&mut app, 80, 24);
+
+        for (i, r) in rows_short.iter().enumerate() {
+            assert!(
+                !r.contains("STALEMARK"),
+                "frame 2 row {i} has stale frame-1 content: {r:?}"
+            );
+        }
+    }
+
+    /// Reproduce the REAL streaming timing: text chunks AND tool-call events
+    /// arrive in one drain batch with NO manual flush between them. The draw
+    /// path then flushes the stream buffer — but by then the tool cards are
+    /// already appended, so `flush_stream_buffer` sees the last message is a
+    /// ToolInvocation (not Assistant) and creates a NEW assistant bubble BELOW
+    /// the cards, splitting the preamble text from its tool calls. This is the
+    /// "old content still there" misplacement users see with multiple tools.
+    #[test]
+    fn stream_text_and_toolcalls_one_batch_bubble_below_cards() {
+        let mut app = test_app();
+        app.show_sidebar = false;
+        app.add_message(ChatRole::User, "read both files".to_string());
+        app.start_thinking();
+
+        let args_a = serde_json::json!({ "path": "/tmp/a.txt" });
+        let args_b = serde_json::json!({ "path": "/tmp/b.txt" });
+
+        // Stream preamble accumulates in stream_buffer (no flush yet)…
+        process_observer_event(&mut app, ObserverEvent::StreamChunk("Reading ".to_string()));
+        process_observer_event(
+            &mut app,
+            ObserverEvent::StreamChunk("the files".to_string()),
+        );
+        // …then BOTH tool calls arrive in the same batch (add cards → request_render).
+        process_observer_event(
+            &mut app,
+            ObserverEvent::ToolCalls(vec![
+                tool_call("c1", "read_file", &args_a),
+                tool_call("c2", "read_file", &args_b),
+            ]),
+        );
+
+        // NOW the draw fires (exactly as run_main_loop does: flush THEN draw).
+        app.flush_stream_buffer();
+        let rows = render_to_strings(&mut app, 90, 24);
+        for (i, r) in rows.iter().enumerate() {
+            if !r.is_empty() {
+                eprintln!("{i:02}: {r}");
+            }
+        }
+
+        // The preamble "Reading the files" must appear in an assistant bubble
+        // ABOVE the tool cards (it was streamed before the calls), not orphaned
+        // below them.
+        let preamble_row = rows.iter().position(|r| r.contains("Reading the files"));
+        let card_a_row = rows
+            .iter()
+            .position(|r| r.contains("read_file") && r.contains("⏳"));
+        assert!(preamble_row.is_some(), "preamble text must be rendered");
+        assert!(card_a_row.is_some(), "pending card A must be rendered");
+        assert!(
+            preamble_row < card_a_row,
+            "preamble bubble must render ABOVE the tool cards, not below them \
+             (preamble={preamble_row:?}, card={card_a_row:?}) — this split is \
+             the issue #18 residue"
+        );
     }
 }
