@@ -100,9 +100,16 @@ impl EvalResult {
         }
     }
 
-    /// Whether this result passed all metrics.
+    /// Whether this result passed all metrics. Non-applicable scores
+    /// (a metric that doesn't apply to this case's expected-output type —
+    /// e.g. `ContainsMatchMetric` on an `Exact` case) are skipped, so a
+    /// multi-metric suite doesn't fail a case a metric already passed.
     pub fn passed(&self) -> bool {
-        self.error.is_none() && self.scores.iter().all(|ms| ms.score.passed)
+        self.error.is_none()
+            && self
+                .scores
+                .iter()
+                .all(|ms| !ms.score.applicable || ms.score.passed)
     }
 
     /// Whether this result had an execution error.
@@ -110,16 +117,21 @@ impl EvalResult {
         self.error.is_some()
     }
 
-    /// Get the average normalized score across all metrics.
+    /// Get the average normalized score across all **applicable** metrics.
     pub fn avg_score(&self) -> f64 {
-        if self.scores.is_empty() {
+        let applicable: Vec<_> = self
+            .scores
+            .iter()
+            .filter(|ms| ms.score.applicable)
+            .collect();
+        if applicable.is_empty() {
             return 0.0;
         }
-        self.scores
+        applicable
             .iter()
             .map(|ms| ms.score.normalized())
             .sum::<f64>()
-            / self.scores.len() as f64
+            / applicable.len() as f64
     }
 
     /// Add a metric score.
@@ -403,6 +415,36 @@ mod tests {
         let mut result = EvalResult::new("case_1", "test", "");
         result.error = Some("Provider unavailable".to_string());
         assert!(result.has_error());
+        assert!(!result.passed());
+    }
+
+    #[test]
+    fn test_passed_skips_non_applicable_metrics() {
+        // An Exact case: exact_match passes, contains/regex are
+        // "not applicable". `passed()` must skip them — otherwise a
+        // multi-metric suite could never pass an Exact case (the bug that
+        // made evolve's pass_rate read 0% with a correct model output).
+        let mut result = EvalResult::new("math_add", "What is 2+2?", "4");
+        result.add_score("exact_match", EvalScore::perfect("Exact match"));
+        result.add_score(
+            "contains_match",
+            EvalScore::not_applicable("ContainsMatch not applicable for Exact expected output"),
+        );
+        result.add_score(
+            "regex_match",
+            EvalScore::not_applicable("RegexMatch not applicable for Exact expected output"),
+        );
+        assert!(result.passed(), "non-applicable metrics must not fail the case");
+        // avg_score also skips non-applicable (0/1 would otherwise drag it to 0.33).
+        assert_eq!(result.avg_score(), 1.0);
+
+        // But a real failure on an applicable metric still fails.
+        let mut result = EvalResult::new("math_add", "What is 2+2?", "five");
+        result.add_score("exact_match", EvalScore::zero("Expected '4' but got 'five'"));
+        result.add_score(
+            "contains_match",
+            EvalScore::not_applicable("ContainsMatch not applicable for Exact expected output"),
+        );
         assert!(!result.passed());
     }
 

@@ -61,37 +61,20 @@ impl EvalMetric for ExactMatchMetric {
             }
             ExpectedOutput::Contains { .. } => {
                 // Not applicable — return skip score
-                EvalScore::new(
-                    0.0,
-                    1.0,
-                    "ExactMatch not applicable for Contains expected output",
-                    false,
-                )
+                EvalScore::not_applicable("ExactMatch not applicable for Contains expected output")
             }
-            ExpectedOutput::Regex { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "ExactMatch not applicable for Regex expected output",
-                false,
-            ),
-            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "ExactMatch not applicable for LlmJudge expected output",
-                false,
-            ),
-            ExpectedOutput::Trajectory { .. } => EvalScore::new(
-                0.0,
-                1.0,
+            ExpectedOutput::Regex { .. } => {
+                EvalScore::not_applicable("ExactMatch not applicable for Regex expected output")
+            }
+            ExpectedOutput::LlmJudge { .. } => {
+                EvalScore::not_applicable("ExactMatch not applicable for LlmJudge expected output")
+            }
+            ExpectedOutput::Trajectory { .. } => EvalScore::not_applicable(
                 "ExactMatch not applicable for Trajectory expected output",
-                false,
             ),
-            ExpectedOutput::Custom { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "ExactMatch not applicable for Custom expected output",
-                false,
-            ),
+            ExpectedOutput::Custom { .. } => {
+                EvalScore::not_applicable("ExactMatch not applicable for Custom expected output")
+            }
         }
     }
 }
@@ -116,12 +99,9 @@ impl EvalMetric for ContainsMatchMetric {
 
     async fn score(&self, _input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore {
         match expected {
-            ExpectedOutput::Exact { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "ContainsMatch not applicable for Exact expected output",
-                false,
-            ),
+            ExpectedOutput::Exact { .. } => {
+                EvalScore::not_applicable("ContainsMatch not applicable for Exact expected output")
+            }
             ExpectedOutput::Contains {
                 substrings,
                 case_sensitive,
@@ -165,30 +145,18 @@ impl EvalMetric for ContainsMatchMetric {
                     )
                 }
             }
-            ExpectedOutput::Regex { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "ContainsMatch not applicable for Regex expected output",
-                false,
-            ),
-            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
-                0.0,
-                1.0,
+            ExpectedOutput::Regex { .. } => {
+                EvalScore::not_applicable("ContainsMatch not applicable for Regex expected output")
+            }
+            ExpectedOutput::LlmJudge { .. } => EvalScore::not_applicable(
                 "ContainsMatch not applicable for LlmJudge expected output",
-                false,
             ),
-            ExpectedOutput::Trajectory { .. } => EvalScore::new(
-                0.0,
-                1.0,
+            ExpectedOutput::Trajectory { .. } => EvalScore::not_applicable(
                 "ContainsMatch not applicable for Trajectory expected output",
-                false,
             ),
-            ExpectedOutput::Custom { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "ContainsMatch not applicable for Custom expected output",
-                false,
-            ),
+            ExpectedOutput::Custom { .. } => {
+                EvalScore::not_applicable("ContainsMatch not applicable for Custom expected output")
+            }
         }
     }
 }
@@ -223,44 +191,27 @@ impl EvalMetric for RegexMatchMetric {
                             EvalScore::zero(format!("Pattern '{}' not found in output", pattern))
                         }
                     }
-                    Err(e) => EvalScore::new(
-                        0.0,
-                        1.0,
-                        format!("Invalid regex pattern '{}': {}", pattern, e),
-                        false,
-                    ),
+                    Err(e) => EvalScore::not_applicable(format!(
+                        "Invalid regex pattern '{}': {}",
+                        pattern, e
+                    )),
                 }
             }
-            ExpectedOutput::Exact { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "RegexMatch not applicable for Exact expected output",
-                false,
-            ),
-            ExpectedOutput::Contains { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "RegexMatch not applicable for Contains expected output",
-                false,
-            ),
-            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "RegexMatch not applicable for LlmJudge expected output",
-                false,
-            ),
-            ExpectedOutput::Trajectory { .. } => EvalScore::new(
-                0.0,
-                1.0,
+            ExpectedOutput::Exact { .. } => {
+                EvalScore::not_applicable("RegexMatch not applicable for Exact expected output")
+            }
+            ExpectedOutput::Contains { .. } => {
+                EvalScore::not_applicable("RegexMatch not applicable for Contains expected output")
+            }
+            ExpectedOutput::LlmJudge { .. } => {
+                EvalScore::not_applicable("RegexMatch not applicable for LlmJudge expected output")
+            }
+            ExpectedOutput::Trajectory { .. } => EvalScore::not_applicable(
                 "RegexMatch not applicable for Trajectory expected output",
-                false,
             ),
-            ExpectedOutput::Custom { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "RegexMatch not applicable for Custom expected output",
-                false,
-            ),
+            ExpectedOutput::Custom { .. } => {
+                EvalScore::not_applicable("RegexMatch not applicable for Custom expected output")
+            }
         }
     }
 }
@@ -328,36 +279,21 @@ impl EvalMetric for TrajectoryMetric {
 
                 EvalScore::new(fraction, 1.0, reason, missing.is_empty())
             }
-            ExpectedOutput::Exact { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "Trajectory not applicable for Exact expected output",
-                false,
-            ),
-            ExpectedOutput::Contains { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "Trajectory not applicable for Contains expected output",
-                false,
-            ),
-            ExpectedOutput::Regex { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "Trajectory not applicable for Regex expected output",
-                false,
-            ),
-            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "Trajectory not applicable for LlmJudge expected output",
-                false,
-            ),
-            ExpectedOutput::Custom { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "Trajectory not applicable for Custom expected output",
-                false,
-            ),
+            ExpectedOutput::Exact { .. } => {
+                EvalScore::not_applicable("Trajectory not applicable for Exact expected output")
+            }
+            ExpectedOutput::Contains { .. } => {
+                EvalScore::not_applicable("Trajectory not applicable for Contains expected output")
+            }
+            ExpectedOutput::Regex { .. } => {
+                EvalScore::not_applicable("Trajectory not applicable for Regex expected output")
+            }
+            ExpectedOutput::LlmJudge { .. } => {
+                EvalScore::not_applicable("Trajectory not applicable for LlmJudge expected output")
+            }
+            ExpectedOutput::Custom { .. } => {
+                EvalScore::not_applicable("Trajectory not applicable for Custom expected output")
+            }
         }
     }
 
@@ -613,36 +549,21 @@ impl EvalMetric for LlmJudgeMetric {
                     EvalScore::new(0.0, 1.0, "No LLM provider configured for judge", false)
                 }
             }
-            ExpectedOutput::Exact { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "LlmJudge not applicable for Exact expected output",
-                false,
-            ),
-            ExpectedOutput::Contains { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "LlmJudge not applicable for Contains expected output",
-                false,
-            ),
-            ExpectedOutput::Regex { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "LlmJudge not applicable for Regex expected output",
-                false,
-            ),
-            ExpectedOutput::Trajectory { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "LlmJudge not applicable for Trajectory expected output",
-                false,
-            ),
-            ExpectedOutput::Custom { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "LlmJudge not applicable for Custom expected output",
-                false,
-            ),
+            ExpectedOutput::Exact { .. } => {
+                EvalScore::not_applicable("LlmJudge not applicable for Exact expected output")
+            }
+            ExpectedOutput::Contains { .. } => {
+                EvalScore::not_applicable("LlmJudge not applicable for Contains expected output")
+            }
+            ExpectedOutput::Regex { .. } => {
+                EvalScore::not_applicable("LlmJudge not applicable for Regex expected output")
+            }
+            ExpectedOutput::Trajectory { .. } => {
+                EvalScore::not_applicable("LlmJudge not applicable for Trajectory expected output")
+            }
+            ExpectedOutput::Custom { .. } => {
+                EvalScore::not_applicable("LlmJudge not applicable for Custom expected output")
+            }
         }
     }
 }
@@ -676,35 +597,20 @@ impl EvalMetric for CustomJudgeMetric {
     async fn score(&self, input: &str, actual: &str, expected: &ExpectedOutput) -> EvalScore {
         match expected {
             ExpectedOutput::Custom { judge } => judge.judge(input, actual).await,
-            ExpectedOutput::Exact { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "CustomJudge not applicable for Exact expected output",
-                false,
-            ),
-            ExpectedOutput::Contains { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "CustomJudge not applicable for Contains expected output",
-                false,
-            ),
-            ExpectedOutput::Regex { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "CustomJudge not applicable for Regex expected output",
-                false,
-            ),
-            ExpectedOutput::LlmJudge { .. } => EvalScore::new(
-                0.0,
-                1.0,
-                "CustomJudge not applicable for LlmJudge expected output",
-                false,
-            ),
-            ExpectedOutput::Trajectory { .. } => EvalScore::new(
-                0.0,
-                1.0,
+            ExpectedOutput::Exact { .. } => {
+                EvalScore::not_applicable("CustomJudge not applicable for Exact expected output")
+            }
+            ExpectedOutput::Contains { .. } => {
+                EvalScore::not_applicable("CustomJudge not applicable for Contains expected output")
+            }
+            ExpectedOutput::Regex { .. } => {
+                EvalScore::not_applicable("CustomJudge not applicable for Regex expected output")
+            }
+            ExpectedOutput::LlmJudge { .. } => {
+                EvalScore::not_applicable("CustomJudge not applicable for LlmJudge expected output")
+            }
+            ExpectedOutput::Trajectory { .. } => EvalScore::not_applicable(
                 "CustomJudge not applicable for Trajectory expected output",
-                false,
             ),
         }
     }
@@ -842,11 +748,8 @@ impl EvalMetric for EfficiencyMetric {
 
     async fn score(&self, _input: &str, _actual: &str, _expected: &ExpectedOutput) -> EvalScore {
         // No trace available in metric-only mode — efficiency is unmeasurable.
-        EvalScore::new(
-            0.0,
-            1.0,
+        EvalScore::not_applicable(
             "efficiency requires trace data — run with a provider + tracing".to_string(),
-            false,
         )
     }
 
@@ -860,11 +763,8 @@ impl EvalMetric for EfficiencyMetric {
         let tree = match tree {
             Some(t) => t,
             None => {
-                return EvalScore::new(
-                    0.0,
-                    1.0,
+                return EvalScore::not_applicable(
                     "no trace — efficiency not measurable".to_string(),
-                    false,
                 )
             }
         };
@@ -949,11 +849,8 @@ impl EvalMetric for CacheHitRateMetric {
     }
 
     async fn score(&self, _input: &str, _actual: &str, _expected: &ExpectedOutput) -> EvalScore {
-        EvalScore::new(
-            0.0,
-            1.0,
+        EvalScore::not_applicable(
             "cache_hit_rate requires trace data — run with a provider + tracing".to_string(),
-            false,
         )
     }
 
@@ -967,11 +864,8 @@ impl EvalMetric for CacheHitRateMetric {
         let tree = match tree {
             Some(t) => t,
             None => {
-                return EvalScore::new(
-                    0.0,
-                    1.0,
+                return EvalScore::not_applicable(
                     "no trace — cache hit rate not measurable".to_string(),
-                    false,
                 )
             }
         };

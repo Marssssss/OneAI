@@ -30,3 +30,6 @@ swebench-workspace/
 # Downloaded dataset (export_dataset.py output — 300 rows, regenerable).
 swe_bench_lite.jsonl
 swe_bench_verified.jsonl
+
+# OneAI evolve run artifacts (CLI writes to <cwd>/.oneai/evolve/...). Regenerable.
+.oneai/

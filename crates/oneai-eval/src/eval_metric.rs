@@ -23,6 +23,11 @@ use crate::eval_case::ExpectedOutput;
 /// - `max_value`: the maximum possible score for this metric
 /// - `reason`: human-readable explanation of why this score was given
 /// - `passed`: whether the score meets the passing threshold
+/// - `applicable`: whether this metric applies to the case's expected-output
+///   type (false = "not applicable" — e.g. `ContainsMatchMetric` scoring an
+///   `Exact` case). Non-applicable scores are skipped by
+///   [`EvalResult::passed`](crate::EvalResult::passed) so a multi-metric
+///   suite doesn't fail a case just because a metric doesn't apply to it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EvalScore {
     /// The numeric score achieved.
@@ -35,7 +40,18 @@ pub struct EvalScore {
     pub reason: String,
 
     /// Whether this score passes the threshold.
+    #[serde(default = "default_true")]
     pub passed: bool,
+
+    /// Whether this metric applies to the case's expected-output type.
+    /// Defaults to `true`; set `false` via [`Self::not_applicable`] for the
+    /// "not applicable for X" branches so [`EvalResult::passed`] skips them.
+    #[serde(default = "default_true")]
+    pub applicable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl EvalScore {
@@ -46,6 +62,7 @@ impl EvalScore {
             max_value: 1.0,
             reason: reason.into(),
             passed: true,
+            applicable: true,
         }
     }
 
@@ -56,6 +73,20 @@ impl EvalScore {
             max_value: 1.0,
             reason: reason.into(),
             passed: false,
+            applicable: true,
+        }
+    }
+
+    /// Create a "not applicable" score — this metric doesn't apply to the
+    /// case's expected-output type. Skipped by `EvalResult::passed` so it
+    /// can't fail a case a different metric already passed.
+    pub fn not_applicable(reason: impl Into<String>) -> Self {
+        Self {
+            value: 0.0,
+            max_value: 1.0,
+            reason: reason.into(),
+            passed: false,
+            applicable: false,
         }
     }
 
@@ -66,6 +97,7 @@ impl EvalScore {
             max_value,
             reason: reason.into(),
             passed,
+            applicable: true,
         }
     }
 
@@ -76,6 +108,7 @@ impl EvalScore {
             max_value: 1.0,
             reason: reason.into(),
             passed,
+            applicable: true,
         }
     }
 

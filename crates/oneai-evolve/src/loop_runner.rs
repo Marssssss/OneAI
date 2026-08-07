@@ -231,9 +231,9 @@ impl EvolutionLoop {
 
         for gen in 0..self.config.max_generations {
             final_gen = gen;
-            let is_final = gen + 1 == self.config.max_generations;
-            let exec = self
-                .run_single_generation(&base, suite, &run_dir, gen, is_final)
+            let is_planned_final = gen + 1 == self.config.max_generations;
+            let mut exec = self
+                .run_single_generation(&base, suite, &run_dir, gen)
                 .await?;
             total_tokens += exec.gen_tokens;
 
@@ -247,7 +247,8 @@ impl EvolutionLoop {
                 .as_ref()
                 .and_then(|f| f.config_file.clone());
 
-            // Record the lesson + generation summary.
+            // Record the lesson (the stagnation check below reads
+            // `gens_without_improvement`, which needs this gen's row first).
             lessons.record(LessonEntry {
                 generation: gen,
                 base_pass_rate: exec.base_pass_rate,
@@ -257,23 +258,6 @@ impl EvolutionLoop {
                 frontier_is_seed,
                 lessons_text: exec.lessons_text.clone(),
             });
-            generations.push(GenerationSummary {
-                generation: gen,
-                base_pass_rate: exec.base_pass_rate,
-                frontier_pass_rate: frontier_pass,
-                frontier_total_tokens: frontier_tok,
-                frontier_total_latency_ms: frontier_lat,
-                frontier_is_seed,
-                candidate_scores: exec.candidate_scores.clone(),
-                frontier_config_file: frontier_cfg_file.clone(),
-                lessons_text: exec.lessons_text.clone(),
-                held_out_pass_rate: exec.held_out_pass_rate,
-            });
-
-            // Lift this generation's final-gen accumulators (overwritten each
-            // gen so the last one wins).
-            final_candidate_scores = exec.candidate_scores;
-            final_frontier = exec.frontier_rec.clone();
 
             // Convergence / stop checks (design §4 E4).
             if frontier_pass >= target {
@@ -294,13 +278,48 @@ impl EvolutionLoop {
                 ));
             }
             let mut stopping = stop_reason.is_some();
-            if is_final {
+            if is_planned_final {
                 // Reached the cap — record it if no other reason fired first.
                 if stop_reason.is_none() {
                     stop_reason = Some(format!("max_generations {gen} reached"));
                 }
                 stopping = true;
             }
+
+            // E5 regression gates run on the run's final generation — which is
+            // either the planned last gen OR an early-stopping gen (converged
+            // / budget / stagnation). Running them only on the planned last
+            // gen would miss early convergence (the common case).
+            let mut held_out_pass_rate = None;
+            if stopping && !self.config.no_optimize {
+                held_out_pass_rate = self
+                    .run_regression_gates(
+                        &base,
+                        &mut exec.frontier_rec,
+                        &exec.frontier_scored,
+                        suite,
+                    )
+                    .await?;
+            }
+
+            generations.push(GenerationSummary {
+                generation: gen,
+                base_pass_rate: exec.base_pass_rate,
+                frontier_pass_rate: frontier_pass,
+                frontier_total_tokens: frontier_tok,
+                frontier_total_latency_ms: frontier_lat,
+                frontier_is_seed,
+                candidate_scores: exec.candidate_scores.clone(),
+                frontier_config_file: frontier_cfg_file.clone(),
+                lessons_text: exec.lessons_text.clone(),
+                held_out_pass_rate,
+            });
+
+            // Lift this generation's final-gen accumulators (overwritten each
+            // gen so the last one wins). `exec.frontier_rec` now carries the
+            // replay gate's `replay_deterministic` when this was the final gen.
+            final_candidate_scores = exec.candidate_scores;
+            final_frontier = exec.frontier_rec.clone();
 
             if stopping {
                 // Persist the final generation's trajectories + diagnoses
@@ -367,8 +386,8 @@ impl EvolutionLoop {
         let lessons_path = run_dir.join("lessons.jsonl");
         let mut lessons = LessonsLog::load(lessons_path.clone())?;
 
-        let exec = self
-            .run_single_generation(&base, suite, run_dir, next_gen, true)
+        let mut exec = self
+            .run_single_generation(&base, suite, run_dir, next_gen)
             .await?;
 
         let (frontier_pass, frontier_tok, frontier_lat, frontier_is_seed) = match &exec.frontier_rec
@@ -380,6 +399,15 @@ impl EvolutionLoop {
             .frontier_rec
             .as_ref()
             .and_then(|f| f.config_file.clone());
+
+        // `step` runs exactly one generation → it's the final gen, so the E5
+        // regression gates run (when not `no_optimize` + a non-seed frontier).
+        let held_out_pass_rate = if !self.config.no_optimize {
+            self.run_regression_gates(&base, &mut exec.frontier_rec, &exec.frontier_scored, suite)
+                .await?
+        } else {
+            None
+        };
 
         lessons.record(LessonEntry {
             generation: next_gen,
@@ -405,7 +433,7 @@ impl EvolutionLoop {
             candidate_scores: exec.candidate_scores.clone(),
             frontier_config_file: frontier_cfg_file,
             lessons_text: exec.lessons_text.clone(),
-            held_out_pass_rate: exec.held_out_pass_rate,
+            held_out_pass_rate,
         });
 
         let lessons_file = if lessons.is_empty() {
@@ -449,7 +477,6 @@ impl EvolutionLoop {
         suite: &EvalSuite,
         run_dir: &Path,
         gen: usize,
-        is_final: bool,
     ) -> Result<GenExec> {
         let optimizer = if !self.config.no_optimize {
             self.optimizer.clone()
@@ -495,7 +522,7 @@ impl EvolutionLoop {
 
         // ④ optimization: vary K → score subset → Pareto. The base is
         // always candidate 0 so the frontier can be the base itself.
-        let (candidate_scores, mut frontier_rec, frontier_scored) = match &optimizer {
+        let (candidate_scores, frontier_rec, frontier_scored) = match &optimizer {
             Some(opt) => {
                 let ratio = opt.config.case_subset_ratio;
                 let subset = select_case_subset(suite, ratio, &failed_ids);
@@ -521,61 +548,11 @@ impl EvolutionLoop {
             None => (Vec::new(), None, Vec::new()),
         };
 
-        // E5 regression gates (final generation only). Both gate on a
-        // non-seed frontier (a seed frontier trivially has no overfit /
-        // drift signal — it's the base).
-        let mut held_out_pass_rate = None;
-        if is_final && optimizer.is_some() {
-            if let Some(rec) = frontier_rec.as_mut() {
-                if !rec.is_seed {
-                    if let Some(best) = frontier_scored.first() {
-                        // ⑤a held-out: re-run the frontier on the FULL suite
-                        // (variation scored it on the subset only). held_out <
-                        // frontier subset pass_rate flags overfitting to the
-                        // train subset (design §4 E5).
-                        let ho_runs = self.collect_runs(&best.candidate, suite).await?;
-                        let ho_passed = ho_runs.iter().filter(|r| r.result.passed()).count();
-                        let ho_total = ho_runs.len();
-                        held_out_pass_rate = Some(if ho_total == 0 {
-                            0.0
-                        } else {
-                            ho_passed as f64 / ho_total as f64
-                        });
-
-                        // ⑤b replay gate: replay the frontier's recorded
-                        // trajectory with frozen responses, assert the loop's
-                        // tool-call sequence didn't drift (design §6.4 — only
-                        // meaningful for non-semantic mutations; the existing
-                        // `replay_trajectory_with` builds a no-pack app, so it
-                        // only reproduces direct-answer trajectories — tool-call
-                        // trajectories are skipped to avoid false positives).
-                        if is_replay_eligible(base, &best.candidate) {
-                            let traj = &ho_runs[0].trajectory;
-                            if traj.recorded_tool_calls.is_empty() {
-                                match oneai_eval::replay_trajectory_with(traj.clone()).await {
-                                    Ok(rr) => {
-                                        rec.replay_deterministic = Some(rr.tool_calls_match());
-                                    }
-                                    Err(e) => {
-                                        warn!("evolve: replay gate errored: {e:?}");
-                                    }
-                                }
-                            } else {
-                                warn!(
-                                    "evolve: replay skipped (tool-call trajectory; \
-                                     no-pack replay can't reproduce tools)"
-                                );
-                            }
-                        } else {
-                            warn!(
-                                "evolve: replay skipped \
-                                 (semantic mutation — system_prompt/decorators changed)"
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        // E5 regression gates are NOT run here — the caller decides whether
+        // this generation is the run's final one (planned last gen OR early
+        // stop via convergence/budget/stagnation) and calls
+        // [`run_regression_gates`] then. Running them here would miss the
+        // early-stop case (a gen that converges before the planned cap).
 
         // Merge the frontier into the next-gen base + lessons text. With no
         // optimizer, the base carries forward unchanged.
@@ -596,10 +573,75 @@ impl EvolutionLoop {
             diagnoses,
             candidate_scores,
             frontier_rec,
+            frontier_scored,
             next_base,
             lessons_text,
-            held_out_pass_rate,
         })
+    }
+
+    /// E5 regression gates: held-out full-suite + replay determinism. Run on
+    /// the run's final generation (planned last gen OR an early-stopping gen).
+    /// Both gate on a non-seed frontier (a seed frontier has no overfit/drift
+    /// signal — it's the base). Returns `held_out_pass_rate` (⑤a) for the
+    /// generation summary + mutates `frontier_rec.replay_deterministic` (⑤b).
+    async fn run_regression_gates(
+        &self,
+        base: &CandidateConfig,
+        frontier_rec: &mut Option<FrontierRecord>,
+        frontier_scored: &[ScoredCandidate],
+        suite: &EvalSuite,
+    ) -> Result<Option<f64>> {
+        let Some(rec) = frontier_rec.as_mut() else {
+            return Ok(None);
+        };
+        if rec.is_seed {
+            return Ok(None);
+        }
+        let Some(best) = frontier_scored.first() else {
+            return Ok(None);
+        };
+
+        // ⑤a held-out: re-run the frontier on the FULL suite (variation
+        // scored it on the subset only). held_out < frontier subset
+        // pass_rate flags overfitting to the train subset (design §4 E5).
+        let ho_runs = self.collect_runs(&best.candidate, suite).await?;
+        let ho_passed = ho_runs.iter().filter(|r| r.result.passed()).count();
+        let ho_total = ho_runs.len();
+
+        // ⑤b replay gate: replay the frontier's recorded trajectory with
+        // frozen responses, assert the loop's tool-call sequence didn't drift
+        // (design §6.4 — only meaningful for non-semantic mutations; the
+        // existing `replay_trajectory_with` builds a no-pack app, so it only
+        // reproduces direct-answer trajectories — tool-call trajectories are
+        // skipped to avoid false positives).
+        if is_replay_eligible(base, &best.candidate) {
+            let traj = &ho_runs[0].trajectory;
+            if traj.recorded_tool_calls.is_empty() {
+                match oneai_eval::replay_trajectory_with(traj.clone()).await {
+                    Ok(rr) => {
+                        rec.replay_deterministic = Some(rr.tool_calls_match());
+                    }
+                    Err(e) => {
+                        warn!("evolve: replay gate errored: {e:?}");
+                    }
+                }
+            } else {
+                warn!(
+                    "evolve: replay skipped (tool-call trajectory; \
+                     no-pack replay can't reproduce tools)"
+                );
+            }
+        } else {
+            warn!(
+                "evolve: replay skipped \
+                 (semantic mutation — system_prompt/decorators changed)"
+            );
+        }
+        Ok(Some(if ho_total == 0 {
+            0.0
+        } else {
+            ho_passed as f64 / ho_total as f64
+        }))
     }
 
     /// Build a fresh `App` per `candidate` (separate recorder + provider
@@ -728,10 +770,12 @@ struct GenExec {
     diagnoses: Vec<Diagnosis>,
     candidate_scores: Vec<CandidateScoreRecord>,
     frontier_rec: Option<FrontierRecord>,
+    /// The scored frontier (carries the candidate configs) — kept so the
+    /// caller can run the E5 regression gates after deciding this gen is the
+    /// run's final one.
+    frontier_scored: Vec<ScoredCandidate>,
     next_base: CandidateConfig,
     lessons_text: String,
-    /// E5 held-out gate result (final gen, non-seed frontier only).
-    held_out_pass_rate: Option<f64>,
 }
 
 /// One generation's optimization output — folded into the loop's lesson +

@@ -97,7 +97,7 @@ mod cmd_workflow;
 mod config;
 mod tui;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -523,8 +523,9 @@ enum EvolveAction {
         /// Builtin suite name (coding_basics, tool_use, general, efficiency).
         #[arg(long)]
         suite: String,
-        /// Skip variation (E1/E2 degenerate path; default true).
-        #[arg(long, default_value = "true")]
+        /// Skip variation (E1/E2 degenerate path; default true). Pass
+        /// `--no-optimize false` to run the GEPA variation + Pareto loop.
+        #[arg(long, default_value = "true", action = ArgAction::Set)]
         no_optimize: bool,
         /// E4: generation cap. 1 = single-gen (E3); >1 = multi-gen loop to
         /// convergence.
