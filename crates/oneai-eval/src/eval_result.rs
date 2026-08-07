@@ -434,13 +434,19 @@ mod tests {
             "regex_match",
             EvalScore::not_applicable("RegexMatch not applicable for Exact expected output"),
         );
-        assert!(result.passed(), "non-applicable metrics must not fail the case");
+        assert!(
+            result.passed(),
+            "non-applicable metrics must not fail the case"
+        );
         // avg_score also skips non-applicable (0/1 would otherwise drag it to 0.33).
         assert_eq!(result.avg_score(), 1.0);
 
         // But a real failure on an applicable metric still fails.
         let mut result = EvalResult::new("math_add", "What is 2+2?", "five");
-        result.add_score("exact_match", EvalScore::zero("Expected '4' but got 'five'"));
+        result.add_score(
+            "exact_match",
+            EvalScore::zero("Expected '4' but got 'five'"),
+        );
         result.add_score(
             "contains_match",
             EvalScore::not_applicable("ContainsMatch not applicable for Exact expected output"),

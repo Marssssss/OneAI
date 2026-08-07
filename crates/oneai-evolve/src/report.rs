@@ -345,8 +345,13 @@ impl EvolutionReport {
     /// Render a compact human-readable summary (for CLI output).
     pub fn to_summary(&self) -> String {
         let passed = self.case_records.iter().filter(|c| c.passed).count();
+        // Header reports the **base** run's full-suite outcome (the top-level
+        // `case_records` / `pass_rate` are the final generation's base/seed
+        // scoring, NOT the frontier's). Relabel `pass`→`base` so a reader
+        // doesn't mistake it for the frontier — the frontier line below
+        // carries the optimized outcome + held-out gate.
         let mut s = format!(
-            "Evolution gen {} ({}): suite={} | pass {}/{} ({:.0}%) | tokens {} | run_dir={}\n",
+            "Evolution gen {} ({}): suite={} | base {}/{} ({:.0}%) | tokens {} | run_dir={}\n",
             self.generation,
             if self.no_optimize {
                 "no-optimize"
@@ -360,6 +365,26 @@ impl EvolutionReport {
             self.total_tokens,
             self.run_dir.display()
         );
+        // When optimization ran, surface the frontier outcome up top so the
+        // base-vs-frontier distinction is unambiguous (the multi-gen table
+        // further down repeats this per generation). Held-out only exists for
+        // the final generation's E5 gate (`generations.last()`).
+        if let Some(f) = &self.frontier {
+            let kind = if f.is_seed {
+                "seed (no improvement)"
+            } else {
+                "frontier"
+            };
+            let held = self.generations.last().and_then(|g| g.held_out_pass_rate);
+            s.push_str(&match held {
+                Some(h) => format!(
+                    "  frontier: {:.0}% (subset, {kind}) | held-out {:.0}% (full suite)\n",
+                    f.pass_rate * 100.0,
+                    h * 100.0,
+                ),
+                None => format!("  frontier: {:.0}% (subset, {kind})\n", f.pass_rate * 100.0,),
+            });
+        }
         if let Some(reason) = &self.stop_reason {
             s.push_str(&format!("  stop: {reason}\n"));
         }

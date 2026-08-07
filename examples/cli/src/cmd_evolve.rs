@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use oneai_core::traits::LlmProvider;
 use oneai_domain::{DomainPackConfig, DomainPackSpecFile};
-use oneai_eval::builtin_suites;
+use oneai_eval::{builtin_suites, load_gsm8k_suite};
 use oneai_evolve::{
     config_diff, AppBaseline, EvolutionConfig, EvolutionLoop, EvolutionReport, EvolveRunArgs,
     GepaConfig, LessonsLog,
@@ -43,10 +43,16 @@ fn build_provider(
 }
 
 /// `oneai evolve run` — E1 degenerate, E3 single-gen, or E4 multi-gen run.
+///
+/// `--suite <name>` selects a builtin suite; `--suite-file <path>` loads a
+/// GSM8K-format JSONL file (with optional `--sample N` deterministic subset).
+/// Exactly one of the two must be given.
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_evolve_run(
     seed: &str,
-    suite: &str,
+    suite: Option<&str>,
+    suite_file: Option<&str>,
+    sample: Option<usize>,
     no_optimize: bool,
     max_generations: usize,
     target: f64,
@@ -64,14 +70,27 @@ pub async fn cmd_evolve_run(
     });
     let seed_config = spec_file.config;
 
-    // Load the builtin suite (coding_basics / tool_use / general / efficiency).
-    let suite = builtin_suites::get_builtin_suite(suite).unwrap_or_else(|| {
-        eprintln!(
-            "Suite '{suite}' not found. Available: {:?}",
-            builtin_suites::builtin_suite_names()
-        );
-        std::process::exit(1);
-    });
+    // Resolve the suite: --suite-file (GSM8K JSONL) takes priority over the
+    // builtin --suite. Exactly one must be supplied.
+    let suite = match (suite, suite_file) {
+        (_, Some(path)) => {
+            load_gsm8k_suite(std::path::Path::new(path), sample).unwrap_or_else(|e| {
+                eprintln!("Error loading GSM8K suite '{path}': {e}");
+                std::process::exit(1);
+            })
+        }
+        (Some(name), None) => builtin_suites::get_builtin_suite(name).unwrap_or_else(|| {
+            eprintln!(
+                "Suite '{name}' not found. Available: {:?}",
+                builtin_suites::builtin_suite_names()
+            );
+            std::process::exit(1);
+        }),
+        (None, None) => {
+            eprintln!("Error: pass either --suite <builtin> or --suite-file <gsm8k.jsonl>");
+            std::process::exit(1);
+        }
+    };
 
     println!(
         "Evolve run: seed={seed_path} suite={suite_name} | no_optimize={no_optimize} | \

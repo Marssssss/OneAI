@@ -521,8 +521,17 @@ enum EvolveAction {
         #[arg(long)]
         seed: String,
         /// Builtin suite name (coding_basics, tool_use, general, efficiency).
+        /// Required unless `--suite-file` is given.
         #[arg(long)]
-        suite: String,
+        suite: Option<String>,
+        /// Path to a GSM8K-format JSONL suite file (`{"question","answer"}`).
+        /// Takes priority over `--suite`. Pair with `--sample N` to subset.
+        #[arg(long)]
+        suite_file: Option<String>,
+        /// When loading `--suite-file`, take a deterministic random sample of
+        /// the first N cases (full file by default). Useful for GSM8K's 8.5k.
+        #[arg(long)]
+        sample: Option<usize>,
         /// Skip variation (E1/E2 degenerate path; default true). Pass
         /// `--no-optimize false` to run the GEPA variation + Pareto loop.
         #[arg(long, default_value = "true", action = ArgAction::Set)]
@@ -1596,6 +1605,8 @@ fn main() {
             EvolveAction::Run {
                 seed,
                 suite,
+                suite_file,
+                sample,
                 no_optimize,
                 max_generations,
                 target,
@@ -1608,7 +1619,9 @@ fn main() {
                 let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
                 rt.block_on(cmd_evolve::cmd_evolve_run(
                     &seed,
-                    &suite,
+                    suite.as_deref(),
+                    suite_file.as_deref(),
+                    sample,
                     no_optimize,
                     max_generations,
                     target,
