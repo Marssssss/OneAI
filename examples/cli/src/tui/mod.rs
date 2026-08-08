@@ -630,7 +630,14 @@ fn run_main_loop(
         // Process interaction requests from the interaction gate (tool
         // approval, plan decisions, plan review). Variants not enabled in the
         // TUI config (PreInfer/PostInfer) never arrive; defensively Proceed.
-        if let Ok(item) = interaction_rx.try_recv() {
+        //
+        // Drain ALL pending items this frame — a parallel tool batch can land
+        // several approvals at once. Processing only one per frame would leave
+        // the others stuck in the channel while the user answers the first; the
+        // agent loop's `join_all` is awaiting every reply, so draining them all
+        // into the queue here keeps the batch moving as the user clears each card
+        // (Issue #20).
+        while let Ok(item) = interaction_rx.try_recv() {
             let response_tx = item.response_tx;
             // Auto-accept mode — silently proceed every decision point (no card).
             if matches!(app.interaction_mode, app::InteractionMode::AutoAccept) {
@@ -653,22 +660,15 @@ fn run_main_loop(
                             format!("Auto-approved {} (session allowlist)", tool_name),
                         );
                     } else {
-                        // Show approval card in the TUI
-                        app.approval_pending = Some(ApprovalPendingState {
+                        // Show approval card in the TUI — or queue it if one is
+                        // already on screen (parallel-tool-call case, Issue #20).
+                        let state = ApprovalPendingState {
                             request: approval,
                             response_tx: Some(response_tx),
                             tool_name,
                             justification,
-                        });
-                        app.add_message(
-                            ChatRole::Approval,
-                            format!(
-                                "Tool: {} ({})\n{}",
-                                app.approval_pending.as_ref().unwrap().tool_name,
-                                perm_label,
-                                app.approval_pending.as_ref().unwrap().justification,
-                            ),
-                        );
+                        };
+                        promote_or_enqueue_approval(&mut app, state, &perm_label);
                     }
                 }
                 oneai_core::InteractionRequest::PlanDecision {
@@ -2472,6 +2472,69 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
     }
 }
 
+/// Either display an approval request as the current card, or enqueue it
+/// behind the one already on screen.
+///
+/// Parallel tool calls can land several approvals in the same frame
+/// (`execute_tool_calls` runs them under `join_all`). Only one card can be
+/// shown at a time; the rest wait in `approval_queue` and are surfaced one by
+/// one as the user clears each (Issue #20). Without this, a later arrival
+/// overwrote `approval_pending` and dropped the earlier oneshot reply channel,
+/// so the user could only ever answer the last approval — the rest failed with
+/// `ChannelDropped`.
+fn promote_or_enqueue_approval(app: &mut App, state: ApprovalPendingState, perm_label: &str) {
+    let queued = app.approval_queue.len();
+    if app.approval_pending.is_none() {
+        // Nothing on screen — show this one immediately.
+        app.approval_selected_index = 0;
+        let content = if queued > 0 {
+            format!(
+                "Tool: {} ({})\n{}\n\n⏳ {} more approval(s) queued after this one.",
+                state.tool_name, perm_label, state.justification, queued,
+            )
+        } else {
+            format!(
+                "Tool: {} ({})\n{}",
+                state.tool_name, perm_label, state.justification,
+            )
+        };
+        app.approval_pending = Some(state);
+        app.add_message(ChatRole::Approval, content);
+    } else {
+        app.approval_queue.push_back(state);
+    }
+}
+
+/// Pop the next queued approval (if any) onto the screen after the user has
+/// answered the current one. Called from `handle_approval_key` once the
+/// current response has been sent.
+fn promote_next_approval(app: &mut App) {
+    if let Some(state) = app.approval_queue.pop_front() {
+        app.approval_selected_index = 0;
+        let perm_label = state
+            .request
+            .permission_level
+            .map(|p| format!("{:?}", p))
+            .unwrap_or_else(|| format!("{:?}", state.request.risk_level));
+        let queued = app.approval_queue.len();
+        let content = if queued > 0 {
+            format!(
+                "Tool: {} ({})\n{}\n\n⏳ {} more approval(s) queued after this one.",
+                state.tool_name, perm_label, state.justification, queued,
+            )
+        } else {
+            format!(
+                "Tool: {} ({})\n{}",
+                state.tool_name, perm_label, state.justification,
+            )
+        };
+        app.approval_pending = Some(state);
+        app.add_message(ChatRole::Approval, content);
+        // Mark dirty so the new card paints this frame.
+        app.request_render();
+    }
+}
+
 /// Handle approval key presses (Y/N/M/A + cursor selection).
 ///
 /// This is called from the main loop when an approval is pending.
@@ -2656,6 +2719,11 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
         if let Some(tx) = state.response_tx {
             let _ = tx.send(response);
         }
+
+        // Surface the next queued approval (if any) — parallel-tool-call case
+        // (Issue #20): each reply unblocks one of the awaiting tool futures,
+        // and the next card moves onto the screen.
+        promote_next_approval(app);
     }
 }
 
@@ -3632,5 +3700,162 @@ mod issue18_tests {
              (preamble={preamble_row:?}, card={card_a_row:?}) — this split is \
              the issue #18 residue"
         );
+    }
+}
+
+#[cfg(test)]
+mod issue20_tests {
+    //! Regression tests for issue #20: parallel tool calls each require
+    //! approval, but the TUI only kept a single `approval_pending` slot — a
+    //! later arrival overwrote it and dropped the earlier oneshot reply
+    //! channel, so the user could only ever answer the *last* approval; the
+    //! rest silently failed with `ChannelDropped` and their tool calls died.
+    //!
+    //! The fix: `approval_queue` holds arrivals behind the displayed card, and
+    //! the main loop drains the whole channel each frame. These tests pin the
+    //! state machine (no real terminal / event loop needed).
+
+    use super::{handle_approval_key, promote_next_approval, promote_or_enqueue_approval};
+    use crate::tui::app::{App, ApprovalPendingState, ChatRole};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use oneai_core::{ApprovalRequest, InteractionResponse, PermissionLevel, RiskLevel};
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+
+    fn test_app() -> App {
+        App::new(
+            "test".to_string(),
+            "test-model".to_string(),
+            Vec::new(),
+            "session1234567".to_string(),
+            Arc::new(oneai_skill::SkillRegistry::new()),
+        )
+    }
+
+    fn approval_state(
+        name: &str,
+        tx: oneshot::Sender<InteractionResponse>,
+    ) -> ApprovalPendingState {
+        ApprovalPendingState {
+            request: ApprovalRequest {
+                tool_name: name.to_string(),
+                args: serde_json::json!({}),
+                risk_level: RiskLevel::High,
+                permission_level: Some(PermissionLevel::Full),
+                justification: format!("run {}", name),
+            },
+            tool_name: name.to_string(),
+            justification: format!("run {}", name),
+            response_tx: Some(tx),
+        }
+    }
+
+    /// Two approvals land in the same frame. The first becomes the displayed
+    /// card; the second must NOT overwrite it — it waits in the queue with its
+    /// reply channel intact (not dropped).
+    #[test]
+    fn parallel_approvals_queue_instead_of_overwriting() {
+        let mut app = test_app();
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+
+        promote_or_enqueue_approval(&mut app, approval_state("shell", tx1), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("edit_file", tx2), "Full");
+
+        // The first one is the one on screen.
+        assert_eq!(
+            app.approval_pending.as_ref().unwrap().tool_name,
+            "shell",
+            "first arrival must be the displayed card"
+        );
+        // The second is queued, not lost.
+        assert_eq!(
+            app.approval_queue.len(),
+            1,
+            "second arrival must be queued, not dropped"
+        );
+        assert_eq!(app.approval_queue[0].tool_name, "edit_file");
+
+        // The queue holds a live reply channel (not yet answered).
+        assert!(
+            rx1.is_empty(),
+            "first reply channel must still be open (not dropped/answered)"
+        );
+        // The queued channel is also still live — the bug dropped its sender by
+        // overwriting `approval_pending`, which would close this receiver.
+        assert!(
+            rx2.is_empty(),
+            "queued reply channel must NOT be dropped by an overwrite (issue #20)"
+        );
+    }
+
+    /// Answering the displayed card sends the reply and promotes the next
+    /// queued card onto the screen — so the user can clear approvals one by one
+    /// and every tool future gets its reply.
+    #[test]
+    fn answering_current_promotes_next_from_queue() {
+        let mut app = test_app();
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
+        promote_or_enqueue_approval(&mut app, approval_state("shell", tx1), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("edit_file", tx2), "Full");
+
+        // Approve the displayed card (Enter with selection at index 0 = Y).
+        handle_approval_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // First tool got its reply.
+        assert!(
+            matches!(rx1.try_recv().unwrap(), InteractionResponse::Proceed),
+            "approving the displayed card must reply to ITS channel"
+        );
+
+        // Second card is now on screen, queue drained by one.
+        assert_eq!(
+            app.approval_pending.as_ref().unwrap().tool_name,
+            "edit_file",
+            "next queued approval must be promoted onto the screen"
+        );
+        assert!(app.approval_queue.is_empty(), "queue drained by one");
+
+        // Clear it too.
+        handle_approval_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(rx2.try_recv().unwrap(), InteractionResponse::Proceed),
+            "the previously-queued approval must also get its reply"
+        );
+        assert!(
+            app.approval_pending.is_none(),
+            "no approval left pending after queue is exhausted"
+        );
+    }
+
+    /// A brand-new approval batch's first card must surface a chat Approval
+    /// message; subsequent ones surface as they are promoted.
+    #[test]
+    fn approval_cards_surface_one_at_a_time() {
+        let mut app = test_app();
+        let (tx1, _rx1) = oneshot::channel();
+        let (tx2, _rx2) = oneshot::channel();
+        let (tx3, _rx3) = oneshot::channel();
+
+        promote_or_enqueue_approval(&mut app, approval_state("shell", tx1), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("edit_file", tx2), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("apply_patch", tx3), "Full");
+
+        // Only the first is displayed so far → exactly one Approval card on screen.
+        let cards = app
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, ChatRole::Approval))
+            .count();
+        assert_eq!(cards, 1, "queued approvals must not each emit a card yet");
+
+        promote_next_approval(&mut app);
+        let cards = app
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, ChatRole::Approval))
+            .count();
+        assert_eq!(cards, 2, "promoting the next approval surfaces a new card");
     }
 }

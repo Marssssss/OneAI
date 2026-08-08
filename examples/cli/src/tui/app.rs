@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -728,8 +729,15 @@ pub struct App {
     /// Message history for ↑↓ navigation.
     pub message_history: MessageHistory,
 
-    /// Pending approval request (if any).
+    /// Pending approval request (if any) — the one currently displayed.
     pub approval_pending: Option<ApprovalPendingState>,
+
+    /// Approval requests queued behind the currently-displayed one. Parallel
+    /// tool calls can each require approval in the same iteration; without this
+    /// queue the later arrivals would overwrite `approval_pending` and drop the
+    /// earlier oneshot reply channels (Issue #20 — the user could only answer
+    /// the last approval, the rest silently failed with `ChannelDropped`).
+    pub approval_queue: VecDeque<ApprovalPendingState>,
 
     /// Selected option index in approval UI (0=Y, 1=N, 2=M, 3=A).
     pub approval_selected_index: usize,
@@ -902,6 +910,7 @@ impl App {
             collapsed_ids: HashSet::new(),
             message_history: MessageHistory::new(),
             approval_pending: None,
+            approval_queue: VecDeque::new(),
             approval_selected_index: 0,
             session_allowlist: HashSet::new(),
             interaction_mode: InteractionMode::default(),
