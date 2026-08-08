@@ -17,12 +17,12 @@
 //! Each "filled" cell is rendered as a space with bg=BRAND_COLOR, and each "empty"
 //! cell is a space with bg=BRAND_BG. This eliminates all gaps.
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -287,7 +287,10 @@ fn draw_text_brand(f: &mut Frame, rect: Rect, app: &App) {
     }
     full_spans.extend(brand_spans);
     let used = padding + total_visual_width;
-    let remaining = rect.width as usize - used;
+    // saturating: if the brand content is wider than the rect (very narrow
+    // terminal), just render left-aligned with no trailing fill rather than
+    // underflowing `rect.width - used`.
+    let remaining = (rect.width as usize).saturating_sub(used);
     if remaining > 0 {
         full_spans.push(Span::styled(
             " ".repeat(remaining),

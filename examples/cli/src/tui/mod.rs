@@ -20,7 +20,12 @@ use crossterm::{
     },
     ExecutableCommand,
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::backend::CrosstermBackend;
+// Issue #18: use a vendored `Terminal` (custom_terminal.rs, derived from
+// ratatui + codex) whose `diff_buffers` patches the ForcedWidth-shrinkage
+// residue and which exposes `invalidate_viewport()` to self-heal desync on
+// scroll/stream-end. See docs + examples/cli/src/tui/custom_terminal.rs.
+use crate::tui::custom_terminal::Terminal;
 
 use oneai_agent::ParadigmKind;
 use oneai_app::AppBuilder;
@@ -37,6 +42,7 @@ use session::SessionState;
 // ─── Public Modules ────────────────────────────────────────────────────────
 
 pub mod app;
+pub mod custom_terminal;
 pub mod history;
 pub mod input_mode;
 pub mod observer;
@@ -87,7 +93,7 @@ pub fn run_tui(
     // newline (each Enter triggers send). Pair with DisableBracketedPaste on exit.
     std::io::stdout().execute(EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(std::io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::with_options(backend)?;
     terminal.clear()?;
 
     // Build App
@@ -259,7 +265,7 @@ fn dispatch_event(
         // promptly. Without this, old content lingers (ghosting) until the next
         // keypress or stream token — ratatui's per-frame full-screen Clear handles
         // the actual wipe once a draw runs, and `autoresize` re-queries the size.
-        Event::Resize(_, _) => app.request_render(),
+        Event::Resize(_, _) => app.request_invalidate(), // Issue #18: full repaint after resize to resync any drifted cells
         _ => {}
     }
 }
@@ -406,12 +412,15 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
                 .content_height
                 .saturating_sub(app.last_chat_rect.height as usize);
             app.user_scrolled = app.chat_scroll_y < max_scroll;
-            app.request_render();
+            // Issue #18: scroll is a desync-reveal event — force a full-viewport
+            // repaint so any cells the terminal drifted from (clobbered during
+            // streaming) are resynced, not skipped by ratatui's incremental diff.
+            app.request_invalidate();
         }
         crossterm::event::MouseEventKind::ScrollUp => {
             app.chat_scroll_y = app.chat_scroll_y.saturating_sub(3);
             app.user_scrolled = true;
-            app.request_render();
+            app.request_invalidate(); // Issue #18: full repaint on scroll to self-heal desync
         }
 
         // ── Left button down ────────────────────────────────────────────────
@@ -699,6 +708,18 @@ fn run_main_loop(
         // Stream buffer is flushed in the draw path so a frame always reflects
         // all text received before its deadline.
         if app.render.should_draw() {
+            // Issue #18 self-heal: if a desync-trigger event (scroll / resize /
+            // stream-end / `/clear`) set the flag, force the vendored Terminal to
+            // repaint the whole viewport this frame instead of an incremental
+            // diff. ratatui's diff skips cells it thinks are unchanged, so once the
+            // terminal drifts from the buffer (e.g. a wide emoji's 2nd cell got
+            // clobbered during streaming) ordinary redraws never repair it.
+            // `invalidate_viewport` resets the previous buffer + marks every cell
+            // `AlwaysUpdate`, so this frame re-sends everything and resyncs.
+            if app.invalidate_next_draw {
+                terminal.invalidate_viewport();
+                app.invalidate_next_draw = false;
+            }
             app.flush_stream_buffer();
             // ?2026 synchronized output: batch this frame's cell updates into one
             // atomic terminal swap so a large repaint (fast scroll / resize /
@@ -777,6 +798,7 @@ fn handle_user_input_async(
                 // Create a new session entry in the sidebar
                 app.add_new_session(app.session_id.clone());
                 app.add_message(ChatRole::System, "Conversation cleared.");
+                app.request_invalidate(); // Issue #18: full repaint so cleared bubbles can't leave stale cells
                 return;
             }
             "/usage" => {
@@ -2206,7 +2228,10 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
         ObserverEvent::Complete(result) => {
             // Flush any remaining buffered stream text before marking as done
             app.flush_stream_buffer();
-            app.request_render(); // final text landed — draw the completed state now
+            // Issue #18: streaming may clobber wide cells on the terminal (the
+            // ratatui↔terminal width model can drift); force a full repaint at
+            // stream-end so the completed state is resynced, not left stale.
+            app.request_invalidate(); // final text landed — draw the completed state now
             app.stop_thinking(); // stop timer; last run duration retained for dim display
                                  // Remove useless thinking bubbles: the "Processing your request..."
                                  // placeholder (model never produced thinking) AND any empty thinking
@@ -2995,6 +3020,91 @@ mod issue18_tests {
     use super::process_observer_event;
     use crate::tui::app::{App, ChatRole};
     use oneai_agent::ToolCallRequest;
+    use unicode_width::UnicodeWidthStr;
+
+    /// Issue #18 (reopen) — root cause: emoji width mismatch between ratatui's
+    /// buffer (unicode-width 0.2) and the real terminal.
+    ///
+    /// `unicode-width 0.2` *under-reports* certain emoji as width 1 even though
+    /// every real terminal renders them as 2 cells (emoji presentation):
+    ///   🛠 (U+1F6E0)  -> width 1  ❌  (terminal renders 2)
+    ///   ♻ (U+267B)   -> width 1  ❌  (terminal renders 2)
+    ///   ⏱ (U+23F1)   -> width 1  ❌  (terminal renders 2)
+    /// (and their VS16-bearing forms, since the base char still reports 1.)
+    ///
+    /// When ratatui places such a glyph at col K (1 cell) and the terminal
+    /// advances the cursor by 2, ratatui's per-cell diff then writes the *next*
+    /// span's content into col K+1 — which on the terminal is the glyph's own
+    /// second cell — clobbering half of it. The full-screen `Clear` can't help:
+    /// the diff re-issues that wrong write every frame. Stale/missing chars
+    /// result, and they "re-mutate" when the line's content changes and the
+    /// diff re-sends a neighbouring cell. This was the actual cause of the
+    /// "old content remains / sidebar chars missing" residue — NOT a flush
+    /// ordering issue (the 7887b85 fix was misdiagnosed and ineffective).
+    ///
+    /// Guard: every glyph the TUI/sidebar/skill icons render as a fixed icon
+    /// MUST report width 2 under unicode-width 0.2 (== what a real terminal
+    /// renders). If someone reintroduces an under-reported emoji, this fails.
+    #[test]
+    fn issue18_no_under_reported_emoji_in_icons() {
+        // Skill icons — each must be exactly 2 cells wide (terminal-consistent).
+        let skills = [
+            "skill-creator",
+            "project-planning",
+            "code-review",
+            "debug-analysis",
+            "refactoring",
+            "test-strategy",
+            "documentation",
+            "git-workflow",
+            "dependency-analysis",
+            "deep-research",
+            "academic-search",
+            "data-extraction",
+            "citation-management",
+            "fact-verification",
+            "summarization",
+            "translation",
+            "creative-writing",
+            "nonexistent-skill", // default branch
+        ];
+        for name in skills {
+            let icon = oneai_skill::builtin::skill_icon(name);
+            let w = icon.width();
+            assert_eq!(
+                w, 2,
+                "skill_icon({name:?}) = {icon:?} reports unicode-width {w} (expected 2). \
+                 Width-1 emoji clobber their neighbour cell in ratatui's diff — see issue #18."
+            );
+        }
+
+        // Structural sidebar glyphs that must be width-2 (the formerly-broken
+        // ones are now replaced; pin the replacements so a revert is caught).
+        let must_be_2 = ["⏳", "🧰", "🔧", "🔁"];
+        for g in must_be_2 {
+            assert_eq!(
+                g.width(),
+                2,
+                "glyph {g:?} must report width 2 (issue #18 width-mismatch guard)"
+            );
+        }
+
+        // The known under-reported codepoints must NOT appear as standalone
+        // icon glyphs anywhere we render. (VS16 forms 🛠️/♻️ carry the same
+        // width-1 base, so forbid the base char too.)
+        let forbidden_base = ['🛠', '♻', '⏱'];
+        for name in skills {
+            let icon = oneai_skill::builtin::skill_icon(name);
+            for c in icon.chars() {
+                assert!(
+                    !forbidden_base.contains(&c),
+                    "skill_icon({name:?}) = {icon:?} contains under-reported char {c:?} — \
+                     reverts issue #18 fix"
+                );
+            }
+        }
+    }
+
     use oneai_core::ToolOutput;
     use std::sync::Arc;
 
@@ -3035,16 +3145,21 @@ mod issue18_tests {
         }
     }
 
-    /// Render `app` to a fresh TestBackend of the given size and return the
+    /// Render `app` to a fresh buffer of the given size and return the
     /// visible cell grid (each row joined, trailing spaces trimmed) so we can
     /// visually inspect what actually lands on screen.
+    ///
+    /// Uses the vendored `custom_terminal::Frame` directly (not `TestBackend`):
+    /// the vendored `Terminal` requires `B: Write`, which ratatui's
+    /// `TestBackend` doesn't impl, and these tests only inspect the rendered
+    /// buffer (cell content), which is widget-determined — independent of the
+    /// Terminal's flush path.
     fn render_to_strings(app: &mut App, w: u16, h: u16) -> Vec<String> {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-        let backend = TestBackend::new(w, h);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| crate::tui::render::draw(f, app)).unwrap();
-        let buffer = terminal.backend().buffer();
+        use crate::tui::custom_terminal::Frame;
+        let area = ratatui::layout::Rect::new(0, 0, w, h);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let mut frame = Frame::new_for_test(&mut buffer, area);
+        crate::tui::render::draw(&mut frame, app);
         (0..h)
             .map(|y| {
                 let row: String = (0..w)

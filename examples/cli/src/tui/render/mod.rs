@@ -11,12 +11,12 @@
 //! └──────────┴───────────────────────────────────────────────────────┘
 //! ```
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem},
-    Frame,
 };
 
 use super::app::App;

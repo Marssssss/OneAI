@@ -633,6 +633,15 @@ pub struct App {
     /// 渲染去抖调度器（取代旧 `dirty` 标志，统一 draw 门控 + stream flush 时机）。
     pub render: RenderScheduler,
 
+    /// Issue #18 self-heal: set to force the *next* draw to do a full-viewport
+    /// repaint (ratatui `invalidate_viewport` — reset previous buffer +
+    /// `CellDiffOption::AlwaysUpdate`) instead of an incremental diff. This
+    /// heals any buffer↔terminal desync (the cause of residue that doesn't
+    /// clear on redraw — e.g. after streaming clobbered a wide cell, or after
+    /// raw terminal ops). Set on desync-trigger events (scroll, resize,
+    /// stream-end, /clear); consumed in the main draw path.
+    pub invalidate_next_draw: bool,
+
     /// Whether the sidebar is visible.
     pub show_sidebar: bool,
 
@@ -865,6 +874,7 @@ impl App {
         Self {
             should_quit: false,
             render: RenderScheduler::new(), // First frame must always draw
+            invalidate_next_draw: false,    // Issue #18: no desync to heal at startup
             show_sidebar: true,
             input: String::new(),
             input_cursor_pos: 0,
@@ -952,6 +962,13 @@ impl App {
     /// 即时请求渲染（交互路径，零延迟）——等价旧 `dirty = true`。
     pub fn request_render(&mut self) {
         self.render.request_render();
+    }
+
+    /// Issue #18: 请求下一帧做全量重绘（自愈 desync）。在滚动/resize/流式结束/
+    /// `/clear` 等可能让 ratatui buffer 与终端失步的点调用。主循环 draw 前消费。
+    pub fn request_invalidate(&mut self) {
+        self.invalidate_next_draw = true;
+        self.request_render();
     }
 
     /// 去抖请求渲染（流式 token / spinner）——武装 deadline，窗口内合并。

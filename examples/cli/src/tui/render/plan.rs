@@ -6,12 +6,12 @@
 //! a plan via `exit_plan_mode`, `draw_plan_approval` shows an accept/reject
 //! popup instead.
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    Frame,
 };
 
 use oneai_agent::{PlanStep, PlanStepStatus};

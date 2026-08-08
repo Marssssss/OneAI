@@ -4,11 +4,11 @@
 //! context information below the brand line in a compact format:
 //! `provider·model | session_id | paradigm#iteration | ctx 0.6k/128k $0.003`
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    Frame,
 };
 
 use super::super::app::{App, InteractionMode};

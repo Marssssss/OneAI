@@ -297,11 +297,11 @@ pub fn builtin_skill_names() -> Vec<&'static str> {
 /// Used in TUI rendering for visual identification.
 pub fn skill_icon(name: &str) -> &str {
     match name {
-        "skill-creator" => "🛠️",
+        "skill-creator" => "🔧",
         "project-planning" => "📋",
         "code-review" => "🔍",
         "debug-analysis" => "🐛",
-        "refactoring" => "♻️",
+        "refactoring" => "🔁",
         "test-strategy" => "✅",
         "documentation" => "📝",
         "git-workflow" => "🌿",

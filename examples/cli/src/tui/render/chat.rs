@@ -12,12 +12,12 @@
 //! markdown and re-highlighting code blocks every frame. Only messages whose
 //! content, collapsed state, or width has changed are re-rendered.
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
-    Frame,
 };
 
 use super::super::app::{content_hash, App, ChatMessage, ChatRole};

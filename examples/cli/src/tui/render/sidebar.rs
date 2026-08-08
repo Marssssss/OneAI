@@ -8,12 +8,12 @@
 //! - Skills section
 //! - Cost section (cost + context occupancy bar)
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem},
-    Frame,
 };
 
 use super::super::app::App;
@@ -57,7 +57,7 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
             ratatui::style::Color::DarkGray
         };
         items.push(ListItem::new(Line::from(Span::styled(
-            format!(" ⏱ {}", super::format_work_duration(dur)),
+            format!(" ⏳ {}", super::format_work_duration(dur)),
             Style::default().fg(color),
         ))));
     }
@@ -168,7 +168,7 @@ pub fn draw_sidebar(f: &mut Frame, rect: Rect, app: &App) {
 
         // ── Tools section ────────────────────────────────────────────────────
         items.push(ListItem::new(Line::from(Span::styled(
-            " 🛠 Tools",
+            " 🧰 Tools",
             Style::default()
                 .fg(SIDEBAR_TITLE_COLOR)
                 .add_modifier(Modifier::BOLD),

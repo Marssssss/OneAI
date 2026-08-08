@@ -192,8 +192,11 @@ dirs = "5"
 tempfile = "3"
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
+# Vendored Terminal (custom_terminal.rs, derived from codex/ratatui) uses
+# derive_more::IsVariant on its DrawCommand enum.
+derive_more = { version = "1", features = ["is_variant"] }
 # System clipboard for in-app Shift+drag text selection in the TUI.
 arboard = "3.6"
 

@@ -24,8 +24,9 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 regex = { workspace = true }
 dirs = { workspace = true }
-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["crossterm_0_28", "unstable"] }
 crossterm = { workspace = true, features = ["bracketed-paste"] }
+derive_more = { workspace = true }
 async-trait = { workspace = true }
 oneai-core = { workspace = true }
 oneai-app = { workspace = true }

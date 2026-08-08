@@ -8,12 +8,12 @@
 //! cause of issue #8. `input_visual_line_count` is shared with the layout in
 //! `render/mod.rs` so the input area grows with the wrapped line count (capped).
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 
 use super::super::app::{App, InteractionMode};

@@ -6,12 +6,12 @@
 //! - Y/N/M/A response options
 //! - Adaptive width based on terminal width
 
+use crate::tui::custom_terminal::Frame;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
