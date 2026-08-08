@@ -5,7 +5,7 @@
 //! a hardcoded environment snapshot — the single source of truth for env
 //! sensing, composed via DomainPacks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 // for `writeln!` on String in the reconciliation block
@@ -28,7 +28,7 @@ use crate::context_source::{ContextSource, RefreshPolicy};
 /// Refresh policy: OnChange — only injects new content when git status changes.
 /// Priority: 10 (high — git status is very important for coding agents).
 pub struct GitStatusSource {
-    project_dir: PathBuf,
+    project_dir: Arc<std::sync::RwLock<PathBuf>>,
     last_content: Arc<RwLock<Option<String>>>,
 }
 
@@ -36,7 +36,7 @@ impl GitStatusSource {
     /// Create a new GitStatusSource for the given project directory.
     pub fn new(project_dir: &str) -> Self {
         Self {
-            project_dir: PathBuf::from(project_dir),
+            project_dir: Arc::new(std::sync::RwLock::new(PathBuf::from(project_dir))),
             last_content: Arc::new(RwLock::new(None)),
         }
     }
@@ -49,7 +49,13 @@ impl ContextSource for GitStatusSource {
     }
 
     async fn load(&self) -> Result<String> {
-        let dir = self.project_dir.to_str().unwrap_or(".");
+        let dir = self
+            .project_dir
+            .read()
+            .unwrap()
+            .to_str()
+            .unwrap_or(".")
+            .to_string();
         let (shell, shell_arg) = if cfg!(target_os = "windows") {
             ("powershell", "-Command")
         } else {
@@ -166,6 +172,15 @@ impl ContextSource for GitStatusSource {
     fn priority(&self) -> u32 {
         10
     }
+
+    fn is_path_bound(&self) -> bool {
+        true
+    }
+
+    fn rebind_project_dir(&self, dir: &Path) -> bool {
+        *self.project_dir.write().unwrap() = dir.to_path_buf();
+        true
+    }
 }
 
 // ─── FileTreeSource ────────────────────────────────────────────────────────────
@@ -179,14 +194,14 @@ impl ContextSource for GitStatusSource {
 /// Refresh policy: OnceAtStart — file structure rarely changes during a session.
 /// Priority: 20 (medium — file structure is important but stable).
 pub struct FileTreeSource {
-    project_dir: PathBuf,
+    project_dir: Arc<std::sync::RwLock<PathBuf>>,
 }
 
 impl FileTreeSource {
     /// Create a new FileTreeSource for the given project directory.
     pub fn new(project_dir: &str) -> Self {
         Self {
-            project_dir: PathBuf::from(project_dir),
+            project_dir: Arc::new(std::sync::RwLock::new(PathBuf::from(project_dir))),
         }
     }
 }
@@ -198,7 +213,13 @@ impl ContextSource for FileTreeSource {
     }
 
     async fn load(&self) -> Result<String> {
-        let dir = self.project_dir.to_str().unwrap_or(".");
+        let dir = self
+            .project_dir
+            .read()
+            .unwrap()
+            .to_str()
+            .unwrap_or(".")
+            .to_string();
         let (shell, shell_arg) = if cfg!(target_os = "windows") {
             ("powershell", "-Command")
         } else {
@@ -246,6 +267,15 @@ impl ContextSource for FileTreeSource {
     fn priority(&self) -> u32 {
         20
     }
+
+    fn is_path_bound(&self) -> bool {
+        true
+    }
+
+    fn rebind_project_dir(&self, dir: &Path) -> bool {
+        *self.project_dir.write().unwrap() = dir.to_path_buf();
+        true
+    }
 }
 
 // ─── ProjectConfigSource ───────────────────────────────────────────────────────
@@ -260,14 +290,14 @@ impl ContextSource for FileTreeSource {
 /// Refresh policy: OnceAtStart — project config rarely changes.
 /// Priority: 30 (lower — config is useful but not critical).
 pub struct ProjectConfigSource {
-    project_dir: PathBuf,
+    project_dir: Arc<std::sync::RwLock<PathBuf>>,
 }
 
 impl ProjectConfigSource {
     /// Create a new ProjectConfigSource for the given project directory.
     pub fn new(project_dir: &str) -> Self {
         Self {
-            project_dir: PathBuf::from(project_dir),
+            project_dir: Arc::new(std::sync::RwLock::new(PathBuf::from(project_dir))),
         }
     }
 }
@@ -279,7 +309,7 @@ impl ContextSource for ProjectConfigSource {
     }
 
     async fn load(&self) -> Result<String> {
-        let dir = &self.project_dir;
+        let dir = self.project_dir.read().unwrap().clone();
 
         // Try to read Cargo.toml (Rust project)
         let cargo_path = dir.join("Cargo.toml");
@@ -330,6 +360,15 @@ impl ContextSource for ProjectConfigSource {
 
     fn priority(&self) -> u32 {
         30
+    }
+
+    fn is_path_bound(&self) -> bool {
+        true
+    }
+
+    fn rebind_project_dir(&self, dir: &Path) -> bool {
+        *self.project_dir.write().unwrap() = dir.to_path_buf();
+        true
     }
 }
 
@@ -465,7 +504,7 @@ impl ContextSource for EnvironmentInfoSource {
 /// Refresh policy: OnceAtStart — project instructions rarely change during a session.
 /// Priority: 1 (highest — project instructions are the primary context driver).
 pub struct ProjectInstructionsSource {
-    project_dir: PathBuf,
+    project_dir: Arc<std::sync::RwLock<PathBuf>>,
     cached_content: Arc<RwLock<Option<String>>>,
 }
 
@@ -473,7 +512,7 @@ impl ProjectInstructionsSource {
     /// Create a new ProjectInstructionsSource for the given project directory.
     pub fn new(project_dir: &str) -> Self {
         Self {
-            project_dir: PathBuf::from(project_dir),
+            project_dir: Arc::new(std::sync::RwLock::new(PathBuf::from(project_dir))),
             cached_content: Arc::new(RwLock::new(None)),
         }
     }
@@ -481,11 +520,12 @@ impl ProjectInstructionsSource {
     /// Search for instruction files in priority order.
     /// Returns the content of the first file found, or None.
     async fn find_instructions(&self) -> Option<String> {
+        let project_dir = self.project_dir.read().unwrap().clone();
         let candidates = ["ONEAI.md", "CLAUDE.md", "AGENTS.md"];
 
         // 1. Check project root directory
         for candidate in &candidates {
-            let path = self.project_dir.join(candidate);
+            let path = project_dir.join(candidate);
             if path.exists() {
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     if !content.trim().is_empty() {
@@ -500,7 +540,7 @@ impl ProjectInstructionsSource {
         let subdirs = ["src", "lib", "app", "crates", "packages", "modules"];
         for subdir in &subdirs {
             for candidate in &candidates {
-                let path = self.project_dir.join(subdir).join(candidate);
+                let path = project_dir.join(subdir).join(candidate);
                 if path.exists() {
                     if let Ok(content) = tokio::fs::read_to_string(&path).await {
                         if !content.trim().is_empty() {
@@ -557,6 +597,15 @@ impl ContextSource for ProjectInstructionsSource {
     fn priority(&self) -> u32 {
         1
     } // Highest priority — project instructions are the primary context
+
+    fn is_path_bound(&self) -> bool {
+        true
+    }
+
+    fn rebind_project_dir(&self, dir: &Path) -> bool {
+        *self.project_dir.write().unwrap() = dir.to_path_buf();
+        true
+    }
 }
 
 // ─── GitReconciliationSource ──────────────────────────────────────────────────
@@ -874,6 +923,78 @@ mod tests {
             EnvironmentInfoSource::new().refresh_policy(),
             RefreshPolicy::OnceAtStart
         );
+    }
+
+    // ─── switch_project rebind ─────────────────────────────────────────────
+    // Issue #19: path-bound sources must re-bind to a new project dir so the
+    // model can drop redundant context from the startup project.
+
+    #[tokio::test]
+    async fn test_rebind_project_config_source() {
+        use std::fs;
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        fs::write(
+            dir_a.path().join("Cargo.toml"),
+            "[package]\nname = \"project_a\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir_b.path().join("Cargo.toml"),
+            "[package]\nname = \"project_b\"\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+
+        let source = ProjectConfigSource::new(dir_a.path().to_str().unwrap());
+        assert!(source.is_path_bound());
+        assert!(source.load().await.unwrap().contains("project_a"));
+
+        assert!(source.rebind_project_dir(dir_b.path()));
+        assert!(source.load().await.unwrap().contains("project_b"));
+    }
+
+    #[tokio::test]
+    async fn test_rebind_project_instructions_source() {
+        use std::fs;
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        fs::write(dir_a.path().join("CLAUDE.md"), "rules for project A").unwrap();
+        fs::write(dir_b.path().join("CLAUDE.md"), "rules for project B").unwrap();
+
+        let source = ProjectInstructionsSource::new(dir_a.path().to_str().unwrap());
+        assert!(source.is_path_bound());
+        assert_eq!(source.load().await.unwrap(), "rules for project A");
+
+        assert!(source.rebind_project_dir(dir_b.path()));
+        assert_eq!(source.load().await.unwrap(), "rules for project B");
+    }
+
+    #[tokio::test]
+    async fn test_rebind_file_tree_source() {
+        use std::fs;
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        fs::write(dir_a.path().join("marker_a.txt"), "").unwrap();
+        fs::write(dir_b.path().join("marker_b.txt"), "").unwrap();
+
+        let source = FileTreeSource::new(dir_a.path().to_str().unwrap());
+        assert!(source.is_path_bound());
+        assert!(source.load().await.unwrap().contains("marker_a.txt"));
+
+        assert!(source.rebind_project_dir(dir_b.path()));
+        assert!(source.load().await.unwrap().contains("marker_b.txt"));
+        assert!(!source.load().await.unwrap().contains("marker_a.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_ambient_sources_are_not_path_bound() {
+        // Date / environment sources are ambient — rebind is a no-op.
+        let date = DateSource::new();
+        assert!(!date.is_path_bound());
+        assert!(!date.rebind_project_dir(std::path::Path::new("/nonexistent")));
+        let env = EnvironmentInfoSource::new();
+        assert!(!env.is_path_bound());
+        assert!(!env.rebind_project_dir(std::path::Path::new("/nonexistent")));
     }
 
     // ─── GitReconciliationSource ───────────────────────────────────────────

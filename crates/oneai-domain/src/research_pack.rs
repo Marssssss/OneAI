@@ -72,7 +72,13 @@ prioritize relevance over comprehensiveness.
 
 When you need to search the web, use web_search. When you need to read a specific page, \
 use web_fetch. When you need to read local files, use read_file. When your research is \
-complete, provide a comprehensive synthesis with citations.";
+complete, provide a comprehensive synthesis with citations.
+
+**Working on a different project:** The injected project context (project instructions, \
+file tree, project config, git status) is bound to the directory OneAI was started in. \
+If your research concerns a project at a DIFFERENT path, call `switch_project` with that \
+project's absolute root path FIRST so the project context is re-bound and you read \
+accurate (non-redundant) information. The new context is injected on the next iteration.";
 
 // ─── Research Sub-Agent Type Definitions ──────────────────────────────────────
 

@@ -21,6 +21,7 @@
 //! DomainPacks, instead of a hardcoded parallel path.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 // for `writeln!` on String below
 use std::fmt::Write as _;
@@ -146,6 +147,37 @@ impl ContextAssembler {
                 .insert(source.key().to_string(), content);
         }
         Ok(())
+    }
+
+    /// Whether any source is path-bound (reads from a project directory).
+    ///
+    /// Gates advertising the `switch_project` meta-tool to the model — it's
+    /// only useful when at least one source would actually rebind, so a
+    /// no-domain build (mobile / macOS native) doesn't show a no-op.
+    pub fn has_path_bound_sources(&self) -> bool {
+        self.context_sources.iter().any(|s| s.is_path_bound())
+    }
+
+    /// Re-bind every path-bound source to a different project directory.
+    ///
+    /// Called when the model invokes the `switch_project` meta-tool (parsed in
+    /// `AgentLoop::parse_decision` → `AgentDecision::SwitchProject`). Each
+    /// path-bound source updates its interior-mutable directory; the rebound
+    /// sources' cached entries are dropped so the next `assemble()` doesn't
+    /// inject stale content from the old project — `refresh_sources()` (called
+    /// at the top of the next iteration) repopulates them from the new dir.
+    ///
+    /// Returns the number of sources rebound (0 when the new dir equals the
+    /// current one for every source, or no source is path-bound).
+    pub fn rebind_project_dir(&mut self, dir: &Path) -> usize {
+        let mut rebound = 0usize;
+        for source in &self.context_sources {
+            if source.rebind_project_dir(dir) {
+                self.cached_context.remove(source.key());
+                rebound += 1;
+            }
+        }
+        rebound
     }
 }
 
@@ -518,5 +550,91 @@ mod tests {
             block.contains("persistent long-term memory"),
             "guidance should frame it as persistent memory: {block}"
         );
+    }
+
+    // ─── switch_project / rebind_project_dir (Issue #19) ───────────────────
+
+    /// A path-bound source for testing: holds a dir in an interior-mutable
+    /// cell, returns content derived from the current dir so rebind is
+    /// observable via `load()`.
+    struct PathBoundStub {
+        dir: Arc<Mutex<std::path::PathBuf>>,
+    }
+
+    impl PathBoundStub {
+        fn new(dir: std::path::PathBuf) -> Self {
+            Self {
+                dir: Arc::new(Mutex::new(dir)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ContextSource for PathBoundStub {
+        fn key(&self) -> &str {
+            "path_bound_stub"
+        }
+        async fn load(&self) -> Result<String> {
+            let dir = self.dir.lock().unwrap().clone();
+            Ok(format!("ctx-for:{}", dir.display()))
+        }
+        fn is_path_bound(&self) -> bool {
+            true
+        }
+        fn rebind_project_dir(&self, dir: &Path) -> bool {
+            *self.dir.lock().unwrap() = dir.to_path_buf();
+            true
+        }
+    }
+
+    #[test]
+    fn has_path_bound_sources_reflects_source_set() {
+        // Empty assembler → no path-bound sources.
+        let ca = ContextAssembler::new();
+        assert!(!ca.has_path_bound_sources());
+
+        // Ambient-only (StubSource defaults is_path_bound=false) → still none.
+        let ca = ContextAssembler::with_context_sources(vec![Arc::new(StubSource {
+            key: "stub",
+            content: "x",
+        })]);
+        assert!(!ca.has_path_bound_sources());
+
+        // A path-bound source → true.
+        let ca = ContextAssembler::with_context_sources(vec![Arc::new(PathBoundStub::new(
+            std::path::PathBuf::from("/proj-a"),
+        ))]);
+        assert!(ca.has_path_bound_sources());
+    }
+
+    #[tokio::test]
+    async fn rebind_project_dir_updates_sources_and_clears_cache() {
+        let stub = Arc::new(PathBoundStub::new(std::path::PathBuf::from("/proj-a")));
+        let mut ca =
+            ContextAssembler::with_context_sources(vec![stub.clone() as Arc<dyn ContextSource>]);
+
+        // Prime the cache with proj-a content.
+        ca.refresh_sources().await.unwrap();
+        let state = LoopState::new("task");
+        let text_a = text_of(&ca.assemble(&state).unwrap());
+        assert!(text_a.contains("ctx-for:/proj-a"));
+
+        // Rebind to proj-b. The cache entry is dropped so the next assemble
+        // can't serve stale proj-a content; refresh re-reads proj-b.
+        let n = ca.rebind_project_dir(std::path::Path::new("/proj-b"));
+        assert_eq!(n, 1);
+        // Immediately after rebind (no refresh yet), the stale cache is gone.
+        let state2 = LoopState::new("task2");
+        let text_pre = text_of(&ca.assemble(&state2).unwrap());
+        assert!(
+            !text_pre.contains("ctx-for:/proj-a"),
+            "stale proj-a content must not survive rebind: {text_pre}"
+        );
+
+        // After refresh, the new project's content is injected.
+        ca.refresh_sources().await.unwrap();
+        let state3 = LoopState::new("task3");
+        let text_b = text_of(&ca.assemble(&state3).unwrap());
+        assert!(text_b.contains("ctx-for:/proj-b"));
     }
 }

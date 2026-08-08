@@ -288,6 +288,28 @@ impl ScriptedResponse {
         }
     }
 
+    /// Create a SwitchProject response — the model wants to re-bind the
+    /// project context to a different project root (Issue #19 meta-tool).
+    pub fn switch_project(project_dir: &str) -> Self {
+        Self {
+            content: vec![ContentBlock::ToolCall {
+                id: format!("call_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                name: "switch_project".to_string(),
+                args: serde_json::to_string(&serde_json::json!({
+                    "project_dir": project_dir,
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+            }],
+            usage: TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+                ..Default::default()
+            },
+            model: "mock-model".to_string(),
+        }
+    }
+
     /// Create a response with thinking content followed by a text answer.
     ///
     /// Simulates extended thinking models (Anthropic, DeepSeek).

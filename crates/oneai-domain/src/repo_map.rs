@@ -693,7 +693,7 @@ fn walk_dir(cur: &Path, skip: &[String], out: &mut Vec<PathBuf>) {
 // ─── RepoMapSource ──────────────────────────────────────────────────────────
 
 pub struct RepoMapSource {
-    project_dir: PathBuf,
+    project_dir: Arc<std::sync::RwLock<PathBuf>>,
     config: RepoMapConfig,
     last_content: Arc<RwLock<Option<String>>>,
 }
@@ -701,7 +701,7 @@ pub struct RepoMapSource {
 impl RepoMapSource {
     pub fn new(project_dir: &str) -> Self {
         Self {
-            project_dir: PathBuf::from(project_dir),
+            project_dir: Arc::new(std::sync::RwLock::new(PathBuf::from(project_dir))),
             config: RepoMapConfig::default(),
             last_content: Arc::new(RwLock::new(None)),
         }
@@ -709,7 +709,7 @@ impl RepoMapSource {
 
     pub fn with_config(project_dir: &str, config: RepoMapConfig) -> Self {
         Self {
-            project_dir: PathBuf::from(project_dir),
+            project_dir: Arc::new(std::sync::RwLock::new(PathBuf::from(project_dir))),
             config,
             last_content: Arc::new(RwLock::new(None)),
         }
@@ -722,7 +722,8 @@ impl ContextSource for RepoMapSource {
         "repo_map"
     }
     async fn load(&self) -> Result<String> {
-        let content = build_repo_map(&self.project_dir, &self.config).await;
+        let dir = self.project_dir.read().unwrap().clone();
+        let content = build_repo_map(&dir, &self.config).await;
         *self.last_content.write().await = Some(content.clone());
         Ok(content)
     }
@@ -731,6 +732,13 @@ impl ContextSource for RepoMapSource {
     }
     fn priority(&self) -> u32 {
         8
+    }
+    fn is_path_bound(&self) -> bool {
+        true
+    }
+    fn rebind_project_dir(&self, dir: &Path) -> bool {
+        *self.project_dir.write().unwrap() = dir.to_path_buf();
+        true
     }
 }
 
@@ -856,5 +864,28 @@ mod tests {
         assert_eq!(cfg.max_chars, 8000);
         assert_eq!(cfg.max_files, 200);
         assert!(cfg.skip_dirs.contains(&"target".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_rebind_repo_map_source() {
+        use std::fs;
+        // Issue #19: RepoMapSource must re-bind to a new project dir so the
+        // model can drop the startup project's repo map.
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir_a.path().join("src")).unwrap();
+        fs::write(dir_a.path().join("src").join("lib.rs"), "pub fn alpha() {}").unwrap();
+        fs::create_dir_all(dir_b.path().join("src")).unwrap();
+        fs::write(dir_b.path().join("src").join("lib.rs"), "pub fn beta() {}").unwrap();
+
+        let source = RepoMapSource::new(dir_a.path().to_str().unwrap());
+        assert!(source.is_path_bound());
+        let content_a = source.load().await.unwrap();
+        assert!(content_a.contains("alpha"));
+
+        assert!(source.rebind_project_dir(dir_b.path()));
+        let content_b = source.load().await.unwrap();
+        assert!(content_b.contains("beta"));
+        assert!(!content_b.contains("alpha"));
     }
 }

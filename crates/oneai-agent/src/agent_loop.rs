@@ -15,6 +15,7 @@
 //! - Checkpoints are saved automatically per iteration
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -202,6 +203,12 @@ pub enum AgentDecision {
 
     /// The model wants to switch to a different paradigm.
     SwitchParadigm { paradigm: ParadigmKind },
+
+    /// The model wants to re-bind the project context to a different project
+    /// root (the `switch_project` meta-tool). `call_id` is the tool-call id so
+    /// the loop can feed back a `tool_result` confirmation; `dir` is the target
+    /// project root. The next iteration injects the new project's context.
+    SwitchProject { call_id: String, dir: PathBuf },
 }
 
 // ─── ParadigmKind ───────────────────────────────────────────────────────────
@@ -2041,6 +2048,9 @@ impl AgentLoop {
                     AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
                     AgentDecision::Delegate { tasks } => format!("Delegate({} tasks)", tasks.len()),
                     AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
+                    AgentDecision::SwitchProject { dir, .. } => {
+                        format!("SwitchProject({})", dir.display())
+                    }
                 },
                 response.message.content.len(),
                 response.message.text_content().len(),
@@ -2160,6 +2170,9 @@ impl AgentLoop {
                         AgentDecision::ToolCalls { calls } => format!("ToolCalls({} calls)", calls.len()),
                         AgentDecision::Delegate { tasks } => format!("Delegate({} tasks)", tasks.len()),
                         AgentDecision::SwitchParadigm { .. } => "SwitchParadigm".to_string(),
+                        AgentDecision::SwitchProject { dir, .. } => {
+                            format!("SwitchProject({})", dir.display())
+                        }
                     },
                     retry_response.message.content.len(),
                 );
@@ -3163,6 +3176,66 @@ impl AgentLoop {
                         .await?;
                     state.feed_paradigm_result(paradigm, result);
                 }
+                AgentDecision::SwitchProject { call_id, dir } => {
+                    // Canonicalize so path-contains checks in the file-tool
+                    // sandbox and the sources' `find`/`git` cd resolve the
+                    // same absolute path the model meant. Fall back to the raw
+                    // arg if canonicalization fails (dir doesn't exist yet).
+                    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+
+                    // ─── Trace: log project switch event ─────────────────
+                    if let Some(ctx) = &self.config.trace_context {
+                        ctx.log_event(
+                            EventKind::WorkflowStepStart,
+                            "agent.project_switch",
+                            HashMap::from([(
+                                "agent.project_dir".to_string(),
+                                serde_json::json!(dir.to_string_lossy().to_string()),
+                            )]),
+                        );
+                    }
+
+                    // Surface any preamble text the model emitted before the
+                    // switch call, then rebind every path-bound context source.
+                    let text_content = response.message.text_content();
+                    if !text_content.is_empty() {
+                        state
+                            .conversation
+                            .add_message(Message::assistant(&text_content));
+                    }
+                    let rebound = self
+                        .context_assembler
+                        .write()
+                        .await
+                        .rebind_project_dir(&dir);
+                    tracing::info!(
+                        "AgentLoop switch_project → {} ({} sources rebound)",
+                        dir.display(),
+                        rebound
+                    );
+                    // Feed back a tool_result so the model sees the switch was
+                    // honored — and knows the new context lands next iteration.
+                    let confirmation = format!(
+                        "Project context re-bound to {} ({} sources rebound). \
+                         Next iteration injects the new project's instructions / \
+                         repo map / file tree / config / git status. \
+                         Note: the file-tool and shell sandboxes stay scoped to \
+                         the startup project — use absolute paths via shell for \
+                         file operations on the new project.",
+                        dir.display(),
+                        rebound
+                    );
+                    state
+                        .conversation
+                        .add_message(Message::tool_result(call_id.clone(), confirmation.clone()));
+                    let tool_output = ToolOutput {
+                        success: true,
+                        content: confirmation,
+                        error: None,
+                        added_tool_names: Vec::new(),
+                    };
+                    observer.on_tool_result(&call_id, "switch_project", &tool_output);
+                }
             }
 
             // ─── DirectAnswer-triggered Reflect (Phase 2.1 Stage A) ─────────
@@ -3582,6 +3655,26 @@ impl AgentLoop {
                                 _ => ParadigmKind::ReAct,
                             };
                             return Ok(AgentDecision::SwitchParadigm { paradigm });
+                        }
+                    }
+                    if name == "switch_project" {
+                        // Re-bind the project context to a different project root.
+                        // Like `switch_paradigm`, intercepted here and never
+                        // dispatched to the ToolExecutor; the loop handler feeds
+                        // back a `tool_result` confirmation and the next
+                        // iteration injects the new project's context. Any other
+                        // tool calls in the same turn are dropped (they would
+                        // run against the old/stale project context).
+                        let dir_str = args_value
+                            .get("project_dir")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| args_value.get("path").and_then(|v| v.as_str()));
+                        if let Some(dir_str) = dir_str {
+                            let dir = PathBuf::from(dir_str);
+                            return Ok(AgentDecision::SwitchProject {
+                                call_id: id.clone(),
+                                dir,
+                            });
                         }
                     }
                     tool_calls.push(ToolCallRequest {
@@ -5385,6 +5478,13 @@ impl AgentLoop {
             if self.sub_agent_factory.available_kinds().is_empty() {
                 meta.retain(|d| d.name != crate::meta_tool::TOOL_DELEGATE);
             }
+            // `switch_project` only makes sense when at least one context
+            // source is path-bound (a DomainPack is active). On a no-domain
+            // build (mobile / macOS native) there are no path-bound sources, so
+            // advertising it would be a no-op the model might call uselessly.
+            if !self.context_assembler.read().await.has_path_bound_sources() {
+                meta.retain(|d| d.name != crate::meta_tool::TOOL_SWITCH_PROJECT);
+            }
             all.append(&mut meta);
         }
         all
@@ -6212,7 +6312,13 @@ impl AgentLoopGraphActionExecutor {
         // NOTE: the plan control tools (task_create/exit_plan_mode/...) are not
         // injected here yet — that is pre-existing tech debt, out of scope for
         // the meta-tool打通 work.
-        defs.append(&mut crate::meta_tool::meta_tool_definitions());
+        // `switch_project` is loop-only: it relies on `AgentDecision::
+        // SwitchProject`, which the graph executor (oneai-core `GraphDecision`)
+        // doesn't model. Filter it so a StateGraph LlmInfer node doesn't
+        // advertise a meta-tool it can't honor.
+        let mut meta = crate::meta_tool::meta_tool_definitions();
+        meta.retain(|d| d.name != crate::meta_tool::TOOL_SWITCH_PROJECT);
+        defs.append(&mut meta);
         defs
     }
 }

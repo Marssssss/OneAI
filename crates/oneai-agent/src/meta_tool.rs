@@ -22,16 +22,21 @@
 pub const TOOL_DELEGATE: &str = "delegate";
 /// Tool name for switching the active paradigm (entering a fixed graph flow).
 pub const TOOL_SWITCH_PARADIGM: &str = "switch_paradigm";
+/// Tool name for re-binding the project context to a different project root.
+pub const TOOL_SWITCH_PROJECT: &str = "switch_project";
 
 /// Whether a tool name is a model-driven meta-tool that the loop intercepts.
 ///
 /// Use this as a defensive guard in the tool-dispatch path so a future routing
-/// change can never accidentally send `delegate`/`switch_paradigm` to the
-/// `ToolExecutor` (which would emit a "tool not found" error). Today
-/// `parse_decision` converts these to `AgentDecision` before dispatch, so this
-/// predicate is a backstop, not the primary filter.
+/// change can never accidentally send `delegate`/`switch_paradigm`/
+/// `switch_project` to the `ToolExecutor` (which would emit a "tool not found"
+/// error). Today `parse_decision` converts these to `AgentDecision` before
+/// dispatch, so this predicate is a backstop, not the primary filter.
 pub fn is_meta_tool(name: &str) -> bool {
-    matches!(name, TOOL_DELEGATE | TOOL_SWITCH_PARADIGM)
+    matches!(
+        name,
+        TOOL_DELEGATE | TOOL_SWITCH_PARADIGM | TOOL_SWITCH_PROJECT
+    )
 }
 
 /// JSON-schema tool definitions for the two meta-tools, injected into the
@@ -105,6 +110,29 @@ pub fn meta_tool_definitions() -> Vec<oneai_core::ToolDefinition> {
                 "required": ["paradigm"]
             }),
         },
+        oneai_core::ToolDefinition {
+            name: TOOL_SWITCH_PROJECT.into(),
+            description: "Re-bind the project *context* (project instructions, repo map, \
+                file tree, project config, git status) to a different project root directory. \
+                Call this FIRST, before any other work, when the task concerns a project that \
+                lives at a different path than the currently-injected project context — so you \
+                operate on accurate (non-redundant) information instead of carrying the wrong \
+                project's CLAUDE.md / repo map / file tree / config / git status. Pass the \
+                absolute path to the target project's root directory. The new context is \
+                injected on the next iteration. Note: this re-binds context only; the file-tool \
+                and shell sandboxes stay scoped to the startup project, so use absolute paths \
+                via shell for file operations on the new project.".into(),
+            parameters_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Absolute path to the target project's root directory."
+                    }
+                },
+                "required": ["project_dir"]
+            }),
+        },
     ]
 }
 
@@ -116,6 +144,7 @@ mod tests {
     fn test_is_meta_tool() {
         assert!(is_meta_tool(TOOL_DELEGATE));
         assert!(is_meta_tool(TOOL_SWITCH_PARADIGM));
+        assert!(is_meta_tool(TOOL_SWITCH_PROJECT));
         assert!(!is_meta_tool("read_file"));
         assert!(!is_meta_tool("delegate_other"));
         assert!(!is_meta_tool(""));
@@ -124,7 +153,7 @@ mod tests {
     #[test]
     fn test_meta_tool_definitions_shape() {
         let defs = meta_tool_definitions();
-        assert_eq!(defs.len(), 2);
+        assert_eq!(defs.len(), 3);
 
         let delegate = defs.iter().find(|d| d.name == TOOL_DELEGATE).unwrap();
         let schema = &delegate.parameters_schema;
@@ -157,5 +186,11 @@ mod tests {
             serde_json::json!(["plan", "react", "reflect", "explore"])
         );
         assert_eq!(schema["required"], serde_json::json!(["paradigm"]));
+
+        let switch_proj = defs.iter().find(|d| d.name == TOOL_SWITCH_PROJECT).unwrap();
+        let schema = &switch_proj.parameters_schema;
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["project_dir"]["type"], "string");
+        assert_eq!(schema["required"], serde_json::json!(["project_dir"]));
     }
 }
