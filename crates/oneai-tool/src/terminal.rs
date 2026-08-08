@@ -197,6 +197,47 @@ pub(crate) fn format_and_truncate(stdout: &str, stderr: &str, max_output_bytes: 
     }
 }
 
+/// Detect whether a sandbox-wrapped command's failure was a **sandbox policy
+/// denial** (vs. a genuine command error), and return a clear, non-retryable
+/// message when it was.
+///
+/// Seatbelt denies surface as `Operation not permitted` (EPERM); bwrap
+/// ro-bind write attempts as `Read-only file system` (EROFS). Without this,
+/// a denied write (`echo x > /opt/homebrew/...`) returned a generic
+/// `Exit code: 1` — the agent loop re-prompted the model for self-correction,
+/// the model retried the same doomed command, and the user saw "failure then
+/// a second approval dialog" (issue #21). Surfacing a clear, non-retryable
+/// denial stops the retry loop and tells the user exactly what the sandbox
+/// blocked.
+///
+/// Only consulted when the command was sandbox-wrapped (`backend_name`
+/// provided) — a bare `Permission denied` from an unwrapped command stays a
+/// plain exit-code error (it's an OS permission issue, not sandbox policy).
+pub(crate) fn sandbox_denial_message(
+    backend_name: &str,
+    stdout: &str,
+    stderr: &str,
+) -> Option<String> {
+    let combined = format!("{stdout}\n{stderr}");
+    // Match case-insensitively via lowercasing so "operation not permitted"
+    // (some shells lower-case it) is caught too.
+    let combined_l = combined.to_lowercase();
+    let signature = if combined_l.contains("operation not permitted") {
+        "operation not permitted"
+    } else if combined_l.contains("read-only file system") {
+        "read-only file system"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "Denied by {backend_name} sandbox policy: the sandbox blocked this operation \
+         ({signature}). Writes outside the project/temp/HOME dirs and reads of ~/.ssh et al. \
+         are not permitted. This is a security policy, not a transient failure — do NOT retry \
+         the same command. Target a path inside the project, or ask the user to run it outside \
+         the sandbox."
+    ))
+}
+
 // ─── LocalBackend ────────────────────────────────────────────────────────────
 
 /// Local terminal backend — the current `ShellTool` execution path, verbatim.
@@ -253,18 +294,22 @@ impl TerminalBackend for LocalBackend {
         // if one is configured. The working dir for wrapping comes from the
         // caller's ExecOptions (ShellTool builds it from its
         // allowed_working_dirs); default to "." when unspecified.
-        let effective_command = if let Some(b) = &self.sandbox {
+        //
+        // `sandbox_name` is captured so a wrapped-command failure can be
+        // checked against the sandbox-denial signature (issue #21) — surfacing
+        // a clear non-retryable denial instead of a generic exit code.
+        let (effective_command, sandbox_name) = if let Some(b) = &self.sandbox {
             let working_dir = opts
                 .working_dir
                 .as_deref()
                 .unwrap_or_else(|| std::path::Path::new("."));
             let wrapped = b.wrap_command(command, working_dir)?;
             tracing::info!("ShellTool: command wrapped by {} sandbox backend", b.name());
-            wrapped.shell_command
+            (wrapped.shell_command, Some(b.name().to_string()))
         } else {
             // No backend — just use the raw command (regex-only protection
             // already ran in ShellTool::execute).
-            command.to_string()
+            (command.to_string(), None)
         };
 
         // Resolve the shell based on the platform and (on Windows) whether
@@ -287,14 +332,22 @@ impl TerminalBackend for LocalBackend {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 let content = format_and_truncate(&stdout, &stderr, opts.max_output_bytes);
+                let error = if output.status.success() {
+                    None
+                } else if let Some(name) = &sandbox_name {
+                    // Sandboxed failure — check for a sandbox policy denial
+                    // first (issue #21); fall back to a plain exit code if
+                    // the failure doesn't look like a sandbox denial.
+                    sandbox_denial_message(name, &stdout, &stderr).or_else(|| {
+                        Some(format!("Exit code: {}", output.status.code().unwrap_or(-1)))
+                    })
+                } else {
+                    Some(format!("Exit code: {}", output.status.code().unwrap_or(-1)))
+                };
                 Ok(ExecResult {
                     success: output.status.success(),
                     content,
-                    error: if output.status.success() {
-                        None
-                    } else {
-                        Some(format!("Exit code: {}", output.status.code().unwrap_or(-1)))
-                    },
+                    error,
                 })
             }
             Ok(Err(e)) => Ok(ExecResult {
@@ -458,5 +511,107 @@ mod tests {
             .await
             .unwrap();
         assert!(res.content.contains("[output truncated due to size limit]"));
+    }
+
+    // ─── sandbox_denial_message (issue #21) ───────────────────────────────
+
+    #[test]
+    fn test_sandbox_denial_detects_operation_not_permitted() {
+        // seatbelt EPERM on a file-write redirect: `sh: /opt/homebrew/x:
+        // Operation not permitted`.
+        let msg = sandbox_denial_message(
+            "seatbelt",
+            "",
+            "sh: /opt/homebrew/oneai_sb_test.txt: Operation not permitted",
+        );
+        let msg = msg.expect("seatbelt EPERM must be detected");
+        assert!(msg.contains("Denied by seatbelt sandbox policy"));
+        assert!(msg.contains("operation not permitted"));
+        assert!(msg.contains("do NOT retry"));
+    }
+
+    #[test]
+    fn test_sandbox_denial_detects_readonly_filesystem() {
+        // bwrap ro-bind write: `Read-only file system` (EROFS).
+        let msg = sandbox_denial_message("bwrap", "", "sh: /usr/local/x: Read-only file system")
+            .expect("bwrap EROFS must be detected");
+        assert!(msg.contains("Denied by bwrap sandbox policy"));
+        assert!(msg.contains("read-only file system"));
+    }
+
+    #[test]
+    fn test_sandbox_denial_case_insensitive() {
+        // Some shells lowercase the errno string.
+        assert!(sandbox_denial_message("seatbelt", "", "x: operation not permitted").is_some());
+    }
+
+    #[test]
+    fn test_sandbox_denial_ignores_unrelated_failure() {
+        // A genuine command error (not a sandbox denial) → no special
+        // message; the caller falls back to the plain exit code.
+        assert!(sandbox_denial_message("seatbelt", "command not found", "").is_none());
+        assert!(sandbox_denial_message("bwrap", "", "some other EPERM-less error text").is_none());
+    }
+
+    #[test]
+    fn test_sandbox_denial_checks_stdout_too() {
+        // seatbelt sometimes surfaces the EPERM on stdout (e.g. `ls ~/.ssh`
+        // prints "ls: ...: Operation not permitted" to stderr, but a redirect
+        // chain can route it to stdout). Both are scanned.
+        assert!(sandbox_denial_message("seatbelt", "Operation not permitted", "").is_some());
+    }
+
+    /// Issue #21 end-to-end: a seatbelt-denied write under the real macOS
+    /// sandbox must surface the clear denial message (not a generic exit
+    /// code), so the model doesn't loop-retry the doomed command. macOS-only
+    /// (needs `sandbox-exec`); skipped elsewhere.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_local_backend_surfaces_seatbelt_denial() {
+        if !std::path::Path::new("/usr/bin/sandbox-exec").exists() {
+            eprintln!("sandbox-exec not present; skipping");
+            return;
+        }
+        // Build a LocalBackend wired with the real SeatbeltBackend (the same
+        // default CodingPack uses). Project dir = a temp dir (allowed write
+        // root). The write target is a path the OS lets the user write but
+        // the seatbelt does NOT allow (outside project/tmp/HOME): /opt/homebrew
+        // on Apple Silicon is user-owned, so the denial is the sandbox's, not
+        // the OS's — proving the message is the sandbox-denial path.
+        let tmp = std::env::temp_dir().join(format!(
+            "oneai_seatbelt_denial_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let seatbelt = crate::sandbox::SeatbeltBackend::coding_defaults(&tmp);
+        if !seatbelt.is_available() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            eprintln!("seatbelt not available; skipping");
+            return;
+        }
+        let backend = LocalBackend::with_sandbox(Arc::new(seatbelt), Vec::new());
+        let opts = ExecOptions::new(30, Some(std::path::PathBuf::from(&tmp)), 100_000);
+        let target = "/opt/homebrew/oneai_seatbelt_denial_probe.txt";
+        let res = backend
+            .execute(&format!("echo probe > {target}"), &opts)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_file(target);
+        assert!(
+            !res.success,
+            "the seatbelt should have denied the write; got success. content={}",
+            res.content
+        );
+        let err = res.error.expect("denied command must have an error");
+        assert!(
+            err.contains("Denied by seatbelt sandbox policy"),
+            "expected the clear sandbox-denial message, got: {err}"
+        );
+        assert!(err.contains("do NOT retry"));
     }
 }
