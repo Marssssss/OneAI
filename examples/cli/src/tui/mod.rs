@@ -875,6 +875,7 @@ fn handle_user_input_async(
                 // continues with full prior context; `/session list` shows
                 // resumable ids. Bare `/session` still prints current info.
                 let sub = parts.get(1).copied().unwrap_or("");
+                tracing::info!("[/session] dispatch sub={:?} parts={:?}", sub, parts);
                 match sub {
                     "resume" => {
                         let id = match parts.get(2).copied().filter(|s| !s.is_empty()) {
@@ -894,6 +895,11 @@ fn handle_user_input_async(
                             // conversation, which we treat as "not found".
                             let new_session = state.app.create_session_with_id(&id).await;
                             let msgs = new_session.conversation().messages.clone();
+                            tracing::info!(
+                                "[/session resume] id={} loaded_msgs={} (empty => not found)",
+                                id,
+                                msgs.len()
+                            );
                             if msgs.is_empty() {
                                 return None;
                             }
@@ -913,6 +919,11 @@ fn handle_user_input_async(
                                 );
                             }
                             Some((count, conv_msgs)) => {
+                                tracing::info!(
+                                    "[/session resume] OK id={} rebuilding {} chat messages",
+                                    id,
+                                    count
+                                );
                                 let converted = conversation_to_chat_messages(&conv_msgs);
                                 app.messages.clear();
                                 app.render_cache.invalidate_all();
@@ -977,7 +988,9 @@ fn handle_user_input_async(
                         }
                         return;
                     }
-                    _ => {} // fall through to the info display below
+                    _ => {
+                        tracing::info!("[/session] falling through to info display (sub not resume/list)");
+                    } // fall through to the info display below
                 }
                 let ctx_est = if app.context_tokens_is_estimated {
                     "~"
