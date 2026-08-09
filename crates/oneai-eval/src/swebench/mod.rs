@@ -22,7 +22,7 @@ pub mod runner;
 pub use instance::{load_instances, load_instances_filtered, SwebenchInstance};
 pub use judge::{parse_instance_results, SwebenchJudge, SwebenchVerdict};
 pub use leaderboard::{
-    render_swebench_leaderboard, write_prediction_jsonl, LeaderboardInstance, SwebenchLeaderboard,
-    SWEBENCH_RESOLVED_METRIC,
+    render_swebench_leaderboard, write_prediction_jsonl, write_report, LeaderboardInstance,
+    SwebenchLeaderboard, SWEBENCH_RESOLVED_METRIC,
 };
-pub use runner::{SwebenchRunner, SwebenchRunnerConfig};
+pub use runner::{write_trajectory, SwebenchRunner, SwebenchRunnerConfig, SwebenchTrajectory};

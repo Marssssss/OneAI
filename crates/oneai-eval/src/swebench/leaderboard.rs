@@ -12,7 +12,7 @@
 //! This is a module-level function rather than an `EvalReport` method to keep
 //! the SWE-bench schema out of the generic report type.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::eval_result::EvalReport;
 
@@ -106,6 +106,27 @@ pub fn write_prediction_jsonl(report: &EvalReport, path: &Path) -> Result<usize,
     Ok(count)
 }
 
+/// Persist the full eval report (issue #22): `report.json` (machine-readable)
+/// + `report.md` (human-readable) into the workspace.
+///
+/// Previously the swebench CLI only *printed* the report — a long smoke run
+/// scrolled it off the terminal and the run became un-复盘-able. Returns the
+/// path to `report.json` (the machine-readable copy). `report.md` sits next to
+/// it. A write failure of either file is surfaced as an error rather than
+/// silently dropping half the artifact.
+pub fn write_report(report: &EvalReport, workspace: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(workspace).map_err(|e| format!("cannot create workspace: {e}"))?;
+    let json_path = workspace.join("report.json");
+    let md_path = workspace.join("report.md");
+    let json = report
+        .to_json()
+        .map_err(|e| format!("serialize report: {e}"))?;
+    std::fs::write(&json_path, &json).map_err(|e| format!("write {}: {e}", json_path.display()))?;
+    std::fs::write(&md_path, report.to_markdown())
+        .map_err(|e| format!("write {}: {e}", md_path.display()))?;
+    Ok(json_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +197,34 @@ mod tests {
         assert!(text.contains("\"instance_id\":\"a\""));
         assert!(text.contains("\"model_patch\":\"diff a\""));
         assert!(!text.contains("\"instance_id\":\"b\""));
+    }
+
+    #[test]
+    fn test_write_report_writes_json_and_markdown() {
+        // Issue #22: the eval report must land on disk (not just stdout).
+        let report = EvalReport::new("swebench", vec![result("a", true, 3, "diff a")]);
+        let dir = std::env::temp_dir().join(format!(
+            "oneai_swebench_report_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let json_path = write_report(&report, &dir).expect("write_report ok");
+
+        // Both artifacts land in the workspace.
+        assert_eq!(json_path, dir.join("report.json"));
+        assert!(dir.join("report.md").exists());
+        // The JSON is a faithful serialization of the report (pretty-printed,
+        // so check the field name + a distinctive value rather than a literal
+        // `"suite_name":"swebench"` which the spaces in pretty JSON break).
+        let json = std::fs::read_to_string(&json_path).unwrap();
+        assert!(json.contains("\"suite_name\""));
+        assert!(json.contains("\"case_id\""));
+        assert!(json.contains("diff a"));
+        // The Markdown is non-empty.
+        let md = std::fs::read_to_string(dir.join("report.md")).unwrap();
+        assert!(!md.trim().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

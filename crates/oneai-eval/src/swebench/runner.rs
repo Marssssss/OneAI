@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use oneai_core::error::Result;
 use oneai_trace::TraceMetrics;
+use serde::Serialize;
 
 use crate::efficiency::EfficiencyProfile;
 use crate::eval_metric::EvalJudge;
@@ -291,6 +292,27 @@ impl SwebenchRunner {
                         result.set_metadata("timing", &json);
                     }
                     result.efficiency = Some(prof);
+
+                    // Persist the per-instance trajectory (issue #22). The
+                    // workspace's `predictions.jsonl` + `leaderboard.json` carry
+                    // only the patch + aggregate cost/efficiency numbers — they
+                    // drop *why* a run took N inferences, so a smoke run can't
+                    // be 复盘'd once the terminal scrollback is gone. This
+                    // writes the step-granularity record (full conversation
+                    // transcript + the trace span tree) into
+                    // `<workspace>/trajectories/<instance_id>.json`. The path
+                    // is mirrored into metadata so the report points at it.
+                    match write_trajectory(
+                        &self.config.workspace_dir,
+                        &instance.instance_id,
+                        &session_id,
+                        session.conversation(),
+                        &tree,
+                    ) {
+                        Ok(p) => result
+                            .set_metadata("trajectory_file", p.to_string_lossy().into_owned()),
+                        Err(e) => result.set_metadata("trajectory_error", e),
+                    }
                 }
             }
             Err(e) => {
@@ -311,6 +333,60 @@ impl SwebenchRunner {
             }
         }
     }
+}
+
+/// A persisted per-instance trajectory for a SWE-bench run (issue #22).
+///
+/// `predictions.jsonl` + `leaderboard.json` carry only the patch + aggregate
+/// cost/efficiency numbers; they drop *why* a run took N inferences. This
+/// artifact keeps the step-granularity record — the full conversation
+/// transcript (what the agent said / called / saw each step) and the trace
+/// span tree (per-inference + per-tool timing + token usage) — so a smoke run
+/// can be reviewed (复盘) afterwards without the terminal scrollback.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct SwebenchTrajectory {
+    /// The SWE-bench instance id (sanitized into the filename).
+    pub instance_id: String,
+    /// The OneAI session id (ties to usage-tracker accounting).
+    pub session_id: String,
+    /// Full conversation transcript (user / assistant / tool messages).
+    pub conversation: oneai_core::Conversation,
+    /// The trace span tree — per-span timing + token usage (efficiency axis).
+    pub trace_tree: oneai_trace::TraceTree,
+}
+
+/// Write a per-instance trajectory JSON into
+/// `<workspace>/trajectories/<instance_id>.json`.
+///
+/// The path (relative to the workspace) is what the report's
+/// `trajectory_file` metadata points at. Idempotent per instance — re-running
+/// an instance overwrites the prior trajectory for that id.
+pub fn write_trajectory(
+    workspace_dir: &Path,
+    instance_id: &str,
+    session_id: &str,
+    conversation: &oneai_core::Conversation,
+    trace_tree: &oneai_trace::TraceTree,
+) -> std::result::Result<PathBuf, String> {
+    let dir = workspace_dir.join("trajectories");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create trajectory dir: {e}"))?;
+    let safe = sanitize_instance_id(instance_id);
+    let path = dir.join(format!("{safe}.json"));
+    let traj = SwebenchTrajectory {
+        instance_id: instance_id.to_string(),
+        session_id: session_id.to_string(),
+        conversation: conversation.clone(),
+        trace_tree: trace_tree.clone(),
+    };
+    let json = serde_json::to_string_pretty(&traj)
+        .map_err(|e| format!("serialize trajectory {instance_id}: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Replace path separators in an instance id so it's a safe single file name.
+fn sanitize_instance_id(id: &str) -> String {
+    id.replace(['/', '\\'], "_")
 }
 
 /// Run `git diff` (unstaged) in `clone_dir` and return the patch text.
@@ -571,8 +647,6 @@ mod tests {
         };
 
         let report = runner.run(&[instance]).await.expect("run ok");
-        let _ = std::fs::remove_dir_all(&workspace);
-        let _ = std::fs::remove_dir_all(&repo_path);
 
         let r = &report.results[0];
         assert!(r.error.is_none(), "unexpected error: {:?}", r.error);
@@ -590,6 +664,56 @@ mod tests {
             "domain branch should produce ≥1 LLM span, got {}",
             tb.inference_calls
         );
+
+        // Issue #22: the per-instance trajectory must land on disk (not just be
+        // compressed into aggregate metrics then dropped). The domain branch is
+        // the one the real swebench CLI exercises, so guard it here.
+        let traj_rel = r
+            .metadata
+            .get("trajectory_file")
+            .expect("trajectory_file metadata present");
+        let traj_path = std::path::PathBuf::from(traj_rel);
+        assert!(
+            traj_path.exists(),
+            "trajectory file should exist at {}",
+            traj_path.display()
+        );
+        assert!(
+            traj_path.starts_with(&workspace),
+            "trajectory should be inside the workspace"
+        );
+        assert!(
+            traj_path.to_string_lossy().ends_with("fixture__dom-1.json"),
+            "trajectory filename should be derived from the instance id, got {}",
+            traj_path.display()
+        );
+        let raw = std::fs::read_to_string(&traj_path).expect("read trajectory file");
+        let traj: SwebenchTrajectory =
+            serde_json::from_str(&raw).expect("trajectory JSON parses into SwebenchTrajectory");
+        assert_eq!(traj.instance_id, "fixture__dom-1");
+        assert!(
+            !traj.session_id.is_empty(),
+            "session_id should be captured into the trajectory"
+        );
+        // Conversation transcript captured: user prompt + the mock's direct
+        // answer → at least two messages.
+        assert!(
+            traj.conversation.messages.len() >= 2,
+            "conversation transcript should hold the user prompt + assistant answer, got {} messages",
+            traj.conversation.messages.len()
+        );
+        // Trace tree captured at step granularity (SESSION root with children).
+        assert_eq!(
+            traj.trace_tree.root_span.kind,
+            oneai_trace::SpanKind::SESSION
+        );
+        assert!(
+            traj.trace_tree.root_span.count_spans() >= 1,
+            "trace tree should hold at least the root span"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&repo_path);
     }
 
     #[tokio::test]

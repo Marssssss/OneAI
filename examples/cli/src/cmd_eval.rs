@@ -12,7 +12,7 @@ use oneai_eval::{
     memory::{builtin_suite, load_suite_jsonl, run_memory_eval, MemoryEvalConfig},
     replay::replay_trajectory,
     swebench::{
-        load_instances_filtered, render_swebench_leaderboard, write_prediction_jsonl,
+        load_instances_filtered, render_swebench_leaderboard, write_prediction_jsonl, write_report,
         SwebenchRunner, SwebenchRunnerConfig,
     },
     EvalRunner, ScoreOnlyRunner, SuiteRegistry,
@@ -469,6 +469,26 @@ pub async fn cmd_eval_swebench(
             );
         }
         Err(e) => eprintln!("Warning: could not serialize leaderboard: {}", e),
+    }
+    // Persist the full eval report (issue #22): the runner already wrote the
+    // per-instance trajectories under <workspace>/trajectories/; without this
+    // the report only lived in the terminal scrollback. JSON + Markdown so it
+    // is both machine- and human-readable on disk.
+    match write_report(&report, ws) {
+        Ok(p) => println!("Report → {} (+ report.md)", p.display()),
+        Err(e) => eprintln!("Warning: could not write report: {}", e),
+    }
+    let traj_count = report
+        .results
+        .iter()
+        .filter(|r| r.metadata.contains_key("trajectory_file"))
+        .count();
+    if traj_count > 0 {
+        println!(
+            "Trajectories: {} → {}/trajectories/",
+            traj_count,
+            ws.display()
+        );
     }
 
     // Report.
