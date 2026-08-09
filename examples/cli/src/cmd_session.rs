@@ -83,8 +83,11 @@ pub fn cmd_session_resume(session_id: &str) {
                 }
             }
 
-            println!("\nNote: Full session resume with agent loop requires the interactive CLI.");
-            println!("Use: oneai chat --resume {}", session_id);
+            println!("\nNote: Full session resume with agent loop requires the interactive TUI.");
+            println!(
+                "Start the TUI with `oneai chat`, then run:  /session resume {}",
+                session_id
+            );
         }
         Ok(None) => {
             eprintln!("Session '{}' not found.", session_id);

@@ -34,7 +34,7 @@ use oneai_domain::coding_pack;
 use oneai_provider::ProviderFactory;
 use oneai_tool::CalculatorTool;
 
-use app::{App, ApprovalPendingState, ChatRole, TokenUsage};
+use app::{App, ApprovalPendingState, ChatMessage, ChatRole, TokenUsage};
 use observer::{ObserverEvent, TuiObserver};
 use render::spinner::advance_frame;
 use session::SessionState;
@@ -768,7 +768,7 @@ fn handle_user_input_async(
                 return;
             }
             "/help" | "/h" => {
-                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /usage · /context · /session · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, \\+Enter=newline, Tab=sidebar, v=sidebar verbose, Ctrl+C=clear/quit, ↑↓=line/history, Ctrl+↑↓/PageUp/PageDown=scroll, Home/End=jump top/bottom, Shift+Tab=mode(Normal/Auto/Plan)\nSelect & copy: hold Shift + drag in chat — releases to copy to clipboard (works on every terminal) · Scroll: wheel / drag scrollbar / PageUp-Down / Ctrl+↑↓ / Home/End\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
+                app.add_message(ChatRole::System, "Commands:\n  /help · /tools · /skills · /skill · /clear · /usage · /context · /session [list|resume <id>] · /domain · /compact · /wf · /tool · /new · /init · /quit\nKeys: Enter=send, \\+Enter=newline, Tab=sidebar, v=sidebar verbose, Ctrl+C=clear/quit, ↑↓=line/history, Ctrl+↑↓/PageUp/PageDown=scroll, Home/End=jump top/bottom, Shift+Tab=mode(Normal/Auto/Plan)\nSelect & copy: hold Shift + drag in chat — releases to copy to clipboard (works on every terminal) · Scroll: wheel / drag scrollbar / PageUp-Down / Ctrl+↑↓ / Home/End\nSkills: /skill <name> activate · /skill off deactivate · /skill add <name> <desc>\nWorkflows: /wf list · /wf run <name> · /wf show <name> · /wf graph <name> · /wf status · /wf history\nContext: /context shows detailed token breakdown by category\nSession: /session list shows saved ids · /session resume <id> reloads a prior conversation into the live session\nInit: /init [oneai|agents|claude] [--force] [--no-llm] generates project-instruction file (LLM-synthesized if a provider is configured)\nPlan mode: Shift+Tab to Plan, model submits a plan → ↑↓ review, Enter=accept / Esc=reject");
                 return;
             }
             "/tools" | "/t" => {
@@ -870,6 +870,115 @@ fn handle_user_input_async(
                 return;
             }
             "/session" => {
+                // Subcommands (issue #23): `/session resume <id>` loads a
+                // saved conversation back into the live session so the model
+                // continues with full prior context; `/session list` shows
+                // resumable ids. Bare `/session` still prints current info.
+                let sub = parts.get(1).copied().unwrap_or("");
+                match sub {
+                    "resume" => {
+                        let id = match parts.get(2).copied().filter(|s| !s.is_empty()) {
+                            Some(id) => id.to_string(),
+                            None => {
+                                app.add_message(
+                                    ChatRole::Error,
+                                    "Usage: /session resume <id>  — use /session list to see ids",
+                                );
+                                return;
+                            }
+                        };
+                        let loaded = rt.block_on(async {
+                            let mut state = session_state.lock().await;
+                            // create_session_with_id loads the conversation
+                            // from SQLite; an unknown id yields an empty
+                            // conversation, which we treat as "not found".
+                            let new_session = state.app.create_session_with_id(&id).await;
+                            let msgs = new_session.conversation().messages.clone();
+                            if msgs.is_empty() {
+                                return None;
+                            }
+                            let count = msgs.len();
+                            state.session = new_session;
+                            Some((count, msgs))
+                        });
+                        match loaded {
+                            None => {
+                                app.add_message(
+                                    ChatRole::Error,
+                                    format!(
+                                        "Session '{}' not found or has no history. \
+                                         Use /session list for available ids.",
+                                        id
+                                    ),
+                                );
+                            }
+                            Some((count, conv_msgs)) => {
+                                let converted = conversation_to_chat_messages(&conv_msgs);
+                                app.messages.clear();
+                                app.render_cache.invalidate_all();
+                                app.collapsed_ids.clear();
+                                for m in converted {
+                                    if m.role.default_collapsed() {
+                                        app.collapsed_ids.insert(m.id.clone());
+                                    }
+                                    app.messages.push(m);
+                                }
+                                app.session_id = id.clone();
+                                // Mark as a new active sidebar entry (mirrors /new)
+                                // so the resumed session is selectable.
+                                app.add_new_session(id.clone());
+                                app.update_session_info();
+                                app.token_usage = TokenUsage::new();
+                                app.context_tokens = 0;
+                                app.context_tokens_is_estimated = false;
+                                app.current_iteration = 0;
+                                app.last_context_accounting = None;
+                                app.chat_scroll_y = 0;
+                                app.user_scrolled = false; // auto-follow to latest
+                                app.request_invalidate(); // full repaint — new message set
+                                app.add_message(
+                                    ChatRole::System,
+                                    format!(
+                                        "Resumed session {} ({} messages). \
+                                         The model sees this history — continue below.",
+                                        id, count
+                                    ),
+                                );
+                            }
+                        }
+                        return;
+                    }
+                    "list" => {
+                        let sessions = rt.block_on(async {
+                            let state = session_state.lock().await;
+                            state.app.list_conversations().await
+                        });
+                        if sessions.is_empty() {
+                            app.add_message(
+                                ChatRole::System,
+                                "No saved sessions. (The TUI auto-saves every \
+                                 conversation, so this only happens if none has \
+                                 completed a turn yet.)",
+                            );
+                        } else {
+                            let mut sorted = sessions;
+                            sorted.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+                            let mut lines = String::from("Saved sessions — /session resume <id>:");
+                            for s in &sorted {
+                                lines.push_str(&format!(
+                                    "\n  {}  [{} msgs]  {}  {}",
+                                    s.id,
+                                    s.message_count,
+                                    s.updated_at.format("%Y-%m-%d %H:%M"),
+                                    s.title.as_deref().unwrap_or(""),
+                                ));
+                            }
+                            app.add_message(ChatRole::System, lines);
+                        }
+                        return;
+                    }
+                    _ => {} // fall through to the info display below
+                }
                 let ctx_est = if app.context_tokens_is_estimated {
                     "~"
                 } else {
@@ -1949,6 +2058,130 @@ fn handle_workflow_command(
             );
         }
     }
+}
+
+/// Reconstruct TUI chat messages from a persisted conversation so a resumed
+/// session displays its prior history (issue #23 — `/session resume <id>`
+/// otherwise shows an empty chat and the model loses all context).
+///
+/// Mirrors the live observer path (`process_observer_event`): a `ToolCall`
+/// block becomes a pending `ToolInvocation` card, and the matching
+/// `ToolResult` (in a later `Role::Tool` message) fills that card's `result`.
+/// `Thinking` blocks render as collapsed Thinking cards; `Text` blocks map to
+/// User/Assistant/System bubbles. Returns the messages in conversation order.
+fn conversation_to_chat_messages(messages: &[oneai_core::Message]) -> Vec<ChatMessage> {
+    use oneai_core::{ContentBlock, Role};
+    let mut out: Vec<ChatMessage> = Vec::new();
+    // call_id → index into `out` of the ToolInvocation card awaiting its
+    // result. The result arrives in a later `Role::Tool` message.
+    let mut pending: HashMap<String, usize> = HashMap::new();
+
+    let pretty_args = |args: &str| -> String {
+        // The stored `args` field is already a JSON string; pretty-print it
+        // when it parses so the card matches the live ToolCall rendering,
+        // otherwise fall back to the raw text.
+        serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+            .unwrap_or_else(|| args.to_string())
+    };
+
+    for msg in messages {
+        match msg.role {
+            Role::User => {
+                let text = msg.text_content();
+                if !text.trim().is_empty() {
+                    out.push(ChatMessage::new(ChatRole::User, text));
+                }
+            }
+            Role::System => {
+                let text = msg.text_content();
+                if !text.trim().is_empty() {
+                    out.push(ChatMessage::new(ChatRole::System, text));
+                }
+            }
+            Role::Assistant => {
+                // Walk blocks in stored order, preserving the live display
+                // order: text/thinking precede the tool calls they introduce.
+                // Accumulate text and flush it as an Assistant bubble BEFORE
+                // pushing a Thinking/ToolCall card, so the preamble lands above
+                // the card (not below — the issue the live observer path also
+                // guards against by flushing the stream buffer first).
+                let mut text_parts: Vec<String> = Vec::new();
+                let flush_text = |text_parts: &mut Vec<String>, out: &mut Vec<ChatMessage>| {
+                    if !text_parts.is_empty() {
+                        out.push(ChatMessage::new(
+                            ChatRole::Assistant,
+                            std::mem::take(text_parts).join("\n"),
+                        ));
+                    }
+                };
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            if !text.trim().is_empty() {
+                                text_parts.push(text.clone());
+                            }
+                        }
+                        ContentBlock::Thinking { text } => {
+                            if !text.trim().is_empty() {
+                                flush_text(&mut text_parts, &mut out);
+                                out.push(ChatMessage::new_collapsed(
+                                    ChatRole::Thinking,
+                                    text.clone(),
+                                ));
+                            }
+                        }
+                        ContentBlock::ToolCall { id, name, args } => {
+                            flush_text(&mut text_parts, &mut out);
+                            let card = ChatMessage::new_collapsed(
+                                ChatRole::ToolInvocation {
+                                    call_id: id.clone(),
+                                    tool_name: name.clone(),
+                                    args: pretty_args(args),
+                                    result: None,
+                                },
+                                String::new(),
+                            );
+                            if !id.is_empty() {
+                                pending.insert(id.clone(), out.len());
+                            }
+                            out.push(card);
+                        }
+                        _ => {}
+                    }
+                }
+                flush_text(&mut text_parts, &mut out);
+            }
+            Role::Tool => {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { call_id, content } = block {
+                        if let Some(&idx) = pending.get(call_id) {
+                            if let ChatRole::ToolInvocation { result, .. } = &mut out[idx].role {
+                                *result = Some((true, content.clone()));
+                            }
+                            pending.remove(call_id);
+                        } else {
+                            // Orphan result (no matching call — e.g. history
+                            // was compacted) — show as a completed card so the
+                            // output isn't silently dropped.
+                            out.push(ChatMessage::new_collapsed(
+                                ChatRole::ToolInvocation {
+                                    call_id: call_id.clone(),
+                                    tool_name: "(result)".to_string(),
+                                    args: String::new(),
+                                    result: Some((true, content.clone())),
+                                },
+                                String::new(),
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Process an observer event and update the app state.
@@ -3857,5 +4090,128 @@ mod issue20_tests {
             .filter(|m| matches!(m.role, ChatRole::Approval))
             .count();
         assert_eq!(cards, 2, "promoting the next approval surfaces a new card");
+    }
+}
+
+#[cfg(test)]
+mod issue23_tests {
+    //! Issue #23: `/session resume <id>` must rebuild the chat view — and feed
+    //! the model the prior conversation — from a persisted conversation. These
+    //! tests pin `conversation_to_chat_messages`, the Message→ChatRole mapping
+    //! that reconstructs the chat bubbles (and pairs ToolCall↔ToolResult into
+    //! one filled ToolInvocation card) from the raw stored history.
+
+    use super::conversation_to_chat_messages;
+    use crate::tui::app::ChatRole;
+    use oneai_core::{ContentBlock, Conversation, Message, Role};
+
+    fn conv(messages: Vec<Message>) -> Conversation {
+        let mut c = Conversation::with_id("test-session".to_string());
+        c.messages = messages;
+        c
+    }
+
+    #[test]
+    fn maps_text_roles_and_fills_tool_result() {
+        let conversation = conv(vec![
+            Message::user("list files"),
+            // Assistant turn with a preamble text + a tool call.
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "I'll read the dir.".to_string(),
+                    },
+                    ContentBlock::ToolCall {
+                        id: "call_1".to_string(),
+                        name: "list_dir".to_string(),
+                        args: r#"{"path":"."}"#.to_string(),
+                    },
+                ],
+                metadata: Default::default(),
+            },
+            // Tool result for call_1.
+            Message::tool_result("call_1".to_string(), "file_a\nfile_b".to_string()),
+            // Final assistant answer.
+            Message::assistant("Done."),
+        ]);
+
+        let msgs = conversation_to_chat_messages(&conversation.messages);
+
+        // Expected order: User, Assistant(text), ToolInvocation(filled), Assistant
+        assert_eq!(msgs.len(), 4);
+        assert!(matches!(msgs[0].role, ChatRole::User));
+        assert!(matches!(msgs[1].role, ChatRole::Assistant));
+        assert_eq!(msgs[1].content, "I'll read the dir.");
+        // The ToolInvocation card must have its result filled (not pending).
+        match &msgs[2].role {
+            ChatRole::ToolInvocation {
+                tool_name, result, ..
+            } => {
+                assert_eq!(tool_name, "list_dir");
+                let (ok, content) = result.as_ref().expect("result filled");
+                assert!(*ok);
+                assert_eq!(content, "file_a\nfile_b");
+            }
+            other => panic!("expected ToolInvocation, got {:?}", other),
+        }
+        assert!(matches!(msgs[3].role, ChatRole::Assistant));
+        assert_eq!(msgs[3].content, "Done.");
+    }
+
+    #[test]
+    fn orphan_tool_result_becomes_its_own_card() {
+        // A result with no preceding matching call (history was compacted
+        // and the call dropped) must still surface as a completed card —
+        // silently dropping it would hide output from the resumed history.
+        let conversation = conv(vec![Message::tool_result(
+            "ghost".to_string(),
+            "stale output".to_string(),
+        )]);
+        let msgs = conversation_to_chat_messages(&conversation.messages);
+        assert_eq!(msgs.len(), 1);
+        match &msgs[0].role {
+            ChatRole::ToolInvocation { result, .. } => {
+                let (ok, content) = result.as_ref().expect("result filled");
+                assert!(*ok);
+                assert_eq!(content, "stale output");
+            }
+            other => panic!("expected ToolInvocation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn thinking_blocks_render_as_collapsed_cards() {
+        let conversation = conv(vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "reasoning here".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ],
+            metadata: Default::default(),
+        }]);
+        let msgs = conversation_to_chat_messages(&conversation.messages);
+        assert!(msgs.iter().any(|m| matches!(m.role, ChatRole::Thinking)));
+        assert!(msgs
+            .iter()
+            .any(|m| matches!(m.role, ChatRole::Assistant) && m.content == "answer"));
+    }
+
+    #[test]
+    fn empty_text_blocks_are_dropped() {
+        let conversation = conv(vec![
+            Message::user(""),
+            Message::assistant("   "),
+            Message::user("real"),
+        ]);
+        let msgs = conversation_to_chat_messages(&conversation.messages);
+        // Only the non-empty user message survives.
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0].role, ChatRole::User));
+        assert_eq!(msgs[0].content, "real");
     }
 }
