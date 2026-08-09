@@ -66,6 +66,13 @@ pub const TOOL_RESULT_SUCCESS_COLOR: Color = SUCCESS;
 /// Tool result (failure) color.
 pub const TOOL_RESULT_FAILURE_COLOR: Color = DANGER;
 
+/// Tool output body color — the actual stdout/stderr-style content of a tool
+/// result. Deliberately a cool muted slate, distinct from `ASSISTANT_COLOR`
+/// (sage green) so machine output never blends into the model's prose.
+/// Success/failure is still conveyed by the status icon + title border; this
+/// color only styles the body text.
+pub const TOOL_OUTPUT_COLOR: Color = Color::Rgb(148, 166, 184); // muted cool slate
+
 /// Approval card color.
 pub const APPROVAL_COLOR: Color = WARNING;
 /// Approval border color.
@@ -139,6 +146,25 @@ pub const DIFF_ADDED_BG: Color = Color::Rgb(28, 56, 36); // Dark green BG
 
 /// Diff deleted line background.
 pub const DIFF_DELETED_BG: Color = Color::Rgb(56, 30, 30); // Dark red BG
+
+/// Diff added line foreground — clear green (programmer convention: `+` is
+/// green). RGB so it renders identically across terminals, not subject to the
+/// 16-color palette mapping of `Color::Green`.
+pub const DIFF_ADDED_FG: Color = Color::Rgb(122, 196, 143); // clear green
+
+/// Diff deleted line foreground — clear red (programmer convention: `-` is
+/// red).
+pub const DIFF_DELETED_FG: Color = Color::Rgb(216, 118, 118); // clear red
+
+/// Diff file header (`+++` / `---`) foreground — muted cyan, the conventional
+/// file-path color in unified diffs.
+pub const DIFF_FILE_HEADER_COLOR: Color = Color::Rgb(110, 168, 200); // muted cyan
+
+/// Diff hunk header (`@@ ... @@`) foreground — dimmed, like git renders them.
+pub const DIFF_HUNK_COLOR: Color = DIM;
+
+/// Diff line-number gutter foreground.
+pub const DIFF_LINENO_COLOR: Color = MUTED;
 
 // ─── Progress Bar Colors ───────────────────────────────────────────────────
 

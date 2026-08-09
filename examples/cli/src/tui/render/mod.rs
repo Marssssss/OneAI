@@ -285,3 +285,104 @@ fn draw_command_popup(f: &mut Frame, chat_rect: Rect, _input_rect: Rect, app: &A
 
     f.render_widget(list, popup_rect);
 }
+
+// ─── Issue #26 regression tests ─────────────────────────────────────────────
+// Tool output must be visually distinct from the model's prose (assistant text
+// is sage green; success tool output is cool slate), and code diffs must follow
+// programmer convention (green `+`, red `-`).
+#[cfg(test)]
+mod issue26_tests {
+    use super::super::theme::*;
+    use super::diff::render_diff_lines;
+    use super::message::render_result_lines;
+
+    /// Find the foreground Color of the `+`/`-` marker span of a diff line
+    /// (the marker is the span whose content is exactly "+" or "-").
+    fn marker_fg(spans: &[ratatui::text::Span], marker: &str) -> Option<ratatui::style::Color> {
+        spans
+            .iter()
+            .find(|s| s.content == marker)
+            .and_then(|s| s.style.fg)
+    }
+
+    /// Extract the foreground Color from the first styled, non-empty span of a
+    /// line, ignoring the 2-space indent and line-number gutter.
+    fn first_fg(spans: &[ratatui::text::Span]) -> Option<ratatui::style::Color> {
+        for s in spans {
+            if s.content.trim().is_empty() {
+                continue;
+            }
+            return s.style.fg;
+        }
+        None
+    }
+
+    /// The core bug: success tool-output body used `TOOL_RESULT_SUCCESS_COLOR`
+    /// (== ASSISTANT_COLOR == sage green), indistinguishable from the model's
+    /// prose. It must now use a distinct color.
+    #[test]
+    fn tool_output_body_differs_from_assistant_prose() {
+        assert_ne!(
+            TOOL_OUTPUT_COLOR, ASSISTANT_COLOR,
+            "tool output must not share the assistant prose color"
+        );
+        // And specifically must differ from the success status color (sage green).
+        assert_ne!(TOOL_OUTPUT_COLOR, TOOL_RESULT_SUCCESS_COLOR);
+    }
+
+    /// Success tool output renders its body in TOOL_OUTPUT_COLOR, not the
+    /// success/assistant green.
+    #[test]
+    fn success_tool_output_body_uses_output_color() {
+        let lines = render_result_lines("some stdout line\nmore output", true, 80);
+        assert!(!lines.is_empty());
+        for line in &lines {
+            let fg = first_fg(&line.spans).unwrap_or(TOOL_OUTPUT_COLOR);
+            assert_eq!(
+                fg, TOOL_OUTPUT_COLOR,
+                "success tool output body must be slate, not green"
+            );
+        }
+    }
+
+    /// Failure tool output keeps the danger red so errors still stand out.
+    #[test]
+    fn failure_tool_output_body_stays_red() {
+        let lines = render_result_lines("boom: something failed", false, 80);
+        assert!(!lines.is_empty());
+        let fg = first_fg(&lines[0].spans).unwrap_or(TOOL_RESULT_FAILURE_COLOR);
+        assert_eq!(fg, TOOL_RESULT_FAILURE_COLOR);
+    }
+
+    /// Programmer-convention diff colors: `+` additions green, `-` deletions
+    /// red, rendered via explicit RGB (terminal-palette independent).
+    #[test]
+    fn diff_additions_green_deletions_red() {
+        let diff = "--- a/f.rs\n+++ b/f.rs\n@@ -1,2 +1,2 @@\n-old\n+new\n ctx\n";
+        let lines = render_diff_lines(diff, 80);
+
+        // Find the added (+new) and deleted (-old) lines by inspecting content.
+        let mut added_fg = None;
+        let mut deleted_fg = None;
+        for line in &lines {
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            if joined.contains("+new") {
+                added_fg = marker_fg(&line.spans, "+");
+            } else if joined.contains("-old") {
+                deleted_fg = marker_fg(&line.spans, "-");
+            }
+        }
+        assert_eq!(
+            added_fg,
+            Some(DIFF_ADDED_FG),
+            "added diff lines must be green"
+        );
+        assert_eq!(
+            deleted_fg,
+            Some(DIFF_DELETED_FG),
+            "deleted diff lines must be red"
+        );
+        // Green/red are themselves distinct colors (sanity).
+        assert_ne!(DIFF_ADDED_FG, DIFF_DELETED_FG);
+    }
+}

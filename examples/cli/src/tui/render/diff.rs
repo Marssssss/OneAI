@@ -19,11 +19,11 @@ use super::super::theme::*;
 /// Render a diff section with +/- line markers.
 ///
 /// This renderer handles unified diff format:
-/// - Lines starting with `+++` or `---` are file headers (cyan)
-/// - Lines starting with `@@` are hunk markers (magenta)
+/// - Lines starting with `+++` or `---` are file headers (muted cyan)
+/// - Lines starting with `@@` are hunk markers (dim, bold)
 /// - Lines starting with `+` (not `++`) are additions (green)
 /// - Lines starting with `-` (not `--`) are deletions (red)
-/// - Other lines are context (gray)
+/// - Other lines are context (muted)
 ///
 /// All lines are truncated to `max_width` visual cells to prevent content
 /// from exceeding the bubble viewport width (which causes rendering artifacts).
@@ -134,7 +134,7 @@ fn render_hunk_header(line: &str, max_width: usize) -> Line<'static> {
     Line::from(Span::styled(
         truncated,
         Style::default()
-            .fg(ratatui::style::Color::Magenta)
+            .fg(DIFF_HUNK_COLOR)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -143,7 +143,7 @@ fn render_file_header(line: &str, max_width: usize) -> Line<'static> {
     let truncated = truncate_span_content(line, max_width);
     Line::from(Span::styled(
         truncated,
-        Style::default().fg(ratatui::style::Color::Cyan),
+        Style::default().fg(DIFF_FILE_HEADER_COLOR),
     ))
 }
 
@@ -155,21 +155,16 @@ fn render_added_line(line: &str, line_no: usize, max_width: usize) -> Line<'stat
     let truncated_content = truncate_span_content(content, content_max_width);
     let line_no_str = format!("{:>4} ", line_no);
     Line::from(vec![
-        Span::styled(
-            line_no_str,
-            Style::default().fg(ratatui::style::Color::DarkGray),
-        ),
+        Span::styled(line_no_str, Style::default().fg(DIFF_LINENO_COLOR)),
         Span::styled(
             "+",
             Style::default()
-                .fg(ratatui::style::Color::Green)
+                .fg(DIFF_ADDED_FG)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             truncated_content,
-            Style::default()
-                .fg(ratatui::style::Color::Green)
-                .bg(DIFF_ADDED_BG),
+            Style::default().fg(DIFF_ADDED_FG).bg(DIFF_ADDED_BG),
         ),
     ])
 }
@@ -182,21 +177,16 @@ fn render_deleted_line(line: &str, line_no: usize, max_width: usize) -> Line<'st
     let truncated_content = truncate_span_content(content, content_max_width);
     let line_no_str = format!("{:>4} ", line_no);
     Line::from(vec![
-        Span::styled(
-            line_no_str,
-            Style::default().fg(ratatui::style::Color::DarkGray),
-        ),
+        Span::styled(line_no_str, Style::default().fg(DIFF_LINENO_COLOR)),
         Span::styled(
             "-",
             Style::default()
-                .fg(ratatui::style::Color::Red)
+                .fg(DIFF_DELETED_FG)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             truncated_content,
-            Style::default()
-                .fg(ratatui::style::Color::Red)
-                .bg(DIFF_DELETED_BG),
+            Style::default().fg(DIFF_DELETED_FG).bg(DIFF_DELETED_BG),
         ),
     ])
 }
@@ -213,15 +203,9 @@ fn render_context_line(
     let line_no_str = format!("{:>4}/{:>4} ", old_no, new_no);
     let truncated_content = truncate_span_content(line, content_max_width);
     Line::from(vec![
-        Span::styled(
-            line_no_str,
-            Style::default().fg(ratatui::style::Color::DarkGray),
-        ),
-        Span::styled(" ", Style::default().fg(ratatui::style::Color::DarkGray)),
-        Span::styled(
-            truncated_content,
-            Style::default().fg(ratatui::style::Color::DarkGray),
-        ),
+        Span::styled(line_no_str, Style::default().fg(DIFF_LINENO_COLOR)),
+        Span::styled(" ", Style::default().fg(DIFF_LINENO_COLOR)),
+        Span::styled(truncated_content, Style::default().fg(DIFF_LINENO_COLOR)),
     ])
 }
 

@@ -333,7 +333,7 @@ fn render_tool_invocation(
 /// - Empty / placeholder results → a single "(completed successfully)" line.
 /// - Diff content → coloured diff lines.
 /// - Everything else → wrapped plain text.
-fn render_result_lines(
+pub(super) fn render_result_lines(
     result_content: &str,
     success: bool,
     inner_width: usize,
@@ -373,9 +373,13 @@ fn render_result_lines(
             .collect();
     }
 
-    // Regular output — wrap and display with the status color.
-    let status_color = if success {
-        TOOL_RESULT_SUCCESS_COLOR
+    // Regular output — wrap and display. The body uses a dedicated
+    // TOOL_OUTPUT_COLOR so machine output never blends into the model's prose
+    // (assistant text is sage green; success tool output is cool slate).
+    // Failure stays red so errors still pop; success/failure is reinforced by
+    // the status icon + title border above.
+    let content_color = if success {
+        TOOL_OUTPUT_COLOR
     } else {
         TOOL_RESULT_FAILURE_COLOR
     };
@@ -385,7 +389,7 @@ fn render_result_lines(
         .map(|wrapped_line| {
             Line::from(vec![
                 Span::styled("  ", Style::default().fg(ratatui::style::Color::Reset)),
-                Span::styled(wrapped_line, Style::default().fg(status_color)),
+                Span::styled(wrapped_line, Style::default().fg(content_color)),
             ])
         })
         .collect()
@@ -1120,23 +1124,13 @@ fn format_tool_output(content: &str, max_width: usize) -> Vec<Line<'static>> {
             serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| content.to_string());
         return wrap_content(&pretty, max_width)
             .into_iter()
-            .map(|t| {
-                Line::from(Span::styled(
-                    t,
-                    Style::default().fg(ratatui::style::Color::Rgb(184, 180, 160)),
-                ))
-            })
+            .map(|t| Line::from(Span::styled(t, Style::default().fg(TOOL_OUTPUT_COLOR))))
             .collect();
     }
 
-    // Plain text — wrap with appropriate styling
+    // Plain text — wrap with the tool-output body color.
     wrap_content(content, max_width)
         .into_iter()
-        .map(|t| {
-            Line::from(Span::styled(
-                t,
-                Style::default().fg(ratatui::style::Color::Green),
-            ))
-        })
+        .map(|t| Line::from(Span::styled(t, Style::default().fg(TOOL_OUTPUT_COLOR))))
         .collect()
 }
