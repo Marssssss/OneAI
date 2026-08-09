@@ -890,22 +890,43 @@ fn handle_user_input_async(
                         };
                         let loaded = rt.block_on(async {
                             let mut state = session_state.lock().await;
-                            // create_session_with_id loads the conversation
-                            // from SQLite; an unknown id yields an empty
-                            // conversation, which we treat as "not found".
-                            let new_session = state.app.create_session_with_id(&id).await;
+                            // Accept either the full UUID or a unique short
+                            // prefix (e.g. the 8-char id shown in the sidebar).
+                            // Without this, a short id silently misses the row,
+                            // `create_session_with_id` returns an *empty*
+                            // conversation, we refuse it — and the session stays
+                            // the fresh one. The next run then uses the empty
+                            // session and the model is amnesiac: the exact
+                            // issue #23 symptom. Resolve to the full id first.
+                            let (resolved, ambiguous) = {
+                                let sessions = state.app.list_conversations().await;
+                                if sessions.iter().any(|s| s.id == id) {
+                                    (id.clone(), false)
+                                } else {
+                                    let matches: Vec<_> =
+                                        sessions.iter().filter(|s| s.id.starts_with(&id)).collect();
+                                    match matches.len() {
+                                        1 => (matches[0].id.clone(), false),
+                                        _ => (id.clone(), matches.len() > 1),
+                                    }
+                                }
+                            };
+                            let new_session = state.app.create_session_with_id(&resolved).await;
                             let msgs = new_session.conversation().messages.clone();
                             tracing::info!(
-                                "[/session resume] id={} loaded_msgs={} (empty => not found)",
+                                "[/session resume] requested={} resolved={} ambiguous={} \
+                                 loaded_msgs={} (0 => not found / empty)",
                                 id,
+                                resolved,
+                                ambiguous,
                                 msgs.len()
                             );
-                            if msgs.is_empty() {
+                            if ambiguous || msgs.is_empty() {
                                 return None;
                             }
                             let count = msgs.len();
                             state.session = new_session;
-                            Some((count, msgs))
+                            Some((count, msgs, resolved))
                         });
                         match loaded {
                             None => {
@@ -913,15 +934,16 @@ fn handle_user_input_async(
                                     ChatRole::Error,
                                     format!(
                                         "Session '{}' not found or has no history. \
-                                         Use /session list for available ids.",
+                                         Use /session list for available ids (you can \
+                                         pass the full id or a unique short prefix).",
                                         id
                                     ),
                                 );
                             }
-                            Some((count, conv_msgs)) => {
+                            Some((count, conv_msgs, resolved)) => {
                                 tracing::info!(
                                     "[/session resume] OK id={} rebuilding {} chat messages",
-                                    id,
+                                    resolved,
                                     count
                                 );
                                 let converted = conversation_to_chat_messages(&conv_msgs);
@@ -934,10 +956,10 @@ fn handle_user_input_async(
                                     }
                                     app.messages.push(m);
                                 }
-                                app.session_id = id.clone();
+                                app.session_id = resolved.clone();
                                 // Mark as a new active sidebar entry (mirrors /new)
                                 // so the resumed session is selectable.
-                                app.add_new_session(id.clone());
+                                app.add_new_session(resolved.clone());
                                 app.update_session_info();
                                 app.token_usage = TokenUsage::new();
                                 app.context_tokens = 0;
@@ -952,7 +974,7 @@ fn handle_user_input_async(
                                     format!(
                                         "Resumed session {} ({} messages). \
                                          The model sees this history — continue below.",
-                                        id, count
+                                        resolved, count
                                     ),
                                 );
                             }
@@ -989,7 +1011,9 @@ fn handle_user_input_async(
                         return;
                     }
                     _ => {
-                        tracing::info!("[/session] falling through to info display (sub not resume/list)");
+                        tracing::info!(
+                            "[/session] falling through to info display (sub not resume/list)"
+                        );
                     } // fall through to the info display below
                 }
                 let ctx_est = if app.context_tokens_is_estimated {
