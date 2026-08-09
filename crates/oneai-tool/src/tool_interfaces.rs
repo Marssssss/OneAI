@@ -782,7 +782,7 @@ impl Tool for FileReadTool {
                 let output = selected_lines
                     .iter()
                     .enumerate()
-                    .map(|(i, line)| format!("{:>6}\t{}", start + i + 1, line))
+                    .map(|(i, line)| format!("{:>5}:\t{}", start + i + 1, line))
                     .collect::<Vec<String>>()
                     .join("\n");
 

@@ -31,6 +31,7 @@ pub mod input;
 pub mod markdown;
 pub mod message;
 pub mod plan;
+pub mod session_tabs;
 pub mod sidebar;
 pub mod spinner;
 
@@ -53,34 +54,34 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         1
     };
     let context_bar_lines = if !app.show_sidebar { 1 } else { 0 };
+    // Session tab strip (issue #30): one row when ≥2 sessions exist, else 0
+    // (avoids stealing a line from the chat area when there's nothing to show).
+    let tabs_lines = if app.sessions.len() > 1 { 1 } else { 0 };
 
+    // Fixed 4-slot vertical layout: brand | session tabs | context bar | main.
+    // Absent slots use Length(0) (a zero-height rect) so indices stay stable.
     let outer_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if context_bar_lines > 0 {
-            vec![
-                Constraint::Length(brand_lines),       // brand line (1 or 3)
-                Constraint::Length(context_bar_lines), // context bar
-                Constraint::Min(0),                    // main content
-            ]
-        } else {
-            vec![Constraint::Length(brand_lines), Constraint::Min(0)]
-        })
+        .constraints([
+            Constraint::Length(brand_lines),       // brand line (1 or 5)
+            Constraint::Length(tabs_lines),        // session tabs (0 or 1)
+            Constraint::Length(context_bar_lines), // context bar (0 or 1)
+            Constraint::Min(0),                    // main content
+        ])
         .split(total_size);
 
     let brand_rect = outer_layout[0];
-    let context_bar_rect = if context_bar_lines > 0 {
-        outer_layout[1]
-    } else {
-        Rect::default()
-    };
-    let content_rect = if context_bar_lines > 0 {
-        outer_layout[2]
-    } else {
-        outer_layout[1]
-    };
+    let tabs_rect = outer_layout[1];
+    let context_bar_rect = outer_layout[2];
+    let content_rect = outer_layout[3];
 
     // Draw brand line
     brand::draw_brand(f, brand_rect, app);
+
+    // Draw session tab strip (only when there's room and ≥2 sessions).
+    if tabs_lines > 0 && tabs_rect.height > 0 {
+        session_tabs::draw_session_tabs(f, tabs_rect, app);
+    }
 
     // Draw context bar when sidebar is hidden
     if !app.show_sidebar && context_bar_rect.height > 0 {
@@ -270,12 +271,25 @@ fn draw_command_popup(f: &mut Frame, chat_rect: Rect, _input_rect: Rect, app: &A
         String::new()
     };
 
+    // Title reflects two-level autocomplete (issue #30): a suggestion with a
+    // space (`/session resume`) is a subcommand; otherwise it's a top-level
+    // command.
+    let is_subcommand = suggestions
+        .first()
+        .map(|(cmd, _)| cmd.contains(' '))
+        .unwrap_or(false);
+    let title_label = if is_subcommand {
+        "Subcommands"
+    } else {
+        "Commands"
+    };
+
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(INPUT_BORDER))
             .title(Span::styled(
-                format!(" Commands{} ", title_suffix),
+                format!(" {}{} ", title_label, title_suffix),
                 Style::default()
                     .fg(INPUT_PROMPT_COLOR)
                     .add_modifier(Modifier::BOLD),

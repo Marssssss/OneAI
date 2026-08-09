@@ -190,31 +190,154 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/q", "Shortcut for /quit"),
 ];
 
+/// Two-level subcommand map for slash autocomplete (issue #30).
+///
+/// Source of truth mirrors the TUI dispatch tree in `tui/mod.rs` (the
+/// `/session`/`/skill`/`/wf`/`/init`/`/domain`/`/paradigm` arms). When the
+/// input is `<cmd> ` (command fully typed + trailing space), the autocomplete
+/// popup surfaces these subcommands filtered by what the user has typed so
+/// far. Commands absent here (`/clear`, `/new`, ...) take free-form args or
+/// none, so they offer no二级 list — the popup closes.
+pub const SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "/session",
+        &[
+            ("resume", "Reload a saved session by id (or short prefix)"),
+            ("list", "Show resumable session ids"),
+        ],
+    ),
+    (
+        "/skill",
+        &[
+            ("off", "Deactivate the active skill"),
+            ("add", "Register a custom skill (this session)"),
+            ("remove", "Remove a skill (this session)"),
+            ("info", "Show a skill's details"),
+            ("search", "Find relevant skills by query"),
+        ],
+    ),
+    (
+        "/wf",
+        &[
+            ("list", "List defined workflows"),
+            ("run", "Run a workflow by name"),
+            ("define", "Define a new workflow"),
+            ("show", "Show a workflow's steps"),
+            ("graph", "Show a workflow's StateGraph"),
+            ("status", "Show the running workflow's status"),
+            ("history", "Show workflow run history"),
+        ],
+    ),
+    (
+        "/init",
+        &[
+            ("oneai", "Generate ONEAI.md"),
+            ("agents", "Generate AGENTS.md"),
+            ("claude", "Generate CLAUDE.md"),
+        ],
+    ),
+    (
+        "/domain",
+        &[
+            ("coding", "Coding domain pack"),
+            ("general", "General domain pack"),
+        ],
+    ),
+    (
+        "/paradigm",
+        &[
+            ("ReAct", "Reason+act loop"),
+            ("Plan", "Plan-then-execute"),
+            ("Reflect", "Self-review loop"),
+            ("Explore", "Divergent search"),
+        ],
+    ),
+];
+
 impl App {
     /// Get filtered command suggestions based on current input.
-    pub fn get_command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
-        if !self.input.starts_with('/') {
+    ///
+    /// Two-level (issue #30):
+    /// - Input `<prefix>` (no space after the command token) → top-level
+    ///   commands from `SLASH_COMMANDS` whose name starts with the prefix
+    ///   (legacy behavior).
+    /// - Input `<cmd> <sub-partial>` (command fully typed + a space, even an
+    ///   empty one) → subcommands of `<cmd>` (from `SUBCOMMANDS`) whose name
+    ///   starts with `<sub-partial>`. Returned as the full input line
+    ///   (`"<cmd> <sub>"`) so the existing `accept_autocomplete` whole-line
+    ///   overwrite and `draw_command_popup` renderer keep working unchanged.
+    pub fn get_command_suggestions(&self) -> Vec<(String, &'static str)> {
+        let input = &self.input;
+        if !input.starts_with('/') {
             return Vec::new();
         }
-        let prefix = &self.input;
-        SLASH_COMMANDS
-            .iter()
-            .filter(|(cmd, _)| cmd.starts_with(prefix))
-            .map(|&(cmd, desc)| (cmd, desc))
-            .collect()
+        // Strip the leading '/', split off the first token (command name) from
+        // the rest. `splitn(2, ' ')` keeps trailing space semantics: a bare
+        // trailing space yields `rest = Some("")` → all subcommands surface.
+        let after_slash = &input[1..];
+        let mut split = after_slash.splitn(2, ' ');
+        let cmd_name = split.next().unwrap_or("");
+        let rest = split.next();
+
+        match rest {
+            None => {
+                // Still completing the command name — prefix includes '/'.
+                SLASH_COMMANDS
+                    .iter()
+                    .filter(|(cmd, _)| cmd.starts_with(input.as_str()))
+                    .map(|&(cmd, desc)| (cmd.to_string(), desc))
+                    .collect()
+            }
+            Some(sub_partial) => {
+                // Command fully typed + space → enumerate its subcommands.
+                let full_cmd = format!("/{}", cmd_name);
+                let Some((_, subs)) = SUBCOMMANDS.iter().find(|(c, _)| *c == full_cmd) else {
+                    // No fixed subcommand list for this command (e.g. /clear,
+                    // /tool <json>, /session resume <free id>) → no popup.
+                    return Vec::new();
+                };
+                subs.iter()
+                    .filter(|(sub, _)| sub.starts_with(sub_partial))
+                    .map(|(sub, desc)| (format!("{} {}", full_cmd, sub), *desc))
+                    .collect()
+            }
+        }
     }
 
     /// Accept the currently selected autocomplete suggestion.
+    ///
+    /// Overwrites the input with the whole-line suggestion (legacy behavior),
+    /// then adapts the post-accept state for two-level flow (issue #30):
+    /// - A top-level command that has subcommands → append a trailing space
+    ///   and keep autocomplete open so the二级 list surfaces immediately.
+    /// - A subcommand → append a trailing space (room for the next free-form
+    ///   arg like an id/name) and close the popup.
+    /// - A plain top-level command (no subcommands) → as-is, close.
     pub fn accept_autocomplete(&mut self) {
         let suggestions = self.get_command_suggestions();
         if suggestions.is_empty() {
             return;
         }
         let idx = self.command_autocomplete_index.min(suggestions.len() - 1);
-        self.input = suggestions[idx].0.to_string();
+        let chosen = suggestions[idx].0.clone();
+        let is_subcommand = chosen.contains(' ');
+        let top_has_subs = !is_subcommand && SUBCOMMANDS.iter().any(|(c, _)| *c == chosen);
+
+        self.input = if is_subcommand || top_has_subs {
+            format!("{} ", chosen)
+        } else {
+            chosen
+        };
         self.input_cursor_pos = self.input.len();
-        self.command_autocomplete = false;
-        self.command_autocomplete_index = 0;
+
+        if top_has_subs {
+            // Reopen so the二级 subcommand list appears right away.
+            self.command_autocomplete = true;
+            self.command_autocomplete_index = 0;
+        } else {
+            self.command_autocomplete = false;
+            self.command_autocomplete_index = 0;
+        }
     }
 }
 
@@ -1151,13 +1274,31 @@ impl App {
         }
     }
 
-    /// Add a new session to the sessions list (e.g., after /clear or /new).
-    /// Marks the previous active session as inactive and creates a new one.
+    /// Add a new session to the sessions list (e.g., after /clear or /new), or
+    /// activate an existing one (e.g., `/session resume <id>` of a session that
+    /// already appears in the list). Marks every other session inactive. Does
+    /// NOT push a duplicate when the id is already present — that was the root
+    /// cause of "switching via the TAB bar added an extra row each click" (the
+    /// startup DB load now pre-populates `sessions`, so the resumed session is
+    /// usually already listed).
     #[allow(dead_code)]
     pub fn add_new_session(&mut self, new_session_id: String) {
         // Mark previous sessions as inactive
         for session in &mut self.sessions {
             session.is_active = false;
+        }
+
+        // If this session already has an entry (e.g. loaded from the DB at
+        // startup and now resumed), just reactivate it — no duplicate row.
+        if let Some(existing) = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.full_id == new_session_id)
+        {
+            existing.is_active = true;
+            existing.message_count = self.messages.len();
+            self.session_id = new_session_id;
+            return;
         }
 
         let short_id = new_session_id[..8.min(new_session_id.len())].to_string();
@@ -2158,5 +2299,142 @@ mod tests {
             ..Default::default()
         };
         assert!((full.cache_hit_ratio() - 1.0).abs() < 1e-9);
+    }
+
+    // ── #30 two-level slash autocomplete ─────────────────────────────────────
+
+    fn suggestions_for(app: &App) -> Vec<String> {
+        app.get_command_suggestions()
+            .into_iter()
+            .map(|(cmd, _)| cmd)
+            .collect()
+    }
+
+    #[test]
+    fn slash_toplevel_completion_unchanged() {
+        // No space after the command token → still completes top-level names.
+        let mut app = test_app();
+        app.input = "/se".to_string();
+        assert!(suggestions_for(&app).iter().any(|s| s == "/session"));
+    }
+
+    #[test]
+    fn slash_subcommand_list_after_trailing_space() {
+        // `<cmd> ` (trailing space) → surface ALL subcommands of that command.
+        let mut app = test_app();
+        app.input = "/session ".to_string();
+        let s = suggestions_for(&app);
+        assert!(s.contains(&"/session resume".to_string()));
+        assert!(s.contains(&"/session list".to_string()));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn slash_subcommand_filtered_by_partial() {
+        let mut app = test_app();
+        app.input = "/wf r".to_string();
+        let s = suggestions_for(&app);
+        assert_eq!(s, vec!["/wf run".to_string()]);
+    }
+
+    #[test]
+    fn slash_no_subcommands_command_offers_none_after_space() {
+        // /clear has no fixed subcommand list → popup closes (free-form args).
+        let mut app = test_app();
+        app.input = "/clear ".to_string();
+        assert!(app.get_command_suggestions().is_empty());
+    }
+
+    #[test]
+    fn slash_free_form_arg_after_subcommand_offers_none() {
+        // `/session resume <free id>` → the third token is free-form; the
+        // partial "resume x" matches no subcommand → no popup.
+        let mut app = test_app();
+        app.input = "/session resume x".to_string();
+        assert!(app.get_command_suggestions().is_empty());
+    }
+
+    #[test]
+    fn accept_toplevel_with_subs_reopens_for_subcommands() {
+        // Accepting `/session` (has subs) appends a space and keeps the popup
+        // open so the二级 list surfaces immediately.
+        let mut app = test_app();
+        app.input = "/se".to_string();
+        app.command_autocomplete = true;
+        app.command_autocomplete_index = 0;
+        app.accept_autocomplete();
+        assert_eq!(app.input, "/session ");
+        assert!(
+            app.command_autocomplete,
+            "popup must reopen for subcommands"
+        );
+        // The reopened list must be the subcommand list, not the top-level one.
+        assert!(suggestions_for(&app).contains(&"/session resume".to_string()));
+    }
+
+    #[test]
+    fn accept_subcommand_appends_space_and_closes() {
+        // Accepting a subcommand leaves room for the next free-form arg and
+        // closes the popup (no fixed list for the arg).
+        let mut app = test_app();
+        app.input = "/wf r".to_string();
+        app.command_autocomplete = true;
+        app.command_autocomplete_index = 0;
+        app.accept_autocomplete();
+        assert_eq!(app.input, "/wf run ");
+        assert!(!app.command_autocomplete);
+    }
+
+    // ── #30 session TAB bar (display-only) ──────────────────────────────────
+
+    fn app_with_sessions(n: usize) -> App {
+        // Build an App with `n` sessions; the last one is active.
+        let mut app = test_app();
+        app.sessions.clear();
+        for i in 0..n {
+            app.sessions.push(crate::tui::app::SessionInfo {
+                short_id: format!("s{}", i),
+                full_id: format!("full-{}", i),
+                message_count: i,
+                is_active: i + 1 == n, // last is active
+                preview: String::new(),
+            });
+        }
+        app
+    }
+
+    #[test]
+    fn add_new_session_dedupes_existing_id() {
+        // Resuming a session already in the list (e.g. one loaded from the DB
+        // at startup) must NOT push a duplicate row — it just reactivates the
+        // existing entry. Guards against the "switching adds an extra row each
+        // time" regression (issue #30).
+        let mut app = app_with_sessions(3); // full-0, full-1, full-2(active)
+        assert_eq!(app.sessions.len(), 3);
+        app.add_new_session("full-0".to_string());
+        assert_eq!(app.sessions.len(), 3, "must not add a duplicate row");
+        assert_eq!(app.session_id, "full-0");
+        let active = app.sessions.iter().filter(|s| s.is_active).count();
+        assert_eq!(active, 1, "exactly one active session");
+        assert!(
+            app.sessions.iter().find(|s| s.full_id == "full-0").unwrap().is_active,
+            "resumed entry must be the active one"
+        );
+        assert!(
+            !app.sessions.iter().find(|s| s.full_id == "full-1").unwrap().is_active,
+            "others must be inactive"
+        );
+    }
+
+    #[test]
+    fn add_new_session_pushes_truly_new_id() {
+        // A brand-new id (e.g. /new, /clear) still appends a fresh active row.
+        let mut app = app_with_sessions(2);
+        app.add_new_session("new-id-99".to_string());
+        assert_eq!(app.sessions.len(), 3);
+        assert_eq!(app.session_id, "new-id-99");
+        assert!(
+            app.sessions.iter().find(|s| s.full_id == "new-id-99").unwrap().is_active
+        );
     }
 }

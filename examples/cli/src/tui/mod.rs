@@ -34,7 +34,7 @@ use oneai_domain::coding_pack;
 use oneai_provider::ProviderFactory;
 use oneai_tool::CalculatorTool;
 
-use app::{App, ApprovalPendingState, ChatMessage, ChatRole, TokenUsage};
+use app::{App, ApprovalPendingState, ChatMessage, ChatRole, SessionInfo, TokenUsage};
 use observer::{ObserverEvent, TuiObserver};
 use render::spinner::advance_frame;
 use session::SessionState;
@@ -209,6 +209,46 @@ pub fn run_tui(
 
         tui_app.skill_names = tui_app.skill_registry.skill_names().await;
         tui_app.current_domain = domain_pack_name.to_string();
+
+        // Load the most recent saved sessions into `tui_app.sessions` so the
+        // sidebar AND the top TAB bar (issue #30) show history at startup,
+        // not just the single fresh current session. Both surfaces read the
+        // same `app.sessions`, so populating it once fixes both.
+        let mut saved = app_arc.list_conversations().await;
+        saved.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+        // `session_id` was moved into App::new; the App keeps it as
+        // `session_id`, so read it back to mark the active entry.
+        let current_id = tui_app.session_id.clone();
+        let mut recent: Vec<SessionInfo> = saved
+            .into_iter()
+            .take(7)
+            .map(|s| {
+                let is_active = s.id == current_id;
+                SessionInfo {
+                    short_id: s.id[..8.min(s.id.len())].to_string(),
+                    full_id: s.id,
+                    message_count: s.message_count,
+                    is_active,
+                    preview: s.title.unwrap_or_default(),
+                }
+            })
+            .collect();
+        if !recent.is_empty() {
+            // The fresh current session often isn't in list_conversations
+            // yet (no completed turn). Keep it as the active entry at the
+            // front so the user always sees their current session, alongside
+            // up to 6 most-recent saved ones (cap = 7).
+            let current_present = recent.iter().any(|s| s.full_id == current_id);
+            if !current_present {
+                let initial = tui_app.sessions.remove(0); // App::new's active session
+                recent.insert(0, initial);
+                if recent.len() > 7 {
+                    recent.truncate(7);
+                }
+            }
+            tui_app.sessions = recent;
+        }
+        tui_app.update_session_info();
 
         (tui_app, session_state, interaction_rx)
     });
@@ -888,96 +928,16 @@ fn handle_user_input_async(
                                 return;
                             }
                         };
-                        let loaded = rt.block_on(async {
-                            let mut state = session_state.lock().await;
-                            // Accept either the full UUID or a unique short
-                            // prefix (e.g. the 8-char id shown in the sidebar).
-                            // Without this, a short id silently misses the row,
-                            // `create_session_with_id` returns an *empty*
-                            // conversation, we refuse it — and the session stays
-                            // the fresh one. The next run then uses the empty
-                            // session and the model is amnesiac: the exact
-                            // issue #23 symptom. Resolve to the full id first.
-                            let (resolved, ambiguous) = {
-                                let sessions = state.app.list_conversations().await;
-                                if sessions.iter().any(|s| s.id == id) {
-                                    (id.clone(), false)
-                                } else {
-                                    let matches: Vec<_> =
-                                        sessions.iter().filter(|s| s.id.starts_with(&id)).collect();
-                                    match matches.len() {
-                                        1 => (matches[0].id.clone(), false),
-                                        _ => (id.clone(), matches.len() > 1),
-                                    }
-                                }
-                            };
-                            let new_session = state.app.create_session_with_id(&resolved).await;
-                            let msgs = new_session.conversation().messages.clone();
-                            tracing::info!(
-                                "[/session resume] requested={} resolved={} ambiguous={} \
-                                 loaded_msgs={} (0 => not found / empty)",
-                                id,
-                                resolved,
-                                ambiguous,
-                                msgs.len()
+                        if !resume_session(app, session_state.clone(), rt, &id) {
+                            app.add_message(
+                                ChatRole::Error,
+                                format!(
+                                    "Session '{}' not found or has no history. \
+                                     Use /session list for available ids (you can \
+                                     pass the full id or a unique short prefix).",
+                                    id
+                                ),
                             );
-                            if ambiguous || msgs.is_empty() {
-                                return None;
-                            }
-                            let count = msgs.len();
-                            state.session = new_session;
-                            Some((count, msgs, resolved))
-                        });
-                        match loaded {
-                            None => {
-                                app.add_message(
-                                    ChatRole::Error,
-                                    format!(
-                                        "Session '{}' not found or has no history. \
-                                         Use /session list for available ids (you can \
-                                         pass the full id or a unique short prefix).",
-                                        id
-                                    ),
-                                );
-                            }
-                            Some((count, conv_msgs, resolved)) => {
-                                tracing::info!(
-                                    "[/session resume] OK id={} rebuilding {} chat messages",
-                                    resolved,
-                                    count
-                                );
-                                let converted = conversation_to_chat_messages(&conv_msgs);
-                                app.messages.clear();
-                                app.render_cache.invalidate_all();
-                                app.collapsed_ids.clear();
-                                for m in converted {
-                                    if m.role.default_collapsed() {
-                                        app.collapsed_ids.insert(m.id.clone());
-                                    }
-                                    app.messages.push(m);
-                                }
-                                app.session_id = resolved.clone();
-                                // Mark as a new active sidebar entry (mirrors /new)
-                                // so the resumed session is selectable.
-                                app.add_new_session(resolved.clone());
-                                app.update_session_info();
-                                app.token_usage = TokenUsage::new();
-                                app.context_tokens = 0;
-                                app.context_tokens_is_estimated = false;
-                                app.current_iteration = 0;
-                                app.last_context_accounting = None;
-                                app.chat_scroll_y = 0;
-                                app.user_scrolled = false; // auto-follow to latest
-                                app.request_invalidate(); // full repaint — new message set
-                                app.add_message(
-                                    ChatRole::System,
-                                    format!(
-                                        "Resumed session {} ({} messages). \
-                                         The model sees this history — continue below.",
-                                        resolved, count
-                                    ),
-                                );
-                            }
                         }
                         return;
                     }
@@ -1640,6 +1600,102 @@ fn handle_user_input_async(
 }
 
 /// Handle `/wf` workflow commands.
+/// Load a saved conversation into the live session by id (issue #30).
+///
+/// Single session-load codepath shared by `/session resume <id>` (slash
+/// command) and the top TAB-bar session switch (Alt+1..7 / tab click via
+/// `App::pending_session_switch`), so id resolution, message rebuild, and
+/// per-session counter reset live in exactly one place. Accepts the full UUID
+/// or a unique short prefix (e.g. the 8-char id shown in the sidebar). Returns
+/// `true` on a successful load, `false` if not found / ambiguous / empty (the
+/// caller renders the error).
+fn resume_session(
+    app: &mut App,
+    session_state: Arc<tokio::sync::Mutex<SessionState>>,
+    rt: &tokio::runtime::Runtime,
+    id: &str,
+) -> bool {
+    let loaded = rt.block_on(async {
+        let mut state = session_state.lock().await;
+        // Accept either the full UUID or a unique short prefix (e.g. the
+        // 8-char id shown in the sidebar). Without this, a short id silently
+        // misses the row, `create_session_with_id` returns an *empty*
+        // conversation, we refuse it — and the session stays the fresh one.
+        // The next run then uses the empty session and the model is amnesiac:
+        // the exact issue #23 symptom. Resolve to the full id first.
+        let (resolved, ambiguous) = {
+            let sessions = state.app.list_conversations().await;
+            if sessions.iter().any(|s| s.id == id) {
+                (id.to_string(), false)
+            } else {
+                let matches: Vec<_> = sessions.iter().filter(|s| s.id.starts_with(id)).collect();
+                match matches.len() {
+                    1 => (matches[0].id.clone(), false),
+                    _ => (id.to_string(), matches.len() > 1),
+                }
+            }
+        };
+        let new_session = state.app.create_session_with_id(&resolved).await;
+        let msgs = new_session.conversation().messages.clone();
+        tracing::info!(
+            "[resume_session] requested={} resolved={} ambiguous={} \
+             loaded_msgs={} (0 => not found / empty)",
+            id,
+            resolved,
+            ambiguous,
+            msgs.len()
+        );
+        if ambiguous || msgs.is_empty() {
+            return None;
+        }
+        let count = msgs.len();
+        state.session = new_session;
+        Some((count, msgs, resolved))
+    });
+    match loaded {
+        None => false,
+        Some((count, conv_msgs, resolved)) => {
+            tracing::info!(
+                "[resume_session] OK id={} rebuilding {} chat messages",
+                resolved,
+                count
+            );
+            let converted = conversation_to_chat_messages(&conv_msgs);
+            app.messages.clear();
+            app.render_cache.invalidate_all();
+            app.collapsed_ids.clear();
+            for m in converted {
+                if m.role.default_collapsed() {
+                    app.collapsed_ids.insert(m.id.clone());
+                }
+                app.messages.push(m);
+            }
+            app.session_id = resolved.clone();
+            // Mark as a new active sidebar entry (mirrors /new) so the resumed
+            // session is selectable and appears in the TAB strip.
+            app.add_new_session(resolved.clone());
+            app.update_session_info();
+            app.token_usage = TokenUsage::new();
+            app.context_tokens = 0;
+            app.context_tokens_is_estimated = false;
+            app.current_iteration = 0;
+            app.last_context_accounting = None;
+            app.chat_scroll_y = 0;
+            app.user_scrolled = false; // auto-follow to latest
+            app.request_invalidate(); // full repaint — new message set
+            app.add_message(
+                ChatRole::System,
+                format!(
+                    "Resumed session {} ({} messages). \
+                     The model sees this history — continue below.",
+                    resolved, count
+                ),
+            );
+            true
+        }
+    }
+}
+
 fn handle_workflow_command(
     app: &mut App,
     session_state: Arc<tokio::sync::Mutex<SessionState>>,

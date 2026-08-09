@@ -309,8 +309,9 @@ impl SwebenchRunner {
                         session.conversation(),
                         &tree,
                     ) {
-                        Ok(p) => result
-                            .set_metadata("trajectory_file", p.to_string_lossy().into_owned()),
+                        Ok(p) => {
+                            result.set_metadata("trajectory_file", p.to_string_lossy().into_owned())
+                        }
                         Err(e) => result.set_metadata("trajectory_error", e),
                     }
                 }
