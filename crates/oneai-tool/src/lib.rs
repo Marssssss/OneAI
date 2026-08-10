@@ -16,6 +16,7 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod apply_patch;
+pub mod code;
 pub mod executor;
 pub mod file_ops;
 pub mod interaction_gate;
@@ -30,6 +31,7 @@ pub mod tool_interfaces;
 // Explicit imports to avoid ambiguity between local_tools and tool_interfaces
 // (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
 pub use apply_patch::{parse_unified_diff, ApplyPatchTool, DiffHunk, DiffLine};
+pub use code::CodeInterpreterTool;
 pub use executor::*;
 pub use file_ops::{
     DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps, SandboxedFileOps,

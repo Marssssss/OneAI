@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::RwLock;
+
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::{InteractionGate, PermissionResolver, Tool};
 use oneai_core::{
@@ -139,216 +141,22 @@ impl ToolExecutor {
 
     /// Execute a tool by name with the given arguments.
     ///
-    /// The execution flow:
-    /// 1. Look up the tool in the registry
-    /// 2. Check if the tool requires approval (based on risk level)
-    /// 3. If approval is needed, request it from the approval gate
-    /// 4. If approved, use the (possibly modified) args to execute the tool
-    /// 5. Return the result
-    ///
-    /// Returns an error if:
-    /// - The tool is not found in the registry
-    /// - The approval gate denies the request
-    /// - The tool execution fails
-    /// - The tool execution times out
+    /// Delegates to [`execute_with_approval`] — the single shared approval
+    /// pipeline also used by the `code_interpreter` bridge for tool calls made
+    /// *inside* a sandboxed script. Both paths therefore hit the identical
+    /// permission-resolver + `InteractionGate::ToolApproval` + timeout +
+    /// output-cap logic: no bypass, no divergence (the gap-analysis P1 bug,
+    /// hardened for code mode).
     pub async fn execute(&self, tool_name: &str, args: serde_json::Value) -> Result<ToolOutput> {
-        // Look up the tool
-        let tool = self
-            .registry
-            .get(tool_name)
-            .await
-            .ok_or_else(|| OneAIError::Tool(format!("Tool '{}' not found", tool_name)))?;
-
-        // Domain permission resolver (optional). When present it overrides the
-        // tool's own risk level — this is the seam that makes this executor
-        // honour DomainPack `deny_by_default` instead of bypassing it
-        // (gap-analysis P1: the ToolExecutor path and the agent-loop path had
-        // diverged; workflow steps routed here previously skipped domain policy).
-        let effective_level;
-        let force_approval;
-        match self.permission_resolver.as_ref() {
-            Some(resolver) => match resolver.resolve(tool_name, &args) {
-                PermissionAction::Deny { reason } => {
-                    tracing::warn!("Tool '{}' denied by domain policy: {}", tool_name, reason);
-                    return Ok(ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(format!("Denied by domain policy: {}", reason)),
-                        ..Default::default()
-                    });
-                }
-                PermissionAction::AutoApprove => {
-                    tracing::info!("Tool '{}' auto-approved by domain policy", tool_name);
-                    // Domain says skip the gate entirely regardless of risk.
-                    return self.execute_with_timeout(tool, args).await;
-                }
-                PermissionAction::RequireConfirmation => {
-                    // Domain says always confirm — force Full-risk approval.
-                    effective_level = RiskLevel::High;
-                    force_approval = true;
-                }
-                PermissionAction::UseDefaultPermission { level } => {
-                    effective_level = level.to_risk_level();
-                    force_approval = false;
-                }
-            },
-            // No resolver wired — fall back to the tool's inherent risk level
-            // (the pre-existing behaviour).
-            None => {
-                effective_level = tool.risk_level();
-                force_approval = false;
-            }
-        }
-
-        let needs_approval = force_approval || self.needs_approval_for_level(effective_level);
-
-        if needs_approval
-            && self
-                .interaction_gate
-                .enabled(InteractionPoint::ToolApproval)
-        {
-            // Ask the interaction gate's ToolApproval point whether to proceed.
-            let approval_request = ApprovalRequest {
-                tool_name: tool_name.to_string(),
-                args: args.clone(),
-                risk_level: effective_level,
-                permission_level: Some(PermissionLevel::from_risk_level(effective_level)),
-                justification: format!(
-                    "Tool '{}' with risk level {:?} requires human approval",
-                    tool_name, effective_level
-                ),
-            };
-
-            let response = self
-                .interaction_gate
-                .request(InteractionRequest::ToolApproval {
-                    approval: approval_request,
-                })
-                .await?;
-
-            match response {
-                InteractionResponse::Proceed => {
-                    tracing::info!(
-                        "Tool '{}' approved for execution with args: {}",
-                        tool_name,
-                        args
-                    );
-                    self.execute_with_timeout(tool, args).await
-                }
-                InteractionResponse::ProceedWith { modification } => {
-                    // ToolApproval only honours an arg rewrite; other modifications
-                    // (which don't apply here) fall through to the original args.
-                    let final_args = match modification {
-                        InteractionModification::ReplaceToolArgs(new_args) => new_args,
-                        _ => args,
-                    };
-                    tracing::info!(
-                        "Tool '{}' approved with modified args: {}",
-                        tool_name,
-                        final_args
-                    );
-                    self.execute_with_timeout(tool, final_args).await
-                }
-                InteractionResponse::Abort { reason } => {
-                    tracing::warn!("Tool '{}' denied: {}", tool_name, reason);
-                    Ok(ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(format!("Execution denied: {}", reason)),
-                        ..Default::default()
-                    })
-                }
-                InteractionResponse::Revise { feedback } => {
-                    // The direct execute_tool path can't loop on feedback, so a
-                    // Revise is surfaced as a denial carrying the feedback.
-                    tracing::warn!("Tool '{}' revise-feedback: {}", tool_name, feedback);
-                    Ok(ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(format!("Execution denied: {}", feedback)),
-                        ..Default::default()
-                    })
-                }
-                InteractionResponse::Choose { .. } => {
-                    // PlanDecision-only reply; doesn't apply to ToolApproval. Proceed.
-                    self.execute_with_timeout(tool, args).await
-                }
-                // InteractionResponse is #[non_exhaustive]; unknown variants
-                // (e.g. future decision points) default to proceeding.
-                _ => self.execute_with_timeout(tool, args).await,
-            }
-        } else {
-            // No approval needed (or the gate disabled the ToolApproval point) —
-            // execute directly. A disabled point short-circuits to auto-proceed,
-            // which mirrors the agent-loop's behaviour under NoopInteractionGate.
-            tracing::info!(
-                "Tool '{}' executing directly (risk level: {:?})",
-                tool_name,
-                effective_level
-            );
-            self.execute_with_timeout(tool, args).await
-        }
-    }
-
-    /// Check if a given risk level requires approval under this executor's config.
-    fn needs_approval_for_level(&self, level: RiskLevel) -> bool {
-        match level {
-            RiskLevel::High => true,
-            RiskLevel::Medium => self.config.require_approval_for_medium,
-            RiskLevel::Low => false,
-        }
-    }
-
-    /// Execute a tool with timeout enforcement.
-    async fn execute_with_timeout(
-        &self,
-        tool: Arc<dyn Tool>,
-        args: serde_json::Value,
-    ) -> Result<ToolOutput> {
-        let timeout = Duration::from_secs(self.config.default_timeout_secs);
-
-        let result = tokio::time::timeout(timeout, tool.execute(args)).await;
-
-        let output = match result {
-            Ok(output) => output, // output is already Result<ToolOutput, OneAIError>
-            Err(_) => Ok(ToolOutput {
-                success: false,
-                content: String::new(),
-                error: Some(format!(
-                    "Tool '{}' timed out after {} seconds",
-                    tool.name(),
-                    self.config.default_timeout_secs
-                )),
-                ..Default::default()
-            }),
-        };
-
-        Ok(self.enforce_output_limit(tool.name(), output?))
-    }
-
-    /// Bound a tool's textual output to `max_output_bytes`. The single
-    /// chokepoint that protects the context window from runaway output
-    /// (e.g. an unbounded MCP / custom tool) regardless of whether the tool
-    /// self-truncates. `max_output_bytes == 0` disables the guard.
-    fn enforce_output_limit(&self, tool_name: &str, mut output: ToolOutput) -> ToolOutput {
-        let cap = self.config.max_output_bytes;
-        if cap == 0 || output.content.len() <= cap {
-            return output;
-        }
-        let original_len = output.content.len();
-        // Walk back to the nearest UTF-8 char boundary so we never split a
-        // multi-byte sequence (which would produce an invalid String).
-        let mut cut = cap;
-        while cut > 0 && !output.content.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        let mut truncated = String::from(&output.content[..cut]);
-        truncated.push_str(&format!(
-            "\n...[output truncated: tool '{}' returned {} bytes, exceeded {} byte limit]",
-            tool_name, original_len, cap
-        ));
-        output.content = truncated;
-        output
+        execute_with_approval(
+            &self.registry.tools_map(),
+            &self.interaction_gate,
+            self.permission_resolver.as_ref(),
+            &self.config,
+            tool_name,
+            args,
+        )
+        .await
     }
 
     /// Register a tool in the registry.
@@ -381,6 +189,223 @@ impl ToolExecutor {
     pub fn config(&self) -> &ToolExecutorConfig {
         &self.config
     }
+}
+
+// ─── Shared approval pipeline (free function) ────────────────────────────────
+//
+// `execute_with_approval` is the single seam shared by `ToolExecutor::execute`
+// (the agent-loop / workflow dispatch path) and the `code_interpreter` bridge
+// (tool calls made *inside* a sandboxed code-mode script). Routing both
+// through here guarantees a script-internal tool call hits the identical
+// permission-resolver + `InteractionGate::ToolApproval` + timeout + output-cap
+// path as a direct model call — no bypass, no divergence (the gap-analysis P1
+// bug, hardened for code mode).
+
+/// Execute a tool through the full approval pipeline: registry lookup →
+/// optional domain permission resolver → `InteractionGate::ToolApproval`
+/// (when the resolved risk needs it) → timed execution → output-size cap.
+///
+/// Takes the shared `tools_map` (not a `ToolRegistry`) plus the gate/resolver
+/// so the `code_interpreter` bridge can call it without holding a
+/// `ToolExecutor` (which would form an `Arc` cycle: the tool lives in the
+/// same registry it would query).
+pub async fn execute_with_approval(
+    tools_map: &Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    interaction_gate: &Arc<dyn InteractionGate>,
+    permission_resolver: Option<&Arc<dyn PermissionResolver>>,
+    config: &ToolExecutorConfig,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> Result<ToolOutput> {
+    // Look up the tool in the shared registry map.
+    let tool = {
+        let map = tools_map.read().await;
+        map.get(tool_name).cloned()
+    }
+    .ok_or_else(|| OneAIError::Tool(format!("Tool '{}' not found", tool_name)))?;
+
+    // Domain permission resolver (optional). When present it overrides the
+    // tool's own risk level — this is the seam that makes this path honour
+    // DomainPack `deny_by_default` instead of bypassing it (gap-analysis P1).
+    let effective_level;
+    let force_approval;
+    match permission_resolver {
+        Some(resolver) => match resolver.resolve(tool_name, &args) {
+            PermissionAction::Deny { reason } => {
+                tracing::warn!("Tool '{}' denied by domain policy: {}", tool_name, reason);
+                return Ok(ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(format!("Denied by domain policy: {}", reason)),
+                    ..Default::default()
+                });
+            }
+            PermissionAction::AutoApprove => {
+                tracing::info!("Tool '{}' auto-approved by domain policy", tool_name);
+                // Domain says skip the gate entirely regardless of risk.
+                return execute_with_timeout(tool, args, config).await;
+            }
+            PermissionAction::RequireConfirmation => {
+                // Domain says always confirm — force Full-risk approval.
+                effective_level = RiskLevel::High;
+                force_approval = true;
+            }
+            PermissionAction::UseDefaultPermission { level } => {
+                effective_level = level.to_risk_level();
+                force_approval = false;
+            }
+        },
+        // No resolver wired — fall back to the tool's inherent risk level.
+        None => {
+            effective_level = tool.risk_level();
+            force_approval = false;
+        }
+    }
+
+    let needs_approval = force_approval || needs_approval_for_level(effective_level, config);
+
+    if needs_approval && interaction_gate.enabled(InteractionPoint::ToolApproval) {
+        let approval_request = ApprovalRequest {
+            tool_name: tool_name.to_string(),
+            args: args.clone(),
+            risk_level: effective_level,
+            permission_level: Some(PermissionLevel::from_risk_level(effective_level)),
+            justification: format!(
+                "Tool '{}' with risk level {:?} requires human approval",
+                tool_name, effective_level
+            ),
+        };
+
+        let response = interaction_gate
+            .request(InteractionRequest::ToolApproval {
+                approval: approval_request,
+            })
+            .await?;
+
+        match response {
+            InteractionResponse::Proceed => {
+                tracing::info!(
+                    "Tool '{}' approved for execution with args: {}",
+                    tool_name,
+                    args
+                );
+                execute_with_timeout(tool, args, config).await
+            }
+            InteractionResponse::ProceedWith { modification } => {
+                // ToolApproval only honours an arg rewrite; other modifications
+                // fall through to the original args.
+                let final_args = match modification {
+                    InteractionModification::ReplaceToolArgs(new_args) => new_args,
+                    _ => args,
+                };
+                tracing::info!(
+                    "Tool '{}' approved with modified args: {}",
+                    tool_name,
+                    final_args
+                );
+                execute_with_timeout(tool, final_args, config).await
+            }
+            InteractionResponse::Abort { reason } => {
+                tracing::warn!("Tool '{}' denied: {}", tool_name, reason);
+                Ok(ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(format!("Execution denied: {}", reason)),
+                    ..Default::default()
+                })
+            }
+            InteractionResponse::Revise { feedback } => {
+                tracing::warn!("Tool '{}' revise-feedback: {}", tool_name, feedback);
+                Ok(ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(format!("Execution denied: {}", feedback)),
+                    ..Default::default()
+                })
+            }
+            InteractionResponse::Choose { .. } => {
+                // PlanDecision-only reply; doesn't apply to ToolApproval. Proceed.
+                execute_with_timeout(tool, args, config).await
+            }
+            // InteractionResponse is #[non_exhaustive]; unknown variants
+            // (e.g. future decision points) default to proceeding.
+            _ => execute_with_timeout(tool, args, config).await,
+        }
+    } else {
+        // No approval needed (or the gate disabled the ToolApproval point) —
+        // execute directly. A disabled point short-circuits to auto-proceed,
+        // which mirrors the agent-loop's behaviour under NoopInteractionGate.
+        tracing::info!(
+            "Tool '{}' executing directly (risk level: {:?})",
+            tool_name,
+            effective_level
+        );
+        execute_with_timeout(tool, args, config).await
+    }
+}
+
+/// Check if a given risk level requires approval under the given config.
+fn needs_approval_for_level(level: RiskLevel, config: &ToolExecutorConfig) -> bool {
+    match level {
+        RiskLevel::High => true,
+        RiskLevel::Medium => config.require_approval_for_medium,
+        RiskLevel::Low => false,
+    }
+}
+
+/// Execute a tool with timeout enforcement.
+async fn execute_with_timeout(
+    tool: Arc<dyn Tool>,
+    args: serde_json::Value,
+    config: &ToolExecutorConfig,
+) -> Result<ToolOutput> {
+    let timeout = Duration::from_secs(config.default_timeout_secs);
+
+    let result = tokio::time::timeout(timeout, tool.execute(args)).await;
+
+    let output = match result {
+        Ok(output) => output, // output is already Result<ToolOutput, OneAIError>
+        Err(_) => Ok(ToolOutput {
+            success: false,
+            content: String::new(),
+            error: Some(format!(
+                "Tool '{}' timed out after {} seconds",
+                tool.name(),
+                config.default_timeout_secs
+            )),
+            ..Default::default()
+        }),
+    };
+
+    Ok(enforce_output_limit(
+        tool.name(),
+        output?,
+        config.max_output_bytes,
+    ))
+}
+
+/// Bound a tool's textual output to `max_output_bytes`. The single
+/// chokepoint that protects the context window from runaway output
+/// (e.g. an unbounded MCP / custom tool) regardless of whether the tool
+/// self-truncates. `max_output_bytes == 0` disables the guard.
+fn enforce_output_limit(tool_name: &str, mut output: ToolOutput, cap: usize) -> ToolOutput {
+    if cap == 0 || output.content.len() <= cap {
+        return output;
+    }
+    let original_len = output.content.len();
+    // Walk back to the nearest UTF-8 char boundary so we never split a
+    // multi-byte sequence (which would produce an invalid String).
+    let mut cut = cap;
+    while cut > 0 && !output.content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut truncated = String::from(&output.content[..cut]);
+    truncated.push_str(&format!(
+        "\n...[output truncated: tool '{}' returned {} bytes, exceeded {} byte limit]",
+        tool_name, original_len, cap
+    ));
+    output.content = truncated;
+    output
 }
 
 #[cfg(test)]

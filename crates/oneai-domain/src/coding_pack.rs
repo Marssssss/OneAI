@@ -367,6 +367,23 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 - Do NOT guess from memory for anything that may have changed\n\
                 - Combine web_search + web_fetch; cross-reference multiple results"
             ),
+            ToolDecorator::with_description(
+                "code_interpreter",
+                "Execute a Python script in a sandboxed CPython interpreter. The script can \
+                call any registered OneAI tool as a keyword-only function (e.g. \
+                `read_file(file_path='...')`, `grep(pattern='...')`) — each call routes \
+                back through the normal permission/approval path exactly like a direct \
+                tool call, so high-risk operations still pause for approval.\n\n\
+                **RECOMMENDED** when one task needs many tool calls with control flow that \
+                discrete tool calls cannot express cleanly:\n\
+                - Loops / conditionals / retries / data-dependent branching across calls\n\
+                - Aggregate, filter, or transform results from several tools in-process\n\
+                - Reuse intermediate values without round-tripping through the context\n\n\
+                Print results to stdout (stdout is the returned value). Network is disabled \
+                in the sandbox — for git clone / npm install / networked work use `shell`. \
+                Do NOT use code_interpreter for a single read/edit — prefer the dedicated \
+                tool. The script runs with a timeout; long compute stays in `shell`."
+            ),
         ],
 
         // Layer 2: Context sources — coding environment sensing
@@ -398,6 +415,7 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 "shell".to_string(),
                 "write_file".to_string(),
                 "notebook_edit".to_string(),
+                "code_interpreter".to_string(),
             ]),
             deny_by_default: vec![
                 DenyPattern::deny_tool_args(
@@ -1200,7 +1218,7 @@ mod tests {
 
         assert_eq!(pack.name, "coding");
         assert_eq!(pack.tools.len(), 12); // 9 original + ApplyPatchTool + WebSearchTool + FileWriteTool
-        assert_eq!(pack.tool_decorators.len(), 11); // 8 original + apply_patch + web_search + write_file
+        assert_eq!(pack.tool_decorators.len(), 12); // 8 original + apply_patch + web_search + write_file + code_interpreter
         assert_eq!(pack.context_sources.len(), 7); // 6 original + RepoMapSource
         assert!(!pack.system_prompt_template.is_empty());
     }

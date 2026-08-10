@@ -204,6 +204,11 @@ pub struct AppBuilder {
     /// this field is the app-level handle for out-of-band lifecycle
     /// (snapshot / restore / cleanup).
     terminal_backend: Option<Arc<dyn oneai_tool::TerminalBackend>>,
+
+    /// Working directory the `code_interpreter` tool runs scripts in (the
+    /// sandbox's project root for relative file ops). Defaults to the process
+    /// CWD at `build()` time. `None` → current_dir().
+    code_working_dir: Option<std::path::PathBuf>,
 }
 
 impl AppBuilder {
@@ -261,6 +266,7 @@ impl AppBuilder {
             working_state_root: None,
             cron_scheduler: None,
             terminal_backend: None,
+            code_working_dir: None,
         }
     }
 
@@ -1390,6 +1396,16 @@ impl AppBuilder {
         self
     }
 
+    /// Set the working directory the `code_interpreter` tool runs scripts in.
+    ///
+    /// Defaults to the process CWD. The directory is also the sandbox's
+    /// project root — relative file operations inside a script resolve here,
+    /// and it is added to the Seatbelt / bwrap write allow-list.
+    pub fn code_working_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.code_working_dir = Some(dir);
+        self
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -1629,6 +1645,39 @@ impl AppBuilder {
         if let Some(cron) = &self.cron_scheduler {
             let tool = oneai_tool::ScheduleTool::new(cron.clone());
             self.tool_registry.register(Arc::new(tool)).await?;
+        }
+
+        // Code mode — sandboxed CPython code-interpreter tool (code_interpreter).
+        // Registered plainly (not `register_gated`): the tool *itself* implements
+        // `service_available()` (probes `python3` on PATH), and the AgentLoop's
+        // `build_tool_definitions_*` filter already excludes tools whose
+        // `service_available()` is false — so where the interpreter is absent
+        // (mobile / native targets without a bundled CPython) the tool vanishes
+        // from the schema entirely (zero footprint, with the discoverable warn
+        // log), the OneAI Footprint Ladder applied to code mode. `register_gated`
+        // would override the inner probe with an external check_fn, so it is the
+        // wrong seam here. v1 sandbox disables network (`allow_network=false`);
+        // sandboxed-network approval (#28) is a follow-up. The tool holds the
+        // shared `tools_map` + gate + resolver (not the `ToolExecutor`) so
+        // script-internal tool calls route through `execute_with_approval` — the
+        // same approval path as a direct call, without an Arc cycle.
+        // See plan hazy-imagining-liskov.md.
+        {
+            let working_dir = self
+                .code_working_dir
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let sandbox = oneai_tool::default_sandbox_backend(&working_dir, false);
+            let code_tool = oneai_tool::CodeInterpreterTool::new(
+                self.tool_registry.tools_map(),
+                interaction_gate.clone(),
+                permission_resolver.clone(),
+                tool_executor.config().clone(),
+                sandbox,
+                working_dir,
+            );
+            self.tool_registry.register(Arc::new(code_tool)).await?;
         }
 
         // Connect MCP plugin servers and register discovered tools
