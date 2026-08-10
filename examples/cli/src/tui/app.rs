@@ -2417,11 +2417,19 @@ mod tests {
         let active = app.sessions.iter().filter(|s| s.is_active).count();
         assert_eq!(active, 1, "exactly one active session");
         assert!(
-            app.sessions.iter().find(|s| s.full_id == "full-0").unwrap().is_active,
+            app.sessions
+                .iter()
+                .find(|s| s.full_id == "full-0")
+                .unwrap()
+                .is_active,
             "resumed entry must be the active one"
         );
         assert!(
-            !app.sessions.iter().find(|s| s.full_id == "full-1").unwrap().is_active,
+            !app.sessions
+                .iter()
+                .find(|s| s.full_id == "full-1")
+                .unwrap()
+                .is_active,
             "others must be inactive"
         );
     }
@@ -2434,7 +2442,11 @@ mod tests {
         assert_eq!(app.sessions.len(), 3);
         assert_eq!(app.session_id, "new-id-99");
         assert!(
-            app.sessions.iter().find(|s| s.full_id == "new-id-99").unwrap().is_active
+            app.sessions
+                .iter()
+                .find(|s| s.full_id == "new-id-99")
+                .unwrap()
+                .is_active
         );
     }
 }
