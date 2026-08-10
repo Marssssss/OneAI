@@ -716,14 +716,20 @@ impl EvolutionLoop {
         let frontier = optimizer.select(&scored);
         let frontier_rec = match frontier.first() {
             Some(b) => {
-                // Is the frontier-best the base? Compare the three axes —
-                // an exact match means no candidate improved on the base, so
-                // nothing new to persist. (Collision only when a candidate
-                // matches the base on all axes — then not persisting is
-                // harmless: it's the same quality.)
+                // Is the frontier-best meaningfully better than the base?
+                // Compare only the *deterministic* axes — pass_rate + tokens.
+                // total_latency_ms is wall-clock (nondeterministic even under
+                // the mock — a loaded CI runner jitters it by ±1ms), so
+                // including it flipped `is_seed` false on candidates that
+                // tied the base on every reproducible axis, spuriously
+                // persisting a frontier config + breaking the carry-forward
+                // invariant. Latency still feeds Pareto *selection* (the
+                // frontier composition); it just doesn't gate the
+                // persist/no-persist decision. An exact pass+token match
+                // means no candidate improved on the base on anything
+                // reproducible → nothing new worth persisting.
                 let is_seed = b.pass_rate == base_scored.pass_rate
-                    && b.total_tokens == base_scored.total_tokens
-                    && b.total_latency_ms == base_scored.total_latency_ms;
+                    && b.total_tokens == base_scored.total_tokens;
                 let config_file = if is_seed {
                     None
                 } else {
