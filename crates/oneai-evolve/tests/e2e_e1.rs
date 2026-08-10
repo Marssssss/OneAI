@@ -32,6 +32,7 @@ fn coding_seed_config() -> DomainPackConfig {
             auto_approve: vec!["read_file".to_string(), "calculator".to_string()],
             require_confirmation: vec![],
             deny_by_default: vec![],
+            ..Default::default()
         },
         paradigm_strategies: vec![],
         compression_template: CompressionTemplateConfig {

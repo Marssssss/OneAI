@@ -16,8 +16,9 @@
 //! merged using the "strictest wins" rule.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
-use oneai_core::PermissionLevel;
+use oneai_core::{ApprovalPolicy, PermissionLevel};
 use serde::{Deserialize, Serialize};
 
 // ─── DenyPattern ───────────────────────────────────────────────────────────────
@@ -144,6 +145,20 @@ pub struct PermissionProfile {
     /// When no profile-specific rule exists, this threshold determines
     /// which PermissionLevels require approval.
     pub default_threshold: PermissionLevel,
+
+    /// The Guardian's `AskForApproval` policy (#28 Stage 2) — when to prompt
+    /// the user given a Guardian verdict on a tool call's content. Defaults to
+    /// `OnFailure` (auto-decide safe/destructive, prompt only when uncertain).
+    /// `Never` for headless/CI; `OnRequest` for conservative domains. The
+    /// AppBuilder feeds this into the `GuardianContext`.
+    #[serde(default)]
+    pub approval_policy: ApprovalPolicy,
+
+    /// Directories the Guardian treats as "trusted" for
+    /// `OnUntrustedDir` (and as the cwd-trust baseline). Empty → trust the
+    /// working dir itself. The AppBuilder fills the project root here.
+    #[serde(default)]
+    pub trusted_dirs: Vec<PathBuf>,
 }
 
 impl PermissionProfile {
@@ -156,6 +171,8 @@ impl PermissionProfile {
             deny_by_default: Vec::new(),
             permission_overrides: HashMap::new(),
             default_threshold: PermissionLevel::Standard,
+            approval_policy: ApprovalPolicy::OnFailure,
+            trusted_dirs: Vec::new(),
         }
     }
 
@@ -247,6 +264,19 @@ impl PermissionProfile {
         // Default threshold: take stricter
         let default_threshold = stricter_level(a.default_threshold, b.default_threshold);
 
+        // #28 Stage 2 — approval_policy + trusted_dirs merge. The strictest
+        // policy is the one that asks the most (OnRequest > OnUntrustedDir >
+        // OnFailure > Never): a multi-domain agent inherits the more-
+        // conservative domain's prompting posture. trusted_dirs is the
+        // intersection (a dir must be trusted by BOTH to stay trusted).
+        let approval_policy = stricter_policy(a.approval_policy, b.approval_policy);
+        let trusted_dirs = a
+            .trusted_dirs
+            .iter()
+            .filter(|d| b.trusted_dirs.contains(d))
+            .cloned()
+            .collect();
+
         Self {
             name,
             auto_approve,
@@ -254,6 +284,8 @@ impl PermissionProfile {
             deny_by_default,
             permission_overrides,
             default_threshold,
+            approval_policy,
+            trusted_dirs,
         }
     }
 }
@@ -294,6 +326,26 @@ fn stricter_level(a: PermissionLevel, b: PermissionLevel) -> PermissionLevel {
     }
 }
 
+/// The stricter (more-asking) of two `ApprovalPolicy`s. Strictness order:
+/// `OnRequest` > `OnUntrustedDir` > `OnFailure` > `Never`. A multi-domain agent
+/// inherits the more conservative domain's prompting posture.
+fn stricter_policy(a: ApprovalPolicy, b: ApprovalPolicy) -> ApprovalPolicy {
+    fn rank(p: ApprovalPolicy) -> u8 {
+        match p {
+            ApprovalPolicy::OnRequest => 3,
+            ApprovalPolicy::OnUntrustedDir => 2,
+            ApprovalPolicy::OnFailure => 1,
+            ApprovalPolicy::Never => 0,
+            _ => 3, // unknown variants default to strictest
+        }
+    }
+    if rank(b) > rank(a) {
+        b
+    } else {
+        a
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +377,7 @@ mod tests {
             )],
             permission_overrides: HashMap::new(),
             default_threshold: PermissionLevel::Standard,
+            ..Default::default()
         };
 
         let action = profile.resolve("shell", &serde_json::json!({"command": "rm -rf /"}));
@@ -345,6 +398,7 @@ mod tests {
             deny_by_default: Vec::new(),
             permission_overrides: HashMap::new(),
             default_threshold: PermissionLevel::Standard,
+            ..Default::default()
         };
 
         let action = profile.resolve("read_file", &serde_json::json!({"path": "/tmp/test"}));
@@ -360,6 +414,7 @@ mod tests {
             deny_by_default: Vec::new(),
             permission_overrides: HashMap::new(),
             default_threshold: PermissionLevel::Standard,
+            ..Default::default()
         };
 
         let action = profile.resolve("shell", &serde_json::json!({"command": "echo hi"}));
@@ -375,6 +430,7 @@ mod tests {
             deny_by_default: Vec::new(),
             permission_overrides: HashMap::from([("shell".to_string(), PermissionLevel::Full)]),
             default_threshold: PermissionLevel::Read,
+            ..Default::default()
         };
 
         let action = profile.resolve("shell", &serde_json::json!({}));
@@ -395,6 +451,7 @@ mod tests {
             deny_by_default: vec![DenyPattern::deny_tool("shell_dangerous", "Dangerous")],
             permission_overrides: HashMap::from([("shell".to_string(), PermissionLevel::Full)]),
             default_threshold: PermissionLevel::Standard,
+            ..Default::default()
         };
 
         let research = PermissionProfile {
@@ -407,6 +464,7 @@ mod tests {
             )],
             permission_overrides: HashMap::from([("shell".to_string(), PermissionLevel::Full)]),
             default_threshold: PermissionLevel::Read,
+            ..Default::default()
         };
 
         let merged = PermissionProfile::merge_strictest(&coding, &research);

@@ -167,6 +167,7 @@ mod tests {
                 auto_approve: vec!["read_file".to_string(), "calculator".to_string()],
                 require_confirmation: vec![],
                 deny_by_default: vec![],
+                ..Default::default()
             },
             paradigm_strategies: vec![],
             compression_template: oneai_domain::CompressionTemplateConfig {

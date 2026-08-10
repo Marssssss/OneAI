@@ -139,6 +139,7 @@ mod tests {
                 auto_approve: vec![],
                 require_confirmation: vec![],
                 deny_by_default: vec![],
+                ..Default::default()
             },
             paradigm_strategies: vec![],
             compression_template: Default::default(),

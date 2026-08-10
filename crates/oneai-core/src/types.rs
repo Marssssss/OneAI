@@ -866,6 +866,195 @@ pub enum PermissionAction {
     UseDefaultPermission { level: PermissionLevel },
 }
 
+// ─── ApprovalPolicy / Verdict / ReviewAction (#28 Stage 2) ──────────────────
+//
+// The content-level Guardian layer: after the domain `PermissionResolver`
+// decides a tool call *needs* approval (Full / RequireConfirmation), the
+// Guardian inspects the call's **content** (a shell command string, a Python
+// script body) and classifies it. The `ApprovalPolicy` then maps that verdict +
+// whether the working directory is trusted to a concrete action: run, deny, or
+// prompt the user. This is the Codex-style three-path approval — auto-approve
+// safe commands, auto-deny destructive ones, escalate the rest.
+
+/// When to ask the user for approval, given a Guardian [`Verdict`].
+///
+/// Maps to Codex's `AskForApproval` four-tier policy. The matrix (verdict ×
+/// cwd-trusted) is implemented by [`ApprovalPolicy::decide`].
+///
+/// - `Never` — fully automated, fail-closed: never prompt. Guardian-Allow runs,
+///   everything else (Deny *and* Escalate) is denied. For headless / CI.
+/// - `OnFailure` — Guardian auto-decides; ask **only** when it can't (Escalate).
+///   The productive interactive default. Deny still auto-denies (no point
+///   asking about a clearly-destructive `rm -rf /`).
+/// - `OnRequest` — ask for anything the Guardian doesn't auto-allow, including
+///   a Deny the user may want to override (a legitimate `rm -rf /tmp/old` that
+///   matched the destructive pattern too broadly).
+/// - `OnUntrustedDir` — `OnFailure` inside trusted directories, `OnRequest`
+///   outside them. Trusted = the project root + its sub-tree (configurable).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum ApprovalPolicy {
+    Never,
+    OnFailure,
+    OnRequest,
+    OnUntrustedDir,
+}
+
+// Manual because the default is `OnFailure` (not the first variant `Never`);
+// `#[derive(Default)]` would pick `Never`, so the impl genuinely can't be
+// derived. clippy::derivable_impls is a false positive here.
+#[allow(clippy::derivable_impls)]
+impl Default for ApprovalPolicy {
+    fn default() -> Self {
+        Self::OnFailure
+    }
+}
+
+/// A Guardian's content-level classification of one tool call.
+///
+/// `Allow` / `Deny` are the Guardian's confident calls; `Escalate` means it
+/// couldn't decide (the common case for anything that isn't an obvious
+/// read-only command or an obvious destructive one). The [`ApprovalPolicy`]
+/// decides what `Escalate` means at runtime (prompt or deny).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Verdict {
+    /// Safe to run without asking — e.g. a read-only `ls` / `git status`, a
+    /// pure-computation script.
+    Allow { reason: String },
+    /// Destructive — should not run. e.g. `rm -rf /`, `mkfs`, a fork bomb,
+    /// `curl … | sh`.
+    Deny { reason: String },
+    /// Uncertain — defer to the [`ApprovalPolicy`] (prompt under `OnFailure`,
+    /// deny under `Never`).
+    Escalate { reason: String },
+}
+
+/// The concrete action the executor takes after the Guardian + policy resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReviewAction {
+    /// Run the tool now (Guardian auto-approved). The reason is surfaced to the
+    /// user as a system note so auto-execution is never silent.
+    Run { reason: String },
+    /// Deny the tool call (Guardian auto-denied). The reason is surfaced.
+    Deny { reason: String },
+    /// Defer to the manual `ToolApproval` gate (the existing approval card).
+    Prompt { reason: String },
+}
+
+impl ApprovalPolicy {
+    /// Resolve a Guardian [`Verdict`] (+ cwd-trust) to a [`ReviewAction`].
+    ///
+    /// The matrix:
+    /// ```text
+    ///                   | Allow | Deny  | Escalate
+    /// ------------------+-------+-------+----------
+    /// Never             | Run   | Deny  | Deny
+    /// OnFailure         | Run   | Deny  | Prompt
+    /// OnRequest         | Run   | Prompt| Prompt
+    /// OnUntrustedDir ✓  | Run   | Deny  | Prompt   (trusted cwd)
+    /// OnUntrustedDir ✗  | Run   | Prompt| Prompt   (untrusted cwd)
+    /// ```
+    pub fn decide(&self, verdict: Verdict, cwd_trusted: bool) -> ReviewAction {
+        // OnUntrustedDir reduces to OnFailure inside a trusted dir and
+        // OnRequest outside it. Never/OnFailure/OnRequest are cwd-invariant.
+        let effective = match self {
+            Self::OnUntrustedDir if cwd_trusted => Self::OnFailure,
+            Self::OnUntrustedDir => Self::OnRequest,
+            other => *other,
+        };
+        match (verdict, effective) {
+            // Allow always runs, under every policy.
+            (Verdict::Allow { reason }, _) => ReviewAction::Run { reason },
+            // A confident Deny is honoured unless OnRequest lets the user override.
+            (Verdict::Deny { reason }, Self::OnRequest) => ReviewAction::Prompt { reason },
+            (Verdict::Deny { reason }, _) => ReviewAction::Deny { reason },
+            // Uncertain: Never fails closed; every other policy prompts.
+            (Verdict::Escalate { reason }, Self::Never) => ReviewAction::Deny { reason },
+            (Verdict::Escalate { reason }, _) => ReviewAction::Prompt { reason },
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_policy_tests {
+    //! Exhaustive matrix test for `ApprovalPolicy::decide` — #28 Stage 2.
+    //! 4 policies × 3 verdicts × {trusted, untrusted} cwd = 24 cells.
+    use super::*;
+
+    const ALLOW: fn() -> Verdict = || Verdict::Allow {
+        reason: "ok".into(),
+    };
+    const DENY: fn() -> Verdict = || Verdict::Deny {
+        reason: "no".into(),
+    };
+    const ESC: fn() -> Verdict = || Verdict::Escalate { reason: "?".into() };
+
+    fn run(r: ReviewAction) -> bool {
+        matches!(r, ReviewAction::Run { .. })
+    }
+    fn deny(r: ReviewAction) -> bool {
+        matches!(r, ReviewAction::Deny { .. })
+    }
+    fn prompt(r: ReviewAction) -> bool {
+        matches!(r, ReviewAction::Prompt { .. })
+    }
+
+    #[test]
+    fn never_policy() {
+        let p = ApprovalPolicy::Never;
+        assert!(run(p.decide(ALLOW(), true)));
+        assert!(deny(p.decide(DENY(), true)));
+        assert!(deny(p.decide(ESC(), true))); // fail-closed
+                                              // cwd-invariant
+        assert!(deny(p.decide(ESC(), false)));
+    }
+
+    #[test]
+    fn on_failure_policy() {
+        let p = ApprovalPolicy::OnFailure;
+        assert!(run(p.decide(ALLOW(), true)));
+        assert!(deny(p.decide(DENY(), true)));
+        assert!(prompt(p.decide(ESC(), true))); // only ask when uncertain
+        assert!(prompt(p.decide(ESC(), false)));
+    }
+
+    #[test]
+    fn on_request_policy() {
+        let p = ApprovalPolicy::OnRequest;
+        assert!(run(p.decide(ALLOW(), true)));
+        assert!(prompt(p.decide(DENY(), true))); // user may override a deny
+        assert!(prompt(p.decide(ESC(), true)));
+        assert!(prompt(p.decide(DENY(), false)));
+    }
+
+    #[test]
+    fn on_untrusted_dir_policy() {
+        let p = ApprovalPolicy::OnUntrustedDir;
+        // Trusted cwd → behaves like OnFailure.
+        assert!(run(p.decide(ALLOW(), true)));
+        assert!(deny(p.decide(DENY(), true)));
+        assert!(prompt(p.decide(ESC(), true)));
+        // Untrusted cwd → behaves like OnRequest.
+        assert!(run(p.decide(ALLOW(), false)));
+        assert!(prompt(p.decide(DENY(), false)));
+        assert!(prompt(p.decide(ESC(), false)));
+    }
+
+    #[test]
+    fn reason_is_preserved() {
+        let r = ApprovalPolicy::OnFailure.decide(
+            Verdict::Allow {
+                reason: "read-only".into(),
+            },
+            true,
+        );
+        assert!(matches!(r, ReviewAction::Run { reason } if reason == "read-only"));
+    }
+}
+
 // ─── PlanStep / PlanStepStatus ───────────────────────────────────────────────
 //
 // `PlanStep` lives in `oneai-core` (not `oneai-agent`) so that

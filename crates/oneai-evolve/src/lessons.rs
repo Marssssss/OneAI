@@ -322,6 +322,7 @@ mod tests {
                 auto_approve: vec!["read_file".into()],
                 require_confirmation: vec![],
                 deny_by_default: vec![],
+                ..Default::default()
             },
             paradigm_strategies: vec![],
             compression_template: CompressionTemplateConfig {

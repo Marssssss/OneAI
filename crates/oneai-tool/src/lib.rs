@@ -19,6 +19,7 @@ pub mod apply_patch;
 pub mod code;
 pub mod executor;
 pub mod file_ops;
+pub mod guardian;
 pub mod host_allowlist;
 pub mod interaction_gate;
 pub mod local_tools;
@@ -38,6 +39,7 @@ pub use executor::*;
 pub use file_ops::{
     DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps, SandboxedFileOps,
 };
+pub use guardian::{GuardianContext, RuleGuardian};
 pub use host_allowlist::{HostAllowlistStore, InMemoryHostAllowlist};
 pub use interaction_gate::*;
 pub use local_tools::{CalculatorTool, FileWriteTool};

@@ -274,6 +274,10 @@ pub fn research_pack(project_dir: &str) -> DomainPack {
             ],
             permission_overrides: HashMap::new(),
             default_threshold: PermissionLevel::Standard,
+            // #28 Stage 2 — research is conservative: ask for anything the
+            // Guardian doesn't auto-allow (the user may override a deny).
+            approval_policy: oneai_core::ApprovalPolicy::OnRequest,
+            trusted_dirs: Vec::new(),
         },
 
         // Layer 4: Paradigm strategies — research task patterns

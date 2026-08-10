@@ -428,6 +428,11 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
                 ("shell".to_string(), PermissionLevel::Full),
             ]),
             default_threshold: PermissionLevel::Standard,
+            // #28 Stage 2 — Guardian default policy. Coding is interactive;
+            // auto-decide safe/destructive commands, prompt only when the
+            // Guardian (rules + LLM fallback) can't decide.
+            approval_policy: oneai_core::ApprovalPolicy::OnFailure,
+            trusted_dirs: Vec::new(),
         },
 
         // Layer 4: Paradigm strategies — coding task patterns

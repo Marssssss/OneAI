@@ -215,6 +215,15 @@ pub struct AppBuilder {
     /// `code_interpreter` air-gaps (`NetworkPolicy::Denied`) instead of binding
     /// a loopback proxy.
     network_proxy_enabled: bool,
+
+    /// Guardian `AskForApproval` policy (#28 Stage 2). The DomainPack's
+    /// `PermissionProfile.approval_policy` overrides this at `build()` when a
+    /// domain is configured; this field is the domain-less default.
+    guardian_policy: oneai_core::ApprovalPolicy,
+
+    /// Trusted directories for `OnUntrustedDir` (#28 Stage 2). `None` → trust
+    /// the working dir only (the `code_interpreter` working dir / process CWD).
+    trusted_dirs: Option<Vec<std::path::PathBuf>>,
 }
 
 impl AppBuilder {
@@ -274,6 +283,8 @@ impl AppBuilder {
             terminal_backend: None,
             code_working_dir: None,
             network_proxy_enabled: true,
+            guardian_policy: oneai_core::ApprovalPolicy::default(),
+            trusted_dirs: None,
         }
     }
 
@@ -1423,6 +1434,23 @@ impl AppBuilder {
         self
     }
 
+    /// Set the Guardian's `AskForApproval` policy (#28 Stage 2). A
+    /// DomainPack's `PermissionProfile.approval_policy` overrides this at
+    /// `build()` when a domain is configured; this setter is the domain-less
+    /// default (e.g. `Never` for headless / CI runs).
+    pub fn approval_policy(mut self, policy: oneai_core::ApprovalPolicy) -> Self {
+        self.guardian_policy = policy;
+        self
+    }
+
+    /// Set the trusted directories for `OnUntrustedDir` (#28 Stage 2). `None`
+    /// (default) → trust the working dir only. Pass the project root (+ any
+    /// sibling roots the agent may legitimately operate in).
+    pub fn trusted_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
+        self.trusted_dirs = Some(dirs);
+        self
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -1600,6 +1628,53 @@ impl AppBuilder {
             .as_ref()
             .map(|dp| Arc::new(dp.permission_profile.clone()) as Arc<dyn PermissionResolver>);
 
+        // #28 Stage 2 — Guardian (content-level safety review). The policy
+        // comes from the DomainPack's PermissionProfile when a domain is
+        // configured, else the builder default (`guardian_policy`, OnFailure).
+        // The reviewer is the `LlmGuardian` (rules + LLM fallback on Escalate)
+        // when a provider is wired — otherwise the pure `RuleGuardian` (Escalate
+        // stays Escalate → the policy decides). Mobile targets set no provider
+        // and no domain → guardian stays `None` (the pre-Stage-2 behaviour).
+        let guardian_working_dir = self
+            .code_working_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let guardian_policy = merged_domain_pack
+            .as_ref()
+            .map(|dp| dp.permission_profile.approval_policy)
+            .unwrap_or(self.guardian_policy);
+        let trusted_dirs = merged_domain_pack
+            .as_ref()
+            .and_then(|dp| {
+                if dp.permission_profile.trusted_dirs.is_empty() {
+                    None
+                } else {
+                    Some(dp.permission_profile.trusted_dirs.clone())
+                }
+            })
+            .or(self.trusted_dirs.clone())
+            .unwrap_or_else(|| vec![guardian_working_dir.clone()]);
+        let guardian: Option<std::sync::Arc<oneai_tool::GuardianContext>> =
+            if merged_domain_pack.is_some() || self.provider.is_some() {
+                let reviewer: std::sync::Arc<dyn oneai_core::traits::CommandReviewer> =
+                    match &self.provider {
+                        Some(provider) => std::sync::Arc::new(oneai_agent::LlmGuardian::new(
+                            provider.clone(),
+                            "guardian",
+                        )),
+                        None => std::sync::Arc::new(oneai_tool::RuleGuardian::new()),
+                    };
+                Some(std::sync::Arc::new(oneai_tool::GuardianContext::new(
+                    reviewer,
+                    guardian_policy,
+                    trusted_dirs,
+                    guardian_working_dir.clone(),
+                )))
+            } else {
+                None
+            };
+
         let tool_executor = {
             let exec = ToolExecutor::with_interaction_gate(
                 self.tool_registry.clone(),
@@ -1607,6 +1682,10 @@ impl AppBuilder {
             );
             let exec = match &permission_resolver {
                 Some(r) => exec.with_permission_resolver(r.clone()),
+                None => exec,
+            };
+            let exec = match &guardian {
+                Some(g) => exec.with_guardian(g.clone()),
                 None => exec,
             };
             Arc::new(exec)
@@ -1731,6 +1810,10 @@ impl AppBuilder {
             );
             let code_tool = match proxy_port {
                 Some(port) => code_tool.with_network_proxy(port),
+                None => code_tool,
+            };
+            let code_tool = match &guardian {
+                Some(g) => code_tool.with_guardian(g.clone()),
                 None => code_tool,
             };
             self.tool_registry.register(Arc::new(code_tool)).await?;

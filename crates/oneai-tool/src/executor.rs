@@ -27,6 +27,7 @@ use oneai_core::{
     InteractionResponse, PermissionAction, PermissionLevel, RiskLevel, ToolOutput,
 };
 
+use crate::guardian::GuardianContext;
 use crate::interaction_gate::DenyAllInteractionGate;
 use crate::registry::ToolRegistry;
 
@@ -85,6 +86,12 @@ pub struct ToolExecutor {
     /// instead of bypassing it (gap-analysis P1: the ToolExecutor path and the
     /// agent-loop path had diverged). `None` falls back to per-tool risk.
     permission_resolver: Option<Arc<dyn PermissionResolver>>,
+    /// Optional Guardian — content-level safety review (#28 Stage 2). When
+    /// present, a tool call that needs approval is first classified by the
+    /// Guardian (Allow/Deny/Escalate) and the [`ApprovalPolicy`] matrix maps
+    /// that to Run/Deny/Prompt *before* the manual gate. `None` → the
+    /// pre-Stage-2 behaviour (manual gate / no-UI proceed).
+    guardian: Option<Arc<GuardianContext>>,
     /// Configuration.
     config: ToolExecutorConfig,
 }
@@ -99,6 +106,7 @@ impl ToolExecutor {
             registry,
             interaction_gate: Arc::new(DenyAllInteractionGate),
             permission_resolver: None,
+            guardian: None,
             config: ToolExecutorConfig::default(),
         }
     }
@@ -112,6 +120,7 @@ impl ToolExecutor {
             registry,
             interaction_gate,
             permission_resolver: None,
+            guardian: None,
             config: ToolExecutorConfig::default(),
         }
     }
@@ -126,6 +135,7 @@ impl ToolExecutor {
             registry,
             interaction_gate,
             permission_resolver: None,
+            guardian: None,
             config,
         }
     }
@@ -136,6 +146,16 @@ impl ToolExecutor {
     /// (not just on the agent-loop's parallel dispatch path).
     pub fn with_permission_resolver(mut self, resolver: Arc<dyn PermissionResolver>) -> Self {
         self.permission_resolver = Some(resolver);
+        self
+    }
+
+    /// Attach a Guardian — the content-level safety review layer (#28 Stage
+    /// 2). When set, tool calls that need approval are first classified by the
+    /// Guardian and the `ApprovalPolicy` matrix decides Run/Deny/Prompt before
+    /// the manual gate. Shared with the `code_interpreter` bridge so a
+    /// script-internal tool call hits the same Guardian as a direct call.
+    pub fn with_guardian(mut self, guardian: Arc<GuardianContext>) -> Self {
+        self.guardian = Some(guardian);
         self
     }
 
@@ -152,6 +172,7 @@ impl ToolExecutor {
             &self.registry.tools_map(),
             &self.interaction_gate,
             self.permission_resolver.as_ref(),
+            self.guardian.as_deref(),
             &self.config,
             tool_name,
             args,
@@ -213,6 +234,7 @@ pub async fn execute_with_approval(
     tools_map: &Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     interaction_gate: &Arc<dyn InteractionGate>,
     permission_resolver: Option<&Arc<dyn PermissionResolver>>,
+    guardian: Option<&GuardianContext>,
     config: &ToolExecutorConfig,
     tool_name: &str,
     args: serde_json::Value,
@@ -264,16 +286,57 @@ pub async fn execute_with_approval(
 
     let needs_approval = force_approval || needs_approval_for_level(effective_level, config);
 
+    // #28 Stage 2 — Guardian content review. Runs only when the call needs
+    // approval (Read/Low tools bypass it). The Guardian classifies the call's
+    // content (a shell command / script body) and the `ApprovalPolicy` matrix
+    // maps verdict -> Run/Deny/Prompt. A Deny (verdict-Deny, or Escalate under
+    // `Never`) fires **before** the manual gate — a hard safety guard even
+    // when a `NoopInteractionGate` would otherwise auto-proceed. A Prompt
+    // folds its reason into the approval justification and falls through to
+    // the manual gate (or, if the gate is disabled, proceeds — the no-UI
+    // posture). `None` -> the pre-Stage-2 behaviour.
+    let mut guardian_reason: Option<String> = None;
+    if needs_approval {
+        if let Some(g) = guardian {
+            match g.apply(tool_name, &args).await {
+                oneai_core::ReviewAction::Run { reason } => {
+                    tracing::info!("Guardian auto-approved tool '{}': {}", tool_name, reason);
+                    return execute_with_timeout(tool, args, config).await;
+                }
+                oneai_core::ReviewAction::Deny { reason } => {
+                    tracing::warn!("Guardian denied tool '{}': {}", tool_name, reason);
+                    return Ok(ToolOutput {
+                        success: false,
+                        content: String::new(),
+                        error: Some(format!("Denied by Guardian: {}", reason)),
+                        ..Default::default()
+                    });
+                }
+                oneai_core::ReviewAction::Prompt { reason } => {
+                    guardian_reason = Some(reason);
+                }
+                // `ReviewAction` is #[non_exhaustive]; an unknown variant
+                // falls through to the manual gate (safe default = ask).
+                _ => {}
+            }
+        }
+    }
+
     if needs_approval && interaction_gate.enabled(InteractionPoint::ToolApproval) {
+        // Surface the Guardian's reasoning (if any) as the justification; else
+        // the standard risk-level message.
+        let justification = guardian_reason.unwrap_or_else(|| {
+            format!(
+                "Tool '{}' with risk level {:?} requires human approval",
+                tool_name, effective_level
+            )
+        });
         let approval_request = ApprovalRequest {
             tool_name: tool_name.to_string(),
             args: args.clone(),
             risk_level: effective_level,
             permission_level: Some(PermissionLevel::from_risk_level(effective_level)),
-            justification: format!(
-                "Tool '{}' with risk level {:?} requires human approval",
-                tool_name, effective_level
-            ),
+            justification,
         };
 
         let response = interaction_gate

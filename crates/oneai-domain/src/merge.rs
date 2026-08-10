@@ -431,6 +431,7 @@ mod tests {
                 deny_by_default: Vec::new(),
                 permission_overrides: std::collections::HashMap::new(),
                 default_threshold: PermissionLevel::Standard,
+                ..Default::default()
             },
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new("coding"),
@@ -457,6 +458,7 @@ mod tests {
                 deny_by_default: Vec::new(),
                 permission_overrides: std::collections::HashMap::new(),
                 default_threshold: PermissionLevel::Read,
+                ..Default::default()
             },
             paradigm_strategies: Vec::new(),
             compression_template: CompressionTemplate::new("research"),

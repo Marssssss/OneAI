@@ -136,7 +136,7 @@ pub struct DomainPackConfig {
 }
 
 /// Permission profile in config format (all string-based).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PermissionProfileConfig {
     /// Tool names to auto-approve (skip approval gate).
     #[serde(default)]
@@ -149,6 +149,15 @@ pub struct PermissionProfileConfig {
     /// Deny patterns — always block matching tool calls.
     #[serde(default)]
     pub deny_by_default: Vec<DenyPatternConfig>,
+
+    /// Guardian `AskForApproval` policy (#28 Stage 2): `never` / `on_failure`
+    /// / `on_request` / `on_untrusted_dir`. Defaults to `on_failure`.
+    #[serde(default)]
+    pub approval_policy: Option<oneai_core::ApprovalPolicy>,
+
+    /// Trusted directories for `OnUntrustedDir` (project roots). Strings.
+    #[serde(default)]
+    pub trusted_dirs: Vec<String>,
 }
 
 /// Deny pattern in config format.
@@ -595,6 +604,12 @@ fn resolve_permission_profile(config: &PermissionProfileConfig) -> PermissionPro
             .collect(),
         permission_overrides: HashMap::new(),
         default_threshold: PermissionLevel::Standard,
+        approval_policy: config.approval_policy.unwrap_or_default(),
+        trusted_dirs: config
+            .trusted_dirs
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect(),
     }
 }
 
@@ -884,6 +899,7 @@ preserve_fields = ["critical_files", "progress_status"]
                 auto_approve: vec!["read_file".to_string(), "calculator".to_string()],
                 require_confirmation: vec![],
                 deny_by_default: vec![],
+                ..Default::default()
             },
             paradigm_strategies: vec![],
             compression_template: CompressionTemplateConfig {
@@ -919,6 +935,7 @@ preserve_fields = ["critical_files", "progress_status"]
                 auto_approve: vec!["nonexistent_tool".to_string()],
                 require_confirmation: vec![],
                 deny_by_default: vec![],
+                ..Default::default()
             },
             paradigm_strategies: vec![],
             compression_template: CompressionTemplateConfig {

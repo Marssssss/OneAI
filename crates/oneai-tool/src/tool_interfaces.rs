@@ -256,7 +256,10 @@ impl PermissionAwareTool for ShellTool {
 ///   `find . -name '*.tmp' -delete`)
 /// - `curl ... | sh` / `wget ... | sh` / `| bash` — pipe-to-shell remote
 ///   execution (supply-chain exfil/exec vector)
-fn default_blocked_patterns() -> Vec<regex::Regex> {
+///
+/// Public so the Guardian (`crate::guardian`) can reuse the same deny-pattern
+/// set instead of maintaining a parallel blacklist.
+pub fn default_blocked_patterns() -> Vec<regex::Regex> {
     [
         r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?/|-[a-zA-Z]*r[a-zA-Z]*\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?/)",
         // Home-directory recursive deletion: `rm -rf ~`, `rm -rf ~/*`,

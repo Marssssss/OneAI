@@ -145,6 +145,33 @@ pub trait PermissionResolver: Send + Sync {
     fn resolve(&self, tool_name: &str, args: &serde_json::Value) -> PermissionAction;
 }
 
+// ─── CommandReviewer ─────────────────────────────────────────────────────────
+
+/// Content-level safety review of a tool call — the Guardian layer
+/// (#28 Stage 2).
+///
+/// Where [`PermissionResolver`] decides *which tools* need approval (a
+/// domain-level static classification), `CommandReviewer` inspects the call's
+/// **content** — the shell command string, the Python script body — and
+/// classifies it as [`Verdict::Allow`] / [`Verdict::Deny`] /
+/// [`Verdict::Escalate`]. The executor then applies the [`ApprovalPolicy`]
+/// matrix to that verdict to decide Run / Deny / Prompt.
+///
+/// The trait is `async` so an implementation may delegate an `Escalate` to an
+/// LLM sub-inference (the `LlmGuardian` in `oneai-agent`); the rule-based
+/// `RuleGuardian` in `oneai-tool` is sync-classified and returns immediately.
+///
+/// Defined in `oneai-core` (alongside `PermissionResolver`) so `oneai-tool`'s
+/// executor can hold it without inverting the dependency direction; impls live
+/// in `oneai-tool` (rule) and `oneai-agent` (LLM fallback). When `None`, the
+/// executor skips the Guardian entirely — the pre-Stage-2 behaviour.
+#[async_trait::async_trait]
+pub trait CommandReviewer: Send + Sync {
+    /// Classify a tool call. `args` is the raw tool args; the reviewer knows
+    /// which fields carry the command/script for the tools it reviews.
+    async fn review(&self, tool_name: &str, args: &serde_json::Value) -> Verdict;
+}
+
 // ─── DataLayerReloader ──────────────────────────────────────────────────────
 
 /// Reload an agent's runtime **data layer** mid-session without restart

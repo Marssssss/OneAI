@@ -35,6 +35,7 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::RwLock;
 
 use crate::executor::{execute_with_approval, ToolExecutorConfig};
+use crate::guardian::GuardianContext;
 use crate::sandbox::SandboxBackend;
 
 /// The bundled Python bridge — the small process that exec's the user code and
@@ -74,6 +75,12 @@ pub struct CodeInterpreterTool {
     /// (constructed by the caller with `NetworkPolicy::LoopbackProxy`) admits
     /// only loopback. `None` → the sandbox is air-gapped (`NetworkPolicy::Denied`).
     proxy_port: Option<u16>,
+    /// The Guardian context (#28 Stage 2). When `Some`, tool calls made
+    /// *inside* a script are content-reviewed by the same Guardian a direct
+    /// call hits — the bridge's per-call dispatch routes through
+    /// [`execute_with_approval`] with this context. `None` → the bridge
+    /// skips the Guardian (the manual gate / no-UI posture still applies).
+    guardian: Option<Arc<GuardianContext>>,
 }
 
 impl CodeInterpreterTool {
@@ -104,6 +111,7 @@ impl CodeInterpreterTool {
             default_timeout_secs,
             max_output_bytes,
             proxy_port: None,
+            guardian: None,
         }
     }
 
@@ -114,6 +122,13 @@ impl CodeInterpreterTool {
     /// with [`crate::sandbox::NetworkPolicy::LoopbackProxy`].
     pub fn with_network_proxy(mut self, port: u16) -> Self {
         self.proxy_port = Some(port);
+        self
+    }
+
+    /// Wire the Guardian — script-internal tool calls are content-reviewed
+    /// by the same [`GuardianContext`] a direct call hits (#28 Stage 2).
+    pub fn with_guardian(mut self, guardian: Arc<GuardianContext>) -> Self {
+        self.guardian = Some(guardian);
         self
     }
 
@@ -226,6 +241,7 @@ impl CodeInterpreterTool {
             &self.tools_map,
             &self.gate,
             self.resolver.as_ref(),
+            self.guardian.as_deref(),
             &self.config,
             &tool_name,
             args.clone(),
