@@ -38,8 +38,8 @@ use oneai_rag::DocumentIndex;
 use oneai_rag::EmbeddingConfigExt;
 use oneai_skill::SkillSelector;
 use oneai_tool::{
-    ChannelInteractionGate, InteractionGateConfig, NoopInteractionGate, ThresholdInteractionGate,
-    ToolExecutor, ToolRegistry,
+    ChannelInteractionGate, InMemoryHostAllowlist, InteractionGateConfig, NetworkPolicy,
+    NetworkProxy, NoopInteractionGate, ThresholdInteractionGate, ToolExecutor, ToolRegistry,
 };
 use oneai_trace::{InMemoryCollector, TraceContext, TraceEmitter};
 use oneai_workflow::WorkflowExecutor;
@@ -209,6 +209,12 @@ pub struct AppBuilder {
     /// sandbox's project root for relative file ops). Defaults to the process
     /// CWD at `build()` time. `None` → current_dir().
     code_working_dir: Option<std::path::PathBuf>,
+
+    /// Whether the code-mode egress proxy (#28 Stage 1) is bound at `build()`.
+    /// Default `true` on desktop; mobile/native targets set this `false` so
+    /// `code_interpreter` air-gaps (`NetworkPolicy::Denied`) instead of binding
+    /// a loopback proxy.
+    network_proxy_enabled: bool,
 }
 
 impl AppBuilder {
@@ -267,6 +273,7 @@ impl AppBuilder {
             cron_scheduler: None,
             terminal_backend: None,
             code_working_dir: None,
+            network_proxy_enabled: true,
         }
     }
 
@@ -1406,6 +1413,16 @@ impl AppBuilder {
         self
     }
 
+    /// Toggle the code-mode egress proxy (#28 Stage 1). Default `true` — the
+    /// `code_interpreter` sandbox runs `LoopbackProxy` and scripts' outbound
+    /// HTTPS is gated per-host via `InteractionRequest::NetworkApproval`. Set
+    /// `false` on targets where a loopback proxy isn't wanted (the script
+    /// sandbox then air-gaps to `NetworkPolicy::Denied`).
+    pub fn network_proxy(mut self, enabled: bool) -> Self {
+        self.network_proxy_enabled = enabled;
+        self
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -1654,21 +1671,56 @@ impl AppBuilder {
         // `service_available()` is false — so where the interpreter is absent
         // (mobile / native targets without a bundled CPython) the tool vanishes
         // from the schema entirely (zero footprint, with the discoverable warn
-        // log), the OneAI Footprint Ladder applied to code mode. `register_gated`
-        // would override the inner probe with an external check_fn, so it is the
-        // wrong seam here. v1 sandbox disables network (`allow_network=false`);
-        // sandboxed-network approval (#28) is a follow-up. The tool holds the
-        // shared `tools_map` + gate + resolver (not the `ToolExecutor`) so
-        // script-internal tool calls route through `execute_with_approval` — the
-        // same approval path as a direct call, without an Arc cycle.
-        // See plan hazy-imagining-liskov.md.
+        // log). The tool holds the shared `tools_map` + gate + resolver (not the
+        // `ToolExecutor`) so script-internal tool calls route through
+        // `execute_with_approval` — the same approval path as a direct call,
+        // without an Arc cycle.
+        //
+        // #28 Stage 1 — egress gate: when `network_proxy_enabled`, bind a local
+        // CONNECT proxy (`NetworkProxy`) on the App runtime, run its accept loop
+        // as a long-lived task, and wire `code_interpreter` to it: the sandbox
+        // backend is `NetworkPolicy::LoopbackProxy` (loopback only — direct
+        // egress blocked) and the spawn gets `HTTPS_PROXY=http://127.0.0.1:PORT`.
+        // Per-host approval flows through the same `InteractionGate` via
+        // `InteractionRequest::NetworkApproval`. When disabled (or unreachable
+        // — bwrap netns can't reach host loopback, degrading to no-network),
+        // the sandbox air-gaps to `Denied`. See plan hazy-imagining-liskov.md.
         {
             let working_dir = self
                 .code_working_dir
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            let sandbox = oneai_tool::default_sandbox_backend(&working_dir, false);
+
+            let proxy_port = if self.network_proxy_enabled {
+                let allowlist =
+                    std::sync::Arc::new(InMemoryHostAllowlist::new()) as std::sync::Arc<_>;
+                let bind =
+                    NetworkProxy::bind(interaction_gate.clone(), allowlist, "code_interpreter")
+                        .await;
+                match bind {
+                    Ok((proxy, port)) => {
+                        tokio::spawn(proxy.run());
+                        tracing::info!("code mode: egress proxy bound on 127.0.0.1:{port}");
+                        Some(port)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "code mode: egress proxy bind failed ({e}); air-gapping sandbox"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let policy = if proxy_port.is_some() {
+                NetworkPolicy::LoopbackProxy
+            } else {
+                NetworkPolicy::Denied
+            };
+            let sandbox = oneai_tool::default_sandbox_backend_with_policy(&working_dir, policy);
             let code_tool = oneai_tool::CodeInterpreterTool::new(
                 self.tool_registry.tools_map(),
                 interaction_gate.clone(),
@@ -1677,6 +1729,10 @@ impl AppBuilder {
                 sandbox,
                 working_dir,
             );
+            let code_tool = match proxy_port {
+                Some(port) => code_tool.with_network_proxy(port),
+                None => code_tool,
+            };
             self.tool_registry.register(Arc::new(code_tool)).await?;
         }
 

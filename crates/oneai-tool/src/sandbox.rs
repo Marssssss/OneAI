@@ -50,6 +50,40 @@ pub struct WrappedCommand {
     pub allow_network: bool,
 }
 
+/// The network egress policy a sandbox backend enforces.
+///
+/// `LoopbackProxy` is the code-mode network gate (#28 Stage 1): the sandbox
+/// allows loopback only (so the sandboxed process can reach the host's local
+/// egress proxy on `127.0.0.1:<port>`) and denies direct internet egress. The
+/// proxy then enforces a per-host allow-list + approval gate. Backends that
+/// can't express "loopback-to-host-proxy" (bwrap's `--unshare-net` isolates a
+/// *private* loopback unreachable from the host; docker/regex have no
+/// per-host filter) degrade `LoopbackProxy` to `Denied` semantics — the host
+/// proxy stays unreachable, so the sandboxed process simply has no network.
+/// Only Seatbelt (mac) gives the true strong gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetworkPolicy {
+    /// Deny all network (including loopback). The safe default.
+    #[default]
+    Denied,
+    /// Allow loopback only — the sandboxed process may reach the host's local
+    /// egress proxy but not the internet directly.
+    LoopbackProxy,
+    /// Blanket allow all network (the pre-#28 `allow_network = true` posture).
+    Allowed,
+}
+
+impl NetworkPolicy {
+    /// The legacy boolean: `true` → `Allowed`, `false` → `Denied`.
+    pub fn from_allow_network(allow: bool) -> Self {
+        if allow {
+            Self::Allowed
+        } else {
+            Self::Denied
+        }
+    }
+}
+
 // ─── SandboxBackend Trait ────────────────────────────────────────────────────
 
 /// Sandbox backend trait — platform-specific command isolation.
@@ -98,17 +132,28 @@ pub struct SeatbeltBackend {
     /// Directory paths that the sandboxed process can write to.
     allowed_write_dirs: Vec<PathBuf>,
 
-    /// Whether network access is allowed.
-    allow_network: bool,
+    /// Network egress policy. See [`NetworkPolicy`].
+    network: NetworkPolicy,
 }
 
 impl SeatbeltBackend {
     /// Create a new SeatbeltBackend with the given allowed directories.
+    ///
+    /// `allow_network` is the legacy boolean (mapped via
+    /// [`NetworkPolicy::from_allow_network`]); use [`Self::with_network_policy`]
+    /// for the `LoopbackProxy` gate.
     pub fn new(allowed_write_dirs: Vec<PathBuf>, allow_network: bool) -> Self {
         Self {
             allowed_write_dirs,
-            allow_network,
+            network: NetworkPolicy::from_allow_network(allow_network),
         }
+    }
+
+    /// Override the network egress policy (e.g. set `LoopbackProxy` for the
+    /// code-mode network gate).
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.network = policy;
+        self
     }
 
     /// Create a basic SeatbeltBackend for coding tasks.
@@ -116,7 +161,7 @@ impl SeatbeltBackend {
     pub fn coding_defaults(project_dir: &Path) -> Self {
         Self {
             allowed_write_dirs: vec![project_dir.to_path_buf()],
-            allow_network: true,
+            network: NetworkPolicy::Allowed,
         }
     }
 
@@ -242,13 +287,27 @@ impl SeatbeltBackend {
         rules.push("(allow file-write* (literal \"/dev/null\"))".to_string());
         rules.push("(allow file-write* (literal \"/dev/dtracehelper\"))".to_string());
 
-        // Network policy. LLM API IPs vary, so egress can't be path-filtered
-        // without a local proxy (future NetworkProxy work, out of scope);
-        // allow_network toggles blanket allow/deny.
-        if self.allow_network {
-            rules.push("(allow network*)".to_string());
-        } else {
-            rules.push("(deny network*)".to_string());
+        // Network policy. LLM API IPs vary, so direct egress can't be
+        // path-filtered without a local proxy; `LoopbackProxy` is exactly that
+        // gate (#28 Stage 1) — allow loopback only (so the sandboxed process
+        // can reach the host's local egress proxy on 127.0.0.1:<port>) and
+        // let `(deny default)` cover everything else. `Denied` needs no rule
+        // (deny-default); `Allowed` blanket-permits.
+        match self.network {
+            NetworkPolicy::Allowed => rules.push("(allow network*)".to_string()),
+            NetworkPolicy::LoopbackProxy => {
+                // Loopback only — the sandboxed process may reach the host's
+                // local egress proxy on 127.0.0.1:<port>. `(local)` is more
+                // specific than a blanket rule, so non-local stays denied by
+                // `(deny default)` (no blanket `(deny network*)` — it would
+                // race the local allow on precedence).
+                rules.push("(allow network* (local))".to_string());
+            }
+            // `Denied` is fully covered by `(deny default)`, but emit an
+            // explicit `(deny network*)` so the posture is self-describing.
+            NetworkPolicy::Denied => {
+                rules.push("(deny network*)".to_string());
+            }
         }
 
         rules.join("\n")
@@ -294,7 +353,7 @@ impl SandboxBackend for SeatbeltBackend {
             shell_command: wrapped,
             env_vars: HashMap::new(),
             working_dir: working_dir.to_path_buf(),
-            allow_network: self.allow_network,
+            allow_network: self.network == NetworkPolicy::Allowed,
         })
     }
 
@@ -331,8 +390,8 @@ pub struct DockerBackend {
     /// Directory paths to mount into the container.
     mount_dirs: Vec<PathBuf>,
 
-    /// Whether network access is allowed in the container.
-    allow_network: bool,
+    /// Network egress policy. See [`NetworkPolicy`].
+    network: NetworkPolicy,
 }
 
 impl DockerBackend {
@@ -341,8 +400,15 @@ impl DockerBackend {
         Self {
             image: image.to_string(),
             mount_dirs,
-            allow_network,
+            network: NetworkPolicy::from_allow_network(allow_network),
         }
+    }
+
+    /// Override the network egress policy. Docker has no loopback-to-proxy
+    /// mode, so `LoopbackProxy` degrades to `Denied` (`--network none`).
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.network = policy;
+        self
     }
 
     /// Create a basic DockerBackend for coding tasks.
@@ -351,7 +417,7 @@ impl DockerBackend {
         Self {
             image: "oneai-sandbox:latest".to_string(),
             mount_dirs: vec![project_dir.to_path_buf()],
-            allow_network: true,
+            network: NetworkPolicy::Allowed,
         }
     }
 }
@@ -379,7 +445,7 @@ impl SandboxBackend for DockerBackend {
         docker_args.push(format!("-w {}", wd_str));
 
         // Network policy
-        if !self.allow_network {
+        if self.network != NetworkPolicy::Allowed {
             docker_args.push("--network none".to_string());
         }
 
@@ -398,7 +464,7 @@ impl SandboxBackend for DockerBackend {
             shell_command: docker_args.join(" "),
             env_vars: HashMap::new(),
             working_dir: working_dir.to_path_buf(),
-            allow_network: self.allow_network,
+            allow_network: self.network == NetworkPolicy::Allowed,
         })
     }
 
@@ -437,8 +503,8 @@ pub struct BubblewrapBackend {
     /// Directory paths the sandboxed process may write to (read-write bind).
     allowed_write_dirs: Vec<PathBuf>,
 
-    /// Whether network access is allowed (shares the host netns).
-    allow_network: bool,
+    /// Network egress policy. See [`NetworkPolicy`].
+    network: NetworkPolicy,
 }
 
 impl BubblewrapBackend {
@@ -446,8 +512,16 @@ impl BubblewrapBackend {
     pub fn new(allowed_write_dirs: Vec<PathBuf>, allow_network: bool) -> Self {
         Self {
             allowed_write_dirs,
-            allow_network,
+            network: NetworkPolicy::from_allow_network(allow_network),
         }
+    }
+
+    /// Override the network egress policy. Note: bwrap cannot express
+    /// `LoopbackProxy` (an isolated netns's loopback is unreachable from the
+    /// host), so `LoopbackProxy` degrades to `Denied` here.
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.network = policy;
+        self
     }
 
     /// Create a basic BubblewrapBackend for coding tasks. Project dir is the
@@ -480,8 +554,12 @@ impl SandboxBackend for BubblewrapBackend {
     fn wrap_command(&self, command: &str, working_dir: &Path) -> Result<WrappedCommand> {
         let mut args: Vec<String> = vec!["bwrap".into(), "--unshare-all".into()];
 
-        // --unshare-all includes --unshare-net; re-share only when allowed.
-        if self.allow_network {
+        // --unshare-all includes --unshare-net; re-share only when blanket
+        // allowed. `LoopbackProxy` keeps the netns unshared (an isolated
+        // loopback can't reach the host proxy) — the host proxy is unreachable
+        // here, so it degrades to no-network; only Seatbelt (mac) gives the
+        // true loopback-to-proxy gate.
+        if self.network == NetworkPolicy::Allowed {
             args.push("--share-net".into());
         }
 
@@ -525,7 +603,7 @@ impl SandboxBackend for BubblewrapBackend {
             shell_command: args.join(" "),
             env_vars: HashMap::new(),
             working_dir: working_dir.to_path_buf(),
-            allow_network: self.allow_network,
+            allow_network: self.network == NetworkPolicy::Allowed,
         })
     }
 
@@ -561,8 +639,9 @@ pub struct RegexBackend {
     #[allow(dead_code)]
     allowed_dirs: Vec<PathBuf>,
 
-    /// Whether network access is allowed.
-    allow_network: bool,
+    /// Network egress policy. See [`NetworkPolicy`].
+    #[allow(dead_code)]
+    network: NetworkPolicy,
 }
 
 impl RegexBackend {
@@ -570,15 +649,22 @@ impl RegexBackend {
     pub fn new(allowed_dirs: Vec<PathBuf>, allow_network: bool) -> Self {
         Self {
             allowed_dirs,
-            allow_network,
+            network: NetworkPolicy::from_allow_network(allow_network),
         }
+    }
+
+    /// Override the network egress policy. RegexBackend has no real isolation
+    /// (it only passes the command through); `LoopbackProxy` is informational.
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.network = policy;
+        self
     }
 
     /// Create a basic RegexBackend for coding tasks.
     pub fn coding_defaults(project_dir: &Path) -> Self {
         Self {
             allowed_dirs: vec![project_dir.to_path_buf()],
-            allow_network: true,
+            network: NetworkPolicy::Allowed,
         }
     }
 }
@@ -598,7 +684,7 @@ impl SandboxBackend for RegexBackend {
             shell_command: command.to_string(),
             env_vars: HashMap::new(),
             working_dir: working_dir.to_path_buf(),
-            allow_network: self.allow_network,
+            allow_network: self.network == NetworkPolicy::Allowed,
         })
     }
 
@@ -628,6 +714,10 @@ pub fn default_sandbox_backend(
     project_dir: &Path,
     _allow_network: bool,
 ) -> Arc<dyn SandboxBackend> {
+    // The bool arg is a legacy vestige (always ignored — `coding_defaults`
+    // hard-codes the per-backend network posture). Selectors that need a real
+    // network policy (e.g. code-interpreter's `LoopbackProxy` gate) use
+    // [`default_sandbox_backend_with_policy`].
     if cfg!(target_os = "macos") {
         let seatbelt = SeatbeltBackend::coding_defaults(project_dir);
         if seatbelt.is_available() {
@@ -652,6 +742,55 @@ pub fn default_sandbox_backend(
 
     tracing::info!("Using regex-based sandbox backend (platform-specific isolation not available)");
     Arc::new(RegexBackend::coding_defaults(project_dir))
+}
+
+/// Like [`default_sandbox_backend`] but applies an explicit network egress
+/// [`NetworkPolicy`] to the selected backend. This is the code-interpreter seam:
+/// `LoopbackProxy` wires the code-mode network gate (the sandboxed process can
+/// reach only the host's local egress proxy), `Denied` fully air-gaps it.
+///
+/// Only Seatbelt (mac) gives the true `LoopbackProxy` strong gate; bwrap/docker/
+/// regex degrade `LoopbackProxy` to no-network (their isolation can't reach the
+/// host's loopback). See [`NetworkPolicy`] for the platform asymmetry.
+pub fn default_sandbox_backend_with_policy(
+    project_dir: &Path,
+    policy: NetworkPolicy,
+) -> Arc<dyn SandboxBackend> {
+    if cfg!(target_os = "macos") {
+        let seatbelt = SeatbeltBackend::coding_defaults(project_dir).with_network_policy(policy);
+        if seatbelt.is_available() {
+            tracing::info!(
+                "Using Seatbelt sandbox backend on macOS (network policy: {:?})",
+                policy
+            );
+            return Arc::new(seatbelt);
+        }
+    }
+
+    if cfg!(target_os = "linux") {
+        let bwrap = BubblewrapBackend::coding_defaults(project_dir).with_network_policy(policy);
+        if bwrap.is_available() {
+            tracing::info!(
+                "Using Bubblewrap sandbox backend on Linux (network policy: {:?})",
+                policy
+            );
+            return Arc::new(bwrap);
+        }
+        let docker = DockerBackend::coding_defaults(project_dir).with_network_policy(policy);
+        if docker.is_available() {
+            tracing::info!(
+                "Using Docker sandbox backend on Linux (network policy: {:?})",
+                policy
+            );
+            return Arc::new(docker);
+        }
+    }
+
+    tracing::info!(
+        "Using regex-based sandbox backend (network policy: {:?}; platform-specific isolation not available)",
+        policy
+    );
+    Arc::new(RegexBackend::coding_defaults(project_dir).with_network_policy(policy))
 }
 
 #[cfg(test)]
@@ -707,6 +846,23 @@ mod tests {
         let backend = SeatbeltBackend::new(vec![PathBuf::from("/project")], false);
         let profile = backend.generate_profile();
         assert!(profile.contains("(deny network*)"));
+        assert!(!profile.contains("(allow network*)"));
+    }
+
+    /// #28 Stage 1 — the LoopbackProxy profile admits only loopback (so the
+    /// sandboxed process can reach the host's local egress proxy) and denies
+    /// everything else. The `with_network_policy` seam is how the code-mode
+    /// network gate wires in.
+    #[test]
+    fn test_seatbelt_loopback_proxy_profile() {
+        let backend = SeatbeltBackend::coding_defaults(Path::new("/project"))
+            .with_network_policy(NetworkPolicy::LoopbackProxy);
+        let profile = backend.generate_profile();
+        assert!(
+            profile.contains("(allow network* (local))"),
+            "loopback must be allowed for the host proxy"
+        );
+        // No blanket allow (direct internet stays denied by deny-default).
         assert!(!profile.contains("(allow network*)"));
     }
 

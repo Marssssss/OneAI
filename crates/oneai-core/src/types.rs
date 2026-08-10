@@ -1349,6 +1349,21 @@ pub enum InteractionPoint {
     PlanDecision,
     /// Final confirmation of a single produced plan.
     PlanReview,
+    /// A sandboxed process (e.g. a `code_interpreter` script or a sandboxed
+    /// shell) is attempting an outbound network connection and the host's
+    /// network gate needs to decide whether to let it through.
+    ///
+    /// Unlike the other points, this is **not** an iteration decision the
+    /// agent loop polls each turn — it is raised on demand by the local
+    /// egress proxy when a connection to an *un-approved* host is attempted.
+    /// The proxy blocks (holding the script's connection open) until the
+    /// layer replies: [`InteractionResponse::Proceed`] admits the host (and
+    /// the proxy records it in its session allow-list so subsequent attempts
+    /// to the same host don't re-prompt); [`InteractionResponse::Abort`]
+    /// denies it (the script sees a connection error). Default-enabled — a
+    /// no-UI run uses a `NoopInteractionGate` (Proceed = allow all), matching
+    /// the "no UI = auto-proceed" posture; `DenyAllInteractionGate` denies all.
+    NetworkApproval,
 }
 
 /// A selectable option for a [`InteractionRequest::PlanDecision`].
@@ -1402,6 +1417,17 @@ pub enum InteractionRequest {
     },
     /// Final confirmation of a single produced plan.
     PlanReview { plan: String, steps: Vec<PlanStep> },
+    /// A sandboxed process is attempting an outbound connection to `host` and
+    /// the network gate is asking whether to admit it. See
+    /// [`InteractionPoint::NetworkApproval`] for the on-demand semantics; the
+    /// proxy blocks on this request until a reply arrives.
+    NetworkApproval {
+        /// The host (no port) the sandboxed process wants to reach.
+        host: String,
+        /// Origin tool / context raising the request (e.g. `"code_interpreter"`),
+        /// for the approval UI's attribution line.
+        requested_by: String,
+    },
 }
 
 /// The application layer's reply to an [`InteractionRequest`].

@@ -37,6 +37,7 @@ fn mobile_config() -> InteractionGateConfig {
         tool_approval: true,
         plan_decision: false,
         plan_review: false,
+        network_approval: false,
     }
 }
 

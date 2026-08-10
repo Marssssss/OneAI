@@ -69,6 +69,11 @@ pub struct CodeInterpreterTool {
     working_dir: std::path::PathBuf,
     default_timeout_secs: u64,
     max_output_bytes: usize,
+    /// The local egress proxy port (#28 Stage 1). When `Some`, scripts route
+    /// outbound HTTPS through `http://127.0.0.1:{port}` and the sandbox backend
+    /// (constructed by the caller with `NetworkPolicy::LoopbackProxy`) admits
+    /// only loopback. `None` → the sandbox is air-gapped (`NetworkPolicy::Denied`).
+    proxy_port: Option<u16>,
 }
 
 impl CodeInterpreterTool {
@@ -98,7 +103,18 @@ impl CodeInterpreterTool {
             working_dir,
             default_timeout_secs,
             max_output_bytes,
+            proxy_port: None,
         }
+    }
+
+    /// Wire the code-mode egress gate: scripts' outbound HTTPS is routed
+    /// through the local proxy on `port` (set `HTTPS_PROXY`/`HTTP_PROXY` env),
+    /// and per-host approval flows through the same `InteractionGate` the tool
+    /// already holds. The caller must have constructed the `sandbox` backend
+    /// with [`crate::sandbox::NetworkPolicy::LoopbackProxy`].
+    pub fn with_network_proxy(mut self, port: u16) -> Self {
+        self.proxy_port = Some(port);
+        self
     }
 
     /// Whether `python3` is reachable on `PATH`. Probed once (sync spawn),
@@ -311,7 +327,8 @@ impl Tool for CodeInterpreterTool {
 
         let (shell, shell_arg) = crate::tool_interfaces::resolve_shell();
 
-        let mut child = Command::new(shell)
+        let mut command = Command::new(shell);
+        command
             .arg(shell_arg)
             .arg(&wrapped.shell_command)
             .stdin(std::process::Stdio::piped())
@@ -319,7 +336,22 @@ impl Tool for CodeInterpreterTool {
             .stderr(std::process::Stdio::piped())
             .envs(&wrapped.env_vars)
             .env("ONEAI_CODE", &code)
-            .env("ONEAI_TOOLS", &tools_json)
+            .env("ONEAI_TOOLS", &tools_json);
+
+        // #28 Stage 1 — route the script's outbound HTTPS through the local
+        // egress proxy. The sandbox backend (constructed with
+        // `NetworkPolicy::LoopbackProxy`) admits only loopback, so direct
+        // internet egress is blocked; the proxy enforces the per-host gate.
+        if let Some(port) = self.proxy_port {
+            let proxy_url = format!("http://127.0.0.1:{port}");
+            command
+                .env("HTTPS_PROXY", &proxy_url)
+                .env("HTTP_PROXY", &proxy_url)
+                // Don't re-proxy loopback / the proxy itself.
+                .env("NO_PROXY", "127.0.0.1,localhost");
+        }
+
+        let mut child = command
             .spawn()
             .map_err(|e| OneAIError::Other(format!("code mode: failed to spawn python3: {e}")))?;
 
@@ -473,7 +505,7 @@ mod tests {
     use crate::interaction_gate::NoopInteractionGate;
     use crate::local_tools::CalculatorTool;
     use crate::registry::ToolRegistry;
-    use crate::sandbox::default_sandbox_backend;
+    use crate::sandbox::{default_sandbox_backend_with_policy, NetworkPolicy};
 
     /// Build a tool wired to a fresh registry holding `calculator`, with a
     /// no-op gate and the default regex sandbox backend.
@@ -484,7 +516,7 @@ mod tests {
             .await
             .unwrap();
         let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let sandbox = default_sandbox_backend(&working_dir, false);
+        let sandbox = default_sandbox_backend_with_policy(&working_dir, NetworkPolicy::Denied);
         let tool = CodeInterpreterTool::new(
             registry.tools_map(),
             Arc::new(NoopInteractionGate),

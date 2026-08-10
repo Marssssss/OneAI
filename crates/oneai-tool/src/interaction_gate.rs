@@ -87,6 +87,11 @@ pub struct InteractionGateConfig {
     pub plan_decision: bool,
     /// Call back for final plan confirmation.
     pub plan_review: bool,
+    /// Call back when a sandboxed process attempts an outbound network
+    /// connection to an un-approved host (the network gate). Default `true` —
+    /// network egress requires approval; a no-UI run wires a `NoopInteractionGate`
+    /// (Proceed = allow all) to match the "no UI = auto-proceed" posture.
+    pub network_approval: bool,
 }
 
 impl Default for InteractionGateConfig {
@@ -97,6 +102,7 @@ impl Default for InteractionGateConfig {
             tool_approval: true,
             plan_decision: true,
             plan_review: true,
+            network_approval: true,
         }
     }
 }
@@ -111,6 +117,7 @@ impl InteractionGateConfig {
             tool_approval: true,
             plan_decision: true,
             plan_review: true,
+            network_approval: true,
         }
     }
 
@@ -121,6 +128,7 @@ impl InteractionGateConfig {
             InteractionPoint::ToolApproval => self.tool_approval,
             InteractionPoint::PlanDecision => self.plan_decision,
             InteractionPoint::PlanReview => self.plan_review,
+            InteractionPoint::NetworkApproval => self.network_approval,
             // Future variants default to disabled (loop short-circuits to Proceed).
             _ => false,
         }
@@ -179,6 +187,7 @@ impl ChannelInteractionGate {
             InteractionRequest::ToolApproval { .. } => InteractionPoint::ToolApproval,
             InteractionRequest::PlanDecision { .. } => InteractionPoint::PlanDecision,
             InteractionRequest::PlanReview { .. } => InteractionPoint::PlanReview,
+            InteractionRequest::NetworkApproval { .. } => InteractionPoint::NetworkApproval,
             // Future variants: default to a typically-disabled point so the loop
             // short-circuits to Proceed rather than silently blocking.
             _ => InteractionPoint::PreInfer,
@@ -386,6 +395,34 @@ pub fn into_shared<G: InteractionGate + 'static>(gate: G) -> Arc<dyn Interaction
 mod tests {
     use super::*;
     use oneai_core::{DecisionOption, PlanStep};
+
+    /// #28 Stage 1 — a NetworkApproval request must route to the
+    /// NetworkApproval point (not the PreInfer fallback), and that point
+    /// follows `config.network_approval`. If it fell to the `_ => PreInfer`
+    /// arm, the TUI default (preinfer=false) would auto-proceed every egress
+    /// request — the network hole.
+    #[test]
+    fn network_approval_routes_to_its_own_point() {
+        let req = InteractionRequest::NetworkApproval {
+            host: "example.com".to_string(),
+            requested_by: "code_interpreter".to_string(),
+        };
+        assert_eq!(
+            ChannelInteractionGate::point_of(&req),
+            InteractionPoint::NetworkApproval
+        );
+    }
+
+    #[test]
+    fn network_approval_enabled_by_default_disabled_by_config() {
+        let cfg = InteractionGateConfig::default();
+        assert!(cfg.enabled_for(InteractionPoint::NetworkApproval));
+        let cfg = InteractionGateConfig {
+            network_approval: false,
+            ..InteractionGateConfig::default()
+        };
+        assert!(!cfg.enabled_for(InteractionPoint::NetworkApproval));
+    }
 
     fn sample_plan_decision() -> InteractionRequest {
         InteractionRequest::PlanDecision {

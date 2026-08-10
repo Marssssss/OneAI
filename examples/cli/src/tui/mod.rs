@@ -734,6 +734,29 @@ fn run_main_loop(
                     app.pending_plan = Some((plan, steps, Some(response_tx)));
                     app.is_thinking = false; // pause spinner while awaiting review
                 }
+                oneai_core::InteractionRequest::NetworkApproval { host, requested_by } => {
+                    // #28 Stage 1 — a sandboxed script wants to reach `host`.
+                    // Reuse the ToolApproval card + queue (Issue #20) by
+                    // synthesizing an approval request keyed on the host; the
+                    // card's Proceed/Abort map directly to the proxy's
+                    // admit/deny semantics.
+                    let approval = oneai_core::ApprovalRequest {
+                        tool_name: host.clone(),
+                        args: serde_json::json!({ "host": host, "requested_by": requested_by }),
+                        risk_level: oneai_core::RiskLevel::High,
+                        permission_level: Some(oneai_core::PermissionLevel::Full),
+                        justification: format!(
+                            "Network egress request to {host} (from {requested_by})"
+                        ),
+                    };
+                    let state = ApprovalPendingState {
+                        request: approval.clone(),
+                        response_tx: Some(response_tx),
+                        tool_name: approval.tool_name.clone(),
+                        justification: approval.justification.clone(),
+                    };
+                    promote_or_enqueue_approval(&mut app, state, "Network");
+                }
                 _ => {
                     // PreInfer/PostInfer — not surfaced in the TUI; proceed.
                     let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);

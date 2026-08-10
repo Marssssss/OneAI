@@ -19,9 +19,11 @@ pub mod apply_patch;
 pub mod code;
 pub mod executor;
 pub mod file_ops;
+pub mod host_allowlist;
 pub mod interaction_gate;
 pub mod local_tools;
 pub mod mcp_real;
+pub mod network_proxy;
 pub mod registry;
 pub mod sandbox;
 pub mod schedule_tool;
@@ -36,16 +38,18 @@ pub use executor::*;
 pub use file_ops::{
     DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps, SandboxedFileOps,
 };
+pub use host_allowlist::{HostAllowlistStore, InMemoryHostAllowlist};
 pub use interaction_gate::*;
 pub use local_tools::{CalculatorTool, FileWriteTool};
 pub use mcp_real::McpServerManager as RealMcpServerManager;
 pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
 pub use mcp_real::{default_mcp_configs, optional_mcp_configs};
 pub use mcp_real::{McpConnection, McpFramingParser, McpServerConfig, McpToolInfo, McpTransport};
+pub use network_proxy::NetworkProxy;
 pub use registry::*;
 pub use sandbox::{
-    default_sandbox_backend, DockerBackend, RegexBackend, SandboxBackend, SeatbeltBackend,
-    WrappedCommand,
+    default_sandbox_backend, default_sandbox_backend_with_policy, DockerBackend, NetworkPolicy,
+    RegexBackend, SandboxBackend, SeatbeltBackend, WrappedCommand,
 };
 pub use schedule_tool::ScheduleTool;
 #[cfg(feature = "daytona")]
