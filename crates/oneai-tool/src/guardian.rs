@@ -20,7 +20,7 @@ use std::sync::Arc;
 use oneai_core::traits::CommandReviewer;
 use oneai_core::{ApprovalPolicy, ReviewAction, Verdict};
 
-use crate::exec_policy::{shell_tokens, ExecPolicy};
+use crate::exec_policy::{amendment_rule_for, shell_tokens, ExecPolicyStore};
 use crate::tool_interfaces::default_blocked_patterns;
 
 /// Tool name of the shell executor.
@@ -124,25 +124,27 @@ impl CommandReviewer for RuleGuardian {
     }
 }
 
-/// A wired Guardian: the reviewer + the policy that turns its verdict into an
-/// action. Held by `ToolExecutor` / `CodeInterpreterTool` and consulted in
-/// `execute_with_approval` after the domain resolver, before the manual gate.
-///
 /// #28 Stage 4 — an optional [`ExecPolicy`] (config-driven token-prefix rules)
 /// sits *above* the reviewer. For a `shell` call whose command matches an
 /// exec-policy rule, the rule's [`Verdict`] is used directly and the reviewer
 /// is skipped (the declarative path is authoritative over the heuristic). A
 /// command no rule matches falls through to the reviewer (RuleGuardian /
 /// LlmGuardian) — the pre-Stage-4 behaviour.
+///
+/// #28 Stage 5 — `exec_policy` is an [`ExecPolicyStore`]: the static DomainPack
+/// rules (base) ∪ amendments the user approved at runtime, hot-swapped behind
+/// a `RwLock`. [`Self::record_shell_approval`] appends a full-argv `Allow`
+/// rule when the gate approves a shell command, so future identical commands
+/// skip the prompt. Disabled (`None`) → the pre-Stage-5 behaviour.
 #[derive(Clone)]
 pub struct GuardianContext {
     reviewer: Arc<dyn CommandReviewer>,
     policy: ApprovalPolicy,
     trusted_dirs: Vec<PathBuf>,
     working_dir: PathBuf,
-    /// Config-driven token-prefix rules (#28 Stage 4). `None` / empty → the
-    /// reviewer heuristic decides (the pre-Stage-4 behaviour).
-    exec_policy: Option<Arc<ExecPolicy>>,
+    /// Config-driven token-prefix rules + runtime amendments (#28 Stage 4/5).
+    /// `None` → the reviewer heuristic decides (the pre-Stage-4 behaviour).
+    exec_policy: Option<Arc<ExecPolicyStore>>,
 }
 
 impl std::fmt::Debug for GuardianContext {
@@ -153,7 +155,7 @@ impl std::fmt::Debug for GuardianContext {
             .field("working_dir", &self.working_dir)
             .field(
                 "exec_policy_rules",
-                &self.exec_policy.as_ref().map(|p| p.rule_count()),
+                &self.exec_policy.as_ref().map(|_| "<ExecPolicyStore>"),
             )
             .finish_non_exhaustive()
     }
@@ -161,14 +163,14 @@ impl std::fmt::Debug for GuardianContext {
 
 impl GuardianContext {
     /// Assemble a Guardian context from its parts. `exec_policy` is the
-    /// optional #28 Stage 4 rule layer; pass `None` for the pre-Stage-4
-    /// behaviour (reviewer heuristic only).
+    /// optional #28 Stage 4/5 rule layer (a live, swappable `ExecPolicyStore`);
+    /// pass `None` for the pre-Stage-4 behaviour (reviewer heuristic only).
     pub fn new(
         reviewer: Arc<dyn CommandReviewer>,
         policy: ApprovalPolicy,
         trusted_dirs: Vec<PathBuf>,
         working_dir: PathBuf,
-        exec_policy: Option<Arc<ExecPolicy>>,
+        exec_policy: Option<Arc<ExecPolicyStore>>,
     ) -> Self {
         Self {
             reviewer,
@@ -184,16 +186,48 @@ impl GuardianContext {
         self.policy
     }
 
+    /// The live exec-policy store, if wired (#28 Stage 4/5).
+    pub fn exec_policy_store(&self) -> Option<&Arc<ExecPolicyStore>> {
+        self.exec_policy.as_ref()
+    }
+
+    /// Record a user-approved shell command as a runtime amendment (#28 Stage
+    /// 5). Called by the executor when the interaction gate returns
+    /// `Proceed`/`ProceedWith` for a `shell` call. Builds a full-argv `Allow`
+    /// rule (refusing wrappers like `sudo`/`bash -c`), appends it to the live
+    /// `ExecPolicyStore` (hot-swap), and persists it to `~/.oneai/rules/...`
+    /// when a rules file is configured. Returns whether a new rule was
+    /// recorded. No-op for non-`shell` tools, when no store is wired, or when
+    /// the command is a banned wrapper.
+    pub async fn record_shell_approval(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        let Some(store) = self.exec_policy.as_ref() else {
+            return false;
+        };
+        if tool_name != SHELL_TOOL {
+            return false;
+        }
+        let Some(cmd) = args.get("command").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        let Some(rule) = amendment_rule_for(cmd) else {
+            return false;
+        };
+        store.add_amendment_rule(rule).await
+    }
+
     /// Review the call and apply the policy matrix → the action the executor
     /// takes (Run / Deny / Prompt).
     pub async fn apply(&self, tool_name: &str, args: &serde_json::Value) -> ReviewAction {
         let cwd_trusted = self.is_trusted_dir();
-        // #28 Stage 4 — declarative rule layer first (shell only). A matching
+        // #28 Stage 4/5 — declarative rule layer first (shell only). A matching
         // rule's verdict is authoritative; the reviewer heuristic is skipped.
-        if let Some(ep) = self.exec_policy.as_ref().filter(|p| !p.is_empty()) {
+        // The store holds base rules ∪ runtime amendments (hot-swapped).
+        if let Some(ep) = self.exec_policy.as_ref() {
             if let Some(cmd) = shell_command_for(tool_name, args) {
-                if let Some(verdict) = ep.evaluate(&shell_tokens(&cmd)) {
-                    return self.policy.decide(verdict, cwd_trusted);
+                if !ep.is_empty().await {
+                    if let Some(verdict) = ep.evaluate(&shell_tokens(&cmd)).await {
+                        return self.policy.decide(verdict, cwd_trusted);
+                    }
                 }
             }
         }
@@ -275,11 +309,28 @@ fn compile_code_deny_patterns() -> Vec<regex::Regex> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec_policy::{ExecDecision, ExecRule, PatternToken};
+    use crate::exec_policy::{ExecDecision, ExecPolicyStore, ExecRule, PatternToken};
     use serde_json::json;
 
     fn guardian() -> RuleGuardian {
         RuleGuardian::new()
+    }
+
+    /// A store seeded with an Allow rule for `git commit` (no persistence).
+    fn store_allowing_git_commit() -> Arc<ExecPolicyStore> {
+        Arc::new(ExecPolicyStore::from_base(
+            vec![ExecRule {
+                pattern: vec![
+                    PatternToken::Single("git".into()),
+                    PatternToken::Single("commit".into()),
+                ],
+                decision: ExecDecision::Allow,
+                justification: Some("project rule".into()),
+                match_examples: vec!["git commit -m x".into()],
+                not_match_examples: vec!["git push".into()],
+            }],
+            None,
+        ))
     }
 
     #[tokio::test]
@@ -414,19 +465,6 @@ mod tests {
 
     // ── #28 Stage 4 — ExecPolicy layer ─────────────────────────────────────
 
-    fn exec_policy_allowing_git_commit() -> Arc<ExecPolicy> {
-        Arc::new(ExecPolicy::from_rules(vec![ExecRule {
-            pattern: vec![
-                PatternToken::Single("git".into()),
-                PatternToken::Single("commit".into()),
-            ],
-            decision: ExecDecision::Allow,
-            justification: Some("project rule".into()),
-            match_examples: vec!["git commit -m x".into()],
-            not_match_examples: vec!["git push".into()],
-        }]))
-    }
-
     #[tokio::test]
     async fn exec_policy_allow_rule_skips_reviewer() {
         // `git commit` is NOT on RuleGuardian's safe allow-list (it's an
@@ -437,7 +475,7 @@ mod tests {
             ApprovalPolicy::OnFailure,
             Vec::new(),
             std::env::current_dir().unwrap(),
-            Some(exec_policy_allowing_git_commit()),
+            Some(store_allowing_git_commit()),
         );
         let a = ctx
             .apply("shell", &json!({"command": "git commit -m x"}))
@@ -447,13 +485,16 @@ mod tests {
 
     #[tokio::test]
     async fn exec_policy_deny_rule_short_circuits_to_deny() {
-        let ep = Arc::new(ExecPolicy::from_rules(vec![ExecRule {
-            pattern: vec![PatternToken::Single("rm".into())],
-            decision: ExecDecision::Deny,
-            justification: Some("project forbids rm".into()),
-            match_examples: vec!["rm scratch.tmp".into()],
-            not_match_examples: Vec::new(),
-        }]));
+        let ep = Arc::new(ExecPolicyStore::from_base(
+            vec![ExecRule {
+                pattern: vec![PatternToken::Single("rm".into())],
+                decision: ExecDecision::Deny,
+                justification: Some("project forbids rm".into()),
+                match_examples: vec!["rm scratch.tmp".into()],
+                not_match_examples: Vec::new(),
+            }],
+            None,
+        ));
         let ctx = GuardianContext::new(
             Arc::new(RuleGuardian::new()),
             ApprovalPolicy::OnRequest, // would let a Deny verdict → Prompt...
@@ -478,7 +519,7 @@ mod tests {
             ApprovalPolicy::OnFailure,
             Vec::new(),
             std::env::current_dir().unwrap(),
-            Some(exec_policy_allowing_git_commit()),
+            Some(store_allowing_git_commit()),
         );
         let a = ctx.apply("shell", &json!({"command": "ls"})).await;
         assert!(matches!(a, ReviewAction::Run { .. }));
@@ -497,7 +538,7 @@ mod tests {
             ApprovalPolicy::OnFailure,
             Vec::new(),
             std::env::current_dir().unwrap(),
-            Some(exec_policy_allowing_git_commit()),
+            Some(store_allowing_git_commit()),
         );
         let a = ctx
             .apply(
@@ -510,15 +551,95 @@ mod tests {
 
     #[tokio::test]
     async fn empty_exec_policy_is_noop() {
-        // An empty ExecPolicy is a no-op → identical to None (reviewer only).
+        // An empty ExecPolicyStore is a no-op → identical to None (reviewer).
         let ctx = GuardianContext::new(
             Arc::new(RuleGuardian::new()),
             ApprovalPolicy::OnFailure,
             Vec::new(),
             std::env::current_dir().unwrap(),
-            Some(Arc::new(ExecPolicy::empty())),
+            Some(Arc::new(ExecPolicyStore::empty_in_memory())),
         );
         let a = ctx.apply("shell", &json!({"command": "npm install"})).await;
         assert!(matches!(a, ReviewAction::Prompt { .. }));
+    }
+
+    // ── #28 Stage 5 — runtime amendment ────────────────────────────────────
+
+    #[tokio::test]
+    async fn record_shell_approval_amends_then_skips_reviewer() {
+        // `git commit -m x` is normally an Escalate (not on the safe
+        // allow-list). No exec-policy rule for it → reviewer Escalate → Prompt
+        // under OnFailure. After the user approves it (record_shell_approval),
+        // a full-argv Allow rule is added and the *same* command now auto-runs
+        // (ExecPolicy Allow, skipping the reviewer).
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(Arc::new(ExecPolicyStore::empty_in_memory())),
+        );
+        // Before approval: Escalate → Prompt.
+        let a = ctx
+            .apply("shell", &json!({"command": "git commit -m x"}))
+            .await;
+        assert!(matches!(a, ReviewAction::Prompt { .. }));
+
+        let recorded = ctx
+            .record_shell_approval("shell", &json!({"command": "git commit -m x"}))
+            .await;
+        assert!(recorded, "approval recorded as amendment");
+
+        // After approval: the amendment Allow rule matches → Run, no prompt.
+        let a = ctx
+            .apply("shell", &json!({"command": "git commit -m x"}))
+            .await;
+        assert!(matches!(a, ReviewAction::Run { .. }));
+    }
+
+    #[tokio::test]
+    async fn record_shell_approval_refuses_sudo() {
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(Arc::new(ExecPolicyStore::empty_in_memory())),
+        );
+        let recorded = ctx
+            .record_shell_approval("shell", &json!({"command": "sudo ls"}))
+            .await;
+        assert!(!recorded, "sudo must not be auto-recorded");
+    }
+
+    #[tokio::test]
+    async fn record_shell_approval_ignored_for_non_shell_tool() {
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(Arc::new(ExecPolicyStore::empty_in_memory())),
+        );
+        let recorded = ctx
+            .record_shell_approval("read_file", &json!({"file_path": "/etc/hosts"}))
+            .await;
+        assert!(!recorded, "non-shell tools are never amended");
+    }
+
+    #[tokio::test]
+    async fn record_shell_approval_no_store_is_noop() {
+        // No exec-policy store wired → record is a no-op (pre-Stage-5 posture).
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            None,
+        );
+        let recorded = ctx
+            .record_shell_approval("shell", &json!({"command": "ls"}))
+            .await;
+        assert!(!recorded);
     }
 }

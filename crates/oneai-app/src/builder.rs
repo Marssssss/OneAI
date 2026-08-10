@@ -225,6 +225,16 @@ pub struct AppBuilder {
     /// Trusted directories for `OnUntrustedDir` (#28 Stage 2). `None` → trust
     /// the working dir only (the `code_interpreter` working dir / process CWD).
     trusted_dirs: Option<Vec<std::path::PathBuf>>,
+
+    /// #28 Stage 5 — where user-approved amendments are persisted (JSONL,
+    /// one `ExecRule` per line). `None` → `~/.oneai/rules/default.rules`.
+    exec_rules_path: Option<std::path::PathBuf>,
+
+    /// #28 Stage 5 — whether the runtime amendment layer is on (default `true`:
+    /// approving a shell command records a full-argv Allow rule so future
+    /// identical commands skip the prompt). `false` → the Stage-4 static
+    /// posture (no recording, no persistence).
+    exec_amendment_enabled: bool,
 }
 
 impl AppBuilder {
@@ -286,6 +296,8 @@ impl AppBuilder {
             network_proxy_enabled: true,
             guardian_policy: oneai_core::ApprovalPolicy::default(),
             trusted_dirs: None,
+            exec_rules_path: None,
+            exec_amendment_enabled: true,
         }
     }
 
@@ -1452,6 +1464,35 @@ impl AppBuilder {
         self
     }
 
+    /// #28 Stage 5 — override the file user-approved exec-policy amendments
+    /// are persisted to (JSONL, one `ExecRule` per line). `None` (default) →
+    /// `~/.oneai/rules/default.rules`. The file is created lazily on the first
+    /// approved command.
+    pub fn exec_rules_path(mut self, path: std::path::PathBuf) -> Self {
+        self.exec_rules_path = Some(path);
+        self
+    }
+
+    /// #28 Stage 5 — toggle the runtime amendment layer. Default `true`:
+    /// approving a shell command records a full-argv `Allow` rule so future
+    /// identical commands skip the prompt (and persist to
+    /// [`Self::exec_rules_path`]). Pass `false` for the Stage-4 static posture
+    /// (no recording, no persistence, exec-policy is DomainPack-declared only).
+    pub fn with_exec_amendment(mut self, enabled: bool) -> Self {
+        self.exec_amendment_enabled = enabled;
+        self
+    }
+
+    /// Default amendments file: `~/.oneai/rules/default.rules` (mirrors the
+    /// gateway / supervisor / working-state `~/.oneai` root convention).
+    fn default_exec_rules_path() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".oneai")
+            .join("rules")
+            .join("default.rules")
+    }
+
     // ─── A2A Server Integration ──────────────────────────────────────────────────
 
     /// Enable A2A server hosting — expose OneAI agent capabilities via A2A protocol.
@@ -1656,13 +1697,32 @@ impl AppBuilder {
             })
             .or(self.trusted_dirs.clone())
             .unwrap_or_else(|| vec![guardian_working_dir.clone()]);
-        // #28 Stage 4 — ExecPolicy rule layer. Pulled from the merged
-        // DomainPack's PermissionProfile (config-driven token-prefix rules).
-        // `None` / empty → the reviewer heuristic decides (pre-Stage-4).
-        let exec_policy: Option<std::sync::Arc<oneai_tool::ExecPolicy>> = merged_domain_pack
+        // #28 Stage 4/5 — ExecPolicy rule layer. The static base rules come
+        // from the merged DomainPack's PermissionProfile (config-driven
+        // token-prefix rules). Stage 5 wraps them in an `ExecPolicyStore`
+        // that also holds runtime amendments the user approved (hot-swapped +
+        // persisted to `exec_rules_path`). `exec_amendment_enabled = false`
+        // → in-memory store with no persistence (Stage-4 static posture).
+        let exec_policy_base: Vec<oneai_tool::ExecRule> = merged_domain_pack
             .as_ref()
-            .and_then(|dp| dp.permission_profile.exec_policy.clone())
-            .map(std::sync::Arc::new);
+            .and_then(|dp| dp.permission_profile.exec_policy.as_ref())
+            .map(|ep| ep.rules().to_vec())
+            .unwrap_or_default();
+        let exec_policy: Option<std::sync::Arc<oneai_tool::ExecPolicyStore>> = {
+            let rules_file = if self.exec_amendment_enabled {
+                Some(
+                    self.exec_rules_path
+                        .clone()
+                        .unwrap_or_else(Self::default_exec_rules_path),
+                )
+            } else {
+                None
+            };
+            Some(std::sync::Arc::new(oneai_tool::ExecPolicyStore::from_base(
+                exec_policy_base,
+                rules_file,
+            )))
+        };
         let guardian: Option<std::sync::Arc<oneai_tool::GuardianContext>> =
             if merged_domain_pack.is_some() || self.provider.is_some() {
                 let reviewer: std::sync::Arc<dyn oneai_core::traits::CommandReviewer> =

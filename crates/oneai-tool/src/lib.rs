@@ -36,7 +36,10 @@ pub mod tool_interfaces;
 // (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
 pub use apply_patch::{parse_unified_diff, ApplyPatchTool, DiffHunk, DiffLine};
 pub use code::CodeInterpreterTool;
-pub use exec_policy::{shell_tokens, ExecDecision, ExecPolicy, ExecRule, PatternToken};
+pub use exec_policy::{
+    amendment_rule_for, shell_tokens, ExecDecision, ExecPolicy, ExecPolicyStore, ExecRule,
+    PatternToken,
+};
 pub use executor::*;
 pub use file_ops::{
     DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps, SandboxedFileOps,

@@ -347,6 +347,13 @@ pub async fn execute_with_approval(
 
         match response {
             InteractionResponse::Proceed => {
+                // #28 Stage 5 — the user approved this call. For a `shell`
+                // command, record a full-argv Allow amendment so future
+                // identical commands skip the prompt (no-op for non-shell or
+                // when no exec-policy store is wired).
+                if let Some(g) = guardian {
+                    let _ = g.record_shell_approval(tool_name, &args).await;
+                }
                 tracing::info!(
                     "Tool '{}' approved for execution with args: {}",
                     tool_name,
@@ -361,6 +368,11 @@ pub async fn execute_with_approval(
                     InteractionModification::ReplaceToolArgs(new_args) => new_args,
                     _ => args,
                 };
+                // #28 Stage 5 — record the approved (possibly rewritten)
+                // command, same as `Proceed`.
+                if let Some(g) = guardian {
+                    let _ = g.record_shell_approval(tool_name, &final_args).await;
+                }
                 tracing::info!(
                     "Tool '{}' approved with modified args: {}",
                     tool_name,
