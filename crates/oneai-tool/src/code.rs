@@ -521,10 +521,19 @@ mod tests {
     use crate::interaction_gate::NoopInteractionGate;
     use crate::local_tools::CalculatorTool;
     use crate::registry::ToolRegistry;
-    use crate::sandbox::{default_sandbox_backend_with_policy, NetworkPolicy};
+    use crate::sandbox::{NetworkPolicy, RegexBackend, SandboxBackend};
 
     /// Build a tool wired to a fresh registry holding `calculator`, with a
-    /// no-op gate and the default regex sandbox backend.
+    /// no-op gate and the regex (pass-through) sandbox backend.
+    ///
+    /// The sandbox is deliberately a `RegexBackend` (no real process isolation),
+    /// NOT `default_sandbox_backend_with_policy` — that selector picks the
+    /// platform backend (bwrap/docker), and the CI runner has neither bwrap nor
+    /// the `oneai-sandbox:latest` Docker image, so `docker run oneai-sandbox`
+    /// would fail to find the image and the bridge would "exit without sending
+    /// `done`". The sandbox is orthogonal to what these tests exercise (the RPC
+    /// loop); a benign pass-through backend is the correct setup. Production
+    /// wiring (the AppBuilder) selects the real platform backend separately.
     async fn make_tool() -> (CodeInterpreterTool, Arc<ToolRegistry>) {
         let registry = Arc::new(ToolRegistry::new());
         registry
@@ -532,7 +541,9 @@ mod tests {
             .await
             .unwrap();
         let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-        let sandbox = default_sandbox_backend_with_policy(&working_dir, NetworkPolicy::Denied);
+        let sandbox = Arc::new(
+            RegexBackend::coding_defaults(&working_dir).with_network_policy(NetworkPolicy::Denied),
+        ) as Arc<dyn SandboxBackend>;
         let tool = CodeInterpreterTool::new(
             registry.tools_map(),
             Arc::new(NoopInteractionGate),
