@@ -20,6 +20,7 @@ use std::sync::Arc;
 use oneai_core::traits::CommandReviewer;
 use oneai_core::{ApprovalPolicy, ReviewAction, Verdict};
 
+use crate::exec_policy::{shell_tokens, ExecPolicy};
 use crate::tool_interfaces::default_blocked_patterns;
 
 /// Tool name of the shell executor.
@@ -126,12 +127,22 @@ impl CommandReviewer for RuleGuardian {
 /// A wired Guardian: the reviewer + the policy that turns its verdict into an
 /// action. Held by `ToolExecutor` / `CodeInterpreterTool` and consulted in
 /// `execute_with_approval` after the domain resolver, before the manual gate.
+///
+/// #28 Stage 4 — an optional [`ExecPolicy`] (config-driven token-prefix rules)
+/// sits *above* the reviewer. For a `shell` call whose command matches an
+/// exec-policy rule, the rule's [`Verdict`] is used directly and the reviewer
+/// is skipped (the declarative path is authoritative over the heuristic). A
+/// command no rule matches falls through to the reviewer (RuleGuardian /
+/// LlmGuardian) — the pre-Stage-4 behaviour.
 #[derive(Clone)]
 pub struct GuardianContext {
     reviewer: Arc<dyn CommandReviewer>,
     policy: ApprovalPolicy,
     trusted_dirs: Vec<PathBuf>,
     working_dir: PathBuf,
+    /// Config-driven token-prefix rules (#28 Stage 4). `None` / empty → the
+    /// reviewer heuristic decides (the pre-Stage-4 behaviour).
+    exec_policy: Option<Arc<ExecPolicy>>,
 }
 
 impl std::fmt::Debug for GuardianContext {
@@ -140,23 +151,31 @@ impl std::fmt::Debug for GuardianContext {
             .field("policy", &self.policy)
             .field("trusted_dirs", &self.trusted_dirs)
             .field("working_dir", &self.working_dir)
+            .field(
+                "exec_policy_rules",
+                &self.exec_policy.as_ref().map(|p| p.rule_count()),
+            )
             .finish_non_exhaustive()
     }
 }
 
 impl GuardianContext {
-    /// Assemble a Guardian context from its parts.
+    /// Assemble a Guardian context from its parts. `exec_policy` is the
+    /// optional #28 Stage 4 rule layer; pass `None` for the pre-Stage-4
+    /// behaviour (reviewer heuristic only).
     pub fn new(
         reviewer: Arc<dyn CommandReviewer>,
         policy: ApprovalPolicy,
         trusted_dirs: Vec<PathBuf>,
         working_dir: PathBuf,
+        exec_policy: Option<Arc<ExecPolicy>>,
     ) -> Self {
         Self {
             reviewer,
             policy,
             trusted_dirs,
             working_dir,
+            exec_policy,
         }
     }
 
@@ -168,8 +187,17 @@ impl GuardianContext {
     /// Review the call and apply the policy matrix → the action the executor
     /// takes (Run / Deny / Prompt).
     pub async fn apply(&self, tool_name: &str, args: &serde_json::Value) -> ReviewAction {
-        let verdict = self.reviewer.review(tool_name, args).await;
         let cwd_trusted = self.is_trusted_dir();
+        // #28 Stage 4 — declarative rule layer first (shell only). A matching
+        // rule's verdict is authoritative; the reviewer heuristic is skipped.
+        if let Some(ep) = self.exec_policy.as_ref().filter(|p| !p.is_empty()) {
+            if let Some(cmd) = shell_command_for(tool_name, args) {
+                if let Some(verdict) = ep.evaluate(&shell_tokens(&cmd)) {
+                    return self.policy.decide(verdict, cwd_trusted);
+                }
+            }
+        }
+        let verdict = self.reviewer.review(tool_name, args).await;
         self.policy.decide(verdict, cwd_trusted)
     }
 
@@ -182,6 +210,16 @@ impl GuardianContext {
             .iter()
             .any(|d| self.working_dir.starts_with(d) || d.starts_with(&self.working_dir))
     }
+}
+
+/// Extract the shell command string from a `shell` tool call's args (the field
+/// the rule layer tokenizes). Returns `None` for non-shell tools — ExecPolicy's
+/// command-prefix model doesn't apply to e.g. a Python script body.
+fn shell_command_for(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    if tool_name != SHELL_TOOL {
+        return None;
+    }
+    args.get("command").and_then(|v| v.as_str()).map(Into::into)
 }
 
 /// Conservative read-only / safe command allow-list. A command matches here →
@@ -237,6 +275,7 @@ fn compile_code_deny_patterns() -> Vec<regex::Regex> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec_policy::{ExecDecision, ExecRule, PatternToken};
     use serde_json::json;
 
     fn guardian() -> RuleGuardian {
@@ -333,6 +372,7 @@ mod tests {
             ApprovalPolicy::OnFailure,
             Vec::new(),
             std::env::current_dir().unwrap(),
+            None,
         );
         let a = ctx.apply("shell", &json!({"command": "ls"})).await;
         assert!(matches!(a, ReviewAction::Run { .. }));
@@ -351,6 +391,7 @@ mod tests {
             ApprovalPolicy::Never,
             Vec::new(),
             std::env::current_dir().unwrap(),
+            None,
         );
         let a = ctx_never
             .apply("shell", &json!({"command": "npm install"}))
@@ -363,10 +404,121 @@ mod tests {
             ApprovalPolicy::OnRequest,
             Vec::new(),
             std::env::current_dir().unwrap(),
+            None,
         );
         let a = ctx_req
             .apply("shell", &json!({"command": "rm -rf /"}))
             .await;
+        assert!(matches!(a, ReviewAction::Prompt { .. }));
+    }
+
+    // ── #28 Stage 4 — ExecPolicy layer ─────────────────────────────────────
+
+    fn exec_policy_allowing_git_commit() -> Arc<ExecPolicy> {
+        Arc::new(ExecPolicy::from_rules(vec![ExecRule {
+            pattern: vec![
+                PatternToken::Single("git".into()),
+                PatternToken::Single("commit".into()),
+            ],
+            decision: ExecDecision::Allow,
+            justification: Some("project rule".into()),
+            match_examples: vec!["git commit -m x".into()],
+            not_match_examples: vec!["git push".into()],
+        }]))
+    }
+
+    #[tokio::test]
+    async fn exec_policy_allow_rule_skips_reviewer() {
+        // `git commit` is NOT on RuleGuardian's safe allow-list (it's an
+        // Escalate). With an ExecPolicy Allow rule, the call auto-runs — the
+        // rule is authoritative over the heuristic.
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(exec_policy_allowing_git_commit()),
+        );
+        let a = ctx
+            .apply("shell", &json!({"command": "git commit -m x"}))
+            .await;
+        assert!(matches!(a, ReviewAction::Run { .. }));
+    }
+
+    #[tokio::test]
+    async fn exec_policy_deny_rule_short_circuits_to_deny() {
+        let ep = Arc::new(ExecPolicy::from_rules(vec![ExecRule {
+            pattern: vec![PatternToken::Single("rm".into())],
+            decision: ExecDecision::Deny,
+            justification: Some("project forbids rm".into()),
+            match_examples: vec!["rm scratch.tmp".into()],
+            not_match_examples: Vec::new(),
+        }]));
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnRequest, // would let a Deny verdict → Prompt...
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(ep),
+        );
+        // ...but ExecPolicy Deny maps to Verdict::Deny, and OnRequest turns
+        // Deny → Prompt (user may override). So the deny-rule surfaces as a
+        // prompt under OnRequest — exactly the override semantics.
+        let a = ctx
+            .apply("shell", &json!({"command": "rm scratch.tmp"}))
+            .await;
+        assert!(matches!(a, ReviewAction::Prompt { .. }));
+    }
+
+    #[tokio::test]
+    async fn exec_policy_no_match_falls_through_to_reviewer() {
+        // No rule for `ls` — the reviewer heuristic decides (Allow).
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(exec_policy_allowing_git_commit()),
+        );
+        let a = ctx.apply("shell", &json!({"command": "ls"})).await;
+        assert!(matches!(a, ReviewAction::Run { .. }));
+
+        // No rule for `rm -rf /` — the reviewer deny heuristic fires.
+        let a = ctx.apply("shell", &json!({"command": "rm -rf /"})).await;
+        assert!(matches!(a, ReviewAction::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn exec_policy_does_not_apply_to_code_tool() {
+        // ExecPolicy is a command-prefix model; it never applies to a code
+        // script body. The reviewer decides (code_deny → Deny for spawn).
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(exec_policy_allowing_git_commit()),
+        );
+        let a = ctx
+            .apply(
+                "code_interpreter",
+                &json!({"code": "import os\nos.system('ls')"}),
+            )
+            .await;
+        assert!(matches!(a, ReviewAction::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn empty_exec_policy_is_noop() {
+        // An empty ExecPolicy is a no-op → identical to None (reviewer only).
+        let ctx = GuardianContext::new(
+            Arc::new(RuleGuardian::new()),
+            ApprovalPolicy::OnFailure,
+            Vec::new(),
+            std::env::current_dir().unwrap(),
+            Some(Arc::new(ExecPolicy::empty())),
+        );
+        let a = ctx.apply("shell", &json!({"command": "npm install"})).await;
         assert!(matches!(a, ReviewAction::Prompt { .. }));
     }
 }

@@ -1656,6 +1656,13 @@ impl AppBuilder {
             })
             .or(self.trusted_dirs.clone())
             .unwrap_or_else(|| vec![guardian_working_dir.clone()]);
+        // #28 Stage 4 — ExecPolicy rule layer. Pulled from the merged
+        // DomainPack's PermissionProfile (config-driven token-prefix rules).
+        // `None` / empty → the reviewer heuristic decides (pre-Stage-4).
+        let exec_policy: Option<std::sync::Arc<oneai_tool::ExecPolicy>> = merged_domain_pack
+            .as_ref()
+            .and_then(|dp| dp.permission_profile.exec_policy.clone())
+            .map(std::sync::Arc::new);
         let guardian: Option<std::sync::Arc<oneai_tool::GuardianContext>> =
             if merged_domain_pack.is_some() || self.provider.is_some() {
                 let reviewer: std::sync::Arc<dyn oneai_core::traits::CommandReviewer> =
@@ -1671,6 +1678,7 @@ impl AppBuilder {
                     guardian_policy,
                     trusted_dirs,
                     guardian_working_dir.clone(),
+                    exec_policy,
                 )))
             } else {
                 None

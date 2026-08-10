@@ -278,6 +278,7 @@ pub fn research_pack(project_dir: &str) -> DomainPack {
             // Guardian doesn't auto-allow (the user may override a deny).
             approval_policy: oneai_core::ApprovalPolicy::OnRequest,
             trusted_dirs: Vec::new(),
+            exec_policy: None,
         },
 
         // Layer 4: Paradigm strategies — research task patterns

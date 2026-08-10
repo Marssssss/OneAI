@@ -158,6 +158,12 @@ pub struct PermissionProfileConfig {
     /// Trusted directories for `OnUntrustedDir` (project roots). Strings.
     #[serde(default)]
     pub trusted_dirs: Vec<String>,
+
+    /// #28 Stage 4 — ExecPolicy token-prefix rules. Empty → no declarative
+    /// rule layer (the Guardian reviewer heuristic decides). See
+    /// [`oneai_tool::ExecRule`] for the rule shape.
+    #[serde(default)]
+    pub exec_policy: Vec<oneai_tool::ExecRule>,
 }
 
 /// Deny pattern in config format.
@@ -610,6 +616,13 @@ fn resolve_permission_profile(config: &PermissionProfileConfig) -> PermissionPro
             .iter()
             .map(std::path::PathBuf::from)
             .collect(),
+        exec_policy: if config.exec_policy.is_empty() {
+            None
+        } else {
+            Some(oneai_tool::ExecPolicy::from_rules(
+                config.exec_policy.clone(),
+            ))
+        },
     }
 }
 

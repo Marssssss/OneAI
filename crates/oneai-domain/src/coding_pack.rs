@@ -433,6 +433,7 @@ pub fn coding_pack(project_dir: &str) -> DomainPack {
             // Guardian (rules + LLM fallback) can't decide.
             approval_policy: oneai_core::ApprovalPolicy::OnFailure,
             trusted_dirs: Vec::new(),
+            exec_policy: None,
         },
 
         // Layer 4: Paradigm strategies — coding task patterns

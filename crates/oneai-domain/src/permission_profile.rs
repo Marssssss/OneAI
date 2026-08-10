@@ -159,6 +159,13 @@ pub struct PermissionProfile {
     /// working dir itself. The AppBuilder fills the project root here.
     #[serde(default)]
     pub trusted_dirs: Vec<PathBuf>,
+
+    /// #28 Stage 4 — config-driven token-prefix rule layer (`ExecPolicy`). A
+    /// matching rule emits a [`Verdict`](oneai_core::Verdict) directly, skipping
+    /// the Guardian reviewer heuristic. `None` / empty → the reviewer decides
+    /// (pre-Stage-4 behaviour). Default `None`; a DomainPack configures rules.
+    #[serde(default)]
+    pub exec_policy: Option<oneai_tool::ExecPolicy>,
 }
 
 impl PermissionProfile {
@@ -173,6 +180,7 @@ impl PermissionProfile {
             default_threshold: PermissionLevel::Standard,
             approval_policy: ApprovalPolicy::OnFailure,
             trusted_dirs: Vec::new(),
+            exec_policy: None,
         }
     }
 
@@ -277,6 +285,20 @@ impl PermissionProfile {
             .cloned()
             .collect();
 
+        // #28 Stage 4 — exec_policy merge: union both domains' kept rules
+        // (strictest-wins per-evaluation means a Deny in either domain still
+        // denies). `None` from either side yields the other's policy; both
+        // `None` → `None`.
+        let exec_policy = match (a.exec_policy.as_ref(), b.exec_policy.as_ref()) {
+            (None, None) => None,
+            (Some(x), None) | (None, Some(x)) => Some(x.clone()),
+            (Some(a_ep), Some(b_ep)) => {
+                let mut rules = a_ep.rules().to_vec();
+                rules.extend(b_ep.rules().iter().cloned());
+                Some(oneai_tool::ExecPolicy::from_rules(rules))
+            }
+        };
+
         Self {
             name,
             auto_approve,
@@ -286,6 +308,7 @@ impl PermissionProfile {
             default_threshold,
             approval_policy,
             trusted_dirs,
+            exec_policy,
         }
     }
 }
@@ -483,6 +506,101 @@ mod tests {
 
         // default_threshold: stricter of Standard and Read → Standard
         assert_eq!(merged.default_threshold, PermissionLevel::Standard);
+    }
+
+    // ── #28 Stage 4 — ExecPolicy merge + serde round-trip ─────────────────
+
+    fn rule(program: &str, decision: oneai_tool::ExecDecision) -> oneai_tool::ExecRule {
+        use oneai_tool::{ExecRule, PatternToken};
+        ExecRule {
+            pattern: vec![PatternToken::Single(program.into())],
+            decision,
+            justification: Some("test".into()),
+            match_examples: Vec::new(),
+            not_match_examples: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exec_policy_merge_unions_rules_from_both_domains() {
+        let mut coding = PermissionProfile::new("coding");
+        coding.exec_policy = Some(oneai_tool::ExecPolicy::from_rules(vec![rule(
+            "git",
+            oneai_tool::ExecDecision::Allow,
+        )]));
+        let mut research = PermissionProfile::new("research");
+        research.exec_policy = Some(oneai_tool::ExecPolicy::from_rules(vec![rule(
+            "curl",
+            oneai_tool::ExecDecision::Deny,
+        )]));
+
+        let merged = PermissionProfile::merge_strictest(&coding, &research);
+        let ep = merged.exec_policy.expect("merged policy present");
+        assert_eq!(ep.rule_count(), 2);
+        assert!(matches!(
+            ep.evaluate(&["git".to_string()]),
+            Some(oneai_core::Verdict::Allow { .. })
+        ));
+        assert!(matches!(
+            ep.evaluate(&["curl".to_string()]),
+            Some(oneai_core::Verdict::Deny { .. })
+        ));
+    }
+
+    #[test]
+    fn exec_policy_merge_one_side_none_takes_other() {
+        let mut coding = PermissionProfile::new("coding");
+        coding.exec_policy = Some(oneai_tool::ExecPolicy::from_rules(vec![rule(
+            "ls",
+            oneai_tool::ExecDecision::Allow,
+        )]));
+        let research = PermissionProfile::new("research"); // exec_policy None
+
+        let merged = PermissionProfile::merge_strictest(&coding, &research);
+        let ep = merged.exec_policy.expect("coding's policy carried");
+        assert_eq!(ep.rule_count(), 1);
+        assert!(matches!(
+            ep.evaluate(&["ls".to_string()]),
+            Some(oneai_core::Verdict::Allow { .. })
+        ));
+    }
+
+    #[test]
+    fn exec_policy_merge_both_none_yields_none() {
+        let coding = PermissionProfile::new("coding");
+        let research = PermissionProfile::new("research");
+        let merged = PermissionProfile::merge_strictest(&coding, &research);
+        assert!(merged.exec_policy.is_none());
+    }
+
+    #[test]
+    fn exec_policy_serde_round_trip_through_profile() {
+        // PermissionProfile serializes ExecPolicy as its rule list; deserialize
+        // rebuilds the index via from_rules. Round-trip preserves behaviour.
+        let mut profile = PermissionProfile::new("coding");
+        profile.exec_policy = Some(oneai_tool::ExecPolicy::from_rules(vec![
+            oneai_tool::ExecRule {
+                pattern: vec![
+                    oneai_tool::PatternToken::Single("git".into()),
+                    oneai_tool::PatternToken::Single("commit".into()),
+                ],
+                decision: oneai_tool::ExecDecision::Allow,
+                justification: Some("project rule".into()),
+                match_examples: vec!["git commit -m x".into()],
+                not_match_examples: vec!["git push".into()],
+            },
+        ]));
+
+        let json = serde_json::to_string(&profile).expect("serialize");
+        let back: PermissionProfile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(profile, back);
+        let ep = back.exec_policy.expect("policy present after round-trip");
+        assert_eq!(ep.rule_count(), 1);
+        assert!(matches!(
+            ep.evaluate(&oneai_tool::shell_tokens("git commit -m x")),
+            Some(oneai_core::Verdict::Allow { .. })
+        ));
+        assert!(ep.evaluate(&oneai_tool::shell_tokens("git push")).is_none());
     }
 
     #[test]
