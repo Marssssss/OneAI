@@ -61,6 +61,13 @@ pub struct ExecOptions {
     /// Maximum output size in bytes; output is truncated to a UTF-8 boundary
     /// if exceeded (prevents context overflow).
     pub max_output_bytes: usize,
+    /// Extra environment variables to set on the spawned process (merged onto
+    /// the inherited environment; the sandbox backend's own `env_vars` from
+    /// `wrap_command` are applied first, then these override). #28 Stage 3 —
+    /// the ShellTool populates this with `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`
+    /// when a local egress proxy is bound, so sandboxed `curl`/`git`/`npm`
+    /// route through the per-host approval gate.
+    pub env_vars: Vec<(String, String)>,
 }
 
 impl ExecOptions {
@@ -69,7 +76,14 @@ impl ExecOptions {
             timeout_secs,
             working_dir,
             max_output_bytes,
+            env_vars: Vec::new(),
         }
+    }
+
+    /// Append an env var to the spawn (builder-style; later wins on conflict).
+    pub fn with_env_var(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
+        self.env_vars.push((key.into(), val.into()));
+        self
     }
 }
 
@@ -298,6 +312,15 @@ impl TerminalBackend for LocalBackend {
         // `sandbox_name` is captured so a wrapped-command failure can be
         // checked against the sandbox-denial signature (issue #21) — surfacing
         // a clear non-retryable denial instead of a generic exit code.
+        //
+        // `wrapped.env_vars` (from the sandbox backend) + `opts.env_vars`
+        // (from ShellTool, e.g. the egress-proxy `HTTPS_PROXY` env #28 Stage 3)
+        // are both applied to the spawn. The backend's vars go first, then
+        // opts override on conflict — a backend that sets a var for its own
+        // reasons shouldn't be clobbered by a stale tool-level default, but the
+        // tool's explicit proxy env (set because a proxy is actually bound this
+        // session) is the authoritative one.
+        let mut spawn_env: Vec<(String, String)> = Vec::new();
         let (effective_command, sandbox_name) = if let Some(b) = &self.sandbox {
             let working_dir = opts
                 .working_dir
@@ -305,12 +328,14 @@ impl TerminalBackend for LocalBackend {
                 .unwrap_or_else(|| std::path::Path::new("."));
             let wrapped = b.wrap_command(command, working_dir)?;
             tracing::info!("ShellTool: command wrapped by {} sandbox backend", b.name());
+            spawn_env.extend(wrapped.env_vars);
             (wrapped.shell_command, Some(b.name().to_string()))
         } else {
             // No backend — just use the raw command (regex-only protection
             // already ran in ShellTool::execute).
             (command.to_string(), None)
         };
+        spawn_env.extend(opts.env_vars.iter().cloned());
 
         // Resolve the shell based on the platform and (on Windows) whether
         // a POSIX `sh` is reachable. If the command is already wrapped by a
@@ -323,6 +348,7 @@ impl TerminalBackend for LocalBackend {
             tokio::process::Command::new(shell)
                 .arg(shell_arg)
                 .arg(&effective_command)
+                .envs(spawn_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
                 .output(),
         )
         .await;
@@ -478,6 +504,27 @@ mod tests {
         assert!(!res.success);
         let err = res.error.unwrap_or_default();
         assert!(err.contains("timed out"), "expected timeout, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_local_backend_applies_opts_env_vars() {
+        // #28 Stage 3: ShellTool populates opts.env_vars with the egress-proxy
+        // HTTPS_PROXY/HTTP_PROXY/NO_PROXY env; LocalBackend must thread them
+        // onto the spawn so a sandboxed `curl`/`git`/`npm` routes through the
+        // per-host gate. Use a bespoke var so test-env noise can't mask it.
+        let b = LocalBackend::new();
+        let opts = ExecOptions::new(30, None, 100_000)
+            .with_env_var("ONEAI_TEST_EGRESS_PROXY", "http://127.0.0.1:9999");
+        let res = b
+            .execute("echo \"$ONEAI_TEST_EGRESS_PROXY\"", &opts)
+            .await
+            .unwrap();
+        assert!(res.success, "echo should succeed: {:?}", res.error);
+        assert!(
+            res.content.contains("http://127.0.0.1:9999"),
+            "env var not visible to the sandboxed command: {}",
+            res.content
+        );
     }
 
     #[tokio::test]

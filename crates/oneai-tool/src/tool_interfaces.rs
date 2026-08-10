@@ -80,6 +80,13 @@ pub struct ShellTool {
     /// runs its command-string safety pre-flight (blocked patterns, shell
     /// file-write detection), then delegates here.
     backend: std::sync::Arc<dyn crate::terminal::TerminalBackend>,
+
+    /// The local egress proxy port (#28 Stage 3). When `Some`, the spawn gets
+    /// `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY=127.0.0.1,localhost` env so a
+    /// sandboxed `curl`/`git`/`npm` routes through the per-host approval gate
+    /// instead of direct egress (which the `LoopbackProxy` sandbox denies
+    /// anyway). Mirrors `CodeInterpreterTool::proxy_port`.
+    proxy_port: Option<u16>,
 }
 
 /// Sandbox execution mode.
@@ -130,6 +137,7 @@ impl ShellTool {
             sandbox_mode: SandboxMode::Enabled { backend: None },
             max_output_bytes: 100_000, // ~100KB max output
             backend: std::sync::Arc::new(crate::terminal::LocalBackend::new()),
+            proxy_port: None,
         }
     }
 
@@ -147,6 +155,7 @@ impl ShellTool {
             sandbox_mode: SandboxMode::Enabled { backend: None },
             max_output_bytes: 100_000,
             backend,
+            proxy_port: None,
         }
     }
 
@@ -174,6 +183,7 @@ impl ShellTool {
                 backend,
                 Vec::new(),
             )),
+            proxy_port: None,
         }
     }
 
@@ -193,6 +203,7 @@ impl ShellTool {
             },
             max_output_bytes: 100_000,
             backend: std::sync::Arc::new(crate::terminal::LocalBackend::new()),
+            proxy_port: None,
         }
     }
 
@@ -206,7 +217,20 @@ impl ShellTool {
             sandbox_mode: SandboxMode::Enabled { backend: None },
             max_output_bytes: 100_000,
             backend: std::sync::Arc::new(crate::terminal::LocalBackend::new()),
+            proxy_port: None,
         }
+    }
+
+    /// Route sandboxed egress through the local CONNECT proxy on `port`
+    /// (#28 Stage 3). The spawn gets `HTTPS_PROXY`/`HTTP_PROXY` env (and
+    /// `NO_PROXY=127.0.0.1,localhost` so the proxy itself isn't re-proxied);
+    /// the sandbox backend should be `NetworkPolicy::LoopbackProxy` so direct
+    /// egress is blocked and the process must go through the gate. No-op when
+    /// the proxy is unreachable (Linux bwrap netns) — wire it only where the
+    /// sandbox can reach host loopback (macOS seatbelt).
+    pub fn with_network_proxy(mut self, port: u16) -> Self {
+        self.proxy_port = Some(port);
+        self
     }
 
     /// Get the configured default timeout in seconds.
@@ -576,7 +600,23 @@ impl Tool for ShellTool {
             .min(self.max_timeout_secs);
 
         let working_dir = self.allowed_working_dirs.first().cloned();
-        let opts = crate::terminal::ExecOptions::new(timeout, working_dir, self.max_output_bytes);
+        let mut opts =
+            crate::terminal::ExecOptions::new(timeout, working_dir, self.max_output_bytes);
+
+        // #28 Stage 3 — egress gate: when a local proxy is wired, set the
+        // proxy env vars on the spawn so a sandboxed `curl`/`git`/`npm`
+        // routes through the per-host approval gate. The sandbox backend
+        // (LoopbackProxy) blocks direct egress, so the process *must* use the
+        // proxy — the env just tells it where the gate lives. Mirrors
+        // `CodeInterpreterTool::execute`'s proxy env block.
+        if let Some(port) = self.proxy_port {
+            let proxy_url = format!("http://127.0.0.1:{port}");
+            opts = opts
+                .with_env_var("HTTPS_PROXY", proxy_url.clone())
+                .with_env_var("HTTP_PROXY", proxy_url)
+                // Don't re-proxy loopback / the proxy itself.
+                .with_env_var("NO_PROXY", "127.0.0.1,localhost");
+        }
 
         // Delegate execution to the terminal backend. All command-string safety
         // (blocked patterns, file-write guard) ran above; the backend owns the
@@ -3260,5 +3300,49 @@ mod traversal_tests {
         assert!(!path_has_traversal("a.b.c"));
         assert!(!path_has_traversal("normal/path/file.txt"));
         assert!(!path_has_traversal("/absolute/normal"));
+    }
+}
+
+#[cfg(test)]
+mod shell_proxy_tests {
+    use super::ShellTool;
+    use oneai_core::traits::Tool;
+    use serde_json::json;
+
+    /// #28 Stage 3: `with_network_proxy(port)` sets the proxy env on the spawn
+    /// so a sandboxed command routes egress through the local gate. No real
+    /// proxy is bound here — only the env-var threading is asserted.
+    #[tokio::test]
+    async fn with_network_proxy_sets_proxy_env_on_spawn() {
+        let tool = ShellTool::new().with_network_proxy(18999);
+        let out = tool
+            .execute(json!({"command": "echo \"$HTTPS_PROXY\""}))
+            .await
+            .unwrap();
+        assert!(out.success, "echo should succeed: {:?}", out.error);
+        assert!(
+            out.content.contains("http://127.0.0.1:18999"),
+            "HTTPS_PROXY not threaded to the spawn: {}",
+            out.content
+        );
+    }
+
+    /// Without a wired proxy, the tool injects no proxy env of its own. Assert
+    /// on our specific sentinel port (18999) — the test host's own `HTTPS_PROXY`
+    /// (a local proxy, per the repo network-proxy setup) is inherited and would
+    /// otherwise make a blanket `127.0.0.1:` assertion flaky.
+    #[tokio::test]
+    async fn without_proxy_no_injected_port() {
+        let tool = ShellTool::new();
+        let out = tool
+            .execute(json!({"command": "echo \"$HTTPS_PROXY\""}))
+            .await
+            .unwrap();
+        assert!(out.success);
+        assert!(
+            !out.content.contains("127.0.0.1:18999"),
+            "no proxy should be injected by default: {}",
+            out.content
+        );
     }
 }

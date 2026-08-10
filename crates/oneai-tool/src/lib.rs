@@ -40,7 +40,9 @@ pub use file_ops::{
     DirEntry, FileOperations, FileReadResult, LocalFileOps, RemoteFileOps, SandboxedFileOps,
 };
 pub use guardian::{GuardianContext, RuleGuardian};
-pub use host_allowlist::{HostAllowlistStore, InMemoryHostAllowlist};
+pub use host_allowlist::{
+    HostAllowlistStore, InMemoryHostAllowlist, SeededHostAllowlist, DEFAULT_EGRESS_SEED_HOSTS,
+};
 pub use interaction_gate::*;
 pub use local_tools::{CalculatorTool, FileWriteTool};
 pub use mcp_real::McpServerManager as RealMcpServerManager;

