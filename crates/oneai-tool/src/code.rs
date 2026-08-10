@@ -367,6 +367,13 @@ impl Tool for CodeInterpreterTool {
                 .env("NO_PROXY", "127.0.0.1,localhost");
         }
 
+        // kill_on_drop: if the execute future is cancelled (e.g. a test
+        // runtime drops the task, or the agent loop is interrupted mid-script),
+        // the Child is dropped → tokio SIGKILLs the direct child. Without this,
+        // a dropped future would orphan the python bridge. Belt-and-suspenders
+        // alongside the explicit `start_kill` on the timeout/error paths below.
+        command.kill_on_drop(true);
+
         let mut child = command
             .spawn()
             .map_err(|e| OneAIError::Other(format!("code mode: failed to spawn python3: {e}")))?;
@@ -378,7 +385,7 @@ impl Tool for CodeInterpreterTool {
         // Drain stderr concurrently so a chatty python can't deadlock the pipe
         // while we block on the RPC channel. Captured for diagnostics on the
         // error path; the bridge sends the user's own stderr in `done`.
-        let stderr_task = tokio::spawn(drain_stderr(stderr));
+        let mut stderr_task = tokio::spawn(drain_stderr(stderr));
 
         let result = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
@@ -388,21 +395,21 @@ impl Tool for CodeInterpreterTool {
 
         match result {
             Ok(Ok(out)) => {
-                let _ = child.wait().await; // reap
-                let _ = stderr_task.await;
+                let _ = reap_child(&mut child).await;
+                let _ = drain_stderr_bounded(&mut stderr_task).await;
                 Ok(out)
             }
             Ok(Err(e)) => {
                 let _ = child.start_kill();
-                let _ = child.wait().await;
-                let _ = stderr_task.await;
+                let _ = reap_child(&mut child).await;
+                let _ = drain_stderr_bounded(&mut stderr_task).await;
                 Ok(out_from_error(&e))
             }
             // Timed out — kill the runaway script, surface a clear timeout.
             Err(_) => {
                 let _ = child.start_kill();
-                let _ = child.wait().await;
-                let drained = stderr_task.await.unwrap_or_default();
+                let _ = reap_child(&mut child).await;
+                let drained = drain_stderr_bounded(&mut stderr_task).await;
                 let stderr_s = String::from_utf8_lossy(&drained);
                 Ok(ToolOutput {
                     success: false,
@@ -413,6 +420,31 @@ impl Tool for CodeInterpreterTool {
                     ..Default::default()
                 })
             }
+        }
+    }
+}
+
+/// Reap the child process with a hard bound. `start_kill`/exit should make
+/// `wait()` return instantly, but bound it anyway — a wedged child must never
+/// turn a script timeout into an indefinite hang (the #28 Stage-3 CI failure
+/// mode: the test step blocked forever after the 2s timeout fired).
+async fn reap_child(child: &mut tokio::process::Child) {
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+}
+
+/// Drain the stderr task with a hard bound. `drain_stderr` does a `read_to_end`
+/// that blocks until EOF — fine when the child exited cleanly (pipe closes
+/// immediately), but if a descendant the child forked outlives the killed
+/// direct child, the stderr write-end stays open and the drain blocks forever.
+/// Bound it: on expiry, abort the task (abandon partial stderr) so the caller
+/// always proceeds within ~3s rather than hanging.
+async fn drain_stderr_bounded(task: &mut tokio::task::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    match tokio::time::timeout(Duration::from_secs(3), &mut *task).await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(_)) => Vec::new(),
+        Err(_) => {
+            task.abort();
+            Vec::new()
         }
     }
 }
