@@ -62,6 +62,66 @@ use oneai_persistence::SqliteSessionStore;
 
 use crate::session::AppSession;
 
+// ─── InteractionElicitationReviewer ────────────────────────────────────────────
+//
+// Routes an MCP server's `elicitation/create` request through the
+// `InteractionGate` (as an `InteractionRequest::McpElicitation`). The gate
+// surfaces it to the UI handler (Channel/Threshold) or auto-declines
+// (Noop). The connection (in `oneai-tool`) calls the `ElicitationReviewer`
+// trait this implements — keeping `oneai-tool` free of a dependency on
+// `oneai-app` / the gate enum.
+
+/// `ElicitationReviewer` impl that bridges MCP elicitation to the
+/// `InteractionGate`. Constructed at `AppBuilder::build()` time from the
+/// resolved gate and injected into the `McpPluginRegistry`.
+struct InteractionElicitationReviewer {
+    gate: Arc<dyn InteractionGate>,
+}
+
+impl InteractionElicitationReviewer {
+    fn new(gate: Arc<dyn InteractionGate>) -> Self {
+        Self { gate }
+    }
+}
+
+#[async_trait::async_trait]
+impl oneai_tool::ElicitationReviewer for InteractionElicitationReviewer {
+    async fn review(
+        &self,
+        server: &str,
+        message: &str,
+        requested_schema: &serde_json::Value,
+    ) -> oneai_core::error::Result<oneai_core::ElicitationOutcome> {
+        let req = oneai_core::InteractionRequest::McpElicitation {
+            server: server.to_string(),
+            message: message.to_string(),
+            requested_schema: requested_schema.clone(),
+        };
+        let resp = self.gate.request(req).await?;
+        let outcome = match resp {
+            oneai_core::InteractionResponse::ElicitationReply { action, data } => {
+                oneai_core::ElicitationOutcome { action, data }
+            }
+            // Proceed with no data → don't fabricate; decline.
+            oneai_core::InteractionResponse::Proceed => oneai_core::ElicitationOutcome {
+                action: oneai_core::ElicitationAction::Decline,
+                data: None,
+            },
+            oneai_core::InteractionResponse::Abort { .. } => oneai_core::ElicitationOutcome {
+                action: oneai_core::ElicitationAction::Cancel,
+                data: None,
+            },
+            // Revise / Choose / ProceedWith don't map cleanly to an
+            // elicitation reply → decline (server should re-prompt if needed).
+            _ => oneai_core::ElicitationOutcome {
+                action: oneai_core::ElicitationAction::Decline,
+                data: None,
+            },
+        };
+        Ok(outcome)
+    }
+}
+
 /// Builder for assembling a OneAI application.
 pub struct AppBuilder {
     /// LLM provider (optional — needed for agent inference).
@@ -2052,6 +2112,14 @@ impl AppBuilder {
         // `register_tools` on `reload` to pick up re-discovered wrappers.
         let mcp_plugin_registry = match self.mcp_plugin_registry.take() {
             Some(mut reg) => {
+                // Route MCP `elicitation/create` requests through the
+                // InteractionGate (auto-decline under a Noop gate). Done
+                // before `connect_all_enabled` so the first handshake has it.
+                let reviewer = Arc::new(InteractionElicitationReviewer::new(
+                    interaction_gate.clone(),
+                ));
+                reg.set_elicitation_reviewer(reviewer as Arc<dyn oneai_tool::ElicitationReviewer>)
+                    .await;
                 match reg.connect_all_enabled().await {
                     Ok(map) => {
                         let total: usize = map.values().map(Vec::len).sum();

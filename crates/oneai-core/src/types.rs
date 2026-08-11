@@ -1666,6 +1666,15 @@ pub enum InteractionPoint {
     /// no-UI run uses a `NoopInteractionGate` (Proceed = allow all), matching
     /// the "no UI = auto-proceed" posture; `DenyAllInteractionGate` denies all.
     NetworkApproval,
+    /// An external MCP server the agent is connected to has sent an
+    /// `elicitation/create` request — it wants the user to answer a question
+    /// (e.g. supply a credential or pick a value) before it can proceed.
+    /// Like [`InteractionPoint::NetworkApproval`], this is raised on demand
+    /// (mid-`tools/call`), not polled each turn; the connection blocks on the
+    /// reply. Default-enabled — a no-UI run wires a `NoopInteractionGate`, which
+    /// **declines** elicitation (a server asking for input with no UI to gather
+    /// it should not get fabricated data back).
+    McpElicitation,
 }
 
 /// A selectable option for a [`InteractionRequest::PlanDecision`].
@@ -1730,6 +1739,18 @@ pub enum InteractionRequest {
         /// for the approval UI's attribution line.
         requested_by: String,
     },
+    /// An MCP server the agent is connected to sent an `elicitation/create`
+    /// request: it wants the user to answer `message` with data shaped by
+    /// `requested_schema` before it proceeds. The connection blocks on the
+    /// reply ([`InteractionResponse::ElicitationReply`]).
+    McpElicitation {
+        /// The connected MCP server's name.
+        server: String,
+        /// Human-readable question the server wants answered.
+        message: String,
+        /// JSON Schema describing the data the server wants back.
+        requested_schema: serde_json::Value,
+    },
 }
 
 /// The application layer's reply to an [`InteractionRequest`].
@@ -1753,6 +1774,37 @@ pub enum InteractionResponse {
     Choose { option_id: String },
     /// Abort this iteration or the whole loop.
     Abort { reason: String },
+    /// Reply to an MCP `elicitation/create` request — the user's answer to the
+    /// server's question. `action` is accept (with `data`) / decline / cancel.
+    ElicitationReply {
+        action: ElicitationAction,
+        data: Option<serde_json::Value>,
+    },
+}
+
+/// The action a user takes on an MCP `elicitation/create` request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ElicitationAction {
+    /// Accept — return `data` (shaped by the request's `requested_schema`)
+    /// to the server.
+    Accept,
+    /// Decline — the user declined to answer.
+    Decline,
+    /// Cancel — the request is cancelled (e.g. the user dismissed the dialog).
+    Cancel,
+}
+
+/// The outcome of an elicitation review — the answer an MCP server's
+/// `elicitation/create` request resolves to. Mirrors
+/// [`InteractionResponse::ElicitationReply`] but stands alone so a reviewer
+/// trait (defined in `oneai-tool`, alongside the MCP connection) can return it
+/// without depending on the [`InteractionGate`] enum.
+#[derive(Debug, Clone)]
+pub struct ElicitationOutcome {
+    pub action: ElicitationAction,
+    pub data: Option<serde_json::Value>,
 }
 
 /// A modification attached to [`InteractionResponse::ProceedWith`].

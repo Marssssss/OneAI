@@ -36,7 +36,16 @@ pub struct NoopInteractionGate;
 
 #[async_trait::async_trait]
 impl InteractionGate for NoopInteractionGate {
-    async fn request(&self, _req: InteractionRequest) -> Result<InteractionResponse> {
+    async fn request(&self, req: InteractionRequest) -> Result<InteractionResponse> {
+        // MCP elicitation is special: a server asking the user for input with
+        // no UI to gather it must not get fabricated data back. Decline rather
+        // than the default `Proceed` (which other points keep).
+        if matches!(req, InteractionRequest::McpElicitation { .. }) {
+            return Ok(InteractionResponse::ElicitationReply {
+                action: oneai_core::ElicitationAction::Decline,
+                data: None,
+            });
+        }
         Ok(InteractionResponse::Proceed)
     }
 
@@ -129,6 +138,12 @@ impl InteractionGateConfig {
             InteractionPoint::PlanDecision => self.plan_decision,
             InteractionPoint::PlanReview => self.plan_review,
             InteractionPoint::NetworkApproval => self.network_approval,
+            // Elicitation is always enabled — a server's `elicitation/create`
+            // request must reach the UI handler (or auto-decline in a no-UI
+            // run via `NoopInteractionGate`). Not a config flag (would need a
+            // new public field, breaking struct-literal construction under
+            // the v0.2 stability commitment); hardcode `true`.
+            InteractionPoint::McpElicitation => true,
             // Future variants default to disabled (loop short-circuits to Proceed).
             _ => false,
         }
@@ -188,6 +203,7 @@ impl ChannelInteractionGate {
             InteractionRequest::PlanDecision { .. } => InteractionPoint::PlanDecision,
             InteractionRequest::PlanReview { .. } => InteractionPoint::PlanReview,
             InteractionRequest::NetworkApproval { .. } => InteractionPoint::NetworkApproval,
+            InteractionRequest::McpElicitation { .. } => InteractionPoint::McpElicitation,
             // Future variants: default to a typically-disabled point so the loop
             // short-circuits to Proceed rather than silently blocking.
             _ => InteractionPoint::PreInfer,

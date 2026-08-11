@@ -55,9 +55,9 @@ pub use mcp_real::McpServerManager as RealMcpServerManager;
 pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
 pub use mcp_real::{default_mcp_configs, normalize_tool_name, optional_mcp_configs};
 pub use mcp_real::{
-    McpBinding, McpConnection, McpConnectionStatus, McpFramingParser, McpOAuthTokenRefresher,
-    McpServerConfig, McpServerConnectionIdentity, McpToolInfo, McpToolPermissions, McpTransport,
-    McpTransportKind, ToolCatalogCache,
+    ElicitationReviewer, McpBinding, McpConnection, McpConnectionStatus, McpFramingParser,
+    McpOAuthTokenRefresher, McpServerConfig, McpServerConnectionIdentity, McpToolInfo,
+    McpToolPermissions, McpTransport, McpTransportKind, ToolCatalogCache,
 };
 pub use network_proxy::{NetworkApprovalMode, NetworkProxy};
 pub use registry::*;

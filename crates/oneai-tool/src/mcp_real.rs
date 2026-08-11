@@ -350,6 +350,35 @@ pub trait McpOAuthTokenRefresher: Send + Sync {
     async fn refresh_token(&self, server_name: &str) -> Result<Option<String>>;
 }
 
+// ─── ElicitationReviewer ─────────────────────────────────────────────────────
+//
+// MCP servers can send `elicitation/create` requests (server→client) to ask the
+// user a question before continuing. The connection (this crate) observes them
+// on its read path and must dispatch them to a reviewer that decides the reply.
+// The reviewer impl lives in the higher `oneai-app` crate and routes the request
+// through the `InteractionGate` (oneai-core). To cross the layer without a
+// reverse dependency, the connection calls this trait; `ElicitationAction` /
+// `ElicitationOutcome` live in oneai-core so both sides share them.
+
+/// Review an MCP server's `elicitation/create` request and produce the reply.
+///
+/// Implementations (in `oneai-app`) typically route the request through the
+/// `InteractionGate` as an `InteractionRequest::McpElicitation`. The default /
+/// no-UI behaviour is to **decline** (a server asking for input with no UI to
+/// gather it must not get fabricated data back).
+#[async_trait]
+pub trait ElicitationReviewer: Send + Sync {
+    /// Decide the reply to an `elicitation/create` request from `server`.
+    /// `message` is the server's human-readable question; `requested_schema`
+    /// is the JSON Schema describing the data it wants back on `Accept`.
+    async fn review(
+        &self,
+        server: &str,
+        message: &str,
+        requested_schema: &serde_json::Value,
+    ) -> Result<oneai_core::ElicitationOutcome>;
+}
+
 // ─── McpConnection ──────────────────────────────────────────────────────────
 
 /// A persistent connection to an MCP server.
@@ -388,6 +417,10 @@ pub struct McpConnection {
     /// transport to obtain a fresh bearer and retry the call once. `None`
     /// for servers without OAuth.
     token_refresher: Option<Arc<dyn McpOAuthTokenRefresher>>,
+    /// Optional elicitation reviewer — invoked when the server sends an
+    /// `elicitation/create` request mid-call. `None` = decline (cancel the
+    /// server's request) so the protocol stays correct without a UI.
+    elicitation_reviewer: Option<Arc<dyn ElicitationReviewer>>,
     /// `serverInfo` returned by the remote during `initialize` (name /
     /// version of the server, if advertised). Snapshotted into the
     /// [`McpServerConnectionIdentity`] so status reads don't need to lock
@@ -420,6 +453,7 @@ impl McpConnection {
             session_id: None,
             token_refresher: None,
             server_info: None,
+            elicitation_reviewer: None,
         }
     }
 
@@ -428,6 +462,16 @@ impl McpConnection {
     /// the call once. `None` disables the 401-retry path.
     pub fn with_token_refresher(mut self, refresher: Arc<dyn McpOAuthTokenRefresher>) -> Self {
         self.token_refresher = Some(refresher);
+        self
+    }
+
+    /// Attach an elicitation reviewer — invoked when the server sends an
+    /// `elicitation/create` request during a `tools/call`. Without a
+    /// reviewer the connection declines the request (so the server sees a
+    /// reply rather than hanging); with one, the request is routed to the
+    /// UI / gate.
+    pub fn with_elicitation_reviewer(mut self, reviewer: Arc<dyn ElicitationReviewer>) -> Self {
+        self.elicitation_reviewer = Some(reviewer);
         self
     }
 
@@ -490,9 +534,10 @@ impl McpConnection {
                 self.child = Some(child);
 
                 // Step 1: Send initialize request
+                let init_id = self.next_id;
                 let init_request = serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": self.next_id,
+                    "id": init_id,
                     "method": "initialize",
                     "params": {
                         "protocolVersion": "2024-11-05",
@@ -503,7 +548,7 @@ impl McpConnection {
                 self.next_id += 1;
 
                 self.send_jsonrpc(&init_request).await?;
-                let init_response = self.read_jsonrpc_response().await?;
+                let init_response = self.read_jsonrpc_response_for(init_id).await?;
 
                 // Verify initialize response
                 if init_response.get("error").is_some() {
@@ -533,16 +578,17 @@ impl McpConnection {
                 self.send_jsonrpc(&initialized_notification).await?;
 
                 // Step 3: Send list_tools request
+                let list_id = self.next_id;
                 let list_tools_request = serde_json::json!({
                     "jsonrpc": "2.0",
-                    "id": self.next_id,
+                    "id": list_id,
                     "method": "tools/list",
                     "params": {}
                 });
                 self.next_id += 1;
 
                 self.send_jsonrpc(&list_tools_request).await?;
-                let tools_response = self.read_jsonrpc_response().await?;
+                let tools_response = self.read_jsonrpc_response_for(list_id).await?;
 
                 // Parse tool definitions from the response
                 if let Some(result) = tools_response.get("result") {
@@ -834,9 +880,10 @@ impl McpConnection {
         tool_name: &str,
         args: serde_json::Value,
     ) -> Result<ToolOutput> {
+        let call_id = self.next_id;
         let call_request = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": self.next_id,
+            "id": call_id,
             "method": "tools/call",
             "params": {
                 "name": tool_name,
@@ -859,7 +906,7 @@ impl McpConnection {
                 });
             }
             self.send_jsonrpc(&call_request).await?;
-            let call_response = self.read_jsonrpc_response().await?;
+            let call_response = self.read_jsonrpc_response_for(call_id).await?;
             return Self::parse_tool_call_response(&call_response);
         }
 
@@ -872,6 +919,28 @@ impl McpConnection {
         let response = self
             .send_http_call(&url, &call_request, use_session)
             .await?;
+        // If the parsed body is a server-initiated request (has `method` +
+        // `id`), the server tried to elicit / ping us mid-call. The HTTP
+        // transport's one-shot POST/response model can't multiplex a server
+        // request + our response in one body — surface a clear error rather
+        // than mis-parsing the request as the tool result. (Stdio transports
+        // handle server requests inline via `read_jsonrpc_response_for`.)
+        if response.get("method").is_some() && response.get("id").is_some() {
+            let method = response
+                .get("method")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
+            return Ok(ToolOutput {
+                success: false,
+                content: String::new(),
+                error: Some(format!(
+                    "MCP server sent a '{method}' request during the HTTP call; \
+                     server-initiated requests over HTTP transports are not supported \
+                     (use the stdio transport for full elicitation support)"
+                )),
+                ..Default::default()
+            });
+        }
         Self::parse_tool_call_response(&response)
     }
 
@@ -973,51 +1042,150 @@ impl McpConnection {
         }
     }
 
-    /// Read a JSON-RPC response via the persistent stdout connection.
+    /// Read the JSON-RPC response for request `expected_id` via the persistent
+    /// stdout connection, dispatching any server-initiated requests
+    /// (`elicitation/create`, etc.) that arrive first.
     ///
-    /// Uses the McpFramingParser for proper Content-Length header + body parsing.
-    async fn read_jsonrpc_response(&mut self) -> Result<serde_json::Value> {
-        if let Some(reader) = &mut self.stdout_reader {
-            let mut parser = McpFramingParser::new();
-            let mut buffer = [0u8; 8192];
+    /// Uses the McpFramingParser for Content-Length header + body parsing.
+    /// A frame is:
+    /// - a **response** (has `id`, no `method`) — returned only if its `id`
+    ///   matches `expected_id`; a stray non-matching id is logged and skipped;
+    /// - a **server request** (has `id` + `method`) — dispatched via
+    ///   [`handle_server_request`] (which sends the reply) and the loop
+    ///   continues waiting for the real response;
+    /// - a **notification** (`method`, no `id`) — logged and skipped.
+    async fn read_jsonrpc_response_for(&mut self, expected_id: u64) -> Result<serde_json::Value> {
+        let mut parser = McpFramingParser::new();
+        let mut buffer = [0u8; 8192];
 
-            // Read until we get a complete frame
-            loop {
-                let n = reader.read(&mut buffer).await.map_err(|e| {
-                    oneai_core::error::OneAIError::Provider(format!("MCP read error: {}", e))
+        loop {
+            // Read in a scoped block so the `stdout_reader` borrow ends before
+            // `handle_server_request` (which needs `&mut self` for stdin_writer)
+            // is dispatched below.
+            let n = {
+                let reader = self.stdout_reader.as_mut().ok_or_else(|| {
+                    oneai_core::error::OneAIError::Provider("No MCP stdout connection".to_string())
                 })?;
-
-                if n == 0 {
-                    // EOF — subprocess has closed stdout
-                    return Err(oneai_core::error::OneAIError::Provider(
-                        "MCP server closed stdout (process may have exited)".to_string(),
-                    ));
+                reader.read(&mut buffer).await.map_err(|e| {
+                    oneai_core::error::OneAIError::Provider(format!("MCP read error: {}", e))
+                })?
+            };
+            if n == 0 {
+                return Err(oneai_core::error::OneAIError::Provider(
+                    "MCP server closed stdout (process may have exited)".to_string(),
+                ));
+            }
+            parser.feed(&buffer[..n]);
+            let frames = parser.parse_all_frames();
+            for frame in frames {
+                let has_method = frame.get("method").is_some();
+                let id = frame.get("id").and_then(|v| v.as_u64());
+                if has_method && id.is_some() {
+                    // Server-initiated request — dispatch + reply, keep waiting.
+                    if let Err(e) = self.handle_server_request(&frame).await {
+                        tracing::warn!("MCP server-request handling failed: {}", e);
+                    }
+                    continue;
                 }
-
-                parser.feed(&buffer[..n]);
-
-                // Try to parse all available frames
-                // We need to find the response frame (has an "id" field)
-                let frames = parser.parse_all_frames();
-                for frame in frames {
-                    // Check if this is a response (has "id" field matching our request)
-                    // Notifications don't have "id" — skip them
-                    if frame.get("id").is_some() {
+                if let Some(id) = id {
+                    if id == expected_id {
                         return Ok(frame);
                     }
-                    // Notifications are informational — just log them
-                    if frame.get("method").is_some() {
-                        tracing::debug!("MCP notification: {:?}", frame.get("method"));
-                    }
+                    tracing::debug!(
+                        "MCP stray response for id {} (expected {})",
+                        id,
+                        expected_id
+                    );
+                    continue;
                 }
-
-                // If no response frame yet, continue reading
+                if has_method {
+                    tracing::debug!("MCP notification: {:?}", frame.get("method"));
+                }
             }
-        } else {
-            Err(oneai_core::error::OneAIError::Provider(
-                "No MCP stdout connection".to_string(),
-            ))
         }
+    }
+
+    /// Handle a server-initiated JSON-RPC request observed on the stdio read
+    /// path: dispatch `elicitation/create` to the [`ElicitationReviewer`] (or
+    /// auto-decline if none is wired) and send the reply back over stdin.
+    /// Unknown methods get a `method not found` error response so the server
+    /// doesn't hang waiting for a reply.
+    async fn handle_server_request(&mut self, frame: &serde_json::Value) -> Result<()> {
+        let id = frame.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let method = frame.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let params = frame
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        let reply = if method == "elicitation/create" {
+            let message = params
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+            let schema = params
+                .get("requestedSchema")
+                .cloned()
+                .unwrap_or(serde_json::json!({"type": "object"}));
+            let outcome = if let Some(reviewer) = self.elicitation_reviewer.clone() {
+                reviewer
+                    .review(&self.config.name, &message, &schema)
+                    .await
+                    .unwrap_or(oneai_core::ElicitationOutcome {
+                        action: oneai_core::ElicitationAction::Decline,
+                        data: None,
+                    })
+            } else {
+                // No reviewer wired (no UI) — decline rather than fabricate data.
+                oneai_core::ElicitationOutcome {
+                    action: oneai_core::ElicitationAction::Decline,
+                    data: None,
+                }
+            };
+            Self::build_elicitation_reply(id, &outcome)
+        } else {
+            tracing::debug!("MCP server-request method '{}' unsupported", method);
+            Self::build_method_not_found(id, method)
+        };
+        self.send_jsonrpc(&reply).await
+    }
+
+    /// Build the JSON-RPC reply for an `elicitation/create` request from a
+    /// resolved outcome. Pure (no `&self`) so it's unit-testable without a
+    /// live subprocess.
+    fn build_elicitation_reply(
+        id: u64,
+        outcome: &oneai_core::ElicitationOutcome,
+    ) -> serde_json::Value {
+        let action_str = match outcome.action {
+            oneai_core::ElicitationAction::Accept => "accept",
+            oneai_core::ElicitationAction::Decline => "decline",
+            oneai_core::ElicitationAction::Cancel => "cancel",
+            _ => "decline",
+        };
+        let mut result = serde_json::json!({ "action": action_str });
+        if let Some(data) = outcome.data.clone() {
+            result["content"] = data;
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        })
+    }
+
+    /// Build a `method not found` error response for an unsupported
+    /// server-initiated request, so the server doesn't hang.
+    fn build_method_not_found(id: u64, method: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!("method '{}' not implemented", method),
+            }
+        })
     }
 
     /// Shutdown the MCP connection — kill subprocess or close HTTP client.
@@ -1731,6 +1899,10 @@ pub struct McpServerManager {
     /// `connect`, generation-bumped on `disconnect`/`reconnect`. See
     /// [`ToolCatalogCache`].
     catalog_cache: std::sync::Mutex<ToolCatalogCache>,
+    /// Elicitation reviewer cloned into each new connection so server-initiated
+    /// `elicitation/create` requests on the stdio read path route to it. `None`
+    /// = auto-decline (no UI).
+    elicitation_reviewer: tokio::sync::Mutex<Option<Arc<dyn ElicitationReviewer>>>,
 }
 
 impl McpServerManager {
@@ -1740,6 +1912,7 @@ impl McpServerManager {
             token_refresher: tokio::sync::Mutex::new(None),
             next_generation: std::sync::atomic::AtomicU64::new(1),
             catalog_cache: std::sync::Mutex::new(ToolCatalogCache::new()),
+            elicitation_reviewer: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -1758,6 +1931,16 @@ impl McpServerManager {
     pub async fn set_token_refresher(&self, refresher: Arc<dyn McpOAuthTokenRefresher>) {
         let mut slot = self.token_refresher.lock().await;
         *slot = Some(refresher);
+    }
+
+    /// Install an elicitation reviewer used by all subsequently connected
+    /// stdio servers, so their `elicitation/create` requests route to the
+    /// `InteractionGate` (or whatever the impl decides). Existing connections
+    /// are unaffected (they captured the reviewer at their own connect time, if
+    /// any). `None` (default) = auto-decline.
+    pub async fn set_elicitation_reviewer(&self, reviewer: Arc<dyn ElicitationReviewer>) {
+        let mut slot = self.elicitation_reviewer.lock().await;
+        *slot = Some(reviewer);
     }
 
     /// Connect to an MCP server, discover tools, and create wrappers using
@@ -1787,6 +1970,14 @@ impl McpServerManager {
             let slot = self.token_refresher.lock().await;
             if let Some(refresher) = slot.as_ref() {
                 connection = connection.with_token_refresher(refresher.clone());
+            }
+        }
+        // Attach the elicitation reviewer (if any) so stdio server-initiated
+        // `elicitation/create` requests route to it (auto-decline otherwise).
+        {
+            let slot = self.elicitation_reviewer.lock().await;
+            if let Some(reviewer) = slot.as_ref() {
+                connection = connection.with_elicitation_reviewer(reviewer.clone());
             }
         }
         connection.connect_and_discover().await?;
@@ -2395,6 +2586,118 @@ mod tests {
             mgr.server_status("nope").await,
             McpConnectionStatus::NotConfigured
         );
+    }
+
+    // ── Stage 4-3: bidirectional elicitation ─────────────────────────────
+
+    #[test]
+    fn test_build_elicitation_reply_accept_with_data() {
+        let outcome = oneai_core::ElicitationOutcome {
+            action: oneai_core::ElicitationAction::Accept,
+            data: Some(serde_json::json!({"token": "abc"})),
+        };
+        let reply = McpConnection::build_elicitation_reply(42, &outcome);
+        assert_eq!(reply["id"], 42);
+        assert_eq!(reply["result"]["action"], "accept");
+        assert_eq!(reply["result"]["content"]["token"], "abc");
+    }
+
+    #[test]
+    fn test_build_elicitation_reply_decline_no_data() {
+        let outcome = oneai_core::ElicitationOutcome {
+            action: oneai_core::ElicitationAction::Decline,
+            data: None,
+        };
+        let reply = McpConnection::build_elicitation_reply(7, &outcome);
+        assert_eq!(reply["id"], 7);
+        assert_eq!(reply["result"]["action"], "decline");
+        assert!(reply["result"].get("content").is_none());
+    }
+
+    #[test]
+    fn test_build_elicitation_reply_cancel() {
+        let outcome = oneai_core::ElicitationOutcome {
+            action: oneai_core::ElicitationAction::Cancel,
+            data: None,
+        };
+        let reply = McpConnection::build_elicitation_reply(3, &outcome);
+        assert_eq!(reply["result"]["action"], "cancel");
+    }
+
+    #[test]
+    fn test_build_method_not_found_shape() {
+        let reply = McpConnection::build_method_not_found(99, "ping/create");
+        assert_eq!(reply["id"], 99);
+        assert_eq!(reply["error"]["code"], -32601);
+        assert!(reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ping/create"));
+    }
+
+    /// A reviewer stub that returns a canned outcome — verifies the
+    /// connection calls the reviewer and serializes its result.
+    struct CannedReviewer {
+        outcome: oneai_core::ElicitationOutcome,
+    }
+
+    #[async_trait::async_trait]
+    impl ElicitationReviewer for CannedReviewer {
+        async fn review(
+            &self,
+            _server: &str,
+            _message: &str,
+            _schema: &serde_json::Value,
+        ) -> Result<oneai_core::ElicitationOutcome> {
+            Ok(oneai_core::ElicitationOutcome {
+                action: self.outcome.action,
+                data: self.outcome.data.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_noop_gate_elicitation_declines() {
+        // The Noop gate (no-UI default) must decline elicitation rather than
+        // auto-proceed (which would fabricate an Accept with no data).
+        use crate::interaction_gate::NoopInteractionGate;
+        use oneai_core::traits::InteractionGate;
+        let gate = NoopInteractionGate;
+        let req = oneai_core::InteractionRequest::McpElicitation {
+            server: "srv".to_string(),
+            message: "password?".to_string(),
+            requested_schema: serde_json::json!({"type": "object"}),
+        };
+        let resp = gate.request(req).await.unwrap();
+        match resp {
+            oneai_core::InteractionResponse::ElicitationReply { action, data } => {
+                assert_eq!(action, oneai_core::ElicitationAction::Decline);
+                assert!(data.is_none());
+            }
+            other => panic!("expected ElicitationReply(Decline), got {:?}", other),
+        }
+        // A non-elicitation point still Proceeds.
+        let pre = gate
+            .request(oneai_core::InteractionRequest::PlanReview {
+                plan: String::new(),
+                steps: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(pre, oneai_core::InteractionResponse::Proceed));
+    }
+
+    #[tokio::test]
+    async fn test_manager_accepts_elicitation_reviewer() {
+        let mgr = McpServerManager::new();
+        let reviewer: Arc<dyn ElicitationReviewer> = Arc::new(CannedReviewer {
+            outcome: oneai_core::ElicitationOutcome {
+                action: oneai_core::ElicitationAction::Accept,
+                data: Some(serde_json::json!({"k": "v"})),
+            },
+        });
+        // Must not error — the inject path used by AppBuilder.
+        mgr.set_elicitation_reviewer(reviewer).await;
     }
 
     // ── Stage 2: per-server permission policy ──────────────────────────────

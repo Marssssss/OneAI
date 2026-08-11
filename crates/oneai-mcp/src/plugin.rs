@@ -307,6 +307,17 @@ impl McpPluginRegistry {
             .await;
     }
 
+    /// Install an elicitation reviewer on the manager so stdio servers'
+    /// `elicitation/create` requests route to it (auto-decline otherwise).
+    /// Called once at `AppBuilder::build()` time; cloned into each
+    /// subsequently connected connection.
+    pub async fn set_elicitation_reviewer(
+        &self,
+        reviewer: Arc<dyn oneai_tool::ElicitationReviewer>,
+    ) {
+        self.server_manager.set_elicitation_reviewer(reviewer).await;
+    }
+
     /// Create a registry from a config file.
     ///
     /// Loads entries from `~/.oneai/mcp_servers.toml`, merges with
