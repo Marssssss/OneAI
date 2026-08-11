@@ -665,6 +665,44 @@ pub struct TaskHandle {
     pub platform_handle: String,
 }
 
+// ─── HostAllowlistStore ─────────────────────────────────────────────────────
+
+/// A store of hosts the user has approved (or denied) for sandboxed egress.
+///
+/// The local `NetworkProxy` consults this store before tunnelling a sandboxed
+/// process's outbound connection. An approved host is tunneled straight
+/// through; a denied host is blocked without re-prompting. Hosts the user
+/// admitted via the `InteractionRequest::NetworkApproval` prompt are recorded
+/// here so subsequent connections to the same host don't re-prompt.
+///
+/// The v1 contract is session-scoped (in-memory); a durable, SQLite-backed
+/// implementation lives in `oneai-persistence`. The deny side (`is_denied` /
+/// `add_denied`) defaults to "no record" so existing implementations stay
+/// compatible — a store that doesn't track denials simply never denies on
+/// that basis (the proxy's gate prompt still applies).
+///
+/// `host` is the bare hostname (no port, lowercased by the caller).
+#[async_trait]
+pub trait HostAllowlistStore: Send + Sync {
+    /// Whether `host` is on the approved list.
+    async fn is_allowed(&self, host: &str) -> bool;
+
+    /// Add `host` to the approved list (idempotent).
+    async fn add(&self, host: String);
+
+    /// Whether `host` has been explicitly denied. Default: no record — a
+    /// store that doesn't track denials leaves this false so the proxy falls
+    /// through to its gate-prompt path.
+    async fn is_denied(&self, _host: &str) -> bool {
+        false
+    }
+
+    /// Record `host` as denied so future tunnel attempts are blocked without
+    /// re-prompting. Default: no-op — stores that don't persist denials simply
+    /// drop the record (the next attempt re-prompts).
+    async fn add_denied(&self, _host: String) {}
+}
+
 // ─── StatePersistence ─────────────────────────────────────────────────────────
 
 /// State persistence for checkpointing and recovery.

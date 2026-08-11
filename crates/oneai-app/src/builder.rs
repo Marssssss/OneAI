@@ -217,6 +217,12 @@ pub struct AppBuilder {
     /// a loopback proxy.
     network_proxy_enabled: bool,
 
+    /// How the egress proxy handles a CONNECT to an unknown host (#28 Stage 6).
+    /// Default [`NetworkApprovalMode::Prompt`] — block on the interaction gate
+    /// (the original v1 behavior). `Defer` = tunnel-now + record-later
+    /// ("先执行,后审批"); `Deny` = auto-deny unknown hosts.
+    network_approval_mode: oneai_tool::NetworkApprovalMode,
+
     /// Guardian `AskForApproval` policy (#28 Stage 2). The DomainPack's
     /// `PermissionProfile.approval_policy` overrides this at `build()` when a
     /// domain is configured; this field is the domain-less default.
@@ -294,6 +300,7 @@ impl AppBuilder {
             terminal_backend: None,
             code_working_dir: None,
             network_proxy_enabled: true,
+            network_approval_mode: oneai_tool::NetworkApprovalMode::default(),
             guardian_policy: oneai_core::ApprovalPolicy::default(),
             trusted_dirs: None,
             exec_rules_path: None,
@@ -1447,6 +1454,27 @@ impl AppBuilder {
         self
     }
 
+    /// How the egress proxy handles a CONNECT to an *unknown* host (neither
+    /// allowed nor denied) — #28 Stage 6.
+    ///
+    /// - [`NetworkApprovalMode::Prompt`] (default): block on
+    ///   `InteractionRequest::NetworkApproval` — the UI admits/denies, the
+    ///   result is recorded.
+    /// - [`NetworkApprovalMode::Defer`]: tunnel immediately and fire the
+    ///   approval request on a background task ("先执行,后审批"). The user's
+    ///   later reply records the host for *next* time. Use this for low-friction
+    ///   flows where blocking would break the UX (long installs that need net
+    ///   mid-way); a once-denied host is still blocked synchronously.
+    /// - [`NetworkApprovalMode::Deny`]: auto-deny unknown hosts (strict).
+    ///
+    /// Approved/denied hosts persist across sessions when
+    /// [`sqlite_persistence`](Self::sqlite_persistence) is enabled; otherwise
+    /// they're session-scoped (in-memory).
+    pub fn network_approval_mode(mut self, mode: oneai_tool::NetworkApprovalMode) -> Self {
+        self.network_approval_mode = mode;
+        self
+    }
+
     /// Set the Guardian's `AskForApproval` policy (#28 Stage 2). A
     /// DomainPack's `PermissionProfile.approval_policy` overrides this at
     /// `build()` when a domain is configured; this setter is the domain-less
@@ -1877,7 +1905,18 @@ impl AppBuilder {
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
 
             let allowlist = if self.network_proxy_enabled {
-                let inner = std::sync::Arc::new(InMemoryHostAllowlist::new()) as std::sync::Arc<_>;
+                // #28 Stage 6 — when sqlite_persistence is configured, the host
+                // allow/deny store is the durable `SqliteHostAllowlist` (shares
+                // `~/.oneai/oneai.db`); a host admitted/blocked in one session
+                // is honoured in the next. Otherwise the session-scoped
+                // `InMemoryHostAllowlist` (lost on exit, re-prompts next time).
+                let inner: std::sync::Arc<dyn oneai_tool::HostAllowlistStore> =
+                    match &self.sqlite_store {
+                        Some(store) => std::sync::Arc::new(
+                            oneai_persistence::SqliteHostAllowlist::from_store(store),
+                        ),
+                        None => std::sync::Arc::new(InMemoryHostAllowlist::new()),
+                    };
                 std::sync::Arc::new(SeededHostAllowlist::new(inner))
                     as std::sync::Arc<dyn oneai_tool::HostAllowlistStore>
             } else {
@@ -1888,10 +1927,11 @@ impl AppBuilder {
             };
 
             let proxy_port = if self.network_proxy_enabled {
-                let bind = NetworkProxy::bind(
+                let bind = NetworkProxy::bind_with_mode(
                     interaction_gate.clone(),
                     allowlist.clone(),
                     "code_interpreter",
+                    self.network_approval_mode,
                 )
                 .await;
                 match bind {
@@ -1959,8 +1999,13 @@ impl AppBuilder {
             // ungated) and log it. A userspace net stack (slirp/pasta) would
             // close this — deferred to the Linux strong-gateway follow-up.
             if self.network_proxy_enabled && cfg!(target_os = "macos") {
-                let shell_bind =
-                    NetworkProxy::bind(interaction_gate.clone(), allowlist.clone(), "shell").await;
+                let shell_bind = NetworkProxy::bind_with_mode(
+                    interaction_gate.clone(),
+                    allowlist.clone(),
+                    "shell",
+                    self.network_approval_mode,
+                )
+                .await;
                 match shell_bind {
                     Ok((proxy, shell_port)) => {
                         tokio::spawn(proxy.run());

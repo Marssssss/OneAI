@@ -18,12 +18,14 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod checkpoint;
+pub mod host_allowlist;
 pub mod sqlite_store;
 pub mod state;
 pub mod usage_tracker;
 pub mod working_state_store;
 
 pub use checkpoint::*;
+pub use host_allowlist::*;
 pub use sqlite_store::*;
 pub use state::*;
 pub use usage_tracker::*;

@@ -55,7 +55,7 @@ pub use mcp_real::McpServerManager as RealMcpServerManager;
 pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
 pub use mcp_real::{default_mcp_configs, optional_mcp_configs};
 pub use mcp_real::{McpConnection, McpFramingParser, McpServerConfig, McpToolInfo, McpTransport};
-pub use network_proxy::NetworkProxy;
+pub use network_proxy::{NetworkApprovalMode, NetworkProxy};
 pub use registry::*;
 pub use sandbox::{
     default_sandbox_backend, default_sandbox_backend_with_policy, DockerBackend, NetworkPolicy,

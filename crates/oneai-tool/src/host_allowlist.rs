@@ -1,44 +1,43 @@
-//! Per-host network allow-list — the session store backing the code-mode
-//! egress gate (#28 Stage 1).
+//! Per-host network allow/deny store — backs the code-mode egress gate
+//! (#28 Stage 1 + Stage 6).
 //!
 //! The local [`NetworkProxy`](crate::network_proxy::NetworkProxy) consults a
-//! `HostAllowlistStore` before tunnelling a sandboxed process's outbound
-//! connection. An approved host (one the user admitted via the
-//! `InteractionRequest::NetworkApproval` prompt) is recorded here so
+//! [`HostAllowlistStore`] before tunnelling a sandboxed process's outbound
+//! connection. An approved host is tunneled straight through; a denied host
+//! is blocked without re-prompting. Hosts the user admitted (or denied) via
+//! the `InteractionRequest::NetworkApproval` prompt are recorded here so
 //! subsequent connections to the same host don't re-prompt within the session.
 //!
-//! v1 ships the in-memory (session-scoped) implementation. A persistent,
-//! SQLite-backed implementation is a follow-up — the trait is the seam.
+//! The [`HostAllowlistStore`] trait lives in `oneai-core` (a storage trait,
+//! peer to `StatePersistence`/`MemoryPersistence`); this module ships the
+//! session-scoped in-memory impls + the seeded wrapper. A durable,
+//! SQLite-backed impl lives in `oneai-persistence` (`SqliteHostAllowlist`).
+//!
+//! Re-exported here so `oneai_tool::HostAllowlistStore` stays a valid path.
+
+/// Re-export the core trait so callers that already `use oneai_tool::...` keep
+/// compiling after the trait moved to `oneai-core` (API stability, v0.2.0).
+pub use oneai_core::HostAllowlistStore;
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-/// A store of hosts the user has approved for sandboxed egress.
-///
-/// Implementations need not be crash-durable; session scope is the v1
-/// contract. `host` is the bare hostname (no port, lowercased by the caller).
-#[async_trait::async_trait]
-pub trait HostAllowlistStore: Send + Sync {
-    /// Whether `host` is on the approved list.
-    async fn is_allowed(&self, host: &str) -> bool;
-
-    /// Add `host` to the approved list (idempotent).
-    async fn add(&self, host: String);
-}
-
-/// Session-scoped (in-memory) allow-list. Lost when the process exits — the
-/// deliberate v1 posture: a fresh session re-prompts, so a once-approved
+/// Session-scoped (in-memory) allow + deny store. Lost when the process
+/// exits — the deliberate v1 posture for hosts that aren't also persisted
+/// via `SqliteHostAllowlist`: a fresh session re-prompts, so a once-approved
 /// (perhaps mistaken) host doesn't silently persist forever.
 pub struct InMemoryHostAllowlist {
     hosts: Arc<RwLock<HashSet<String>>>,
+    denied: Arc<RwLock<HashSet<String>>>,
 }
 
 impl InMemoryHostAllowlist {
     pub fn new() -> Self {
         Self {
             hosts: Arc::new(RwLock::new(HashSet::new())),
+            denied: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 }
@@ -57,6 +56,14 @@ impl HostAllowlistStore for InMemoryHostAllowlist {
 
     async fn add(&self, host: String) {
         self.hosts.write().await.insert(host);
+    }
+
+    async fn is_denied(&self, host: &str) -> bool {
+        self.denied.read().await.contains(host)
+    }
+
+    async fn add_denied(&self, host: String) {
+        self.denied.write().await.insert(host);
     }
 }
 
@@ -123,6 +130,18 @@ impl HostAllowlistStore for SeededHostAllowlist {
 
     async fn add(&self, host: String) {
         self.inner.add(host).await;
+    }
+
+    // Denials always delegate to the inner store — seeds are baseline-trust
+    // admits, never denials, so a seed host can't be denied by recording it
+    // (the seed always re-admits). A denied host the user explicitly blocked
+    // at the gate is recorded in the inner store.
+    async fn is_denied(&self, host: &str) -> bool {
+        self.inner.is_denied(host).await
+    }
+
+    async fn add_denied(&self, host: String) {
+        self.inner.add_denied(host).await;
     }
 }
 
