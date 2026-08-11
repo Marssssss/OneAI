@@ -2111,7 +2111,7 @@ impl AppBuilder {
         // app construction. The reloader (`AppDataLayerReloader`) re-runs
         // `register_tools` on `reload` to pick up re-discovered wrappers.
         let mcp_plugin_registry = match self.mcp_plugin_registry.take() {
-            Some(mut reg) => {
+            Some(reg) => {
                 // Route MCP `elicitation/create` requests through the
                 // InteractionGate (auto-decline under a Noop gate). Done
                 // before `connect_all_enabled` so the first handshake has it.
@@ -2167,6 +2167,41 @@ impl AppBuilder {
                     data_layer_reloader.clone(),
                 )))
                 .await?;
+        }
+
+        // #31 Stage 5 — model-transparent lazy MCP. Each `lazy: true` enabled
+        // server that wasn't connected at startup gets a `Deferred`
+        // `McpLazyConnectTool` registered. The model discovers it via
+        // `tool_search`; calling it connects the server + reloads (registering
+        // the real `mcp__<server>__<tool>` wrappers) and the trigger then
+        // self-vanishes (`service_available` → false). Skipped when there's no
+        // MCP registry — zero footprint.
+        if let Some(reg) = &mcp_plugin_registry {
+            for entry in reg.list_entries() {
+                if !entry.lazy || !entry.enabled {
+                    continue;
+                }
+                // A lazy server is never connected at startup
+                // (`connect_all_enabled` filters `!e.lazy`), but guard anyway
+                // so a server that *was* connected (e.g. via an explicit
+                // `connect_server` call) doesn't get a redundant trigger.
+                if reg.is_connected(&entry.name).await {
+                    continue;
+                }
+                let tool = oneai_mcp::McpLazyConnectTool::build(
+                    entry.name.clone(),
+                    entry.description.clone(),
+                    mcp_plugin_registry.clone().unwrap(),
+                    data_layer_reloader.clone(),
+                );
+                if let Err(e) = self.tool_registry.register(tool).await {
+                    tracing::warn!(
+                        "MCP lazy-connect tool for '{}' registration failed (continuing): {}",
+                        entry.name,
+                        e
+                    );
+                }
+            }
         }
 
         // Create MCP server host if enabled
@@ -3150,6 +3185,49 @@ mod tests {
 
         // No MCP server host (not enabled)
         assert!(app.mcp_server_host().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_with_mcp_lazy_server_registers_connect_trigger() {
+        // A `lazy: true` enabled server is skipped at startup and gets a
+        // `Deferred` `mcp_connect_<server>` trigger registered so the model
+        // can connect it on demand via `tool_search`.
+        use std::collections::HashMap;
+        let mut registry = oneai_mcp::McpPluginRegistry::new();
+        registry.add_entry(oneai_mcp::McpPluginEntry {
+            name: "lazyfs".to_string(),
+            description: "lazy filesystem".to_string(),
+            source: oneai_mcp::McpPluginSource::Stdio {
+                command: "echo".to_string(), // never actually connected at build
+                args: vec![],
+                env: HashMap::new(),
+            },
+            enabled: true,
+            lazy: true,
+            ..Default::default()
+        });
+        let app = AppBuilder::new()
+            .noop_interaction_gate()
+            .mcp_plugin_registry(registry)
+            .build()
+            .await
+            .expect("Build should succeed");
+
+        // The lazy-connect trigger is registered + Deferred + still available
+        // (not yet connected).
+        let tool = app
+            .tool_registry
+            .get("mcp_connect_lazyfs")
+            .await
+            .expect("mcp_connect_lazyfs trigger registered");
+        assert_eq!(tool.exposure(), oneai_core::ToolExposure::Deferred);
+        assert!(tool.service_available());
+        // The real tool (not connected) is NOT in the registry.
+        assert!(app
+            .tool_registry
+            .get("mcp__lazyfs__read_file")
+            .await
+            .is_none());
     }
 
     #[tokio::test]

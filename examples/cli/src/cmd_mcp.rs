@@ -237,7 +237,7 @@ pub fn cmd_mcp_connect(name: &str) {
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
     rt.block_on(async {
-        let mut registry = McpPluginRegistry::from_config_file();
+        let registry = McpPluginRegistry::from_config_file();
 
         let entry = registry.get_entry(name);
         if entry.is_none() {
@@ -289,7 +289,7 @@ pub fn cmd_mcp_status(name: Option<&str>) {
     let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
 
     rt.block_on(async {
-        let mut registry = McpPluginRegistry::from_config_file();
+        let registry = McpPluginRegistry::from_config_file();
 
         // Targets: the named server, or every configured entry.
         let targets: Vec<String> = match name {

@@ -245,8 +245,10 @@ pub struct McpPluginRegistry {
     /// concurrent read paths (`all_tool_wrappers` / `server_status`) and an
     /// in-flight `call_tool`.
     server_manager: Arc<RealMcpServerManager>,
-    /// Connected server names.
-    connected: HashMap<String, Vec<String>>, // server_name → discovered_tool_names
+    /// Connected server names → discovered tool names. Behind a `Mutex` so the
+    /// connect-family methods can be `&self` (the lazy-connect tool calls
+    /// `ensure_connected` through an `Arc<McpPluginRegistry>`).
+    connected: tokio::sync::Mutex<HashMap<String, Vec<String>>>,
     /// OAuth token store (`~/.oneai/mcp_oauth/`). Shared with the in-connection
     /// refresher so a 401 can refresh + retry without consulting the registry.
     token_store: OAuthTokenStore,
@@ -264,7 +266,7 @@ impl McpPluginRegistry {
         Self {
             entries: HashMap::new(),
             server_manager: Arc::new(RealMcpServerManager::new()),
-            connected: HashMap::new(),
+            connected: tokio::sync::Mutex::new(HashMap::new()),
             token_store,
         }
     }
@@ -503,7 +505,7 @@ impl McpPluginRegistry {
     /// transport headers (refreshing first if the stored token is expired), and
     /// the manager's token refresher is installed so a 401 mid-call triggers a
     /// refresh + retry.
-    pub async fn connect_server(&mut self, name: &str) -> Result<Vec<String>> {
+    pub async fn connect_server(&self, name: &str) -> Result<Vec<String>> {
         let entry = self.entries.get(name).ok_or_else(|| {
             oneai_core::error::OneAIError::Provider(format!(
                 "MCP plugin '{}' not found in registry",
@@ -532,7 +534,10 @@ impl McpPluginRegistry {
             .connect_server_with_policy(config, &permissions)
             .await?;
 
-        self.connected.insert(name.to_string(), tool_names.clone());
+        self.connected
+            .lock()
+            .await
+            .insert(name.to_string(), tool_names.clone());
 
         tracing::info!(
             "MCP plugin '{}' connected — discovered {} tools: {:?}",
@@ -546,8 +551,9 @@ impl McpPluginRegistry {
 
     /// Connect a server on demand (lazy path). If already connected, returns
     /// its known tool names without reconnecting; otherwise connects now.
-    /// Errors if the entry is missing or disabled.
-    pub async fn ensure_connected(&mut self, name: &str) -> Result<Vec<String>> {
+    /// Errors if the entry is missing or disabled. `&self` so the
+    /// lazy-connect tool can call it through an `Arc<McpPluginRegistry>`.
+    pub async fn ensure_connected(&self, name: &str) -> Result<Vec<String>> {
         let entry = self.entries.get(name).cloned().ok_or_else(|| {
             oneai_core::error::OneAIError::Provider(format!(
                 "MCP plugin '{}' not found in registry",
@@ -570,7 +576,10 @@ impl McpPluginRegistry {
             .server_manager
             .ensure_connected(config, &permissions)
             .await?;
-        self.connected.insert(name.to_string(), tool_names.clone());
+        self.connected
+            .lock()
+            .await
+            .insert(name.to_string(), tool_names.clone());
         Ok(tool_names)
     }
 
@@ -582,7 +591,7 @@ impl McpPluginRegistry {
     /// servers are skipped here (connected on demand via `ensure_connected`).
     /// Returns a map of server_name → discovered_tool_names; a failed connect
     /// yields an empty `Vec` for that server (warned, not fatal).
-    pub async fn connect_all_enabled(&mut self) -> Result<HashMap<String, Vec<String>>> {
+    pub async fn connect_all_enabled(&self) -> Result<HashMap<String, Vec<String>>> {
         // Snapshot enabled, non-lazy entries so the async bearer resolution
         // doesn't hold a borrow of `self.entries`.
         let entry_snapshots: Vec<McpPluginEntry> = self
@@ -630,7 +639,10 @@ impl McpPluginRegistry {
                         tool_names.len(),
                         tool_names
                     );
-                    self.connected.insert(name.clone(), tool_names.clone());
+                    self.connected
+                        .lock()
+                        .await
+                        .insert(name.clone(), tool_names.clone());
                     map.insert(name, tool_names);
                 }
                 Err(e) => {
@@ -648,15 +660,15 @@ impl McpPluginRegistry {
     /// untouched. This is the per-server counterpart to `disconnect_all`;
     /// the previous implementation called `shutdown_all()` and cleared the
     /// entire `connected` map regardless of `name` (issue #31).
-    pub async fn disconnect_server(&mut self, name: &str) -> Result<()> {
+    pub async fn disconnect_server(&self, name: &str) -> Result<()> {
         self.server_manager.disconnect_server(name).await?;
-        self.connected.remove(name);
+        self.connected.lock().await.remove(name);
         tracing::info!("MCP plugin '{}' disconnected", name);
         Ok(())
     }
 
     /// Reconnect a single server: disconnect (if present) then re-establish.
-    pub async fn reconnect_server(&mut self, name: &str) -> Result<Vec<String>> {
+    pub async fn reconnect_server(&self, name: &str) -> Result<Vec<String>> {
         let entry = self.entries.get(name).cloned().ok_or_else(|| {
             oneai_core::error::OneAIError::Provider(format!(
                 "MCP plugin '{}' not found in registry",
@@ -680,7 +692,10 @@ impl McpPluginRegistry {
             .server_manager
             .reconnect_server_with_policy(config, &permissions)
             .await?;
-        self.connected.insert(name.to_string(), tool_names.clone());
+        self.connected
+            .lock()
+            .await
+            .insert(name.to_string(), tool_names.clone());
         tracing::info!(
             "MCP plugin '{}' reconnected — discovered {} tools: {:?}",
             name,
@@ -691,9 +706,9 @@ impl McpPluginRegistry {
     }
 
     /// Disconnect all servers.
-    pub async fn disconnect_all(&mut self) -> Result<()> {
+    pub async fn disconnect_all(&self) -> Result<()> {
         self.server_manager.shutdown_all().await?;
-        self.connected.clear();
+        self.connected.lock().await.clear();
         Ok(())
     }
 
@@ -729,13 +744,13 @@ impl McpPluginRegistry {
     }
 
     /// List connected server names.
-    pub fn connected_servers(&self) -> Vec<String> {
-        self.connected.keys().cloned().collect()
+    pub async fn connected_servers(&self) -> Vec<String> {
+        self.connected.lock().await.keys().cloned().collect()
     }
 
     /// Get discovered tool names for a connected server.
-    pub fn server_tools(&self, name: &str) -> Option<&Vec<String>> {
-        self.connected.get(name)
+    pub async fn server_tools(&self, name: &str) -> Option<Vec<String>> {
+        self.connected.lock().await.get(name).cloned()
     }
 
     // ─── OAuth ───────────────────────────────────────────────────────────────
