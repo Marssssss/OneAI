@@ -91,6 +91,7 @@ impl McpDiscovery {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         Self::connect_and_discover(&config).await
     }
@@ -107,6 +108,7 @@ impl McpDiscovery {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         Self::connect_and_discover(&config).await
     }
@@ -129,6 +131,7 @@ mod tests {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         assert_eq!(config.name, "test-stdio");
     }
@@ -143,6 +146,7 @@ mod tests {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         assert_eq!(config.name, "test-sse");
     }

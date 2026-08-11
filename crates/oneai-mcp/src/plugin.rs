@@ -93,6 +93,14 @@ pub struct McpPluginEntry {
     /// Stdio servers ignore this field.
     #[serde(default)]
     pub oauth: Option<McpOAuthConfig>,
+    /// Defer connecting this server until first use. When `true`,
+    /// [`McpPluginRegistry::connect_all_enabled`] skips it at startup; the
+    /// caller connects it on demand via
+    /// [`McpPluginRegistry::ensure_connected`]. See the `lazy` scope note on
+    /// [`oneai_tool::McpServerConfig::lazy`] — fully model-transparent lazy
+    /// needs the `Deferred` / `tool_search` machinery (issue #27).
+    #[serde(default)]
+    pub lazy: bool,
 }
 
 impl Default for McpPluginEntry {
@@ -111,6 +119,7 @@ impl Default for McpPluginEntry {
             tags: vec![],
             permissions: McpToolPermissions::default(),
             oauth: None,
+            lazy: false,
         }
     }
 }
@@ -163,6 +172,7 @@ impl McpPluginEntry {
             transport,
             requires_api_key: self.requires_api_key,
             api_key_field: self.api_key_env.clone(),
+            lazy: self.lazy,
         }
     }
 }
@@ -178,8 +188,12 @@ impl McpPluginEntry {
 pub struct McpPluginRegistry {
     /// Loaded plugin entries (from config + builtin).
     entries: HashMap<String, McpPluginEntry>,
-    /// MCP server manager (handles actual connections).
-    server_manager: Arc<tokio::sync::Mutex<RealMcpServerManager>>,
+    /// MCP server manager (handles actual connections). Fully internally
+    /// synchronized (`&self` methods + `RwLock` bindings), so the registry
+    /// shares a single `Arc` — no outer `Mutex` and no contention between
+    /// concurrent read paths (`all_tool_wrappers` / `server_status`) and an
+    /// in-flight `call_tool`.
+    server_manager: Arc<RealMcpServerManager>,
     /// Connected server names.
     connected: HashMap<String, Vec<String>>, // server_name → discovered_tool_names
     /// OAuth token store (`~/.oneai/mcp_oauth/`). Shared with the in-connection
@@ -198,7 +212,7 @@ impl McpPluginRegistry {
     pub fn with_token_store(token_store: OAuthTokenStore) -> Self {
         Self {
             entries: HashMap::new(),
-            server_manager: Arc::new(tokio::sync::Mutex::new(RealMcpServerManager::new())),
+            server_manager: Arc::new(RealMcpServerManager::new()),
             connected: HashMap::new(),
             token_store,
         }
@@ -288,8 +302,9 @@ impl McpPluginRegistry {
     /// repeat). Called before each connect so newly-configured OAuth servers
     /// get the 401-retry path on their first connection.
     async fn ensure_refresher(&self) {
-        let mut manager = self.server_manager.lock().await;
-        manager.set_token_refresher(self.build_refresher());
+        self.server_manager
+            .set_token_refresher(self.build_refresher())
+            .await;
     }
 
     /// Create a registry from a config file.
@@ -384,10 +399,10 @@ impl McpPluginRegistry {
         if let Some(token) = self.resolve_bearer(&entry).await? {
             Self::inject_bearer(&mut config, &token);
         }
-        let mut manager = self.server_manager.lock().await;
         // Install the refresher so the in-connection 401-retry path is live.
-        manager.set_token_refresher(self.build_refresher());
-        let tool_names = manager
+        self.ensure_refresher().await;
+        let tool_names = self
+            .server_manager
             .connect_server_with_policy(config, &permissions)
             .await?;
 
@@ -403,19 +418,51 @@ impl McpPluginRegistry {
         Ok(tool_names)
     }
 
-    /// Connect all enabled servers and discover their tools.
+    /// Connect a server on demand (lazy path). If already connected, returns
+    /// its known tool names without reconnecting; otherwise connects now.
+    /// Errors if the entry is missing or disabled.
+    pub async fn ensure_connected(&mut self, name: &str) -> Result<Vec<String>> {
+        let entry = self.entries.get(name).cloned().ok_or_else(|| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' not found in registry",
+                name
+            ))
+        })?;
+        if !entry.enabled {
+            return Err(oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' is disabled",
+                name
+            )));
+        }
+        let mut config = entry.to_server_config();
+        let permissions = entry.permissions.clone();
+        if let Some(token) = self.resolve_bearer(&entry).await? {
+            Self::inject_bearer(&mut config, &token);
+        }
+        self.ensure_refresher().await;
+        let tool_names = self
+            .server_manager
+            .ensure_connected(config, &permissions)
+            .await?;
+        self.connected.insert(name.to_string(), tool_names.clone());
+        Ok(tool_names)
+    }
+
+    /// Connect all enabled, **non-lazy** servers and discover their tools.
     ///
-    /// Connections run **concurrently** (the `server_manager` is shared via
-    /// `Arc<Mutex>`, so each server locks it only for its own handshake).
-    /// Returns a map of server_name → discovered_tool_names; a failed
-    /// connect yields an empty `Vec` for that server (warned, not fatal).
+    /// Connections run **concurrently** — the `server_manager` is shared via
+    /// `Arc` and is fully internally synchronized (`&self` methods), so each
+    /// server's handshake takes only its own per-connection lock. `lazy: true`
+    /// servers are skipped here (connected on demand via `ensure_connected`).
+    /// Returns a map of server_name → discovered_tool_names; a failed connect
+    /// yields an empty `Vec` for that server (warned, not fatal).
     pub async fn connect_all_enabled(&mut self) -> Result<HashMap<String, Vec<String>>> {
-        // Snapshot enabled entries so the async bearer resolution doesn't hold a
-        // borrow of `self.entries`.
+        // Snapshot enabled, non-lazy entries so the async bearer resolution
+        // doesn't hold a borrow of `self.entries`.
         let entry_snapshots: Vec<McpPluginEntry> = self
             .entries
             .values()
-            .filter(|e| e.enabled)
+            .filter(|e| e.enabled && !e.lazy)
             .cloned()
             .collect();
 
@@ -434,19 +481,14 @@ impl McpPluginRegistry {
         self.ensure_refresher().await;
 
         // Each task clones the shared manager Arc and connects one server.
-        // `connect_server_with_policy` is `&mut` on the manager, but the
-        // `Mutex` serializes the critical section — handshakes run
-        // one-at-a-time on the manager while the surrounding work (config
-        // lookup, result aggregation) is concurrent. This still unblocks the
-        // registry from holding the lock across all servers' surrounding setup.
+        // `connect_server_with_policy` is `&self` — the manager's internal
+        // `RwLock` write-locks only for the map swap; handshakes (the heavy
+        // network/subprocess work) run concurrently with no outer lock.
         let mgr = self.server_manager.clone();
         let outcomes = futures::future::join_all(prepared.into_iter().map(|(name, cfg, perms)| {
             let mgr = mgr.clone();
             async move {
-                let outcome = {
-                    let mut manager = mgr.lock().await;
-                    manager.connect_server_with_policy(cfg, &perms).await
-                };
+                let outcome = mgr.connect_server_with_policy(cfg, &perms).await;
                 (name, outcome)
             }
         }))
@@ -481,8 +523,7 @@ impl McpPluginRegistry {
     /// the previous implementation called `shutdown_all()` and cleared the
     /// entire `connected` map regardless of `name` (issue #31).
     pub async fn disconnect_server(&mut self, name: &str) -> Result<()> {
-        let mut manager = self.server_manager.lock().await;
-        manager.disconnect_server(name).await?;
+        self.server_manager.disconnect_server(name).await?;
         self.connected.remove(name);
         tracing::info!("MCP plugin '{}' disconnected", name);
         Ok(())
@@ -508,9 +549,9 @@ impl McpPluginRegistry {
         if let Some(token) = self.resolve_bearer(&entry).await? {
             Self::inject_bearer(&mut config, &token);
         }
-        let mut manager = self.server_manager.lock().await;
-        manager.set_token_refresher(self.build_refresher());
-        let tool_names = manager
+        self.ensure_refresher().await;
+        let tool_names = self
+            .server_manager
             .reconnect_server_with_policy(config, &permissions)
             .await?;
         self.connected.insert(name.to_string(), tool_names.clone());
@@ -525,28 +566,24 @@ impl McpPluginRegistry {
 
     /// Disconnect all servers.
     pub async fn disconnect_all(&mut self) -> Result<()> {
-        let mut manager = self.server_manager.lock().await;
-        manager.shutdown_all().await?;
+        self.server_manager.shutdown_all().await?;
         self.connected.clear();
         Ok(())
     }
 
     /// Whether a server is currently connected.
     pub async fn is_connected(&self, name: &str) -> bool {
-        let manager = self.server_manager.lock().await;
-        manager.is_connected(name)
+        self.server_manager.is_connected(name).await
     }
 
-    /// Status of one server connection (non-async — see `McpConnectionStatus`).
+    /// Status of one server connection.
     pub async fn server_status(&self, name: &str) -> oneai_tool::McpConnectionStatus {
-        let manager = self.server_manager.lock().await;
-        manager.server_status(name)
+        self.server_manager.server_status(name).await
     }
 
     /// Get all discovered tool wrappers from connected servers.
     pub async fn all_tool_wrappers(&self) -> Vec<Arc<RealMcpToolWrapper>> {
-        let manager = self.server_manager.lock().await;
-        manager.all_tool_wrappers()
+        self.server_manager.all_tool_wrappers().await
     }
 
     /// Register all discovered tools into a ToolRegistry.

@@ -147,15 +147,39 @@ pub enum McpTransport {
     },
 }
 
+impl Default for McpTransport {
+    /// Default transport = an empty Stdio invocation. Lets `McpServerConfig`
+    /// derive `Default` so config literals can spread `..Default::default()`
+    /// for the new `lazy` field without repeating every field.
+    fn default() -> Self {
+        Self::Stdio {
+            command: String::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
+        }
+    }
+}
+
 // ─── McpServerConfig ────────────────────────────────────────────────────────
 
 /// Configuration for a MCP server connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct McpServerConfig {
     pub name: String,
     pub transport: McpTransport,
     pub requires_api_key: bool,
     pub api_key_field: Option<String>,
+    /// Defer the actual connect until first use (`ensure_connected` /
+    /// `connect_server`). When `true`, `connect_all_enabled` skips this server
+    /// at startup; the caller connects it on demand.
+    ///
+    /// **Scope note**: a fully model-transparent lazy server (one the model
+    /// can call) still requires the `Deferred` / `tool_search` machinery
+    /// (issue #27) because the tool schema a model sees comes from
+    /// `tools/list`, which only runs after a connect. This flag covers the
+    /// "don't connect at startup, connect on explicit trigger" half; once
+    /// connected, `reload_data_layer` registers the discovered tools.
+    pub lazy: bool,
 }
 
 // ─── Tool name normalization ─────────────────────────────────────────────────
@@ -364,6 +388,11 @@ pub struct McpConnection {
     /// transport to obtain a fresh bearer and retry the call once. `None`
     /// for servers without OAuth.
     token_refresher: Option<Arc<dyn McpOAuthTokenRefresher>>,
+    /// `serverInfo` returned by the remote during `initialize` (name /
+    /// version of the server, if advertised). Snapshotted into the
+    /// [`McpServerConnectionIdentity`] so status reads don't need to lock
+    /// the live connection.
+    server_info: Option<serde_json::Value>,
 }
 
 /// Information about a tool discovered from an MCP server.
@@ -390,6 +419,7 @@ impl McpConnection {
             post_url: None,
             session_id: None,
             token_refresher: None,
+            server_info: None,
         }
     }
 
@@ -483,6 +513,7 @@ impl McpConnection {
                         error
                     )));
                 }
+                self.server_info = Self::extract_server_info(&init_response);
 
                 tracing::info!(
                     "MCP initialized with server '{}' — capabilities: {}",
@@ -590,6 +621,7 @@ impl McpConnection {
                         error
                     )));
                 }
+                self.server_info = Self::extract_server_info(&init_response);
 
                 tracing::info!(
                     "MCP initialized with SSE server '{}' — capabilities: {}",
@@ -702,6 +734,7 @@ impl McpConnection {
                         error
                     )));
                 }
+                self.server_info = Self::extract_server_info(&init_response);
 
                 tracing::info!(
                     "MCP initialized with StreamableHttp server '{}' — session_id: {:?}",
@@ -1020,6 +1053,21 @@ impl McpConnection {
     /// Get the server name.
     pub fn name(&self) -> &str {
         &self.config.name
+    }
+
+    /// `serverInfo` advertised by the remote during `initialize` (`None` if
+    /// the server didn't send one).
+    pub fn server_info(&self) -> Option<&serde_json::Value> {
+        self.server_info.as_ref()
+    }
+
+    /// Extract the `serverInfo` object from an `initialize` response, if the
+    /// server advertised one. Used to populate [`McpServerConnectionIdentity`].
+    fn extract_server_info(init_response: &serde_json::Value) -> Option<serde_json::Value> {
+        init_response
+            .get("result")
+            .and_then(|r| r.get("serverInfo"))
+            .cloned()
     }
 
     // ─── HTTP Helper Methods ─────────────────────────────────────────────────
@@ -1384,38 +1432,169 @@ impl PermissionAwareTool for McpToolWrapper {
 
 use crate::tool_interfaces::PermissionAwareTool;
 
+// ─── McpTransportKind / McpServerConnectionIdentity / McpBinding ──────────────
+//
+// codex-style "immutable binding snapshot". The connection's *identity* (who
+// it is, what transport kind, what `serverInfo` it advertised) is separated
+// from the *live transport state* (subprocess pipes / HTTP client). The
+// manager holds `RwLock<HashMap<String, Arc<McpBinding>>>`; readers clone the
+// `Arc<McpBinding>` under a read lock and release immediately — `server_status`
+// / `all_tool_wrappers` / `get_tool_wrapper` never block an in-flight
+// `call_tool` (which only locks the per-connection `Mutex<McpConnection>`)
+// nor a concurrent connect/disconnect of another server.
+
+/// The transport family a connection uses — a non-owning projection of
+/// [`McpTransport`] so the identity doesn't borrow the live transport config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum McpTransportKind {
+    Stdio,
+    Sse,
+    StreamableHttp,
+}
+
+impl McpTransportKind {
+    /// Project from a [`McpTransport`] without cloning its fields.
+    pub fn from_transport(transport: &McpTransport) -> Self {
+        match transport {
+            McpTransport::Stdio { .. } => Self::Stdio,
+            McpTransport::Sse { .. } => Self::Sse,
+            McpTransport::StreamableHttp { .. } => Self::StreamableHttp,
+        }
+    }
+}
+
+/// A connection's identity — name + transport kind + advertised `serverInfo`.
+/// Separated from the live transport so it can be read without locking the
+/// connection.
+#[derive(Debug, Clone)]
+pub struct McpServerConnectionIdentity {
+    pub name: String,
+    pub transport_kind: McpTransportKind,
+    pub server_info: Option<serde_json::Value>,
+}
+
+/// An immutable snapshot of one connected server: identity, the live
+/// connection (shared `Arc<Mutex<McpConnection>>`), the discovered tool catalog,
+/// the resolved per-tool wrappers, the policy, and a `generation` counter the
+/// catalog cache uses to invalidate stale snapshots across reconnects.
+///
+/// `McpToolWrapper` holds the same `Arc<Mutex<McpConnection>>` (not the
+/// `Arc<McpBinding>`) — this avoids an `Arc` cycle (binding → wrappers →
+/// wrapper → binding) while still giving every wrapper cheap, lock-free access
+/// to its live transport.
+pub struct McpBinding {
+    pub identity: McpServerConnectionIdentity,
+    pub connection: Arc<tokio::sync::Mutex<McpConnection>>,
+    /// Discovered tools keyed by the **raw** name the remote advertises.
+    pub tools: Arc<HashMap<String, McpToolInfo>>,
+    /// Wrappers keyed by the **normalized** registry name (`mcp__<srv>__<tool>`).
+    pub wrappers: Arc<HashMap<String, Arc<McpToolWrapper>>>,
+    pub permissions: McpToolPermissions,
+    pub generation: u64,
+    pub lazy: bool,
+}
+
+impl McpBinding {
+    /// Build the immutable snapshot from a just-connected connection + the
+    /// resolved per-tool policy. The wrappers share the connection `Arc`.
+    fn build(
+        config: &McpServerConfig,
+        connection: Arc<tokio::sync::Mutex<McpConnection>>,
+        conn: &McpConnection,
+        permissions: &McpToolPermissions,
+        generation: u64,
+    ) -> Arc<Self> {
+        let mut tools = HashMap::new();
+        let mut wrappers = HashMap::new();
+        for (raw_name, info) in conn.tools() {
+            let normalized = normalize_tool_name(&config.name, raw_name);
+            let level = permissions.level_for(raw_name);
+            let exposure = permissions.exposure_for(raw_name);
+            let wrapper = Arc::new(McpToolWrapper::with_policy(
+                normalized.clone(),
+                info.name.clone(),
+                info.description.clone(),
+                info.parameters_schema.clone(),
+                info.server_name.clone(),
+                level,
+                exposure,
+                connection.clone(),
+            ));
+            wrappers.insert(normalized, wrapper);
+            tools.insert(raw_name.clone(), info.clone());
+        }
+        Arc::new(Self {
+            identity: McpServerConnectionIdentity {
+                name: config.name.clone(),
+                transport_kind: McpTransportKind::from_transport(&config.transport),
+                server_info: conn.server_info().cloned(),
+            },
+            connection,
+            tools: Arc::new(tools),
+            wrappers: Arc::new(wrappers),
+            permissions: permissions.clone(),
+            generation,
+            lazy: config.lazy,
+        })
+    }
+
+    /// Normalized wrapper names exposed by this binding.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.wrappers.keys().cloned().collect()
+    }
+}
+
 // ─── McpServerManager ────────────────────────────────────────────────────────
 
 /// MCP server manager — handles real connections to MCP servers.
+///
+/// Fully internally synchronized: every method takes `&self` and the bindings
+/// map lives behind a `tokio::sync::RwLock`. Readers (`server_status`,
+/// `all_tool_wrappers`, `get_tool_wrapper`, `server_names`, `is_connected`)
+/// take a **read** lock, clone the `Arc<McpBinding>`s they need, and release —
+/// they never block an in-flight `call_tool` (which only locks the
+/// per-connection `Mutex<McpConnection>`) nor a concurrent connect/disconnect of
+/// another server. Writers (`connect_server*`, `disconnect_server`,
+/// `reconnect_server*`, `shutdown_all`) take the write lock and swap in a fresh
+/// `Arc<McpBinding>`. The OAuth token refresher lives behind a `Mutex` so it
+/// can be installed after construction without `&mut self`.
 pub struct McpServerManager {
-    connections: HashMap<String, Arc<tokio::sync::Mutex<McpConnection>>>,
-    tool_wrappers: HashMap<String, Arc<McpToolWrapper>>,
-    /// Optional OAuth token refresher — cloned into each new connection so
-    /// the transport-level 401 → refresh → retry path is available for OAuth
-    /// servers. `None` = no OAuth servers connected yet (or none configured).
-    token_refresher: Option<Arc<dyn McpOAuthTokenRefresher>>,
+    bindings: tokio::sync::RwLock<HashMap<String, Arc<McpBinding>>>,
+    token_refresher: tokio::sync::Mutex<Option<Arc<dyn McpOAuthTokenRefresher>>>,
+    next_generation: std::sync::atomic::AtomicU64,
 }
 
 impl McpServerManager {
     pub fn new() -> Self {
         Self {
-            connections: HashMap::new(),
-            tool_wrappers: HashMap::new(),
-            token_refresher: None,
+            bindings: tokio::sync::RwLock::new(HashMap::new()),
+            token_refresher: tokio::sync::Mutex::new(None),
+            next_generation: std::sync::atomic::AtomicU64::new(1),
         }
+    }
+
+    /// Allocate a fresh generation counter for a new binding. The catalog
+    /// cache (Stage 4-2) uses this to invalidate stale snapshots across
+    /// reconnects; for now it just gives each binding a monotonically
+    /// increasing identity.
+    fn fresh_generation(&self) -> u64 {
+        self.next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Install an OAuth token refresher used by all subsequently connected
     /// HTTP-transport servers. Existing connections are unaffected (they
     /// captured the refresher at their own connect time, if any).
-    pub fn set_token_refresher(&mut self, refresher: Arc<dyn McpOAuthTokenRefresher>) {
-        self.token_refresher = Some(refresher);
+    pub async fn set_token_refresher(&self, refresher: Arc<dyn McpOAuthTokenRefresher>) {
+        let mut slot = self.token_refresher.lock().await;
+        *slot = Some(refresher);
     }
 
     /// Connect to an MCP server, discover tools, and create wrappers using
     /// the default policy (`Standard` / `Direct`). Convenience wrapper around
     /// [`connect_server_with_policy`](Self::connect_server_with_policy).
-    pub async fn connect_server(&mut self, config: McpServerConfig) -> Result<Vec<String>> {
+    pub async fn connect_server(&self, config: McpServerConfig) -> Result<Vec<String>> {
         self.connect_server_with_policy(config, &McpToolPermissions::default())
             .await
     }
@@ -1428,109 +1607,125 @@ impl McpServerManager {
     /// same-named tools from different servers never collide in the shared
     /// `ToolRegistry`. The returned `Vec` carries those normalized names.
     pub async fn connect_server_with_policy(
-        &mut self,
+        &self,
         config: McpServerConfig,
         permissions: &McpToolPermissions,
     ) -> Result<Vec<String>> {
         let mut connection = McpConnection::new(config.clone());
         // Attach the OAuth refresher (if any) so HTTP-transport calls can
         // recover from a 401 by refreshing + retrying once.
-        if let Some(refresher) = self.token_refresher.clone() {
-            connection = connection.with_token_refresher(refresher);
+        {
+            let slot = self.token_refresher.lock().await;
+            if let Some(refresher) = slot.as_ref() {
+                connection = connection.with_token_refresher(refresher.clone());
+            }
         }
         connection.connect_and_discover().await?;
 
         let connection_arc = Arc::new(tokio::sync::Mutex::new(connection));
-        self.connections
-            .insert(config.name.clone(), connection_arc.clone());
-
-        let mut tool_names = Vec::new();
-        // We need to read tools from the connection (it's locked in the Arc<Mutex>)
-        let conn = connection_arc.lock().await;
-        for (tool_name, tool_info) in conn.tools() {
-            let normalized = normalize_tool_name(&config.name, tool_name);
-            let level = permissions.level_for(tool_name);
-            let exposure = permissions.exposure_for(tool_name);
-            let wrapper = McpToolWrapper::with_policy(
-                normalized.clone(),
-                tool_info.name.clone(),
-                tool_info.description.clone(),
-                tool_info.parameters_schema.clone(),
-                tool_info.server_name.clone(),
-                level,
-                exposure,
+        // Snapshot tools + build wrappers under the per-connection lock.
+        let binding = {
+            let conn = connection_arc.lock().await;
+            McpBinding::build(
+                &config,
                 connection_arc.clone(),
-            );
-            tool_names.push(normalized.clone());
-            self.tool_wrappers.insert(normalized, Arc::new(wrapper));
-        }
+                &conn,
+                permissions,
+                self.fresh_generation(),
+            )
+        };
+        let tool_names = binding.tool_names();
+
+        let mut bindings = self.bindings.write().await;
+        bindings.insert(config.name.clone(), binding);
 
         Ok(tool_names)
     }
 
-    /// Get all tool wrappers.
-    pub fn all_tool_wrappers(&self) -> Vec<Arc<McpToolWrapper>> {
-        self.tool_wrappers.values().cloned().collect()
+    /// If `config.name` is already connected, return its known tool names
+    /// without reconnecting; otherwise connect now. The lazy-connect path:
+    /// callers that defer startup (`lazy: true`) invoke this on first use.
+    pub async fn ensure_connected(
+        &self,
+        config: McpServerConfig,
+        permissions: &McpToolPermissions,
+    ) -> Result<Vec<String>> {
+        {
+            let bindings = self.bindings.read().await;
+            if let Some(existing) = bindings.get(&config.name) {
+                return Ok(existing.tool_names());
+            }
+        }
+        self.connect_server_with_policy(config, permissions).await
     }
 
-    /// Get a tool wrapper by name.
-    pub fn get_tool_wrapper(&self, name: &str) -> Option<&Arc<McpToolWrapper>> {
-        self.tool_wrappers.get(name)
+    /// Get all tool wrappers across every connected server.
+    pub async fn all_tool_wrappers(&self) -> Vec<Arc<McpToolWrapper>> {
+        let bindings = self.bindings.read().await;
+        let mut out = Vec::new();
+        for binding in bindings.values() {
+            out.extend(binding.wrappers.values().cloned());
+        }
+        out
+    }
+
+    /// Get a tool wrapper by its normalized registry name. Returns an owned
+    /// `Arc` (the read lock is released before returning).
+    pub async fn get_tool_wrapper(&self, name: &str) -> Option<Arc<McpToolWrapper>> {
+        let bindings = self.bindings.read().await;
+        for binding in bindings.values() {
+            if let Some(w) = binding.wrappers.get(name) {
+                return Some(w.clone());
+            }
+        }
+        None
     }
 
     /// Names of all currently-connected servers.
-    pub fn server_names(&self) -> Vec<String> {
-        self.connections.keys().cloned().collect()
+    pub async fn server_names(&self) -> Vec<String> {
+        let bindings = self.bindings.read().await;
+        bindings.keys().cloned().collect()
     }
 
     /// Whether a server of the given name is currently connected.
-    pub fn is_connected(&self, name: &str) -> bool {
-        self.connections.contains_key(name)
+    pub async fn is_connected(&self, name: &str) -> bool {
+        let bindings = self.bindings.read().await;
+        bindings.contains_key(name)
     }
 
     /// Status of one server connection.
-    pub fn server_status(&self, name: &str) -> McpConnectionStatus {
-        // A `connections` entry means the handshake completed and we believe
-        // the server is live; transport liveness is only observed on the next
-        // call. `server_status` stays non-async by design (no async lock
-        // taken here) — it reports the tool names we already know about.
-        if self.connections.contains_key(name) {
-            let tools = self
-                .tool_wrappers
-                .values()
-                .filter(|w| w.server_name() == name)
-                .map(|w| w.name().to_string())
-                .collect::<Vec<_>>();
+    pub async fn server_status(&self, name: &str) -> McpConnectionStatus {
+        let bindings = self.bindings.read().await;
+        if let Some(binding) = bindings.get(name) {
+            let tools = binding.wrappers.keys().cloned().collect::<Vec<_>>();
             return McpConnectionStatus::Connected { tools };
         }
-        if self.tool_wrappers.values().any(|w| w.server_name() == name) {
-            McpConnectionStatus::Disconnected
-        } else {
-            McpConnectionStatus::NotConfigured
-        }
+        // No binding under `name` → not configured (we never retain a binding
+        // for a disconnected server; `disconnect_server` removes it).
+        McpConnectionStatus::NotConfigured
+    }
+
+    /// Snapshot of every binding (identity + tools + generation), for
+    /// introspection / CLI `mcp status`. Cheaper than rebuilding wrappers.
+    pub async fn bindings_snapshot(&self) -> Vec<Arc<McpBinding>> {
+        let bindings = self.bindings.read().await;
+        bindings.values().cloned().collect()
     }
 
     /// Disconnect **only** the named server — shut it down and drop its
-    /// connection + tool wrappers, leaving all other servers untouched.
+    /// binding, leaving all other servers untouched.
     ///
     /// This is the per-server counterpart to [`shutdown_all`]; the previous
     /// `disconnect_server` implementations called `shutdown_all` and cleared
     /// every connection (issue #31).
-    pub async fn disconnect_server(&mut self, name: &str) -> Result<()> {
-        if let Some(conn_arc) = self.connections.remove(name) {
-            let mut conn = conn_arc.lock().await;
+    pub async fn disconnect_server(&self, name: &str) -> Result<()> {
+        let binding = {
+            let mut bindings = self.bindings.write().await;
+            bindings.remove(name)
+        };
+        if let Some(binding) = binding {
+            let mut conn = binding.connection.lock().await;
             conn.shutdown().await?;
-        }
-        // Drop tool wrappers belonging to this server. Collect first to
-        // avoid borrowing `self.tool_wrappers` while removing.
-        let drop_names: Vec<String> = self
-            .tool_wrappers
-            .iter()
-            .filter(|(_, w)| w.server_name() == name)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for k in drop_names {
-            self.tool_wrappers.remove(&k);
         }
         Ok(())
     }
@@ -1538,7 +1733,7 @@ impl McpServerManager {
     /// Reconnect a server: disconnect the existing connection (if any) then
     /// re-establish it with the supplied config (default policy). Returns the
     /// normalized tool names discovered after the fresh connect.
-    pub async fn reconnect_server(&mut self, config: McpServerConfig) -> Result<Vec<String>> {
+    pub async fn reconnect_server(&self, config: McpServerConfig) -> Result<Vec<String>> {
         self.reconnect_server_with_policy(config, &McpToolPermissions::default())
             .await
     }
@@ -1547,7 +1742,7 @@ impl McpServerManager {
     /// existing connection (if any) then re-establish it. Returns the
     /// normalized tool names discovered after the fresh connect.
     pub async fn reconnect_server_with_policy(
-        &mut self,
+        &self,
         config: McpServerConfig,
         permissions: &McpToolPermissions,
     ) -> Result<Vec<String>> {
@@ -1556,13 +1751,17 @@ impl McpServerManager {
     }
 
     /// Shutdown all MCP connections.
-    pub async fn shutdown_all(&mut self) -> Result<()> {
-        for conn_arc in self.connections.values() {
-            let mut conn = conn_arc.lock().await;
+    pub async fn shutdown_all(&self) -> Result<()> {
+        let drained: Vec<Arc<McpBinding>> = {
+            let mut bindings = self.bindings.write().await;
+            let drained = bindings.values().cloned().collect::<Vec<_>>();
+            bindings.clear();
+            drained
+        };
+        for binding in drained {
+            let mut conn = binding.connection.lock().await;
             conn.shutdown().await?;
         }
-        self.connections.clear();
-        self.tool_wrappers.clear();
         Ok(())
     }
 }
@@ -1588,6 +1787,7 @@ pub fn default_mcp_configs() -> Vec<McpServerConfig> {
         },
         requires_api_key: false,
         api_key_field: None,
+        ..Default::default()
     }]
 }
 
@@ -1601,6 +1801,7 @@ pub fn optional_mcp_configs() -> Vec<McpServerConfig> {
         },
         requires_api_key: true,
         api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+        ..Default::default()
     }]
 }
 
@@ -1691,6 +1892,7 @@ mod tests {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         let conn = McpConnection::new(config);
         assert_eq!(conn.name(), "filesystem");
@@ -1708,6 +1910,7 @@ mod tests {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         let conn = Arc::new(tokio::sync::Mutex::new(McpConnection::new(config)));
         let wrapper = McpToolWrapper::new(
@@ -1787,6 +1990,7 @@ mod tests {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         let conn = Arc::new(tokio::sync::Mutex::new(McpConnection::new(config)));
         let wrapper = McpToolWrapper::with_remote_name(
@@ -1802,16 +2006,87 @@ mod tests {
         assert_eq!(wrapper.server_name(), "srv");
     }
 
-    #[test]
-    fn test_mcp_server_manager_empty_state() {
+    #[tokio::test]
+    async fn test_mcp_server_manager_empty_state() {
         let mgr = McpServerManager::new();
-        assert!(mgr.server_names().is_empty());
-        assert!(!mgr.is_connected("anything"));
+        assert!(mgr.server_names().await.is_empty());
+        assert!(!mgr.is_connected("anything").await);
         assert_eq!(
-            mgr.server_status("anything"),
+            mgr.server_status("anything").await,
             McpConnectionStatus::NotConfigured
         );
-        assert!(mgr.all_tool_wrappers().is_empty());
+        assert!(mgr.all_tool_wrappers().await.is_empty());
+        assert!(mgr.get_tool_wrapper("anything").await.is_none());
+        assert!(mgr.bindings_snapshot().await.is_empty());
+    }
+
+    // ── Stage 4-1: immutable McpBinding snapshot + identity + lazy ───────
+
+    #[test]
+    fn test_mcp_transport_kind_from_transport() {
+        let stdio = McpTransport::Stdio {
+            command: "c".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        let sse = McpTransport::Sse {
+            url: "http://x".to_string(),
+            headers: HashMap::new(),
+        };
+        let http = McpTransport::StreamableHttp {
+            url: "http://x".to_string(),
+            headers: HashMap::new(),
+        };
+        assert_eq!(
+            McpTransportKind::from_transport(&stdio),
+            McpTransportKind::Stdio
+        );
+        assert_eq!(
+            McpTransportKind::from_transport(&sse),
+            McpTransportKind::Sse
+        );
+        assert_eq!(
+            McpTransportKind::from_transport(&http),
+            McpTransportKind::StreamableHttp
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_binding_build_snapshots_identity_and_tools() {
+        let config = McpServerConfig {
+            name: "srv".to_string(),
+            transport: McpTransport::Stdio {
+                command: "c".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            requires_api_key: false,
+            api_key_field: None,
+            ..Default::default()
+        };
+        // An unconnected McpConnection has no discovered tools / serverInfo —
+        // the binding snapshot should still capture identity + empty catalog.
+        let conn = Arc::new(tokio::sync::Mutex::new(McpConnection::new(config.clone())));
+        let binding = {
+            let conn_guard = conn.lock().await;
+            McpBinding::build(
+                &config,
+                conn.clone(),
+                &conn_guard,
+                &McpToolPermissions::default(),
+                7,
+            )
+        };
+        assert_eq!(binding.identity.name, "srv");
+        assert_eq!(binding.identity.transport_kind, McpTransportKind::Stdio);
+        assert!(binding.identity.server_info.is_none());
+        assert!(binding.tools.is_empty());
+        assert!(binding.wrappers.is_empty());
+        assert_eq!(binding.generation, 7);
+        assert!(!binding.lazy);
+        assert!(binding.tool_names().is_empty());
+        // The wrapper set shares the connection Arc.
+        assert!(Arc::ptr_eq(&binding.connection, &conn));
     }
 
     // ── Stage 2: per-server permission policy ──────────────────────────────
@@ -1858,6 +2133,7 @@ mod tests {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         let conn = Arc::new(tokio::sync::Mutex::new(McpConnection::new(config)));
         let wrapper = McpToolWrapper::with_policy(

@@ -650,6 +650,11 @@ enum McpAction {
         /// Whether server is enabled
         #[arg(long, default_value_t = true)]
         enabled: bool,
+        /// Defer connecting this server until first use. When set, the server
+        /// is skipped at startup (`mcp connect`/`oneai session`) and connected
+        /// on demand via `mcp status <name>` or an explicit `mcp connect`.
+        #[arg(long, default_value_t = false)]
+        lazy: bool,
     },
     /// Remove an MCP server configuration
     Remove {
@@ -1766,6 +1771,7 @@ fn main() {
                 url,
                 args,
                 enabled,
+                lazy,
             } => {
                 cmd_mcp::cmd_mcp_add(
                     &name,
@@ -1774,6 +1780,7 @@ fn main() {
                     url.as_deref(),
                     args.as_deref(),
                     enabled,
+                    lazy,
                 );
             }
             McpAction::Remove { name } => {

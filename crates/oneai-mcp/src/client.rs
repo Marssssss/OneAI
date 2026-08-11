@@ -25,8 +25,8 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use oneai_core::traits::Tool;
 use oneai_core::ToolOutput;
@@ -50,10 +50,12 @@ use crate::error::McpError;
 pub struct McpClient {
     /// Configuration for the MCP server to connect to.
     config: McpServerConfig,
-    /// The underlying server manager (wrapped in Mutex for thread-safe access).
-    manager: Arc<Mutex<RealMcpServerManager>>,
+    /// The underlying server manager. Fully internally synchronized
+    /// (`&self` methods), so the client shares a single `Arc` with no outer
+    /// `Mutex` — `discover_tools` / `call_tool` don't serialize each other.
+    manager: Arc<RealMcpServerManager>,
     /// Whether the client is currently connected.
-    connected: Arc<Mutex<bool>>,
+    connected: AtomicBool,
 }
 
 impl McpClient {
@@ -76,12 +78,9 @@ impl McpClient {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
-        Self {
-            config,
-            manager: Arc::new(Mutex::new(RealMcpServerManager::new())),
-            connected: Arc::new(Mutex::new(false)),
-        }
+        Self::from_config(config)
     }
 
     /// Create a client for an SSE-based MCP server.
@@ -97,12 +96,9 @@ impl McpClient {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
-        Self {
-            config,
-            manager: Arc::new(Mutex::new(RealMcpServerManager::new())),
-            connected: Arc::new(Mutex::new(false)),
-        }
+        Self::from_config(config)
     }
 
     /// Create a client for a StreamableHttp MCP server.
@@ -118,20 +114,17 @@ impl McpClient {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
-        Self {
-            config,
-            manager: Arc::new(Mutex::new(RealMcpServerManager::new())),
-            connected: Arc::new(Mutex::new(false)),
-        }
+        Self::from_config(config)
     }
 
     /// Create a client from a custom McpServerConfig.
     pub fn from_config(config: McpServerConfig) -> Self {
         Self {
             config,
-            manager: Arc::new(Mutex::new(RealMcpServerManager::new())),
-            connected: Arc::new(Mutex::new(false)),
+            manager: Arc::new(RealMcpServerManager::new()),
+            connected: AtomicBool::new(false),
         }
     }
 
@@ -148,14 +141,13 @@ impl McpClient {
     ///
     /// Returns the list of discovered tool names.
     pub async fn connect(&self) -> crate::error::Result<Vec<String>> {
-        let mut manager = self.manager.lock().await;
-        let tool_names = manager
+        let tool_names = self
+            .manager
             .connect_server(self.config.clone())
             .await
             .map_err(|e| McpError::Connection(e.to_string()))?;
 
-        let mut connected = self.connected.lock().await;
-        *connected = true;
+        self.connected.store(true, Ordering::Relaxed);
         Ok(tool_names)
     }
 
@@ -165,8 +157,7 @@ impl McpClient {
     /// description, and input schema. This uses the discovered tools
     /// from the `connect()` phase.
     pub async fn discover_tools(&self) -> crate::error::Result<Vec<McpToolInfo>> {
-        let manager = self.manager.lock().await;
-        let wrappers = manager.all_tool_wrappers();
+        let wrappers = self.manager.all_tool_wrappers().await;
 
         let tool_infos: Vec<McpToolInfo> = wrappers
             .iter()
@@ -192,11 +183,11 @@ impl McpClient {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> crate::error::Result<ToolOutput> {
-        let manager = self.manager.lock().await;
-
-        // Find the tool wrapper
-        let wrapper = manager
+        // Find the tool wrapper (owned Arc — the read lock is released here).
+        let wrapper = self
+            .manager
             .get_tool_wrapper(tool_name)
+            .await
             .ok_or_else(|| McpError::ToolNotFound(tool_name.to_string()))?;
 
         // Execute the tool (McpToolWrapper implements Tool trait)
@@ -211,23 +202,21 @@ impl McpClient {
 
     /// Disconnect from the MCP server.
     ///
-    /// Closes the transport connection and cleans up resources.
+    /// Closes the transport connection and cleans up resources via the
+    /// manager's `shutdown_all` (clears all bindings + shuts down the
+    /// underlying connections).
     pub async fn disconnect(&self) -> crate::error::Result<()> {
-        let mut connected = self.connected.lock().await;
-        *connected = false;
-
-        // The McpServerManager doesn't have an explicit disconnect method,
-        // but dropping the connection closes the subprocess/socket.
-        // We reset the manager to a fresh state.
-        let mut manager = self.manager.lock().await;
-        *manager = RealMcpServerManager::new();
-
+        self.connected.store(false, Ordering::Relaxed);
+        self.manager
+            .shutdown_all()
+            .await
+            .map_err(|e| McpError::Connection(e.to_string()))?;
         Ok(())
     }
 
     /// Check if the client is currently connected.
     pub async fn is_connected(&self) -> bool {
-        *self.connected.lock().await
+        self.connected.load(Ordering::Relaxed)
     }
 }
 
@@ -278,6 +267,7 @@ mod tests {
             },
             requires_api_key: false,
             api_key_field: None,
+            ..Default::default()
         };
         let client = McpClient::from_config(config);
         assert_eq!(client.config().name, "custom-server");

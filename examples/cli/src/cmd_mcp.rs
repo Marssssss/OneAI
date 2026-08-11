@@ -135,6 +135,7 @@ pub fn cmd_mcp_add(
     url: Option<&str>,
     args: Option<&str>,
     enabled: bool,
+    lazy: bool,
 ) {
     let mut registry = McpPluginRegistry::from_config_file();
 
@@ -191,6 +192,7 @@ pub fn cmd_mcp_add(
         requires_api_key: false,
         api_key_env: None,
         tags: vec![name.to_string()],
+        lazy,
         ..Default::default()
     };
 
@@ -202,8 +204,8 @@ pub fn cmd_mcp_add(
     }
 
     println!(
-        "✅ MCP server '{}' added (transport: {}, enabled: {})",
-        name, transport, enabled
+        "✅ MCP server '{}' added (transport: {}, enabled: {}, lazy: {})",
+        name, transport, enabled, lazy
     );
     println!("   Config saved to: ~/.oneai/mcp_servers.toml");
     println!("   Use 'oneai mcp connect {}' to test the connection", name);

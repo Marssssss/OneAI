@@ -192,6 +192,7 @@ async fn oauth_401_triggers_refresh_and_retry() {
             use_dynamic_registration: false,
             ..Default::default()
         }),
+        ..Default::default()
     };
     registry.add_entry(entry);
 
