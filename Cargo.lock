@@ -4006,6 +4006,7 @@ name = "oneai-mcp"
 version = "1.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "eventsource-stream",
@@ -4015,6 +4016,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4022,6 +4024,7 @@ dependencies = [
  "tokio-test",
  "toml 0.8.23",
  "tracing",
+ "url",
  "uuid",
 ]
 

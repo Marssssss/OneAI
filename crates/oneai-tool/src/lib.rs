@@ -55,8 +55,8 @@ pub use mcp_real::McpServerManager as RealMcpServerManager;
 pub use mcp_real::McpToolWrapper as RealMcpToolWrapper;
 pub use mcp_real::{default_mcp_configs, normalize_tool_name, optional_mcp_configs};
 pub use mcp_real::{
-    McpConnection, McpConnectionStatus, McpFramingParser, McpServerConfig, McpToolInfo,
-    McpToolPermissions, McpTransport,
+    McpConnection, McpConnectionStatus, McpFramingParser, McpOAuthTokenRefresher, McpServerConfig,
+    McpToolInfo, McpToolPermissions, McpTransport,
 };
 pub use network_proxy::{NetworkApprovalMode, NetworkProxy};
 pub use registry::*;

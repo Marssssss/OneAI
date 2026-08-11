@@ -693,6 +693,63 @@ enum McpAction {
         #[arg(long, default_value_t = false)]
         list: bool,
     },
+    /// Manage OAuth 2.0 authentication for an HTTP-transport MCP server.
+    /// Drives the discovery → (dynamic) registration → authorize → exchange →
+    /// store → refresh flow. Stored tokens are injected at connect time and a
+    /// 401 during a tool call triggers a refresh + retry automatically.
+    Oauth {
+        /// Server name (must carry an `oauth` config + be SSE/StreamableHttp).
+        server: String,
+        #[command(subcommand)]
+        action: OauthAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum OauthAction {
+    /// Run the authorization-code + PKCE login flow. Defaults to the loopback
+    /// redirect (binds a local port, opens the system browser). Pass
+    /// `--manual` to instead print the authorize URL and paste the redirected
+    /// URL back (SSH / headless).
+    Login {
+        /// Manual paste mode (no local port bound).
+        #[arg(long, default_value_t = false)]
+        manual: bool,
+        /// Loopback redirect port (loopback mode only). `0` = OS-assigned.
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Force a refresh of the stored OAuth tokens using the stored refresh token.
+    Refresh,
+    /// Show stored token metadata (no secrets beyond a redacted preview).
+    Status,
+    /// Delete the stored OAuth tokens (logout).
+    Logout,
+    /// Configure the `[servers.<name>.oauth]` table fields from the CLI
+    /// (persisted to `~/.oneai/mcp_servers.toml`). All flags optional.
+    Set {
+        /// Static client id (omit to use dynamic registration).
+        #[arg(long)]
+        client_id: Option<String>,
+        /// Static client secret (confidential clients).
+        #[arg(long)]
+        client_secret: Option<String>,
+        /// Comma-separated scopes.
+        #[arg(long)]
+        scopes: Option<String>,
+        /// Disable dynamic client registration.
+        #[arg(long, default_value_t = false)]
+        no_dynamic_registration: bool,
+        /// Disable PKCE.
+        #[arg(long, default_value_t = false)]
+        no_pkce: bool,
+        /// Override the OAuth-protected resource URL (defaults to transport url).
+        #[arg(long)]
+        resource_url: Option<String>,
+        /// Loopback redirect port hint.
+        #[arg(long)]
+        redirect_port: Option<u16>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1743,6 +1800,40 @@ fn main() {
                     list,
                 );
             }
+            McpAction::Oauth { server, action } => match action {
+                OauthAction::Login { manual, port } => {
+                    cmd_mcp::cmd_mcp_oauth_login(&server, manual, port);
+                }
+                OauthAction::Refresh => {
+                    cmd_mcp::cmd_mcp_oauth_refresh(&server);
+                }
+                OauthAction::Status => {
+                    cmd_mcp::cmd_mcp_oauth_status(&server);
+                }
+                OauthAction::Logout => {
+                    cmd_mcp::cmd_mcp_oauth_logout(&server);
+                }
+                OauthAction::Set {
+                    client_id,
+                    client_secret,
+                    scopes,
+                    no_dynamic_registration,
+                    no_pkce,
+                    resource_url,
+                    redirect_port,
+                } => {
+                    cmd_mcp::cmd_mcp_oauth_set(
+                        &server,
+                        client_id.as_deref(),
+                        client_secret.as_deref(),
+                        scopes.as_deref(),
+                        no_dynamic_registration,
+                        no_pkce,
+                        resource_url.as_deref(),
+                        redirect_port,
+                    );
+                }
+            },
         },
         Some(Commands::A2a { action }) => match action {
             A2aAction::Serve { domain, port } => {

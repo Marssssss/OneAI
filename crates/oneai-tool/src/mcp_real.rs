@@ -301,6 +301,31 @@ impl Default for McpToolPermissions {
     }
 }
 
+// ─── McpOAuthTokenRefresher ───────────────────────────────────────────────────
+//
+// The MCP OAuth flow (discovery / login / token storage / refresh) lives in
+// the higher `oneai-mcp` crate — it owns reqwest + the token store. But the
+// transport-level 401-retry must happen inside `McpConnection` (this crate),
+// because that is where the failing HTTP POST is observed. To cross the layer
+// without a reverse dependency, the flow crate implements this trait and
+// injects it into the manager / connection. On a 401 from an HTTP transport,
+// the connection calls `refresh_token` to obtain a fresh bearer and retries
+// the call once.
+
+/// Refresh-on-401 hook for MCP HTTP transports.
+///
+/// Implementations (in `oneai-mcp`) load the stored refresh token for a
+/// server, POST it to the authorization server's token endpoint, persist the
+/// new tokens, and return the new access token. Returns `Ok(None)` when no
+/// stored tokens / no refresh token exist (so the caller surfaces the 401
+/// rather than looping).
+#[async_trait]
+pub trait McpOAuthTokenRefresher: Send + Sync {
+    /// Refresh if needed and return the current access token (if any) for a
+    /// server. Called by `McpConnection` on a 401 response.
+    async fn refresh_token(&self, server_name: &str) -> Result<Option<String>>;
+}
+
 // ─── McpConnection ──────────────────────────────────────────────────────────
 
 /// A persistent connection to an MCP server.
@@ -335,6 +360,10 @@ pub struct McpConnection {
     session_id: Option<String>,
     /// Next JSON-RPC request ID (incremented for each request).
     next_id: u64,
+    /// Optional OAuth token refresher — invoked on a 401 from an HTTP
+    /// transport to obtain a fresh bearer and retry the call once. `None`
+    /// for servers without OAuth.
+    token_refresher: Option<Arc<dyn McpOAuthTokenRefresher>>,
 }
 
 /// Information about a tool discovered from an MCP server.
@@ -360,6 +389,28 @@ impl McpConnection {
             sse_url: None,
             post_url: None,
             session_id: None,
+            token_refresher: None,
+        }
+    }
+
+    /// Attach an OAuth token refresher — invoked on a 401 from an HTTP
+    /// transport (SSE / StreamableHttp) to obtain a fresh bearer and retry
+    /// the call once. `None` disables the 401-retry path.
+    pub fn with_token_refresher(mut self, refresher: Arc<dyn McpOAuthTokenRefresher>) -> Self {
+        self.token_refresher = Some(refresher);
+        self
+    }
+
+    /// Replace the bearer in this connection's transport headers. Used after
+    /// a successful refresh so the retry (and subsequent calls) carry the new
+    /// token. No-op for the Stdio transport.
+    fn set_bearer_token(&mut self, token: &str) {
+        let value = format!("Bearer {}", token);
+        match &mut self.config.transport {
+            McpTransport::Sse { headers, .. } | McpTransport::StreamableHttp { headers, .. } => {
+                headers.insert("Authorization".to_string(), value);
+            }
+            McpTransport::Stdio { .. } => {}
         }
     }
 
@@ -740,95 +791,131 @@ impl McpConnection {
     ///
     /// Supports Stdio (persistent subprocess), SSE (HTTP POST), and
     /// StreamableHttp (HTTP POST with session ID).
+    ///
+    /// For the HTTP transports, a 401 response triggers a single
+    /// OAuth token refresh (via the injected [`McpOAuthTokenRefresher`],
+    /// if any) and one retry — the "重试" leg of the OAuth flow. Without a
+    /// refresher, the 401 surfaces as an error like any other non-2xx.
     pub async fn call_tool(
         &mut self,
         tool_name: &str,
         args: serde_json::Value,
     ) -> Result<ToolOutput> {
-        match &self.config.transport {
+        let call_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": args
+            }
+        });
+        self.next_id += 1;
+
+        // Stdio has its own persistent-subprocess flow and no HTTP/OAuth path.
+        if let McpTransport::Stdio { .. } = &self.config.transport {
+            if self.stdin_writer.is_none() || self.stdout_reader.is_none() {
+                return Ok(ToolOutput {
+                    success: false,
+                    content: String::new(),
+                    error: Some(
+                        "MCP connection not established — call connect_and_discover() first"
+                            .to_string(),
+                    ),
+                    ..Default::default()
+                });
+            }
+            self.send_jsonrpc(&call_request).await?;
+            let call_response = self.read_jsonrpc_response().await?;
+            return Self::parse_tool_call_response(&call_response);
+        }
+
+        // HTTP transports (SSE / StreamableHttp) share the OAuth-aware path.
+        let (url, use_session) = match &self.config.transport {
+            McpTransport::Sse { url, .. } => (url.clone(), false),
+            McpTransport::StreamableHttp { url, .. } => (url.clone(), true),
+            McpTransport::Stdio { .. } => unreachable!("stdio handled above"),
+        };
+        let response = self
+            .send_http_call(&url, &call_request, use_session)
+            .await?;
+        Self::parse_tool_call_response(&response)
+    }
+
+    /// Send a `tools/call` POST for an HTTP transport, with one-shot 401 →
+    /// refresh → retry. Returns the parsed JSON-RPC response. `use_session`
+    /// selects the StreamableHttp session-header path over the plain SSE path.
+    async fn send_http_call(
+        &mut self,
+        url: &str,
+        message: &serde_json::Value,
+        use_session: bool,
+    ) -> Result<serde_json::Value> {
+        // Clone the Client (cheap — it's an `Arc` internally) so the
+        // immutable borrow of `self.http_client` ends before the `&mut self`
+        // refresh path below.
+        let client = self.http_client.clone().ok_or_else(|| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "{} HTTP client not initialized",
+                if use_session { "StreamableHttp" } else { "SSE" }
+            ))
+        })?;
+
+        // Snapshot the current headers + session id so the immutable borrow of
+        // `self.config.transport` ends before the `&mut self` refresh below.
+        let (headers, session_id) = match &self.config.transport {
+            McpTransport::Sse { headers, .. } => (headers.clone(), None),
+            McpTransport::StreamableHttp { headers, .. } => (
+                headers.clone(),
+                if use_session {
+                    self.session_id.clone()
+                } else {
+                    None
+                },
+            ),
             McpTransport::Stdio { .. } => {
-                // Use persistent connection (no re-spawn!)
-                if self.stdin_writer.is_none() || self.stdout_reader.is_none() {
-                    return Ok(ToolOutput {
-                        success: false,
-                        content: String::new(),
-                        error: Some(
-                            "MCP connection not established — call connect_and_discover() first"
-                                .to_string(),
-                        ),
-                        ..Default::default()
-                    });
+                return Err(oneai_core::error::OneAIError::Provider(
+                    "send_http_call called for a Stdio transport".to_string(),
+                ));
+            }
+        };
+
+        let response = if use_session {
+            Self::send_post_session(&client, url, &headers, session_id.as_deref(), message).await?
+        } else {
+            Self::send_post(&client, url, &headers, message).await?
+        };
+
+        // 401 → refresh once (if a refresher is wired) and retry the same call.
+        if response.status().as_u16() == 401 {
+            if let Some(refresher) = self.token_refresher.clone() {
+                if let Some(new_token) = refresher.refresh_token(&self.config.name).await? {
+                    self.set_bearer_token(&new_token);
+                    let headers = match &self.config.transport {
+                        McpTransport::Sse { headers, .. }
+                        | McpTransport::StreamableHttp { headers, .. } => headers.clone(),
+                        McpTransport::Stdio { .. } => headers,
+                    };
+                    let retry = if use_session {
+                        Self::send_post_session(
+                            &client,
+                            url,
+                            &headers,
+                            session_id.as_deref(),
+                            message,
+                        )
+                        .await?
+                    } else {
+                        Self::send_post(&client, url, &headers, message).await?
+                    };
+                    let (val, _) = Self::parse_mcp_response(retry, url).await?;
+                    return Ok(val);
                 }
-
-                // Send tools/call request
-                let call_request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": self.next_id,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": args
-                    }
-                });
-                self.next_id += 1;
-
-                self.send_jsonrpc(&call_request).await?;
-                let call_response = self.read_jsonrpc_response().await?;
-
-                Self::parse_tool_call_response(&call_response)
-            }
-            McpTransport::Sse { url, headers } => {
-                // Use HTTP POST for SSE transport
-                let client = self.http_client.as_ref().ok_or_else(|| {
-                    oneai_core::error::OneAIError::Provider(
-                        "SSE HTTP client not initialized".to_string(),
-                    )
-                })?;
-
-                let call_request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": self.next_id,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": args
-                    }
-                });
-                self.next_id += 1;
-
-                let response = Self::http_post_json(client, url, headers, &call_request).await?;
-                Self::parse_tool_call_response(&response)
-            }
-            McpTransport::StreamableHttp { url, headers } => {
-                // Use HTTP POST with session ID for StreamableHttp transport
-                let client = self.http_client.as_ref().ok_or_else(|| {
-                    oneai_core::error::OneAIError::Provider(
-                        "StreamableHttp HTTP client not initialized".to_string(),
-                    )
-                })?;
-
-                let call_request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": self.next_id,
-                    "method": "tools/call",
-                    "params": {
-                        "name": tool_name,
-                        "arguments": args
-                    }
-                });
-                self.next_id += 1;
-
-                let (response, _) = Self::http_post_with_session(
-                    client,
-                    url,
-                    headers,
-                    self.session_id.as_deref(),
-                    &call_request,
-                )
-                .await?;
-                Self::parse_tool_call_response(&response)
             }
         }
+
+        let (val, _) = Self::parse_mcp_response(response, url).await?;
+        Ok(val)
     }
 
     /// Send a JSON-RPC message via the persistent stdin connection.
@@ -957,27 +1044,11 @@ impl McpConnection {
         })
     }
 
-    /// Send a JSON-RPC message via HTTP POST and receive the JSON response.
-    async fn http_post_json(
-        client: &reqwest::Client,
-        url: &str,
+    /// Apply a custom-headers map to a request builder.
+    fn apply_headers(
+        mut request: reqwest::RequestBuilder,
         headers: &HashMap<String, String>,
-        message: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let (response, _) = Self::http_post_with_headers(client, url, headers, message).await?;
-        Ok(response)
-    }
-
-    /// Send a JSON-RPC message via HTTP POST and receive response + headers.
-    async fn http_post_with_headers(
-        client: &reqwest::Client,
-        url: &str,
-        headers: &HashMap<String, String>,
-        message: &serde_json::Value,
-    ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
-        let mut request = client.post(url).json(message);
-
-        // Add any custom headers to this specific request
+    ) -> reqwest::RequestBuilder {
         for (key, value) in headers {
             if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
                 if let Ok(header_value) = reqwest::header::HeaderValue::from_str(value) {
@@ -985,90 +1056,60 @@ impl McpConnection {
                 }
             }
         }
+        request
+    }
 
-        let response = request.send().await.map_err(|e| {
+    /// Build and **send** a JSON POST request (no session header), returning
+    /// the raw `reqwest::Response`. Network errors only — the caller inspects
+    /// `.status()` and reads the body. Split out so `call_tool` can branch on
+    /// a 401 before the body is consumed.
+    async fn send_post(
+        client: &reqwest::Client,
+        url: &str,
+        headers: &HashMap<String, String>,
+        message: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let request = Self::apply_headers(client.post(url).json(message), headers);
+        request.send().await.map_err(|e| {
             oneai_core::error::OneAIError::Provider(format!(
                 "MCP HTTP POST error to {}: {}",
                 url, e
             ))
-        })?;
-
-        let resp_headers = response.headers().clone();
-
-        // Check status code
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(oneai_core::error::OneAIError::Provider(format!(
-                "MCP HTTP POST returned status {} from {}: {}",
-                status.as_u16(),
-                url,
-                body
-            )));
-        }
-
-        // Parse response body as JSON
-        let body = response.text().await.map_err(|e| {
-            oneai_core::error::OneAIError::Provider(format!("MCP HTTP POST read error: {}", e))
-        })?;
-
-        // The response might be SSE format (multiple events) or plain JSON
-        // Try parsing as plain JSON first
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-            return Ok((json, resp_headers));
-        }
-
-        // Try parsing as SSE format (event: message, data: {...})
-        // Find the JSON data in SSE events
-        for line in body.lines() {
-            if line.starts_with("data: ") {
-                let data = line.trim_start_matches("data: ").trim();
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                    return Ok((json, resp_headers));
-                }
-            }
-        }
-
-        // If neither works, return an error
-        Err(oneai_core::error::OneAIError::Provider(format!(
-            "MCP HTTP POST response could not be parsed as JSON from {}: {}",
-            url, body
-        )))
+        })
     }
 
-    /// Send a JSON-RPC message via HTTP POST with session ID header.
-    async fn http_post_with_session(
+    /// Build and **send** a JSON POST request with the `Mcp-Session-Id` header
+    /// (StreamableHttp). Like [`send_post`](Self::send_post), returns the raw
+    /// response so the caller can react to a 401.
+    async fn send_post_session(
         client: &reqwest::Client,
         url: &str,
         headers: &HashMap<String, String>,
         session_id: Option<&str>,
         message: &serde_json::Value,
-    ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
-        let mut request = client.post(url).json(message);
-
-        // Add session ID header if present
-        if let Some(sid) = session_id {
-            request = request.header("Mcp-Session-Id", sid);
-        }
-
-        // Add custom headers
-        for (key, value) in headers {
-            if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
-                if let Ok(header_value) = reqwest::header::HeaderValue::from_str(value) {
-                    request = request.header(header_name, header_value);
-                }
-            }
-        }
-
-        let response = request.send().await.map_err(|e| {
+    ) -> Result<reqwest::Response> {
+        let request = client.post(url).json(message);
+        let request = if let Some(sid) = session_id {
+            request.header("Mcp-Session-Id", sid)
+        } else {
+            request
+        };
+        let request = Self::apply_headers(request, headers);
+        request.send().await.map_err(|e| {
             oneai_core::error::OneAIError::Provider(format!(
                 "MCP HTTP POST error to {}: {}",
                 url, e
             ))
-        })?;
+        })
+    }
 
+    /// Consume a `reqwest::Response`: error on non-2xx (carrying status +
+    /// body), otherwise parse the body as plain JSON or an SSE `data:` event.
+    async fn parse_mcp_response(
+        response: reqwest::Response,
+        url: &str,
+    ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
         let resp_headers = response.headers().clone();
-
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -1084,7 +1125,6 @@ impl McpConnection {
             oneai_core::error::OneAIError::Provider(format!("MCP HTTP POST read error: {}", e))
         })?;
 
-        // Parse response (plain JSON or SSE format)
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
             return Ok((json, resp_headers));
         }
@@ -1103,6 +1143,41 @@ impl McpConnection {
             url,
             &body[..body.len().min(200)]
         )))
+    }
+
+    /// Send a JSON-RPC message via HTTP POST and receive the JSON response.
+    async fn http_post_json(
+        client: &reqwest::Client,
+        url: &str,
+        headers: &HashMap<String, String>,
+        message: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let response = Self::send_post(client, url, headers, message).await?;
+        let (json, _) = Self::parse_mcp_response(response, url).await?;
+        Ok(json)
+    }
+
+    /// Send a JSON-RPC message via HTTP POST and receive response + headers.
+    async fn http_post_with_headers(
+        client: &reqwest::Client,
+        url: &str,
+        headers: &HashMap<String, String>,
+        message: &serde_json::Value,
+    ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
+        let response = Self::send_post(client, url, headers, message).await?;
+        Self::parse_mcp_response(response, url).await
+    }
+
+    /// Send a JSON-RPC message via HTTP POST with session ID header.
+    async fn http_post_with_session(
+        client: &reqwest::Client,
+        url: &str,
+        headers: &HashMap<String, String>,
+        session_id: Option<&str>,
+        message: &serde_json::Value,
+    ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
+        let response = Self::send_post_session(client, url, headers, session_id, message).await?;
+        Self::parse_mcp_response(response, url).await
     }
 
     /// Parse a tool call response from any transport into a ToolOutput.
@@ -1315,6 +1390,10 @@ use crate::tool_interfaces::PermissionAwareTool;
 pub struct McpServerManager {
     connections: HashMap<String, Arc<tokio::sync::Mutex<McpConnection>>>,
     tool_wrappers: HashMap<String, Arc<McpToolWrapper>>,
+    /// Optional OAuth token refresher — cloned into each new connection so
+    /// the transport-level 401 → refresh → retry path is available for OAuth
+    /// servers. `None` = no OAuth servers connected yet (or none configured).
+    token_refresher: Option<Arc<dyn McpOAuthTokenRefresher>>,
 }
 
 impl McpServerManager {
@@ -1322,7 +1401,15 @@ impl McpServerManager {
         Self {
             connections: HashMap::new(),
             tool_wrappers: HashMap::new(),
+            token_refresher: None,
         }
+    }
+
+    /// Install an OAuth token refresher used by all subsequently connected
+    /// HTTP-transport servers. Existing connections are unaffected (they
+    /// captured the refresher at their own connect time, if any).
+    pub fn set_token_refresher(&mut self, refresher: Arc<dyn McpOAuthTokenRefresher>) {
+        self.token_refresher = Some(refresher);
     }
 
     /// Connect to an MCP server, discover tools, and create wrappers using
@@ -1346,6 +1433,11 @@ impl McpServerManager {
         permissions: &McpToolPermissions,
     ) -> Result<Vec<String>> {
         let mut connection = McpConnection::new(config.clone());
+        // Attach the OAuth refresher (if any) so HTTP-transport calls can
+        // recover from a 401 by refreshing + retrying once.
+        if let Some(refresher) = self.token_refresher.clone() {
+            connection = connection.with_token_refresher(refresher);
+        }
         connection.connect_and_discover().await?;
 
         let connection_arc = Arc::new(tokio::sync::Mutex::new(connection));

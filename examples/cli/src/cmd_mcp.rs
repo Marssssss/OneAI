@@ -1,18 +1,22 @@
 //! MCP server management commands.
 //!
 //! Subcommands for managing MCP server plugins and running as an MCP server:
-//!   oneai mcp serve   — Run OneAI as an MCP server (Stdio mode)
-//!   oneai mcp list    — List configured MCP servers
-//!   oneai mcp add     — Add an MCP server config
-//!   oneai mcp remove  — Remove an MCP server config
-//!   oneai mcp connect — Test connecting to an MCP server
+//!   oneai mcp serve    — Run OneAI as an MCP server (Stdio mode)
+//!   oneai mcp list     — List configured MCP servers
+//!   oneai mcp add      — Add an MCP server config
+//!   oneai mcp remove   — Remove an MCP server config
+//!   oneai mcp connect  — Test connecting to an MCP server
+//!   oneai mcp oauth    — OAuth 2.0 login / refresh / status / logout for an
+//!                        HTTP-transport MCP server (issue #31 Stage 3).
 
 use std::sync::Arc;
 
 use oneai_core::{PermissionLevel as Level, ToolExposure};
 use oneai_tool::{CalculatorTool, ToolRegistry};
 
-use oneai_mcp::{McpPluginEntry, McpPluginRegistry, McpPluginSource, McpServerHost};
+use oneai_mcp::{
+    McpOAuthConfig, McpPluginEntry, McpPluginRegistry, McpPluginSource, McpServerHost,
+};
 
 /// Run OneAI as an MCP server via Stdio transport.
 ///
@@ -457,4 +461,193 @@ fn fmt_exposure(e: ToolExposure) -> &'static str {
         ToolExposure::Hidden => "hidden",
         _ => "unknown",
     }
+}
+
+// ─── OAuth ───────────────────────────────────────────────────────────────────
+
+/// Run the OAuth login flow for a server (issue #31 Stage 3).
+pub fn cmd_mcp_oauth_login(server: &str, manual: bool, port: Option<u16>) {
+    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+    rt.block_on(async {
+        // Apply a --port override to the entry's oauth config before login
+        // (avoids requiring a separate `set` step just to pin a port).
+        let mut registry = McpPluginRegistry::from_config_file();
+        if let Some(p) = port {
+            let mut entry = match registry.get_entry(server) {
+                Some(e) => e.clone(),
+                None => {
+                    eprintln!("MCP server '{}' not found in config.", server);
+                    return;
+                }
+            };
+            let oauth = entry.oauth.get_or_insert_with(McpOAuthConfig::default);
+            oauth.redirect_port = Some(p);
+            registry.add_entry(entry);
+            let _ = registry.save_config();
+        }
+        match registry.oauth_login(server, manual).await {
+            Ok(tokens) => {
+                println!(
+                    "✅ OAuth login complete for '{}' — token_type={}, expires_at={:?}",
+                    server, tokens.token_type, tokens.expires_at
+                );
+            }
+            Err(e) => {
+                eprintln!("❌ OAuth login failed: {}", e);
+                eprintln!("  Make sure the server entry has an [oauth] table and is an");
+                eprintln!("  SSE or streamable_http transport. Use `oneai mcp oauth <server> set` to configure.");
+            }
+        }
+    });
+}
+
+/// Force a refresh of a server's stored OAuth tokens.
+pub fn cmd_mcp_oauth_refresh(server: &str) {
+    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+    rt.block_on(async {
+        let registry = McpPluginRegistry::from_config_file();
+        match registry.oauth_refresh(server).await {
+            Ok(tokens) => {
+                println!(
+                    "✅ OAuth tokens refreshed for '{}' — expires_at={:?}",
+                    server, tokens.expires_at
+                );
+            }
+            Err(e) => {
+                eprintln!("❌ OAuth refresh failed: {}", e);
+            }
+        }
+    });
+}
+
+/// Show stored OAuth token metadata for a server (redacted access token).
+pub fn cmd_mcp_oauth_status(server: &str) {
+    let registry = McpPluginRegistry::from_config_file();
+    let entry = match registry.get_entry(server) {
+        Some(e) => e,
+        None => {
+            eprintln!("MCP server '{}' not found in config.", server);
+            return;
+        }
+    };
+    println!("🔌 MCP OAuth status — '{}'\n", server);
+    match entry.oauth.as_ref() {
+        Some(cfg) => {
+            println!("  Configured OAuth: yes");
+            println!(
+                "    resource_url: {}",
+                cfg.resource_url
+                    .as_deref()
+                    .unwrap_or("(from transport url)")
+            );
+            println!("    scopes: {:?}", cfg.scopes);
+            println!(
+                "    client_id: {}",
+                cfg.client_id.as_deref().unwrap_or("(dynamic registration)")
+            );
+            println!(
+                "    dynamic_registration: {} | pkce: {}",
+                cfg.use_dynamic_registration, cfg.pkce
+            );
+        }
+        None => {
+            println!(
+                "  Configured OAuth: no (run `oneai mcp oauth {} set ...`)",
+                server
+            );
+        }
+    }
+
+    match registry.oauth_status(server) {
+        Some(tokens) => {
+            let preview = redact(&tokens.access_token);
+            println!("\n  Stored tokens:");
+            println!("    access_token: {}", preview);
+            println!("    token_type:   {}", tokens.token_type);
+            println!(
+                "    refresh_token: {}",
+                if tokens.refresh_token.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+            );
+            println!("    expires_at:    {:?}", tokens.expires_at);
+            println!("    expired:       {}", tokens.is_expired());
+        }
+        None => {
+            println!(
+                "\n  Stored tokens: none (run `oneai mcp oauth {} login`)",
+                server
+            );
+        }
+    }
+}
+
+/// Delete a server's stored OAuth tokens (logout).
+pub fn cmd_mcp_oauth_logout(server: &str) {
+    let registry = McpPluginRegistry::from_config_file();
+    match registry.oauth_logout(server) {
+        Ok(()) => println!("✅ OAuth tokens deleted for '{}'.", server),
+        Err(e) => eprintln!("❌ OAuth logout failed: {}", e),
+    }
+}
+
+/// Configure the `[servers.<name>.oauth]` table from CLI flags.
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_mcp_oauth_set(
+    server: &str,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    scopes: Option<&str>,
+    no_dynamic_registration: bool,
+    no_pkce: bool,
+    resource_url: Option<&str>,
+    redirect_port: Option<u16>,
+) {
+    let mut registry = McpPluginRegistry::from_config_file();
+    let mut entry = match registry.get_entry(server) {
+        Some(e) => e.clone(),
+        None => {
+            eprintln!("MCP server '{}' not found in config.", server);
+            return;
+        }
+    };
+    // Build the oauth config — `Set` replaces the whole oauth table for
+    // clarity; callers wanting partial edits can edit the TOML directly.
+    let oauth = McpOAuthConfig {
+        resource_url: resource_url.map(str::to_string),
+        scopes: scopes
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        client_id: client_id.map(str::to_string),
+        client_secret: client_secret.map(str::to_string),
+        redirect_port,
+        use_dynamic_registration: !no_dynamic_registration,
+        pkce: !no_pkce,
+    };
+    entry.oauth = Some(oauth);
+    registry.add_entry(entry);
+    if let Err(e) = registry.save_config() {
+        eprintln!("Error saving config: {}", e);
+        return;
+    }
+    println!(
+        "✅ OAuth config saved for '{}' → ~/.oneai/mcp_servers.toml",
+        server
+    );
+    println!("   Run `oneai mcp oauth {} login` to authorize.", server);
+}
+
+fn redact(token: &str) -> String {
+    let len = token.len();
+    if len <= 8 {
+        return "*".repeat(len);
+    }
+    format!("{}…{}", &token[..4], &token[len - 4..])
 }

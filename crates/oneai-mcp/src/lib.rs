@@ -77,6 +77,7 @@ pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod handler;
+pub mod oauth;
 pub mod plugin;
 pub mod router;
 pub mod server;
@@ -87,6 +88,10 @@ pub use config::*;
 pub use discovery::McpDiscovery;
 pub use error::{McpError, Result as McpResult};
 pub use handler::*;
+pub use oauth::{
+    McpOAuthConfig, McpOAuthFlow, McpOAuthTokenRefresherImpl, OAuthAuthorizationServer,
+    OAuthStoredTokens, OAuthTokenStore, Pkce,
+};
 pub use plugin::*;
 pub use router::*;
 pub use server::*;

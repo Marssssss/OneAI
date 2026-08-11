@@ -14,11 +14,14 @@ use std::sync::Arc;
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
 use oneai_tool::{
-    McpServerConfig, McpToolPermissions, McpTransport, RealMcpServerManager, RealMcpToolWrapper,
-    ToolRegistry,
+    McpOAuthTokenRefresher, McpServerConfig, McpToolPermissions, McpTransport,
+    RealMcpServerManager, RealMcpToolWrapper, ToolRegistry,
 };
 
 use crate::config::McpServerConfigFile;
+use crate::oauth::{
+    McpOAuthConfig, McpOAuthFlow, McpOAuthTokenRefresherImpl, OAuthStoredTokens, OAuthTokenStore,
+};
 
 /// Source type for an MCP plugin server.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -83,6 +86,13 @@ pub struct McpPluginEntry {
     /// `Direct` — zero behaviour change unless a config sets overrides.
     #[serde(default)]
     pub permissions: McpToolPermissions,
+    /// Optional OAuth 2.0 (PKCE) config for HTTP-transport servers. When set
+    /// on an SSE / StreamableHttp server, the registry injects a stored bearer
+    /// into the transport headers at connect time and installs a token
+    /// refresher so a 401 during a tool call triggers a refresh + retry.
+    /// Stdio servers ignore this field.
+    #[serde(default)]
+    pub oauth: Option<McpOAuthConfig>,
 }
 
 impl Default for McpPluginEntry {
@@ -100,6 +110,7 @@ impl Default for McpPluginEntry {
             api_key_env: None,
             tags: vec![],
             permissions: McpToolPermissions::default(),
+            oauth: None,
         }
     }
 }
@@ -171,16 +182,114 @@ pub struct McpPluginRegistry {
     server_manager: Arc<tokio::sync::Mutex<RealMcpServerManager>>,
     /// Connected server names.
     connected: HashMap<String, Vec<String>>, // server_name → discovered_tool_names
+    /// OAuth token store (`~/.oneai/mcp_oauth/`). Shared with the in-connection
+    /// refresher so a 401 can refresh + retry without consulting the registry.
+    token_store: OAuthTokenStore,
 }
 
 impl McpPluginRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
+        Self::with_token_store(OAuthTokenStore::default_store())
+    }
+
+    /// Create a registry with an explicit OAuth token store (tests / custom
+    /// roots). The same store is shared with the in-connection refresher.
+    pub fn with_token_store(token_store: OAuthTokenStore) -> Self {
         Self {
             entries: HashMap::new(),
             server_manager: Arc::new(tokio::sync::Mutex::new(RealMcpServerManager::new())),
             connected: HashMap::new(),
+            token_store,
         }
+    }
+
+    /// Build the OAuth token refresher used by the manager. Cloned into each
+    /// connection at connect time, enabling the transport-level 401 → refresh
+    /// → retry path.
+    fn build_refresher(&self) -> Arc<dyn McpOAuthTokenRefresher> {
+        Arc::new(McpOAuthTokenRefresherImpl::new(self.token_store.clone()))
+    }
+
+    /// The on-disk OAuth token store. Useful for CLI `status` / `logout`
+    /// operations that don't need a live connection.
+    pub fn token_store(&self) -> &OAuthTokenStore {
+        &self.token_store
+    }
+
+    /// Derive the OAuth resource URL (the protected-resource endpoint) for an
+    /// entry. Defaults to the transport URL when the entry's
+    /// `oauth.resource_url` is unset. Returns `None` for non-HTTP transports
+    /// or entries without an `oauth` config.
+    fn oauth_resource_url(entry: &McpPluginEntry) -> Option<String> {
+        let cfg = entry.oauth.as_ref()?;
+        let transport_url = match &entry.source {
+            McpPluginSource::Sse { url, .. } | McpPluginSource::StreamableHttp { url, .. } => {
+                url.clone()
+            }
+            _ => return None,
+        };
+        Some(cfg.resource_url.clone().unwrap_or(transport_url))
+    }
+
+    /// Build an `McpOAuthFlow` for an entry (for login / refresh / status).
+    /// `None` if the entry has no OAuth config or is not an HTTP transport.
+    fn oauth_flow_for(&self, entry: &McpPluginEntry) -> Option<McpOAuthFlow> {
+        let resource_url = Self::oauth_resource_url(entry)?;
+        Some(McpOAuthFlow::new(
+            entry.name.clone(),
+            entry.oauth.clone()?,
+            resource_url,
+            self.token_store.clone(),
+        ))
+    }
+
+    /// Resolve a bearer token to inject into an entry's transport at connect
+    /// time. Loads stored tokens; if they're expired and a refresh token is
+    /// available, refreshes first (persisting the new record). Returns
+    /// `Ok(None)` when the entry has no OAuth config or no stored tokens — the
+    /// caller connects without a bearer (the server may allow unauth, or the
+    /// first 401 triggers a refresh+retry via the in-connection refresher).
+    async fn resolve_bearer(&self, entry: &McpPluginEntry) -> Result<Option<String>> {
+        let Some(flow) = self.oauth_flow_for(entry) else {
+            return Ok(None);
+        };
+        let Some(tokens) = flow.stored_token() else {
+            return Ok(None);
+        };
+        if tokens.is_expired() && tokens.refresh_token.is_some() {
+            match flow.refresh_stored().await {
+                Ok(refreshed) => return Ok(Some(refreshed.access_token)),
+                Err(e) => {
+                    tracing::warn!(
+                        "OAuth refresh for '{}' failed at connect (will retry on 401): {}",
+                        entry.name,
+                        e
+                    );
+                    return Ok(Some(tokens.access_token)); // try the stale one
+                }
+            }
+        }
+        Ok(Some(tokens.access_token))
+    }
+
+    /// Inject a bearer into an HTTP transport's headers in-place.
+    fn inject_bearer(config: &mut McpServerConfig, token: &str) {
+        let value = format!("Bearer {}", token);
+        match &mut config.transport {
+            McpTransport::Sse { headers, .. } | McpTransport::StreamableHttp { headers, .. } => {
+                headers.insert("Authorization".to_string(), value);
+            }
+            McpTransport::Stdio { .. } => {}
+        }
+    }
+
+    /// Install the OAuth refresher on the manager (idempotent — cheap to
+    /// repeat). Called before each connect so newly-configured OAuth servers
+    /// get the 401-retry path on their first connection.
+    async fn ensure_refresher(&self) {
+        let mut manager = self.server_manager.lock().await;
+        manager.set_token_refresher(self.build_refresher());
     }
 
     /// Create a registry from a config file.
@@ -248,6 +357,11 @@ impl McpPluginRegistry {
     ///
     /// Uses the oneai-tool McpServerManager to establish a connection
     /// and discover available tools. Stores discovered tool names.
+    ///
+    /// For OAuth-configured HTTP servers, a stored bearer is injected into the
+    /// transport headers (refreshing first if the stored token is expired), and
+    /// the manager's token refresher is installed so a 401 mid-call triggers a
+    /// refresh + retry.
     pub async fn connect_server(&mut self, name: &str) -> Result<Vec<String>> {
         let entry = self.entries.get(name).ok_or_else(|| {
             oneai_core::error::OneAIError::Provider(format!(
@@ -255,6 +369,7 @@ impl McpPluginRegistry {
                 name
             ))
         })?;
+        let entry = entry.clone();
 
         if !entry.enabled {
             return Err(oneai_core::error::OneAIError::Provider(format!(
@@ -263,9 +378,15 @@ impl McpPluginRegistry {
             )));
         }
 
-        let config = entry.to_server_config();
+        let mut config = entry.to_server_config();
         let permissions = entry.permissions.clone();
+        // OAuth: inject a stored bearer (refreshing if expired) before connect.
+        if let Some(token) = self.resolve_bearer(&entry).await? {
+            Self::inject_bearer(&mut config, &token);
+        }
         let mut manager = self.server_manager.lock().await;
+        // Install the refresher so the in-connection 401-retry path is live.
+        manager.set_token_refresher(self.build_refresher());
         let tool_names = manager
             .connect_server_with_policy(config, &permissions)
             .await?;
@@ -289,12 +410,28 @@ impl McpPluginRegistry {
     /// Returns a map of server_name → discovered_tool_names; a failed
     /// connect yields an empty `Vec` for that server (warned, not fatal).
     pub async fn connect_all_enabled(&mut self) -> Result<HashMap<String, Vec<String>>> {
-        let configs: Vec<(String, McpServerConfig, McpToolPermissions)> = self
+        // Snapshot enabled entries so the async bearer resolution doesn't hold a
+        // borrow of `self.entries`.
+        let entry_snapshots: Vec<McpPluginEntry> = self
             .entries
             .values()
             .filter(|e| e.enabled)
-            .map(|e| (e.name.clone(), e.to_server_config(), e.permissions.clone()))
+            .cloned()
             .collect();
+
+        // Pre-resolve OAuth bearers (file reads; occasional refresh) so the
+        // parallel connect tasks only carry plain `McpServerConfig`s.
+        let mut prepared: Vec<(String, McpServerConfig, McpToolPermissions)> = Vec::new();
+        for entry in entry_snapshots {
+            let mut config = entry.to_server_config();
+            if let Some(token) = self.resolve_bearer(&entry).await? {
+                Self::inject_bearer(&mut config, &token);
+            }
+            prepared.push((entry.name.clone(), config, entry.permissions.clone()));
+        }
+
+        // Install the OAuth refresher once (shared by all subsequent connects).
+        self.ensure_refresher().await;
 
         // Each task clones the shared manager Arc and connects one server.
         // `connect_server_with_policy` is `&mut` on the manager, but the
@@ -303,7 +440,7 @@ impl McpPluginRegistry {
         // lookup, result aggregation) is concurrent. This still unblocks the
         // registry from holding the lock across all servers' surrounding setup.
         let mgr = self.server_manager.clone();
-        let outcomes = futures::future::join_all(configs.into_iter().map(|(name, cfg, perms)| {
+        let outcomes = futures::future::join_all(prepared.into_iter().map(|(name, cfg, perms)| {
             let mgr = mgr.clone();
             async move {
                 let outcome = {
@@ -365,9 +502,14 @@ impl McpPluginRegistry {
                 name
             )));
         }
-        let config = entry.to_server_config();
+        let mut config = entry.to_server_config();
         let permissions = entry.permissions.clone();
+        // OAuth: inject a stored bearer (refreshing if expired) before reconnect.
+        if let Some(token) = self.resolve_bearer(&entry).await? {
+            Self::inject_bearer(&mut config, &token);
+        }
         let mut manager = self.server_manager.lock().await;
+        manager.set_token_refresher(self.build_refresher());
         let tool_names = manager
             .reconnect_server_with_policy(config, &permissions)
             .await?;
@@ -431,6 +573,60 @@ impl McpPluginRegistry {
     /// Get discovered tool names for a connected server.
     pub fn server_tools(&self, name: &str) -> Option<&Vec<String>> {
         self.connected.get(name)
+    }
+
+    // ─── OAuth ───────────────────────────────────────────────────────────────
+
+    /// Run the OAuth login flow for a server (loopback redirect by default).
+    /// The server entry must carry an `oauth` config and be an HTTP transport
+    /// (SSE / StreamableHttp). On success the tokens are persisted and ready
+    /// to inject on the next connect.
+    pub async fn oauth_login(&self, name: &str, manual: bool) -> Result<OAuthStoredTokens> {
+        let entry = self.entries.get(name).ok_or_else(|| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' not found in registry",
+                name
+            ))
+        })?;
+        let flow = self.oauth_flow_for(entry).ok_or_else(|| {
+            oneai_core::error::OneAIError::Config(format!(
+                "MCP plugin '{}' has no OAuth config (or is not an HTTP transport)",
+                name
+            ))
+        })?;
+        if manual {
+            flow.login_manual().await
+        } else {
+            flow.login_loopback().await
+        }
+    }
+
+    /// Force a refresh of a server's stored OAuth tokens.
+    pub async fn oauth_refresh(&self, name: &str) -> Result<OAuthStoredTokens> {
+        let entry = self.entries.get(name).ok_or_else(|| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' not found in registry",
+                name
+            ))
+        })?;
+        let flow = self.oauth_flow_for(entry).ok_or_else(|| {
+            oneai_core::error::OneAIError::Config(format!(
+                "MCP plugin '{}' has no OAuth config (or is not an HTTP transport)",
+                name
+            ))
+        })?;
+        flow.refresh_stored().await
+    }
+
+    /// Load a server's stored OAuth tokens (without refreshing). `None` if no
+    /// login has been completed.
+    pub fn oauth_status(&self, name: &str) -> Option<OAuthStoredTokens> {
+        self.token_store.load(name)
+    }
+
+    /// Delete a server's stored OAuth tokens (logout).
+    pub fn oauth_logout(&self, name: &str) -> Result<()> {
+        self.token_store.delete(name)
     }
 
     /// Save the current registry entries to the default config file.
