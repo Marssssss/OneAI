@@ -4020,6 +4020,154 @@ async fn self_extension_diff_catches_footprint_gate_flip() {
     );
 }
 
+// ─── #27 ToolExposure — model dispatch reject + schema filter ────────────────
+
+/// A mock tool with a fixed `ToolExposure` — the model-dispatch guard and the
+/// schema filter both consult `effective_exposure`, which (with no DomainPack)
+/// falls back to `tool.exposure()`.
+struct FixedExposureMockTool {
+    name: String,
+    exposure: oneai_core::ToolExposure,
+    executed: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl Tool for FixedExposureMockTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "a tool with a fixed exposure for #27 tests"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
+    fn exposure(&self) -> oneai_core::ToolExposure {
+        self.exposure
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+    ) -> std::result::Result<ToolOutput, oneai_core::error::OneAIError> {
+        self.executed.store(true, Ordering::Relaxed);
+        Ok(ToolOutput {
+            success: true,
+            content: "ran".into(),
+            error: None,
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn tool_exposure_hidden_call_is_rejected_not_executed() {
+    // No DomainPack → effective exposure = tool.exposure() = Hidden. The
+    // model calling a Hidden tool (a hallucinated name — the schema filter
+    // keeps it out of the tool list) must be rejected at dispatch and never
+    // executed. Defense-in-depth for #27.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("hidden_tool", serde_json::json!({})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observer = TestObserver {
+        events: events.clone(),
+    };
+
+    let tools_map: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let executed = Arc::new(AtomicBool::new(false));
+    let hidden = Arc::new(FixedExposureMockTool {
+        name: "hidden_tool".to_string(),
+        exposure: oneai_core::ToolExposure::Hidden,
+        executed: executed.clone(),
+    }) as Arc<dyn Tool>;
+    tools_map
+        .write()
+        .await
+        .insert("hidden_tool".to_string(), hidden);
+
+    let loop_ = build_agent_loop_with_map(
+        provider,
+        tools_map,
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let _ = loop_
+        .run_with_observer("call the hidden tool", &observer)
+        .await
+        .unwrap();
+
+    // The dispatch guard produced a failed ToolResult naming exposure=Hidden.
+    let evs = events.lock().unwrap().clone();
+    let rejected = evs.iter().any(|e| {
+        matches!(e, TestEvent::ToolResult(_, name, out)
+            if name == "hidden_tool" && !out.success
+            && out.error.as_deref().unwrap_or("").contains("not model-dispatchable"))
+    });
+    assert!(
+        rejected,
+        "Hidden tool call must be rejected; events = {evs:?}"
+    );
+    assert!(
+        !executed.load(Ordering::Relaxed),
+        "Hidden tool must never execute"
+    );
+}
+
+#[tokio::test]
+async fn tool_exposure_deferred_call_is_dispatched() {
+    // `Deferred` is model-dispatchable (the model reaches it via tool_search,
+    // then calls by name). The dispatch guard must NOT reject it.
+    let provider = MockProvider::from_script(vec![
+        ScriptedResponse::tool_call("deferred_tool", serde_json::json!({})),
+        ScriptedResponse::direct_answer("done"),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observer = TestObserver {
+        events: events.clone(),
+    };
+
+    let tools_map: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+    let executed = Arc::new(AtomicBool::new(false));
+    let deferred = Arc::new(FixedExposureMockTool {
+        name: "deferred_tool".to_string(),
+        exposure: oneai_core::ToolExposure::Deferred,
+        executed: executed.clone(),
+    }) as Arc<dyn Tool>;
+    tools_map
+        .write()
+        .await
+        .insert("deferred_tool".to_string(), deferred);
+
+    let loop_ = build_agent_loop_with_map(
+        provider,
+        tools_map,
+        AgentLoopConfig {
+            inject_skills: false,
+            thinking_budget: None,
+            hard_max_iterations: Some(10),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let _ = loop_
+        .run_with_observer("call the deferred tool", &observer)
+        .await
+        .unwrap();
+
+    assert!(
+        executed.load(Ordering::Relaxed),
+        "Deferred tool must be dispatched (model-dispatchable)"
+    );
+}
+
 // ─── Scenario: switch_project meta-tool (Issue #19) ──────────────────────────
 
 /// The `switch_project` meta-tool is intercepted by `parse_decision`, re-binds

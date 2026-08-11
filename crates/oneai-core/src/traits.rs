@@ -120,6 +120,21 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// How this tool is exposed to the model and to code mode (#27).
+    ///
+    /// See [`crate::ToolExposure`]. Default [`crate::ToolExposure::Direct`]:
+    /// existing tools remain visible everywhere (zero behavior change). The
+    /// effective value at a given site is resolved through an
+    /// [`ExposureResolver`] (a DomainPack `PermissionProfile.tool_exposure`
+    /// map overrides this) — see [`effective_exposure`].
+    ///
+    /// Like [`service_available`](Self::service_available), this is a
+    /// non-`async` check by design — it runs on the tool-definition hot path
+    /// every iteration.
+    fn exposure(&self) -> ToolExposure {
+        ToolExposure::Direct
+    }
+
     /// Execute the tool with the given arguments.
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput>;
 }
@@ -143,6 +158,41 @@ pub trait Tool: Send + Sync {
 pub trait PermissionResolver: Send + Sync {
     /// Resolve the permission action for a `(tool_name, args)` call.
     fn resolve(&self, tool_name: &str, args: &serde_json::Value) -> PermissionAction;
+}
+
+// ─── ExposureResolver ────────────────────────────────────────────────────────
+
+/// Resolve the effective [`ToolExposure`] of a tool — the seam by which a
+/// DomainPack's `PermissionProfile.tool_exposure` map overrides a tool's own
+/// [`Tool::exposure`] without inverting the dependency direction (`oneai-tool`
+/// and `oneai-agent` hold this trait object, not `oneai-domain`).
+///
+/// Mirrors [`PermissionResolver`]: the impl lives in `oneai-domain`
+/// (`PermissionProfile`, `MergedDomainPack`); the holders are the four
+/// enforcement sites — the model-schema builder, the agent dispatch path,
+/// the code-mode bridge tool list, and the `tool_search` discovery tool.
+/// When `None`, the caller falls back to `tool.exposure()` directly — see
+/// [`effective_exposure`].
+pub trait ExposureResolver: Send + Sync {
+    /// Resolve the effective exposure for `(tool_name, tool)`. The `tool`
+    /// reference is supplied so the resolver can fall back to the tool's own
+    /// [`Tool::exposure`] when no override is configured.
+    fn resolve_exposure(&self, tool_name: &str, tool: &dyn Tool) -> ToolExposure;
+}
+
+/// The effective exposure of `tool`: the resolver's override (if any) wins,
+/// otherwise the tool's own [`Tool::exposure`].
+///
+/// This is the single function the four enforcement sites call — it is the
+/// one source of truth for "what exposure applies here", so a DomainPack
+/// override and a tool-impl default never diverge.
+pub fn effective_exposure(
+    resolver: Option<&dyn ExposureResolver>,
+    tool: &dyn Tool,
+) -> ToolExposure {
+    resolver
+        .map(|r| r.resolve_exposure(tool.name(), tool))
+        .unwrap_or_else(|| tool.exposure())
 }
 
 // ─── CommandReviewer ─────────────────────────────────────────────────────────

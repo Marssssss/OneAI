@@ -18,7 +18,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use oneai_core::{ApprovalPolicy, PermissionLevel};
+use oneai_core::traits::{ExposureResolver, Tool};
+use oneai_core::{ApprovalPolicy, PermissionLevel, ToolExposure};
 use serde::{Deserialize, Serialize};
 
 // ─── DenyPattern ───────────────────────────────────────────────────────────────
@@ -166,6 +167,17 @@ pub struct PermissionProfile {
     /// (pre-Stage-4 behaviour). Default `None`; a DomainPack configures rules.
     #[serde(default)]
     pub exec_policy: Option<oneai_tool::ExecPolicy>,
+
+    /// #27 — per-tool `ToolExposure` overrides (config-driven visibility
+    /// control). A tool name present here overrides the tool's own
+    /// [`Tool::exposure`](oneai_core::traits::Tool::exposure); absent → the
+    /// tool's default applies. This is the single declarative seam by which a
+    /// DomainPack defers a tool (e.g. a heavy MCP tool to `Deferred` so it
+    /// leaves the initial schema and is reached via `tool_search`), hides one
+    /// (`Hidden`), or restricts one to code mode (`CodeModeOnly`). Default
+    /// empty → zero behavior change (every tool stays `Direct`).
+    #[serde(default)]
+    pub tool_exposure: HashMap<String, ToolExposure>,
 }
 
 impl PermissionProfile {
@@ -181,6 +193,7 @@ impl PermissionProfile {
             approval_policy: ApprovalPolicy::OnFailure,
             trusted_dirs: Vec::new(),
             exec_policy: None,
+            tool_exposure: HashMap::new(),
         }
     }
 
@@ -299,6 +312,21 @@ impl PermissionProfile {
             }
         };
 
+        // #27 — tool_exposure merge: union both maps; on a name present in
+        // both, take the stricter (less model-visible) exposure so combining
+        // packs never widens what the model sees (`ToolExposure::stricter_of`).
+        let mut tool_exposure = a.tool_exposure.clone();
+        for (tool, exp_b) in &b.tool_exposure {
+            match tool_exposure.get(tool) {
+                Some(exp_a) => {
+                    tool_exposure.insert(tool.clone(), exp_a.stricter_of(*exp_b));
+                }
+                None => {
+                    tool_exposure.insert(tool.clone(), *exp_b);
+                }
+            }
+        }
+
         Self {
             name,
             auto_approve,
@@ -309,6 +337,7 @@ impl PermissionProfile {
             approval_policy,
             trusted_dirs,
             exec_policy,
+            tool_exposure,
         }
     }
 }
@@ -326,6 +355,21 @@ impl oneai_core::PermissionResolver for PermissionProfile {
     /// `PermissionResolver` trait, not this concrete type).
     fn resolve(&self, tool_name: &str, args: &serde_json::Value) -> PermissionAction {
         PermissionProfile::resolve(self, tool_name, args)
+    }
+}
+
+impl ExposureResolver for PermissionProfile {
+    /// Resolve the effective [`ToolExposure`] for a tool: the
+    /// `tool_exposure` map overrides the tool's own default; absent →
+    /// `tool.exposure()`. This makes a `PermissionProfile` injectable into the
+    /// four enforcement sites (model-schema builder, agent dispatch,
+    /// code-mode bridge, `tool_search`) without those sites depending on
+    /// `oneai-domain`.
+    fn resolve_exposure(&self, tool_name: &str, tool: &dyn Tool) -> ToolExposure {
+        self.tool_exposure
+            .get(tool_name)
+            .copied()
+            .unwrap_or_else(|| tool.exposure())
     }
 }
 
@@ -616,6 +660,109 @@ mod tests {
         assert_eq!(
             stricter_level(PermissionLevel::Read, PermissionLevel::Read),
             PermissionLevel::Read
+        );
+    }
+
+    // ── #27 — ToolExposure override resolution + merge ────────────────────────
+
+    /// A mock tool whose `exposure()` is backed by a fixed value — mirrors the
+    /// `service_available` mock pattern in `oneai-agent::e2e_tests`.
+    struct FixedExposureTool {
+        name: &'static str,
+        exposure: ToolExposure,
+    }
+    #[async_trait::async_trait]
+    impl oneai_core::traits::Tool for FixedExposureTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "mock"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn risk_level(&self) -> oneai_core::RiskLevel {
+            oneai_core::RiskLevel::Low
+        }
+        fn exposure(&self) -> ToolExposure {
+            self.exposure
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> oneai_core::error::Result<oneai_core::ToolOutput> {
+            Ok(oneai_core::ToolOutput::default())
+        }
+    }
+
+    #[test]
+    fn resolve_exposure_map_override_beats_tool_default() {
+        // Tool's own exposure = Direct, but the profile map overrides to Deferred.
+        let tool = FixedExposureTool {
+            name: "heavy_tool",
+            exposure: ToolExposure::Direct,
+        };
+        let mut profile = PermissionProfile::new("coding");
+        profile
+            .tool_exposure
+            .insert("heavy_tool".to_string(), ToolExposure::Deferred);
+
+        assert_eq!(
+            profile.resolve_exposure("heavy_tool", &tool),
+            ToolExposure::Deferred
+        );
+    }
+
+    #[test]
+    fn resolve_exposure_falls_back_to_tool_default_when_unmapped() {
+        let tool = FixedExposureTool {
+            name: "plain",
+            exposure: ToolExposure::DirectModelOnly,
+        };
+        let profile = PermissionProfile::new("coding"); // empty map
+        assert_eq!(
+            profile.resolve_exposure("plain", &tool),
+            ToolExposure::DirectModelOnly
+        );
+    }
+
+    #[test]
+    fn merge_strictest_picks_the_less_model_visible_exposure() {
+        let mut a = PermissionProfile::new("a");
+        a.tool_exposure
+            .insert("t".to_string(), ToolExposure::Direct);
+        let mut b = PermissionProfile::new("b");
+        b.tool_exposure
+            .insert("t".to_string(), ToolExposure::Hidden);
+
+        let merged = PermissionProfile::merge_strictest(&a, &b);
+        // Hidden is less model-visible than Direct — it wins.
+        assert_eq!(merged.tool_exposure.get("t"), Some(&ToolExposure::Hidden));
+
+        // A tool only in one pack's map is carried through (union).
+        let mut a2 = PermissionProfile::new("a2");
+        a2.tool_exposure
+            .insert("only_in_a".to_string(), ToolExposure::Deferred);
+        let b2 = PermissionProfile::new("b2");
+        let merged2 = PermissionProfile::merge_strictest(&a2, &b2);
+        assert_eq!(
+            merged2.tool_exposure.get("only_in_a"),
+            Some(&ToolExposure::Deferred)
+        );
+    }
+
+    #[test]
+    fn tool_exposure_serde_round_trips_through_profile() {
+        let mut profile = PermissionProfile::new("coding");
+        profile
+            .tool_exposure
+            .insert("web_search".to_string(), ToolExposure::DeferredModelOnly);
+        let json = serde_json::to_string(&profile).unwrap();
+        let back: PermissionProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.tool_exposure.get("web_search"),
+            Some(&ToolExposure::DeferredModelOnly)
         );
     }
 }

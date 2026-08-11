@@ -284,6 +284,25 @@ impl DomainPackValidator {
             ));
         }
 
+        // #27 — tool_exposure values must be one of the six legal ToolExposure
+        // variants. The runtime (config_parser) warns-and-skips an unknown
+        // value; the validator hard-fails so a typo is caught by `oneai pack
+        // check` before it silently leaves a tool at the default `Direct`.
+        for (name, raw) in &config.permission_profile.tool_exposure {
+            if crate::config_parser::parse_tool_exposure(raw).is_none() {
+                issues.push(ValidationIssue::error_at(
+                    "permissions",
+                    format!(
+                        "Unknown tool_exposure value '{}' for tool '{}' — expected one of \
+                         direct / deferred / deferred_model_only / direct_model_only / \
+                         code_mode_only / hidden",
+                        raw, name,
+                    ),
+                    format!("permission_profile.tool_exposure['{}']", name),
+                ));
+            }
+        }
+
         // Paradigm strategies: trigger and sequence must be non-empty
         for (i, strategy) in config.paradigm_strategies.iter().enumerate() {
             if strategy.trigger.is_empty() {
@@ -923,5 +942,48 @@ mod tests {
             .warnings()
             .iter()
             .any(|w| w.message.contains("not in extraction_schema")));
+    }
+
+    // ── #27 — tool_exposure validation ────────────────────────────────────────
+
+    #[test]
+    fn tool_exposure_unknown_value_is_validation_error() {
+        let mut config = make_valid_config();
+        config
+            .permission_profile
+            .tool_exposure
+            .insert("heavy_tool".to_string(), "totally_invisible".to_string());
+        let result = DomainPackValidator::validate(&config);
+        assert!(!result.is_valid());
+        assert!(result
+            .errors()
+            .iter()
+            .any(|e| e.message.contains("Unknown tool_exposure value")
+                && e.message.contains("heavy_tool")
+                && e.message.contains("totally_invisible")));
+    }
+
+    #[test]
+    fn tool_exposure_legal_values_pass_validation() {
+        let mut config = make_valid_config();
+        for v in [
+            "direct",
+            "deferred",
+            "deferred_model_only",
+            "direct_model_only",
+            "code_mode_only",
+            "hidden",
+        ] {
+            config
+                .permission_profile
+                .tool_exposure
+                .insert(format!("tool_{v}"), v.to_string());
+        }
+        let result = DomainPackValidator::validate(&config);
+        assert!(
+            result.is_valid(),
+            "all six legal exposure values should pass; issues = {:?}",
+            result.issues()
+        );
     }
 }

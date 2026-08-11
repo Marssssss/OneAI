@@ -1461,10 +1461,23 @@ impl AgentLoop {
             // consumer.
             {
                 let tools = self.tools.read().await;
+                let resolver: Option<&dyn oneai_core::traits::ExposureResolver> =
+                    self.domain_pack.as_deref().map(|dp| {
+                        let r: &dyn oneai_core::traits::ExposureResolver = dp;
+                        r
+                    });
                 state.prev_active_tool_names = Some(
                     tools
                         .values()
                         .filter(|t| t.service_available())
+                        // #27 — the self-extension baseline tracks
+                        // schema-visible tools only, so the post-batch diff
+                        // (which becomes a model-facing "new tools" note) never
+                        // surfaces Hidden / Deferred / CodeModeOnly names.
+                        .filter(|t| {
+                            oneai_core::traits::effective_exposure(resolver, t.as_ref())
+                                .is_model_visible_initial()
+                        })
                         .map(|t| t.name().to_string())
                         .collect(),
                 );
@@ -3039,9 +3052,22 @@ impl AgentLoop {
                     // above (OTEL block) — here we only read the registry.
                     let now_active: std::collections::HashSet<String> = {
                         let tools = self.tools.read().await;
+                        let resolver: Option<&dyn oneai_core::traits::ExposureResolver> =
+                            self.domain_pack.as_deref().map(|dp| {
+                                let r: &dyn oneai_core::traits::ExposureResolver = dp;
+                                r
+                            });
                         tools
                             .values()
                             .filter(|t| t.service_available())
+                            // #27 — schema-visible only, mirroring the
+                            // `prev_active_tool_names` baseline so the diff
+                            // never produces a model-facing note naming a
+                            // Hidden / Deferred / CodeModeOnly tool.
+                            .filter(|t| {
+                                oneai_core::traits::effective_exposure(resolver, t.as_ref())
+                                    .is_model_visible_initial()
+                            })
                             .map(|t| t.name().to_string())
                             .collect()
                     };
@@ -3866,6 +3892,15 @@ impl AgentLoop {
         };
         // `tools_map` read guard dropped here — before any execute() below.
 
+        // #27 — capture the exposure resolver once for the per-call guard
+        // below (cloning the `Arc` is cheap). `None` when no DomainPack is
+        // loaded → `effective_exposure` falls back to `Tool::exposure()`.
+        let exposure_resolver: Option<Arc<dyn oneai_core::traits::ExposureResolver>> =
+            self.domain_pack.clone().map(|dp| {
+                let r: Arc<dyn oneai_core::traits::ExposureResolver> = dp;
+                r
+            });
+
         let futures: Vec<_> = resolved
             .into_iter()
             .map(|(call, tool_opt, perm_check)| {
@@ -3873,7 +3908,37 @@ impl AgentLoop {
                 let call_id = call.id.clone();
                 let args = call.args.clone();
                 let interaction_gate = self.interaction_gate.clone();
+                let exposure_resolver = exposure_resolver.clone();
                 async move {
+                    // Step 0 (#27): exposure guard — a model call naming a
+                    // `Hidden` or `CodeModeOnly` tool is rejected. The schema
+                    // filter already keeps these out of the model's tool list,
+                    // so reaching here means a hallucinated/guessed name —
+                    // defense-in-depth, the tool is never executed.
+                    if let Some(ref tool) = tool_opt {
+                        let e = oneai_core::traits::effective_exposure(
+                            exposure_resolver.as_deref(),
+                            tool.as_ref(),
+                        );
+                        if !e.is_model_dispatchable() {
+                            return Ok(ToolCallResult {
+                                call_id,
+                                tool_name,
+                                output: ToolOutput {
+                                    success: false,
+                                    content: String::new(),
+                                    error: Some(format!(
+                                        "tool '{}' is not model-dispatchable \
+                                        (exposure={:?}) — it is not in the schema \
+                                        and was not reached via tool_search",
+                                        tool.name(),
+                                        e,
+                                    )),
+                                    ..Default::default()
+                                },
+                            });
+                        }
+                    }
                     // Step 1: Check domain PermissionProfile (highest priority)
                     match perm_check {
                         Some(PermissionAction::Deny { reason }) => Ok(ToolCallResult {
@@ -5209,10 +5274,18 @@ impl AgentLoop {
 
         // Apply domain pack tool decorators if present
         if let Some(domain) = &self.domain_pack {
+            // Coerce for the #27 exposure gate (see build_tool_definitions_for_paradigm).
+            let resolver: Option<&dyn oneai_core::traits::ExposureResolver> = Some(domain.as_ref());
             tools_map
                 .values()
                 // Footprint gate — see `build_tool_definitions_for_paradigm`.
                 .filter(|tool| tool.service_available())
+                // #27 exposure gate — Deferred/DeferredModelOnly/CodeModeOnly/Hidden
+                // leave the initial schema.
+                .filter(|tool| {
+                    oneai_core::traits::effective_exposure(resolver, tool.as_ref())
+                        .is_model_visible_initial()
+                })
                 .map(|tool| {
                     // Check if there's a decorator for this tool
                     let decorator = domain.find_decorator(tool.name());
@@ -5328,6 +5401,27 @@ impl AgentLoop {
                     );
                     false
                 }
+            })
+            // ─── #27 ToolExposure gate ─────────────────────────────────────────
+            // A tool whose effective exposure is NOT model-visible-initial
+            // (`Deferred` / `DeferredModelOnly` / `CodeModeOnly` / `Hidden`)
+            // leaves the initial schema. Deferred ones are reached on demand
+            // via the `tool_search` tool; the rest stay registered &
+            // dispatchable but out of the model's view. The effective exposure
+            // is the DomainPack's `tool_exposure` override (if any) or the
+            // tool's own `Tool::exposure()`. Deferred tools are excluded
+            // silently (it's an intentional delay, not a missing prerequisite).
+            .filter(|tool| {
+                // Coerce `Option<&MergedDomainPack>` → `Option<&dyn ExposureResolver>`
+                // (an unsized coercion needs an explicit coercion site — a typed
+                // `let` inside the closure body).
+                let resolver: Option<&dyn oneai_core::traits::ExposureResolver> =
+                    self.domain_pack.as_deref().map(|dp| {
+                        let r: &dyn oneai_core::traits::ExposureResolver = dp;
+                        r
+                    });
+                oneai_core::traits::effective_exposure(resolver, tool.as_ref())
+                    .is_model_visible_initial()
             })
             .collect();
 
@@ -6256,6 +6350,17 @@ impl AgentLoopGraphActionExecutor {
         let filtered_tools: Vec<&Arc<dyn Tool>> = filtered_tools
             .into_iter()
             .filter(|tool| tool.service_available())
+            // #27 exposure gate — keep only model-visible-initial exposures.
+            // See `build_tool_definitions_for_paradigm` for the full rationale.
+            .filter(|tool| {
+                let resolver: Option<&dyn oneai_core::traits::ExposureResolver> =
+                    self.domain_pack.as_deref().map(|dp| {
+                        let r: &dyn oneai_core::traits::ExposureResolver = dp;
+                        r
+                    });
+                oneai_core::traits::effective_exposure(resolver, tool.as_ref())
+                    .is_model_visible_initial()
+            })
             .collect();
 
         // Apply domain pack tool decorators

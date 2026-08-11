@@ -813,6 +813,119 @@ impl PermissionLevel {
     }
 }
 
+// ─── ToolExposure ────────────────────────────────────────────────────────────
+
+/// How a tool is exposed to the model and to code mode (#27 — Codex `ToolExposure`).
+///
+/// Not every registered tool is handed to the model up-front. A tool can be
+/// deferred until the model discovers it via the `tool_search` tool, restricted
+/// to code-mode scripts only, or kept registered-and-dispatchable yet entirely
+/// hidden from the model. This keeps the per-domain initial schema small and
+/// focused (important when many MCP tools are registered), without losing the
+/// tools the model can reach on demand.
+///
+/// The six values cover two orthogonal axes — *model visibility* (initial
+/// schema vs discoverable via `tool_search` vs hidden) and *code-mode
+/// callability*:
+///
+/// | Value | Initial schema | `tool_search` | code mode |
+/// |-------|:--------------:|:-------------:|:---------:|
+/// | `Direct` | ✓ | — | ✓ |
+/// | `Deferred` | ✗ | ✓ | ✓ |
+/// | `DeferredModelOnly` | ✗ | ✓ | ✗ |
+/// | `DirectModelOnly` | ✓ | — | ✗ |
+/// | `CodeModeOnly` | ✗ | ✗ | ✓ |
+/// | `Hidden` | ✗ | ✗ | ✗ |
+///
+/// Default `Direct` — existing tools remain visible everywhere, so adding the
+/// field is zero behavior change. The effective value at a given site is
+/// resolved through [`crate::traits::ExposureResolver`] (a DomainPack
+/// `PermissionProfile.tool_exposure` map overrides the tool's own
+/// [`crate::traits::Tool::exposure`]).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExposure {
+    /// In the initial tool list sent to the model; also callable from code mode.
+    #[default]
+    Direct,
+    /// Not in the initial list; discoverable via `tool_search`; usable in code mode.
+    Deferred,
+    /// Discoverable via `tool_search`, but NOT callable from code mode.
+    DeferredModelOnly,
+    /// In the initial list, but NOT callable from code mode.
+    DirectModelOnly,
+    /// Only callable from code mode (never in the model's schema, never in `tool_search`).
+    CodeModeOnly,
+    /// Registered & dispatchable by the system, but never exposed to the model
+    /// or to code-mode scripts.
+    Hidden,
+}
+
+impl ToolExposure {
+    /// Whether the tool appears in the **initial** schema handed to the model.
+    ///
+    /// `Direct` and `DirectModelOnly` are listed up-front; the deferred /
+    /// code-mode-only / hidden values are excluded (deferred ones are reached
+    /// via `tool_search`, the rest are not model-reachable at all).
+    pub fn is_model_visible_initial(self) -> bool {
+        matches!(self, Self::Direct | Self::DirectModelOnly)
+    }
+
+    /// Whether the tool is listed by the `tool_search` discovery tool.
+    ///
+    /// Only the deferred values — `Deferred` and `DeferredModelOnly` — are
+    /// surfaced on demand; everything else is either already visible or
+    /// intentionally out of the model's reach.
+    pub fn is_search_discoverable(self) -> bool {
+        matches!(self, Self::Deferred | Self::DeferredModelOnly)
+    }
+
+    /// Whether the tool may be called from a `code_interpreter` script.
+    ///
+    /// `Direct`, `Deferred`, and `CodeModeOnly` are callable; the
+    /// `*ModelOnly` variants and `Hidden` are not exposed to the bridge.
+    pub fn is_code_mode_callable(self) -> bool {
+        matches!(self, Self::Direct | Self::Deferred | Self::CodeModeOnly)
+    }
+
+    /// Whether the model may dispatch this tool by name (directly or after
+    /// `tool_search` discovery).
+    ///
+    /// `Hidden` and `CodeModeOnly` are not model-dispatchable — a model call
+    /// naming such a tool is rejected at the dispatch site (defense-in-depth:
+    /// the schema filter already excludes them, this catches a hallucinated
+    /// name).
+    pub fn is_model_dispatchable(self) -> bool {
+        !matches!(self, Self::Hidden | Self::CodeModeOnly)
+    }
+
+    /// A coarse "restrictiveness" ranking on the *model-visibility* axis, used
+    /// to pick the strictest exposure when merging two DomainPacks: a more
+    /// restrictive (less model-visible) value wins. Higher = more hidden.
+    fn restrictiveness(self) -> u8 {
+        match self {
+            Self::Direct => 0,
+            Self::Deferred => 1,
+            Self::DirectModelOnly => 2,
+            Self::DeferredModelOnly => 3,
+            Self::CodeModeOnly => 4,
+            Self::Hidden => 5,
+        }
+    }
+
+    /// Pick the more restrictive (less model-visible) of two exposures — used
+    /// by `PermissionProfile::merge_strictest` so that combining two packs
+    /// never widens what the model sees.
+    pub fn stricter_of(self, other: Self) -> Self {
+        if self.restrictiveness() >= other.restrictiveness() {
+            self
+        } else {
+            other
+        }
+    }
+}
+
 // ─── ApprovalRequest ─────────────────────────────────────────────────────────
 
 /// Request for human approval of a high-risk tool execution.
@@ -2763,5 +2876,74 @@ mod tests {
         assert_eq!(back.temperature, Some(0.7));
         assert_eq!(back.max_tokens, Some(2048));
         assert_eq!(back.top_p, None);
+    }
+
+    #[test]
+    fn tool_exposure_predicators_match_the_codex_axis_table() {
+        // The six values' axes — see the table in the enum doc comment.
+        // (initial schema, search-discoverable, code-mode callable, model-dispatchable)
+        let table = [
+            (ToolExposure::Direct, true, false, true, true),
+            (ToolExposure::Deferred, false, true, true, true),
+            (ToolExposure::DeferredModelOnly, false, true, false, true),
+            (ToolExposure::DirectModelOnly, true, false, false, true),
+            (ToolExposure::CodeModeOnly, false, false, true, false),
+            (ToolExposure::Hidden, false, false, false, false),
+        ];
+        for (e, init, search, code, dispatch) in table {
+            assert_eq!(
+                e.is_model_visible_initial(),
+                init,
+                "{:?}.is_model_visible_initial",
+                e
+            );
+            assert_eq!(
+                e.is_search_discoverable(),
+                search,
+                "{:?}.is_search_discoverable",
+                e
+            );
+            assert_eq!(
+                e.is_code_mode_callable(),
+                code,
+                "{:?}.is_code_mode_callable",
+                e
+            );
+            assert_eq!(
+                e.is_model_dispatchable(),
+                dispatch,
+                "{:?}.is_model_dispatchable",
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn tool_exposure_stricter_of_never_widens_model_visibility() {
+        // Merge picks the less model-visible value: Hidden > CodeModeOnly >
+        // DeferredModelOnly > DirectModelOnly > Deferred > Direct.
+        assert_eq!(
+            ToolExposure::Hidden.stricter_of(ToolExposure::Direct),
+            ToolExposure::Hidden
+        );
+        assert_eq!(
+            ToolExposure::Deferred.stricter_of(ToolExposure::DirectModelOnly),
+            ToolExposure::DirectModelOnly
+        );
+        // Symmetric.
+        assert_eq!(
+            ToolExposure::Direct.stricter_of(ToolExposure::Deferred),
+            ToolExposure::Deferred
+        );
+    }
+
+    #[test]
+    fn tool_exposure_default_and_serde_round_trip() {
+        assert_eq!(ToolExposure::default(), ToolExposure::Direct);
+        let e = ToolExposure::DeferredModelOnly;
+        let json = serde_json::to_string(&e).unwrap();
+        assert_eq!(json, "\"deferred_model_only\"");
+        let back: ToolExposure = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, e);
     }
 }

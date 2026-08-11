@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use oneai_core::traits::Tool;
+use oneai_core::ToolExposure;
 
 use crate::compression_template::CompressionTemplate;
 use crate::context_source::ContextSource;
@@ -310,6 +311,18 @@ impl MergedDomainPack {
         self.permission_profile.resolve(tool_name, args)
     }
 
+    /// Resolve the effective [`ToolExposure`] for a tool using the merged
+    /// `PermissionProfile.tool_exposure` map (#27). A tool name present in the
+    /// map overrides the tool's own [`Tool::exposure`]; absent → the tool's
+    /// default. This is the entry point the agent-loop enforcement sites call
+    /// directly (they hold a `MergedDomainPack`); the code-mode bridge and
+    /// `tool_search` tool go through the `ExposureResolver` trait object
+    /// (`PermissionProfile` impls it) since they live in `oneai-tool`.
+    pub fn resolve_exposure(&self, tool_name: &str, tool: &dyn Tool) -> ToolExposure {
+        use oneai_core::traits::ExposureResolver;
+        self.permission_profile.resolve_exposure(tool_name, tool)
+    }
+
     /// Check if the merged pack has any tools.
     pub fn has_tools(&self) -> bool {
         !self.tools.is_empty()
@@ -378,6 +391,17 @@ impl MergedDomainPack {
             state_graphs: self.state_graphs.clone(),
             sub_agent_definitions: self.sub_agent_definitions.clone(),
         }
+    }
+}
+
+/// Trait impl so `MergedDomainPack` can be passed as
+/// `Arc<dyn ExposureResolver>` / `Option<&dyn ExposureResolver>` to the
+/// enforcement sites (agent loop's `effective_exposure`, code-mode bridge,
+/// `tool_search`). Delegates to the inherent method so there's one source of
+/// truth.
+impl oneai_core::traits::ExposureResolver for MergedDomainPack {
+    fn resolve_exposure(&self, tool_name: &str, tool: &dyn Tool) -> ToolExposure {
+        MergedDomainPack::resolve_exposure(self, tool_name, tool)
     }
 }
 

@@ -59,7 +59,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oneai_core::traits::Tool;
-use oneai_core::{DecayPolicy, FactType, PermissionLevel, RecallConfig};
+use oneai_core::{DecayPolicy, FactType, PermissionLevel, RecallConfig, ToolExposure};
 use oneai_tool::{
     ApplyPatchTool, CalculatorTool, EnvironmentTool, FileEditTool, FileListTool, FileReadTool,
     GlobTool, GrepTool, NotebookEditTool, ShellTool, WebFetchTool, WebSearchTool,
@@ -164,6 +164,16 @@ pub struct PermissionProfileConfig {
     /// [`oneai_tool::ExecRule`] for the rule shape.
     #[serde(default)]
     pub exec_policy: Vec<oneai_tool::ExecRule>,
+
+    /// #27 — per-tool `ToolExposure` overrides (config-driven visibility).
+    /// Map of tool name → one of `direct` / `deferred` /
+    /// `deferred_model_only` / `direct_model_only` / `code_mode_only` /
+    /// `hidden`. Unknown values fail parsing (validated in
+    /// [`resolve_permission_profile`]). Absent → the tool's own default
+    /// `Direct` applies. Use to defer heavy/MCP tools out of the initial
+    /// schema (discovered via `tool_search`) or hide one entirely.
+    #[serde(default)]
+    pub tool_exposure: HashMap<String, String>,
 }
 
 /// Deny pattern in config format.
@@ -623,6 +633,44 @@ fn resolve_permission_profile(config: &PermissionProfileConfig) -> PermissionPro
                 config.exec_policy.clone(),
             ))
         },
+        tool_exposure: config
+            .tool_exposure
+            .iter()
+            .filter_map(|(name, raw)| match parse_tool_exposure(raw) {
+                Some(e) => Some((name.clone(), e)),
+                // Warn + skip — same posture as ExecPolicy `from_rules`
+                // discarding an inconsistent rule. `DomainPackValidator`
+                // (`oneai pack check`) hard-fails on the typo so it's caught
+                // before runtime; here we must stay infallible (resolve_config
+                // returns DomainPack, not Result).
+                None => {
+                    tracing::warn!(
+                        "tool_exposure: unknown exposure '{}' for tool '{}' — \
+                         expected one of direct/deferred/deferred_model_only/\
+                         direct_model_only/code_mode_only/hidden. Skipping.",
+                        raw,
+                        name
+                    );
+                    None
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Parse a config-string `ToolExposure` value (case-insensitive). Returns
+/// `None` for an unknown value — callers warn-and-skip (runtime) or
+/// hard-fail (validator). Mirrors the snake_case serde rename of
+/// [`ToolExposure`].
+pub(crate) fn parse_tool_exposure(raw: &str) -> Option<ToolExposure> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "direct" => Some(ToolExposure::Direct),
+        "deferred" => Some(ToolExposure::Deferred),
+        "deferred_model_only" => Some(ToolExposure::DeferredModelOnly),
+        "direct_model_only" => Some(ToolExposure::DirectModelOnly),
+        "code_mode_only" => Some(ToolExposure::CodeModeOnly),
+        "hidden" => Some(ToolExposure::Hidden),
+        _ => None,
     }
 }
 
@@ -1159,5 +1207,81 @@ system_prompt: "You are a coding agent"
             config.memory_profile.skill_lifecycle.archive_after_secs,
             7_776_000
         );
+    }
+
+    // ── #27 — tool_exposure config round-trip ────────────────────────────────────
+
+    #[test]
+    fn parse_yaml_tool_exposure_round_trips_into_profile_map() {
+        let yaml = r#"
+name: coding
+description: "pack with deferred tools"
+tools: [read_file, heavy_tool]
+context_sources: [date]
+permission_profile:
+  auto_approve: [read_file]
+  require_confirmation: []
+  deny_by_default: []
+  tool_exposure:
+    heavy_tool: deferred
+    web_search: deferred_model_only
+    secret_tool: hidden
+compression_template:
+  name: coding
+  preserve_fields: []
+system_prompt: "You are a coding agent"
+"#;
+        let config: DomainPackConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.permission_profile.tool_exposure.get("heavy_tool"),
+            Some(&"deferred".to_string())
+        );
+        // resolve → runtime enum
+        let profile = resolve_permission_profile(&config.permission_profile);
+        assert_eq!(
+            profile.tool_exposure.get("heavy_tool"),
+            Some(&oneai_core::ToolExposure::Deferred)
+        );
+        assert_eq!(
+            profile.tool_exposure.get("web_search"),
+            Some(&oneai_core::ToolExposure::DeferredModelOnly)
+        );
+        assert_eq!(
+            profile.tool_exposure.get("secret_tool"),
+            Some(&oneai_core::ToolExposure::Hidden)
+        );
+    }
+
+    #[test]
+    fn resolve_permission_profile_warn_skips_unknown_exposure_value() {
+        // Unknown value doesn't appear in the runtime map (warn+skip), but the
+        // known ones still resolve. The validator (`oneai pack check`) is the
+        // path that hard-fails on the typo.
+        let mut config = PermissionProfileConfig::default();
+        config
+            .tool_exposure
+            .insert("good".into(), "deferred".into());
+        config
+            .tool_exposure
+            .insert("bad".into(), "totally_invisible".into());
+        let profile = resolve_permission_profile(&config);
+        assert_eq!(
+            profile.tool_exposure.get("good"),
+            Some(&oneai_core::ToolExposure::Deferred)
+        );
+        assert!(!profile.tool_exposure.contains_key("bad"));
+    }
+
+    #[test]
+    fn parse_tool_exposure_is_case_insensitive() {
+        assert_eq!(
+            parse_tool_exposure("Deferred"),
+            Some(oneai_core::ToolExposure::Deferred)
+        );
+        assert_eq!(
+            parse_tool_exposure("  HIDDEN "),
+            Some(oneai_core::ToolExposure::Hidden)
+        );
+        assert_eq!(parse_tool_exposure("nonsense"), None);
     }
 }

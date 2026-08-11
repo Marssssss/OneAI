@@ -182,6 +182,16 @@ impl Tool for DecoratedTool {
             .unwrap_or_else(|| self.inner.risk_level())
     }
 
+    fn exposure(&self) -> oneai_core::ToolExposure {
+        // Single-layer override discipline (#27): the DomainPack's
+        // `PermissionProfile.tool_exposure` map (consulted by the enforcement
+        // sites via `ExposureResolver`) is the single declarative override; a
+        // `ToolDecorator` does NOT carry its own exposure field. So a
+        // decorated tool's exposure is the inner tool's exposure — the
+        // decorator only rewrites the model-facing description/schema/risk.
+        self.inner.exposure()
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         // Always delegate to inner tool — behavior is unchanged
         self.inner.execute(args).await

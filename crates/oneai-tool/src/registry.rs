@@ -53,6 +53,9 @@ impl Tool for GatedTool {
     fn service_available(&self) -> bool {
         (self.check)()
     }
+    fn exposure(&self) -> oneai_core::ToolExposure {
+        self.inner.exposure()
+    }
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         self.inner.execute(args).await
     }

@@ -31,6 +31,7 @@ pub mod sandbox;
 pub mod schedule_tool;
 pub mod terminal;
 pub mod tool_interfaces;
+pub mod tool_search;
 
 // Explicit imports to avoid ambiguity between local_tools and tool_interfaces
 // (both used to define ShellTool and FileReadTool, but those are now only in tool_interfaces)
@@ -70,6 +71,7 @@ pub use terminal::modal::ModalBackend;
 pub use terminal::{ExecOptions, ExecResult, LocalBackend, SnapshotHandle, TerminalBackend};
 pub use tool_interfaces::*;
 pub use tool_interfaces::{SearchResult, WebSearchTool};
+pub use tool_search::{ToolSearchTool, TOOL_SEARCH_TOOL};
 
 #[cfg(test)]
 mod tests {

@@ -28,7 +28,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use oneai_core::error::{OneAIError, Result};
-use oneai_core::traits::{InteractionGate, PermissionResolver, Tool};
+use oneai_core::traits::{
+    effective_exposure, ExposureResolver, InteractionGate, PermissionResolver, Tool,
+};
 use oneai_core::{RiskLevel, ToolOutput};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
@@ -81,6 +83,12 @@ pub struct CodeInterpreterTool {
     /// [`execute_with_approval`] with this context. `None` → the bridge
     /// skips the Guardian (the manual gate / no-UI posture still applies).
     guardian: Option<Arc<GuardianContext>>,
+    /// #27 — the exposure resolver (DomainPack `PermissionProfile`). When
+    /// `Some`, the bridge's tool list is filtered by the *effective* exposure
+    /// (resolver override or tool's own [`Tool::exposure`]); only
+    /// `is_code_mode_callable()` tools reach the script. `None` → the tool's
+    /// own `exposure()` is the source (every tool stays `Direct` by default).
+    exposure_resolver: Option<Arc<dyn ExposureResolver>>,
 }
 
 impl CodeInterpreterTool {
@@ -112,6 +120,7 @@ impl CodeInterpreterTool {
             max_output_bytes,
             proxy_port: None,
             guardian: None,
+            exposure_resolver: None,
         }
     }
 
@@ -129,6 +138,17 @@ impl CodeInterpreterTool {
     /// by the same [`GuardianContext`] a direct call hits (#28 Stage 2).
     pub fn with_guardian(mut self, guardian: Arc<GuardianContext>) -> Self {
         self.guardian = Some(guardian);
+        self
+    }
+
+    /// Wire the exposure resolver (#27) — the DomainPack's
+    /// `PermissionProfile`. The bridge tool list then reflects the
+    /// *effective* exposure: a tool the DomainPack defers
+    /// (`Deferred`) still reaches code mode, while a `DirectModelOnly` /
+    /// `DeferredModelOnly` / `Hidden` tool is excluded from the script's
+    /// callable set even if it is registered.
+    pub fn with_exposure_resolver(mut self, resolver: Arc<dyn ExposureResolver>) -> Self {
+        self.exposure_resolver = Some(resolver);
         self
     }
 
@@ -164,14 +184,21 @@ impl CodeInterpreterTool {
     }
 
     /// Build the JSON tool list injected into the bridge env. Only tools that
-    /// are currently visible (`service_available()`) and that are not the code
-    /// interpreter itself (recursion guard at the schema level too) are exposed.
+    /// are currently visible (`service_available()`), whose *effective*
+    /// exposure is code-mode-callable (`Direct` / `Deferred` /
+    /// `CodeModeOnly`), and that are not the code interpreter itself
+    /// (recursion guard at the schema level too) are exposed. The effective
+    /// exposure comes from the optional [`ExposureResolver`] (DomainPack
+    /// override) or the tool's own [`Tool::exposure`].
     async fn build_tool_list(&self) -> Vec<serde_json::Value> {
+        let resolver = self.exposure_resolver.as_deref() as Option<&dyn ExposureResolver>;
         let map = self.tools_map.read().await;
         map.values()
             .filter(|t| {
                 let name = t.name();
-                name != CODE_INTERPRETER_TOOL && t.service_available()
+                name != CODE_INTERPRETER_TOOL
+                    && t.service_available()
+                    && effective_exposure(resolver, t.as_ref()).is_code_mode_callable()
             })
             .map(|t| {
                 serde_json::json!({
@@ -235,6 +262,36 @@ impl CodeInterpreterTool {
                 "content": "",
                 "error": err,
             });
+        }
+
+        // #27 — exposure guard: a tool whose effective exposure is NOT
+        // code-mode-callable (`DirectModelOnly` / `DeferredModelOnly` /
+        // `Hidden`) is rejected here. `build_tool_list` already hides these
+        // from the script's callable set, so a script naming one is a
+        // hallucinated/escaped name — defense-in-depth, mirroring the
+        // agent-loop dispatch rejection of `Hidden`/`CodeModeOnly`.
+        let resolver = self.exposure_resolver.as_deref() as Option<&dyn ExposureResolver>;
+        let tool_opt = self.tools_map.read().await.get(&tool_name).cloned();
+        if let Some(ref tool) = tool_opt {
+            let e = effective_exposure(resolver, tool.as_ref());
+            if !e.is_code_mode_callable() {
+                let err = format!(
+                    "code mode: tool '{}' is not code-mode-callable (exposure={:?})",
+                    tool_name, e
+                );
+                traces.push(serde_json::json!({
+                    "tool": tool_name,
+                    "args": args,
+                    "success": false,
+                    "error": err,
+                }));
+                return serde_json::json!({
+                    "id": id,
+                    "success": false,
+                    "content": "",
+                    "error": err,
+                });
+            }
         }
 
         let output = execute_with_approval(
@@ -653,6 +710,91 @@ mod tests {
             .unwrap()
             .contains("cannot call code_interpreter"));
         assert_eq!(traces.len(), 1);
+    }
+
+    // ── #27 — build_tool_list filters by effective exposure ─────────────────
+
+    /// A mock tool whose `exposure()` is fixed — used to verify the
+    /// code-mode bridge tool list keeps only `is_code_mode_callable` tools.
+    struct FixedExposureMockTool {
+        name: &'static str,
+        exposure: oneai_core::ToolExposure,
+    }
+    #[async_trait::async_trait]
+    impl Tool for FixedExposureMockTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "mock"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn risk_level(&self) -> oneai_core::RiskLevel {
+            oneai_core::RiskLevel::Low
+        }
+        fn exposure(&self) -> oneai_core::ToolExposure {
+            self.exposure
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> oneai_core::error::Result<oneai_core::ToolOutput> {
+            Ok(oneai_core::ToolOutput::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_tool_list_keeps_only_code_mode_callable_tools() {
+        // No exposure resolver → effective exposure = tool.exposure(). The
+        // bridge list must include Direct / Deferred / CodeModeOnly and
+        // exclude DirectModelOnly / DeferredModelOnly / Hidden (+ code_interpreter
+        // recursion guard, but that's not registered here).
+        let registry = Arc::new(ToolRegistry::new());
+        for (name, exp) in [
+            ("direct_t", oneai_core::ToolExposure::Direct),
+            ("deferred_t", oneai_core::ToolExposure::Deferred),
+            ("code_only_t", oneai_core::ToolExposure::CodeModeOnly),
+            (
+                "direct_model_only_t",
+                oneai_core::ToolExposure::DirectModelOnly,
+            ),
+            (
+                "deferred_model_only_t",
+                oneai_core::ToolExposure::DeferredModelOnly,
+            ),
+            ("hidden_t", oneai_core::ToolExposure::Hidden),
+        ] {
+            registry
+                .register(Arc::new(FixedExposureMockTool {
+                    name,
+                    exposure: exp,
+                }) as Arc<dyn Tool>)
+                .await
+                .unwrap();
+        }
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let sandbox = Arc::new(
+            RegexBackend::coding_defaults(&working_dir).with_network_policy(NetworkPolicy::Denied),
+        ) as Arc<dyn SandboxBackend>;
+        let tool = CodeInterpreterTool::new(
+            registry.tools_map(),
+            Arc::new(NoopInteractionGate),
+            None,
+            ToolExecutorConfig::default(),
+            sandbox,
+            working_dir,
+        );
+
+        let list = tool.build_tool_list().await;
+        let mut names: Vec<&str> = list.iter().map(|v| v["name"].as_str().unwrap()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["code_only_t", "deferred_t", "direct_t"],
+            "only Direct/Deferred/CodeModeOnly reach the bridge"
+        );
     }
 
     #[tokio::test]

@@ -279,6 +279,7 @@ pub fn research_pack(project_dir: &str) -> DomainPack {
             approval_policy: oneai_core::ApprovalPolicy::OnRequest,
             trusted_dirs: Vec::new(),
             exec_policy: None,
+            tool_exposure: HashMap::new(),
         },
 
         // Layer 4: Paradigm strategies — research task patterns

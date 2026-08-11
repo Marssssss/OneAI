@@ -1670,6 +1670,18 @@ impl AppBuilder {
             .as_ref()
             .map(|dp| Arc::new(dp.permission_profile.clone()) as Arc<dyn PermissionResolver>);
 
+        // #27 — exposure resolver: the same `PermissionProfile` (which impls
+        // `ExposureResolver`) overrides a tool's `Tool::exposure` with the
+        // DomainPack's `tool_exposure` map. Wired into the model-schema
+        // filter (agent loop), the code-mode bridge tool list, and the
+        // `tool_search` discovery tool. `None` when no domain pack is
+        // configured → `effective_exposure` falls back to `Tool::exposure`.
+        let exposure_resolver: Option<Arc<dyn oneai_core::traits::ExposureResolver>> =
+            merged_domain_pack.as_ref().map(|dp| {
+                Arc::new(dp.permission_profile.clone())
+                    as Arc<dyn oneai_core::traits::ExposureResolver>
+            });
+
         // #28 Stage 2 — Guardian (content-level safety review). The policy
         // comes from the DomainPack's PermissionProfile when a domain is
         // configured, else the builder default (`guardian_policy`, OnFailure).
@@ -1812,6 +1824,22 @@ impl AppBuilder {
             self.tool_registry.register(Arc::new(tool)).await?;
         }
 
+        // #27 — `tool_search` discovery tool. Registered always-on (Direct):
+        // it lets the model discover `Deferred` / `DeferredModelOnly` tools the
+        // DomainPack kept out of the initial schema (e.g. heavy / MCP tools
+        // deferred to keep context focused). When no deferred tools exist it
+        // returns an empty list — the one-tool footprint is the cost of the
+        // discovery capability. Wired with the same `ExposureResolver` as the
+        // code-mode bridge so config overrides (`tool_exposure` map) take
+        // effect here too.
+        {
+            let tool = oneai_tool::ToolSearchTool::new(
+                self.tool_registry.tools_map(),
+                exposure_resolver.clone(),
+            );
+            self.tool_registry.register(Arc::new(tool)).await?;
+        }
+
         // Code mode — sandboxed CPython code-interpreter tool (code_interpreter).
         // Registered plainly (not `register_gated`): the tool *itself* implements
         // `service_available()` (probes `python3` on PATH), and the AgentLoop's
@@ -1903,6 +1931,13 @@ impl AppBuilder {
             };
             let code_tool = match &guardian {
                 Some(g) => code_tool.with_guardian(g.clone()),
+                None => code_tool,
+            };
+            // #27 — wire the exposure resolver so the code-mode bridge tool
+            // list honours the DomainPack's `tool_exposure` map (e.g. a
+            // `DirectModelOnly` tool is excluded from the script's callable set).
+            let code_tool = match &exposure_resolver {
+                Some(r) => code_tool.with_exposure_resolver(r.clone()),
                 None => code_tool,
             };
             self.tool_registry.register(Arc::new(code_tool)).await?;
