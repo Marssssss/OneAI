@@ -60,6 +60,50 @@ pub enum McpPluginSource {
     },
 }
 
+/// Where a [`McpPluginEntry`] came from — its **provenance**. Higher-priority
+/// origins override lower-priority ones when two entries share a name (see
+/// [`McpPluginRegistry::merge_entry`]). This is a runtime tag, **not**
+/// persisted: a config file round-trip re-tags every entry as `Config`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerOrigin {
+    /// Declared in the user's config file (`~/.oneai/mcp_servers.toml`).
+    /// Highest priority — the user's explicit choice wins.
+    Config,
+    /// Declared by the active DomainPack. Beats everything except the user
+    /// config (a user can override a domain-declared server).
+    DomainPack,
+    /// Added at runtime via the CLI (`oneai mcp add`). Beats discovery + builtin.
+    Cli,
+    /// Found via one-shot `McpDiscovery`. Lowest priority above builtin.
+    Discovery,
+    /// A built-in default (shipped with OneAI, e.g. the `filesystem` preset).
+    /// Lowest priority — any other source overrides it.
+    Builtin,
+}
+
+impl McpServerOrigin {
+    /// Higher priority overrides lower. Config > DomainPack > Cli > Discovery
+    /// > Builtin. Ties resolve to "later write wins" (the new entry replaces).
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::Config => 10,
+            Self::DomainPack => 8,
+            Self::Cli => 6,
+            Self::Discovery => 4,
+            Self::Builtin => 2,
+        }
+    }
+}
+
+impl Default for McpServerOrigin {
+    /// Entries deserialized from a config file default to `Config` provenance.
+    fn default() -> Self {
+        Self::Config
+    }
+}
+
 /// An MCP plugin server entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct McpPluginEntry {
@@ -101,6 +145,12 @@ pub struct McpPluginEntry {
     /// needs the `Deferred` / `tool_search` machinery (issue #27).
     #[serde(default)]
     pub lazy: bool,
+    /// Provenance — where this entry came from. Runtime tag, **not**
+    /// persisted (`serde(skip)`): a config file round-trip re-tags every
+    /// entry as `Config`. Higher-priority origins override lower-priority ones
+    /// when two entries share a name. See [`McpServerOrigin::priority`].
+    #[serde(skip)]
+    pub origin: McpServerOrigin,
 }
 
 impl Default for McpPluginEntry {
@@ -120,6 +170,7 @@ impl Default for McpPluginEntry {
             permissions: McpToolPermissions::default(),
             oauth: None,
             lazy: false,
+            origin: McpServerOrigin::default(),
         }
     }
 }
@@ -334,11 +385,13 @@ impl McpPluginRegistry {
         // Load builtin defaults first
         registry.populate_builtin_entries();
 
-        // Load from config file (overrides/extends builtins)
+        // Load from config file (overrides/extends builtins). Each file entry
+        // carries `Config` provenance (serde default) and merges by priority —
+        // Config (10) beats the Builtin (2) presets inserted above.
         if path.exists() {
             if let Ok(config) = McpServerConfigFile::load_from(path) {
                 for entry in config.servers {
-                    registry.entries.insert(entry.name.clone(), entry);
+                    registry.merge_entry(entry);
                 }
             }
         }
@@ -354,9 +407,71 @@ impl McpPluginRegistry {
             .join("mcp_servers.toml")
     }
 
-    /// Add a plugin entry.
-    pub fn add_entry(&mut self, entry: McpPluginEntry) {
-        self.entries.insert(entry.name.clone(), entry);
+    /// Merge an entry, keeping the higher-priority provenance when a same-named
+    /// entry already exists. `new.origin.priority() >= existing.origin.priority()`
+    /// overwrites; otherwise the existing entry is kept (a lower-priority source
+    /// does not clobber a higher one). Ties resolve to "new wins".
+    pub fn merge_entry(&mut self, entry: McpPluginEntry) {
+        let overwrite = match self.entries.get(&entry.name) {
+            None => true,
+            Some(e) => entry.origin.priority() >= e.origin.priority(),
+        };
+        if overwrite {
+            self.entries.insert(entry.name.clone(), entry);
+        }
+    }
+
+    /// Add a plugin entry (provenance `Cli`). Convenience over
+    /// [`merge_entry`](Self::merge_entry) for runtime-added servers; respects
+    /// priority (won't clobber a Config/DomainPack entry of the same name).
+    pub fn add_entry(&mut self, mut entry: McpPluginEntry) {
+        entry.origin = McpServerOrigin::Cli;
+        self.merge_entry(entry);
+    }
+
+    /// Add a plugin entry with an explicit provenance (e.g. `DomainPack` /
+    /// `Discovery`).
+    pub fn add_entry_with_origin(&mut self, mut entry: McpPluginEntry, origin: McpServerOrigin) {
+        entry.origin = origin;
+        self.merge_entry(entry);
+    }
+
+    /// Merge a batch of DomainPack-declared servers (provenance `DomainPack`).
+    /// A user `Config` entry of the same name wins; a `Builtin`/`Discovery`/
+    /// `Cli` entry is overridden.
+    pub fn add_domain_pack_entries(&mut self, entries: Vec<McpPluginEntry>) {
+        for mut e in entries {
+            e.origin = McpServerOrigin::DomainPack;
+            self.merge_entry(e);
+        }
+    }
+
+    /// Merge a one-shot-discovered server (provenance `Discovery`). Lowest
+    /// priority above `Builtin` — won't clobber anything except a builtin.
+    pub fn add_discovered(&mut self, mut entry: McpPluginEntry) {
+        entry.origin = McpServerOrigin::Discovery;
+        self.merge_entry(entry);
+    }
+
+    /// List entries that came from a specific provenance.
+    pub fn list_by_origin(&self, origin: McpServerOrigin) -> Vec<&McpPluginEntry> {
+        self.entries
+            .values()
+            .filter(|e| e.origin == origin)
+            .collect()
+    }
+
+    /// All distinct origins currently present in the registry.
+    pub fn origins(&self) -> Vec<McpServerOrigin> {
+        let mut out: Vec<McpServerOrigin> = self
+            .entries
+            .values()
+            .map(|e| e.origin)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        out.sort_by_key(|o| o.priority());
+        out
     }
 
     /// Remove a plugin entry.
@@ -708,9 +823,11 @@ impl McpPluginRegistry {
     // ─── Private methods ───────────────────────────────────────────────────
 
     fn populate_builtin_entries(&mut self) {
-        let builtins = builtin_mcp_entries();
-        for entry in builtins {
-            self.entries.insert(entry.name.clone(), entry);
+        for mut entry in builtin_mcp_entries() {
+            entry.origin = McpServerOrigin::Builtin;
+            // Builtins merge into an empty registry (insert). They're the
+            // lowest priority so any later source overrides them.
+            self.merge_entry(entry);
         }
     }
 }
@@ -977,5 +1094,133 @@ mod tests {
         let deserialized: McpPluginEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "filesystem");
         assert!(matches!(deserialized.source, McpPluginSource::Sse { .. }));
+    }
+
+    // ── Stage 4-4: multi-source registration + priority merge ─────────────
+
+    fn entry(name: &str) -> McpPluginEntry {
+        McpPluginEntry {
+            name: name.to_string(),
+            description: format!("entry {name}"),
+            source: McpPluginSource::Stdio {
+                command: "c".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_origin_priority_order() {
+        assert!(McpServerOrigin::Config.priority() > McpServerOrigin::DomainPack.priority());
+        assert!(McpServerOrigin::DomainPack.priority() > McpServerOrigin::Cli.priority());
+        assert!(McpServerOrigin::Cli.priority() > McpServerOrigin::Discovery.priority());
+        assert!(McpServerOrigin::Discovery.priority() > McpServerOrigin::Builtin.priority());
+    }
+
+    #[test]
+    fn test_origin_serde_roundtrip_snake_case() {
+        let json = serde_json::to_string(&McpServerOrigin::DomainPack).unwrap();
+        assert!(json.contains("\"domain_pack\""));
+        let back: McpServerOrigin = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, McpServerOrigin::DomainPack);
+    }
+
+    #[test]
+    fn test_origin_field_not_persisted_serde_skip() {
+        // An entry tagged DomainPack round-trips back as Config (serde skip +
+        // default = Config). Provenance is runtime-only.
+        let mut e = entry("srv");
+        e.origin = McpServerOrigin::DomainPack;
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains("origin"));
+        let back: McpPluginEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.origin, McpServerOrigin::Config);
+    }
+
+    #[test]
+    fn test_merge_higher_priority_overwrites_lower() {
+        let mut reg = McpPluginRegistry::new();
+        // Builtin first.
+        reg.add_entry_with_origin(entry("fs"), McpServerOrigin::Builtin);
+        // Config should override Builtin.
+        let mut cfg = entry("fs");
+        cfg.description = "from config".to_string();
+        reg.add_entry_with_origin(cfg, McpServerOrigin::Config);
+        assert_eq!(reg.get_entry("fs").unwrap().description, "from config");
+        assert_eq!(reg.get_entry("fs").unwrap().origin, McpServerOrigin::Config);
+    }
+
+    #[test]
+    fn test_merge_lower_priority_does_not_clobber_higher() {
+        let mut reg = McpPluginRegistry::new();
+        // Config entry (priority 10) inserted first with description "cfg".
+        let mut cfg = entry("fs");
+        cfg.description = "cfg".to_string();
+        reg.add_entry_with_origin(cfg, McpServerOrigin::Config);
+        // A DomainPack entry (priority 8 < 10) must not override it.
+        let mut dp = entry("fs");
+        dp.description = "from domain pack".to_string();
+        reg.add_entry_with_origin(dp, McpServerOrigin::DomainPack);
+        assert_eq!(reg.get_entry("fs").unwrap().description, "cfg");
+        assert_eq!(reg.get_entry("fs").unwrap().origin, McpServerOrigin::Config);
+    }
+
+    #[test]
+    fn test_merge_same_priority_new_wins() {
+        let mut reg = McpPluginRegistry::new();
+        reg.add_entry_with_origin(entry("fs"), McpServerOrigin::Cli);
+        let mut dp = entry("fs");
+        dp.description = "second cli".to_string();
+        reg.add_entry_with_origin(dp, McpServerOrigin::Cli);
+        assert_eq!(reg.get_entry("fs").unwrap().description, "second cli");
+    }
+
+    #[test]
+    fn test_add_domain_pack_and_discovered_helpers() {
+        let mut reg = McpPluginRegistry::new();
+        reg.add_domain_pack_entries(vec![entry("dp1"), entry("dp2")]);
+        reg.add_discovered(entry("disc"));
+        assert_eq!(
+            reg.get_entry("dp1").unwrap().origin,
+            McpServerOrigin::DomainPack
+        );
+        assert_eq!(
+            reg.get_entry("disc").unwrap().origin,
+            McpServerOrigin::Discovery
+        );
+        // Discovery does NOT override a same-named DomainPack entry.
+        reg.add_discovered(entry("dp1"));
+        assert_eq!(
+            reg.get_entry("dp1").unwrap().origin,
+            McpServerOrigin::DomainPack
+        );
+    }
+
+    #[test]
+    fn test_list_by_origin_and_origins() {
+        let mut reg = McpPluginRegistry::new();
+        reg.add_entry_with_origin(entry("b"), McpServerOrigin::Builtin);
+        reg.add_entry_with_origin(entry("c"), McpServerOrigin::Config);
+        reg.add_entry_with_origin(entry("d"), McpServerOrigin::DomainPack);
+        assert_eq!(reg.list_by_origin(McpServerOrigin::Builtin).len(), 1);
+        assert_eq!(reg.list_by_origin(McpServerOrigin::Config).len(), 1);
+        // origins() returns distinct, sorted by priority asc.
+        let o = reg.origins();
+        assert_eq!(o.first().copied(), Some(McpServerOrigin::Builtin));
+        assert_eq!(o.last().copied(), Some(McpServerOrigin::Config));
+        assert_eq!(o.len(), 3);
+    }
+
+    #[test]
+    fn test_add_entry_pub_tags_cli() {
+        let mut reg = McpPluginRegistry::new();
+        reg.add_entry(entry("cli_added"));
+        assert_eq!(
+            reg.get_entry("cli_added").unwrap().origin,
+            McpServerOrigin::Cli
+        );
     }
 }
