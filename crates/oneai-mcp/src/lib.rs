@@ -43,6 +43,24 @@
 //! let tools = McpDiscovery::discover_stdio("npx", &["@anthropic/mcp-server-filesystem"]).await?;
 //! ```
 
+//! # Tool names + permissions
+//!
+//! Discovered MCP tools are registered under **namespaced** names
+//! `mcp__<server>__<tool>` (see [`oneai_tool::normalize_tool_name`]) so two
+//! servers exposing a same-named tool never collide in the shared
+//! `ToolRegistry`. The raw tool name is sent to the remote server on
+//! `tools/call`.
+//!
+//! Each `McpPluginEntry` carries a [`oneai_tool::McpToolPermissions`] policy
+//! (default `Standard` / `Direct` = zero behaviour change). It sets the
+//! **tool-declared** `PermissionLevel` and `ToolExposure` for that server's
+//! wrappers. The DomainPack `PermissionProfile` (`PermissionResolver` /
+//! `ExposureResolver`) layers on top exactly as for any built-in tool — it
+//! can still tighten a named MCP tool (e.g. force
+//! `mcp__filesystem__delete_file` to `Full` / `Hidden`) per domain. In other
+//! words: the MCP config sets the tool's own declared level; the DomainPack
+//! can override it further; the stricter result wins.
+
 //! # Stability
 //!
 //! This crate follows the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/).

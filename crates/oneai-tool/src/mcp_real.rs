@@ -14,8 +14,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
-use oneai_core::{PermissionLevel, ToolOutput};
+use oneai_core::{PermissionLevel, ToolExposure, ToolOutput};
 
+use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
@@ -155,6 +156,149 @@ pub struct McpServerConfig {
     pub transport: McpTransport,
     pub requires_api_key: bool,
     pub api_key_field: Option<String>,
+}
+
+// ─── Tool name normalization ─────────────────────────────────────────────────
+//
+// Discovered MCP tool names are namespaced into `mcp__<server>__<tool>` so that
+// two servers exposing a same-named tool (e.g. `read_file`) never collide in
+// the shared `ToolRegistry`. This mirrors the codex MCP client design. The raw
+// tool name stays queryable via the tool's description / `McpToolInfo`.
+
+/// Sanitize a name component into a lowercase `[a-z0-9_]` slug with no
+/// leading/trailing or repeated underscores.
+fn sanitize_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_under = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_under = false;
+        } else if !prev_under {
+            out.push('_');
+            prev_under = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// Normalize a discovered MCP tool name into a namespaced, collision-free
+/// identifier `mcp__<server>__<tool>`. When the combined name would exceed
+/// 64 bytes, the tool segment is truncated and an 8-hex SHA1 digest of the
+/// original `server::tool` is appended to preserve uniqueness within the
+/// 64-byte cap (a common provider identifier limit).
+pub fn normalize_tool_name(server: &str, tool: &str) -> String {
+    let srv = sanitize_component(server);
+    let srv = if srv.is_empty() {
+        "server".to_string()
+    } else {
+        srv
+    };
+    let tl = sanitize_component(tool);
+    let tool_seg = if tl.is_empty() {
+        "tool".to_string()
+    } else {
+        tl
+    };
+    let prefix = format!("mcp__{}__", srv);
+    const MAX: usize = 64;
+    if prefix.len() + tool_seg.len() <= MAX {
+        return format!("{}{}", prefix, tool_seg);
+    }
+    // Truncate tool to fit prefix + "_" + 8 hex digest, keeping the digest to
+    // guarantee uniqueness across distinct original names that collapse to the
+    // same sanitized+truncated form.
+    let budget = MAX
+        .saturating_sub(prefix.len())
+        .saturating_sub(9) // "_" + 8 hex
+        .max(1);
+    let trunc: String = tool_seg.chars().take(budget).collect();
+    let mut hasher = Sha1::new();
+    hasher.update(format!("{}::{}", server, tool).as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest
+        .iter()
+        .take(4)
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    format!("{}{}_{}", prefix, trunc, hex)
+}
+
+// ─── McpConnectionStatus ─────────────────────────────────────────────────────
+
+/// Runtime status of one configured MCP server connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum McpConnectionStatus {
+    /// Connected — carries the normalized tool names exposed by this server.
+    Connected { tools: Vec<String> },
+    /// Configured but not currently connected.
+    Disconnected,
+    /// Not present in the manager at all.
+    NotConfigured,
+}
+
+impl McpConnectionStatus {
+    /// Whether the server is currently connected.
+    pub fn is_connected(&self) -> bool {
+        matches!(self, Self::Connected { .. })
+    }
+}
+
+// ─── McpToolPermissions ──────────────────────────────────────────────────────
+//
+// Per-server MCP tool permission policy. This sets the **tool-declared**
+// `PermissionLevel` and `ToolExposure` for the wrappers a server exposes —
+// the same knobs the DomainPack `PermissionProfile` can still tighten per
+// name (the DomainPack `PermissionResolver` / `ExposureResolver` layer on
+// top, exactly as for any built-in tool). Default = `Standard` / `Direct`
+// everywhere, preserving the pre-existing behaviour.
+
+fn default_standard_level() -> PermissionLevel {
+    PermissionLevel::Standard
+}
+
+/// Per-server MCP tool permission + exposure policy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpToolPermissions {
+    /// Default `PermissionLevel` for tools on this server unless overridden.
+    #[serde(default = "default_standard_level")]
+    pub default_level: PermissionLevel,
+    /// Per-tool `PermissionLevel` overrides, keyed by the **raw** tool name
+    /// the remote server advertises (the un-namespaced name).
+    #[serde(default)]
+    pub tool_overrides: HashMap<String, PermissionLevel>,
+    /// Per-tool `ToolExposure` overrides, keyed by the raw tool name. Absent
+    /// = `Direct` (the `Tool::exposure` default).
+    #[serde(default)]
+    pub tool_exposure: HashMap<String, ToolExposure>,
+}
+
+impl McpToolPermissions {
+    /// Resolve the effective `PermissionLevel` for a tool: per-tool override
+    /// if present, else the server default.
+    pub fn level_for(&self, tool: &str) -> PermissionLevel {
+        self.tool_overrides
+            .get(tool)
+            .copied()
+            .unwrap_or(self.default_level)
+    }
+
+    /// Resolve the effective `ToolExposure` for a tool: per-tool override if
+    /// present, else `Direct`.
+    pub fn exposure_for(&self, tool: &str) -> ToolExposure {
+        self.tool_exposure.get(tool).copied().unwrap_or_default()
+    }
+}
+
+impl Default for McpToolPermissions {
+    fn default() -> Self {
+        Self {
+            default_level: PermissionLevel::Standard,
+            tool_overrides: HashMap::new(),
+            tool_exposure: HashMap::new(),
+        }
+    }
 }
 
 // ─── McpConnection ──────────────────────────────────────────────────────────
@@ -1019,11 +1163,17 @@ impl McpConnection {
 /// The connection must be mutable for call_tool (needs to read/write),
 /// so we use an Arc<Mutex> pattern.
 pub struct McpToolWrapper {
+    /// Namespaced registry-facing name (`mcp__<server>__<tool>`).
     name: String,
+    /// The raw tool name the remote MCP server expects in `tools/call`.
+    remote_name: String,
     description: String,
     parameters_schema: serde_json::Value,
-    #[allow(dead_code)]
     server_name: String,
+    /// Tool-declared permission level (server default or per-tool override).
+    permission_level: PermissionLevel,
+    /// Tool-declared exposure to the model / code mode.
+    exposure: ToolExposure,
     /// Shared mutable connection — needed because call_tool reads/writes to the subprocess.
     connection: Arc<tokio::sync::Mutex<McpConnection>>,
 }
@@ -1036,13 +1186,88 @@ impl McpToolWrapper {
         server_name: String,
         connection: Arc<tokio::sync::Mutex<McpConnection>>,
     ) -> Self {
+        // Back-compat single-arg constructor: assume the registry name and the
+        // remote name are identical (pre-normalization callers), and the
+        // default policy (Standard / Direct).
+        let remote_name = name.clone();
         Self {
             name,
+            remote_name,
             description,
             parameters_schema,
             server_name,
+            permission_level: PermissionLevel::Standard,
+            exposure: ToolExposure::Direct,
             connection,
         }
+    }
+
+    /// Build a wrapper with distinct registry (normalized) and remote (raw)
+    /// tool names — the path used by `McpServerManager::connect_server` once
+    /// tools are namespaced.
+    pub fn with_remote_name(
+        name: String,
+        remote_name: String,
+        description: String,
+        parameters_schema: serde_json::Value,
+        server_name: String,
+        connection: Arc<tokio::sync::Mutex<McpConnection>>,
+    ) -> Self {
+        Self {
+            name,
+            remote_name,
+            description,
+            parameters_schema,
+            server_name,
+            permission_level: PermissionLevel::Standard,
+            exposure: ToolExposure::Direct,
+            connection,
+        }
+    }
+
+    /// Build a wrapper carrying an explicit per-tool policy (resolved from the
+    /// server's `McpToolPermissions` by the manager at connect time).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_policy(
+        name: String,
+        remote_name: String,
+        description: String,
+        parameters_schema: serde_json::Value,
+        server_name: String,
+        permission_level: PermissionLevel,
+        exposure: ToolExposure,
+        connection: Arc<tokio::sync::Mutex<McpConnection>>,
+    ) -> Self {
+        Self {
+            name,
+            remote_name,
+            description,
+            parameters_schema,
+            server_name,
+            permission_level,
+            exposure,
+            connection,
+        }
+    }
+
+    /// The server this tool was discovered from.
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// The raw tool name the remote MCP server expects in `tools/call`.
+    pub fn remote_name(&self) -> &str {
+        &self.remote_name
+    }
+
+    /// The tool-declared permission level (before DomainPack tightening).
+    pub fn declared_permission_level(&self) -> PermissionLevel {
+        self.permission_level
+    }
+
+    /// The tool-declared exposure (before DomainPack tightening).
+    pub fn declared_exposure(&self) -> ToolExposure {
+        self.exposure
     }
 }
 
@@ -1062,15 +1287,23 @@ impl Tool for McpToolWrapper {
         self.permission_level().to_risk_level()
     }
 
+    /// Tool-declared exposure — the DomainPack `ExposureResolver` still
+    /// tightens this per name on the hot path.
+    fn exposure(&self) -> ToolExposure {
+        self.exposure
+    }
+
     async fn execute(&self, args: serde_json::Value) -> Result<ToolOutput> {
         let mut conn = self.connection.lock().await;
-        conn.call_tool(&self.name, args).await
+        // Send the *raw* tool name the remote server expects, not the
+        // namespaced registry name.
+        conn.call_tool(&self.remote_name, args).await
     }
 }
 
 impl PermissionAwareTool for McpToolWrapper {
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Standard
+        self.permission_level
     }
 }
 
@@ -1092,8 +1325,26 @@ impl McpServerManager {
         }
     }
 
-    /// Connect to an MCP server, discover tools, and create wrappers.
+    /// Connect to an MCP server, discover tools, and create wrappers using
+    /// the default policy (`Standard` / `Direct`). Convenience wrapper around
+    /// [`connect_server_with_policy`](Self::connect_server_with_policy).
     pub async fn connect_server(&mut self, config: McpServerConfig) -> Result<Vec<String>> {
+        self.connect_server_with_policy(config, &McpToolPermissions::default())
+            .await
+    }
+
+    /// Connect to an MCP server, discover tools, and create wrappers carrying
+    /// the per-tool permission + exposure policy resolved from `permissions`.
+    ///
+    /// Each discovered tool is registered under a **normalized, namespaced**
+    /// name (`mcp__<server>__<tool>`, see [`normalize_tool_name`]) so that
+    /// same-named tools from different servers never collide in the shared
+    /// `ToolRegistry`. The returned `Vec` carries those normalized names.
+    pub async fn connect_server_with_policy(
+        &mut self,
+        config: McpServerConfig,
+        permissions: &McpToolPermissions,
+    ) -> Result<Vec<String>> {
         let mut connection = McpConnection::new(config.clone());
         connection.connect_and_discover().await?;
 
@@ -1105,16 +1356,21 @@ impl McpServerManager {
         // We need to read tools from the connection (it's locked in the Arc<Mutex>)
         let conn = connection_arc.lock().await;
         for (tool_name, tool_info) in conn.tools() {
-            let wrapper = McpToolWrapper::new(
+            let normalized = normalize_tool_name(&config.name, tool_name);
+            let level = permissions.level_for(tool_name);
+            let exposure = permissions.exposure_for(tool_name);
+            let wrapper = McpToolWrapper::with_policy(
+                normalized.clone(),
                 tool_info.name.clone(),
                 tool_info.description.clone(),
                 tool_info.parameters_schema.clone(),
                 tool_info.server_name.clone(),
+                level,
+                exposure,
                 connection_arc.clone(),
             );
-            tool_names.push(tool_name.clone());
-            self.tool_wrappers
-                .insert(tool_name.clone(), Arc::new(wrapper));
+            tool_names.push(normalized.clone());
+            self.tool_wrappers.insert(normalized, Arc::new(wrapper));
         }
 
         Ok(tool_names)
@@ -1128,6 +1384,83 @@ impl McpServerManager {
     /// Get a tool wrapper by name.
     pub fn get_tool_wrapper(&self, name: &str) -> Option<&Arc<McpToolWrapper>> {
         self.tool_wrappers.get(name)
+    }
+
+    /// Names of all currently-connected servers.
+    pub fn server_names(&self) -> Vec<String> {
+        self.connections.keys().cloned().collect()
+    }
+
+    /// Whether a server of the given name is currently connected.
+    pub fn is_connected(&self, name: &str) -> bool {
+        self.connections.contains_key(name)
+    }
+
+    /// Status of one server connection.
+    pub fn server_status(&self, name: &str) -> McpConnectionStatus {
+        // A `connections` entry means the handshake completed and we believe
+        // the server is live; transport liveness is only observed on the next
+        // call. `server_status` stays non-async by design (no async lock
+        // taken here) — it reports the tool names we already know about.
+        if self.connections.contains_key(name) {
+            let tools = self
+                .tool_wrappers
+                .values()
+                .filter(|w| w.server_name() == name)
+                .map(|w| w.name().to_string())
+                .collect::<Vec<_>>();
+            return McpConnectionStatus::Connected { tools };
+        }
+        if self.tool_wrappers.values().any(|w| w.server_name() == name) {
+            McpConnectionStatus::Disconnected
+        } else {
+            McpConnectionStatus::NotConfigured
+        }
+    }
+
+    /// Disconnect **only** the named server — shut it down and drop its
+    /// connection + tool wrappers, leaving all other servers untouched.
+    ///
+    /// This is the per-server counterpart to [`shutdown_all`]; the previous
+    /// `disconnect_server` implementations called `shutdown_all` and cleared
+    /// every connection (issue #31).
+    pub async fn disconnect_server(&mut self, name: &str) -> Result<()> {
+        if let Some(conn_arc) = self.connections.remove(name) {
+            let mut conn = conn_arc.lock().await;
+            conn.shutdown().await?;
+        }
+        // Drop tool wrappers belonging to this server. Collect first to
+        // avoid borrowing `self.tool_wrappers` while removing.
+        let drop_names: Vec<String> = self
+            .tool_wrappers
+            .iter()
+            .filter(|(_, w)| w.server_name() == name)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in drop_names {
+            self.tool_wrappers.remove(&k);
+        }
+        Ok(())
+    }
+
+    /// Reconnect a server: disconnect the existing connection (if any) then
+    /// re-establish it with the supplied config (default policy). Returns the
+    /// normalized tool names discovered after the fresh connect.
+    pub async fn reconnect_server(&mut self, config: McpServerConfig) -> Result<Vec<String>> {
+        self.reconnect_server_with_policy(config, &McpToolPermissions::default())
+            .await
+    }
+
+    /// Reconnect a server with an explicit per-tool policy: disconnect the
+    /// existing connection (if any) then re-establish it. Returns the
+    /// normalized tool names discovered after the fresh connect.
+    pub async fn reconnect_server_with_policy(
+        &mut self,
+        config: McpServerConfig,
+        permissions: &McpToolPermissions,
+    ) -> Result<Vec<String>> {
+        self.disconnect_server(&config.name).await?;
+        self.connect_server_with_policy(config, permissions).await
     }
 
     /// Shutdown all MCP connections.
@@ -1294,5 +1627,175 @@ mod tests {
         );
         assert_eq!(wrapper.name(), "search");
         assert_eq!(wrapper.risk_level(), oneai_core::RiskLevel::Medium);
+    }
+
+    // ── Stage 1: name normalization + per-server disconnect ────────────────
+
+    #[test]
+    fn test_normalize_tool_name_namespaces() {
+        assert_eq!(
+            normalize_tool_name("filesystem", "read_file"),
+            "mcp__filesystem__read_file"
+        );
+    }
+
+    #[test]
+    fn test_normalize_tool_name_sanitizes() {
+        // Uppercase + non-alnum → lowercased + underscores, no repeats.
+        assert_eq!(
+            normalize_tool_name("My-Server.io", "Read File!"),
+            "mcp__my_server_io__read_file"
+        );
+    }
+
+    #[test]
+    fn test_normalize_tool_name_collides_same_raw_distinct_server() {
+        // Same raw tool name on two servers → distinct normalized names.
+        let a = normalize_tool_name("fs", "read_file");
+        let b = normalize_tool_name("git", "read_file");
+        assert_ne!(a, b);
+        assert!(a.starts_with("mcp__fs__"));
+        assert!(b.starts_with("mcp__git__"));
+    }
+
+    #[test]
+    fn test_normalize_tool_name_truncates_long_under_64() {
+        let server = "s";
+        let tool = "x".repeat(200);
+        let n = normalize_tool_name(server, &tool);
+        assert!(
+            n.len() <= 64,
+            "normalized name must be ≤64 bytes, got {} ({})",
+            n.len(),
+            n
+        );
+        assert!(n.starts_with("mcp__s__"));
+        // Long distinct names must not collapse to the same identifier.
+        let tool2 = "y".repeat(200);
+        let n2 = normalize_tool_name(server, &tool2);
+        assert_ne!(n, n2);
+    }
+
+    #[test]
+    fn test_mcp_connection_status_is_connected() {
+        assert!(McpConnectionStatus::Connected { tools: vec![] }.is_connected());
+        assert!(!McpConnectionStatus::Disconnected.is_connected());
+        assert!(!McpConnectionStatus::NotConfigured.is_connected());
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_remote_name_split() {
+        // `with_remote_name` keeps registry name ≠ remote name.
+        let config = McpServerConfig {
+            name: "srv".to_string(),
+            transport: McpTransport::Stdio {
+                command: "c".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            requires_api_key: false,
+            api_key_field: None,
+        };
+        let conn = Arc::new(tokio::sync::Mutex::new(McpConnection::new(config)));
+        let wrapper = McpToolWrapper::with_remote_name(
+            "mcp__srv__read_file".to_string(),
+            "read_file".to_string(),
+            "Reads a file".to_string(),
+            serde_json::json!({}),
+            "srv".to_string(),
+            conn,
+        );
+        assert_eq!(wrapper.name(), "mcp__srv__read_file");
+        assert_eq!(wrapper.remote_name(), "read_file");
+        assert_eq!(wrapper.server_name(), "srv");
+    }
+
+    #[test]
+    fn test_mcp_server_manager_empty_state() {
+        let mgr = McpServerManager::new();
+        assert!(mgr.server_names().is_empty());
+        assert!(!mgr.is_connected("anything"));
+        assert_eq!(
+            mgr.server_status("anything"),
+            McpConnectionStatus::NotConfigured
+        );
+        assert!(mgr.all_tool_wrappers().is_empty());
+    }
+
+    // ── Stage 2: per-server permission policy ──────────────────────────────
+
+    #[test]
+    fn test_mcp_tool_permissions_default_is_standard_direct() {
+        let p = McpToolPermissions::default();
+        assert_eq!(p.default_level, PermissionLevel::Standard);
+        assert!(p.tool_overrides.is_empty());
+        assert!(p.tool_exposure.is_empty());
+        // A tool with no override falls back to default Standard / Direct.
+        assert_eq!(p.level_for("anything"), PermissionLevel::Standard);
+        assert_eq!(p.exposure_for("anything"), ToolExposure::Direct);
+    }
+
+    #[test]
+    fn test_mcp_tool_permissions_level_and_exposure_for() {
+        let p = McpToolPermissions {
+            default_level: PermissionLevel::Read,
+            tool_overrides: HashMap::from([("dangerous".to_string(), PermissionLevel::Full)]),
+            tool_exposure: HashMap::from([
+                ("hidden_one".to_string(), ToolExposure::Hidden),
+                ("deferred_one".to_string(), ToolExposure::Deferred),
+            ]),
+        };
+
+        // default applies to unknown tools
+        assert_eq!(p.level_for("boring"), PermissionLevel::Read);
+        assert_eq!(p.exposure_for("boring"), ToolExposure::Direct);
+        // overrides apply when present
+        assert_eq!(p.level_for("dangerous"), PermissionLevel::Full);
+        assert_eq!(p.exposure_for("hidden_one"), ToolExposure::Hidden);
+        assert_eq!(p.exposure_for("deferred_one"), ToolExposure::Deferred);
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_with_policy_carries_levels() {
+        let config = McpServerConfig {
+            name: "srv".to_string(),
+            transport: McpTransport::Stdio {
+                command: "c".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            requires_api_key: false,
+            api_key_field: None,
+        };
+        let conn = Arc::new(tokio::sync::Mutex::new(McpConnection::new(config)));
+        let wrapper = McpToolWrapper::with_policy(
+            "mcp__srv__dangerous".to_string(),
+            "dangerous".to_string(),
+            "A dangerous tool".to_string(),
+            serde_json::json!({}),
+            "srv".to_string(),
+            PermissionLevel::Full,
+            ToolExposure::DeferredModelOnly,
+            conn,
+        );
+        assert_eq!(wrapper.permission_level(), PermissionLevel::Full);
+        assert_eq!(wrapper.risk_level(), oneai_core::RiskLevel::High);
+        assert_eq!(wrapper.exposure(), ToolExposure::DeferredModelOnly);
+        assert_eq!(wrapper.declared_permission_level(), PermissionLevel::Full);
+        assert_eq!(wrapper.declared_exposure(), ToolExposure::DeferredModelOnly);
+    }
+
+    #[test]
+    fn test_mcp_tool_permissions_serde_roundtrip() {
+        let p = McpToolPermissions {
+            default_level: PermissionLevel::Full,
+            tool_overrides: HashMap::from([("x".to_string(), PermissionLevel::Read)]),
+            tool_exposure: HashMap::from([("x".to_string(), ToolExposure::Hidden)]),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: McpToolPermissions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_level, PermissionLevel::Full);
+        assert_eq!(back.level_for("x"), PermissionLevel::Read);
+        assert_eq!(back.exposure_for("x"), ToolExposure::Hidden);
     }
 }

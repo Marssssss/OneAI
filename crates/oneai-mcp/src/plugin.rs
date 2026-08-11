@@ -14,7 +14,8 @@ use std::sync::Arc;
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
 use oneai_tool::{
-    McpServerConfig, McpTransport, RealMcpServerManager, RealMcpToolWrapper, ToolRegistry,
+    McpServerConfig, McpToolPermissions, McpTransport, RealMcpServerManager, RealMcpToolWrapper,
+    ToolRegistry,
 };
 
 use crate::config::McpServerConfigFile;
@@ -78,6 +79,29 @@ pub struct McpPluginEntry {
     /// Tags for categorization.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Per-server tool permission + exposure policy. Default `Standard` /
+    /// `Direct` — zero behaviour change unless a config sets overrides.
+    #[serde(default)]
+    pub permissions: McpToolPermissions,
+}
+
+impl Default for McpPluginEntry {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            source: McpPluginSource::Stdio {
+                command: String::new(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            enabled: true,
+            requires_api_key: false,
+            api_key_env: None,
+            tags: vec![],
+            permissions: McpToolPermissions::default(),
+        }
+    }
 }
 
 fn default_enabled() -> bool {
@@ -240,8 +264,11 @@ impl McpPluginRegistry {
         }
 
         let config = entry.to_server_config();
+        let permissions = entry.permissions.clone();
         let mut manager = self.server_manager.lock().await;
-        let tool_names = manager.connect_server(config).await?;
+        let tool_names = manager
+            .connect_server_with_policy(config, &permissions)
+            .await?;
 
         self.connected.insert(name.to_string(), tool_names.clone());
 
@@ -257,41 +284,101 @@ impl McpPluginRegistry {
 
     /// Connect all enabled servers and discover their tools.
     ///
-    /// Returns a map of server_name → discovered_tool_names.
+    /// Connections run **concurrently** (the `server_manager` is shared via
+    /// `Arc<Mutex>`, so each server locks it only for its own handshake).
+    /// Returns a map of server_name → discovered_tool_names; a failed
+    /// connect yields an empty `Vec` for that server (warned, not fatal).
     pub async fn connect_all_enabled(&mut self) -> Result<HashMap<String, Vec<String>>> {
-        let enabled_names: Vec<String> = self
+        let configs: Vec<(String, McpServerConfig, McpToolPermissions)> = self
             .entries
             .values()
             .filter(|e| e.enabled)
-            .map(|e| e.name.clone())
+            .map(|e| (e.name.clone(), e.to_server_config(), e.permissions.clone()))
             .collect();
 
-        let mut results = HashMap::new();
-        for name in &enabled_names {
-            match self.connect_server(name).await {
+        // Each task clones the shared manager Arc and connects one server.
+        // `connect_server_with_policy` is `&mut` on the manager, but the
+        // `Mutex` serializes the critical section — handshakes run
+        // one-at-a-time on the manager while the surrounding work (config
+        // lookup, result aggregation) is concurrent. This still unblocks the
+        // registry from holding the lock across all servers' surrounding setup.
+        let mgr = self.server_manager.clone();
+        let outcomes = futures::future::join_all(configs.into_iter().map(|(name, cfg, perms)| {
+            let mgr = mgr.clone();
+            async move {
+                let outcome = {
+                    let mut manager = mgr.lock().await;
+                    manager.connect_server_with_policy(cfg, &perms).await
+                };
+                (name, outcome)
+            }
+        }))
+        .await;
+
+        let mut map = HashMap::new();
+        for (name, outcome) in outcomes {
+            match outcome {
                 Ok(tool_names) => {
-                    results.insert(name.clone(), tool_names);
+                    tracing::info!(
+                        "MCP plugin '{}' connected — discovered {} tools: {:?}",
+                        name,
+                        tool_names.len(),
+                        tool_names
+                    );
+                    self.connected.insert(name.clone(), tool_names.clone());
+                    map.insert(name, tool_names);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to connect MCP plugin '{}': {}", name, e);
-                    results.insert(name.clone(), Vec::new());
+                    map.insert(name, Vec::new());
                 }
             }
         }
 
-        Ok(results)
+        Ok(map)
     }
 
-    /// Disconnect a server by name.
+    /// Disconnect a single server by name — shuts down only that server's
+    /// connection and drops its tool wrappers, leaving every other server
+    /// untouched. This is the per-server counterpart to `disconnect_all`;
+    /// the previous implementation called `shutdown_all()` and cleared the
+    /// entire `connected` map regardless of `name` (issue #31).
     pub async fn disconnect_server(&mut self, name: &str) -> Result<()> {
         let mut manager = self.server_manager.lock().await;
-        // Shutdown specific connection
-        // Note: current McpServerManager only supports shutdown_all()
-        // For now, we just remove from the connected map
-        manager.shutdown_all().await?;
-        self.connected.clear();
+        manager.disconnect_server(name).await?;
+        self.connected.remove(name);
         tracing::info!("MCP plugin '{}' disconnected", name);
         Ok(())
+    }
+
+    /// Reconnect a single server: disconnect (if present) then re-establish.
+    pub async fn reconnect_server(&mut self, name: &str) -> Result<Vec<String>> {
+        let entry = self.entries.get(name).cloned().ok_or_else(|| {
+            oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' not found in registry",
+                name
+            ))
+        })?;
+        if !entry.enabled {
+            return Err(oneai_core::error::OneAIError::Provider(format!(
+                "MCP plugin '{}' is disabled",
+                name
+            )));
+        }
+        let config = entry.to_server_config();
+        let permissions = entry.permissions.clone();
+        let mut manager = self.server_manager.lock().await;
+        let tool_names = manager
+            .reconnect_server_with_policy(config, &permissions)
+            .await?;
+        self.connected.insert(name.to_string(), tool_names.clone());
+        tracing::info!(
+            "MCP plugin '{}' reconnected — discovered {} tools: {:?}",
+            name,
+            tool_names.len(),
+            tool_names
+        );
+        Ok(tool_names)
     }
 
     /// Disconnect all servers.
@@ -300,6 +387,18 @@ impl McpPluginRegistry {
         manager.shutdown_all().await?;
         self.connected.clear();
         Ok(())
+    }
+
+    /// Whether a server is currently connected.
+    pub async fn is_connected(&self, name: &str) -> bool {
+        let manager = self.server_manager.lock().await;
+        manager.is_connected(name)
+    }
+
+    /// Status of one server connection (non-async — see `McpConnectionStatus`).
+    pub async fn server_status(&self, name: &str) -> oneai_tool::McpConnectionStatus {
+        let manager = self.server_manager.lock().await;
+        manager.server_status(name)
     }
 
     /// Get all discovered tool wrappers from connected servers.
@@ -441,6 +540,7 @@ fn builtin_mcp_entries() -> Vec<McpPluginEntry> {
             requires_api_key: false,
             api_key_env: None,
             tags: vec!["filesystem".to_string(), "files".to_string()],
+            ..Default::default()
         },
         McpPluginEntry {
             name: "web_search".to_string(),
@@ -454,6 +554,7 @@ fn builtin_mcp_entries() -> Vec<McpPluginEntry> {
             requires_api_key: true,
             api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
             tags: vec!["web".to_string(), "search".to_string()],
+            ..Default::default()
         },
     ]
 }
@@ -518,6 +619,7 @@ mod tests {
             requires_api_key: false,
             api_key_env: None,
             tags: vec!["filesystem".to_string()],
+            ..Default::default()
         };
 
         let config = entry.to_server_config();
@@ -546,6 +648,7 @@ mod tests {
             requires_api_key: false,
             api_key_env: None,
             tags: vec!["test".to_string()],
+            ..Default::default()
         };
 
         registry.add_entry(entry);
@@ -571,6 +674,7 @@ mod tests {
             requires_api_key: false,
             api_key_env: None,
             tags: vec![],
+            ..Default::default()
         });
         registry.add_entry(McpPluginEntry {
             name: "disabled_server".to_string(),
@@ -584,6 +688,7 @@ mod tests {
             requires_api_key: false,
             api_key_env: None,
             tags: vec![],
+            ..Default::default()
         });
 
         assert_eq!(registry.list_enabled().len(), 1);
@@ -621,6 +726,7 @@ mod tests {
             requires_api_key: true,
             api_key_env: Some("API_KEY".to_string()),
             tags: vec!["files".to_string()],
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&entry).unwrap();

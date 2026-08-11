@@ -2039,15 +2039,39 @@ impl AppBuilder {
             }
         }
 
-        // Connect MCP plugin servers and register discovered tools
-        let mcp_plugin_registry = self.mcp_plugin_registry.map(std::sync::Arc::new);
-        if let Some(_registry) = &mcp_plugin_registry {
-            // Note: connect_all_enabled() is async and mutable, so we need to handle it carefully
-            // We'll register tools in the build flow after creating the mutable registry
-            tracing::info!(
-                "MCP plugin registry configured — tools will be registered at build time"
-            );
-        }
+        // Connect MCP plugin servers and register discovered tools.
+        //
+        // Previously this only wrapped the registry in `Arc` and left
+        // `connect_all_enabled` uncalled anywhere in the runtime path — so a
+        // configured `mcp_servers_from_config()` build connected zero servers
+        // and registered zero tools (issue #31). We now connect enabled
+        // servers here on the owned registry (before it's shared via `Arc`)
+        // and register discovered tools into the live `ToolRegistry`. Failures
+        // are warned, not fatal — a single misconfigured server must not abort
+        // app construction. The reloader (`AppDataLayerReloader`) re-runs
+        // `register_tools` on `reload` to pick up re-discovered wrappers.
+        let mcp_plugin_registry = match self.mcp_plugin_registry.take() {
+            Some(mut reg) => {
+                match reg.connect_all_enabled().await {
+                    Ok(map) => {
+                        let total: usize = map.values().map(Vec::len).sum();
+                        tracing::info!(
+                            "MCP plugin registry — connected {} server(s), {} tool(s) total",
+                            map.len(),
+                            total
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("MCP connect_all_enabled failed (continuing): {}", e);
+                    }
+                }
+                if let Err(e) = reg.register_tools(&self.tool_registry).await {
+                    tracing::warn!("MCP register_tools failed (continuing): {}", e);
+                }
+                Some(std::sync::Arc::new(reg))
+            }
+            None => None,
+        };
 
         // Data-layer reloader (evolution-plan §3.4) — backs the `reload`
         // tool. Default = `AppDataLayerReloader` (skills + MCP

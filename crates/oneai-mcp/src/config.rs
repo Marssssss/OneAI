@@ -128,6 +128,7 @@ impl McpServerConfigFile {
                     requires_api_key: false,
                     api_key_env: None,
                     tags: vec!["filesystem".to_string(), "files".to_string()],
+                    ..Default::default()
                 },
                 McpPluginEntry {
                     name: "web_search".to_string(),
@@ -141,6 +142,7 @@ impl McpServerConfigFile {
                     requires_api_key: true,
                     api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
                     tags: vec!["web".to_string(), "search".to_string()],
+                    ..Default::default()
                 },
             ],
         }
@@ -233,6 +235,7 @@ mod tests {
                 requires_api_key: false,
                 api_key_env: None,
                 tags: vec!["filesystem".to_string()],
+                ..Default::default()
             }],
         };
 
@@ -263,6 +266,7 @@ mod tests {
                 requires_api_key: true,
                 api_key_env: Some("API_KEY".to_string()),
                 tags: vec!["search".to_string()],
+                ..Default::default()
             }],
         };
 

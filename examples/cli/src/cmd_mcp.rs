@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use oneai_tool::CalculatorTool;
-use oneai_tool::ToolRegistry;
+use oneai_core::{PermissionLevel as Level, ToolExposure};
+use oneai_tool::{CalculatorTool, ToolRegistry};
 
 use oneai_mcp::{McpPluginEntry, McpPluginRegistry, McpPluginSource, McpServerHost};
 
@@ -187,6 +187,7 @@ pub fn cmd_mcp_add(
         requires_api_key: false,
         api_key_env: None,
         tags: vec![name.to_string()],
+        ..Default::default()
     };
 
     registry.add_entry(entry);
@@ -270,4 +271,190 @@ pub fn cmd_mcp_connect(name: &str) {
         // Cleanup — disconnect
         let _ = registry.disconnect_all().await;
     });
+}
+
+/// Probe one (or all) server(s): connect, list the namespaced tool names the
+/// model would see, then disconnect **only that server** (exercising the
+/// per-server `disconnect_server` path). Differs from `connect` in that it
+/// disconnects the named server alone rather than `disconnect_all`, and
+/// reports the `mcp__<server>__<tool>` identifiers registered into the
+/// `ToolRegistry`.
+pub fn cmd_mcp_status(name: Option<&str>) {
+    let rt = tokio::runtime::Runtime::new().expect("Tokio runtime creation");
+
+    rt.block_on(async {
+        let mut registry = McpPluginRegistry::from_config_file();
+
+        // Targets: the named server, or every configured entry.
+        let targets: Vec<String> = match name {
+            Some(n) => {
+                if registry.get_entry(n).is_none() {
+                    eprintln!("MCP server '{}' not found in config.", n);
+                    return;
+                }
+                vec![n.to_string()]
+            }
+            None => registry
+                .list_entries()
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
+        };
+
+        println!("🔌 MCP server status probe\n");
+
+        for srv in &targets {
+            println!("── {} ──", srv);
+            match registry.connect_server(srv).await {
+                Ok(tool_names) => {
+                    println!("  ✅ live — {} tool(s)", tool_names.len());
+                    for t in &tool_names {
+                        println!("    • {}", t);
+                    }
+                    if tool_names.is_empty() {
+                        println!("    (no tools advertised)");
+                    }
+                }
+                Err(e) => {
+                    println!("  ❌ unreachable — {}", e);
+                }
+            }
+            // Per-server disconnect (not disconnect_all).
+            let _ = registry.disconnect_server(srv).await;
+            println!();
+        }
+    });
+}
+
+/// Parse a CLI string into a `PermissionLevel` (read/standard/full) or
+/// `ToolExposure` (direct/deferred/...) via the same serde rename rules the
+/// TOML config uses.
+fn parse_level(s: &str) -> std::result::Result<Level, String> {
+    serde_json::from_str::<Level>(&format!("\"{}\"", s))
+        .map_err(|_| format!("unknown permission level '{}': use read/standard/full", s))
+}
+fn parse_exposure(s: &str) -> std::result::Result<ToolExposure, String> {
+    serde_json::from_str::<ToolExposure>(&format!("\"{}\"", s)).map_err(|_| {
+        format!(
+            "unknown exposure '{}': use direct/deferred/deferred_model_only/direct_model_only/code_mode_only/hidden",
+            s
+        )
+    })
+}
+
+/// Inspect or set per-server tool permission + exposure policy.
+///
+/// `oneai mcp perm <server> --list`                — print the current policy.
+/// `oneai mcp perm <server> --level read`          — set the server default level.
+/// `oneai mcp perm <server> --tool x --exposure hidden` — set a per-tool override.
+pub fn cmd_mcp_perm(
+    server: &str,
+    tool: Option<&str>,
+    level: Option<&str>,
+    exposure: Option<&str>,
+    list: bool,
+) {
+    let mut registry = McpPluginRegistry::from_config_file();
+
+    let mut entry = match registry.get_entry(server) {
+        Some(e) => e.clone(),
+        None => {
+            eprintln!("MCP server '{}' not found in config.", server);
+            return;
+        }
+    };
+
+    if !list && level.is_none() && exposure.is_none() {
+        eprintln!("Nothing to do — pass --list, --level, or --exposure.");
+        return;
+    }
+
+    // Apply mutations.
+    if let Some(lvl) = level {
+        match parse_level(lvl) {
+            Ok(l) => {
+                if let Some(t) = tool {
+                    entry.permissions.tool_overrides.insert(t.to_string(), l);
+                } else {
+                    entry.permissions.default_level = l;
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(exp) = exposure {
+        match parse_exposure(exp) {
+            Ok(e) => {
+                if let Some(t) = tool {
+                    entry.permissions.tool_exposure.insert(t.to_string(), e);
+                } else {
+                    eprintln!("--exposure requires --tool (server-wide exposure default is always Direct).");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Persist (only if something changed).
+    if !list {
+        registry.add_entry(entry.clone());
+        if let Err(e) = registry.save_config() {
+            eprintln!("Error saving config: {}", e);
+            return;
+        }
+    }
+
+    // Print the (possibly updated) policy.
+    println!("🔌 MCP server '{}' permission policy", server);
+    println!(
+        "  default_level: {}",
+        fmt_level(entry.permissions.default_level)
+    );
+    if entry.permissions.tool_overrides.is_empty() {
+        println!("  tool_overrides: (none)");
+    } else {
+        println!("  tool_overrides:");
+        for (t, l) in &entry.permissions.tool_overrides {
+            println!("    {} → {}", t, fmt_level(*l));
+        }
+    }
+    if entry.permissions.tool_exposure.is_empty() {
+        println!("  tool_exposure: (none — all Direct)");
+    } else {
+        println!("  tool_exposure:");
+        for (t, e) in &entry.permissions.tool_exposure {
+            println!("    {} → {}", t, fmt_exposure(*e));
+        }
+    }
+    if !list {
+        println!("\nSaved to ~/.oneai/mcp_servers.toml");
+        println!("Reconnect or restart the app for the policy to take effect on live wrappers.");
+    }
+}
+
+fn fmt_level(l: Level) -> &'static str {
+    match l {
+        Level::Read => "read",
+        Level::Standard => "standard",
+        Level::Full => "full",
+    }
+}
+
+fn fmt_exposure(e: ToolExposure) -> &'static str {
+    match e {
+        ToolExposure::Direct => "direct",
+        ToolExposure::Deferred => "deferred",
+        ToolExposure::DeferredModelOnly => "deferred_model_only",
+        ToolExposure::DirectModelOnly => "direct_model_only",
+        ToolExposure::CodeModeOnly => "code_mode_only",
+        ToolExposure::Hidden => "hidden",
+        _ => "unknown",
+    }
 }

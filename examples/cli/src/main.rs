@@ -661,6 +661,38 @@ enum McpAction {
         /// Server name
         name: String,
     },
+    /// Probe one server's liveness + discovered tools (connects, lists, then
+    /// disconnects that single server). Differs from `connect` in that it
+    /// disconnects only the named server (exercising the per-server
+    /// disconnect path) and prints the namespaced tool names the model would
+    /// actually see.
+    Status {
+        /// Server name (omit to probe all enabled servers)
+        name: Option<String>,
+    },
+    /// Inspect or set per-server tool permission/exposure policy. The policy
+    /// sets the tool-declared `PermissionLevel` + `ToolExposure` for the
+    /// server's discovered tools; the DomainPack `PermissionProfile` can still
+    /// tighten it per name. Changes persist to `~/.oneai/mcp_servers.toml`
+    /// and take effect on the next connect/reload.
+    Perm {
+        /// Server name.
+        server: String,
+        /// Raw tool name (as advertised by the server) to set a per-tool
+        /// override on. Omit to set the server-wide default.
+        #[arg(long)]
+        tool: Option<String>,
+        /// `read` / `standard` / `full` — the permission level.
+        #[arg(long)]
+        level: Option<String>,
+        /// `direct` / `deferred` / `deferred_model_only` / `direct_model_only`
+        /// / `code_mode_only` / `hidden` — the model exposure.
+        #[arg(long)]
+        exposure: Option<String>,
+        /// Just print the current policy for this server.
+        #[arg(long, default_value_t = false)]
+        list: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1692,6 +1724,24 @@ fn main() {
             }
             McpAction::Connect { name } => {
                 cmd_mcp::cmd_mcp_connect(&name);
+            }
+            McpAction::Status { name } => {
+                cmd_mcp::cmd_mcp_status(name.as_deref());
+            }
+            McpAction::Perm {
+                server,
+                tool,
+                level,
+                exposure,
+                list,
+            } => {
+                cmd_mcp::cmd_mcp_perm(
+                    &server,
+                    tool.as_deref(),
+                    level.as_deref(),
+                    exposure.as_deref(),
+                    list,
+                );
             }
         },
         Some(Commands::A2a { action }) => match action {
