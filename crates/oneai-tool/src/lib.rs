@@ -57,7 +57,7 @@ pub use mcp_real::{default_mcp_configs, normalize_tool_name, optional_mcp_config
 pub use mcp_real::{
     McpBinding, McpConnection, McpConnectionStatus, McpFramingParser, McpOAuthTokenRefresher,
     McpServerConfig, McpServerConnectionIdentity, McpToolInfo, McpToolPermissions, McpTransport,
-    McpTransportKind,
+    McpTransportKind, ToolCatalogCache,
 };
 pub use network_proxy::{NetworkApprovalMode, NetworkProxy};
 pub use registry::*;

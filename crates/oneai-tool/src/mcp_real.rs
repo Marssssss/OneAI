@@ -1545,6 +1545,170 @@ impl McpBinding {
     }
 }
 
+// ─── ToolCatalogCache (LRU + generation) ─────────────────────────────────────
+//
+// Caches the last-known `tools/list` catalog per server across connect/disconnect
+// cycles. Each entry carries a `generation` counter; `bump_generation` (called on
+// disconnect/reconnect) advances it so a stale snapshot (cached under an older
+// generation) no longer satisfies a `get(_, expected_generation)` lookup — the
+// caller must re-fetch. An LRU order bounds memory when connecting many servers.
+//
+// Today the cache is consulted by `cached_tools` / `last_known_tools` for
+// diagnostics (e.g. reporting a disconnected server's last-seen tool count). The
+// handshake itself still runs `tools/list` (the connection must open regardless);
+// wiring the cache to *skip* a redundant `tools/list` on a same-generation
+// reconnect is a later optimization — the structure + generation contract are in
+// place to support it without another API change.
+
+/// One cached tool catalog entry.
+#[derive(Debug, Clone)]
+struct CachedCatalog {
+    /// Discovered tools (raw-name keyed snapshot projected to a Vec).
+    tools: Vec<McpToolInfo>,
+    /// Generation this entry was written under. `get` only returns it when the
+    /// caller's `expected_generation` matches.
+    generation: u64,
+    /// Monotonic LRU sequence number (larger = more recently touched).
+    lru_seq: u64,
+}
+
+/// LRU-bounded, generation-stamped tool catalog cache.
+pub struct ToolCatalogCache {
+    entries: HashMap<String, CachedCatalog>,
+    /// Server names in least-recently-used-first order.
+    order: Vec<String>,
+    capacity: usize,
+    next_seq: u64,
+}
+
+impl ToolCatalogCache {
+    /// Default capacity (32 servers). Bound chosen to cover typical agent
+    /// setups while keeping the cache trivially small.
+    pub const DEFAULT_CAPACITY: usize = 32;
+
+    pub fn new() -> Self {
+        Self::with_capacity(Self::DEFAULT_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity,
+            next_seq: 1,
+        }
+    }
+
+    /// Return the cached catalog only if `server` is present AND its
+    /// generation matches `expected_generation`. A mismatch (stale snapshot
+    /// after a reconnect/disconnect bumped the generation) returns `None`.
+    /// Returns an owned `Vec` so LRU order can be promoted on the hit (a
+    /// borrow into `self.entries` would forbid the mutating touch).
+    pub fn get(&mut self, server: &str, expected_generation: u64) -> Option<Vec<McpToolInfo>> {
+        let entry = self.entries.get_mut(server)?;
+        if entry.generation != expected_generation {
+            return None;
+        }
+        let tools = entry.tools.clone();
+        // Promote LRU: move `server` to the back (most-recently-used).
+        self.order.retain(|n| n != server);
+        self.order.push(server.to_string());
+        Some(tools)
+    }
+
+    /// Last-known tools for `server`, ignoring generation (diagnostics only —
+    /// e.g. "this server is disconnected but last advertised N tools").
+    pub fn last_known_tools(&self, server: &str) -> Option<&[McpToolInfo]> {
+        self.entries.get(server).map(|e| e.tools.as_slice())
+    }
+
+    /// Insert / replace a catalog entry, advancing its LRU position. Evicts
+    /// the least-recently-used entry when over capacity.
+    pub fn put(&mut self, server: &str, tools: Vec<McpToolInfo>, generation: u64) {
+        let seq = self.fresh_seq();
+        if self.entries.contains_key(server) {
+            if let Some(entry) = self.entries.get_mut(server) {
+                entry.tools = tools;
+                entry.generation = generation;
+                entry.lru_seq = seq;
+            }
+            self.touch(server, &seq);
+            return;
+        }
+        if self.entries.len() >= self.capacity {
+            // Evict the least-recently-used (front of `order`).
+            if let Some(victim) = self.order.first().cloned() {
+                self.entries.remove(&victim);
+                self.order.retain(|n| n != &victim);
+            }
+        }
+        self.entries.insert(
+            server.to_string(),
+            CachedCatalog {
+                tools,
+                generation,
+                lru_seq: seq,
+            },
+        );
+        self.order.push(server.to_string());
+    }
+
+    /// Advance `server`'s generation so any snapshot cached under an older
+    /// generation stops matching `get`. Returns the new generation, or `None`
+    /// if the server was never cached. The cached entry is *retained* (so
+    /// `last_known_tools` still works) but its generation is bumped.
+    pub fn bump_generation(&mut self, server: &str) -> Option<u64> {
+        // Allocate the seq first to avoid a second `&mut self` borrow while
+        // `entry` (from `self.entries.get_mut`) is live.
+        let seq = self.fresh_seq();
+        let entry = self.entries.get_mut(server)?;
+        // Advance past any generation a caller might still hold. The manager's
+        // `fresh_generation` is monotonic, so the bumped value just needs to
+        // differ from all prior writes — use the cache's own seq counter to
+        // stay self-contained.
+        let new_gen = entry.generation.wrapping_add(1).max(seq);
+        entry.generation = new_gen;
+        Some(new_gen)
+    }
+
+    /// Drop the cached entry for `server` entirely.
+    pub fn invalidate(&mut self, server: &str) {
+        self.entries.remove(server);
+        self.order.retain(|n| n != server);
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn fresh_seq(&mut self) -> u64 {
+        let s = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        s
+    }
+
+    /// Move `server` to the back of `order` (most-recently-used).
+    fn touch(&mut self, server: &str, _seq: &u64) {
+        self.order.retain(|n| n != server);
+        self.order.push(server.to_string());
+    }
+}
+
+impl Default for ToolCatalogCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ─── McpServerManager ────────────────────────────────────────────────────────
 
 /// MCP server manager — handles real connections to MCP servers.
@@ -1563,6 +1727,10 @@ pub struct McpServerManager {
     bindings: tokio::sync::RwLock<HashMap<String, Arc<McpBinding>>>,
     token_refresher: tokio::sync::Mutex<Option<Arc<dyn McpOAuthTokenRefresher>>>,
     next_generation: std::sync::atomic::AtomicU64,
+    /// LRU-bounded, generation-stamped tool catalog cache. Populated on
+    /// `connect`, generation-bumped on `disconnect`/`reconnect`. See
+    /// [`ToolCatalogCache`].
+    catalog_cache: std::sync::Mutex<ToolCatalogCache>,
 }
 
 impl McpServerManager {
@@ -1571,6 +1739,7 @@ impl McpServerManager {
             bindings: tokio::sync::RwLock::new(HashMap::new()),
             token_refresher: tokio::sync::Mutex::new(None),
             next_generation: std::sync::atomic::AtomicU64::new(1),
+            catalog_cache: std::sync::Mutex::new(ToolCatalogCache::new()),
         }
     }
 
@@ -1635,9 +1804,18 @@ impl McpServerManager {
             )
         };
         let tool_names = binding.tool_names();
+        // Snapshot the discovered catalog + generation for the LRU cache before
+        // the binding Arc is moved into the bindings map.
+        let catalog_tools: Vec<McpToolInfo> = binding.tools.values().cloned().collect();
+        let catalog_gen = binding.generation;
 
         let mut bindings = self.bindings.write().await;
         bindings.insert(config.name.clone(), binding);
+        // Refresh the catalog cache so `cached_tools` / `last_known_tools`
+        // return the up-to-date snapshot under this generation.
+        if let Ok(mut cache) = self.catalog_cache.lock() {
+            cache.put(&config.name, catalog_tools, catalog_gen);
+        }
 
         Ok(tool_names)
     }
@@ -1700,9 +1878,28 @@ impl McpServerManager {
             let tools = binding.wrappers.keys().cloned().collect::<Vec<_>>();
             return McpConnectionStatus::Connected { tools };
         }
-        // No binding under `name` → not configured (we never retain a binding
-        // for a disconnected server; `disconnect_server` removes it).
+        // No live binding — consult the catalog cache to distinguish
+        // "was connected once, now disconnected" from "never configured".
+        if let Ok(cache) = self.catalog_cache.lock() {
+            if cache.last_known_tools(name).is_some() {
+                return McpConnectionStatus::Disconnected;
+            }
+        }
         McpConnectionStatus::NotConfigured
+    }
+
+    /// Cached catalog for `server`, only if its generation still matches
+    /// `expected_generation`. Returns `None` when the server was never cached
+    /// or its snapshot was invalidated by a disconnect/reconnect.
+    pub fn cached_tools(&self, server: &str, expected_generation: u64) -> Option<Vec<McpToolInfo>> {
+        let mut cache = self.catalog_cache.lock().ok()?;
+        cache.get(server, expected_generation)
+    }
+
+    /// Last-known catalog for `server` (ignoring generation). Diagnostics only.
+    pub fn last_known_tools(&self, server: &str) -> Option<Vec<McpToolInfo>> {
+        let cache = self.catalog_cache.lock().ok()?;
+        cache.last_known_tools(server).map(|s| s.to_vec())
     }
 
     /// Snapshot of every binding (identity + tools + generation), for
@@ -1726,6 +1923,14 @@ impl McpServerManager {
         if let Some(binding) = binding {
             let mut conn = binding.connection.lock().await;
             conn.shutdown().await?;
+            // Bump the catalog generation so any snapshot cached under the old
+            // generation stops matching `cached_tools(_, gen)` — a future
+            // reconnect repopulates with a fresh generation. The entry is
+            // retained so `last_known_tools` can still report the last-seen
+            // catalog for diagnostics.
+            if let Ok(mut cache) = self.catalog_cache.lock() {
+                cache.bump_generation(name);
+            }
         }
         Ok(())
     }
@@ -1761,6 +1966,10 @@ impl McpServerManager {
         for binding in drained {
             let mut conn = binding.connection.lock().await;
             conn.shutdown().await?;
+        }
+        // Drop the whole catalog cache — every server is gone.
+        if let Ok(mut cache) = self.catalog_cache.lock() {
+            *cache = ToolCatalogCache::new();
         }
         Ok(())
     }
@@ -2087,6 +2296,105 @@ mod tests {
         assert!(binding.tool_names().is_empty());
         // The wrapper set shares the connection Arc.
         assert!(Arc::ptr_eq(&binding.connection, &conn));
+    }
+
+    // ── Stage 4-2: tool catalog cache LRU + generation ───────────────────
+
+    fn info(name: &str) -> McpToolInfo {
+        McpToolInfo {
+            name: name.to_string(),
+            description: format!("tool {name}"),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            server_name: "srv".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_catalog_cache_put_and_get_matching_generation() {
+        let mut cache = ToolCatalogCache::new();
+        cache.put("a", vec![info("t1")], 1);
+        assert_eq!(cache.len(), 1);
+        let got = cache.get("a", 1).expect("matching generation hits");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "t1");
+    }
+
+    #[test]
+    fn test_catalog_cache_get_returns_none_on_generation_mismatch() {
+        let mut cache = ToolCatalogCache::new();
+        cache.put("a", vec![info("t1")], 1);
+        // Different expected generation → miss (stale snapshot).
+        assert!(cache.get("a", 2).is_none());
+        // Unknown server → miss.
+        assert!(cache.get("b", 1).is_none());
+    }
+
+    #[test]
+    fn test_catalog_cache_bump_generation_invalidates_old_snapshot() {
+        let mut cache = ToolCatalogCache::new();
+        cache.put("a", vec![info("t1")], 1);
+        let new_gen = cache.bump_generation("a").expect("was cached");
+        assert_ne!(new_gen, 1);
+        // Old generation no longer matches; the entry is retained for
+        // `last_known_tools`.
+        assert!(cache.get("a", 1).is_none());
+        assert_eq!(cache.last_known_tools("a").map(|t| t.len()), Some(1));
+        // Bumping an unknown server returns None (no-op).
+        assert!(cache.bump_generation("never").is_none());
+    }
+
+    #[test]
+    fn test_catalog_cache_lru_eviction_when_over_capacity() {
+        let mut cache = ToolCatalogCache::with_capacity(2);
+        cache.put("a", vec![info("a")], 1);
+        cache.put("b", vec![info("b")], 1);
+        assert_eq!(cache.len(), 2);
+        // Touch "a" so "b" becomes least-recently-used.
+        let _ = cache.get("a", 1);
+        cache.put("c", vec![info("c")], 1);
+        assert_eq!(cache.len(), 2); // capacity bound
+        assert!(cache.last_known_tools("a").is_some()); // a was recent
+        assert!(cache.last_known_tools("b").is_none()); // b evicted
+        assert!(cache.last_known_tools("c").is_some());
+    }
+
+    #[test]
+    fn test_catalog_cache_put_replaces_existing_and_promotes_lru() {
+        let mut cache = ToolCatalogCache::with_capacity(2);
+        cache.put("a", vec![info("a1")], 1);
+        cache.put("b", vec![info("b1")], 1);
+        // Replace "a"'s entry under a new generation.
+        cache.put("a", vec![info("a2")], 2);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(
+            cache.get("a", 2).map(|t| t[0].name.clone()),
+            Some("a2".to_string())
+        );
+        // "b" is now least-recently-used → evicted on next put.
+        cache.put("c", vec![info("c")], 1);
+        assert!(cache.last_known_tools("b").is_none());
+    }
+
+    #[test]
+    fn test_catalog_cache_invalidate_removes_entry() {
+        let mut cache = ToolCatalogCache::new();
+        cache.put("a", vec![info("a")], 1);
+        cache.invalidate("a");
+        assert!(cache.is_empty());
+        assert!(cache.last_known_tools("a").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_manager_cached_tools_generation_invalidated_on_disconnect() {
+        // The empty-state manager has no cached entries.
+        let mgr = McpServerManager::new();
+        assert!(mgr.last_known_tools("nope").is_none());
+        assert!(mgr.cached_tools("nope", 1).is_none());
+        // server_status on a never-configured server is NotConfigured.
+        assert_eq!(
+            mgr.server_status("nope").await,
+            McpConnectionStatus::NotConfigured
+        );
     }
 
     // ── Stage 2: per-server permission policy ──────────────────────────────
