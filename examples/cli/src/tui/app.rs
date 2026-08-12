@@ -456,26 +456,6 @@ pub struct PlanDecisionState {
     pub request_id: String,
 }
 
-/// TUI-internal async-op results (NOT engine yields). `/init` and `/compact`
-/// run LLM calls in background tasks; their results land here. Kept separate
-/// from `EngineYield` because they're TUI operations, not engine output —
-/// two channels, two distinct schemas, no duplication.
-#[derive(Debug)]
-pub enum TuiAsyncEvent {
-    /// `/init` finished — payload is the pre-formatted result/error message.
-    InitResult(String),
-    /// `/compact` finished. `summary` empty ⇒ conversation was too short.
-    CompactResult {
-        summary: String,
-        removed_count: usize,
-        /// Retained recent turns `(role, text)` for re-render after clearing.
-        retained: Vec<(String, String)>,
-    },
-    /// A TUI-async op failed (e.g. `/compact` LLM error). Distinct from
-    /// `EngineYield::Error` (which is engine output).
-    Error(String),
-}
-
 // ─── Chat Message ──────────────────────────────────────────────────────────
 
 /// A message in the chat area.
@@ -1002,11 +982,6 @@ pub struct App {
     /// When set, the plan-review popup is collecting Revise feedback text
     /// instead of navigating buttons.
     pub plan_revise_input: Option<String>,
-    /// Sender for TUI-internal async-op results (`/init`, `/compact`). Set
-    /// after `App::new` (the TUI wires its `tui_rx` here). Background tasks
-    /// clone this and send `TuiAsyncEvent`s; the main loop drains `tui_rx`.
-    /// `Option` so tests (which don't spawn these ops) leave it `None`.
-    pub tui_async_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiAsyncEvent>>,
 }
 
 impl App {
@@ -1090,7 +1065,6 @@ impl App {
             plan_approval_selected_index: 0,
             plan_approval_scroll: 0,
             plan_revise_input: None,
-            tui_async_tx: None,
         }
     }
 

@@ -136,7 +136,7 @@ pub fn run_tui(
     let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
-    let (app, session_state, engine_bus, mut tui_rx) = rt.block_on(async {
+    let (app, session_state, engine_bus) = rt.block_on(async {
         // Engine bus: the TUI is a bus consumer — one channel, one schema.
         // `engine_bus()` constructs the `InProcessBus`, wires a
         // `BusInteractionGate` (approvals round-trip as
@@ -219,12 +219,6 @@ pub fn run_tui(
         tui_app.skill_names = tui_app.skill_registry.skill_names().await;
         tui_app.current_domain = domain_pack_name.to_string();
 
-        // TUI-internal async-op channel (for /init, /compact LLM-call results).
-        // Distinct from the engine bus: two channels, two distinct schemas.
-        let (tui_tx, tui_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::tui::app::TuiAsyncEvent>();
-        tui_app.tui_async_tx = Some(tui_tx);
-
         // Load the most recent saved sessions into `tui_app.sessions` so the
         // sidebar AND the top TAB bar (issue #30) show history at startup,
         // not just the single fresh current session. Both surfaces read the
@@ -282,7 +276,7 @@ pub fn run_tui(
             engine_bus.clone(),
         );
 
-        (tui_app, session_state, engine_bus, tui_rx)
+        (tui_app, session_state, engine_bus)
     });
 
     // The TUI main loop consumes yields directly off the bus — one channel,
@@ -301,7 +295,6 @@ pub fn run_tui(
         interrupt_slot,
         engine_bus,
         &mut bus_rx,
-        &mut tui_rx,
     );
 
     // Restore terminal
@@ -621,11 +614,10 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
 
 /// Main TUI event loop.
 ///
-/// The agent runs in a background directive-pump task; `EngineYield`s are
-/// consumed here directly off `bus_rx` (one channel, one schema), and TUI-
-/// internal async-op results (`/init`, `/compact`) off `tui_rx`. The
-/// typewriter effect works the same — stream chunks arrive in real-time
-/// while the TUI continues rendering.
+/// The agent runs in a background directive-pump task; `EngineYield`s (turn
+/// output + `/init`/`/compact` results + errors) are consumed here directly
+/// off `bus_rx` — one channel, one schema. The typewriter effect works the
+/// same: stream chunks arrive in real-time while the TUI keeps rendering.
 #[allow(clippy::too_many_arguments)]
 fn run_main_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -635,7 +627,6 @@ fn run_main_loop(
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
     bus_rx: &mut tokio::sync::broadcast::Receiver<oneai_bus::EngineYield>,
-    tui_rx: &mut tokio::sync::mpsc::UnboundedReceiver<app::TuiAsyncEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     while !app.should_quit {
         // Advance spinner frame only when thinking (spinner animation needs periodic redraw)
@@ -712,12 +703,6 @@ fn run_main_loop(
                     tracing::warn!("TUI yield consumer lagged, skipped {n} yields");
                 }
             }
-        }
-
-        // TUI-internal async-op results (/init, /compact) — distinct channel,
-        // distinct schema (these are NOT engine yields).
-        while let Ok(ev) = tui_rx.try_recv() {
-            process_tui_event(&mut app, ev);
         }
 
         // Render AFTER processing all events and state changes.
@@ -1136,7 +1121,7 @@ fn handle_user_input_async(
                 app.request_render();
 
                 let session_state_cl = session_state.clone();
-                let tx = app.tui_async_tx.clone();
+                let bus = engine_bus.clone();
                 let format_label = opts.format.label().to_string();
                 rt.spawn(async move {
                     // Grab the provider (cloned Arc) under a short lock, if available.
@@ -1175,22 +1160,20 @@ fn handle_user_input_async(
                         }
                         Err(e) => format!("✗ /init failed: {}", e),
                     };
-                    if let Some(tx) = tx {
-                        let _ = tx.send(crate::tui::app::TuiAsyncEvent::InitResult(msg));
-                    }
+                    use oneai_bus::EngineBus;
+                    let _ = bus.emit(oneai_bus::EngineYield::InitResult { message: msg });
                 });
                 return;
             }
             "/compact" => {
                 // Compact conversation in place via LLM summarization.
                 //
-                // Mirrors /init's async pattern: the LLM summary call takes
-                // seconds, so we run it in a background task with a progress
-                // line + spinner and deliver the result via the TUI-internal
-                // async channel (`TuiAsyncEvent::CompactResult`). Unlike the
-                // old implementation, we do NOT reset the session — the summary
-                // is injected into the *backend* Conversation
-                // (`AppSession::compact`) so the model sees it on the next run,
+                // The LLM summary call takes seconds, so we run it in a
+                // background task with a progress line + spinner and deliver
+                // the result back onto the bus as `EngineYield::CompactResult`
+                // (one channel, one schema — no separate TUI-async channel).
+                // We do NOT reset the session — the summary is injected into
+                // the *backend* Conversation (`AppSession::compact`) so the model sees it on the next run,
                 // and work continues in the same session (same session_id, no
                 // new sidebar entry).
                 let has_provider =
@@ -1208,28 +1191,29 @@ fn handle_user_input_async(
                 app.request_render();
 
                 let session_state_cl = session_state.clone();
-                let tx = app.tui_async_tx.clone();
+                let bus = engine_bus.clone();
                 rt.spawn(async move {
                     let outcome = session_state_cl.lock().await.session.compact(2).await;
-                    let msg = match &outcome {
+                    use oneai_bus::{EngineBus, EngineYield};
+                    let _ = match &outcome {
                         // Empty summary ⇒ conversation was too short; send an
                         // empty payload so the handler shows the "too short"
                         // notice (the backend was left untouched by compact()).
-                        Ok(o) if o.summary.is_empty() => app::TuiAsyncEvent::CompactResult {
+                        Ok(o) if o.summary.is_empty() => bus.emit(EngineYield::CompactResult {
                             summary: String::new(),
                             removed_count: 0,
                             retained: Vec::new(),
-                        },
-                        Ok(o) => app::TuiAsyncEvent::CompactResult {
+                        }),
+                        Ok(o) => bus.emit(EngineYield::CompactResult {
                             summary: o.summary.clone(),
                             removed_count: o.removed_count,
                             retained: o.retained.clone(),
-                        },
-                        Err(e) => app::TuiAsyncEvent::Error(format!("✗ /compact failed: {}", e)),
+                        }),
+                        Err(e) => bus.emit(EngineYield::Error {
+                            recoverable: false,
+                            message: format!("✗ /compact failed: {}", e),
+                        }),
                     };
-                    if let Some(tx) = tx {
-                        let _ = tx.send(msg);
-                    }
                 });
                 return;
             }
@@ -2583,6 +2567,54 @@ fn process_yield(app: &mut App, y: oneai_bus::EngineYield, bus: &oneai_bus::InPr
             app.plan_state = None;
             app.add_message(ChatRole::Error, message);
         }
+        oneai_bus::EngineYield::InitResult { message, .. } => {
+            // `/init` background generation finished — re-enable input + show
+            // the result. Producer-agnostic (in-process frontend emits it
+            // directly; sidecar engine emits after `Directive::InitProject`).
+            app.stop_thinking();
+            app.add_message(ChatRole::System, message);
+        }
+        oneai_bus::EngineYield::CompactResult {
+            summary,
+            removed_count,
+            retained,
+            ..
+        } => {
+            // `/compact` finished. The backend Conversation was already
+            // replaced in place by `AppSession::compact` (summary system
+            // message + retained recent turns) — the model sees it on the
+            // next run. Here we just refresh the display: clear the rich
+            // display list, show the summary, re-append the retained turns.
+            app.stop_thinking();
+            app.render_cache.invalidate_all();
+            app.messages.clear();
+            if summary.is_empty() {
+                app.add_message(
+                    ChatRole::System,
+                    "Conversation too short to compact — nothing to summarize.",
+                );
+            } else {
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "📋 Conversation compacted: {} older messages summarized into the \
+                     session context. Work continues in this session — the summary is \
+                     visible to the model.\n\n--- Summary ---\n{}",
+                        removed_count, summary
+                    ),
+                );
+                for (role, text) in &retained {
+                    match role.as_str() {
+                        "user" => app.add_message(ChatRole::User, text.clone()),
+                        _ => app.add_message(ChatRole::Assistant, text.clone()),
+                    }
+                }
+            }
+            app.context_tokens = 0;
+            app.context_tokens_is_estimated = false;
+            app.last_context_accounting = None;
+            app.request_render();
+        }
         oneai_bus::EngineYield::TokenUsage { usage, .. } => {
             let usage = app::TokenUsage {
                 prompt: usage.prompt_tokens,
@@ -2757,58 +2789,6 @@ fn handle_approval_yield(
         // proceed (matches the old `_` arm's Proceed fallback).
         _ => {
             let _ = bus.resolve_approval(&request_id, InteractionResponse::Proceed);
-        }
-    }
-}
-
-/// Process a TUI-internal async-op result (`/init`, `/compact`). These are NOT
-/// engine yields — they live on a separate channel with a distinct schema.
-fn process_tui_event(app: &mut App, event: app::TuiAsyncEvent) {
-    use app::TuiAsyncEvent;
-    match event {
-        TuiAsyncEvent::InitResult(msg) => {
-            app.stop_thinking();
-            app.add_message(ChatRole::System, msg);
-        }
-        TuiAsyncEvent::CompactResult {
-            summary,
-            removed_count,
-            retained,
-        } => {
-            app.stop_thinking();
-            app.render_cache.invalidate_all();
-            app.messages.clear();
-            if summary.is_empty() {
-                app.add_message(
-                    ChatRole::System,
-                    "Conversation too short to compact — nothing to summarize.",
-                );
-            } else {
-                app.add_message(
-                    ChatRole::System,
-                    format!(
-                        "📋 Conversation compacted: {} older messages summarized into the \
-                     session context. Work continues in this session — the summary is \
-                     visible to the model.\n\n--- Summary ---\n{}",
-                        removed_count, summary
-                    ),
-                );
-                for (role, text) in &retained {
-                    match role.as_str() {
-                        "user" => app.add_message(ChatRole::User, text.clone()),
-                        _ => app.add_message(ChatRole::Assistant, text.clone()),
-                    }
-                }
-            }
-            app.context_tokens = 0;
-            app.context_tokens_is_estimated = false;
-            app.last_context_accounting = None;
-            app.request_render();
-        }
-        TuiAsyncEvent::Error(msg) => {
-            app.stop_thinking();
-            app.plan_state = None;
-            app.add_message(ChatRole::Error, msg);
         }
     }
 }

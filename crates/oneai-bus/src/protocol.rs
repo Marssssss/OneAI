@@ -202,6 +202,19 @@ pub enum EngineYield {
     /// Tools were added to the registry mid-run (self-extension). ←
     /// `on_tools_added`.
     ToolsAdded { turn_id: String, names: Vec<String> },
+    /// `/init` (project-info generation) finished — payload is the
+    /// pre-formatted result/error message. Producer-agnostic: in the
+    /// in-process CLI the frontend's /init task emits this directly; in a
+    /// sidecar the engine emits it after processing `Directive::InitProject`.
+    InitResult { message: String },
+    /// `/compact` (LLM summarization) finished. `summary` empty ⇒
+    /// conversation was too short. `retained` are the recent `(role, text)`
+    /// turns kept for the frontend to re-render after clearing its display.
+    CompactResult {
+        summary: String,
+        removed_count: usize,
+        retained: Vec<(String, String)>,
+    },
     /// Cache-aware token usage for the turn so far. ← `on_token_usage_full`.
     TokenUsage { usage: BusUsageRecord },
     /// A recoverable (loop continues) or fatal (turn ends) engine error.
