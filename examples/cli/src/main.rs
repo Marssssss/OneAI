@@ -83,6 +83,7 @@ mod cmd_pack;
 mod cmd_provider;
 mod cmd_reload;
 mod cmd_run;
+mod cmd_serve;
 mod cmd_session;
 mod cmd_skill;
 mod cmd_studio;
@@ -180,6 +181,22 @@ enum Commands {
     Supervisor {
         #[command(subcommand)]
         action: SupervisorAction,
+    },
+    /// Serve the unified engine bus over IPC (sidecar — Directive writer +
+    /// Yield reader socket frontend for macOS/Windows native apps). #24/#25 P3.
+    Serve {
+        /// IPC socket path (default: ~/.oneai/serve.sock)
+        #[arg(long)]
+        socket: Option<String>,
+        /// Domain pack (default: coding)
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model override
+        #[arg(long)]
+        model: Option<String>,
+        /// Default user identity for memory namespacing
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Cron — durable NL/cron/ISO scheduling + external one-shot triggers
     /// (Phase 3.2). Deliver fired jobs into the gateway's bound channel
@@ -1580,6 +1597,18 @@ fn main() {
                 socket,
             } => cmd_supervisor::cmd_supervisor_rpc_stream(socket.as_deref(), &id, &message),
         },
+        Some(Commands::Serve {
+            socket,
+            domain,
+            model,
+            user,
+        }) => cmd_serve::cmd_serve(
+            &config,
+            socket.as_deref(),
+            domain.as_deref(),
+            model.as_deref(),
+            user.as_deref(),
+        ),
         Some(Commands::Pack { action }) => match action {
             PackAction::List => cmd_pack::cmd_pack_list(),
             PackAction::Show { name } => cmd_pack::cmd_pack_show(&name),

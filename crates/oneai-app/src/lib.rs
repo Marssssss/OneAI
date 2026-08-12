@@ -19,10 +19,12 @@
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
 pub mod builder;
+pub mod directive_pump;
 pub mod reloader;
 pub mod session;
 
 pub use builder::*;
+pub use directive_pump::{spawn_directive_pump, DirectiveRuntime};
 pub use reloader::*;
 pub use session::*;
 

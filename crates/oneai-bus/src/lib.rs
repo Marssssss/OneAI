@@ -35,6 +35,7 @@
 
 pub mod bus;
 pub mod protocol;
+pub mod serve;
 pub mod wire;
 
 pub use bus::{EngineBus, InProcessBus};
@@ -42,6 +43,7 @@ pub use protocol::{
     BusParadigmKind, BusSubAgent, BusSubAgentKind, BusToolCall, BusTurnSummary, BusUsageRecord,
     Directive, EngineYield,
 };
+pub use serve::bridge_connection;
 pub use wire::{parse_directive, parse_yield, serialize_directive, serialize_yield};
 
 use thiserror::Error;
@@ -62,4 +64,14 @@ pub enum BusError {
     /// A serialized frame did not decode.
     #[error("wire codec error: {0}")]
     Codec(String),
+    /// An I/O error on the sidecar wire bridge (client disconnect mid-yield,
+    /// broken pipe, etc.).
+    #[error("wire io error: {0}")]
+    Io(String),
+}
+
+impl From<std::io::Error> for BusError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e.to_string())
+    }
 }
