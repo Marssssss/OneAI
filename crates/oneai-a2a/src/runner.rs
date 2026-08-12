@@ -10,6 +10,22 @@
 //! [`A2ARunner::run_task_streaming`] and returns the reply as a Task +
 //! Artifact (or, for the streaming path, SSE events pushed through the sink).
 //!
+//! ## Why this crate does NOT depend on `oneai-bus` (P5 decision)
+//!
+//! `tasks/sendSubscribe`'s SSE payload is the A2A-protocol-mandated
+//! `task` / `status` / `artifact` shape (see `transport::TaskStreamEvent`),
+//! NOT `EngineYield` — a remote A2A client speaks that protocol and would
+//! break if the payload were swapped. The other two wires (studio WS,
+//! supervisor IPC) converged to `EngineYield` in P5-A/P5-B because they are
+//! *local* frontends that own both ends. A2A is inter-agent: only the codec
+//! could be shared, and `serde_json` already is the codec. Bus-feeding the
+//! SSE stream (subscribe to an `InProcessBus`, map each `EngineYield` to an
+//! A2A `task`/`status`/`artifact` SSE event) is therefore a **CLI-side
+//! concern**: a future `A2ARunner` impl may do that mapping inside
+//! `run_task_streaming` without this crate gaining a `oneai-bus` dependency.
+//! Keeping a2a bus-free preserves the protocol boundary (supply-chain
+//! discipline — no new cross-crate dep for zero wire-level gain).
+//!
 //! The default [`PlaceholderRunner`] reproduces the pre-3.5 placeholder
 //! ack ("Task received and processed. N skills available.") so the existing
 //! handler/router/server unit tests — which assert "task transitions to
