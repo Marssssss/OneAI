@@ -4,99 +4,38 @@
 //! and the live in-memory instance handles. All long-lived `AgentLoop` work
 //! happens through [`InstanceHandle::run_turn`]; this layer schedules it,
 //! records lifecycle transitions in the registry, and (for `rpc_stream`)
-//! bridges the agent's [`AgentLoopObserver`] callbacks to an [`EventSink`].
+//! bridges the agent's `EngineYield` stream (via a per-call
+//! [`oneai_bus::InProcessBus`] + [`oneai_agent::BusObserver`]) to an
+//! [`EventSink`] that forwards each yield's JSON to the connected client.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use oneai_agent::{
-    AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind, SubAgentSummary,
-    ToolCallRequest,
-};
-use oneai_core::{ContextAccounting, InterruptPoint, ResumeSignal, ToolOutput};
+use oneai_agent::{AgentLoopObserver, BusObserver};
+use oneai_bus::{EngineBus, InProcessBus};
 use oneai_trace::{EventKind, SpanKind, SpanStatus, TraceContext};
 
 use crate::error::{Result, SupervisorError};
 use crate::registry::{InstanceRegistry, InstanceSpec, InstanceStatus};
-use crate::runner::{paradigm_to_string, InstanceHandle, SupervisorRunner, TurnSummary};
+use crate::runner::{InstanceHandle, SupervisorRunner, TurnSummary};
 
-// ─── Events (mirror of oneai-studio::StudioEvent, for rpc_stream) ────────────
+// ─── EventSink (carries serialized EngineYield JSON) ─────────────────────────
 
-/// Frontend-facing tool-call representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallView {
-    pub id: String,
-    pub tool_name: String,
-    pub args: serde_json::Value,
-}
-
-/// One lifecycle event pushed during a streaming `rpc_stream` turn.
-///
-/// Each variant corresponds to an [`AgentLoopObserver`] callback, serialized
-/// as JSON for the connected client (mirrors `oneai-studio::StudioEvent`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum Event {
-    IterationStart {
-        iteration: usize,
-        paradigm: String,
-    },
-    DirectAnswer {
-        text: String,
-    },
-    ToolCalls {
-        calls: Vec<ToolCallView>,
-    },
-    ToolResult {
-        call_id: String,
-        tool_name: String,
-        success: bool,
-        output_summary: String,
-    },
-    Delegate {
-        task: String,
-        agent_type: String,
-    },
-    ParadigmSwitch {
-        paradigm: String,
-    },
-    CheckpointSaved {
-        iteration: usize,
-        checkpoint_id: String,
-    },
-    TraceEvent {
-        kind: String,
-        name: String,
-        attributes: serde_json::Value,
-    },
-    Thinking {
-        text: String,
-    },
-    StreamChunk {
-        text: String,
-    },
-    LoopComplete {
-        result_summary: String,
-    },
-    Error {
-        message: String,
-    },
-}
-
-/// A sink that receives [`Event`]s during a streaming turn. Implemented by the
-/// server to forward JSON lines to the connected client; the in-proc `Supervisor`
-/// also provides a collecting impl for tests.
+/// A sink that receives serialized `EngineYield` JSON values during a
+/// streaming `rpc_stream` turn. Implemented by the server to forward each
+/// value as a `StreamLine::event` line to the connected client; the in-proc
+/// `Supervisor` tests provide a collecting impl.
 pub trait EventSink: Send + Sync {
-    fn emit(&self, event: Event);
+    /// Receive one `EngineYield` as an already-serialized JSON value.
+    fn emit(&self, yield_json: serde_json::Value);
 }
 
-/// An [`EventSink`] that buffers every event in memory (tests / in-proc use).
+/// An [`EventSink`] that buffers every yield value in memory (tests / in-proc).
 pub struct CollectingSink {
-    inner: std::sync::Mutex<Vec<Event>>,
+    inner: std::sync::Mutex<Vec<serde_json::Value>>,
 }
 
 impl CollectingSink {
@@ -106,7 +45,7 @@ impl CollectingSink {
         }
     }
 
-    pub fn events(&self) -> Vec<Event> {
+    pub fn events(&self) -> Vec<serde_json::Value> {
         self.inner.lock().unwrap().clone()
     }
 }
@@ -118,192 +57,50 @@ impl Default for CollectingSink {
 }
 
 impl EventSink for CollectingSink {
-    fn emit(&self, event: Event) {
-        self.inner.lock().unwrap().push(event);
+    fn emit(&self, yield_json: serde_json::Value) {
+        self.inner.lock().unwrap().push(yield_json);
     }
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max_len])
-    }
-}
-
-/// An [`AgentLoopObserver`] that bridges every callback to an [`EventSink`].
-struct StreamingObserver {
+/// Spawn a forwarder that drains `bus`'s yield stream into `sink` as
+/// serialized JSON values. The caller must have already obtained the
+/// `receiver` via `bus.subscribe_yields()` BEFORE constructing the
+/// `BusObserver` — otherwise early yields (emitted before the spawned task
+/// subscribes) hit a broadcast with zero receivers and are lost. Returns
+/// immediately; the task ends when the yield channel closes (bus dropped).
+fn spawn_yield_forwarder(
+    mut rx: tokio::sync::broadcast::Receiver<oneai_bus::EngineYield>,
     sink: Arc<dyn EventSink>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Ok(yield_) = rx.recv().await {
+            let value = serde_json::to_value(&yield_).unwrap_or(serde_json::Value::Null);
+            sink.emit(value);
+        }
+    })
 }
 
-impl StreamingObserver {
-    fn new(sink: Arc<dyn EventSink>) -> Self {
-        Self { sink }
+/// Build a per-turn bus + `BusObserver` and (for `rpc_stream`) a forwarder
+/// that pumps yields to `sink`. The returned observer drives the turn; the
+/// forwarder (if any) lives until the bus drops.
+///
+/// The yield subscription is taken BEFORE the `BusObserver` is constructed so
+/// no early emit is lost to a zero-receiver broadcast (the same race P3 fixed
+/// in `bridge_connection`).
+fn wire_turn(sink: Option<Arc<dyn EventSink>>) -> (Arc<dyn EngineBus>, Arc<dyn AgentLoopObserver>) {
+    let bus: Arc<dyn EngineBus> = Arc::new(InProcessBus::default());
+    if let Some(sink) = sink {
+        // Subscribe BEFORE spawning so the receiver exists before any emit.
+        let rx = bus.subscribe_yields();
+        // Detach the forwarder — it runs until the yield channel closes
+        // (bus dropped at turn end), independent of this call's scope.
+        spawn_yield_forwarder(rx, sink);
     }
-
-    fn emit(&self, event: Event) {
-        self.sink.emit(event);
-    }
-}
-
-impl AgentLoopObserver for StreamingObserver {
-    fn on_iteration_start(&self, iteration: usize, paradigm: ParadigmKind) {
-        self.emit(Event::IterationStart {
-            iteration,
-            paradigm: paradigm_to_string(paradigm),
-        });
-    }
-
-    fn on_direct_answer(&self, text: &str) {
-        self.emit(Event::DirectAnswer {
-            text: text.to_string(),
-        });
-    }
-
-    fn on_tool_calls(&self, calls: &[ToolCallRequest]) {
-        self.emit(Event::ToolCalls {
-            calls: calls
-                .iter()
-                .map(|c| ToolCallView {
-                    id: c.id.clone(),
-                    tool_name: c.name.clone(),
-                    args: c.args.clone(),
-                })
-                .collect(),
-        });
-    }
-
-    fn on_tool_result(&self, call_id: &str, tool_name: &str, output: &ToolOutput) {
-        self.emit(Event::ToolResult {
-            call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            success: output.success,
-            output_summary: if output.success {
-                truncate(&output.content, 200)
-            } else {
-                output.error.clone().unwrap_or_default()
-            },
-        });
-    }
-
-    fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
-        self.emit(Event::Delegate {
-            task: task.to_string(),
-            agent_type: agent_type.name().to_string(),
-        });
-    }
-
-    fn on_delegate_complete(&self, summary: &SubAgentSummary) {
-        self.emit(Event::TraceEvent {
-            kind: "DelegateComplete".to_string(),
-            name: "agent.delegate_complete".to_string(),
-            attributes: serde_json::json!({
-                "completed": summary.completed,
-                "summary": truncate(&summary.summary, 200),
-            }),
-        });
-    }
-
-    fn on_paradigm_switch(&self, paradigm: ParadigmKind) {
-        self.emit(Event::ParadigmSwitch {
-            paradigm: paradigm_to_string(paradigm),
-        });
-    }
-
-    fn on_checkpoint(&self, iteration: usize) {
-        self.emit(Event::CheckpointSaved {
-            iteration,
-            checkpoint_id: format!("checkpoint_iter_{}", iteration),
-        });
-    }
-
-    fn on_complete(&self, result: &AgentLoopResult) {
-        self.emit(Event::LoopComplete {
-            result_summary: format!(
-                "Completed: {} iterations, paradigm {}",
-                result.iterations,
-                paradigm_to_string(result.active_paradigm)
-            ),
-        });
-    }
-
-    fn on_stream_chunk(&self, text: &str) {
-        self.emit(Event::StreamChunk {
-            text: text.to_string(),
-        });
-    }
-
-    fn on_thinking(&self, text: &str) {
-        self.emit(Event::Thinking {
-            text: text.to_string(),
-        });
-    }
-
-    fn on_token_usage(&self, prompt_tokens: u32, completion_tokens: u32) {
-        self.emit(Event::TraceEvent {
-            kind: "TokenUsage".to_string(),
-            name: "llm.token_usage".to_string(),
-            attributes: serde_json::json!({
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            }),
-        });
-    }
-
-    fn on_context_accounting(&self, accounting: &ContextAccounting) {
-        self.emit(Event::TraceEvent {
-            kind: "ContextAccounting".to_string(),
-            name: "agent.context_accounting".to_string(),
-            attributes: serde_json::json!({
-                "total_tokens": accounting.total_tokens,
-                "context_window_size": accounting.context_window_size,
-                "utilization_pct": accounting.utilization_pct,
-            }),
-        });
-    }
-
-    fn on_interrupt(&self, point: &InterruptPoint) {
-        self.emit(Event::TraceEvent {
-            kind: "Interrupt".to_string(),
-            name: "agent.interrupt".to_string(),
-            attributes: serde_json::json!({
-                "id": point.id,
-                "iteration": point.iteration,
-                "reason": format!("{:?}", point.reason),
-            }),
-        });
-    }
-
-    fn on_resume(&self, signal: &ResumeSignal) {
-        self.emit(Event::TraceEvent {
-            kind: "Resume".to_string(),
-            name: "agent.resume".to_string(),
-            attributes: serde_json::json!({
-                "interrupt_id": signal.interrupt_id,
-                "feedback": signal.feedback,
-                "action": format!("{:?}", signal.action),
-            }),
-        });
-    }
-
-    fn on_plan_update(&self, plan: Option<&oneai_agent::plan_state::PlanState>) {
-        self.emit(Event::TraceEvent {
-            kind: "PlanUpdate".to_string(),
-            name: "agent.plan_update".to_string(),
-            attributes: serde_json::json!({
-                "has_plan": plan.is_some(),
-            }),
-        });
-    }
-
-    fn on_reflection(&self, summary: &str) {
-        self.emit(Event::TraceEvent {
-            kind: "Reflection".to_string(),
-            name: "agent.reflection".to_string(),
-            attributes: serde_json::json!({ "summary": summary }),
-        });
-    }
+    // turn_id is informational here (the wire `StreamLine` carries its own id);
+    // BusObserver tags each yield with it so a frontend can correlate.
+    let turn_id = format!("sup_{}", uuid::Uuid::new_v4());
+    let observer: Arc<dyn AgentLoopObserver> = Arc::new(BusObserver::new(bus.clone(), turn_id));
+    (bus, observer)
 }
 
 // ─── Supervisor ──────────────────────────────────────────────────────────────
@@ -412,8 +209,9 @@ impl Supervisor {
         self.registry
             .set_status(id, InstanceStatus::Running)
             .await?;
-        let sink: Arc<dyn EventSink> = Arc::new(CollectingSink::new());
-        let observer: Arc<dyn AgentLoopObserver> = Arc::new(StreamingObserver::new(sink.clone()));
+        // Per-turn bus + BusObserver; no sink (no client to stream to).
+        // Yields emit to the bus with zero subscribers → no-op.
+        let (_bus, observer) = wire_turn(None);
         let span = self.trace_span("supervisor.rpc");
         let result = handle.run_turn(task, observer).await;
         self.trace_exit(
@@ -430,7 +228,9 @@ impl Supervisor {
         Ok(summary)
     }
 
-    /// Run one turn, streaming live events to `sink`. Returns the final summary.
+    /// Run one turn, streaming live `EngineYield`s to `sink`. Returns the final
+    /// summary. Each yield is forwarded as serialized JSON (the wire
+    /// `StreamLine.event` payload is an `EngineYield` value).
     pub async fn rpc_stream(
         &self,
         id: &str,
@@ -446,9 +246,12 @@ impl Supervisor {
         self.registry
             .set_status(id, InstanceStatus::Running)
             .await?;
-        let observer: Arc<dyn AgentLoopObserver> = Arc::new(StreamingObserver::new(sink));
+        // Per-turn bus + BusObserver + a forwarder pumping yields to `sink`.
+        let (bus, observer) = wire_turn(Some(sink));
         let span = self.trace_span("supervisor.rpc_stream");
         let result = handle.run_turn(task, observer).await;
+        // Drop the bus so the forwarder task ends cleanly.
+        drop(bus);
         self.trace_exit(
             span,
             if result.is_ok() {
@@ -483,6 +286,7 @@ mod tests {
     use super::*;
     use crate::runner::InstanceStatus;
     use async_trait::async_trait;
+    use oneai_agent::{AgentLoopResult, ParadigmKind};
 
     // A fake handle + runner for in-proc tests (no provider / no LLM).
     struct FakeHandle {
@@ -607,23 +411,25 @@ mod tests {
         assert_eq!(summary.final_answer, "hello");
 
         let events = sink.events();
-        // Expect at least: IterationStart, two StreamChunks, DirectAnswer, LoopComplete.
+        // Each event is a serialized EngineYield — discriminate by `kind`.
+        // Expect at least: iteration_start, two stream_chunk, direct_answer,
+        // turn_complete.
         assert!(events
             .iter()
-            .any(|e| matches!(e, Event::IterationStart { paradigm, .. } if paradigm == "react")));
+            .any(|e| e.get("kind").and_then(|v| v.as_str()) == Some("iteration_start")));
         assert!(
             events
                 .iter()
-                .filter(|e| matches!(e, Event::StreamChunk { .. }))
+                .filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("stream_chunk"))
                 .count()
                 >= 2
         );
         assert!(events
             .iter()
-            .any(|e| matches!(e, Event::DirectAnswer { .. })));
+            .any(|e| e.get("kind").and_then(|v| v.as_str()) == Some("direct_answer")));
         assert!(events
             .iter()
-            .any(|e| matches!(e, Event::LoopComplete { .. })));
+            .any(|e| e.get("kind").and_then(|v| v.as_str()) == Some("turn_complete")));
     }
 
     #[tokio::test]

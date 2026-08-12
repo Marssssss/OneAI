@@ -19,6 +19,7 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 oneai-core = { workspace = true }
+oneai-bus = { workspace = true }
 oneai-agent = { workspace = true }
 oneai-trace = { workspace = true, features = ["trace"] }
 

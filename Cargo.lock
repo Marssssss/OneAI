@@ -4292,6 +4292,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "oneai-agent",
+ "oneai-bus",
  "oneai-core",
  "oneai-trace",
  "serde",

@@ -45,7 +45,7 @@ pub use protocol::{decode, encode, Request, Response, RpcMethod, StreamLine};
 pub use registry::{InstanceInfo, InstanceRegistry, InstanceSpec, InstanceStatus};
 pub use runner::{paradigm_to_string, InstanceHandle, SupervisorRunner, TurnSummary};
 pub use server::{serve, serve_with_trace, SupervisorConfig, SupervisorServer};
-pub use supervisor::{Event, Supervisor};
+pub use supervisor::{EventSink, Supervisor};
 pub use transport::{
     connect, default_server_dir, default_socket_path, mem_listener, IpcListener, IpcStream,
     MemListenerHandle,

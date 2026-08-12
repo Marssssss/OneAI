@@ -19,7 +19,7 @@ use oneai_trace::TraceContext;
 use crate::error::Result;
 use crate::protocol::{decode, encode, Request, Response, RpcMethod, StreamLine};
 use crate::registry::{InstanceRegistry, InstanceSpec};
-use crate::supervisor::{Event, EventSink, Supervisor};
+use crate::supervisor::{EventSink, Supervisor};
 use crate::transport::IpcListener;
 
 /// Daemon configuration.
@@ -238,18 +238,17 @@ async fn dispatch(request: &Request, supervisor: &Arc<Supervisor>) -> DispatchOu
     }
 }
 
-/// A sink that JSON-encodes each [`Event`] as a `StreamLine::event` line and
-/// pushes the encoded string into an unbounded channel (drained by the
-/// connection's writer arm).
+/// A sink that wraps each serialized `EngineYield` value as a
+/// `StreamLine::event` line and pushes the encoded string into an unbounded
+/// channel (drained by the connection's writer arm).
 struct LineSink {
     id: u64,
     tx: mpsc::UnboundedSender<String>,
 }
 
 impl EventSink for LineSink {
-    fn emit(&self, event: Event) {
-        let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-        let line = StreamLine::event(self.id, payload);
+    fn emit(&self, yield_json: serde_json::Value) {
+        let line = StreamLine::event(self.id, yield_json);
         if let Ok(s) = encode(&line) {
             let _ = self.tx.send(s);
         }

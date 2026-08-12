@@ -17,8 +17,8 @@ use crate::error::{Result, SupervisorError};
 use crate::protocol::{encode, Request, Response, RpcMethod, StreamLine};
 use crate::registry::{InstanceInfo, InstanceSpec};
 use crate::runner::TurnSummary;
-use crate::supervisor::Event;
 use crate::transport::{self, IpcStream};
+use oneai_bus::EngineYield;
 
 /// A client connected to a supervisor daemon.
 pub struct SupervisorClient {
@@ -137,13 +137,13 @@ impl SupervisorClient {
         Ok(serde_json::from_value(result)?)
     }
 
-    /// Run one turn, returning a live stream of [`Event`]s. The stream ends
-    /// (returns `None`) after the terminal `done` line.
+    /// Run one turn, returning a live stream of [`EngineYield`]s. The stream
+    /// ends (returns `None`) after the terminal `done` line.
     ///
     /// Holds the connection's lock for the duration of the stream, so no other
     /// call can be issued mid-stream (single-flight on one connection).
-    pub fn rpc_stream(&self, id: &str, task: &str) -> impl Stream<Item = Result<Event>> + '_ {
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event>>(64);
+    pub fn rpc_stream(&self, id: &str, task: &str) -> impl Stream<Item = Result<EngineYield>> + '_ {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<EngineYield>>(64);
         let inner = self.inner.clone();
         let id = id.to_string();
         let task = task.to_string();
@@ -190,8 +190,8 @@ impl SupervisorClient {
                     }
                 };
                 if let Some(event_value) = line.event {
-                    if let Ok(event) = serde_json::from_value::<Event>(event_value) {
-                        let _ = tx.send(Ok(event)).await;
+                    if let Ok(yield_) = serde_json::from_value::<EngineYield>(event_value) {
+                        let _ = tx.send(Ok(yield_)).await;
                     }
                 }
                 if line.done.unwrap_or(false) {

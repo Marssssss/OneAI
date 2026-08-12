@@ -9,8 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio_stream::StreamExt;
 
+use oneai_bus::EngineYield;
 use oneai_supervisor::{
-    serve, Event, InstanceHandle, InstanceSpec, InstanceStatus, SupervisorClient, SupervisorRunner,
+    serve, InstanceHandle, InstanceSpec, InstanceStatus, SupervisorClient, SupervisorRunner,
     TurnSummary,
 };
 
@@ -144,20 +145,20 @@ async fn full_lifecycle_over_uds() {
     }
     assert!(events
         .iter()
-        .any(|e| matches!(e, Event::IterationStart { .. })));
+        .any(|e| matches!(e, EngineYield::IterationStart { .. })));
     assert!(
         events
             .iter()
-            .filter(|e| matches!(e, Event::StreamChunk { .. }))
+            .filter(|e| matches!(e, EngineYield::StreamChunk { .. }))
             .count()
             >= 2
     );
     assert!(events
         .iter()
-        .any(|e| matches!(e, Event::DirectAnswer { .. })));
+        .any(|e| matches!(e, EngineYield::DirectAnswer { .. })));
     assert!(events
         .iter()
-        .any(|e| matches!(e, Event::LoopComplete { .. })));
+        .any(|e| matches!(e, EngineYield::TurnComplete { .. })));
 
     // Stop.
     client.stop("alice").await.unwrap();

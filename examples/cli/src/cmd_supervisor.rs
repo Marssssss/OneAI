@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use oneai_agent::AgentLoop;
 use oneai_app::AppBuilder;
+use oneai_bus::EngineYield;
 use oneai_core::InterruptReason;
 use oneai_supervisor::{
-    default_socket_path, Event, InstanceHandle, InstanceSpec, InstanceStatus, SupervisorClient,
+    default_socket_path, InstanceHandle, InstanceSpec, InstanceStatus, SupervisorClient,
     SupervisorConfig, SupervisorRunner, TurnSummary,
 };
 use oneai_tool::CalculatorTool;
@@ -261,62 +262,60 @@ pub fn cmd_supervisor_rpc_stream(socket: Option<&str>, id: &str, message: &str) 
     });
 }
 
-fn print_event(event: &Event) {
+fn print_event(event: &EngineYield) {
     match event {
-        Event::IterationStart {
+        EngineYield::IterationStart {
             iteration,
             paradigm,
+            ..
         } => {
-            eprintln!("[iter {} | paradigm {}]", iteration, paradigm);
+            eprintln!("[iter {} | paradigm {:?}]", iteration, paradigm);
         }
-        Event::StreamChunk { text } => {
+        EngineYield::StreamChunk { text, .. } => {
             print!("{}", text);
             use std::io::Write;
             let _ = std::io::stdout().flush();
         }
-        Event::DirectAnswer { text } => {
+        EngineYield::DirectAnswer { text, .. } => {
             println!("\n[answer] {}", text);
         }
-        Event::ToolCalls { calls } => {
+        EngineYield::ToolCalls { calls, .. } => {
             for c in calls {
-                eprintln!("[tool] {} ({})", c.tool_name, c.id);
+                eprintln!("[tool] {} ({})", c.name, c.id);
             }
         }
-        Event::ToolResult {
-            tool_name,
-            success,
-            output_summary,
-            ..
+        EngineYield::ToolResult {
+            tool_name, output, ..
         } => {
             eprintln!(
                 "[tool→{}] {} = {}",
                 tool_name,
-                if *success { "ok" } else { "fail" },
-                output_summary
+                if output.success { "ok" } else { "fail" },
+                if output.success {
+                    &output.content
+                } else {
+                    output.error.as_deref().unwrap_or("")
+                }
             );
         }
-        Event::ParadigmSwitch { paradigm } => {
-            eprintln!("[switch → {}]", paradigm);
+        EngineYield::ParadigmSwitch { to, .. } => {
+            eprintln!("[switch → {:?}]", to);
         }
-        Event::Thinking { text } => {
+        EngineYield::Thinking { text, .. } => {
             eprintln!("[think] {}", text);
         }
-        Event::LoopComplete { result_summary } => {
-            eprintln!("[done] {}", result_summary);
+        EngineYield::TurnComplete { summary, .. } => {
+            eprintln!(
+                "[done] {} ({} iters, paradigm {:?})",
+                summary.final_answer, summary.iterations, summary.active_paradigm
+            );
         }
-        Event::Delegate { task, agent_type } => {
-            eprintln!("[delegate → {}] {}", agent_type, task);
-        }
-        Event::CheckpointSaved {
-            iteration,
-            checkpoint_id,
+        EngineYield::Delegate {
+            task, agent_kind, ..
         } => {
-            eprintln!("[ckpt @ {} {}]", iteration, checkpoint_id);
+            eprintln!("[delegate → {:?}] {}", agent_kind, task);
         }
-        Event::TraceEvent { kind, name, .. } => {
-            eprintln!("[trace {} {}]", kind, name);
-        }
-        Event::Error { message } => {
+        EngineYield::Error { message, .. } => {
             eprintln!("[error] {}", message);
         }
         _ => {}
