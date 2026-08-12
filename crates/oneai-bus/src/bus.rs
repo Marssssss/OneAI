@@ -151,9 +151,18 @@ impl EngineBus for InProcessBus {
                 }
                 Ok(())
             }
-            // Forward user-facing directives to the engine driver.
+            // Forward user-facing directives to the engine driver. The new
+            // session/config/init/compact directives join the same forward
+            // path — the directive pump (engine side) acts on them.
             Directive::UserMessage { .. }
             | Directive::SwitchParadigm { .. }
+            | Directive::UpdateConfig { .. }
+            | Directive::Compact { .. }
+            | Directive::InitProject { .. }
+            | Directive::CreateSession { .. }
+            | Directive::LoadSession { .. }
+            | Directive::ClearSession
+            | Directive::DeleteSession { .. }
             | Directive::Shutdown => self
                 .directive_tx
                 .send(directive)

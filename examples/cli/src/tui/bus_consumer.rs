@@ -135,6 +135,197 @@ pub fn spawn_directive_pump(
                         "Directive::SwitchParadigm applied — next turn starts under it"
                     );
                 }
+                Directive::UpdateConfig {
+                    plan_mode: Some(on),
+                } => {
+                    // Hot-sync session config. Currently just plan_mode (Plan
+                    // blocks tool execution); provider/model/memory overrides
+                    // are future fields. FIFO-ordered before any UserMessage,
+                    // so the next turn sees the new config. `plan_mode: None`
+                    // (leave unchanged) matches the catch-all below.
+                    session_state.lock().await.session.set_plan_mode(on);
+                }
+                Directive::Compact { keep_recent_turns } => {
+                    // /compact: LLM-summarize the backend conversation in place.
+                    // Holds the session lock for the call (a concurrent
+                    // UserMessage blocks — same as the old direct path).
+                    let outcome = {
+                        let mut state = session_state.lock().await;
+                        state.session.compact(keep_recent_turns).await
+                    };
+                    let _ = match &outcome {
+                        Ok(o) if o.summary.is_empty() => {
+                            bus.emit(oneai_bus::EngineYield::CompactResult {
+                                summary: String::new(),
+                                removed_count: 0,
+                                retained: Vec::new(),
+                            })
+                        }
+                        Ok(o) => bus.emit(oneai_bus::EngineYield::CompactResult {
+                            summary: o.summary.clone(),
+                            removed_count: o.removed_count,
+                            retained: o
+                                .retained
+                                .iter()
+                                .map(|(r, t)| (r.clone(), t.clone()))
+                                .collect(),
+                        }),
+                        Err(e) => bus.emit(oneai_bus::EngineYield::Error {
+                            recoverable: false,
+                            message: format!("Error: {e}"),
+                        }),
+                    };
+                }
+                Directive::InitProject {
+                    format,
+                    force,
+                    no_llm,
+                } => {
+                    // /init: generate a project-instruction file. Runs the
+                    // probe/LLM synthesis WITHOUT the session lock (only the
+                    // provider is borrowed under a short lock).
+                    let fmt = format
+                        .as_deref()
+                        .and_then(|s| {
+                            oneai_domain::project_info::ProjectInfoFormat::from_name(s).ok()
+                        })
+                        .unwrap_or_default();
+                    let opts = oneai_domain::project_info::ProjectInfoOptions {
+                        format: fmt,
+                        force,
+                        ..Default::default()
+                    };
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let dir = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+                    let provider: Option<std::sync::Arc<dyn oneai_core::traits::LlmProvider>> =
+                        if no_llm {
+                            None
+                        } else {
+                            session_state.lock().await.session.provider().cloned()
+                        };
+                    let result = match &provider {
+                        Some(p) => {
+                            oneai_domain::project_info::generate_project_info_with_llm(
+                                &dir, &opts, &**p,
+                            )
+                            .await
+                        }
+                        None => {
+                            oneai_domain::project_info::generate_project_info(&dir, &opts).await
+                        }
+                    };
+                    let format_label = opts.format.label().to_string();
+                    let msg = match &result {
+                        Ok(r) if r.skipped => format!(
+                            "⊘ {} already exists — left untouched.\nRe-run `/init --force` to overwrite, or edit it directly.",
+                            r.path.display()
+                        ),
+                        Ok(r) => {
+                            let verb = if r.overwritten { "Overwrote" } else { "Created" };
+                            let mode = if r.llm_generated {
+                                "LLM-synthesized"
+                            } else {
+                                "heuristic"
+                            };
+                            if !r.llm_generated && provider.is_some() {
+                                format!(
+                                    "✅ {} {} ({})\n⚠  LLM synthesis failed — wrote a heuristic doc instead. Check ONEAI_API_KEY or use --no-llm.\nFormat: {} — loaded into agent context on next session.",
+                                    verb, r.path.display(), mode, format_label
+                                )
+                            } else {
+                                format!(
+                                    "✅ {} {} ({})\nFormat: {} — loaded into agent context on next session.\nEdit it to add project conventions & constraints.",
+                                    verb, r.path.display(), mode, format_label
+                                )
+                            }
+                        }
+                        Err(e) => format!("✗ /init failed: {}", e),
+                    };
+                    let _ = bus.emit(oneai_bus::EngineYield::InitResult { message: msg });
+                }
+                Directive::CreateSession { id } => {
+                    // Start a fresh session. `id` None ⇒ engine assigns a new
+                    // uuid (the common /new path); Some ⇒ bind to that id.
+                    let new_id = match id {
+                        Some(wanted) => {
+                            let new_session = session_state
+                                .lock()
+                                .await
+                                .app
+                                .create_session_with_id(&wanted)
+                                .await;
+                            let nid = new_session.session_id().to_string();
+                            session_state.lock().await.session = new_session;
+                            nid
+                        }
+                        None => {
+                            let mut state = session_state.lock().await;
+                            state.reset_session();
+                            state.session.session_id().to_string()
+                        }
+                    };
+                    let _ = bus.emit(oneai_bus::EngineYield::SessionCreated { id: new_id });
+                }
+                Directive::LoadSession { id } => {
+                    // Load a saved session by full id or unique short prefix
+                    // (issue #23: a bare short id resolved to an empty
+                    // conversation left the model amnesiac — resolve here, and
+                    // emit the message history so the frontend rebuilds).
+                    let (resolved, msgs) = {
+                        let mut state = session_state.lock().await;
+                        let sessions = state.app.list_conversations().await;
+                        let resolved = if sessions.iter().any(|s| s.id == id) {
+                            id.clone()
+                        } else {
+                            let matches: Vec<_> =
+                                sessions.iter().filter(|s| s.id.starts_with(&id)).collect();
+                            match matches.len() {
+                                1 => matches[0].id.clone(),
+                                _ => id.clone(),
+                            }
+                        };
+                        let new_session = state.app.create_session_with_id(&resolved).await;
+                        let msgs = new_session.conversation().messages.clone();
+                        state.session = new_session;
+                        (resolved, msgs)
+                    };
+                    tracing::info!(
+                        "[LoadSession] requested={} resolved={} loaded_msgs={} (0 => not found / empty)",
+                        id,
+                        resolved,
+                        msgs.len()
+                    );
+                    let _ = bus.emit(oneai_bus::EngineYield::SessionLoaded {
+                        id: resolved,
+                        messages: msgs,
+                    });
+                }
+                Directive::ClearSession => {
+                    // Clear the live conversation — fresh backend, new id.
+                    let new_id = {
+                        let mut state = session_state.lock().await;
+                        state.reset_session();
+                        state.session.session_id().to_string()
+                    };
+                    let _ = bus.emit(oneai_bus::EngineYield::SessionCleared { id: new_id });
+                }
+                Directive::DeleteSession { id } => {
+                    // Delete a saved session from the durable store.
+                    let result = session_state
+                        .lock()
+                        .await
+                        .app
+                        .delete_conversation(&id)
+                        .await;
+                    let _ = match result {
+                        Ok(()) => bus.emit(oneai_bus::EngineYield::SessionDeleted { id }),
+                        Err(e) => bus.emit(oneai_bus::EngineYield::Error {
+                            recoverable: false,
+                            message: format!("Error: {e}"),
+                        }),
+                    };
+                }
                 Directive::Shutdown => {
                     tracing::info!("Directive::Shutdown received — stopping directive pump");
                     break;

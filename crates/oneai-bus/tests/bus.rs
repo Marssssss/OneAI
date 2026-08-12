@@ -38,6 +38,80 @@ async fn yield_tool_calls_round_trips() {
     assert_eq!(format!("{back:?}"), format!("{y:?}"));
 }
 
+/// serde round-trip for the session-lifecycle / config directives added in
+/// P2-last — guards the `snake_case` tag + `#[non_exhaustive]` forward-compat
+/// for the 7 new inbound variants.
+#[tokio::test]
+async fn directive_session_lifecycle_round_trips() {
+    let cases: Vec<BusDirective> = vec![
+        BusDirective::UpdateConfig {
+            plan_mode: Some(true),
+        },
+        BusDirective::Compact {
+            keep_recent_turns: 2,
+        },
+        BusDirective::InitProject {
+            format: Some("oneai".to_string()),
+            force: true,
+            no_llm: false,
+        },
+        BusDirective::CreateSession { id: None },
+        BusDirective::LoadSession {
+            id: "abc123".to_string(),
+        },
+        BusDirective::ClearSession,
+        BusDirective::DeleteSession {
+            id: "deadbeef".to_string(),
+        },
+    ];
+    for d in cases {
+        let line = serialize_directive(&d).unwrap();
+        let back = parse_directive(line.trim()).unwrap();
+        assert_eq!(format!("{back:?}"), format!("{d:?}"));
+    }
+}
+
+/// serde round-trip for the 4 new session EngineYield variants — `SessionLoaded`
+/// carries a `Vec<Message>` so the frontend can rebuild its display.
+#[tokio::test]
+async fn yield_session_lifecycle_round_trips() {
+    use oneai_core::{Message, Role};
+    let cases: Vec<EngineYield> = vec![
+        EngineYield::SessionCreated {
+            id: "s1".to_string(),
+        },
+        EngineYield::SessionLoaded {
+            id: "s2".to_string(),
+            messages: vec![Message::user("hello"), Message::assistant("hi there")],
+        },
+        EngineYield::SessionCleared {
+            id: "s3".to_string(),
+        },
+        EngineYield::SessionDeleted {
+            id: "s4".to_string(),
+        },
+    ];
+    for y in cases {
+        let line = serialize_yield(&y).unwrap();
+        let back: EngineYield = parse_yield(line.trim()).unwrap();
+        assert_eq!(format!("{back:?}"), format!("{y:?}"));
+    }
+    // Confirm `Role` survives the round-trip inside SessionLoaded (a stale
+    // #[non_exhaustive] or missing serde on Role would silently lose it).
+    let loaded = EngineYield::SessionLoaded {
+        id: "s".to_string(),
+        messages: vec![Message::text(Role::User, "x")],
+    };
+    let back: EngineYield = parse_yield(serialize_yield(&loaded).unwrap().trim()).unwrap();
+    match back {
+        EngineYield::SessionLoaded { messages, .. } => {
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, Role::User);
+        }
+        _ => panic!("round-trip changed variant"),
+    }
+}
+
 /// Malformed input surfaces a codec error, not a panic.
 #[tokio::test]
 async fn malformed_wire_frame_is_a_codec_error() {

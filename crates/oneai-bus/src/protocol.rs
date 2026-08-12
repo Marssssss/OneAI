@@ -94,8 +94,9 @@ pub struct BusUsageRecord {
 /// Control directives — [`Directive::Approve`] and [`Directive::Interrupt`] —
 /// are handled by the bus itself (they resolve a pending approval / fire the
 /// registered cancel token). The rest ([`Directive::UserMessage`],
-/// [`Directive::SwitchParadigm`], [`Directive::Shutdown`]) are forwarded to
-/// the engine driver to read off its directive stream.
+/// [`Directive::SwitchParadigm`], [`Directive::Shutdown`], plus the
+/// session/config/init/compact directives) are forwarded to the engine driver
+/// to read off its directive stream.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -117,6 +118,38 @@ pub enum Directive {
     Interrupt { reason: InterruptReason },
     /// Force a paradigm switch (also doable model-driven via `switch_paradigm`).
     SwitchParadigm { to: BusParadigmKind },
+    /// Hot-update session config. Currently only `plan_mode` (Plan blocks tool
+    /// execution); provider/model/memory overrides are future fields —
+    /// `#[non_exhaustive]` allows adding them without breaking older frontends.
+    /// `None` ⇒ leave that field unchanged.
+    UpdateConfig { plan_mode: Option<bool> },
+    /// Compact the conversation via LLM summarization (`/compact`). The result
+    /// lands as [`EngineYield::CompactResult`].
+    Compact { keep_recent_turns: usize },
+    /// Generate a project-instruction file (`/init`). `format` = `oneai` /
+    /// `agents` / `claude` (None ⇒ default). `force` overwrites an existing
+    /// file; `no_llm` skips LLM synthesis and uses the heuristic composer.
+    /// The result lands as [`EngineYield::InitResult`].
+    InitProject {
+        format: Option<String>,
+        force: bool,
+        no_llm: bool,
+    },
+    /// Start a fresh session. `id` = None ⇒ the engine assigns a new id; Some
+    /// ⇒ bind to that id (must not already exist). Result: [`EngineYield::SessionCreated`].
+    CreateSession { id: Option<String> },
+    /// Load a previously-saved session by id (full id or a unique short prefix,
+    /// resolved by the engine). Result: [`EngineYield::SessionLoaded`] (empty
+    /// `messages` ⇒ not found / empty).
+    LoadSession { id: String },
+    /// Clear the live session's conversation history (the engine starts a fresh
+    /// backend conversation; the frontend keeps its sidebar entry). Result:
+    /// [`EngineYield::SessionCleared`].
+    ClearSession,
+    /// Delete a saved session from the durable store. Result:
+    /// [`EngineYield::SessionDeleted`] (or [`EngineYield::Error`] if the id is
+    /// unknown / the store is not configured).
+    DeleteSession { id: String },
     /// Graceful session end. The engine emits [`EngineYield::SessionEnded`]
     /// then drops its channels.
     Shutdown,
@@ -224,6 +257,24 @@ pub enum EngineYield {
         turn_id: String,
         summary: BusTurnSummary,
     },
+    /// A new session was created (`Directive::CreateSession` / `ClearSession`).
+    /// Carries the engine-assigned id so the frontend binds its sidebar entry.
+    SessionCreated { id: String },
+    /// A session was loaded (`Directive::LoadSession`). Carries the rebuilt
+    /// message history so the frontend re-renders. Empty `messages` ⇒ not
+    /// found / empty session — the frontend shows an error and keeps the live
+    /// session rather than going amnesiac.
+    SessionLoaded {
+        id: String,
+        messages: Vec<oneai_core::Message>,
+    },
+    /// Session cleared (`Directive::ClearSession`) — fresh backend
+    /// conversation, new engine-assigned id. Distinct from `SessionCreated` so
+    /// the frontend can phrase the announcement differently.
+    SessionCleared { id: String },
+    /// Session deleted (`Directive::DeleteSession`) — confirms the id removed
+    /// from the durable store.
+    SessionDeleted { id: String },
     /// Session ended — no further yields will be emitted.
     SessionEnded,
 }

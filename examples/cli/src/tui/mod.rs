@@ -790,23 +790,17 @@ fn handle_user_input_async(
                 return;
             }
             "/clear" => {
-                app.messages.clear();
-                app.render_cache.invalidate_all();
-                rt.block_on(async {
-                    session_state.lock().await.reset_session();
+                // Clear the live conversation via the bus (Directive::ClearSession).
+                // The pump resets the backend + emits SessionCleared; the yield
+                // arm resets the local display. Immediate feedback only here.
+                let submitted = rt.block_on(async {
+                    use oneai_bus::{Directive, EngineBus};
+                    engine_bus.submit(Directive::ClearSession).await.is_ok()
                 });
-                app.session_id = rt.block_on(async {
-                    session_state.lock().await.session.session_id().to_string()
-                });
-                app.token_usage = TokenUsage::new();
-                app.context_tokens = 0;
-                app.context_tokens_is_estimated = false;
-                app.current_iteration = 0;
-                app.last_context_accounting = None;
-                // Create a new session entry in the sidebar
-                app.add_new_session(app.session_id.clone());
-                app.add_message(ChatRole::System, "Conversation cleared.");
-                app.request_invalidate(); // Issue #18: full repaint so cleared bubbles can't leave stale cells
+                if !submitted {
+                    app.add_message(ChatRole::Error, "Bus closed — could not clear session.");
+                    app.request_render();
+                }
                 return;
             }
             "/usage" => {
@@ -896,15 +890,10 @@ fn handle_user_input_async(
                                 return;
                             }
                         };
-                        if !resume_session(app, session_state.clone(), rt, &id) {
+                        if !resume_session(app, &engine_bus, rt, &id) {
                             app.add_message(
                                 ChatRole::Error,
-                                format!(
-                                    "Session '{}' not found or has no history. \
-                                     Use /session list for available ids (you can \
-                                     pass the full id or a unique short prefix).",
-                                    id
-                                ),
+                                "Bus closed — could not load session.",
                             );
                         }
                         return;
@@ -1045,25 +1034,20 @@ fn handle_user_input_async(
                 return;
             }
             "/new" => {
-                // Create a new session (preserves old session in sidebar)
-                rt.block_on(async {
-                    session_state.lock().await.reset_session();
+                // Create a new session via the bus (Directive::CreateSession).
+                // The pump creates a fresh backend + emits SessionCreated; the
+                // yield arm rebuilds the local display + sidebar entry.
+                let submitted = rt.block_on(async {
+                    use oneai_bus::{Directive, EngineBus};
+                    engine_bus
+                        .submit(Directive::CreateSession { id: None })
+                        .await
+                        .is_ok()
                 });
-                let new_session_id = rt.block_on(async {
-                    session_state.lock().await.session.session_id().to_string()
-                });
-                app.messages.clear();
-                app.render_cache.invalidate_all();
-                app.token_usage = TokenUsage::new();
-                app.context_tokens = 0;
-                app.context_tokens_is_estimated = false;
-                app.current_iteration = 0;
-                app.last_context_accounting = None;
-                app.add_new_session(new_session_id);
-                app.add_message(
-                    ChatRole::System,
-                    "New session created. Previous sessions preserved in sidebar.",
-                );
+                if !submitted {
+                    app.add_message(ChatRole::Error, "Bus closed — could not create session.");
+                    app.request_render();
+                }
                 return;
             }
             "/init" => {
@@ -1073,10 +1057,10 @@ fn handle_user_input_async(
                 // doc), falling back to a heuristic composer otherwise. The file is
                 // picked up automatically by ProjectInstructionsSource.
                 //
-                // Runs in a background task (like /agent runs) so the TUI stays
-                // responsive: input clears immediately and a progress line + spinner
-                // show while the probe/LLM call runs. The result lands as an
-                // ObserverEvent::InitResult.
+                // Submits a `Directive::InitProject`; the directive pump runs the
+                // probe/LLM synthesis + emits `EngineYield::InitResult`. Immediate
+                // feedback (progress line + spinner) here; the result lands in the
+                // InitResult yield arm.
                 let args: Vec<&str> = trimmed.split_whitespace().skip(1).collect();
                 let mut force = false;
                 let mut no_llm = false;
@@ -1094,16 +1078,7 @@ fn handle_user_input_async(
                 let fmt = format
                     .and_then(|s| oneai_domain::project_info::ProjectInfoFormat::from_name(s).ok())
                     .unwrap_or_default();
-                let opts = oneai_domain::project_info::ProjectInfoOptions {
-                    format: fmt,
-                    force,
-                    ..Default::default()
-                };
-                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let dir = std::fs::canonicalize(&cwd).unwrap_or(cwd);
 
-                // Immediate feedback: clear input is already done by handle_singleline_key;
-                // show a progress line + start the spinner so the user knows work started.
                 app.start_thinking();
                 let mode_hint = if no_llm {
                     " (heuristic)"
@@ -1114,68 +1089,39 @@ fn handle_user_input_async(
                     ChatRole::System,
                     format!(
                         "⏳ Generating {} (probing project{})…",
-                        opts.format.filename(),
+                        fmt.filename(),
                         mode_hint
                     ),
                 );
                 app.request_render();
 
-                let session_state_cl = session_state.clone();
-                let bus = engine_bus.clone();
-                let format_label = opts.format.label().to_string();
-                rt.spawn(async move {
-                    // Grab the provider (cloned Arc) under a short lock, if available.
-                    let provider: Option<Arc<dyn oneai_core::traits::LlmProvider>> = if no_llm {
-                        None
-                    } else {
-                        session_state_cl.lock().await.session.provider().cloned()
-                    };
-
-                    let result = match &provider {
-                        Some(p) => {
-                            oneai_domain::project_info::generate_project_info_with_llm(&dir, &opts, &**p).await
-                        }
-                        None => oneai_domain::project_info::generate_project_info(&dir, &opts).await,
-                    };
-
-                    let msg = match &result {
-                        Ok(r) if r.skipped => format!(
-                            "⊘ {} already exists — left untouched.\nRe-run `/init --force` to overwrite, or edit it directly.",
-                            r.path.display()
-                        ),
-                        Ok(r) => {
-                            let verb = if r.overwritten { "Overwrote" } else { "Created" };
-                            let mode = if r.llm_generated { "LLM-synthesized" } else { "heuristic" };
-                            if !r.llm_generated && provider.is_some() {
-                                format!(
-                                    "✅ {} {} ({})\n⚠  LLM synthesis failed — wrote a heuristic doc instead. Check ONEAI_API_KEY or use --no-llm.\nFormat: {} — loaded into agent context on next session.",
-                                    verb, r.path.display(), mode, format_label
-                                )
-                            } else {
-                                format!(
-                                    "✅ {} {} ({})\nFormat: {} — loaded into agent context on next session.\nEdit it to add project conventions & constraints.",
-                                    verb, r.path.display(), mode, format_label
-                                )
-                            }
-                        }
-                        Err(e) => format!("✗ /init failed: {}", e),
-                    };
-                    use oneai_bus::EngineBus;
-                    let _ = bus.emit(oneai_bus::EngineYield::InitResult { message: msg });
+                let submitted = rt.block_on(async {
+                    use oneai_bus::{Directive, EngineBus};
+                    engine_bus
+                        .submit(Directive::InitProject {
+                            format: format.map(|s| s.to_string()),
+                            force,
+                            no_llm,
+                        })
+                        .await
+                        .is_ok()
                 });
+                if !submitted {
+                    app.stop_thinking();
+                    app.add_message(ChatRole::Error, "Bus closed — /init failed.");
+                    app.request_render();
+                }
                 return;
             }
             "/compact" => {
                 // Compact conversation in place via LLM summarization.
                 //
-                // The LLM summary call takes seconds, so we run it in a
-                // background task with a progress line + spinner and deliver
-                // the result back onto the bus as `EngineYield::CompactResult`
-                // (one channel, one schema — no separate TUI-async channel).
-                // We do NOT reset the session — the summary is injected into
-                // the *backend* Conversation (`AppSession::compact`) so the model sees it on the next run,
-                // and work continues in the same session (same session_id, no
-                // new sidebar entry).
+                // Submits a `Directive::Compact`; the directive pump runs
+                // `AppSession::compact` and emits `EngineYield::CompactResult`
+                // (or `Error`). The summary is injected into the *backend*
+                // Conversation so the model sees it on the next run — same
+                // session, no new sidebar entry. Immediate feedback here; the
+                // CompactResult yield arm refreshes the display.
                 let has_provider =
                     rt.block_on(async { session_state.lock().await.app.has_provider() });
                 if !has_provider {
@@ -1190,31 +1136,20 @@ fn handle_user_input_async(
                 );
                 app.request_render();
 
-                let session_state_cl = session_state.clone();
-                let bus = engine_bus.clone();
-                rt.spawn(async move {
-                    let outcome = session_state_cl.lock().await.session.compact(2).await;
-                    use oneai_bus::{EngineBus, EngineYield};
-                    let _ = match &outcome {
-                        // Empty summary ⇒ conversation was too short; send an
-                        // empty payload so the handler shows the "too short"
-                        // notice (the backend was left untouched by compact()).
-                        Ok(o) if o.summary.is_empty() => bus.emit(EngineYield::CompactResult {
-                            summary: String::new(),
-                            removed_count: 0,
-                            retained: Vec::new(),
-                        }),
-                        Ok(o) => bus.emit(EngineYield::CompactResult {
-                            summary: o.summary.clone(),
-                            removed_count: o.removed_count,
-                            retained: o.retained.clone(),
-                        }),
-                        Err(e) => bus.emit(EngineYield::Error {
-                            recoverable: false,
-                            message: format!("✗ /compact failed: {}", e),
-                        }),
-                    };
+                let submitted = rt.block_on(async {
+                    use oneai_bus::{Directive, EngineBus};
+                    engine_bus
+                        .submit(Directive::Compact {
+                            keep_recent_turns: 2,
+                        })
+                        .await
+                        .is_ok()
                 });
+                if !submitted {
+                    app.stop_thinking();
+                    app.add_message(ChatRole::Error, "Bus closed — /compact failed.");
+                    app.request_render();
+                }
                 return;
             }
             "/skills" => {
@@ -1527,10 +1462,9 @@ fn handle_user_input_async(
     }
     // Sync the interaction mode into the session before launching the agent loop
     // (Plan mode blocks tool execution; Auto is handled at the approval layer).
+    // Sent as a `Directive::UpdateConfig` ahead of the `UserMessage` — FIFO
+    // ordering guarantees the pump applies it before running the turn.
     let plan_mode = matches!(app.interaction_mode, app::InteractionMode::Plan);
-    rt.block_on(async {
-        session_state.lock().await.session.set_plan_mode(plan_mode);
-    });
     app.start_thinking();
     // Add a thinking bubble to show the agent is processing
     app.add_collapsed_message(ChatRole::Thinking, "Processing your request...");
@@ -1538,12 +1472,17 @@ fn handle_user_input_async(
     let task = trimmed.to_string();
 
     // P2: submit the user message as a `Directive` — the directive pump (spawned
-    // at session start) turns it into `run_turn_via_bus`, the yield bridge
-    // translates `EngineYield`s back into `ObserverEvent`s. No direct
-    // `run_agent` call here; the bus is the complete replacement for the
-    // direct drive (Shape A in-process validation).
+    // at session start) turns it into `run_turn_via_bus`. No direct `run_agent`
+    // call here; the bus is the complete replacement for the direct drive
+    // (Shape A in-process validation). UpdateConfig goes first (FIFO) so the
+    // turn runs under the freshly-synced plan_mode.
     rt.block_on(async {
         use oneai_bus::{Directive, EngineBus};
+        let _ = engine_bus
+            .submit(Directive::UpdateConfig {
+                plan_mode: Some(plan_mode),
+            })
+            .await;
         let _ = engine_bus
             .submit(Directive::UserMessage {
                 content: vec![oneai_core::ContentBlock::Text { text: task }],
@@ -1555,98 +1494,35 @@ fn handle_user_input_async(
 /// Handle `/wf` workflow commands.
 /// Load a saved conversation into the live session by id (issue #30).
 ///
-/// Single session-load codepath shared by `/session resume <id>` (slash
-/// command) and the top TAB-bar session switch (Alt+1..7 / tab click via
-/// `App::pending_session_switch`), so id resolution, message rebuild, and
-/// per-session counter reset live in exactly one place. Accepts the full UUID
-/// or a unique short prefix (e.g. the 8-char id shown in the sidebar). Returns
-/// `true` on a successful load, `false` if not found / ambiguous / empty (the
-/// caller renders the error).
+/// Submit a `Directive::LoadSession` for `/session resume <id>`. The directive
+/// pump resolves the id (full UUID or unique short prefix), binds the backend
+/// session, and emits `EngineYield::SessionLoaded` with the rebuilt message
+/// history — the yield arm rebuilds the display. Accepts the full id or a
+/// short prefix (issue #23: a bare short id resolved to an empty conversation
+/// and the model went amnesiac; resolution now lives in the pump). Returns
+/// `true` when the directive was submitted; a not-found session surfaces as an
+/// empty-`messages` yield (not a `false` return), so the caller only renders
+/// an error on a closed bus.
 fn resume_session(
     app: &mut App,
-    session_state: Arc<tokio::sync::Mutex<SessionState>>,
+    engine_bus: &std::sync::Arc<oneai_bus::InProcessBus>,
     rt: &tokio::runtime::Runtime,
     id: &str,
 ) -> bool {
-    let loaded = rt.block_on(async {
-        let mut state = session_state.lock().await;
-        // Accept either the full UUID or a unique short prefix (e.g. the
-        // 8-char id shown in the sidebar). Without this, a short id silently
-        // misses the row, `create_session_with_id` returns an *empty*
-        // conversation, we refuse it — and the session stays the fresh one.
-        // The next run then uses the empty session and the model is amnesiac:
-        // the exact issue #23 symptom. Resolve to the full id first.
-        let (resolved, ambiguous) = {
-            let sessions = state.app.list_conversations().await;
-            if sessions.iter().any(|s| s.id == id) {
-                (id.to_string(), false)
-            } else {
-                let matches: Vec<_> = sessions.iter().filter(|s| s.id.starts_with(id)).collect();
-                match matches.len() {
-                    1 => (matches[0].id.clone(), false),
-                    _ => (id.to_string(), matches.len() > 1),
-                }
-            }
-        };
-        let new_session = state.app.create_session_with_id(&resolved).await;
-        let msgs = new_session.conversation().messages.clone();
-        tracing::info!(
-            "[resume_session] requested={} resolved={} ambiguous={} \
-             loaded_msgs={} (0 => not found / empty)",
-            id,
-            resolved,
-            ambiguous,
-            msgs.len()
-        );
-        if ambiguous || msgs.is_empty() {
-            return None;
-        }
-        let count = msgs.len();
-        state.session = new_session;
-        Some((count, msgs, resolved))
+    app.start_thinking();
+    app.add_message(ChatRole::System, format!("Loading session {}…", id));
+    app.request_render();
+    let submitted = rt.block_on(async {
+        use oneai_bus::{Directive, EngineBus};
+        engine_bus
+            .submit(Directive::LoadSession { id: id.to_string() })
+            .await
+            .is_ok()
     });
-    match loaded {
-        None => false,
-        Some((count, conv_msgs, resolved)) => {
-            tracing::info!(
-                "[resume_session] OK id={} rebuilding {} chat messages",
-                resolved,
-                count
-            );
-            let converted = conversation_to_chat_messages(&conv_msgs);
-            app.messages.clear();
-            app.render_cache.invalidate_all();
-            app.collapsed_ids.clear();
-            for m in converted {
-                if m.role.default_collapsed() {
-                    app.collapsed_ids.insert(m.id.clone());
-                }
-                app.messages.push(m);
-            }
-            app.session_id = resolved.clone();
-            // Mark as a new active sidebar entry (mirrors /new) so the resumed
-            // session is selectable and appears in the TAB strip.
-            app.add_new_session(resolved.clone());
-            app.update_session_info();
-            app.token_usage = TokenUsage::new();
-            app.context_tokens = 0;
-            app.context_tokens_is_estimated = false;
-            app.current_iteration = 0;
-            app.last_context_accounting = None;
-            app.chat_scroll_y = 0;
-            app.user_scrolled = false; // auto-follow to latest
-            app.request_invalidate(); // full repaint — new message set
-            app.add_message(
-                ChatRole::System,
-                format!(
-                    "Resumed session {} ({} messages). \
-                     The model sees this history — continue below.",
-                    resolved, count
-                ),
-            );
-            true
-        }
+    if !submitted {
+        app.stop_thinking();
     }
+    submitted
 }
 
 fn handle_workflow_command(
@@ -2231,6 +2107,24 @@ fn conversation_to_chat_messages(messages: &[oneai_core::Message]) -> Vec<ChatMe
 }
 
 /// Process an observer event and update the app state.
+/// Reset the local display state for a fresh/replaced session — shared by the
+/// `SessionCreated` / `SessionCleared` yields (mirrors the old /new + /clear
+/// direct paths). The backend session is already bound to `id` by the
+/// directive pump; this only syncs the frontend.
+fn reset_session_display(app: &mut App, id: &str) {
+    app.messages.clear();
+    app.render_cache.invalidate_all();
+    app.collapsed_ids.clear();
+    app.session_id = id.to_string();
+    app.token_usage = TokenUsage::new();
+    app.context_tokens = 0;
+    app.context_tokens_is_estimated = false;
+    app.current_iteration = 0;
+    app.last_context_accounting = None;
+    app.chat_scroll_y = 0;
+    app.user_scrolled = false;
+}
+
 fn process_yield(app: &mut App, y: oneai_bus::EngineYield, bus: &oneai_bus::InProcessBus) {
     use bus_consumer::{
         paradigm_from_bus, sub_agent_kind_from_bus, sub_agent_summary_from_bus, tool_call_from_bus,
@@ -2613,6 +2507,76 @@ fn process_yield(app: &mut App, y: oneai_bus::EngineYield, bus: &oneai_bus::InPr
             app.context_tokens = 0;
             app.context_tokens_is_estimated = false;
             app.last_context_accounting = None;
+            app.request_render();
+        }
+        oneai_bus::EngineYield::SessionCreated { id } => {
+            // Directive::CreateSession landed — fresh backend session bound to
+            // `id`. Reset the local display (mirrors the old /new direct path)
+            // so the frontend matches the engine state.
+            reset_session_display(app, &id);
+            app.add_new_session(id.clone());
+            app.add_message(
+                ChatRole::System,
+                "New session created. Previous sessions preserved in sidebar.",
+            );
+            app.request_invalidate();
+        }
+        oneai_bus::EngineYield::SessionCleared { id } => {
+            // Directive::ClearSession landed — fresh backend conversation, new
+            // id. Mirrors the old /clear direct path.
+            reset_session_display(app, &id);
+            app.add_new_session(id.clone());
+            app.add_message(ChatRole::System, "Conversation cleared.");
+            app.request_invalidate();
+        }
+        oneai_bus::EngineYield::SessionLoaded { id, messages } => {
+            // Directive::LoadSession landed. Empty `messages` ⇒ not found /
+            // empty session — keep the live session + show an error (issue #23:
+            // going amnesiac on a missed id was the original bug).
+            app.stop_thinking();
+            if messages.is_empty() {
+                app.add_message(
+                    ChatRole::Error,
+                    format!("Session {} not found or empty — kept the live session.", id),
+                );
+                app.request_render();
+            } else {
+                let converted = conversation_to_chat_messages(&messages);
+                let count = converted.len();
+                app.messages.clear();
+                app.render_cache.invalidate_all();
+                app.collapsed_ids.clear();
+                for m in converted {
+                    if m.role.default_collapsed() {
+                        app.collapsed_ids.insert(m.id.clone());
+                    }
+                    app.messages.push(m);
+                }
+                app.session_id = id.clone();
+                app.add_new_session(id.clone());
+                app.update_session_info();
+                app.token_usage = TokenUsage::new();
+                app.context_tokens = 0;
+                app.context_tokens_is_estimated = false;
+                app.current_iteration = 0;
+                app.last_context_accounting = None;
+                app.chat_scroll_y = 0;
+                app.user_scrolled = false; // auto-follow to latest
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "Resumed session {} ({} messages). \
+                         The model sees this history — continue below.",
+                        id, count
+                    ),
+                );
+                app.request_invalidate();
+            }
+        }
+        oneai_bus::EngineYield::SessionDeleted { id } => {
+            // Directive::DeleteSession landed — confirm. Sidebar refresh is the
+            // frontend's bookkeeping; this just acknowledges.
+            app.add_message(ChatRole::System, format!("Session {} deleted.", id));
             app.request_render();
         }
         oneai_bus::EngineYield::TokenUsage { usage, .. } => {
@@ -4070,6 +4034,155 @@ mod issue18_tests {
             "preamble bubble must render ABOVE the tool cards, not below them \
              (preamble={preamble_row:?}, card={card_a_row:?}) — this split is \
              the issue #18 residue"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bus_session_tests {
+    //! P2-last: the session-lifecycle yields (`SessionCreated` / `Loaded` /
+    //! `Cleared` / `Deleted`) drive the frontend display reset/rebuild. These
+    //! tests pin `process_yield`'s arms without a terminal — feeding the yield
+    //! and asserting the App state mirrors the old direct-call paths.
+
+    use crate::tui::app::{App, ChatRole};
+    use oneai_bus::{EngineYield, InProcessBus};
+    use oneai_core::Message;
+    use std::sync::Arc;
+
+    fn test_app() -> App {
+        App::new(
+            "test".to_string(),
+            "test-model".to_string(),
+            Vec::new(),
+            "session1234567".to_string(),
+            Arc::new(oneai_skill::SkillRegistry::new()),
+        )
+    }
+
+    fn process(app: &mut App, ev: EngineYield) {
+        let bus = InProcessBus::default();
+        super::process_yield(app, ev, &bus);
+    }
+
+    fn first_system_text(app: &App) -> Option<String> {
+        app.messages
+            .iter()
+            .find(|m| matches!(m.role, ChatRole::System))
+            .map(|m| m.content.clone())
+    }
+
+    #[test]
+    fn session_created_resets_display_and_announces() {
+        let mut app = test_app();
+        // Pre-populate so the reset is observable.
+        app.add_message(ChatRole::User, "stale".to_string());
+        app.context_tokens = 999;
+
+        process(
+            &mut app,
+            EngineYield::SessionCreated {
+                id: "new-id".to_string(),
+            },
+        );
+        assert_eq!(app.session_id, "new-id");
+        assert!(app
+            .messages
+            .iter()
+            .all(|m| !matches!(m.role, ChatRole::User)));
+        assert_eq!(app.context_tokens, 0, "counters reset on new session");
+        let msg = first_system_text(&app).unwrap_or_default();
+        assert!(msg.contains("New session created"), "got: {msg}");
+    }
+
+    #[test]
+    fn session_cleared_resets_display_and_announces() {
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "stale".to_string());
+
+        process(
+            &mut app,
+            EngineYield::SessionCleared {
+                id: "cleared-id".to_string(),
+            },
+        );
+        assert_eq!(app.session_id, "cleared-id");
+        assert!(app
+            .messages
+            .iter()
+            .all(|m| !matches!(m.role, ChatRole::User)));
+        let msg = first_system_text(&app).unwrap_or_default();
+        assert!(msg.contains("Conversation cleared"), "got: {msg}");
+    }
+
+    #[test]
+    fn session_loaded_rebuilds_messages_from_payload() {
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "stale".to_string());
+
+        let messages = vec![Message::user("hello"), Message::assistant("hi there")];
+        process(
+            &mut app,
+            EngineYield::SessionLoaded {
+                id: "loaded-id".to_string(),
+                messages,
+            },
+        );
+        assert_eq!(app.session_id, "loaded-id");
+        // Two history messages + the "Resumed session" system line.
+        let user_count = app
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, ChatRole::User))
+            .count();
+        assert_eq!(user_count, 1, "rebuilt the single user message");
+        let msg = first_system_text(&app).unwrap_or_default();
+        assert!(msg.contains("Resumed session loaded-id"), "got: {msg}");
+    }
+
+    #[test]
+    fn session_loaded_empty_keeps_live_and_errors() {
+        // Issue #23 guard: a miss (empty messages) must NOT clear the live
+        // session — the user keeps their context and sees an error.
+        let mut app = test_app();
+        app.add_message(ChatRole::User, "keep me".to_string());
+
+        process(
+            &mut app,
+            EngineYield::SessionLoaded {
+                id: "missing-id".to_string(),
+                messages: Vec::new(),
+            },
+        );
+        let still_there = app
+            .messages
+            .iter()
+            .any(|m| matches!(m.role, ChatRole::User) && m.content.clone().contains("keep me"));
+        assert!(still_there, "live messages preserved on a missed load");
+        let err = app
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, ChatRole::Error))
+            .map(|m| m.content.clone());
+        assert!(
+            err.unwrap_or_default().contains("not found"),
+            "an error surfaced for the missed load"
+        );
+    }
+
+    #[test]
+    fn session_deleted_announces() {
+        let mut app = test_app();
+        process(
+            &mut app,
+            EngineYield::SessionDeleted {
+                id: "gone-id".to_string(),
+            },
+        );
+        let msg = first_system_text(&app).unwrap_or_default();
+        assert!(
+            msg.contains("gone-id") && msg.contains("deleted"),
+            "got: {msg}"
         );
     }
 }
