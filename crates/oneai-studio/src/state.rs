@@ -1,18 +1,23 @@
 //! StudioState — shared state that connects trace, AgentLoop, StateGraph,
-//! and checkpoint data to the Studio frontend via WebSocket broadcast.
+//! and checkpoint data to the Studio frontend via the unified engine bus.
+//!
+//! P5 convergence: `StudioState` no longer implements `AgentLoopObserver`
+//! directly. The CLI attaches an `oneai_bus::InProcessBus` (via `set_bus`)
+//! and drives the turn with a `BusObserver` that emits `EngineYield`s to it;
+//! the WebSocket handler subscribes to that bus and forwards `serialize_yield`
+//! lines to the browser. This deletes the per-frontend `StudioEvent` enum +
+//! hand-rolled observer projection that previously drifted against the TUI
+//! and supervisor schemas.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
 
-use oneai_agent::{
-    AgentLoopObserver, AgentLoopResult, ParadigmKind, SubAgentKind, ToolCallRequest,
-};
-use oneai_core::{InterruptPoint, ResumeSignal, ToolOutput};
+use oneai_bus::EngineBus;
 use oneai_persistence::FilePersistence;
 use oneai_tool::ToolRegistry;
 use oneai_trace::{InMemoryCollector, TraceContext};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, RwLock};
 
 // ─── StudioRunner ────────────────────────────────────────────────────
 
@@ -21,10 +26,10 @@ use serde::{Deserialize, Serialize};
 /// This lives in the feature crate only as a trait: `oneai-studio` sits
 /// *below* `oneai-app` in the layering and so cannot hold an `AppSession`
 /// or call `run_agent` directly. The CLI (`examples/cli/cmd_studio`)
-/// builds the real `App`/`AppSession` and supplies a `StudioRunner` impl;
-/// `StudioState` holds it (`set_runner`) and the `/api/run` handler calls
-/// it. The `observer` argument is the `StudioState` itself — passed
-/// per-call so the runner never stores a back-reference (no `Arc` cycle).
+/// builds the real `App`/`AppSession` + a `oneai_bus::InProcessBus`, wires a
+/// `BusObserver` to the loop, sets that bus on `StudioState` (so `/ws`
+/// forwards the yields), and supplies a `StudioRunner` impl; `StudioState`
+/// holds it (`set_runner`) and the `/api/run` handler calls it.
 #[async_trait::async_trait]
 pub trait StudioRunner: Send + Sync {
     /// Whether the runner has a configured provider and is not currently
@@ -32,9 +37,10 @@ pub trait StudioRunner: Send + Sync {
     fn status(&self) -> RunnerStatus;
 
     /// Run one agent turn for `task`. Iteration / tool-call / streaming /
-    /// completion events are pushed to all WebSocket subscribers through
-    /// `observer` (which implements `AgentLoopObserver`).
-    async fn run_task(&self, task: &str, observer: Arc<StudioState>) -> RunOutcome;
+    /// completion events flow to all WebSocket subscribers through the
+    /// `EngineYield` stream on the bus the runner holds (set on
+    /// `StudioState` via `set_bus`).
+    async fn run_task(&self, task: &str) -> RunOutcome;
 }
 
 /// Snapshot of runner availability, surfaced to the `/api/run` handler.
@@ -56,74 +62,6 @@ pub enum RunOutcome {
     Rejected { reason: String },
     /// The turn failed with an error.
     Error { message: String },
-}
-
-// ─── StudioEvent ─────────────────────────────────────────────────────
-
-/// An event broadcast to all WebSocket subscribers.
-///
-/// Each event corresponds to an AgentLoopObserver callback, serialized
-/// as JSON for the frontend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum StudioEvent {
-    /// Agent loop iteration started.
-    IterationStart { iteration: usize, paradigm: String },
-
-    /// Model produced a direct answer (loop will end).
-    DirectAnswer { text: String },
-
-    /// Model decided to call tools.
-    ToolCalls { calls: Vec<ToolCallView> },
-
-    /// Tool call completed with result.
-    ToolResult {
-        call_id: String,
-        tool_name: String,
-        success: bool,
-        output_summary: String,
-    },
-
-    /// Model delegated to a sub-agent.
-    Delegate { task: String, agent_type: String },
-
-    /// Model switched paradigm.
-    ParadigmSwitch { paradigm: String },
-
-    /// Checkpoint saved.
-    CheckpointSaved {
-        iteration: usize,
-        checkpoint_id: String,
-    },
-
-    /// A trace event occurred (Thought, Action, Observation, etc.).
-    TraceEvent {
-        kind: String,
-        name: String,
-        attributes: serde_json::Value,
-    },
-
-    /// Thinking/reasoning content (extended thinking).
-    Thinking { text: String },
-
-    /// Streaming text chunk (typewriter effect).
-    StreamChunk { text: String },
-
-    /// Agent loop completed.
-    LoopComplete { result_summary: String },
-
-    /// An error occurred.
-    Error { message: String },
-}
-
-// ─── ToolCallView ────────────────────────────────────────────────────
-
-/// Frontend-friendly tool call representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallView {
-    pub id: String,
-    pub tool_name: String,
-    pub args: serde_json::Value,
 }
 
 // ─── SessionView ─────────────────────────────────────────────────────
@@ -156,12 +94,12 @@ pub enum SessionUpdate {
 
 // ─── StudioState ─────────────────────────────────────────────────────
 
-/// Shared state for the Studio server — connects all data sources
-/// and broadcasts events to WebSocket subscribers.
+/// Shared state for the Studio server — connects all data sources and
+/// broadcasts `EngineYield`s to WebSocket subscribers via the engine bus.
 ///
-/// StudioState implements `AgentLoopObserver` — when the AgentLoop
-/// runs, Observer callbacks push events to all WebSocket subscribers
-/// via a broadcast channel.
+/// The CLI attaches an `InProcessBus` (built alongside the `App`/`AppSession`)
+/// via `set_bus`; the WS handler subscribes through `subscribe()`. With no
+/// bus attached (standalone `serve()`), the WS sits idle — no agent, no yields.
 pub struct StudioState {
     /// Trace context for collecting execution data.
     trace_context: TraceContext,
@@ -175,9 +113,10 @@ pub struct StudioState {
     /// Active sessions being tracked.
     sessions: RwLock<HashMap<String, SessionView>>,
 
-    /// Broadcast channel for pushing events to WebSocket subscribers.
-    /// Capacity: 1024 events (subscriber lag > 1024 = dropped).
-    event_bus: broadcast::Sender<StudioEvent>,
+    /// The engine bus the `BusObserver` emits `EngineYield`s to. Set by the
+    /// CLI when it attaches a runner; `None` for the standalone read-only
+    /// server (no agent → no yields → WS idle).
+    bus: RwLock<Option<Arc<dyn EngineBus>>>,
 
     /// Optional agent driver — set by the CLI (`cmd_studio`) so the
     /// `/api/run` endpoint can launch real agent turns. `None` for the
@@ -192,14 +131,12 @@ impl StudioState {
         persistence: Arc<FilePersistence>,
         tool_registry: Arc<ToolRegistry>,
     ) -> Self {
-        let (event_bus, _) = broadcast::channel(1024);
-
         Self {
             trace_context,
             persistence,
             tool_registry,
             sessions: RwLock::new(HashMap::new()),
-            event_bus,
+            bus: RwLock::new(None),
             runner: RwLock::new(None),
         }
     }
@@ -213,21 +150,23 @@ impl StudioState {
         Self::new(trace_context, persistence, tool_registry)
     }
 
-    /// Subscribe to the event bus — returns a broadcast Receiver.
-    ///
-    /// Each WebSocket connection subscribes via this method.
-    pub fn subscribe(&self) -> broadcast::Receiver<StudioEvent> {
-        self.event_bus.subscribe()
+    /// Subscribe to the engine bus's `EngineYield` stream — each WebSocket
+    /// connection subscribes via this method. Returns `None` when no bus is
+    /// attached (standalone server); the WS handler then idles after the
+    /// welcome message.
+    pub async fn subscribe(&self) -> Option<broadcast::Receiver<oneai_bus::EngineYield>> {
+        self.bus.read().await.clone().map(|b| b.subscribe_yields())
     }
 
-    /// Broadcast an event to all WebSocket subscribers.
-    pub fn broadcast(&self, event: StudioEvent) {
-        // send() returns Err when there are no subscribers — that's OK
-        let _ = self.event_bus.send(event);
+    /// Attach the engine bus the CLI built alongside the `App`/`AppSession`.
+    /// The `BusObserver` driving the turn emits to this bus; `subscribe()`
+    /// reads the same stream.
+    pub async fn set_bus(&self, bus: Option<Arc<dyn EngineBus>>) {
+        *self.bus.write().await = bus;
     }
 
     /// Attach (or detach) the agent driver. Called by the CLI after
-    /// building the `App`/`AppSession` so `/api/run` can launch turns.
+    /// building the `App`/`AppSession` + bus so `/api/run` can launch turns.
     pub async fn set_runner(&self, runner: Option<Arc<dyn StudioRunner>>) {
         *self.runner.write().await = runner;
     }
@@ -290,218 +229,88 @@ impl StudioState {
     }
 }
 
-// ─── AgentLoopObserver Implementation ─────────────────────────────────
-
-impl AgentLoopObserver for StudioState {
-    fn on_iteration_start(&self, iteration: usize, paradigm: ParadigmKind) {
-        self.broadcast(StudioEvent::IterationStart {
-            iteration,
-            paradigm: paradigm_to_string(paradigm),
-        });
-    }
-
-    fn on_direct_answer(&self, text: &str) {
-        self.broadcast(StudioEvent::DirectAnswer {
-            text: text.to_string(),
-        });
-    }
-
-    fn on_tool_calls(&self, calls: &[ToolCallRequest]) {
-        self.broadcast(StudioEvent::ToolCalls {
-            calls: calls
-                .iter()
-                .map(|c| ToolCallView {
-                    id: c.id.clone(),
-                    tool_name: c.name.clone(),
-                    args: c.args.clone(),
-                })
-                .collect(),
-        });
-    }
-
-    fn on_tool_result(&self, call_id: &str, tool_name: &str, output: &ToolOutput) {
-        self.broadcast(StudioEvent::ToolResult {
-            call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            success: output.success,
-            output_summary: if output.success {
-                truncate(&output.content, 200)
-            } else {
-                output.error.clone().unwrap_or_default()
-            },
-        });
-    }
-
-    fn on_delegate(&self, task: &str, agent_type: &SubAgentKind) {
-        self.broadcast(StudioEvent::Delegate {
-            task: task.to_string(),
-            agent_type: agent_type.name().to_string(),
-        });
-    }
-
-    fn on_paradigm_switch(&self, paradigm: ParadigmKind) {
-        self.broadcast(StudioEvent::ParadigmSwitch {
-            paradigm: paradigm_to_string(paradigm),
-        });
-    }
-
-    fn on_checkpoint(&self, iteration: usize) {
-        self.broadcast(StudioEvent::CheckpointSaved {
-            iteration,
-            checkpoint_id: format!("checkpoint_iter_{}", iteration),
-        });
-    }
-
-    fn on_complete(&self, result: &AgentLoopResult) {
-        self.broadcast(StudioEvent::LoopComplete {
-            result_summary: format!(
-                "Completed: {} iterations, paradigm {}",
-                result.iterations,
-                paradigm_to_string(result.active_paradigm)
-            ),
-        });
-    }
-
-    fn on_stream_chunk(&self, text: &str) {
-        self.broadcast(StudioEvent::StreamChunk {
-            text: text.to_string(),
-        });
-    }
-
-    fn on_thinking(&self, text: &str) {
-        self.broadcast(StudioEvent::Thinking {
-            text: text.to_string(),
-        });
-    }
-
-    fn on_token_usage(&self, prompt_tokens: u32, completion_tokens: u32) {
-        self.broadcast(StudioEvent::TraceEvent {
-            kind: "TokenUsage".to_string(),
-            name: "llm.token_usage".to_string(),
-            attributes: serde_json::json!({
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            }),
-        });
-    }
-
-    fn on_interrupt(&self, point: &InterruptPoint) {
-        self.broadcast(StudioEvent::TraceEvent {
-            kind: "Interrupt".to_string(),
-            name: "agent.interrupt".to_string(),
-            attributes: serde_json::json!({
-                "id": point.id,
-                "iteration": point.iteration,
-                "reason": format!("{:?}", point.reason),
-            }),
-        });
-    }
-
-    fn on_resume(&self, signal: &ResumeSignal) {
-        self.broadcast(StudioEvent::TraceEvent {
-            kind: "Resume".to_string(),
-            name: "agent.resume".to_string(),
-            attributes: serde_json::json!({
-                "interrupt_id": signal.interrupt_id,
-                "feedback": signal.feedback,
-                "action": format!("{:?}", signal.action),
-            }),
-        });
-    }
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-/// Convert ParadigmKind to string.
-fn paradigm_to_string(kind: ParadigmKind) -> String {
-    match kind {
-        ParadigmKind::Plan => "plan".to_string(),
-        ParadigmKind::ReAct => "react".to_string(),
-        ParadigmKind::Reflect => "reflect".to_string(),
-        ParadigmKind::Explore => "explore".to_string(),
-        _ => "unknown".to_string(),
-    }
-}
-
-/// Truncate a string to a maximum length.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 
     #[test]
     fn test_studio_state_creation() {
         let state = StudioState::new_default();
-        let sessions = state.list_sessions();
-        // Need to await — use block_on
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let sessions = rt.block_on(sessions);
+        let sessions = rt.block_on(state.list_sessions());
         assert!(sessions.is_empty());
     }
 
-    #[test]
-    fn test_broadcast_iteration_start() {
+    #[tokio::test]
+    async fn subscribe_without_bus_is_none() {
         let state = StudioState::new_default();
-        let mut rx = state.subscribe();
+        assert!(state.subscribe().await.is_none());
+    }
 
-        state.broadcast(StudioEvent::IterationStart {
-            iteration: 1,
-            paradigm: "react".to_string(),
-        });
+    #[tokio::test]
+    async fn bus_forwards_yields_to_subscriber() {
+        let state = StudioState::new_default();
+        let bus: Arc<dyn EngineBus> = Arc::new(InProcessBus::default());
+        state.set_bus(Some(bus.clone())).await;
 
-        let event = rx.try_recv().unwrap();
-        match event {
-            StudioEvent::IterationStart {
-                iteration,
-                paradigm,
-            } => {
-                assert_eq!(iteration, 1);
-                assert_eq!(paradigm, "react");
-            }
-            _ => panic!("Expected IterationStart event"),
+        let mut rx = state.subscribe().await.expect("bus attached");
+        bus.emit(EngineYield::StreamChunk {
+            turn_id: "t1".into(),
+            text: "hi".into(),
+        })
+        .unwrap();
+
+        let y = rx.recv().await.unwrap();
+        match y {
+            EngineYield::StreamChunk { text, .. } => assert_eq!(text, "hi"),
+            _ => panic!("expected StreamChunk"),
         }
     }
 
-    #[test]
-    fn test_broadcast_direct_answer() {
+    #[tokio::test]
+    async fn multiple_subscribers_each_receive() {
         let state = StudioState::new_default();
-        let mut rx = state.subscribe();
+        let bus: Arc<dyn EngineBus> = Arc::new(InProcessBus::default());
+        state.set_bus(Some(bus.clone())).await;
 
-        state.broadcast(StudioEvent::DirectAnswer {
-            text: "The answer is 42".to_string(),
-        });
+        let mut rx1 = state.subscribe().await.unwrap();
+        let mut rx2 = state.subscribe().await.unwrap();
+        bus.emit(EngineYield::DirectAnswer {
+            turn_id: "t".into(),
+            text: "42".into(),
+        })
+        .unwrap();
 
-        let event = rx.try_recv().unwrap();
-        match event {
-            StudioEvent::DirectAnswer { text } => {
-                assert_eq!(text, "The answer is 42");
-            }
-            _ => panic!("Expected DirectAnswer event"),
-        }
+        assert!(matches!(
+            rx1.recv().await.unwrap(),
+            EngineYield::DirectAnswer { .. }
+        ));
+        assert!(matches!(
+            rx2.recv().await.unwrap(),
+            EngineYield::DirectAnswer { .. }
+        ));
     }
 
-    #[test]
-    fn test_multiple_subscribers() {
-        let state = StudioState::new_default();
-        let mut rx1 = state.subscribe();
-        let mut rx2 = state.subscribe();
-
-        state.broadcast(StudioEvent::ParadigmSwitch {
-            paradigm: "plan".to_string(),
-        });
-
-        let event1 = rx1.try_recv().unwrap();
-        let event2 = rx2.try_recv().unwrap();
-        assert!(matches!(event1, StudioEvent::ParadigmSwitch { .. }));
-        assert!(matches!(event2, StudioEvent::ParadigmSwitch { .. }));
+    #[tokio::test]
+    async fn serialize_yield_line_roundtrips() {
+        let y = EngineYield::ToolResult {
+            turn_id: "t1".into(),
+            call_id: "c1".into(),
+            tool_name: "shell".into(),
+            output: oneai_core::ToolOutput {
+                success: true,
+                content: "OK".into(),
+                error: None,
+                ..Default::default()
+            },
+        };
+        let line = oneai_bus::serialize_yield(&y).unwrap();
+        let back = oneai_bus::parse_yield(line.trim()).unwrap();
+        match back {
+            EngineYield::ToolResult { call_id, .. } => assert_eq!(call_id, "c1"),
+            _ => panic!("expected ToolResult"),
+        }
     }
 
     #[test]
@@ -541,40 +350,5 @@ mod tests {
         let session = rt.block_on(state.get_session("sess_1")).unwrap();
         assert_eq!(session.iteration, 5);
         assert_eq!(session.total_tokens, 1200);
-    }
-
-    #[test]
-    fn test_studio_event_json_serialization() {
-        let event = StudioEvent::ToolResult {
-            call_id: "call_1".to_string(),
-            tool_name: "shell".to_string(),
-            success: true,
-            output_summary: "OK".to_string(),
-        };
-
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"ToolResult\""));
-        assert!(json.contains("\"call_1\""));
-
-        // Deserialize back
-        let deserialized: StudioEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, StudioEvent::ToolResult { .. }));
-    }
-
-    #[test]
-    fn test_truncate() {
-        assert_eq!(truncate("short", 10), "short");
-        assert_eq!(
-            truncate("a very long string that exceeds limit", 10),
-            "a very lon..."
-        );
-    }
-
-    #[test]
-    fn test_paradigm_to_string() {
-        assert_eq!(paradigm_to_string(ParadigmKind::Plan), "plan");
-        assert_eq!(paradigm_to_string(ParadigmKind::ReAct), "react");
-        assert_eq!(paradigm_to_string(ParadigmKind::Reflect), "reflect");
-        assert_eq!(paradigm_to_string(ParadigmKind::Explore), "explore");
     }
 }

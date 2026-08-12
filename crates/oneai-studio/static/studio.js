@@ -12,8 +12,8 @@ let runsSucceeded = 0;
 let runsAttempted = 0;
 
 /** The currently-streaming assistant message element (created on first
- *  StreamChunk / Thinking of a turn, finalized on DirectAnswer /
- *  LoopComplete). null when no turn is in flight. */
+ *  stream_chunk / thinking of a turn, finalized on direct_answer /
+ *  turn_complete). null when no turn is in flight. */
 let currentAssistant = null;
 let busy = false;
 
@@ -48,105 +48,92 @@ function connectWebSocket() {
 
 // ─── Event Handler ───────────────────────────────────────────────────
 function handleStudioEvent(event) {
-    // The welcome message is { "type": "connected", ... }; serde-tagged
-    // agent events are { "VariantName": { ... } }. Normalize both.
-    let kind, payload;
-    if (event.type) {
-        kind = event.type;
-        payload = event;
-    } else {
-        kind = Object.keys(event)[0];
-        payload = event[kind];
+    // The welcome line is { "type": "connected", "message": "..." }.
+    // Agent yields are `EngineYield`, serde-tagged as
+    // { "kind": "<snake_case>", ...fields } — fields live at the top level.
+    if (event.type === 'connected') {
+        addTraceEntry('system', event.message || 'Connected');
+        return;
     }
 
+    const kind = event.kind;
     switch (kind) {
-        case 'IterationStart':
-            iterCount = payload.iteration;
-            addTraceEntry('iteration', `Iteration ${payload.iteration} — ${payload.paradigm}`);
-            updateParadigmBadge(payload.paradigm);
-            updateIterationBadge(payload.iteration);
+        case 'iteration_start':
+            iterCount = event.iteration;
+            addTraceEntry('iteration', `Iteration ${event.iteration} — ${event.paradigm}`);
+            updateParadigmBadge(event.paradigm);
+            updateIterationBadge(event.iteration);
             updateMetrics();
             // Open a "thinking" bubble so the user sees activity before the
             // first stream chunk lands.
             ensureAssistantBubble('thinking');
             break;
 
-        case 'DirectAnswer':
-            addTraceEntry('answer', `Direct answer: ${truncate(payload.text, 100)}`);
-            finalizeAssistant(payload.text);
+        case 'direct_answer':
+            addTraceEntry('answer', `Direct answer: ${truncate(event.text, 100)}`);
+            finalizeAssistant(event.text);
             break;
 
-        case 'ToolCalls':
-            addTraceEntry('tool-call', `Tool calls: ${payload.calls.map(c => c.tool_name).join(', ')}`);
-            payload.calls.forEach(c => {
-                addTraceEntry('tool-call', `  ↳ ${c.tool_name}: ${truncate(JSON.stringify(c.args), 80)}`);
+        case 'tool_calls':
+            addTraceEntry('tool-call', `Tool calls: ${event.calls.map(c => c.name).join(', ')}`);
+            event.calls.forEach(c => {
+                addTraceEntry('tool-call', `  ↳ ${c.name}: ${truncate(JSON.stringify(c.args), 80)}`);
             });
-            toolCallCount += payload.calls.length;
+            toolCallCount += event.calls.length;
             updateMetrics();
             break;
 
-        case 'ToolResult':
-            addTraceEntry(payload.success ? 'tool-result' : 'error',
-                `${payload.success ? '✅' : '❌'} ${payload.tool_name}: ${truncate(payload.output_summary, 80)}`);
+        case 'tool_result':
+            addTraceEntry(event.output.success ? 'tool-result' : 'error',
+                `${event.output.success ? '✅' : '❌'} ${event.tool_name}: ${truncate(event.output.content, 80)}`);
             break;
 
-        case 'Delegate':
-            addTraceEntry('iteration', `Delegating to ${payload.agent_type}: ${truncate(payload.task, 60)}`);
+        case 'delegate':
+            addTraceEntry('iteration', `Delegating to ${event.agent_kind}: ${truncate(event.task, 60)}`);
             break;
 
-        case 'ParadigmSwitch':
-            addTraceEntry('iteration', `Switching paradigm → ${payload.paradigm}`);
-            updateParadigmBadge(payload.paradigm);
+        case 'paradigm_switch':
+            addTraceEntry('iteration', `Switching paradigm ${event.from} → ${event.to}`);
+            updateParadigmBadge(event.to);
             break;
 
-        case 'CheckpointSaved':
-            addTraceEntry('iteration', `Checkpoint saved: iter ${payload.iteration}`);
-            break;
-
-        case 'TraceEvent':
-            if (payload.kind === 'TokenUsage') {
-                totalTokens += (payload.attributes?.total_tokens || 0);
-                updateMetrics();
-            }
-            addTraceEntry('trace', `${payload.kind}: ${payload.name}`);
-            break;
-
-        case 'Thinking':
+        case 'thinking':
             ensureAssistantBubble('thinking');
-            appendToAssistant(payload.text, true);
-            addTraceEntry('thinking', `💭 ${truncate(payload.text, 80)}`);
+            appendToAssistant(event.text, true);
+            addTraceEntry('thinking', `💭 ${truncate(event.text, 80)}`);
             break;
 
-        case 'StreamChunk':
+        case 'stream_chunk':
             // Accumulate into the live assistant bubble (typewriter).
             ensureAssistantBubble('assistant');
-            appendToAssistant(payload.text, false);
-            addTraceEntry('trace', `Chunk: ${truncate(payload.text, 40)}`);
+            appendToAssistant(event.text, false);
+            addTraceEntry('trace', `Chunk: ${truncate(event.text, 40)}`);
             break;
 
-        case 'LoopComplete':
-            addTraceEntry('iteration', `✅ Loop complete: ${payload.result_summary}`);
+        case 'turn_complete':
+            addTraceEntry('iteration', `✅ Turn complete: ${event.summary.final_answer || ''}`);
             finalizeAssistant(null);
             setBusy(false);
             runsSucceeded++;
             updateMetrics();
             break;
 
-        case 'Error':
-            addTraceEntry('error', `❌ Error: ${payload.message}`);
-            addMessage('assistant', `⚠️ Error: ${payload.message}`, 'error');
+        case 'token_usage':
+            totalTokens += (event.usage.prompt_tokens + event.usage.completion_tokens);
+            updateMetrics();
+            break;
+
+        case 'error':
+            addTraceEntry('error', `❌ Error: ${event.message}`);
+            addMessage('assistant', `⚠️ Error: ${event.message}`, 'error');
             finalizeAssistant(null);
             setBusy(false);
             errorCount++;
             updateMetrics();
             break;
 
-        case 'connected':
-            addTraceEntry('system', payload.message || 'Connected');
-            break;
-
         default:
-            addTraceEntry('trace', `${kind}: ${JSON.stringify(payload).substring(0, 60)}`);
+            addTraceEntry('trace', `${kind}: ${JSON.stringify(event).substring(0, 60)}`);
     }
 }
 

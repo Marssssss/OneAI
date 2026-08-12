@@ -1,4 +1,10 @@
 //! WebSocket handler — real-time event streaming to Studio frontend.
+//!
+//! Each WS connection subscribes to the engine bus's `EngineYield` stream
+//! (set on `StudioState` via `set_bus` when the CLI attaches a runner) and
+//! forwards each yield as a newline-terminated `serialize_yield` JSON line.
+//! With no bus attached (standalone `serve()`), the socket idles after the
+//! welcome message.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -13,9 +19,9 @@ use crate::state::StudioState;
 
 /// Handler for WebSocket upgrade requests at `/ws`.
 ///
-/// The client connects to this endpoint to receive real-time events
-/// (iteration start, tool calls, paradigm switches, etc.) pushed from
-/// the StudioState broadcast channel.
+/// The client connects to this endpoint to receive real-time `EngineYield`
+/// events (iteration start, tool calls, paradigm switches, streaming chunks,
+/// …) pushed from the engine bus the runner emits to.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<std::sync::Arc<StudioState>>,
@@ -27,16 +33,13 @@ pub async fn ws_handler(
 
 /// Handle an established WebSocket connection.
 ///
-/// Reads from the broadcast channel and forwards events to the client
-/// as JSON text messages. Also reads incoming messages from the client
-/// (e.g., commands like "subscribe", "ping") for future extension.
+/// Subscribes to the bus's yield stream (if a runner is attached) and
+/// forwards each `EngineYield` as a JSON text message. Also reads incoming
+/// messages from the client (e.g. "ping") for future extension.
 async fn handle_socket(socket: WebSocket, state: std::sync::Arc<StudioState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Subscribe to the broadcast channel
-    let mut rx = state.subscribe();
-
-    // Send initial connection message
+    // Send initial connection message.
     let welcome = serde_json::json!({
         "type": "connected",
         "message": "OneAI Studio WebSocket connected"
@@ -44,24 +47,28 @@ async fn handle_socket(socket: WebSocket, state: std::sync::Arc<StudioState>) {
     let welcome_str = serde_json::to_string(&welcome).unwrap_or_default();
     let _ = sender.send(Message::from(welcome_str)).await;
 
-    // Forward broadcast events to the client
+    // Subscribe to the engine bus's yield stream, if a runner is attached.
+    let rx_opt = state.subscribe().await;
+
     let send_task = tokio::spawn(async move {
-        while let Ok(event) = rx.recv().await {
-            let json = serde_json::to_string(&event).unwrap_or_default();
-            if sender.send(Message::from(json)).await.is_err() {
-                break; // Client disconnected
+        if let Some(mut rx) = rx_opt {
+            while let Ok(yield_) = rx.recv().await {
+                let line = oneai_bus::serialize_yield(&yield_).unwrap_or_default();
+                if sender.send(Message::from(line)).await.is_err() {
+                    break; // Client disconnected.
+                }
             }
         }
+        // No bus attached (standalone server) → nothing to forward; the
+        // send task ends and the socket waits on the recv task below.
     });
 
-    // Read incoming messages from the client (for future extension)
+    // Read incoming messages from the client (for future extension).
     let recv_task = tokio::spawn(async move {
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    // Handle incoming commands (future extension)
                     tracing::debug!("Studio WS received: {}", text);
-                    // For now, just log — could add "ping/pong", "subscribe_session", etc.
                 }
                 Ok(Message::Close(_)) => break,
                 Err(_) => break,
@@ -70,79 +77,59 @@ async fn handle_socket(socket: WebSocket, state: std::sync::Arc<StudioState>) {
         }
     });
 
-    // Wait for either task to finish (client disconnect or broadcast end)
     tokio::select! {
         _ = send_task => {},
         _ = recv_task => {},
-    };
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    // `StudioEvent` is referenced only by these tests; kept here (not at module
-    // scope) to avoid an unused-import warning in the non-test build.
-    use crate::state::StudioEvent;
+    use oneai_bus::{EngineBus, EngineYield, InProcessBus};
+    use std::sync::Arc;
 
     #[test]
-    fn test_studio_event_serialization_all_types() {
-        // Verify all StudioEvent variants serialize correctly
-        let events = vec![
-            StudioEvent::IterationStart {
+    fn serialize_yield_all_kinds() {
+        let yields = vec![
+            EngineYield::IterationStart {
+                turn_id: "t".into(),
                 iteration: 1,
-                paradigm: "react".to_string(),
+                paradigm: oneai_bus::BusParadigmKind::ReAct,
             },
-            StudioEvent::DirectAnswer {
-                text: "hello".to_string(),
+            EngineYield::DirectAnswer {
+                turn_id: "t".into(),
+                text: "hello".into(),
             },
-            StudioEvent::ToolCalls {
-                calls: vec![crate::state::ToolCallView {
-                    id: "c1".to_string(),
-                    tool_name: "shell".to_string(),
-                    args: serde_json::json!({"cmd": "ls"}),
-                }],
+            EngineYield::StreamChunk {
+                turn_id: "t".into(),
+                text: "chunk".into(),
             },
-            StudioEvent::ToolResult {
-                call_id: "c1".to_string(),
-                tool_name: "shell".to_string(),
-                success: true,
-                output_summary: "OK".to_string(),
-            },
-            StudioEvent::Delegate {
-                task: "implement".to_string(),
-                agent_type: "coder".to_string(),
-            },
-            StudioEvent::ParadigmSwitch {
-                paradigm: "plan".to_string(),
-            },
-            StudioEvent::CheckpointSaved {
-                iteration: 3,
-                checkpoint_id: "cp_3".to_string(),
-            },
-            StudioEvent::TraceEvent {
-                kind: "Thought".to_string(),
-                name: "agent.thought".to_string(),
-                attributes: serde_json::json!({"msg": "thinking"}),
-            },
-            StudioEvent::Thinking {
-                text: "reasoning...".to_string(),
-            },
-            StudioEvent::StreamChunk {
-                text: "chunk".to_string(),
-            },
-            StudioEvent::LoopComplete {
-                result_summary: "Success".to_string(),
-            },
-            StudioEvent::Error {
-                message: "oops".to_string(),
+            EngineYield::Error {
+                recoverable: false,
+                message: "oops".into(),
             },
         ];
-
-        for event in &events {
-            let json = serde_json::to_string(event).unwrap();
-            let deserialized: StudioEvent = serde_json::from_str(&json).unwrap();
-            // Verify roundtrip
-            let json2 = serde_json::to_string(&deserialized).unwrap();
-            assert_eq!(json, json2);
+        for y in &yields {
+            let line = oneai_bus::serialize_yield(y).unwrap();
+            assert!(line.ends_with('\n'));
+            let back = oneai_bus::parse_yield(line.trim()).unwrap();
+            let line2 = oneai_bus::serialize_yield(&back).unwrap();
+            assert_eq!(line, line2);
         }
+    }
+
+    #[tokio::test]
+    async fn bus_emit_reaches_subscriber() {
+        let bus: Arc<dyn EngineBus> = Arc::new(InProcessBus::default());
+        let mut rx = bus.subscribe_yields();
+        bus.emit(EngineYield::StreamChunk {
+            turn_id: "t".into(),
+            text: "hi".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            EngineYield::StreamChunk { .. }
+        ));
     }
 }

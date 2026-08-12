@@ -466,8 +466,8 @@ pub struct RunRequest {
 
 /// Drive one agent turn from a user prompt. Returns immediately; the
 /// agent's iterations, tool calls, streaming chunks, and final answer
-/// stream to all WebSocket subscribers as `StudioEvent`s (the
-/// `StudioState` is the observer passed to `run_agent`).
+/// stream to all WebSocket subscribers as `EngineYield`s on the engine bus
+/// the runner holds (set on `StudioState` via `set_bus`).
 ///
 /// The actual driving is delegated to a `StudioRunner` (implemented in
 /// the CLI layer, since `oneai-studio` sits below `oneai-app` and cannot
@@ -524,9 +524,8 @@ pub async fn run_task(
 
     // Spawn so the HTTP call returns immediately; events flow over /ws.
     let task = prompt.to_string();
-    let observer = state.clone();
     tokio::spawn(async move {
-        let _ = runner.run_task(&task, observer).await;
+        let _ = runner.run_task(&task).await;
     });
 
     (StatusCode::ACCEPTED, Json(json!({ "accepted": true })))

@@ -47,7 +47,5 @@ pub use checkpoint_dto::{CheckpointDetailView, CheckpointEntryView, CheckpointLi
 pub use graph_dto::{EdgeView, GraphVisualization, NodeView};
 pub use handlers::RunRequest;
 pub use server::{serve, serve_with_state, StudioConfig};
-pub use state::{
-    RunOutcome, RunnerStatus, SessionUpdate, SessionView, StudioEvent, StudioRunner, StudioState,
-};
+pub use state::{RunOutcome, RunnerStatus, SessionUpdate, SessionView, StudioRunner, StudioState};
 pub use trace_dto::{EventView, MetricsView, SpanView, TraceTreeView};

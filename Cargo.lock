@@ -4264,6 +4264,7 @@ dependencies = [
  "chrono",
  "futures",
  "oneai-agent",
+ "oneai-bus",
  "oneai-core",
  "oneai-domain",
  "oneai-eval",

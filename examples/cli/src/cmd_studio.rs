@@ -8,8 +8,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use oneai_agent::AgentLoop;
+use oneai_agent::{AgentLoop, BusObserver};
 use oneai_app::AppBuilder;
+use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_persistence::FilePersistence;
 use oneai_studio::{
     serve_with_state, RunOutcome, RunnerStatus, StudioConfig, StudioRunner, StudioState,
@@ -143,10 +144,15 @@ async fn serve(
 
     let studio_state = Arc::new(StudioState::new(trace_ctx, persistence, tool_registry));
 
+    // The engine bus the BusObserver emits `EngineYield`s to and the WS
+    // handler subscribes to. One bus shared by the runner + all WS clients.
+    let bus: Arc<dyn EngineBus> = Arc::new(InProcessBus::default());
+    studio_state.set_bus(Some(bus.clone())).await;
+
     // Register the session so the header shows it.
     studio_state
         .register_session(oneai_studio::SessionView {
-            id: session_id,
+            id: session_id.clone(),
             paradigm: "react".to_string(),
             iteration: 0,
             running: false,
@@ -154,10 +160,12 @@ async fn serve(
         })
         .await;
 
-    // Attach the runner — `/api/run` calls it; events stream via `studio_state`.
+    // Attach the runner — `/api/run` calls it; events stream via the bus.
     let runner = Arc::new(StudioRunnerImpl {
         session: session.clone(),
         interrupt_slot,
+        bus,
+        session_id,
         busy: Arc::new(AtomicBool::new(false)),
         has_provider,
     });
@@ -175,6 +183,11 @@ async fn serve(
 struct StudioRunnerImpl {
     session: Arc<Mutex<oneai_app::AppSession>>,
     interrupt_slot: Arc<Mutex<Option<AgentLoop>>>,
+    /// Engine bus — the `BusObserver` emits `EngineYield`s here; the WS
+    /// handler subscribes and forwards them to the browser.
+    bus: Arc<dyn EngineBus>,
+    /// Session id — used to mint a per-turn `turn_id`.
+    session_id: String,
     busy: Arc<AtomicBool>,
     has_provider: bool,
 }
@@ -188,7 +201,7 @@ impl StudioRunner for StudioRunnerImpl {
         }
     }
 
-    async fn run_task(&self, task: &str, observer: Arc<StudioState>) -> RunOutcome {
+    async fn run_task(&self, task: &str) -> RunOutcome {
         // Authoritative single-flight guard (defense beyond the handler check).
         if self
             .busy
@@ -200,9 +213,14 @@ impl StudioRunner for StudioRunnerImpl {
             };
         }
 
+        // One BusObserver per turn (fixed turn_id for its lifetime). Its
+        // callbacks emit EngineYield to the bus the WS clients subscribe to.
+        let turn_id = format!("{}_{}", self.session_id, uuid::Uuid::new_v4());
+        let observer = BusObserver::new(self.bus.clone(), turn_id);
+
         let mut session = self.session.lock().await;
         let result = session
-            .run_agent(task, observer.as_ref(), self.interrupt_slot.clone())
+            .run_agent(task, &observer, self.interrupt_slot.clone())
             .await;
         drop(session);
 
@@ -210,7 +228,7 @@ impl StudioRunner for StudioRunnerImpl {
 
         match result {
             Ok(agent_result) => {
-                // on_complete already broadcast LoopComplete to the WS.
+                // on_complete already emitted TurnComplete via the bus.
                 RunOutcome::Done {
                     completed: agent_result.completed,
                     iterations: agent_result.iterations,
@@ -218,7 +236,9 @@ impl StudioRunner for StudioRunnerImpl {
             }
             Err(e) => {
                 let msg = e.to_string();
-                observer.broadcast(oneai_studio::StudioEvent::Error {
+                // Surface the error on the same yield stream the frontend reads.
+                let _ = self.bus.emit(EngineYield::Error {
+                    recoverable: false,
                     message: msg.clone(),
                 });
                 RunOutcome::Error { message: msg }

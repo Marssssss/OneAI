@@ -25,6 +25,7 @@ tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Internal crates
 oneai-core = { workspace = true }
+oneai-bus = { workspace = true }
 oneai-trace = { workspace = true, features = ["trace"] }
 oneai-agent = { workspace = true }
 oneai-workflow = { workspace = true }
