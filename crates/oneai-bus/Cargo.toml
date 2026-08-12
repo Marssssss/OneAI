@@ -1,0 +1,23 @@
+[package]
+name = "oneai-bus"
+description = "Unified engine↔frontend protocol (Directive/EngineYield) and in-process bus — the single bus every frontend (TUI/web/native/sidecar) consumes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["ai", "agent", "bus", "protocol", "cross-platform"]
+categories = ["api-bindings", "development-tools"]
+
+[lib]
+name = "oneai_bus"
+path = "src/lib.rs"
+
+[dependencies]
+oneai-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

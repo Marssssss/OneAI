@@ -1693,7 +1693,14 @@ pub struct DecisionOption {
 /// A request from the agent loop to the application layer at a decision point.
 ///
 /// The loop blocks on the corresponding [`InteractionResponse`] before resuming.
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` are derived so the unified engine bus (`oneai-bus`)
+/// can carry approval requests across its wire codec (in-process mpsc and the
+/// sidecar newline-JSON framing) without a lossy DTO projection — the engine
+/// bus's `EngineYield::ApprovalRequest` and `Directive::Approve` reference this
+/// type directly. Previously studio/supervisor projected around the missing
+/// serde; this removes the need.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum InteractionRequest {
     /// LLM inference is about to run. The layer may rewrite the request
@@ -1754,7 +1761,10 @@ pub enum InteractionRequest {
 }
 
 /// The application layer's reply to an [`InteractionRequest`].
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` derived for the engine bus wire codec — see
+/// [`InteractionRequest`]'s doc comment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 #[allow(clippy::large_enum_variant)] // ProceedWith holds InteractionModification (~264 B);
                                      // boxing would break the public construction API (v0.2.0 stability).
@@ -1808,7 +1818,10 @@ pub struct ElicitationOutcome {
 }
 
 /// A modification attached to [`InteractionResponse::ProceedWith`].
-#[derive(Debug, Clone)]
+///
+/// `Serialize`/`Deserialize` derived for the engine bus wire codec — see
+/// [`InteractionRequest`]'s doc comment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum InteractionModification {
     /// PreInfer: inject a system message into the conversation.

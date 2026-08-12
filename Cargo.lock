@@ -3809,6 +3809,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneai-bus"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "oneai-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "oneai-channel-demo"
 version = "1.1.0"
 dependencies = [
