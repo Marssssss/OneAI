@@ -35,19 +35,17 @@ use oneai_provider::ProviderFactory;
 use oneai_tool::CalculatorTool;
 
 use app::{App, ApprovalPendingState, ChatMessage, ChatRole, SessionInfo, TokenUsage};
-use bus_bridge::{spawn_directive_pump, spawn_yield_bridge, AutoApproveThreshold};
-use observer::ObserverEvent;
+use bus_consumer::spawn_directive_pump;
 use render::spinner::advance_frame;
 use session::SessionState;
 
 // ─── Public Modules ────────────────────────────────────────────────────────
 
 pub mod app;
-pub mod bus_bridge;
+pub mod bus_consumer;
 pub mod custom_terminal;
 pub mod history;
 pub mod input_mode;
-pub mod observer;
 pub mod render;
 pub mod session;
 pub mod theme;
@@ -131,30 +129,23 @@ pub fn run_tui(
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    // Channels + interrupt slot created BEFORE building the App so the bus
-    // bridge + directive pump (spawned inside the build block once the session
-    // + engine_bus exist) can take ownership of them.
-    let (observer_tx, observer_rx) = tokio::sync::mpsc::unbounded_channel();
-    // The interaction channel is now fed by the yield bridge (ApprovalRequest
-    // yields → InteractionPendingItem), not by an mpsc-backed gate.
-    let (interaction_tx, interaction_rx) =
-        tokio::sync::mpsc::channel::<oneai_tool::InteractionPendingItem>(16);
-    // Standalone interrupt slot — still parked with the running AgentLoop so
-    // the pump (which holds the session lock for the whole turn) is decoupled
-    // from the Esc path. Esc now submits `Directive::Interrupt`; the engine
-    // registered the turn's cancel token in `run_agent` (P2 wiring).
+    // Standalone interrupt slot — parked with the running AgentLoop so the
+    // pump (which holds the session lock for the whole turn) is decoupled from
+    // the Esc path. Esc submits `Directive::Interrupt`; the engine registered
+    // the turn's cancel token in `run_agent` (P2 wiring).
     let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
-    let (app, session_state, engine_bus) = rt.block_on(async {
-        // Engine bus (P2): the TUI is now a bus consumer. `engine_bus()`
-        // constructs the `InProcessBus`, wires a `BusInteractionGate` as the
-        // interaction gate (approvals round-trip as
+    let (app, session_state, engine_bus, mut tui_rx) = rt.block_on(async {
+        // Engine bus: the TUI is a bus consumer — one channel, one schema.
+        // `engine_bus()` constructs the `InProcessBus`, wires a
+        // `BusInteractionGate` (approvals round-trip as
         // `EngineYield::ApprovalRequest` ↔ `Directive::Approve`), and returns
         // the directive stream the pump reads `Directive::UserMessage` off.
-        // The old `ThresholdInteractionGate` + its `interaction_rx` are gone;
-        // approvals are re-surfaced into a local channel by the yield bridge
-        // (which also reapplies the Medium-risk auto-proceed threshold).
+        // The TUI main loop subscribes to the yield stream directly
+        // (`bus.subscribe_yields()`) — no separate observer channel, no yield
+        // bridge, no `interaction_rx`. The Medium-risk auto-proceed threshold
+        // lives in `process_yield`'s ApprovalRequest arm.
         let (builder, directive_rx) = AppBuilder::new()
             .default_parser()
             .default_rate_limiter()
@@ -228,6 +219,12 @@ pub fn run_tui(
         tui_app.skill_names = tui_app.skill_registry.skill_names().await;
         tui_app.current_domain = domain_pack_name.to_string();
 
+        // TUI-internal async-op channel (for /init, /compact LLM-call results).
+        // Distinct from the engine bus: two channels, two distinct schemas.
+        let (tui_tx, tui_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::tui::app::TuiAsyncEvent>();
+        tui_app.tui_async_tx = Some(tui_tx);
+
         // Load the most recent saved sessions into `tui_app.sessions` so the
         // sidebar AND the top TAB bar (issue #30) show history at startup,
         // not just the single fresh current session. Both surfaces read the
@@ -268,43 +265,43 @@ pub fn run_tui(
         }
         tui_app.update_session_info();
 
-        // Spawn the bus bridge + directive pump now that the session, the
-        // engine bus, and the channels all exist. The pump owns `directive_rx`
-        // (turns `Directive::UserMessage` into `run_turn_via_bus`); the bridge
-        // drains `EngineYield`s into the TUI's `observer_tx` /
-        // `interaction_tx`. Both live for the session (JoinHandle drop detaches
-        // them onto the runtime).
+        // Spawn the directive pump — the engine-driver half. The TUI main loop
+        // (the consumer half) subscribes to the yield stream directly after
+        // this block. The pump owns `directive_rx` and turns
+        // `Directive::UserMessage` into `run_turn_via_bus`; turn-level errors
+        // go back onto the bus as `EngineYield::Error`. JoinHandle drop
+        // detaches it onto the runtime for the session's lifetime.
         let engine_bus = app_arc
             .engine_bus
             .clone()
             .expect("engine_bus() was called on the builder");
-        let _bridge = spawn_yield_bridge(
-            engine_bus.clone(),
-            observer_tx.clone(),
-            interaction_tx.clone(),
-            AutoApproveThreshold::default(),
-        );
         let _pump = spawn_directive_pump(
             directive_rx,
             session_state.clone(),
             interrupt_slot.clone(),
-            observer_tx.clone(),
+            engine_bus.clone(),
         );
 
-        (tui_app, session_state, engine_bus)
+        (tui_app, session_state, engine_bus, tui_rx)
     });
+
+    // The TUI main loop consumes yields directly off the bus — one channel,
+    // one schema. This replaces the old `observer_rx` + `interaction_rx` pair.
+    let mut bus_rx = {
+        use oneai_bus::EngineBus;
+        engine_bus.subscribe_yields()
+    };
 
     // Run the main loop
     let result = run_main_loop(
         &mut terminal,
         app,
         session_state,
-        observer_tx,
-        observer_rx,
         &rt,
-        interaction_rx,
         interrupt_slot,
         engine_bus,
+        &mut bus_rx,
+        &mut tui_rx,
     );
 
     // Restore terminal
@@ -321,21 +318,14 @@ fn dispatch_event(
     app: &mut App,
     event: Event,
     session_state: Arc<tokio::sync::Mutex<SessionState>>,
-    observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
 ) {
     match event {
-        Event::Key(key) => handle_key_event(
-            app,
-            key,
-            session_state,
-            observer_tx,
-            rt,
-            interrupt_slot,
-            engine_bus,
-        ),
+        Event::Key(key) => {
+            handle_key_event(app, key, session_state, rt, interrupt_slot, engine_bus)
+        }
         Event::Mouse(mouse) => handle_mouse_event(app, mouse),
         // Bracketed paste: insert the whole pasted string at the cursor without
         // submitting. Without this arm, paste falls into the `_` catch-all and is
@@ -373,7 +363,6 @@ fn handle_key_event(
     app: &mut App,
     key: KeyEvent,
     session_state: Arc<tokio::sync::Mutex<SessionState>>,
-    observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
@@ -394,19 +383,19 @@ fn handle_key_event(
     }
 
     if app.approval_pending.is_some() {
-        handle_approval_key(app, key);
+        handle_approval_key(app, key, &engine_bus);
         return;
     }
     // Plan-decision gate (request_plan_decision) — a planning tradeoff the user
     // must resolve. Handled before plan-review and input.
     if app.plan_decision_pending.is_some() {
-        handle_plan_decision_key(app, key);
+        handle_plan_decision_key(app, key, &engine_bus);
         return;
     }
     // Plan review gate (exit_plan_mode) — handled before input so the user
     // can't type while a decision is pending.
     if app.pending_plan.is_some() {
-        handle_plan_approval_key(app, key);
+        handle_plan_approval_key(app, key, &engine_bus);
         return;
     }
     if app.search_mode {
@@ -452,7 +441,6 @@ fn handle_key_event(
                 app,
                 session_state.clone(),
                 user_input,
-                observer_tx,
                 rt,
                 interrupt_slot,
                 engine_bus,
@@ -633,21 +621,21 @@ fn handle_mouse_event(app: &mut App, mouse_event: crossterm::event::MouseEvent) 
 
 /// Main TUI event loop.
 ///
-/// The agent runs in a background tokio task, and observer events
-/// are processed asynchronously in the TUI loop. This enables
-/// the typewriter effect — stream chunks arrive in real-time
+/// The agent runs in a background directive-pump task; `EngineYield`s are
+/// consumed here directly off `bus_rx` (one channel, one schema), and TUI-
+/// internal async-op results (`/init`, `/compact`) off `tui_rx`. The
+/// typewriter effect works the same — stream chunks arrive in real-time
 /// while the TUI continues rendering.
 #[allow(clippy::too_many_arguments)]
 fn run_main_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut app: App,
     session_state: Arc<tokio::sync::Mutex<SessionState>>,
-    observer_tx: tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
-    mut observer_rx: tokio::sync::mpsc::UnboundedReceiver<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
-    mut interaction_rx: tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
+    bus_rx: &mut tokio::sync::broadcast::Receiver<oneai_bus::EngineYield>,
+    tui_rx: &mut tokio::sync::mpsc::UnboundedReceiver<app::TuiAsyncEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     while !app.should_quit {
         // Advance spinner frame only when thinking (spinner animation needs periodic redraw)
@@ -687,7 +675,6 @@ fn run_main_loop(
                 &mut app,
                 first_event,
                 session_state.clone(),
-                &observer_tx,
                 rt,
                 interrupt_slot.clone(),
                 engine_bus.clone(),
@@ -700,7 +687,6 @@ fn run_main_loop(
                         &mut app,
                         ev,
                         session_state.clone(),
-                        &observer_tx,
                         rt,
                         interrupt_slot.clone(),
                         engine_bus.clone(),
@@ -711,106 +697,27 @@ fn run_main_loop(
             }
         }
 
-        // Process observer events (streaming/typewriter works here)
-        while let Ok(event) = observer_rx.try_recv() {
-            process_observer_event(&mut app, event);
+        // Consume engine yields directly off the bus — one channel, one schema.
+        // A lagging subscriber (long blocking approval card) misses yields with a
+        // `Lagged` error; drain logs it and continues. `Closed` ends the loop.
+        loop {
+            match bus_rx.try_recv() {
+                Ok(y) => process_yield(&mut app, y, &engine_bus),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                    app.should_quit = true;
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!("TUI yield consumer lagged, skipped {n} yields");
+                }
+            }
         }
 
-        // Process interaction requests from the interaction gate (tool
-        // approval, plan decisions, plan review). Variants not enabled in the
-        // TUI config (PreInfer/PostInfer) never arrive; defensively Proceed.
-        //
-        // Drain ALL pending items this frame — a parallel tool batch can land
-        // several approvals at once. Processing only one per frame would leave
-        // the others stuck in the channel while the user answers the first; the
-        // agent loop's `join_all` is awaiting every reply, so draining them all
-        // into the queue here keeps the batch moving as the user clears each card
-        // (Issue #20).
-        while let Ok(item) = interaction_rx.try_recv() {
-            let response_tx = item.response_tx;
-            // Auto-accept mode — silently proceed every decision point (no card).
-            if matches!(app.interaction_mode, app::InteractionMode::AutoAccept) {
-                let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);
-                continue;
-            }
-            match item.request {
-                oneai_core::InteractionRequest::ToolApproval { approval } => {
-                    let tool_name = approval.tool_name.clone();
-                    let justification = approval.justification.clone();
-                    let perm_label = approval
-                        .permission_level
-                        .map(|p| format!("{:?}", p))
-                        .unwrap_or_else(|| format!("{:?}", approval.risk_level));
-
-                    if app.session_allowlist.contains(&tool_name) {
-                        let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);
-                        app.add_message(
-                            ChatRole::System,
-                            format!("Auto-approved {} (session allowlist)", tool_name),
-                        );
-                    } else {
-                        // Show approval card in the TUI — or queue it if one is
-                        // already on screen (parallel-tool-call case, Issue #20).
-                        let state = ApprovalPendingState {
-                            request: approval,
-                            response_tx: Some(response_tx),
-                            tool_name,
-                            justification,
-                        };
-                        promote_or_enqueue_approval(&mut app, state, &perm_label);
-                    }
-                }
-                oneai_core::InteractionRequest::PlanDecision {
-                    decision_id: _,
-                    question,
-                    context,
-                    options,
-                } => {
-                    app.plan_decision_pending = Some(app::PlanDecisionState {
-                        question,
-                        context,
-                        options,
-                        selected: 0,
-                        reply_tx: response_tx,
-                    });
-                    app.is_thinking = false; // pause spinner while awaiting decision
-                    app.add_message(
-                        ChatRole::System,
-                        "Decision needed — choose an option.".to_string(),
-                    );
-                }
-                oneai_core::InteractionRequest::PlanReview { plan, steps } => {
-                    app.pending_plan = Some((plan, steps, Some(response_tx)));
-                    app.is_thinking = false; // pause spinner while awaiting review
-                }
-                oneai_core::InteractionRequest::NetworkApproval { host, requested_by } => {
-                    // #28 Stage 1 — a sandboxed script wants to reach `host`.
-                    // Reuse the ToolApproval card + queue (Issue #20) by
-                    // synthesizing an approval request keyed on the host; the
-                    // card's Proceed/Abort map directly to the proxy's
-                    // admit/deny semantics.
-                    let approval = oneai_core::ApprovalRequest {
-                        tool_name: host.clone(),
-                        args: serde_json::json!({ "host": host, "requested_by": requested_by }),
-                        risk_level: oneai_core::RiskLevel::High,
-                        permission_level: Some(oneai_core::PermissionLevel::Full),
-                        justification: format!(
-                            "Network egress request to {host} (from {requested_by})"
-                        ),
-                    };
-                    let state = ApprovalPendingState {
-                        request: approval.clone(),
-                        response_tx: Some(response_tx),
-                        tool_name: approval.tool_name.clone(),
-                        justification: approval.justification.clone(),
-                    };
-                    promote_or_enqueue_approval(&mut app, state, "Network");
-                }
-                _ => {
-                    // PreInfer/PostInfer — not surfaced in the TUI; proceed.
-                    let _ = response_tx.send(oneai_core::InteractionResponse::Proceed);
-                }
-            }
+        // TUI-internal async-op results (/init, /compact) — distinct channel,
+        // distinct schema (these are NOT engine yields).
+        while let Ok(ev) = tui_rx.try_recv() {
+            process_tui_event(&mut app, ev);
         }
 
         // Render AFTER processing all events and state changes.
@@ -863,12 +770,11 @@ fn handle_user_input_async(
     app: &mut App,
     session_state: Arc<tokio::sync::Mutex<SessionState>>,
     input: String,
-    observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
 ) {
-    // `interrupt_slot` is now owned by the directive pump (spawned at session
+    // `interrupt_slot` is owned by the directive pump (spawned at session
     // start); the submit path here no longer needs it, but it's kept in the
     // signature to avoid churn across the existing call sites.
     let _ = &interrupt_slot;
@@ -1230,7 +1136,7 @@ fn handle_user_input_async(
                 app.request_render();
 
                 let session_state_cl = session_state.clone();
-                let tx = observer_tx.clone();
+                let tx = app.tui_async_tx.clone();
                 let format_label = opts.format.label().to_string();
                 rt.spawn(async move {
                     // Grab the provider (cloned Arc) under a short lock, if available.
@@ -1269,7 +1175,9 @@ fn handle_user_input_async(
                         }
                         Err(e) => format!("✗ /init failed: {}", e),
                     };
-                    let _ = tx.send(ObserverEvent::InitResult(msg));
+                    if let Some(tx) = tx {
+                        let _ = tx.send(crate::tui::app::TuiAsyncEvent::InitResult(msg));
+                    }
                 });
                 return;
             }
@@ -1278,12 +1186,13 @@ fn handle_user_input_async(
                 //
                 // Mirrors /init's async pattern: the LLM summary call takes
                 // seconds, so we run it in a background task with a progress
-                // line + spinner and deliver the result via
-                // ObserverEvent::CompactResult. Unlike the old implementation,
-                // we do NOT reset the session — the summary is injected into
-                // the *backend* Conversation (AppSession::compact) so the model
-                // sees it on the next run, and work continues in the same
-                // session (same session_id, no new sidebar entry).
+                // line + spinner and deliver the result via the TUI-internal
+                // async channel (`TuiAsyncEvent::CompactResult`). Unlike the
+                // old implementation, we do NOT reset the session — the summary
+                // is injected into the *backend* Conversation
+                // (`AppSession::compact`) so the model sees it on the next run,
+                // and work continues in the same session (same session_id, no
+                // new sidebar entry).
                 let has_provider =
                     rt.block_on(async { session_state.lock().await.app.has_provider() });
                 if !has_provider {
@@ -1299,26 +1208,28 @@ fn handle_user_input_async(
                 app.request_render();
 
                 let session_state_cl = session_state.clone();
-                let tx = observer_tx.clone();
+                let tx = app.tui_async_tx.clone();
                 rt.spawn(async move {
                     let outcome = session_state_cl.lock().await.session.compact(2).await;
                     let msg = match &outcome {
                         // Empty summary ⇒ conversation was too short; send an
                         // empty payload so the handler shows the "too short"
                         // notice (the backend was left untouched by compact()).
-                        Ok(o) if o.summary.is_empty() => ObserverEvent::CompactResult {
+                        Ok(o) if o.summary.is_empty() => app::TuiAsyncEvent::CompactResult {
                             summary: String::new(),
                             removed_count: 0,
                             retained: Vec::new(),
                         },
-                        Ok(o) => ObserverEvent::CompactResult {
+                        Ok(o) => app::TuiAsyncEvent::CompactResult {
                             summary: o.summary.clone(),
                             removed_count: o.removed_count,
                             retained: o.retained.clone(),
                         },
-                        Err(e) => ObserverEvent::Error(format!("✗ /compact failed: {}", e)),
+                        Err(e) => app::TuiAsyncEvent::Error(format!("✗ /compact failed: {}", e)),
                     };
-                    let _ = tx.send(msg);
+                    if let Some(tx) = tx {
+                        let _ = tx.send(msg);
+                    }
                 });
                 return;
             }
@@ -2336,28 +2247,27 @@ fn conversation_to_chat_messages(messages: &[oneai_core::Message]) -> Vec<ChatMe
 }
 
 /// Process an observer event and update the app state.
-fn process_observer_event(app: &mut App, event: ObserverEvent) {
-    match event {
-        ObserverEvent::IterationStart(iteration, paradigm) => {
+fn process_yield(app: &mut App, y: oneai_bus::EngineYield, bus: &oneai_bus::InProcessBus) {
+    use bus_consumer::{
+        paradigm_from_bus, sub_agent_kind_from_bus, sub_agent_summary_from_bus, tool_call_from_bus,
+    };
+    match y {
+        oneai_bus::EngineYield::IterationStart {
+            iteration,
+            paradigm,
+            ..
+        } => {
             app.current_iteration = iteration;
-            app.active_paradigm = paradigm;
+            app.active_paradigm = paradigm_from_bus(paradigm);
         }
-        ObserverEvent::DirectAnswer(text) => {
+        oneai_bus::EngineYield::DirectAnswer { text, .. } => {
             // Flush any buffered stream content FIRST — this ensures streaming
             // chunks are applied to an assistant message (or create one from
             // the buffer) before we decide whether DirectAnswer is a duplicate.
-            // Without this flush, the stream_buffer remains full and the
-            // already_has_assistant check returns false (no assistant bubble
-            // exists yet), so DirectAnswer creates a new Assistant message.
-            // Then Complete's flush_stream_buffer() finds the last message is
-            // not Assistant (Checkpoint added an Iteration after it), and
-            // creates a SECOND Assistant bubble from the buffer → two bubbles.
             app.flush_stream_buffer();
             app.request_render(); // final text landed — draw the completed state now
 
             // If streaming already created an assistant message, don't add a duplicate.
-            // Search backwards through all messages in the current turn (until we hit
-            // a User message, which marks the start of a new turn).
             let already_has_assistant = app
                 .messages
                 .iter()
@@ -2365,43 +2275,20 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 .take_while(|m| m.role != ChatRole::User)
                 .any(|m| m.role == ChatRole::Assistant);
             if already_has_assistant {
-                // Streaming already showed this content — just ensure final redraw
                 app.request_render();
             } else {
-                // No streaming happened — add the direct answer as a new message
                 app.add_message(ChatRole::Assistant, text);
             }
         }
-        ObserverEvent::ToolCalls(calls) => {
-            // Flush any buffered stream text BEFORE appending the tool cards.
-            //
-            // Stream chunks (on_stream_chunk) accumulate in `stream_buffer` and
-            // are normally applied during the debounced draw. But tool-call
-            // events (on_tool_calls) add cards with `request_render()` (immediate),
-            // so the next draw can fire AFTER the cards are already in
-            // `messages`. At that draw `flush_stream_buffer` sees the LAST
-            // message is a ToolInvocation (not Assistant) and falls through to
-            // "create a NEW assistant message from buffer" — landing the
-            // preamble text bubble BELOW the tool cards it precedes. With
-            // multiple tool calls the misplacement is "基本必现" and reads as
-            // rendering residue (old content still there in the wrong place).
-            //
-            // Flushing here — before the cards are appended — places the
-            // streamed preamble in an assistant bubble ABOVE the cards,
-            // matching the DirectAnswer handler's existing flush-first pattern.
+        oneai_bus::EngineYield::ToolCalls { calls, .. } => {
+            // Flush any buffered stream text BEFORE appending the tool cards —
+            // otherwise the streamed preamble lands BELOW the cards.
             app.flush_stream_buffer();
 
-            for call in calls {
+            for call in calls.into_iter().map(tool_call_from_bus) {
                 let args_str = serde_json::to_string_pretty(&call.args)
                     .unwrap_or_else(|_| call.args.to_string());
 
-                // Dedup: in streaming mode the agent loop emits on_tool_calls
-                // twice for the same call — once during streaming (when the
-                // tool call is fully assembled) and again after the stream
-                // completes (agent_loop.rs). Without dedup we'd add TWO
-                // pending ToolInvocation cards; ToolResult only updates the
-                // last one, leaving a stale ⏳ "preparation" card next to the
-                // result card. Skip if a pending card for this call exists.
                 let call_id = call.id.clone();
                 let tool_name = call.name.clone();
                 let already_pending = app.messages.iter().any(|m| {
@@ -2416,9 +2303,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                         if result.is_some() {
                             return false;
                         }
-                        // Match by call_id when the provider assigned one;
-                        // otherwise fall back to (tool_name, args) so empty-id
-                        // calls still dedup correctly.
                         if !call_id.is_empty() {
                             cid == &call_id
                         } else {
@@ -2432,8 +2316,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                     continue;
                 }
 
-                // Add a unified ToolInvocation message — result is None (pending).
-                // When ToolResult arrives, we'll UPDATE this same message.
                 app.add_collapsed_message(
                     ChatRole::ToolInvocation {
                         call_id: call.id.clone(),
@@ -2441,13 +2323,16 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                         args: args_str,
                         result: None,
                     },
-                    String::new(), // Content is empty until result arrives
+                    String::new(),
                 );
             }
         }
-        ObserverEvent::ToolResult(call_id, tool_name, output) => {
-            // Find the existing ToolInvocation message for this call_id and UPDATE it
-            // with the result. This merges ToolCall + ToolResult into one message.
+        oneai_bus::EngineYield::ToolResult {
+            call_id,
+            tool_name,
+            output,
+            ..
+        } => {
             let call_id_to_find = call_id.clone();
             let found_msg = app.messages.iter_mut().rev().find(|m| {
                 if let ChatRole::ToolInvocation {
@@ -2461,7 +2346,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             });
 
             if let Some(msg) = found_msg {
-                // Update the existing ToolInvocation message with result
                 let success = output.success;
                 let result_content = if output.success {
                     if output.content.trim().is_empty() {
@@ -2476,7 +2360,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                     )
                 };
 
-                // Update the role to include the result
                 if let ChatRole::ToolInvocation {
                     call_id,
                     tool_name,
@@ -2493,23 +2376,14 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 }
                 msg.content = result_content.clone();
 
-                // Decide collapsed state from the result's line count:
-                // > COLLAPSE_THRESHOLD lines → collapsed (5-line preview + expand button)
-                // ≤ COLLAPSE_THRESHOLD lines → expanded (rendered in full, not collapsible)
                 if result_content.lines().count() > theme::COLLAPSE_THRESHOLD {
                     app.collapsed_ids.insert(msg.id.clone());
                 } else {
                     app.collapsed_ids.remove(&msg.id);
                 }
-                // Invalidate render cache since content changed
                 app.render_cache.invalidate(&msg.id);
                 app.request_render();
             } else {
-                // No matching ToolInvocation message found — this can happen
-                // for /tool direct calls. Add a standalone result message.
-                // `add_message` consults `default_collapsed`, which collapses
-                // results longer than COLLAPSE_THRESHOLD lines (5-line preview)
-                // and renders shorter ones in full.
                 if output.success {
                     let result_content = if output.content.trim().is_empty() {
                         format!("{} completed successfully", tool_name)
@@ -2548,16 +2422,17 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 }
             }
         }
-        ObserverEvent::Delegate(task, agent_type) => {
+        oneai_bus::EngineYield::Delegate {
+            task, agent_kind, ..
+        } => {
+            let agent_type = sub_agent_kind_from_bus(agent_kind);
             app.add_message(
                 ChatRole::System,
                 format!("delegating to {} sub-agent: {}", agent_type.name(), task),
             );
         }
-        ObserverEvent::DelegateComplete(summary) => {
-            // Pairs with the Delegate message above to close the lifecycle.
-            // Show status, a trimmed summary, and budget signal so the user
-            // can tell the sub-agent actually finished (not hung).
+        oneai_bus::EngineYield::DelegateComplete { summary, .. } => {
+            let summary = sub_agent_summary_from_bus(summary);
             let status = if summary.completed {
                 "✓"
             } else {
@@ -2571,7 +2446,6 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             };
             let body = summary.summary.trim();
             let preview: String = if body.len() > 280 {
-                // char-boundary-safe truncation for CJK
                 let end = body
                     .char_indices()
                     .take_while(|(i, _)| *i < 280)
@@ -2595,7 +2469,8 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 ),
             );
         }
-        ObserverEvent::ParadigmSwitch(paradigm) => {
+        oneai_bus::EngineYield::ParadigmSwitch { to, .. } => {
+            let paradigm = paradigm_from_bus(to);
             app.active_paradigm = paradigm;
             let name = match paradigm {
                 ParadigmKind::Plan => "Plan",
@@ -2606,38 +2481,31 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             };
             app.add_message(ChatRole::System, format!("switching to {} paradigm", name));
         }
-        ObserverEvent::Checkpoint(_iteration) => {
-            // No visible message — checkpoint is silent in TUI
-        }
-        ObserverEvent::Complete(result) => {
-            // Flush any remaining buffered stream text before marking as done
+        oneai_bus::EngineYield::TurnComplete { summary, .. } => {
             app.flush_stream_buffer();
-            // Issue #18: streaming may clobber wide cells on the terminal (the
-            // ratatui↔terminal width model can drift); force a full repaint at
-            // stream-end so the completed state is resynced, not left stale.
-            app.request_invalidate(); // final text landed — draw the completed state now
-            app.stop_thinking(); // stop timer; last run duration retained for dim display
-                                 // Remove useless thinking bubbles: the "Processing your request..."
-                                 // placeholder (model never produced thinking) AND any empty thinking
-                                 // bubble (model emitted an empty Thinking block). Both leave blank
-                                 // cards that add clutter, so drop them on completion.
+            // Issue #18: streaming may clobber wide cells; force a full repaint
+            // at stream-end so the completed state is resynced.
+            app.request_invalidate();
+            app.stop_thinking();
             app.messages.retain(|m| {
-                if m.role == ChatRole::Thinking
-                    && (m.content == "Processing your request..." || m.content.trim().is_empty())
-                {
-                    false // remove placeholder / empty thinking
-                } else {
-                    true
-                }
+                !(m.role == ChatRole::Thinking
+                    && (m.content == "Processing your request..." || m.content.trim().is_empty()))
             });
 
-            // If the agent loop terminated without producing a meaningful final answer,
-            // display a diagnostic message so the user knows what happened.
-            // Common causes: streaming response failed, provider rejected request format,
-            // or model produced empty response after tool calls.
-            if result.final_answer.trim().is_empty() {
-                let iterations = result.iterations;
-                let completed = result.completed;
+            // !completed diagnostic — folded here (the pump no longer injects
+            // a separate Error); the observer's TurnComplete drives Complete.
+            if !summary.completed {
+                app.add_message(
+                    ChatRole::Error,
+                    format!(
+                        "⚠️ Agent did not reach a final answer after {} iterations.",
+                        summary.iterations
+                    ),
+                );
+            }
+            if summary.final_answer.trim().is_empty() {
+                let iterations = summary.iterations;
+                let completed = summary.completed;
                 let msg_content = if iterations <= 1 {
                     String::from(
                         "⚠️ Agent terminated without producing a response. \
@@ -2661,33 +2529,16 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
                 app.add_message(ChatRole::Error, msg_content);
             }
 
-            // The plan checklist belongs to this run. Now that the run is
-            // done, dismiss the persistent plan panel so it doesn't linger
-            // (a fresh run creates a new plan via task_create / exit_plan_mode).
             app.plan_state = None;
-
-            app.request_render(); // Need redraw to stop spinner
+            app.request_render();
         }
-        ObserverEvent::StreamChunk(text) => {
+        oneai_bus::EngineYield::StreamChunk { text, .. } => {
             app.append_to_last_assistant(&text);
         }
-        ObserverEvent::Thinking(text) => {
-            // Ignore empty/whitespace-only thinking fragments. Some providers
-            // (e.g. GLM/阿里百炼) emit an empty Thinking content block as a
-            // marker on rounds where the model produces no reasoning. Creating
-            // a bubble for it would leave a blank thinking card that never
-            // gets removed (it isn't the "Processing your request..." placeholder).
+        oneai_bus::EngineYield::Thinking { text, .. } => {
             if text.trim().is_empty() {
                 return;
             }
-            // Scope thinking per-iteration: only append to an existing
-            // thinking bubble if it is still the TRAILING message (nothing has
-            // been appended after it this round). If an assistant answer or
-            // tool call already followed the last thinking block, a new
-            // iteration has started — create a fresh thinking bubble so each
-            // round of thinking stays attached to the answer it precedes,
-            // instead of all thinking accumulating into the first round's
-            // block at the top (which then scrolls off-screen).
             let is_trailing_thinking = app
                 .messages
                 .last()
@@ -2696,28 +2547,22 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             if is_trailing_thinking {
                 if let Some(thinking_msg) = app.messages.last_mut() {
                     if thinking_msg.content == "Processing your request..." {
-                        // Replace placeholder with real thinking content
                         thinking_msg.content = text.clone();
                     } else {
-                        // Append thinking fragment (streamed in chunks)
                         thinking_msg.content.push_str(&text);
                     }
-                    // Invalidate render cache since content changed
                     app.render_cache.invalidate(&thinking_msg.id);
-                    // Auto-expand thinking bubble when it has real content so user can see it
                     app.collapsed_ids.remove(&thinking_msg.id);
                 }
             } else {
-                // New round of thinking — create a fresh bubble (auto-scrolls to bottom)
                 app.add_message(ChatRole::Thinking, text.clone());
             }
             app.request_render();
         }
-        ObserverEvent::PlanUpdate(plan) => {
-            // Live task list changed — update the persistent plan panel.
-            // Only log a system message when the plan is first created (the
-            // panel itself shows ongoing progress; per-status flips would spam
-            // the chat).
+        oneai_bus::EngineYield::PlanUpdate { plan, .. } => {
+            // Deserialize the carried JSON back into PlanState. None or a parse
+            // failure (newer PlanState shape than this binary) clears the panel.
+            let plan = plan.and_then(|v| serde_json::from_value::<oneai_agent::PlanState>(v).ok());
             let was_none = app.plan_state.is_none();
             app.plan_state = plan;
             if was_none && app.plan_state.is_some() {
@@ -2733,67 +2578,21 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             }
             app.request_render();
         }
-        ObserverEvent::Error(msg) => {
-            app.stop_thinking(); // run ended via error; retain duration for dim display
-                                 // Run ended (via error) — dismiss the plan panel too.
+        oneai_bus::EngineYield::Error { message, .. } => {
+            app.stop_thinking();
             app.plan_state = None;
-            app.add_message(ChatRole::Error, msg);
+            app.add_message(ChatRole::Error, message);
         }
-        ObserverEvent::InitResult(msg) => {
-            // `/init` background generation finished — re-enable input and show
-            // the result. (No plan/agent-loop state to clear.)
-            app.stop_thinking();
-            app.add_message(ChatRole::System, msg);
-        }
-        ObserverEvent::CompactResult {
-            summary,
-            removed_count,
-            retained,
-        } => {
-            // `/compact` background summarization finished. The backend
-            // Conversation was already replaced in place by AppSession::compact
-            // (summary system message + retained recent turns) — the model sees
-            // it on the next run. Here we just refresh the display to match:
-            // clear the rich display list, show the summary, then re-append the
-            // retained turns for visual continuity. Same session continues —
-            // no new sidebar entry, no session reset.
-            app.stop_thinking();
-            app.render_cache.invalidate_all();
-            app.messages.clear();
-            if summary.is_empty() {
-                app.add_message(
-                    ChatRole::System,
-                    "Conversation too short to compact — nothing to summarize.",
-                );
-            } else {
-                app.add_message(
-                    ChatRole::System,
-                    format!(
-                        "📋 Conversation compacted: {} older messages summarized into the \
-                     session context. Work continues in this session — the summary is \
-                     visible to the model.\n\n--- Summary ---\n{}",
-                        removed_count, summary
-                    ),
-                );
-                // Re-append retained recent turns (user/assistant only) in order.
-                for (role, text) in &retained {
-                    match role.as_str() {
-                        "user" => app.add_message(ChatRole::User, text.clone()),
-                        _ => app.add_message(ChatRole::Assistant, text.clone()),
-                    }
-                }
-            }
-            // Cumulative token_usage is preserved (it tracks total spend,
-            // which compaction shouldn't erase). Only clear the
-            // current-window occupancy — the next inference refreshes it via
-            // ContextAccountingUpdate / TokenUsageUpdate.
-            app.context_tokens = 0;
-            app.context_tokens_is_estimated = false;
-            app.last_context_accounting = None;
-            app.request_render();
-        }
-        ObserverEvent::TokenUsageUpdate(usage) => {
-            // Accumulate raw usage (some providers report real data, others 0)
+        oneai_bus::EngineYield::TokenUsage { usage, .. } => {
+            let usage = app::TokenUsage {
+                prompt: usage.prompt_tokens,
+                completion: usage.completion_tokens,
+                total: usage.prompt_tokens + usage.completion_tokens,
+                is_estimated: false,
+                cache_read: usage.cache_read_tokens,
+                cache_creation: usage.cache_creation_tokens,
+                ..Default::default()
+            };
             let iter_prompt = if usage.prompt > 0 {
                 usage.prompt
             } else if !app.messages.is_empty() {
@@ -2816,42 +2615,200 @@ fn process_observer_event(app: &mut App, event: ObserverEvent) {
             app.token_usage.is_estimated = usage.prompt == 0 && usage.completion == 0;
             app.token_usage.cache_read += usage.cache_read;
             app.token_usage.cache_creation += usage.cache_creation;
-            // Per-call (undiluted) ratio of THIS inference — the "单次推理"
-            // value the user wants, vs. the session-aggregate
-            // `cache_hit_ratio()` which is diluted by the cold-start call.
-            // Only meaningful when the provider reported real usage (prompt>0);
-            // for estimated-fallback calls cache_read is 0 anyway → stays 0.
             app.token_usage.last_hit_ratio = usage.cache_hit_ratio();
 
-            // Use real API prompt_tokens as context size when available.
-            // This is the Claude Code approach — exact data from the API
-            // overrides the heuristic estimate from ContextAccountingUpdate.
-            // Flow: ContextAccountingUpdate (heuristic) → TokenUsageUpdate (exact, overrides)
             if usage.prompt > 0 {
                 app.context_tokens = usage.prompt;
                 app.context_tokens_is_estimated = false;
             }
-
-            app.request_render(); // Sidebar needs update
+            app.request_render();
         }
-        ObserverEvent::ContextAccountingUpdate(accounting) => {
-            // Context accounting from the assembled inference request.
-            // This is the REAL context breakdown — includes system prompt,
-            // tool definitions, context sources, domain pack, etc.
-            // Much more accurate than estimating from TUI-side messages alone.
-            //
-            // Store for the /context command — it reads this instead of
-            // recomputing from the bare session conversation.
+        oneai_bus::EngineYield::ContextAccounting { accounting, .. } => {
             app.last_context_accounting = Some(accounting.clone());
-
-            // Update sidebar context display.
-            // Note: TokenUsageUpdate (which fires AFTER inference) may
-            // override context_tokens with exact API data if available.
-            // Here we set the heuristic estimate as a baseline.
             app.context_tokens = accounting.total_tokens;
             app.context_tokens_is_estimated = accounting.is_estimated;
             app.context_window_size = accounting.context_window_size;
-            app.request_render(); // Sidebar needs update
+            app.request_render();
+        }
+        oneai_bus::EngineYield::ApprovalRequest {
+            request_id,
+            request,
+        } => {
+            handle_approval_yield(app, request_id, request, bus);
+        }
+        // TurnStart / WorkingState / SessionEnded / ToolsAdded have no TUI
+        // rendering (TurnStart was implicit in the direct-drive spawn; the
+        // working-state projector owns WorkingState; ToolsAdded wasn't surfaced
+        // in the old TuiObserver either). A future variant is dropped here.
+        oneai_bus::EngineYield::TurnStart { .. }
+        | oneai_bus::EngineYield::WorkingState { .. }
+        | oneai_bus::EngineYield::SessionEnded
+        | oneai_bus::EngineYield::ToolsAdded { .. } => {}
+        _ => {}
+    }
+}
+
+/// Process an `EngineYield::ApprovalRequest` — the bus-native approval flow.
+///
+/// Replaces the old `interaction_rx` drain. The Medium-risk auto-proceed
+/// threshold (mirroring the retired `ThresholdInteractionGate`) lives here:
+/// at/below-threshold tool approvals resolve immediately (no card); the rest
+/// surface as the TUI's approval card (or queue behind one — Issue #20). All
+/// replies go back over the bus via `InProcessBus::resolve_approval` (sync) —
+/// no oneshot captured in the card.
+fn handle_approval_yield(
+    app: &mut App,
+    request_id: String,
+    request: oneai_core::InteractionRequest,
+    bus: &oneai_bus::InProcessBus,
+) {
+    use oneai_core::{InteractionRequest, InteractionResponse, PermissionLevel, RiskLevel};
+
+    // Auto-accept mode — silently proceed every decision point (no card).
+    if matches!(app.interaction_mode, app::InteractionMode::AutoAccept) {
+        let _ = bus.resolve_approval(&request_id, InteractionResponse::Proceed);
+        return;
+    }
+
+    match request {
+        InteractionRequest::ToolApproval { approval } => {
+            let tool_name = approval.tool_name.clone();
+            let justification = approval.justification.clone();
+            let perm_label = approval
+                .permission_level
+                .map(|p| format!("{:?}", p))
+                .unwrap_or_else(|| format!("{:?}", approval.risk_level));
+            let level = approval
+                .permission_level
+                .unwrap_or_else(|| PermissionLevel::from_risk_level(approval.risk_level));
+
+            // Threshold auto-proceed (mirrors the retired
+            // ThresholdInteractionGate): at/below Standard → proceed silently,
+            // no card. Traced to match the old gate's log.
+            if level.should_auto_approve(&PermissionLevel::Standard) {
+                tracing::info!(
+                    "Auto-proceeding tool '{}' with permission level {:?} (at/below threshold Standard)",
+                    tool_name,
+                    level
+                );
+                let _ = bus.resolve_approval(&request_id, InteractionResponse::Proceed);
+                return;
+            }
+
+            if app.session_allowlist.contains(&tool_name) {
+                let _ = bus.resolve_approval(&request_id, InteractionResponse::Proceed);
+                app.add_message(
+                    ChatRole::System,
+                    format!("Auto-approved {} (session allowlist)", tool_name),
+                );
+                return;
+            }
+
+            let state = ApprovalPendingState {
+                request: approval,
+                request_id: Some(request_id),
+                tool_name,
+                justification,
+            };
+            promote_or_enqueue_approval(app, state, &perm_label);
+        }
+        InteractionRequest::PlanDecision {
+            decision_id: _,
+            question,
+            context,
+            options,
+        } => {
+            app.plan_decision_pending = Some(app::PlanDecisionState {
+                question,
+                context,
+                options,
+                selected: 0,
+                request_id,
+            });
+            app.is_thinking = false;
+            app.add_message(
+                ChatRole::System,
+                "Decision needed — choose an option.".to_string(),
+            );
+        }
+        InteractionRequest::PlanReview { plan, steps } => {
+            app.pending_plan = Some((plan, steps, Some(request_id)));
+            app.is_thinking = false;
+        }
+        InteractionRequest::NetworkApproval { host, requested_by } => {
+            // #28 Stage 1 — reuse the ToolApproval card + queue (Issue #20)
+            // by synthesizing an approval request keyed on the host.
+            let approval = oneai_core::ApprovalRequest {
+                tool_name: host.clone(),
+                args: serde_json::json!({ "host": host, "requested_by": requested_by }),
+                risk_level: RiskLevel::High,
+                permission_level: Some(PermissionLevel::Full),
+                justification: format!("Network egress request to {host} (from {requested_by})"),
+            };
+            let state = ApprovalPendingState {
+                request: approval.clone(),
+                request_id: Some(request_id),
+                tool_name: approval.tool_name.clone(),
+                justification: approval.justification.clone(),
+            };
+            promote_or_enqueue_approval(app, state, "Network");
+        }
+        // McpElicitation (and any future variant) — not surfaced in the TUI;
+        // proceed (matches the old `_` arm's Proceed fallback).
+        _ => {
+            let _ = bus.resolve_approval(&request_id, InteractionResponse::Proceed);
+        }
+    }
+}
+
+/// Process a TUI-internal async-op result (`/init`, `/compact`). These are NOT
+/// engine yields — they live on a separate channel with a distinct schema.
+fn process_tui_event(app: &mut App, event: app::TuiAsyncEvent) {
+    use app::TuiAsyncEvent;
+    match event {
+        TuiAsyncEvent::InitResult(msg) => {
+            app.stop_thinking();
+            app.add_message(ChatRole::System, msg);
+        }
+        TuiAsyncEvent::CompactResult {
+            summary,
+            removed_count,
+            retained,
+        } => {
+            app.stop_thinking();
+            app.render_cache.invalidate_all();
+            app.messages.clear();
+            if summary.is_empty() {
+                app.add_message(
+                    ChatRole::System,
+                    "Conversation too short to compact — nothing to summarize.",
+                );
+            } else {
+                app.add_message(
+                    ChatRole::System,
+                    format!(
+                        "📋 Conversation compacted: {} older messages summarized into the \
+                     session context. Work continues in this session — the summary is \
+                     visible to the model.\n\n--- Summary ---\n{}",
+                        removed_count, summary
+                    ),
+                );
+                for (role, text) in &retained {
+                    match role.as_str() {
+                        "user" => app.add_message(ChatRole::User, text.clone()),
+                        _ => app.add_message(ChatRole::Assistant, text.clone()),
+                    }
+                }
+            }
+            app.context_tokens = 0;
+            app.context_tokens_is_estimated = false;
+            app.last_context_accounting = None;
+            app.request_render();
+        }
+        TuiAsyncEvent::Error(msg) => {
+            app.stop_thinking();
+            app.plan_state = None;
+            app.add_message(ChatRole::Error, msg);
         }
     }
 }
@@ -2927,7 +2884,7 @@ fn promote_next_approval(app: &mut App) {
 /// - Enter: confirm currently selected option
 /// - Y/N/M/A: direct shortcut (immediate response)
 /// - Esc: cancel (deny)
-fn handle_approval_key(app: &mut App, key: KeyEvent) {
+fn handle_approval_key(app: &mut App, key: KeyEvent, bus: &oneai_bus::InProcessBus) {
     if key.kind != KeyEventKind::Press {
         return;
     }
@@ -3099,9 +3056,9 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
             }
         };
 
-        // Send the response back through the oneshot channel
-        if let Some(tx) = state.response_tx {
-            let _ = tx.send(response);
+        // Reply over the bus by correlation id (no oneshot captured).
+        if let Some(rid) = state.request_id {
+            let _ = bus.resolve_approval(&rid, response);
         }
 
         // Surface the next queued approval (if any) — parallel-tool-call case
@@ -3119,7 +3076,7 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) {
 /// feeds the feedback back to the model), Esc cancels the input (back to buttons).
 /// ↑↓/j/k/PageUp/PageDown/Home/End scroll the plan body so the user can read
 /// plans that overflow the compact default window.
-fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
+fn handle_plan_approval_key(app: &mut App, key: KeyEvent, bus: &oneai_bus::InProcessBus) {
     if key.kind != KeyEventKind::Press {
         return;
     }
@@ -3137,9 +3094,12 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 let feedback = std::mem::take(buf);
                 app.plan_revise_input = None;
-                if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
-                    if let Some(tx) = reply_tx {
-                        let _ = tx.send(oneai_core::InteractionResponse::Revise { feedback });
+                if let Some((_plan, _steps, rid)) = app.pending_plan.take() {
+                    if let Some(rid) = rid {
+                        let _ = bus.resolve_approval(
+                            &rid,
+                            oneai_core::InteractionResponse::Revise { feedback },
+                        );
                     }
                     app.add_message(
                         ChatRole::System,
@@ -3222,9 +3182,10 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             match app.plan_approval_selected_index {
                 0 => {
                     // Accept
-                    if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
-                        if let Some(tx) = reply_tx {
-                            let _ = tx.send(oneai_core::InteractionResponse::Proceed);
+                    if let Some((_plan, _steps, rid)) = app.pending_plan.take() {
+                        if let Some(rid) = rid {
+                            let _ = bus
+                                .resolve_approval(&rid, oneai_core::InteractionResponse::Proceed);
                         }
                         app.add_message(ChatRole::System, "✅ Plan accepted — execution starting.");
                     }
@@ -3240,11 +3201,14 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
                 }
                 _ => {
                     // Reject (index 2)
-                    if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
-                        if let Some(tx) = reply_tx {
-                            let _ = tx.send(oneai_core::InteractionResponse::Abort {
-                                reason: "User rejected plan".to_string(),
-                            });
+                    if let Some((_plan, _steps, rid)) = app.pending_plan.take() {
+                        if let Some(rid) = rid {
+                            let _ = bus.resolve_approval(
+                                &rid,
+                                oneai_core::InteractionResponse::Abort {
+                                    reason: "User rejected plan".to_string(),
+                                },
+                            );
                         }
                         app.add_message(
                             ChatRole::System,
@@ -3257,11 +3221,14 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
             app.request_render();
         }
         (_, KeyCode::Esc) => {
-            if let Some((_plan, _steps, reply_tx)) = app.pending_plan.take() {
-                if let Some(tx) = reply_tx {
-                    let _ = tx.send(oneai_core::InteractionResponse::Abort {
-                        reason: "User rejected plan".to_string(),
-                    });
+            if let Some((_plan, _steps, rid)) = app.pending_plan.take() {
+                if let Some(rid) = rid {
+                    let _ = bus.resolve_approval(
+                        &rid,
+                        oneai_core::InteractionResponse::Abort {
+                            reason: "User rejected plan".to_string(),
+                        },
+                    );
                 }
                 app.add_message(
                     ChatRole::System,
@@ -3279,7 +3246,7 @@ fn handle_plan_approval_key(app: &mut App, key: KeyEvent) {
 ///
 /// ↑↓/Tab cycles options; Enter chooses (`Choose`); `e` opens an inline input
 /// box for custom feedback → `Revise`; Esc → `Abort`.
-fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
+fn handle_plan_decision_key(app: &mut App, key: KeyEvent, bus: &oneai_bus::InProcessBus) {
     if key.kind != KeyEventKind::Press {
         return;
     }
@@ -3295,9 +3262,10 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                 let feedback = std::mem::take(buf);
                 app.plan_revise_input = None;
                 if let Some(state) = app.plan_decision_pending.take() {
-                    let _ = state
-                        .reply_tx
-                        .send(oneai_core::InteractionResponse::Revise { feedback });
+                    let _ = bus.resolve_approval(
+                        &state.request_id,
+                        oneai_core::InteractionResponse::Revise { feedback },
+                    );
                     app.add_message(
                         ChatRole::System,
                         "↩️ Custom decision sent — planner will use it.",
@@ -3362,7 +3330,7 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
                     }
                     None => oneai_core::InteractionResponse::Proceed,
                 };
-                let _ = state.reply_tx.send(resp);
+                let _ = bus.resolve_approval(&state.request_id, resp);
             }
             app.is_thinking = true;
             app.request_render();
@@ -3377,9 +3345,12 @@ fn handle_plan_decision_key(app: &mut App, key: KeyEvent) {
         }
         (_, KeyCode::Esc) => {
             if let Some(state) = app.plan_decision_pending.take() {
-                let _ = state.reply_tx.send(oneai_core::InteractionResponse::Abort {
-                    reason: "User cancelled decision".to_string(),
-                });
+                let _ = bus.resolve_approval(
+                    &state.request_id,
+                    oneai_core::InteractionResponse::Abort {
+                        reason: "User cancelled decision".to_string(),
+                    },
+                );
                 app.add_message(ChatRole::System, "❌ Decision cancelled.");
             }
             app.is_thinking = true;
@@ -3468,11 +3439,77 @@ mod issue18_tests {
     //! the full call list, then per-call `on_tool_result`) through
     //! `process_observer_event` and asserts no stale pending ⏳ card survives.
 
-    use super::observer::ObserverEvent;
-    use super::process_observer_event;
+    use super::process_yield;
     use crate::tui::app::{App, ChatRole};
-    use oneai_agent::ToolCallRequest;
+    use oneai_agent::{AgentLoopResult, ParadigmKind, ToolCallRequest};
+    use oneai_bus::{BusParadigmKind, BusToolCall, BusTurnSummary, EngineYield, InProcessBus};
     use unicode_width::UnicodeWidthStr;
+
+    // Test helpers: build `EngineYield` variants concisely (turn_id is ignored
+    // by the rendering arms). `process` drives the real `process_yield` with a
+    // throwaway bus (the rendering arms don't touch it; only ApprovalRequest
+    // would, which these tests don't exercise here).
+    fn process(app: &mut App, ev: EngineYield) {
+        let bus = InProcessBus::default();
+        process_yield(app, ev, &bus);
+    }
+    fn ev_tool_calls(calls: Vec<ToolCallRequest>) -> EngineYield {
+        EngineYield::ToolCalls {
+            turn_id: String::new(),
+            calls: calls
+                .into_iter()
+                .map(|c| BusToolCall {
+                    id: c.id,
+                    name: c.name,
+                    args: c.args,
+                })
+                .collect(),
+        }
+    }
+    fn ev_tool_result(call_id: String, tool_name: String, output: ToolOutput) -> EngineYield {
+        EngineYield::ToolResult {
+            turn_id: String::new(),
+            call_id,
+            tool_name,
+            output,
+        }
+    }
+    fn ev_iter(iteration: usize, paradigm: ParadigmKind) -> EngineYield {
+        EngineYield::IterationStart {
+            turn_id: String::new(),
+            iteration,
+            paradigm: BusParadigmKind::from(paradigm),
+        }
+    }
+    fn ev_thinking(text: String) -> EngineYield {
+        EngineYield::Thinking {
+            turn_id: String::new(),
+            text,
+        }
+    }
+    fn ev_stream(text: String) -> EngineYield {
+        EngineYield::StreamChunk {
+            turn_id: String::new(),
+            text,
+        }
+    }
+    fn ev_direct(text: String) -> EngineYield {
+        EngineYield::DirectAnswer {
+            turn_id: String::new(),
+            text,
+        }
+    }
+    fn ev_complete(r: AgentLoopResult) -> EngineYield {
+        EngineYield::TurnComplete {
+            turn_id: String::new(),
+            summary: BusTurnSummary {
+                final_answer: r.final_answer.clone(),
+                iterations: r.iterations,
+                completed: r.completed,
+                active_paradigm: BusParadigmKind::from(r.active_paradigm),
+            },
+        }
+    }
 
     /// Issue #18 (reopen) — root cause: emoji width mismatch between ratatui's
     /// buffer (unicode-width 0.2) and the real terminal.
@@ -3704,21 +3741,21 @@ mod issue18_tests {
         let args_b = serde_json::json!({ "path": "/tmp/b.txt" });
 
         // 1. streaming emit A
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![tool_call("call_A", "read_file", &args_a)]),
+            ev_tool_calls(vec![tool_call("call_A", "read_file", &args_a)]),
         );
         // 2. streaming emit B
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![tool_call("call_B", "read_file", &args_b)]),
+            ev_tool_calls(vec![tool_call("call_B", "read_file", &args_b)]),
         );
         assert_eq!(pending_card_count(&app), 2, "both streaming cards pending");
 
         // 3. post-stream re-emit of the FULL list — must NOT create duplicates
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![
+            ev_tool_calls(vec![
                 tool_call("call_A", "read_file", &args_a),
                 tool_call("call_B", "read_file", &args_b),
             ]),
@@ -3730,9 +3767,9 @@ mod issue18_tests {
         );
 
         // 4. result for A
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult(
+            ev_tool_result(
                 "call_A".to_string(),
                 "read_file".to_string(),
                 ok_output("AAA"),
@@ -3741,9 +3778,9 @@ mod issue18_tests {
         assert_eq!(pending_card_count(&app), 1, "card A resolved");
 
         // 5. result for B
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult(
+            ev_tool_result(
                 "call_B".to_string(),
                 "read_file".to_string(),
                 ok_output("BBB"),
@@ -3788,39 +3825,30 @@ mod issue18_tests {
         };
 
         // Iteration start + thinking placeholder
-        process_observer_event(
-            &mut app,
-            ObserverEvent::IterationStart(0, oneai_agent::ParadigmKind::ReAct),
-        );
-        process_observer_event(
-            &mut app,
-            ObserverEvent::Thinking("let me check".to_string()),
-        );
+        process(&mut app, ev_iter(0, oneai_agent::ParadigmKind::ReAct));
+        process(&mut app, ev_thinking("let me check".to_string()));
         dump(&mut app, "thinking");
 
         // Stream preamble text
-        process_observer_event(&mut app, ObserverEvent::StreamChunk("Reading ".to_string()));
-        process_observer_event(
-            &mut app,
-            ObserverEvent::StreamChunk("the files".to_string()),
-        );
+        process(&mut app, ev_stream("Reading ".to_string()));
+        process(&mut app, ev_stream("the files".to_string()));
         app.flush_stream_buffer();
         dump(&mut app, "preamble streamed");
 
         // Streaming tool-call emits (one per call) + post-stream re-emit
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![tool_call("call_A", "read_file", &args_a)]),
+            ev_tool_calls(vec![tool_call("call_A", "read_file", &args_a)]),
         );
         dump(&mut app, "call A streamed (pending)");
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![tool_call("call_B", "read_file", &args_b)]),
+            ev_tool_calls(vec![tool_call("call_B", "read_file", &args_b)]),
         );
         dump(&mut app, "call B streamed (2 pending)");
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![
+            ev_tool_calls(vec![
                 tool_call("call_A", "read_file", &args_a),
                 tool_call("call_B", "read_file", &args_b),
             ]),
@@ -3828,18 +3856,18 @@ mod issue18_tests {
         dump(&mut app, "post-stream re-emit (should dedup)");
 
         // Results land
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult(
+            ev_tool_result(
                 "call_A".to_string(),
                 "read_file".to_string(),
                 ok_output("AAA output"),
             ),
         );
         dump(&mut app, "result A");
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult(
+            ev_tool_result(
                 "call_B".to_string(),
                 "read_file".to_string(),
                 ok_output("BBB output"),
@@ -3888,79 +3916,61 @@ mod issue18_tests {
         };
 
         // ── Iteration 1 ──
-        process_observer_event(
-            &mut app,
-            ObserverEvent::IterationStart(0, oneai_agent::ParadigmKind::ReAct),
-        );
-        process_observer_event(
-            &mut app,
-            ObserverEvent::StreamChunk("Step 1: read ".to_string()),
-        );
-        process_observer_event(
-            &mut app,
-            ObserverEvent::StreamChunk("two files".to_string()),
-        );
+        process(&mut app, ev_iter(0, oneai_agent::ParadigmKind::ReAct));
+        process(&mut app, ev_stream("Step 1: read ".to_string()));
+        process(&mut app, ev_stream("two files".to_string()));
         app.flush_stream_buffer();
         dump(&mut app, "iter1 preamble");
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![
+            ev_tool_calls(vec![
                 tool_call("c1", "read_file", &args_a),
                 tool_call("c2", "read_file", &args_b),
             ]),
         );
         dump(&mut app, "iter1 two pending cards");
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult("c1".into(), "read_file".into(), ok_output("AAA")),
+            ev_tool_result("c1".into(), "read_file".into(), ok_output("AAA")),
         );
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult("c2".into(), "read_file".into(), ok_output("BBB")),
+            ev_tool_result("c2".into(), "read_file".into(), ok_output("BBB")),
         );
         dump(&mut app, "iter1 both resolved");
 
         // ── Iteration 2 ──
-        process_observer_event(
-            &mut app,
-            ObserverEvent::IterationStart(1, oneai_agent::ParadigmKind::ReAct),
-        );
-        process_observer_event(
-            &mut app,
-            ObserverEvent::StreamChunk("Step 2: grep ".to_string()),
-        );
-        process_observer_event(
-            &mut app,
-            ObserverEvent::StreamChunk("two patterns".to_string()),
-        );
+        process(&mut app, ev_iter(1, oneai_agent::ParadigmKind::ReAct));
+        process(&mut app, ev_stream("Step 2: grep ".to_string()));
+        process(&mut app, ev_stream("two patterns".to_string()));
         app.flush_stream_buffer();
         dump(&mut app, "iter2 preamble");
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![
+            ev_tool_calls(vec![
                 tool_call("c3", "grep", &args_c),
                 tool_call("c4", "grep", &args_d),
             ]),
         );
         dump(&mut app, "iter2 two pending cards");
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult("c3".into(), "grep".into(), ok_output("CCC")),
+            ev_tool_result("c3".into(), "grep".into(), ok_output("CCC")),
         );
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolResult("c4".into(), "grep".into(), ok_output("DDD")),
+            ev_tool_result("c4".into(), "grep".into(), ok_output("DDD")),
         );
         dump(&mut app, "iter2 both resolved");
 
         // ── Final answer + complete ──
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::DirectAnswer("Done — here's the summary.".to_string()),
+            ev_direct("Done — here's the summary.".to_string()),
         );
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::Complete(oneai_agent::AgentLoopResult {
+            ev_complete(oneai_agent::AgentLoopResult {
                 conversation: oneai_core::Conversation::new(),
                 final_answer: "Done".to_string(),
                 global_state: oneai_core::GlobalState::default(),
@@ -4046,15 +4056,12 @@ mod issue18_tests {
         let args_b = serde_json::json!({ "path": "/tmp/b.txt" });
 
         // Stream preamble accumulates in stream_buffer (no flush yet)…
-        process_observer_event(&mut app, ObserverEvent::StreamChunk("Reading ".to_string()));
-        process_observer_event(
-            &mut app,
-            ObserverEvent::StreamChunk("the files".to_string()),
-        );
+        process(&mut app, ev_stream("Reading ".to_string()));
+        process(&mut app, ev_stream("the files".to_string()));
         // …then BOTH tool calls arrive in the same batch (add cards → request_render).
-        process_observer_event(
+        process(
             &mut app,
-            ObserverEvent::ToolCalls(vec![
+            ev_tool_calls(vec![
                 tool_call("c1", "read_file", &args_a),
                 tool_call("c2", "read_file", &args_b),
             ]),
@@ -4104,7 +4111,6 @@ mod issue20_tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use oneai_core::{ApprovalRequest, InteractionResponse, PermissionLevel, RiskLevel};
     use std::sync::Arc;
-    use tokio::sync::oneshot;
 
     fn test_app() -> App {
         App::new(
@@ -4116,10 +4122,7 @@ mod issue20_tests {
         )
     }
 
-    fn approval_state(
-        name: &str,
-        tx: oneshot::Sender<InteractionResponse>,
-    ) -> ApprovalPendingState {
+    fn approval_state(name: &str, request_id: &str) -> ApprovalPendingState {
         ApprovalPendingState {
             request: ApprovalRequest {
                 tool_name: name.to_string(),
@@ -4130,21 +4133,18 @@ mod issue20_tests {
             },
             tool_name: name.to_string(),
             justification: format!("run {}", name),
-            response_tx: Some(tx),
+            request_id: Some(request_id.to_string()),
         }
     }
 
     /// Two approvals land in the same frame. The first becomes the displayed
     /// card; the second must NOT overwrite it — it waits in the queue with its
-    /// reply channel intact (not dropped).
+    /// correlation id intact.
     #[test]
     fn parallel_approvals_queue_instead_of_overwriting() {
         let mut app = test_app();
-        let (tx1, rx1) = oneshot::channel();
-        let (tx2, rx2) = oneshot::channel();
-
-        promote_or_enqueue_approval(&mut app, approval_state("shell", tx1), "Full");
-        promote_or_enqueue_approval(&mut app, approval_state("edit_file", tx2), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("shell", "r1"), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("edit_file", "r2"), "Full");
 
         // The first one is the one on screen.
         assert_eq!(
@@ -4159,38 +4159,64 @@ mod issue20_tests {
             "second arrival must be queued, not dropped"
         );
         assert_eq!(app.approval_queue[0].tool_name, "edit_file");
-
-        // The queue holds a live reply channel (not yet answered).
-        assert!(
-            rx1.is_empty(),
-            "first reply channel must still be open (not dropped/answered)"
-        );
-        // The queued channel is also still live — the bug dropped its sender by
-        // overwriting `approval_pending`, which would close this receiver.
-        assert!(
-            rx2.is_empty(),
-            "queued reply channel must NOT be dropped by an overwrite (issue #20)"
+        // The queued correlation id is intact (the bus's pending approval for
+        // r2 is still awaiting — the card holds its request_id).
+        assert_eq!(
+            app.approval_queue[0].request_id.as_deref(),
+            Some("r2"),
+            "queued approval keeps its correlation id (issue #20)"
         );
     }
 
-    /// Answering the displayed card sends the reply and promotes the next
-    /// queued card onto the screen — so the user can clear approvals one by one
-    /// and every tool future gets its reply.
-    #[test]
-    fn answering_current_promotes_next_from_queue() {
-        let mut app = test_app();
-        let (tx1, mut rx1) = oneshot::channel();
-        let (tx2, mut rx2) = oneshot::channel();
-        promote_or_enqueue_approval(&mut app, approval_state("shell", tx1), "Full");
-        promote_or_enqueue_approval(&mut app, approval_state("edit_file", tx2), "Full");
+    /// Answering the displayed card resolves the bus's pending approval and
+    /// promotes the next queued card onto the screen. The real round-trip:
+    /// `bus.request_approval` blocks → `handle_approval_key` resolves it.
+    #[tokio::test]
+    async fn answering_current_promotes_next_from_queue() {
+        use oneai_bus::{EngineBus, EngineYield, InProcessBus};
+        let bus = Arc::new(InProcessBus::new().0);
+        let mut sub = bus.subscribe_yields();
 
-        // Approve the displayed card (Enter with selection at index 0 = Y).
-        handle_approval_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // Engine asks for two approvals (both block until the card answers).
+        let bus1 = bus.clone();
+        let bus2 = bus.clone();
+        let req = || oneai_core::InteractionRequest::ToolApproval {
+            approval: ApprovalRequest {
+                tool_name: "shell".into(),
+                args: serde_json::json!({}),
+                risk_level: RiskLevel::High,
+                permission_level: Some(PermissionLevel::Full),
+                justification: "test".into(),
+            },
+        };
+        let t1 = tokio::spawn(async move { bus1.request_approval(req()).await });
+        let t2 = tokio::spawn(async move { bus2.request_approval(req()).await });
+
+        // Harvest the two request_ids off the yield stream.
+        let r1 = match sub.recv().await.unwrap() {
+            EngineYield::ApprovalRequest { request_id, .. } => request_id,
+            _ => panic!("expected ApprovalRequest"),
+        };
+        let r2 = match sub.recv().await.unwrap() {
+            EngineYield::ApprovalRequest { request_id, .. } => request_id,
+            _ => panic!("expected ApprovalRequest"),
+        };
+
+        let mut app = test_app();
+        promote_or_enqueue_approval(&mut app, approval_state("shell", &r1), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("edit_file", &r2), "Full");
+
+        // Approve the displayed card (Enter, selection 0 = Y).
+        handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &bus,
+        );
 
         // First tool got its reply.
         assert!(
-            matches!(rx1.try_recv().unwrap(), InteractionResponse::Proceed),
-            "approving the displayed card must reply to ITS channel"
+            matches!(t1.await.unwrap().unwrap(), InteractionResponse::Proceed),
+            "approving the displayed card must resolve ITS approval"
         );
 
         // Second card is now on screen, queue drained by one.
@@ -4202,9 +4228,13 @@ mod issue20_tests {
         assert!(app.approval_queue.is_empty(), "queue drained by one");
 
         // Clear it too.
-        handle_approval_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &bus,
+        );
         assert!(
-            matches!(rx2.try_recv().unwrap(), InteractionResponse::Proceed),
+            matches!(t2.await.unwrap().unwrap(), InteractionResponse::Proceed),
             "the previously-queued approval must also get its reply"
         );
         assert!(
@@ -4218,13 +4248,9 @@ mod issue20_tests {
     #[test]
     fn approval_cards_surface_one_at_a_time() {
         let mut app = test_app();
-        let (tx1, _rx1) = oneshot::channel();
-        let (tx2, _rx2) = oneshot::channel();
-        let (tx3, _rx3) = oneshot::channel();
-
-        promote_or_enqueue_approval(&mut app, approval_state("shell", tx1), "Full");
-        promote_or_enqueue_approval(&mut app, approval_state("edit_file", tx2), "Full");
-        promote_or_enqueue_approval(&mut app, approval_state("apply_patch", tx3), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("shell", "r1"), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("edit_file", "r2"), "Full");
+        promote_or_enqueue_approval(&mut app, approval_state("apply_patch", "r3"), "Full");
 
         // Only the first is displayed so far → exactly one Approval card on screen.
         let cards = app

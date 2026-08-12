@@ -433,13 +433,18 @@ pub struct ApprovalPendingState {
     pub request: ApprovalRequest,
     pub tool_name: String,
     pub justification: String,
-    /// The oneshot channel to send the interaction response back.
-    /// This is optional because it gets consumed when the user responds.
-    pub response_tx: Option<tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>>,
+    /// The bus-assigned id correlating this approval with the engine's
+    /// `request_approval` await. The TUI replies by calling
+    /// `InProcessBus::resolve_approval(request_id, response)` — no oneshot
+    /// captured here. `Option` because it's not always set (e.g. a synthesized
+    /// card from an older path); when `None`, the card can't reply (dropped
+    /// silently) — preserves the old "response_tx was None" semantics.
+    pub request_id: Option<String>,
 }
 
 /// State for a pending plan-decision request (a planning tradeoff the user must
-/// resolve). Set when an `InteractionRequest::PlanDecision` arrives.
+/// resolve). Set when an `EngineYield::ApprovalRequest` carrying a
+/// `PlanDecision` arrives.
 #[derive(Debug)]
 pub struct PlanDecisionState {
     pub question: String,
@@ -447,8 +452,28 @@ pub struct PlanDecisionState {
     pub options: Vec<oneai_core::DecisionOption>,
     /// Currently highlighted option index.
     pub selected: usize,
-    /// Reply channel for the chosen `InteractionResponse` (Choose/Revise/Abort).
-    pub reply_tx: tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>,
+    /// Bus correlation id — reply via `InProcessBus::resolve_approval`.
+    pub request_id: String,
+}
+
+/// TUI-internal async-op results (NOT engine yields). `/init` and `/compact`
+/// run LLM calls in background tasks; their results land here. Kept separate
+/// from `EngineYield` because they're TUI operations, not engine output —
+/// two channels, two distinct schemas, no duplication.
+#[derive(Debug)]
+pub enum TuiAsyncEvent {
+    /// `/init` finished — payload is the pre-formatted result/error message.
+    InitResult(String),
+    /// `/compact` finished. `summary` empty ⇒ conversation was too short.
+    CompactResult {
+        summary: String,
+        removed_count: usize,
+        /// Retained recent turns `(role, text)` for re-render after clearing.
+        retained: Vec<(String, String)>,
+    },
+    /// A TUI-async op failed (e.g. `/compact` LLM error). Distinct from
+    /// `EngineYield::Error` (which is engine output).
+    Error(String),
 }
 
 // ─── Chat Message ──────────────────────────────────────────────────────────
@@ -962,12 +987,9 @@ pub struct App {
     pub plan_state: Option<oneai_agent::PlanState>,
     /// A plan submitted via `exit_plan_mode`, awaiting the user's
     /// accept/reject decision. While set, the TUI shows an accept/reject UI.
-    /// The oneshot sender returns the decision to the (blocked) AgentLoop.
-    pub pending_plan: Option<(
-        String,
-        Vec<oneai_agent::PlanStep>,
-        Option<tokio::sync::oneshot::Sender<oneai_core::InteractionResponse>>,
-    )>,
+    /// The third element is the bus correlation id — reply via
+    /// `InProcessBus::resolve_approval`.
+    pub pending_plan: Option<(String, Vec<oneai_agent::PlanStep>, Option<String>)>,
     /// Pending plan-decision request (a tradeoff the user must resolve during
     /// planning). Set when an `InteractionRequest::PlanDecision` arrives.
     pub plan_decision_pending: Option<PlanDecisionState>,
@@ -980,6 +1002,11 @@ pub struct App {
     /// When set, the plan-review popup is collecting Revise feedback text
     /// instead of navigating buttons.
     pub plan_revise_input: Option<String>,
+    /// Sender for TUI-internal async-op results (`/init`, `/compact`). Set
+    /// after `App::new` (the TUI wires its `tui_rx` here). Background tasks
+    /// clone this and send `TuiAsyncEvent`s; the main loop drains `tui_rx`.
+    /// `Option` so tests (which don't spawn these ops) leave it `None`.
+    pub tui_async_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiAsyncEvent>>,
 }
 
 impl App {
@@ -1063,6 +1090,7 @@ impl App {
             plan_approval_selected_index: 0,
             plan_approval_scroll: 0,
             plan_revise_input: None,
+            tui_async_tx: None,
         }
     }
 

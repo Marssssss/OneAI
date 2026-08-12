@@ -194,3 +194,28 @@ impl EngineBus for InProcessBus {
             .expect("interrupt_token poisoned") = Some(token);
     }
 }
+
+impl InProcessBus {
+    /// Resolve a pending approval **synchronously** by `request_id`.
+    ///
+    /// This is the in-process frontend's reply path: a sync TUI main loop (or
+    /// a sync key-press handler) can't `.await` [`EngineBus::submit`]
+    /// (`Directive::Approve`), so this inherent method does just the Approve
+    /// branch — remove the pending oneshot by id and fulfill it — without
+    /// touching the async `submit` path (which is for the forwarded user
+    /// directives + the sidecar wire). Sidecar frontends still use `submit`
+    /// (over the wire, async); in-process frontends use this.
+    pub fn resolve_approval(&self, request_id: &str, response: InteractionResponse) -> Result<()> {
+        let tx = self
+            .pending_approvals
+            .lock()
+            .expect("pending_approvals poisoned")
+            .remove(request_id)
+            .ok_or_else(|| {
+                BusError::NotAcceptable(format!("no pending approval for request_id={request_id}"))
+            })?;
+        // Ignore send error: the requester already dropped (timed out / cancelled).
+        let _ = tx.send(response);
+        Ok(())
+    }
+}
