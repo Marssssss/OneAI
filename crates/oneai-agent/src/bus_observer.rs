@@ -229,6 +229,30 @@ impl AgentLoopObserver for BusObserver {
             },
         });
     }
+
+    fn on_context_accounting(&self, accounting: &oneai_core::ContextAccounting) {
+        self.emit(EngineYield::ContextAccounting {
+            turn_id: self.turn_id.clone(),
+            accounting: accounting.clone(),
+        });
+    }
+
+    fn on_plan_update(&self, plan: Option<&crate::plan_state::PlanState>) {
+        // PlanState lives in this crate; the bus crate can't name it, so carry
+        // the serialized form. None → cleared (no payload).
+        let plan = plan.map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null));
+        self.emit(EngineYield::PlanUpdate {
+            turn_id: self.turn_id.clone(),
+            plan,
+        });
+    }
+
+    fn on_tools_added(&self, names: &[String]) {
+        self.emit(EngineYield::ToolsAdded {
+            turn_id: self.turn_id.clone(),
+            names: names.to_vec(),
+        });
+    }
 }
 
 #[cfg(test)]

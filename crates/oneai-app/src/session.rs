@@ -1215,6 +1215,16 @@ impl AppSession {
         // Cloning the AgentLoop is cheap (all Arc fields).
         *interrupt_slot.lock().await = Some(agent_loop.clone());
 
+        // Bus interrupt wiring (P2): when an engine bus is configured, register
+        // this turn's cancel token so an incoming `Directive::Interrupt` fires
+        // the in-flight inference/stream. Each turn builds a fresh loop with a
+        // fresh token, so re-registering on the next turn overwrites cleanly.
+        // Guarded — non-bus callers (engine_bus None) are unaffected.
+        if let Some(bus) = self.app.engine_bus.as_ref() {
+            use oneai_bus::EngineBus;
+            bus.register_interrupt(agent_loop.cancel_token());
+        }
+
         // ─── Working State wiring (cross-session task continuation) ───────
         // Attach the durable working-state store + per-run scope (user /
         // project / session) to the loop, and — on the first run of a fresh

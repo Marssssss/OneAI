@@ -29,6 +29,10 @@ pub enum ObserverEvent {
     /// lifecycle in the UI. Carries the sub-agent's summary.
     DelegateComplete(SubAgentSummary),
     ParadigmSwitch(ParadigmKind),
+    /// No longer constructed in the bus-driven path (BusObserver's
+    /// `on_checkpoint` is a no-op; working-state flows through the projector).
+    /// Retained for `process_observer_event`'s match + future use.
+    #[allow(dead_code)]
     Checkpoint(usize),
     Complete(AgentLoopResult),
     #[allow(dead_code)]
@@ -62,12 +66,16 @@ pub enum ObserverEvent {
     },
 }
 
-/// TUI observer — receives AgentLoop events and updates the App state
-/// via a channel, so the TUI can render them in real-time.
+/// TUI observer — the OLD direct-drive surface. Superseded in P2 by the
+/// `EngineBus` (`BusObserver` + the `bus_bridge` yield→ObserverEvent
+/// translator); retained (dead) so external references and the type's doc
+/// history stay intact. The bus path is the complete replacement.
+#[allow(dead_code)]
 pub struct TuiObserver {
     tx: tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
 }
 
+#[allow(dead_code)]
 impl TuiObserver {
     pub fn new(tx: tokio::sync::mpsc::UnboundedSender<ObserverEvent>) -> Self {
         Self { tx }

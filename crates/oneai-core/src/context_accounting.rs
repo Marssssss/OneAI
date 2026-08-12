@@ -26,7 +26,7 @@ use crate::Role;
 /// - The TUI sidebar to display `📝~ctx N%` (derived from `utilization_pct`)
 /// - The `/context` command to show a detailed breakdown
 /// - Both use the same `HeuristicTokenCounter` for consistency
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ContextAccounting {
     /// System prompt messages (Role::System).

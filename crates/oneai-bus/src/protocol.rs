@@ -184,6 +184,24 @@ pub enum EngineYield {
     },
     /// Working-state append (task progress, decisions, blockers).
     WorkingState { event: TaskEventPayload },
+    /// Per-category context token breakdown. ← `on_context_accounting`.
+    /// Carried as the core `ContextAccounting` (serde-derivable); a frontend
+    /// renders its context/utilization panel straight off it.
+    ContextAccounting {
+        turn_id: String,
+        accounting: oneai_core::ContextAccounting,
+    },
+    /// Plan-state snapshot changed (task created/updated/cleared).
+    /// ← `on_plan_update`. `oneai_agent::PlanState` lives in a crate the bus
+    /// doesn't depend on, so it's carried as its `serde_json::Value` form
+    /// (BusObserver serializes; the frontend deserializes).
+    PlanUpdate {
+        turn_id: String,
+        plan: Option<serde_json::Value>,
+    },
+    /// Tools were added to the registry mid-run (self-extension). ←
+    /// `on_tools_added`.
+    ToolsAdded { turn_id: String, names: Vec<String> },
     /// Cache-aware token usage for the turn so far. ← `on_token_usage_full`.
     TokenUsage { usage: BusUsageRecord },
     /// A recoverable (loop continues) or fatal (turn ends) engine error.

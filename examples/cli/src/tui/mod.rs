@@ -35,13 +35,15 @@ use oneai_provider::ProviderFactory;
 use oneai_tool::CalculatorTool;
 
 use app::{App, ApprovalPendingState, ChatMessage, ChatRole, SessionInfo, TokenUsage};
-use observer::{ObserverEvent, TuiObserver};
+use bus_bridge::{spawn_directive_pump, spawn_yield_bridge, AutoApproveThreshold};
+use observer::ObserverEvent;
 use render::spinner::advance_frame;
 use session::SessionState;
 
 // ─── Public Modules ────────────────────────────────────────────────────────
 
 pub mod app;
+pub mod bus_bridge;
 pub mod custom_terminal;
 pub mod history;
 pub mod input_mode;
@@ -128,19 +130,35 @@ pub fn run_tui(
     };
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let (app, session_state, interaction_rx) = rt.block_on(async {
-        // Threshold interaction gate: Medium-risk tools auto-proceed, High risk
-        // (and PlanDecision/PlanReview) call back to the TUI via the channel.
-        // tui_default config leaves PreInfer/PostInfer off (no per-iteration
-        // interruption).
-        let (builder, interaction_rx) = AppBuilder::new()
+
+    // Channels + interrupt slot created BEFORE building the App so the bus
+    // bridge + directive pump (spawned inside the build block once the session
+    // + engine_bus exist) can take ownership of them.
+    let (observer_tx, observer_rx) = tokio::sync::mpsc::unbounded_channel();
+    // The interaction channel is now fed by the yield bridge (ApprovalRequest
+    // yields → InteractionPendingItem), not by an mpsc-backed gate.
+    let (interaction_tx, interaction_rx) =
+        tokio::sync::mpsc::channel::<oneai_tool::InteractionPendingItem>(16);
+    // Standalone interrupt slot — still parked with the running AgentLoop so
+    // the pump (which holds the session lock for the whole turn) is decoupled
+    // from the Esc path. Esc now submits `Directive::Interrupt`; the engine
+    // registered the turn's cancel token in `run_agent` (P2 wiring).
+    let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    let (app, session_state, engine_bus) = rt.block_on(async {
+        // Engine bus (P2): the TUI is now a bus consumer. `engine_bus()`
+        // constructs the `InProcessBus`, wires a `BusInteractionGate` as the
+        // interaction gate (approvals round-trip as
+        // `EngineYield::ApprovalRequest` ↔ `Directive::Approve`), and returns
+        // the directive stream the pump reads `Directive::UserMessage` off.
+        // The old `ThresholdInteractionGate` + its `interaction_rx` are gone;
+        // approvals are re-surfaced into a local channel by the yield bridge
+        // (which also reapplies the Medium-risk auto-proceed threshold).
+        let (builder, directive_rx) = AppBuilder::new()
             .default_parser()
             .default_rate_limiter()
-            .threshold_interaction_gate_with_config(
-                16,
-                oneai_core::RiskLevel::Medium,
-                oneai_tool::InteractionGateConfig::tui_default(),
-            );
+            .engine_bus();
 
         let mut builder = builder.generation_config(generation.clone());
         builder = builder.embedding_config(embedding.clone());
@@ -250,17 +268,31 @@ pub fn run_tui(
         }
         tui_app.update_session_info();
 
-        (tui_app, session_state, interaction_rx)
+        // Spawn the bus bridge + directive pump now that the session, the
+        // engine bus, and the channels all exist. The pump owns `directive_rx`
+        // (turns `Directive::UserMessage` into `run_turn_via_bus`); the bridge
+        // drains `EngineYield`s into the TUI's `observer_tx` /
+        // `interaction_tx`. Both live for the session (JoinHandle drop detaches
+        // them onto the runtime).
+        let engine_bus = app_arc
+            .engine_bus
+            .clone()
+            .expect("engine_bus() was called on the builder");
+        let _bridge = spawn_yield_bridge(
+            engine_bus.clone(),
+            observer_tx.clone(),
+            interaction_tx.clone(),
+            AutoApproveThreshold::default(),
+        );
+        let _pump = spawn_directive_pump(
+            directive_rx,
+            session_state.clone(),
+            interrupt_slot.clone(),
+            observer_tx.clone(),
+        );
+
+        (tui_app, session_state, engine_bus)
     });
-
-    // Channel for observer events
-    let (observer_tx, observer_rx) = tokio::sync::mpsc::unbounded_channel();
-
-    // Standalone interrupt slot — holds the running AgentLoop so the TUI can
-    // request an interrupt (Esc) WITHOUT the session lock (which is held for
-    // the whole run_agent). Independent Arc → no deadlock.
-    let interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
 
     // Run the main loop
     let result = run_main_loop(
@@ -272,6 +304,7 @@ pub fn run_tui(
         &rt,
         interaction_rx,
         interrupt_slot,
+        engine_bus,
     );
 
     // Restore terminal
@@ -291,11 +324,18 @@ fn dispatch_event(
     observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
+    engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
 ) {
     match event {
-        Event::Key(key) => {
-            handle_key_event(app, key, session_state, observer_tx, rt, interrupt_slot)
-        }
+        Event::Key(key) => handle_key_event(
+            app,
+            key,
+            session_state,
+            observer_tx,
+            rt,
+            interrupt_slot,
+            engine_bus,
+        ),
         Event::Mouse(mouse) => handle_mouse_event(app, mouse),
         // Bracketed paste: insert the whole pasted string at the cursor without
         // submitting. Without this arm, paste falls into the `_` catch-all and is
@@ -336,6 +376,7 @@ fn handle_key_event(
     observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
+    engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
 ) {
     // Cancel any lingering in-app text selection on the next key press (a
     // stuck highlight can remain if a terminal fails to deliver the mouse-up
@@ -373,9 +414,10 @@ fn handle_key_event(
         app.request_render();
         return;
     }
-    // Esc or Ctrl+C while the agent is running → request an instant
-    // interrupt. The cancel token aborts the in-flight inference/stream; the
-    // loop pauses at the next boundary. Ctrl+C is intercepted here so a
+    // Esc or Ctrl+C while the agent is running → submit a `Directive::Interrupt`
+    // (P2). The engine registered the turn's `CancellationToken` in
+    // `run_agent`, so the bus fires it directly — the in-flight inference/stream
+    // aborts at the next boundary. Ctrl+C is intercepted here so a
     // mid-inference press interrupts instead of quitting (input is empty
     // during inference, so the idle Ctrl+C path would otherwise quit). When
     // idle, Esc is a no-op and Ctrl+C clears the draft / quits (handled in
@@ -387,15 +429,18 @@ fn handle_key_event(
             || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')))
     {
         rt.block_on(async {
-            if let Some(agent_loop) = interrupt_slot.lock().await.as_ref() {
-                agent_loop.request_interrupt(oneai_core::InterruptReason::Custom {
-                    reason: "User requested interrupt".to_string(),
-                });
-                app.add_message(
-                    ChatRole::System,
-                    "⏸ Interrupted — type additional context, then Enter to resume.",
-                );
-            }
+            use oneai_bus::{Directive, EngineBus};
+            let _ = engine_bus
+                .submit(Directive::Interrupt {
+                    reason: oneai_core::InterruptReason::Custom {
+                        reason: "User requested interrupt".to_string(),
+                    },
+                })
+                .await;
+            app.add_message(
+                ChatRole::System,
+                "⏸ Interrupted — type additional context, then Enter to resume.",
+            );
         });
         app.request_render();
         return;
@@ -410,6 +455,7 @@ fn handle_key_event(
                 observer_tx,
                 rt,
                 interrupt_slot,
+                engine_bus,
             );
         }
     }
@@ -601,6 +647,7 @@ fn run_main_loop(
     rt: &tokio::runtime::Runtime,
     mut interaction_rx: tokio::sync::mpsc::Receiver<oneai_tool::InteractionPendingItem>,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
+    engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     while !app.should_quit {
         // Advance spinner frame only when thinking (spinner animation needs periodic redraw)
@@ -643,6 +690,7 @@ fn run_main_loop(
                 &observer_tx,
                 rt,
                 interrupt_slot.clone(),
+                engine_bus.clone(),
             );
 
             // Drain all pending events (especially scroll events) in one frame
@@ -655,6 +703,7 @@ fn run_main_loop(
                         &observer_tx,
                         rt,
                         interrupt_slot.clone(),
+                        engine_bus.clone(),
                     );
                 } else {
                     break;
@@ -817,7 +866,12 @@ fn handle_user_input_async(
     observer_tx: &tokio::sync::mpsc::UnboundedSender<ObserverEvent>,
     rt: &tokio::runtime::Runtime,
     interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
+    engine_bus: std::sync::Arc<oneai_bus::InProcessBus>,
 ) {
+    // `interrupt_slot` is now owned by the directive pump (spawned at session
+    // start); the submit path here no longer needs it, but it's kept in the
+    // signature to avoid churn across the existing call sites.
+    let _ = &interrupt_slot;
     let trimmed = input.trim();
 
     // Handle commands synchronously
@@ -1587,38 +1641,19 @@ fn handle_user_input_async(
     app.add_collapsed_message(ChatRole::Thinking, "Processing your request...");
 
     let task = trimmed.to_string();
-    let tx1 = observer_tx.clone();
-    let tx2 = observer_tx.clone();
 
-    rt.spawn(async move {
-        let mut state = session_state.lock().await;
-        let observer = TuiObserver::new(tx1);
-
-        let result = state
-            .session
-            .run_agent(&task, &observer, interrupt_slot.clone())
+    // P2: submit the user message as a `Directive` — the directive pump (spawned
+    // at session start) turns it into `run_turn_via_bus`, the yield bridge
+    // translates `EngineYield`s back into `ObserverEvent`s. No direct
+    // `run_agent` call here; the bus is the complete replacement for the
+    // direct drive (Shape A in-process validation).
+    rt.block_on(async {
+        use oneai_bus::{Directive, EngineBus};
+        let _ = engine_bus
+            .submit(Directive::UserMessage {
+                content: vec![oneai_core::ContentBlock::Text { text: task }],
+            })
             .await;
-
-        match result {
-            Ok(agent_result) => {
-                if !agent_result.completed {
-                    let _ = tx2.send(ObserverEvent::Error(format!(
-                        "Agent did not reach a final answer after {} iterations.",
-                        agent_result.iterations
-                    )));
-                }
-                let _ = tx2.send(ObserverEvent::Complete(agent_result));
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                let _ = tx2.send(ObserverEvent::Error(format!("Error: {}", err_str)));
-                if err_str.contains("API error") {
-                    let _ = tx2.send(ObserverEvent::Error(
-                        "Hint: check your ONEAI_API_KEY and ONEAI_BASE_URL.".to_string(),
-                    ));
-                }
-            }
-        }
     });
 }
 
