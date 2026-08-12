@@ -40,8 +40,9 @@ pub mod wire;
 
 pub use bus::{EngineBus, InProcessBus};
 pub use protocol::{
-    BusParadigmKind, BusSubAgent, BusSubAgentKind, BusToolCall, BusTurnSummary, BusUsageRecord,
-    Directive, EngineYield,
+    BusAgentSpec, BusEmbeddingConfig, BusEngineConfig, BusGroupScenario, BusLocale,
+    BusParadigmKind, BusReviewLoop, BusSubAgent, BusSubAgentKind, BusToolCall, BusTurnSummary,
+    BusUsageRecord, Directive, EngineYield,
 };
 pub use serve::bridge_connection;
 pub use wire::{parse_directive, parse_yield, serialize_directive, serialize_yield};

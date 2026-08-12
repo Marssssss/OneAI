@@ -174,6 +174,7 @@ mod tests {
                     let _ = bus.emit(EngineYield::StreamChunk {
                         turn_id: turn_id.clone(),
                         text: format!("echo: {task}"),
+                        speaker: None,
                     });
                     let _ = bus.emit(EngineYield::TurnComplete {
                         turn_id: turn_id.clone(),
@@ -265,6 +266,7 @@ mod tests {
                     let _ = bus_for_driver.emit(EngineYield::DirectAnswer {
                         turn_id: "t2".to_string(),
                         text: format!("{resp:?}"),
+                        speaker: None,
                     });
                 }
             }

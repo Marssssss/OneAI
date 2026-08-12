@@ -133,6 +133,7 @@ impl AgentLoopObserver for BusObserver {
         self.emit(EngineYield::DirectAnswer {
             turn_id: self.turn_id.clone(),
             text: text.to_string(),
+            speaker: None,
         });
     }
 
@@ -140,6 +141,7 @@ impl AgentLoopObserver for BusObserver {
         self.emit(EngineYield::ToolCalls {
             turn_id: self.turn_id.clone(),
             calls: calls.iter().map(BusToolCall::from).collect(),
+            speaker: None,
         });
     }
 
@@ -149,6 +151,7 @@ impl AgentLoopObserver for BusObserver {
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
             output: output.clone(),
+            speaker: None,
         });
     }
 
@@ -157,6 +160,7 @@ impl AgentLoopObserver for BusObserver {
             turn_id: self.turn_id.clone(),
             task: task.to_string(),
             agent_kind: BusSubAgentKind::from(agent_type),
+            speaker: None,
         });
     }
 
@@ -164,6 +168,7 @@ impl AgentLoopObserver for BusObserver {
         self.emit(EngineYield::DelegateComplete {
             turn_id: self.turn_id.clone(),
             summary: BusSubAgent::from(summary),
+            speaker: None,
         });
     }
 
@@ -203,6 +208,7 @@ impl AgentLoopObserver for BusObserver {
         self.emit(EngineYield::StreamChunk {
             turn_id: self.turn_id.clone(),
             text: text.to_string(),
+            speaker: None,
         });
     }
 
@@ -210,6 +216,7 @@ impl AgentLoopObserver for BusObserver {
         self.emit(EngineYield::Thinking {
             turn_id: self.turn_id.clone(),
             text: text.to_string(),
+            speaker: None,
         });
     }
 

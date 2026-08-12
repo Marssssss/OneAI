@@ -32,6 +32,7 @@ async fn yield_tool_calls_round_trips() {
             name: "shell".to_string(),
             args: serde_json::json!({"cmd": "ls"}),
         }],
+        speaker: None,
     };
     let line = serialize_yield(&y).unwrap();
     let back: EngineYield = parse_yield(line.trim()).unwrap();

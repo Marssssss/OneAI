@@ -163,6 +163,11 @@ impl EngineBus for InProcessBus {
             | Directive::LoadSession { .. }
             | Directive::ClearSession
             | Directive::DeleteSession { .. }
+            | Directive::Init { .. }
+            | Directive::StartGroupChat { .. }
+            | Directive::GroupStart
+            | Directive::GroupUserMessage { .. }
+            | Directive::GroupSetScriptedOrder { .. }
             | Directive::Shutdown => self
                 .directive_tx
                 .send(directive)
