@@ -113,9 +113,26 @@ pub fn spawn_directive_pump(
                     // Complete arm.
                 }
                 Directive::SwitchParadigm { to } => {
+                    // Frontend-forced paradigm switch. Persist it on the
+                    // session (sticky across turns via conversation.metadata);
+                    // the next run_turn_via_bus materializes it at turn start.
+                    // Emit ParadigmSwitch so the TUI reflects immediately (the
+                    // IterationStart yield on the next turn confirms it).
+                    let target = paradigm_from_bus(to);
+                    let mut state = session_state.lock().await;
+                    let prev = state.session.set_paradigm(target);
+                    let from =
+                        oneai_bus::BusParadigmKind::from(prev.unwrap_or(ParadigmKind::ReAct));
+                    let to_bus = oneai_bus::BusParadigmKind::from(target);
+                    let turn_id = state.session.session_id().to_string();
+                    let _ = bus.emit(oneai_bus::EngineYield::ParadigmSwitch {
+                        turn_id,
+                        from,
+                        to: to_bus,
+                    });
                     tracing::info!(
-                        ?to,
-                        "Directive::SwitchParadigm received — frontend-forced paradigm switch not yet wired (model drives paradigm via meta-tools)"
+                        ?to_bus,
+                        "Directive::SwitchParadigm applied — next turn starts under it"
                     );
                 }
                 Directive::Shutdown => {

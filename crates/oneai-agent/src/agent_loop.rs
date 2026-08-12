@@ -614,6 +614,21 @@ fn paradigm_name(kind: &ParadigmKind) -> &'static str {
     }
 }
 
+/// Inverse of [`paradigm_name`] for the lowercase form stored in
+/// `conversation.metadata["active_paradigm"]` by `Directive::SwitchParadigm`.
+/// Returns `None` for an unknown string so a stale/corrupt metadata value from
+/// an older session degrades to the loop's default (ReAct) rather than
+/// panicking.
+fn paradigm_from_metadata(s: &str) -> Option<ParadigmKind> {
+    match s {
+        "plan" => Some(ParadigmKind::Plan),
+        "react" => Some(ParadigmKind::ReAct),
+        "reflect" => Some(ParadigmKind::Reflect),
+        "explore" => Some(ParadigmKind::Explore),
+        _ => None,
+    }
+}
+
 /// Build a safe fallback `InferenceResponse` for when the PostInfer interaction
 /// gate aborts a response (e.g. the layer flagged disallowed content). The
 /// fallback is a benign assistant message carrying the abort reason.
@@ -1319,6 +1334,12 @@ impl AgentLoop {
                 .conversation
                 .add_message(Message::system(system_prompt));
         }
+
+        // Materialize a frontend-forced paradigm (Directive::SwitchParadigm →
+        // conversation.metadata["active_paradigm"]) before the loop runs, so
+        // this turn starts under the chosen paradigm's prompt + tool filter.
+        // No-op when no paradigm was forced (the default-turn path).
+        self.activate_forced_paradigm(&mut state);
 
         self.run_loop(state, observer).await
     }
@@ -4730,6 +4751,29 @@ impl AgentLoop {
         )
     }
 
+    /// Activate the paradigm a frontend forced via `Directive::SwitchParadigm`.
+    ///
+    /// The directive (handled off the engine thread by the bus directive pump)
+    /// writes the chosen paradigm to `conversation.metadata["active_paradigm"]`
+    /// so it survives across turns (sticky until the frontend changes it again,
+    /// unlike a model-driven mid-turn switch which is per-turn). This method,
+    /// called at the start of `run_with_conversation`, materializes that choice
+    /// into the live `LoopState`: swaps the paradigm tail system messages +
+    /// sets `active_paradigm_config` so `build_tool_definitions_for_paradigm`
+    /// applies the paradigm's tool filter. Idempotent — `apply_paradigm_switch`
+    /// removes any prior tagged tail before appending.
+    ///
+    /// Silent (no `on_paradigm_switch` observer callback): the bus directive
+    /// pump already emitted `EngineYield::ParadigmSwitch` when the directive
+    /// arrived, so firing the observer here would duplicate the yield. The
+    /// paradigm is confirmed to frontends by the next `IterationStart` yield.
+    fn activate_forced_paradigm(&self, state: &mut LoopState) -> Option<ParadigmKind> {
+        let raw = state.conversation.metadata.get("active_paradigm")?;
+        let paradigm = paradigm_from_metadata(raw)?;
+        self.apply_paradigm_switch(paradigm, state);
+        Some(paradigm)
+    }
+
     /// Apply paradigm switch — with optional StateGraph execution.
     ///
     /// When a DomainPack has a predefined StateGraph matching the paradigm
@@ -6982,5 +7026,60 @@ mod dynamic_tool_prompt_tests {
 
         let custom = "You are a research agent.".to_string();
         assert_eq!(resolve_tool_preference_marker(&custom, &tools), custom,);
+    }
+
+    #[test]
+    fn activate_forced_paradigm_materializes_metadata_into_state() {
+        // Directive::SwitchParadigm writes conversation.metadata["active_paradigm"].
+        // run_with_conversation calls activate_forced_paradigm before the loop;
+        // here we call it directly to assert the state mutation without running
+        // inference: the chosen paradigm's config + tagged tail land in state.
+        let loop_ = build_loop(&["read_file", "grep", "shell"]);
+        let mut conv = oneai_core::Conversation::new();
+        conv.metadata
+            .insert("active_paradigm".to_string(), "plan".to_string());
+        let mut state = LoopState::from_conversation(conv, "decompose the task");
+
+        // Before activation: default paradigm, no config, no paradigm tail.
+        assert_eq!(state.active_paradigm, ParadigmKind::ReAct);
+        assert!(state.active_paradigm_config.is_none());
+        assert!(!state
+            .conversation
+            .messages
+            .iter()
+            .any(|m| m.metadata.contains_key("paradigm_tail")));
+
+        let activated = loop_.activate_forced_paradigm(&mut state);
+        assert_eq!(activated, Some(ParadigmKind::Plan));
+        assert_eq!(state.active_paradigm, ParadigmKind::Plan);
+        assert!(state.active_paradigm_config.is_some());
+        assert!(state.conversation.messages.iter().any(
+            |m| m.role == oneai_core::Role::System && m.metadata.contains_key("paradigm_tail")
+        ));
+    }
+
+    #[test]
+    fn activate_forced_paradigm_no_metadata_is_noop() {
+        // Default turn path: no Directive::SwitchParadigm ever received ⇒
+        // metadata has no "active_paradigm" ⇒ activation is a no-op (default
+        // ReAct, no config, no tail). Guards against spurious activation.
+        let loop_ = build_loop(&["read_file"]);
+        let mut state = LoopState::from_conversation(oneai_core::Conversation::new(), "x");
+        assert_eq!(loop_.activate_forced_paradigm(&mut state), None);
+        assert_eq!(state.active_paradigm, ParadigmKind::ReAct);
+        assert!(state.active_paradigm_config.is_none());
+    }
+
+    #[test]
+    fn activate_forced_paradigm_unknown_metadata_is_noop() {
+        // A stale/corrupt metadata value (e.g. a future paradigm name this
+        // binary doesn't know) must degrade to a no-op, not panic.
+        let loop_ = build_loop(&["read_file"]);
+        let mut conv = oneai_core::Conversation::new();
+        conv.metadata
+            .insert("active_paradigm".to_string(), "quantum".to_string());
+        let mut state = LoopState::from_conversation(conv, "x");
+        assert_eq!(loop_.activate_forced_paradigm(&mut state), None);
+        assert_eq!(state.active_paradigm, ParadigmKind::ReAct);
     }
 }

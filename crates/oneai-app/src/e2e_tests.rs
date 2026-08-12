@@ -509,3 +509,59 @@ async fn e2e_bus_driven_turn_emits_yields() {
     assert!(saw_turn_start, "TurnStart emitted");
     assert!(saw_turn_complete, "TurnComplete emitted");
 }
+
+/// `Directive::SwitchParadigm` → `AppSession::set_paradigm` writes
+/// `conversation.metadata["active_paradigm"]`; the next `run_turn_via_bus`
+/// materializes it at turn start (`activate_forced_paradigm`) so the model's
+/// first iteration runs under the forced paradigm — confirmed by an
+/// `EngineYield::IterationStart { paradigm: Plan }` yield.
+#[tokio::test]
+async fn e2e_bus_forced_paradigm_activates_next_turn() {
+    use oneai_agent::ParadigmKind;
+    use oneai_bus::{EngineBus, EngineYield};
+
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("planned"));
+    let (builder, _directive_rx) = AppBuilder::new().provider(provider).engine_bus();
+    let app = builder.default_parser().build().await.expect("build ok");
+    let bus = app
+        .engine_bus
+        .as_ref()
+        .expect("engine_bus set on App")
+        .clone();
+
+    let mut session = app.create_session();
+    // No forced paradigm yet.
+    assert!(session.forced_paradigm().is_none());
+
+    // Frontend forces Plan.
+    let prev = session.set_paradigm(ParadigmKind::Plan);
+    assert!(prev.is_none(), "no prior forced paradigm");
+    assert_eq!(session.forced_paradigm(), Some(ParadigmKind::Plan));
+
+    let mut sub = bus.subscribe_yields();
+    let summary = session
+        .run_turn_via_bus("decompose this", Arc::new(tokio::sync::Mutex::new(None)))
+        .await
+        .unwrap();
+    assert!(summary.completed);
+
+    // The first IterationStart must carry the forced paradigm.
+    let mut saw_plan_iteration = false;
+    while let Ok(y) = sub.try_recv() {
+        if let EngineYield::IterationStart { paradigm, .. } = y {
+            assert_eq!(
+                paradigm,
+                oneai_bus::BusParadigmKind::Plan,
+                "forced paradigm activated for the turn"
+            );
+            saw_plan_iteration = true;
+        }
+    }
+    assert!(
+        saw_plan_iteration,
+        "an IterationStart yield carried the forced Plan paradigm"
+    );
+
+    // Sticky: still forced after the turn (frontend must switch again to clear).
+    assert_eq!(session.forced_paradigm(), Some(ParadigmKind::Plan));
+}

@@ -340,6 +340,58 @@ impl AppSession {
         self.plan_mode = on;
     }
 
+    /// Force the active paradigm for subsequent turns (frontend-driven
+    /// `Directive::SwitchParadigm`). Persists in `conversation.metadata` so it
+    /// is sticky across turns (and survives `/compact` + session resume) until
+    /// the frontend switches again. The `AgentLoop` materializes it at the
+    /// start of the next `run_with_conversation` via `activate_forced_paradigm`
+    /// — paradigm tail system messages + tool filter. Returns the previous
+    /// forced paradigm (read from metadata) so the caller can emit an honest
+    /// `EngineYield::ParadigmSwitch { from, .. }`.
+    pub fn set_paradigm(&mut self, kind: ParadigmKind) -> Option<ParadigmKind> {
+        let prev = self
+            .conversation
+            .metadata
+            .get("active_paradigm")
+            .and_then(|s| match s.as_str() {
+                "plan" => Some(ParadigmKind::Plan),
+                "react" => Some(ParadigmKind::ReAct),
+                "reflect" => Some(ParadigmKind::Reflect),
+                "explore" => Some(ParadigmKind::Explore),
+                _ => None,
+            });
+        let name = match kind {
+            ParadigmKind::Plan => "plan",
+            ParadigmKind::ReAct => "react",
+            ParadigmKind::Reflect => "reflect",
+            ParadigmKind::Explore => "explore",
+            // ParadigmKind is #[non_exhaustive]; an unknown variant (future
+            // agent crate) degrades to the loop's default paradigm rather than
+            // writing a metadata value activate_forced_paradigm can't parse.
+            _ => "react",
+        };
+        self.conversation
+            .metadata
+            .insert("active_paradigm".to_string(), name.to_string());
+        prev
+    }
+
+    /// The paradigm the frontend forced via `Directive::SwitchParadigm`, if any.
+    /// Reads the durable `conversation.metadata` pointer (the same one
+    /// `set_paradigm` writes and `activate_forced_paradigm` reads).
+    pub fn forced_paradigm(&self) -> Option<ParadigmKind> {
+        self.conversation
+            .metadata
+            .get("active_paradigm")
+            .and_then(|s| match s.as_str() {
+                "plan" => Some(ParadigmKind::Plan),
+                "react" => Some(ParadigmKind::ReAct),
+                "reflect" => Some(ParadigmKind::Reflect),
+                "explore" => Some(ParadigmKind::Explore),
+                _ => None,
+            })
+    }
+
     /// The durable working-state store, if configured (`AppBuilder::working_state`).
     pub fn working_state_store(&self) -> Option<Arc<dyn oneai_core::traits::WorkingStateStore>> {
         self.app.working_state_store.clone()
