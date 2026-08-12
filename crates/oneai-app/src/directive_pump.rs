@@ -119,6 +119,42 @@ pub trait DirectiveRuntime: Send {
 
     /// Current session id (owned — crosses awaits).
     async fn session_id(&mut self) -> String;
+
+    // ── Group-chat methods (P4) ─────────────────────────────────────────
+    // Default impls error out so a runtime that isn't group-aware (the TUI's
+    // `SessionState`, the sidecar's `SidecarRuntime`) typechecks unchanged —
+    // group chat is driven by the in-process 3-symbol c_facade runtime, which
+    // overrides these. The pump dispatches `StartGroupChat`/`GroupStart`/
+    // `GroupUserMessage`/`GroupSetScriptedOrder` directives to them.
+
+    /// Build a multi-agent `GroupChatSession` from a scenario; subsequent
+    /// `GroupStart`/`GroupUserMessage` directives drive it. Displaces the
+    /// single-agent session for the group's lifetime.
+    async fn start_group(&mut self, _scenario: oneai_bus::BusGroupScenario) -> Result<()> {
+        Err(oneai_core::error::OneAIError::Agent(
+            "group chat not active on this runtime".into(),
+        ))
+    }
+
+    /// Run the scenario's configured opener turn.
+    async fn group_start(&mut self) -> Result<()> {
+        Err(oneai_core::error::OneAIError::Agent(
+            "group chat not active on this runtime".into(),
+        ))
+    }
+
+    /// Append the user's message and run the round's speakers per the turn
+    /// policy until it's the user's turn again.
+    async fn group_run_task(&mut self, _user_input: &str) -> Result<()> {
+        Err(oneai_core::error::OneAIError::Agent(
+            "group chat not active on this runtime".into(),
+        ))
+    }
+
+    /// Hot-swap the group's turn policy to a fixed scripted order at runtime.
+    async fn group_set_scripted_order(&mut self, _order: Vec<String>) {
+        // Default no-op — a non-group runtime silently ignores the directive.
+    }
 }
 
 /// Spawn the directive pump. Drains `Directive::UserMessage` →
@@ -326,6 +362,47 @@ pub fn spawn_directive_pump<R: DirectiveRuntime + 'static>(
                 Directive::Shutdown => {
                     tracing::info!("Directive::Shutdown received — stopping directive pump");
                     break;
+                }
+                // ── Group-chat directives (P4) ────────────────────────────
+                // Drive a GroupChatSession through `GroupChatBusObserver`,
+                // emitting speaker-tagged yields. `Init` never reaches the
+                // pump (the in-process c_facade intercepts it to build the
+                // engine+bus+pump); a stray `Init` from a sidecar is ignored.
+                Directive::Init { .. } => {
+                    tracing::warn!(
+                        "Directive::Init reached the pump — it should be intercepted by the \
+                         in-process c_facade; ignoring"
+                    );
+                }
+                Directive::StartGroupChat { scenario } => {
+                    let result = rt.lock().await.start_group(scenario).await;
+                    if let Err(e) = result {
+                        let _ = bus.emit(EngineYield::Error {
+                            recoverable: true,
+                            message: format!("group chat start failed: {e}"),
+                        });
+                    }
+                }
+                Directive::GroupStart => {
+                    let result = rt.lock().await.group_start().await;
+                    if let Err(e) = result {
+                        let _ = bus.emit(EngineYield::Error {
+                            recoverable: true,
+                            message: format!("group start failed: {e}"),
+                        });
+                    }
+                }
+                Directive::GroupUserMessage { user_input } => {
+                    let result = rt.lock().await.group_run_task(&user_input).await;
+                    if let Err(e) = result {
+                        let _ = bus.emit(EngineYield::Error {
+                            recoverable: true,
+                            message: format!("group run_task failed: {e}"),
+                        });
+                    }
+                }
+                Directive::GroupSetScriptedOrder { order } => {
+                    rt.lock().await.group_set_scripted_order(order).await;
                 }
                 // Approve / Interrupt are handled by the bus itself and never
                 // reach the directive stream. A future variant the pump doesn't

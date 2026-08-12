@@ -258,6 +258,7 @@ mod tests {
         bus.emit(EngineYield::StreamChunk {
             turn_id: "t1".into(),
             text: "hi".into(),
+            speaker: None,
         })
         .unwrap();
 
@@ -279,6 +280,7 @@ mod tests {
         bus.emit(EngineYield::DirectAnswer {
             turn_id: "t".into(),
             text: "42".into(),
+            speaker: None,
         })
         .unwrap();
 
@@ -304,6 +306,7 @@ mod tests {
                 error: None,
                 ..Default::default()
             },
+            speaker: None,
         };
         let line = oneai_bus::serialize_yield(&y).unwrap();
         let back = oneai_bus::parse_yield(line.trim()).unwrap();

@@ -4353,9 +4353,11 @@ dependencies = [
 name = "oneai-uniffi"
 version = "1.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "oneai-agent",
  "oneai-app",
+ "oneai-bus",
  "oneai-core",
  "oneai-domain",
  "oneai-memory",
@@ -4372,6 +4374,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uniffi",
+ "uuid",
 ]
 
 [[package]]

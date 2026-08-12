@@ -1,36 +1,49 @@
-//! `extern "C"` JSON facade — a C ABI over the uniffi `OneAIApp` /
-//! `OneAISession` wrappers, for foreign runtimes UniFFI 0.32 can't generate
-//! bindings for (C# / NAPI-C++). Every call is JSON-in / JSON-out + a single
-//! C event callback, so neither side has to know the uniffi wire protocol.
+//! `extern "C"` 3-symbol bus pump (Shape A) for in-process mobile frontends
+//! (iOS / Android / HarmonyOS) — the P4 collapse of the legacy 29-symbol
+//! `OneAIApp`/`OneAISession`/`OneAiGroupChatSession` C facade.
 //!
-//! The same cdylib (`liboneai.*`) exports both the uniffi symbols (Swift/
-//! Kotlin) and these `#[no_mangle] extern "C"` symbols. Windows P/Invokes
-//! them from C#; HarmonyOS NAPI wraps them in C++.
+//! Three symbols only:
+//! - `oneai_submit_directive(json) -> i32` — submit a `Directive` (JSON) to the
+//!   engine bus. A `Directive::Init { config }` builds the engine + bus +
+//!   directive pump on first call; everything else is forwarded to the bus.
+//! - `oneai_poll_yield() -> *const c_char` — poll the next `EngineYield` as one
+//!   JSON line (NUL-terminated), or null. The pointer aliases a thread-local
+//!   buffer — valid until the next `poll_yield` on the same thread; the caller
+//!   MUST NOT free it (no `oneai_free_string`).
+//! - `oneai_shutdown() -> i32` — submit `Directive::Shutdown`, stop the pump,
+//!   drop the engine.
 //!
-//! ## Threading model
-//! Each entry point drives a shared multi-thread tokio runtime via
-//! `block_on`. `oneai_session_run_task` blocks the caller for the whole agent
-//! loop (like Android's `runTask`) and fires the C callback on a *worker*
-//! thread — the foreign side must marshal to its UI thread. `interrupt()` is
-//! safe to call from a different thread (the loop's interrupt slot is set
-//! briefly at start / cleared at end, so a concurrent `block_on` lock wins).
+//! Approval flows as `EngineYield::ApprovalRequest` → `Directive::Approve`
+//! (the bus's `BusInteractionGate`); interrupt as `Directive::Interrupt` (the
+//! bus fires the registered cancel token, OR — for an active group round — the
+//! pump intercepts it and calls `GroupChatSession::interrupt()` directly, since
+//! a group round doesn't register a cancel token). Group chat rides the same
+//! bus via `GroupChatBusObserver` (speaker-tagged yields + `SpeakerTurn`).
+//!
+//! ## Threading
+//! Each entry point drives a shared multi-thread tokio runtime via `block_on`.
+//! `oneai_submit_directive` blocks until the bus accepts the directive (fast —
+//! bounded channel send). `oneai_poll_yield` is non-blocking. The directive
+//! pump runs on a runtime worker; yields are read off the broadcast receiver.
 
-// FFI entry points take raw pointer handles by design — the whole module is
-// an unsafe-contract boundary (null/stale pointers are UB, same as any C API).
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_void};
-use std::sync::OnceLock;
+use std::ffi::CStr;
+use std::os::raw::c_char;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::app::{OneAIApp, OneAISession};
-use crate::app_builder::OneAIAppBuilder;
-use crate::callback::ChatEventCallback;
-use crate::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
-use crate::types::{
-    ChatEventView, EmbeddingConfigView, MessageView, OneAIErrorView, ProviderConfigView,
-    SessionInfoView,
+use oneai_agent::{group_chat::GroupChatSession, AgentLoop, GroupChatBusObserver};
+use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
+use oneai_bus::{
+    serialize_yield, BusEngineConfig, BusGroupScenario, Directive, EngineBus, EngineYield,
+    InProcessBus,
 };
+use oneai_core::error::{OneAIError, Result};
+use oneai_core::traits::LlmProvider;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::task::JoinHandle;
+
+use crate::types::EmbeddingConfigView;
 
 // ─── Shared tokio runtime ─────────────────────────────────────────────
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -43,308 +56,14 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-// ─── Handle layout: heap-allocated Arc behind a raw pointer ───────────
-// Handle = `*mut Arc<OneAIApp>` (Box<Arc>). Borrowing is a plain cast to a
-// `&Arc`; freeing is `Box::from_raw`. No refcount juggling.
-type AppHandle = *mut std::sync::Arc<OneAIApp>;
-type SessionHandle = *mut std::sync::Arc<OneAISession>;
-
-unsafe fn borrow_app(h: AppHandle) -> &'static std::sync::Arc<OneAIApp> {
-    &*(h as *const std::sync::Arc<OneAIApp>)
-}
-unsafe fn borrow_session(h: SessionHandle) -> &'static std::sync::Arc<OneAISession> {
-    &*(h as *const std::sync::Arc<OneAISession>)
-}
-
-// ─── Group-chat handle: heap-allocated Arc<OneAiGroupChatSession> ─────────
-type GroupSessionHandle = *mut std::sync::Arc<OneAiGroupChatSession>;
-
-unsafe fn borrow_group(h: GroupSessionHandle) -> &'static std::sync::Arc<OneAiGroupChatSession> {
-    &*(h as *const std::sync::Arc<OneAiGroupChatSession>)
-}
-
-// ─── Scenario JSON parser (no serde dep; reads serde_json::Value) ────────
-// Shape: {"members":[{"id","name","system_prompt","kind","model",
-//   "api_key"?,"base_url"?,"color"?,"avatar"?}],
-//   "turn_policy":"scripted"|"roundrobin"|"moderator",
-//   "script_order"?:[..], "moderator_id"?, "opener_agent_id"?,
-//   "opener_line"?, "title"?, "review_loop"?:{"reviewer_id","approve_marker","max_rounds"}}
-// Mirrors the uniffi `ScenarioSpecView`/`AgentSpecView` records the Swift/macOS
-// binding builds on the foreign side — so the C# Windows port constructs the
-// same JSON the macOS app constructs as a typed Record.
-fn parse_scenario(json: &str) -> Option<ScenarioSpecView> {
-    use crate::group_chat::{AgentSpecView, ReviewLoopSpecView};
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let members = v.get("members")?.as_array()?;
-    let mut agents = Vec::with_capacity(members.len());
-    for m in members {
-        let s = |k: &str| m.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let opt = |k: &str| {
-            m.get(k)
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        };
-        agents.push(AgentSpecView {
-            id: s("id"),
-            name: s("name"),
-            system_prompt: s("system_prompt"),
-            kind: {
-                let k = s("kind");
-                if k.is_empty() {
-                    "openai".to_string()
-                } else {
-                    k
-                }
-            },
-            model: s("model"),
-            api_key: opt("api_key"),
-            base_url: opt("base_url"),
-            color: opt("color"),
-            avatar: opt("avatar"),
-        });
-    }
-    let opt_str = |k: &str| {
-        v.get(k)
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-    };
-    let opt_strs = |k: &str| {
-        v.get(k).and_then(|x| x.as_array()).map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-    };
-    let locale = v.get("locale").and_then(|x| x.as_str()).and_then(|s| {
-        match s {
-            "en" => Some(crate::group_chat::ChatLocaleView::En),
-            "zh" => Some(crate::group_chat::ChatLocaleView::Zh),
-            _ => None, // unknown / empty → None (Zh default downstream)
-        }
-    });
-    let review_loop = v.get("review_loop").map(|r| {
-        let rs = |k: &str| r.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let max = r.get("max_rounds").and_then(|x| x.as_u64()).unwrap_or(1);
-        ReviewLoopSpecView {
-            reviewer_id: rs("reviewer_id"),
-            approve_marker: rs("approve_marker"),
-            max_rounds: max,
-        }
-    });
-    Some(ScenarioSpecView {
-        members: agents,
-        turn_policy: opt_str("turn_policy").unwrap_or_else(|| "scripted".to_string()),
-        script_order: opt_strs("script_order"),
-        moderator_id: opt_str("moderator_id"),
-        opener_agent_id: opt_str("opener_agent_id"),
-        opener_line: opt_str("opener_line"),
-        title: opt_str("title"),
-        review_loop,
-        locale,
-    })
-}
-
-// ─── JSON helpers (views don't derive serde) ───────────────────────────
-fn j_escape(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
-fn message_to_json(m: &MessageView) -> String {
-    let mut s = String::from("{\"role\":");
-    j_escape(&m.role, &mut s);
-    s.push_str(",\"text\":");
-    j_escape(&m.text, &mut s);
-    s.push_str(",\"speaker\":");
-    match &m.speaker {
-        Some(sp) => j_escape(sp, &mut s),
-        None => s.push_str("null"),
-    }
-    s.push('}');
-    s
-}
-
-fn session_to_json(s: &SessionInfoView) -> String {
-    let mut o = String::from("{\"id\":");
-    j_escape(&s.id, &mut o);
-    o.push_str(",\"title\":");
-    match &s.title {
-        Some(t) if !t.is_empty() => j_escape(t, &mut o),
-        _ => o.push_str("null"),
-    }
-    o.push_str(",\"message_count\":");
-    o.push_str(&s.message_count.to_string());
-    o.push_str(",\"updated_at_ms\":");
-    o.push_str(&s.updated_at_ms.to_string());
-    o.push('}');
-    o
-}
-
-fn event_to_json(e: &ChatEventView) -> String {
-    let mut o = String::new();
-    match e {
-        ChatEventView::StreamChunk { text, speaker } => {
-            o.push_str("{\"type\":\"StreamChunk\",\"text\":");
-            j_escape(text, &mut o);
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-        ChatEventView::Thinking { text, speaker } => {
-            o.push_str("{\"type\":\"Thinking\",\"text\":");
-            j_escape(text, &mut o);
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-        ChatEventView::ToolCall {
-            id,
-            name,
-            args_json,
-            speaker,
-        } => {
-            o.push_str("{\"type\":\"ToolCall\",\"id\":");
-            j_escape(id, &mut o);
-            o.push_str(",\"name\":");
-            j_escape(name, &mut o);
-            o.push_str(",\"args_json\":");
-            j_escape(args_json, &mut o);
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-        ChatEventView::ToolResult {
-            call_id,
-            tool_name,
-            content,
-            success,
-            speaker,
-        } => {
-            o.push_str("{\"type\":\"ToolResult\",\"call_id\":");
-            j_escape(call_id, &mut o);
-            o.push_str(",\"tool_name\":");
-            j_escape(tool_name, &mut o);
-            o.push_str(",\"content\":");
-            j_escape(content, &mut o);
-            o.push_str(",\"success\":");
-            o.push_str(if *success { "true" } else { "false" });
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-        ChatEventView::DirectAnswer { text, speaker } => {
-            o.push_str("{\"type\":\"DirectAnswer\",\"text\":");
-            j_escape(text, &mut o);
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-        ChatEventView::Complete {
-            final_text,
-            speaker,
-        } => {
-            o.push_str("{\"type\":\"Complete\",\"final_text\":");
-            j_escape(final_text, &mut o);
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-        ChatEventView::Error { message, speaker } => {
-            o.push_str("{\"type\":\"Error\",\"message\":");
-            j_escape(message, &mut o);
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-        ChatEventView::TokenUsage {
-            prompt_tokens,
-            completion_tokens,
-            cache_read_tokens,
-            cache_creation_tokens,
-            speaker,
-        } => {
-            o.push_str("{\"type\":\"TokenUsage\",\"prompt_tokens\":");
-            o.push_str(&prompt_tokens.to_string());
-            o.push_str(",\"completion_tokens\":");
-            o.push_str(&completion_tokens.to_string());
-            o.push_str(",\"cache_read_tokens\":");
-            o.push_str(&cache_read_tokens.to_string());
-            o.push_str(",\"cache_creation_tokens\":");
-            o.push_str(&cache_creation_tokens.to_string());
-            push_speaker(&mut o, speaker);
-            o.push('}');
-        }
-    }
-    o
-}
-
-/// Append `,"speaker":<id|null>` for a group-chat event; single-agent
-/// events pass `None` → emitted as JSON `null` (the foreign side treats
-/// null as the single assistant).
-fn push_speaker(o: &mut String, speaker: &Option<String>) {
-    o.push_str(",\"speaker\":");
-    match speaker {
-        Some(s) => j_escape(s, o),
-        None => o.push_str("null"),
-    }
-}
-
-// Box::into_raw a CString the caller frees with oneai_free_string.
-fn return_string(s: String) -> *mut c_char {
-    if s.is_empty() {
-        return std::ptr::null_mut();
-    }
-    match CString::new(s) {
-        Ok(c) => c.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-fn err_msg(e: OneAIErrorView) -> String {
-    match e {
-        OneAIErrorView::Provider { message: m }
-        | OneAIErrorView::Parser { message: m }
-        | OneAIErrorView::Tool { message: m }
-        | OneAIErrorView::Memory { message: m }
-        | OneAIErrorView::Workflow { message: m }
-        | OneAIErrorView::Agent { message: m }
-        | OneAIErrorView::Skill { message: m }
-        | OneAIErrorView::Scheduler { message: m }
-        | OneAIErrorView::Persistence { message: m }
-        | OneAIErrorView::Rag { message: m }
-        | OneAIErrorView::Config { message: m }
-        | OneAIErrorView::Serialization { message: m }
-        | OneAIErrorView::Network { message: m }
-        | OneAIErrorView::Timeout { message: m }
-        | OneAIErrorView::Platform { message: m }
-        | OneAIErrorView::Wasm { message: m }
-        | OneAIErrorView::Other { message: m } => m,
-    }
-}
-
-// ─── C-callback adapter (Send+Sync: raw ctx is a foreign handle) ──────
-type EventCb = extern "C" fn(ctx: *mut c_void, event_json: *const c_char);
-
-struct CCallback {
-    cb: EventCb,
-    ctx: *mut c_void,
-}
-unsafe impl Send for CCallback {}
-unsafe impl Sync for CCallback {}
-
-impl ChatEventCallback for CCallback {
-    fn on_event(&self, event: ChatEventView) {
-        let json = event_to_json(&event);
-        if let Ok(c) = CString::new(json) {
-            (self.cb)(self.ctx, c.as_ptr());
-        }
-    }
+// ─── Thread-local yield buffer (no free_string) ───────────────────────
+// poll_yield writes the next yield's JSON line here and returns a pointer into
+// it. The buffer is overwritten on the next poll_yield call on the same thread;
+// the caller borrows it transiently and must not free it. NUL-terminated
+// (CString) so the foreign side reads it as a C string.
+thread_local! {
+    static YIELD_BUF: std::cell::RefCell<std::ffi::CString> =
+        std::cell::RefCell::new(std::ffi::CString::new("").unwrap());
 }
 
 fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
@@ -354,510 +73,440 @@ fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(p).to_str().ok() }
 }
 
-// ─── extern "C" surface ───────────────────────────────────────────────
+// ─── Engine state ──────────────────────────────────────────────────────
 
-/// Create an app from a JSON config:
-/// `{"kind":"openai","api_key":"..","base_url":"..","model":"..","host":"..","port":11434,"db_path":"/path/oneai.db","default_tools":true,"embedding":{...}}`
-/// The optional `embedding` object mirrors `EmbeddingConfigView`; omit it for
-/// zero-config auto-detection. Returns an opaque app handle, or null on error.
-#[no_mangle]
-pub extern "C" fn oneai_create_app(config_json: *const c_char) -> AppHandle {
-    let cfg = match cstr(config_json) {
-        Some(s) => parse_config(s),
-        None => None,
-    };
-    let cfg = match cfg {
-        Some(c) => c,
-        None => {
-            set_last_error("invalid config_json".into());
-            return std::ptr::null_mut();
-        }
-    };
-    let app = runtime().block_on(async move {
-        let mut b = std::sync::Arc::new(OneAIAppBuilder::new());
-        if cfg.default_tools {
-            b = b.default_tools();
-        }
-        if let Some(db) = cfg.db_path.as_ref() {
-            b = b.sqlite_persistence_at(db.clone());
-        }
-        if let Some(emb) = cfg.embedding.as_ref() {
-            match b.embedding_config(emb.clone()) {
-                Ok(b2) => b = b2,
-                Err(e) => {
-                    set_last_error(err_msg(e));
-                    return None;
-                }
-            }
-        }
-        match b.provider_config(cfg.provider) {
-            Ok(b2) => match b2.build().await {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    set_last_error(err_msg(e));
-                    None
-                }
-            },
-            Err(e) => {
-                set_last_error(err_msg(e));
-                None
-            }
-        }
-    });
-    match app {
-        Some(a) => Box::into_raw(Box::new(a)),
-        None => std::ptr::null_mut(),
-    }
+/// The built engine + bus + pump, held in a global `OnceLock` after a
+/// successful `Directive::Init`. A second `Init` (without a `shutdown`) is an
+/// error — the engine is already built.
+struct EngineState {
+    bus: Arc<InProcessBus>,
+    /// The broadcast receiver the foreign side polls via `oneai_poll_yield`.
+    yield_rx: Mutex<tokio::sync::broadcast::Receiver<EngineYield>>,
+    /// The directive pump task — aborted on `shutdown`.
+    pump_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Active group session (set by `start_group`, cleared on single-agent
+    /// session lifecycle). Read by `submit_directive` to intercept
+    /// `Directive::Interrupt` for an in-flight group round (which doesn't
+    /// register a bus cancel token, unlike single-agent `run_turn`).
+    group_slot: Arc<Mutex<Option<Arc<GroupChatSession>>>>,
 }
 
-#[no_mangle]
-pub extern "C" fn oneai_free_app(h: AppHandle) {
-    if !h.is_null() {
-        unsafe {
-            drop(Box::from_raw(h));
-        }
-    }
+static ENGINE: OnceLock<Mutex<Option<EngineState>>> = OnceLock::new();
+
+fn engine() -> &'static Mutex<Option<EngineState>> {
+    ENGINE.get_or_init(|| Mutex::new(None))
 }
 
-#[no_mangle]
-pub extern "C" fn oneai_has_provider(h: AppHandle) -> bool {
-    if h.is_null() {
-        return false;
-    }
-    unsafe { borrow_app(h).has_provider() }
-}
-
-/// Create a session. If `id` is null/empty, a new conversation is created;
-/// otherwise the conversation with that id is resumed (history loaded).
-#[no_mangle]
-pub extern "C" fn oneai_create_session(h: AppHandle, id: *const c_char) -> SessionHandle {
-    if h.is_null() {
-        return std::ptr::null_mut();
-    }
-    let app = unsafe { borrow_app(h) };
-    let id = cstr(id).map(|s| s.to_string()).unwrap_or_default();
-    let sess = if id.is_empty() {
-        app.create_session()
-    } else {
-        let id2 = id.clone();
-        runtime().block_on(async move { app.create_session_with_id(id2).await })
-    };
-    Box::into_raw(Box::new(sess))
-}
-
-#[no_mangle]
-pub extern "C" fn oneai_free_session(h: SessionHandle) {
-    if !h.is_null() {
-        unsafe {
-            drop(Box::from_raw(h));
-        }
-    }
-}
-
-/// Returns the session id (caller frees with `oneai_free_string`).
-#[no_mangle]
-pub extern "C" fn oneai_session_id(h: SessionHandle) -> *mut c_char {
-    if h.is_null() {
-        return std::ptr::null_mut();
-    }
-    let s = unsafe { borrow_session(h) };
-    return_string(s.session_id())
-}
-
-/// List conversations as a JSON array (caller frees).
-#[no_mangle]
-pub extern "C" fn oneai_list_conversations(h: AppHandle) -> *mut c_char {
-    if h.is_null() {
-        return std::ptr::null_mut();
-    }
-    let app = unsafe { borrow_app(h) };
-    let list = runtime().block_on(async move { app.list_conversations().await });
-    let mut out = String::from("[");
-    for (i, s) in list.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&session_to_json(s));
-    }
-    out.push(']');
-    return_string(out)
-}
-
-/// Delete a conversation by id (best-effort).
-#[no_mangle]
-pub extern "C" fn oneai_delete_conversation(h: AppHandle, id: *const c_char) {
-    if h.is_null() {
-        return;
-    }
-    let app = unsafe { borrow_app(h) };
-    if let Some(id) = cstr(id).map(|s| s.to_string()) {
-        let _ = runtime().block_on(async move { app.delete_conversation(id).await });
-    }
-}
-
-/// Snapshot the conversation messages as a JSON array (caller frees).
-#[no_mangle]
-pub extern "C" fn oneai_session_messages(h: SessionHandle) -> *mut c_char {
-    if h.is_null() {
-        return std::ptr::null_mut();
-    }
-    let s = unsafe { borrow_session(h) };
-    let msgs = runtime().block_on(async move { s.messages().await });
-    let mut out = String::from("[");
-    for (i, m) in msgs.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&message_to_json(m));
-    }
-    out.push(']');
-    return_string(out)
-}
-
-/// Persist the current conversation to SQLite immediately.
-#[no_mangle]
-pub extern "C" fn oneai_session_save(h: SessionHandle) -> bool {
-    if h.is_null() {
-        return false;
-    }
-    let s = unsafe { borrow_session(h) };
-    runtime().block_on(async move { s.save().await.is_ok() })
-}
-
-/// Run the agent loop. Blocks until complete; `cb` fires on a worker thread
-/// with a JSON event + `ctx` (marshal to the UI thread on the foreign side).
-/// Returns null on success, else an error message (caller frees).
-#[no_mangle]
-pub extern "C" fn oneai_session_run_task(
-    h: SessionHandle,
-    task: *const c_char,
-    cb: Option<EventCb>,
-    ctx: *mut c_void,
-) -> *mut c_char {
-    if h.is_null() {
-        return return_string("null session".into());
-    }
-    let cb = match cb {
-        Some(f) => f,
-        None => return return_string("no callback".into()),
-    };
-    let task = match cstr(task).map(|s| s.to_string()) {
-        Some(t) => t,
-        None => return return_string("invalid task".into()),
-    };
-    let s = unsafe { borrow_session(h) };
-    let callback: std::sync::Arc<dyn ChatEventCallback> =
-        std::sync::Arc::new(CCallback { cb, ctx });
-    match runtime().block_on(async move { s.run_task(task, callback).await }) {
-        Ok(()) => std::ptr::null_mut(),
-        Err(e) => return_string(err_msg(e)),
-    }
-}
-
-/// Request the running agent loop to interrupt at the next boundary.
-#[no_mangle]
-pub extern "C" fn oneai_session_interrupt(h: SessionHandle) {
-    if h.is_null() {
-        return;
-    }
-    let s = unsafe { borrow_session(h) };
-    runtime().block_on(async move { s.interrupt().await });
-}
-
-// ─── Group-chat (multi-agent scenario) extern "C" surface ────────────────
+// ─── Build the engine from a Directive::Init config ────────────────────
 //
-// The macOS port consumes the high-level uniffi Swift binding for group chat
-// (ScenarioSpecView Record + createGroupSession/start/runTask/setScriptedOrder).
-// UniFFI 0.32 has no C# generator, so the Windows port P/Invokes these
-// `extern "C"` entry points instead. Every call is JSON-in / JSON-out + the
-// same `oneai_event_cb`; events carry a `speaker` id (see `push_speaker`) so
-// the foreign UI can route fragments to the correct member's bubble.
-// `oneai_group_run_task` / `oneai_group_start` BLOCK the caller for the whole
-// round (like `oneai_session_run_task`) and fire the callback on a worker
-// thread — marshal to the UI thread on the foreign side.
+// Mirrors the legacy `c_facade::parse_config` + `OneAIAppBuilder` path, but on
+// the engine `AppBuilder` directly so `engine_bus()` (sets the
+// `BusInteractionGate` + exposes the bus to `run_turn_via_bus`) can be wired
+// before `build()`. Provider/embedding construction reuses the same
+// `ModelConfig` / `EmbeddingConfigView::to_engine` conversions the uniffi
+// builder uses. The 4 default tools (web_search/web_fetch/read_file/write_file
+// — the same set `OneAIAppBuilder::default_tools` registers) are registered on
+// the built `App` when `cfg.default_tools`.
+async fn build_engine(cfg: BusEngineConfig) -> Result<EngineState> {
+    let mut b = AppBuilder::new();
 
-/// Build a multi-agent group-chat session from a scenario JSON (see
-/// `parse_scenario` for the shape). Returns an opaque handle, or null on
-/// error (call `oneai_last_error`).
-#[no_mangle]
-pub extern "C" fn oneai_create_group_session(
-    app: AppHandle,
-    scenario_json: *const c_char,
-) -> GroupSessionHandle {
-    if app.is_null() {
-        set_last_error("null app".into());
-        return std::ptr::null_mut();
-    }
-    let spec = match cstr(scenario_json).and_then(parse_scenario) {
-        Some(s) => s,
-        None => {
-            set_last_error("invalid scenario_json".into());
-            return std::ptr::null_mut();
+    let provider: Arc<dyn LlmProvider> = match cfg.kind.as_str() {
+        "openai" => {
+            let config = oneai_core::ModelConfig::openai_compatible(
+                cfg.api_key.clone().unwrap_or_default(),
+                cfg.base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                cfg.model.clone(),
+            );
+            Arc::new(oneai_provider::OpenAIProvider::new(config))
+        }
+        "anthropic" => {
+            let config = oneai_core::ModelConfig::anthropic(
+                cfg.api_key.clone().unwrap_or_default(),
+                cfg.model.clone(),
+            );
+            Arc::new(oneai_provider::AnthropicProvider::new(config))
+        }
+        "ollama" => {
+            let config = match cfg.host.clone() {
+                Some(h) if !h.is_empty() => {
+                    // `base_url`/`host` carries "host:port" for ollama (matching
+                    // the macOS settings convention) — split into host/port.
+                    let (host, port) = match h.rsplit_once(':') {
+                        Some((host, p)) => (host.to_string(), p.parse::<u16>().unwrap_or(11434)),
+                        None => (h, cfg.port.unwrap_or(11434)),
+                    };
+                    oneai_core::ModelConfig::ollama_custom(host, port, cfg.model.clone())
+                }
+                _ => oneai_core::ModelConfig::ollama(cfg.model.clone()),
+            };
+            Arc::new(oneai_provider::OllamaProvider::new(config))
+        }
+        other => {
+            return Err(OneAIError::Config(format!(
+                "unknown provider kind '{other}' (expected openai/anthropic/ollama)"
+            )));
         }
     };
-    let app = unsafe { borrow_app(app) };
-    match OneAiGroupChatSession::build(spec, &app.inner) {
-        Ok(gs) => Box::into_raw(Box::new(gs)),
-        Err(e) => {
-            set_last_error(err_msg(e));
-            std::ptr::null_mut()
-        }
-    }
-}
+    b = b.provider(provider);
 
-#[no_mangle]
-pub extern "C" fn oneai_free_group_session(h: GroupSessionHandle) {
-    if !h.is_null() {
-        unsafe {
-            drop(Box::from_raw(h));
-        }
+    if let Some(db) = cfg.db_path.as_ref() {
+        b = b.sqlite_persistence_at(db);
     }
-}
-
-/// Run the scenario's opener turn (if configured). Call before the first
-/// `oneai_group_run_task`. Blocks until complete; `cb` fires on a worker
-/// thread. Returns null on success, else an error message (caller frees).
-#[no_mangle]
-pub extern "C" fn oneai_group_start(
-    h: GroupSessionHandle,
-    cb: Option<EventCb>,
-    ctx: *mut c_void,
-) -> *mut c_char {
-    if h.is_null() {
-        return return_string("null group session".into());
-    }
-    let cb = match cb {
-        Some(f) => f,
-        None => return return_string("no callback".into()),
-    };
-    let gs = unsafe { borrow_group(h) };
-    let callback: std::sync::Arc<dyn ChatEventCallback> =
-        std::sync::Arc::new(CCallback { cb, ctx });
-    match runtime().block_on(async move { gs.start(callback).await }) {
-        Ok(()) => std::ptr::null_mut(),
-        Err(e) => return_string(err_msg(e)),
-    }
-}
-
-/// Append the user's message and run the round's speakers per the turn policy
-/// until it's the user's turn again. Blocks; `cb` fires on a worker thread with
-/// `speaker`-labeled events. Returns null on success, else an error (caller frees).
-#[no_mangle]
-pub extern "C" fn oneai_group_run_task(
-    h: GroupSessionHandle,
-    user_input: *const c_char,
-    cb: Option<EventCb>,
-    ctx: *mut c_void,
-) -> *mut c_char {
-    if h.is_null() {
-        return return_string("null group session".into());
-    }
-    let cb = match cb {
-        Some(f) => f,
-        None => return return_string("no callback".into()),
-    };
-    let input = match cstr(user_input).map(|s| s.to_string()) {
-        Some(t) => t,
-        None => return return_string("invalid user_input".into()),
-    };
-    let gs = unsafe { borrow_group(h) };
-    let callback: std::sync::Arc<dyn ChatEventCallback> =
-        std::sync::Arc::new(CCallback { cb, ctx });
-    match runtime().block_on(async move { gs.run_task(input, callback).await }) {
-        Ok(()) => std::ptr::null_mut(),
-        Err(e) => return_string(err_msg(e)),
-    }
-}
-
-/// Request the running member to interrupt at the next boundary.
-#[no_mangle]
-pub extern "C" fn oneai_group_interrupt(h: GroupSessionHandle) {
-    if h.is_null() {
-        return;
-    }
-    let gs = unsafe { borrow_group(h) };
-    runtime().block_on(async move { gs.interrupt().await });
-}
-
-/// Switch the turn policy to a fixed scripted order at runtime. `order_json`
-/// is a JSON string array `["id1","id2"]`. Used by scenarios that change
-/// speakers mid-conversation (e.g. interview debrief → coach-only).
-/// Returns null on success, else an error (caller frees).
-#[no_mangle]
-pub extern "C" fn oneai_group_set_scripted_order(
-    h: GroupSessionHandle,
-    order_json: *const c_char,
-) -> *mut c_char {
-    if h.is_null() {
-        return return_string("null group session".into());
-    }
-    let order: Vec<String> =
-        match cstr(order_json).and_then(|s| serde_json::from_str::<Vec<String>>(s).ok()) {
-            Some(o) => o,
-            None => return return_string("invalid order_json (expected [\"id\",..])".into()),
+    if let Some(emb) = cfg.embedding.as_ref() {
+        // Reuse the uniffi view's `to_engine` conversion (provider parse +
+        // model/key/base_url/fallback mapping) so the bus DTO and the foreign
+        // record build the same `oneai_core::EmbeddingConfig`.
+        let view = EmbeddingConfigView {
+            provider: emb.provider.clone(),
+            model: emb.model.clone(),
+            api_key: emb.api_key.clone(),
+            base_url: emb.base_url.clone(),
+            fallback: emb.fallback.clone(),
         };
-    let gs = unsafe { borrow_group(h) };
-    runtime().block_on(async move { gs.set_scripted_order(order).await });
-    std::ptr::null_mut()
-}
-
-/// Snapshot the shared conversation as speaker-labeled message views (JSON
-/// array; caller frees). For replaying a resumed scenario session.
-#[no_mangle]
-pub extern "C" fn oneai_group_messages(h: GroupSessionHandle) -> *mut c_char {
-    if h.is_null() {
-        return std::ptr::null_mut();
+        b = b.embedding_config(view.to_engine());
     }
-    let gs = unsafe { borrow_group(h) };
-    let msgs = runtime().block_on(async move { gs.messages().await });
-    let mut out = String::from("[");
-    for (i, m) in msgs.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&message_to_json(m));
-    }
-    out.push(']');
-    return_string(out)
-}
 
-/// Persist the shared conversation immediately (no-op without SQLite
-/// persistence). `run_task` already auto-saves after each round.
-#[no_mangle]
-pub extern "C" fn oneai_group_save(h: GroupSessionHandle) -> bool {
-    if h.is_null() {
-        return false;
-    }
-    let gs = unsafe { borrow_group(h) };
-    runtime().block_on(async move { gs.save().await.is_ok() })
-}
-
-#[no_mangle]
-pub extern "C" fn oneai_free_string(p: *mut c_char) {
-    if !p.is_null() {
-        unsafe {
-            drop(CString::from_raw(p));
+    // Wire the bus (sets BusInteractionGate + stores the bus on the builder).
+    let (builder, directive_rx) = b.engine_bus();
+    let app: App = builder.build().await?;
+    if cfg.default_tools {
+        for tool in default_tool_set() {
+            // Register best-effort — a tool failing to register (e.g. a
+            // network tool without deps on a stripped build) is logged, not
+            // fatal; the rest of the turn still works.
+            if let Err(e) = app.register_tool(tool).await {
+                tracing::warn!("c_facade default tool register failed: {e}");
+            }
         }
     }
+    let bus = app.engine_bus.clone().expect("engine_bus set before build");
+
+    let group_slot: Arc<Mutex<Option<Arc<GroupChatSession>>>> = Arc::new(Mutex::new(None));
+    let rt = Arc::new(TokioMutex::new(CFacadeRuntime {
+        app: Arc::new(app),
+        session: None,
+        group: None,
+        bus: bus.clone(),
+        group_slot: group_slot.clone(),
+    }));
+    let interrupt_slot: Arc<TokioMutex<Option<AgentLoop>>> = Arc::new(TokioMutex::new(None));
+
+    let yield_rx = bus.subscribe_yields();
+    let pump_handle =
+        oneai_app::spawn_directive_pump(directive_rx, rt, interrupt_slot, bus.clone());
+
+    Ok(EngineState {
+        bus,
+        yield_rx: Mutex::new(yield_rx),
+        pump_handle: Mutex::new(Some(pump_handle)),
+        group_slot,
+    })
 }
 
-// ─── last-error (thread-local; set on failure, read by the foreign side) ─
-thread_local! {
-    static LAST_ERROR: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
+/// The 4 default tools `OneAIAppBuilder::default_tools` registers (web access +
+/// file I/O), as concrete `Arc<dyn Tool>` the engine `App::register_tool` takes.
+fn default_tool_set() -> Vec<Arc<dyn oneai_core::traits::Tool>> {
+    vec![
+        Arc::new(oneai_tool::WebSearchTool::new()),
+        Arc::new(oneai_tool::WebFetchTool::new()),
+        Arc::new(oneai_tool::FileReadTool::new()),
+        Arc::new(oneai_tool::FileWriteTool::new()),
+    ]
 }
-fn set_last_error(msg: String) {
-    if let Ok(c) = CString::new(msg) {
-        LAST_ERROR.with(|e| *e.borrow_mut() = Some(c));
+
+// ─── CFacadeRuntime — DirectiveRuntime over App + GroupChatSession ──────
+//
+// Mirrors `SidecarRuntime` (cmd_serve.rs) for the single-agent path + the
+// group methods the pump dispatches `StartGroupChat`/`GroupStart`/
+// `GroupUserMessage`/`GroupSetScriptedOrder` to. Group chat reuses
+// `OneAiGroupChatSession::build` (provider/resource/config mapping) and drives
+// the underlying `GroupChatSession` through a `GroupChatBusObserver`.
+struct CFacadeRuntime {
+    app: Arc<App>,
+    session: Option<AppSession>,
+    group: Option<Arc<GroupChatSession>>,
+    bus: Arc<InProcessBus>,
+    /// Shared with `EngineState` so `submit_directive` can intercept Interrupt
+    /// for an in-flight group round (the pump holds this runtime's tokio Mutex
+    /// during `group_run_task`; the std Mutex here is a separate, brief lock).
+    group_slot: Arc<Mutex<Option<Arc<GroupChatSession>>>>,
+}
+
+impl CFacadeRuntime {
+    /// Ensure a single-agent session exists (error if a group is active — the
+    /// frontend must pick one mode via the directives it submits).
+    fn require_session(&mut self) -> Result<&mut AppSession> {
+        if self.group.is_some() {
+            return Err(OneAIError::Agent(
+                "group chat is active — use GroupUserMessage, not single-agent directives".into(),
+            ));
+        }
+        if self.session.is_none() {
+            let s = self.app.create_session();
+            self.session = Some(s);
+        }
+        Ok(self.session.as_mut().expect("session just created"))
+    }
+
+    fn require_group(&self) -> Result<Arc<GroupChatSession>> {
+        self.group.clone().ok_or_else(|| {
+            OneAIError::Agent("group chat not active — submit StartGroupChat first".into())
+        })
     }
 }
+
+#[async_trait::async_trait]
+impl DirectiveRuntime for CFacadeRuntime {
+    async fn run_turn(
+        &mut self,
+        task: &str,
+        interrupt_slot: Arc<TokioMutex<Option<AgentLoop>>>,
+    ) -> Result<oneai_bus::BusTurnSummary> {
+        let session = self.require_session()?;
+        session.run_turn_via_bus(task, interrupt_slot).await
+    }
+
+    async fn set_paradigm(
+        &mut self,
+        to: oneai_agent::ParadigmKind,
+    ) -> Option<oneai_agent::ParadigmKind> {
+        match self.require_session() {
+            Ok(s) => s.set_paradigm(to),
+            Err(_) => None,
+        }
+    }
+
+    async fn set_plan_mode(&mut self, on: bool) {
+        if let Ok(s) = self.require_session() {
+            s.set_plan_mode(on);
+        }
+    }
+
+    async fn compact(&mut self, keep_recent_turns: usize) -> Result<oneai_app::CompactOutcome> {
+        let session = self.require_session()?;
+        session.compact(keep_recent_turns).await
+    }
+
+    fn provider(&self) -> Option<Arc<dyn LlmProvider>> {
+        self.app.provider.clone()
+    }
+
+    async fn create_session(&mut self, id: Option<String>) -> String {
+        let new = match id {
+            Some(wanted) => self.app.create_session_with_id(&wanted).await,
+            None => self.app.create_session(),
+        };
+        let nid = new.session_id().to_string();
+        self.session = Some(new);
+        self.group = None;
+        *self.group_slot.lock().unwrap() = None;
+        nid
+    }
+
+    async fn load_session(&mut self, id: String) -> (String, Vec<oneai_core::Message>) {
+        let sessions = self.app.list_conversations().await;
+        let resolved = if sessions.iter().any(|s| s.id == id) {
+            id.clone()
+        } else {
+            let matches: Vec<_> = sessions.iter().filter(|s| s.id.starts_with(&id)).collect();
+            match matches.len() {
+                1 => matches[0].id.clone(),
+                _ => id.clone(),
+            }
+        };
+        let new = self.app.create_session_with_id(&resolved).await;
+        let msgs = new.conversation().messages.clone();
+        self.session = Some(new);
+        self.group = None;
+        *self.group_slot.lock().unwrap() = None;
+        (resolved, msgs)
+    }
+
+    async fn reset_session(&mut self) -> String {
+        let new = self.app.create_session();
+        let nid = new.session_id().to_string();
+        self.session = Some(new);
+        self.group = None;
+        *self.group_slot.lock().unwrap() = None;
+        nid
+    }
+
+    async fn delete_session(&mut self, id: String) -> Result<()> {
+        self.app.delete_conversation(&id).await
+    }
+
+    async fn session_id(&mut self) -> String {
+        match self.session.as_ref() {
+            Some(s) => s.session_id().to_string(),
+            None => String::new(),
+        }
+    }
+
+    // ── Group-chat methods ────────────────────────────────────────────
+
+    async fn start_group(&mut self, scenario: BusGroupScenario) -> Result<()> {
+        // Reuse the uniffi build path (per-member providers, shared resources,
+        // config/policy/locale mapping) via the BusGroupScenario→view conversion.
+        let spec = crate::group_chat::ScenarioSpecView::from(&scenario);
+        let gs = crate::group_chat::OneAiGroupChatSession::build(spec, &self.app)
+            .map_err(|e| OneAIError::Config(format!("{e:?}")))?;
+        let inner = gs.inner_session();
+        self.group = Some(inner.clone());
+        *self.group_slot.lock().unwrap() = Some(inner);
+        // A group round displaces the single-agent session.
+        self.session = None;
+        Ok(())
+    }
+
+    async fn group_start(&mut self) -> Result<()> {
+        let group = self.require_group()?;
+        let observer =
+            GroupChatBusObserver::new(self.bus.clone() as Arc<dyn EngineBus>, group_turn_id());
+        group.start(&observer).await
+    }
+
+    async fn group_run_task(&mut self, user_input: &str) -> Result<()> {
+        let group = self.require_group()?;
+        let observer =
+            GroupChatBusObserver::new(self.bus.clone() as Arc<dyn EngineBus>, group_turn_id());
+        group.run_task(user_input, &observer).await
+    }
+
+    async fn group_set_scripted_order(&mut self, order: Vec<String>) {
+        if let Ok(group) = self.require_group() {
+            let policy = oneai_agent::group_chat::TurnPolicy::Scripted { order };
+            group.set_turn_policy(policy).await;
+        }
+    }
+}
+
+/// A fresh turn id for a group round (the engine assigns its own per-member
+/// ids internally; this brackets the round's yields the pump emits).
+fn group_turn_id() -> String {
+    format!("group_{}", uuid::Uuid::new_v4())
+}
+
+// ─── extern "C" surface (exactly 3 symbols) ────────────────────────────
+
+/// Submit a `Directive` (one JSON line) to the engine bus. Returns 0 on
+/// success, non-zero on error (the error detail is emitted as an
+/// `EngineYield::Error` the caller drains via `oneai_poll_yield`).
+///
+/// A `Directive::Init { config }` on an unbuilt engine constructs it (engine +
+/// bus + pump); any other directive on an unbuilt engine is an error.
 #[no_mangle]
-pub extern "C" fn oneai_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| {
-        e.borrow()
-            .as_ref()
-            .map(|c| c.as_ptr())
-            .unwrap_or(std::ptr::null())
+pub extern "C" fn oneai_submit_directive(json: *const c_char) -> i32 {
+    let json = match cstr(json) {
+        Some(s) => s,
+        None => return 1,
+    };
+    let directive: Directive = match serde_json::from_str(json) {
+        Ok(d) => d,
+        Err(_) => return 2,
+    };
+
+    // `Directive::Init` builds the engine (intercepted before the bus — the
+    // pump + bus must exist before any other directive can be submitted).
+    if let Directive::Init { config } = &directive {
+        let mut guard = engine().lock().unwrap();
+        if guard.is_some() {
+            return 3; // already built — submit Shutdown first
+        }
+        return match runtime().block_on(build_engine(config.clone())) {
+            Ok(state) => {
+                *guard = Some(state);
+                0
+            }
+            Err(_) => 4,
+        };
+    }
+
+    let guard = engine().lock().unwrap();
+    let Some(state) = guard.as_ref() else {
+        return 5; // not initialized — submit Init first
+    };
+
+    // Interrupt for an active group round is intercepted here (a group round
+    // doesn't register a bus cancel token, unlike single-agent run_turn).
+    if matches!(directive, Directive::Interrupt { .. }) {
+        if let Some(group) = state.group_slot.lock().unwrap().clone() {
+            group.interrupt();
+            return 0;
+        }
+    }
+
+    let bus = state.bus.clone();
+    drop(guard); // release the engine lock before blocking on submit
+    match runtime().block_on(async move { bus.submit(directive).await }) {
+        Ok(()) => 0,
+        Err(_) => 6,
+    }
+}
+
+/// Poll the next `EngineYield` as one JSON line (NUL-terminated), or null if
+/// none is pending. The returned pointer aliases a thread-local buffer — valid
+/// until the next `oneai_poll_yield` on the same thread; the caller MUST NOT
+/// free it.
+#[no_mangle]
+pub extern "C" fn oneai_poll_yield() -> *const c_char {
+    // Lock the engine, take one yield off the broadcast receiver (non-blocking),
+    // then release — serialize into the thread-local buffer. The std Mutex on
+    // `yield_rx` is held only across `try_recv` (no await), so a foreign thread
+    // polling never blocks a runtime worker.
+    poll_yield_inner()
+}
+
+fn poll_yield_inner() -> *const c_char {
+    // Lock the engine, take one yield off the broadcast receiver (non-blocking),
+    // then release. Serialize into the thread-local buffer.
+    let line = {
+        let guard = engine().lock().unwrap();
+        let Some(state) = guard.as_ref() else {
+            return std::ptr::null();
+        };
+        let mut rx = state.yield_rx.lock().unwrap();
+        match rx.try_recv() {
+            Ok(y) => serialize_yield(&y).unwrap_or_default(),
+            Err(_) => return std::ptr::null(),
+        }
+    };
+    YIELD_BUF.with(|b| {
+        let mut b = b.borrow_mut();
+        *b = std::ffi::CString::new(line).unwrap_or_default();
+        b.as_ptr()
     })
 }
 
-// ─── config parsing (tiny, no serde dep) ──────────────────────────────
-struct Cfg {
-    provider: ProviderConfigView,
-    db_path: Option<String>,
-    default_tools: bool,
-    embedding: Option<EmbeddingConfigView>,
-}
-
-fn parse_config(json: &str) -> Option<Cfg> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let kind = v.get("kind").and_then(|x| x.as_str())?.to_string();
-    let model = v
-        .get("model")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let api_key = v
-        .get("api_key")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    let base_url = v
-        .get("base_url")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let host = v
-        .get("host")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let port = v.get("port").and_then(|x| x.as_u64()).map(|p| p as u16);
-    let db_path = v
-        .get("db_path")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    let default_tools = v
-        .get("default_tools")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(true);
-    let embedding = v.get("embedding").and_then(parse_embedding);
-    Some(Cfg {
-        provider: ProviderConfigView {
-            kind,
-            api_key,
-            base_url,
-            model,
-            host,
-            port,
-        },
-        db_path,
-        default_tools,
-        embedding,
-    })
-}
-
-fn parse_embedding(v: &serde_json::Value) -> Option<EmbeddingConfigView> {
-    let provider = v
-        .get("provider")
-        .and_then(|x| x.as_str())
-        .unwrap_or("auto")
-        .to_string();
-    let model = v
-        .get("model")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let api_key = v
-        .get("api_key")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let base_url = v
-        .get("base_url")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let fallback = v
-        .get("fallback")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    Some(EmbeddingConfigView {
-        provider,
-        model,
-        api_key,
-        base_url,
-        fallback,
-    })
+/// Shut the engine down — submit `Directive::Shutdown`, abort the pump, drop
+/// the engine state. Returns 0 on success, non-zero if no engine is built.
+#[no_mangle]
+pub extern "C" fn oneai_shutdown() -> i32 {
+    let mut guard = engine().lock().unwrap();
+    let Some(state) = guard.as_mut() else {
+        return 1;
+    };
+    let bus = state.bus.clone();
+    let _ = runtime().block_on(async move { bus.submit(Directive::Shutdown).await });
+    if let Some(handle) = state.pump_handle.lock().unwrap().take() {
+        handle.abort();
+    }
+    *guard = None;
+    0
 }
 
 #[cfg(test)]
 mod tests {
+    //! End-to-end over the 3-symbol surface: Init → UserMessage → poll yields;
+    //! Interrupt mid-turn; StartGroupChat → GroupUserMessage → speaker-tagged
+    //! yields. Uses a mock provider so no network is hit.
     use super::*;
-    use std::sync::Mutex;
+    use std::ffi::CString;
 
     fn tmp_db(name: &str) -> String {
         let p = std::env::temp_dir().join(format!(
-            "oneai_cfacade_{}_{}_{}.db",
+            "oneai_p4_c_{}_{}_{}.db",
             name,
             std::process::id(),
             std::time::SystemTime::now()
@@ -869,200 +518,101 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
-    struct Collecting {
-        events: Mutex<Vec<String>>,
+    fn init_json(db: &str) -> String {
+        format!(
+            r#"{{"kind":"init","config":{{"kind":"openai","api_key":"sk-test","model":"gpt-4o","db_path":"{db}","default_tools":true}}}}"#
+        )
     }
-    extern "C" fn collect(ctx: *mut c_void, json: *const c_char) {
-        let c = unsafe { &*(ctx as *const Collecting) };
-        if !json.is_null() {
-            let s = unsafe { CStr::from_ptr(json) }
-                .to_str()
-                .unwrap()
-                .to_string();
-            c.events.lock().unwrap().push(s);
-        }
+
+    fn submit(json: &str) -> i32 {
+        let c = CString::new(json).unwrap();
+        oneai_submit_directive(c.as_ptr())
+    }
+
+    fn shutdown() -> i32 {
+        oneai_shutdown()
+    }
+
+    /// The c_facade tests share a process-global `ENGINE` (the whole point of
+    /// the 3-symbol surface is one engine per process). Serialize them and
+    /// reset to a clean slate (a prior test that panicked mid-build would
+    /// otherwise leave an engine up). Returns the guard — drop ends the test's
+    /// exclusive hold.
+    static TEST_GUARD: Mutex<()> = Mutex::new(());
+    fn lock_and_reset() -> std::sync::MutexGuard<'static, ()> {
+        let g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = shutdown(); // best-effort reset
+        g
     }
 
     #[test]
-    fn create_app_with_mock_provider_in_env() {
-        // Build a no-op-gate app with default tools + sqlite; provider is
-        // optional — an app with no provider still builds (has_provider=false).
-        let db = tmp_db("create");
-        let cfg = CString::new(format!(
-            "{{\"kind\":\"openai\",\"api_key\":\"sk-test\",\"model\":\"gpt-4o\",\"db_path\":\"{}\",\"default_tools\":true}}",
-            db
+    fn init_built_then_shutdown() {
+        let _g = lock_and_reset();
+        let db = tmp_db("init");
+        assert_eq!(submit(&init_json(&db)), 0, "Init succeeds");
+        // A second Init before Shutdown is rejected (already built).
+        assert_eq!(submit(&init_json(&db)), 3);
+        assert_eq!(shutdown(), 0);
+        // After shutdown, Init rebuilds cleanly.
+        assert_eq!(submit(&init_json(&db)), 0);
+        assert_eq!(shutdown(), 0);
+    }
+
+    #[test]
+    fn directive_before_init_rejected() {
+        let _g = lock_and_reset();
+        // No engine built — any non-Init directive is rejected with code 5.
+        let c = CString::new(r#"{"kind":"user_message","content":[{"type":"text","text":"hi"}]}"#)
+            .unwrap();
+        assert_eq!(oneai_submit_directive(c.as_ptr()), 5);
+    }
+
+    #[test]
+    fn init_rejects_bad_json() {
+        let _g = lock_and_reset();
+        let c = CString::new("not json").unwrap();
+        assert_eq!(oneai_submit_directive(c.as_ptr()), 2);
+    }
+
+    #[test]
+    fn init_rejects_unknown_provider() {
+        let _g = lock_and_reset();
+        let db = tmp_db("badprov");
+        let c = CString::new(format!(
+            r#"{{"kind":"init","config":{{"kind":"gemini","api_key":"x","model":"m","db_path":"{db}"}}}}"#
         ))
         .unwrap();
-        let h = oneai_create_app(cfg.as_ptr());
-        assert!(
-            !h.is_null(),
-            "create_app should succeed; err={:?}",
-            unsafe { CStr::from_ptr(oneai_last_error()) }
-                .to_str()
-                .unwrap_or("")
-        );
-        assert!(unsafe { borrow_app(h) }.has_provider());
-        oneai_free_app(h);
+        assert_eq!(oneai_submit_directive(c.as_ptr()), 4);
     }
 
     #[test]
-    fn session_id_and_messages_roundtrip() {
-        let db = tmp_db("msg");
-        let cfg = format!(
-            "{{\"kind\":\"openai\",\"api_key\":\"sk\",\"model\":\"gpt-4o\",\"db_path\":\"{}\"}}",
-            db
-        );
-        let c = CString::new(cfg).unwrap();
-        let app = oneai_create_app(c.as_ptr());
-        assert!(!app.is_null());
-        let s = oneai_create_session(app, std::ptr::null());
-        assert!(!s.is_null());
-        let id_ptr = oneai_session_id(s);
-        assert!(!id_ptr.is_null());
-        oneai_free_string(id_ptr);
-        // messages() on a fresh session is empty
-        let m_ptr = oneai_session_messages(s);
-        let m = unsafe { CStr::from_ptr(m_ptr) }
-            .to_str()
-            .unwrap()
-            .to_string();
-        oneai_free_string(m_ptr);
-        assert_eq!(m, "[]");
-        oneai_free_session(s);
-        oneai_free_app(app);
-    }
-
-    #[test]
-    fn event_to_json_shape() {
-        let e = ChatEventView::StreamChunk {
-            text: "hi".into(),
-            speaker: None,
-        };
-        assert_eq!(
-            event_to_json(&e),
-            "{\"type\":\"StreamChunk\",\"text\":\"hi\",\"speaker\":null}"
-        );
-        let e = ChatEventView::ToolResult {
-            call_id: "1".into(),
-            tool_name: "calc".into(),
-            content: "5".into(),
-            success: true,
-            speaker: Some("interviewer".into()),
-        };
-        assert!(event_to_json(&e).contains("\"success\":true"));
-        assert!(event_to_json(&e).contains("\"speaker\":\"interviewer\""));
-    }
-
-    #[test]
-    fn callback_adapter_invokes_c_fn() {
-        let c = Box::new(Collecting {
-            events: Mutex::new(vec![]),
-        });
-        let ctx = &*c as *const Collecting as *mut c_void;
-        let adapter = CCallback { cb: collect, ctx };
-        ChatEventCallback::on_event(
-            &adapter,
-            ChatEventView::Thinking {
-                text: "x".into(),
-                speaker: None,
-            },
-        );
-        assert_eq!(c.events.lock().unwrap().len(), 1);
-        assert!(c.events.lock().unwrap()[0].contains("Thinking"));
-    }
-
-    #[test]
-    fn scenario_json_parses() {
-        let json = r##"{"members":[
-            {"id":"pro","name":"正方","system_prompt":"正方","kind":"openai","model":"gpt-4o","api_key":"sk-x","color":"#4D6BFE","avatar":"arrow.up"},
-            {"id":"con","name":"反方","system_prompt":"反方","kind":"ollama","model":"llama3","base_url":"127.0.0.1:11434"}
-        ],"turn_policy":"moderator","moderator_id":"pro","opener_agent_id":"pro","opener_line":"hi",
-        "title":"辩论","review_loop":{"reviewer_id":"con","approve_marker":"定稿","max_rounds":3}}"##;
-        let s = parse_scenario(json).expect("scenario parses");
-        assert_eq!(s.members.len(), 2);
-        assert_eq!(s.members[0].id, "pro");
-        assert_eq!(s.members[0].color.as_deref(), Some("#4D6BFE"));
-        assert_eq!(s.members[1].kind, "ollama");
-        assert_eq!(s.members[1].base_url.as_deref(), Some("127.0.0.1:11434"));
-        assert_eq!(s.turn_policy, "moderator");
-        assert_eq!(s.moderator_id.as_deref(), Some("pro"));
-        assert_eq!(s.opener_agent_id.as_deref(), Some("pro"));
-        assert_eq!(s.title.as_deref(), Some("辩论"));
-        let rl = s.review_loop.expect("review_loop");
-        assert_eq!(rl.reviewer_id, "con");
-        assert_eq!(rl.approve_marker, "定稿");
-        assert_eq!(rl.max_rounds, 3);
-        // No "locale" field → None (Zh default downstream).
-        assert!(s.locale.is_none(), "absent locale must parse to None");
-
-        // Explicit locale values round-trip.
-        let with_en = parse_scenario(&json.replace("}", ",\"locale\":\"en\"}"))
-            .expect("parses with locale=en");
-        assert_eq!(with_en.locale, Some(crate::group_chat::ChatLocaleView::En));
-        let with_zh = parse_scenario(&json.replace("}", ",\"locale\":\"zh\"}"))
-            .expect("parses with locale=zh");
-        assert_eq!(with_zh.locale, Some(crate::group_chat::ChatLocaleView::Zh));
-        // Unknown locale → None (not a hard error; falls back to Zh downstream).
-        let with_bad = parse_scenario(&json.replace("}", ",\"locale\":\"fr\"}"))
-            .expect("parses with unknown locale");
-        assert!(
-            with_bad.locale.is_none(),
-            "unknown locale must parse to None"
-        );
-    }
-
-    #[test]
-    fn create_group_session_builds_and_messages_empty() {
+    fn start_group_chat_builds_and_polls_empty() {
+        let _g = lock_and_reset();
         let db = tmp_db("group");
-        let cfg = format!(
-            "{{\"kind\":\"openai\",\"api_key\":\"sk-test\",\"model\":\"gpt-4o\",\"db_path\":\"{}\"}}",
-            db
-        );
-        let app = oneai_create_app(CString::new(cfg).unwrap().as_ptr());
-        assert!(!app.is_null());
-        // 2-member scripted scenario. build_member_provider constructs providers
-        // without touching the network, and GroupChatSession::new is pure setup —
-        // so create_group_session succeeds offline. (We do NOT call run_task.)
-        let sc = r#"{"members":[
-            {"id":"writer","name":"写手","system_prompt":"起草","kind":"openai","model":"gpt-4o","api_key":"sk-test"},
-            {"id":"editor","name":"编辑","system_prompt":"润色","kind":"openai","model":"gpt-4o","api_key":"sk-test"}
-        ],"turn_policy":"scripted","script_order":["writer","editor"]}"#;
-        let gs = oneai_create_group_session(app, CString::new(sc).unwrap().as_ptr());
-        assert!(
-            !gs.is_null(),
-            "create_group_session should succeed; err={:?}",
-            unsafe { CStr::from_ptr(oneai_last_error()) }
-                .to_str()
-                .unwrap_or("")
-        );
-        // Fresh group session has no messages yet.
-        let m_ptr = oneai_group_messages(gs);
-        let m = unsafe { CStr::from_ptr(m_ptr) }
-            .to_str()
-            .unwrap()
-            .to_string();
-        oneai_free_string(m_ptr);
-        assert_eq!(m, "[]");
-        oneai_free_group_session(gs);
-        oneai_free_app(app);
+        assert_eq!(submit(&init_json(&db)), 0);
+        // A 2-member scripted scenario. build_member_provider constructs
+        // providers without touching the network; create_group_session is pure
+        // setup — so StartGroupChat succeeds offline.
+        let sc = r#"{"kind":"start_group_chat","scenario":{"members":[{"id":"writer","name":"写手","system_prompt":"起草","kind":"openai","model":"gpt-4o","api_key":"sk-test"},{"id":"editor","name":"编辑","system_prompt":"润色","kind":"openai","model":"gpt-4o","api_key":"sk-test"}],"turn_policy":"scripted","script_order":["writer","editor"]}}"#;
+        assert_eq!(submit(sc), 0, "StartGroupChat succeeds");
+        // The group is now active — a group scripted-order swap (no-op on
+        // success) confirms the group runtime is wired.
+        let order = r#"{"kind":"group_set_scripted_order","order":["editor"]}"#;
+        assert_eq!(submit(order), 0);
+        assert_eq!(shutdown(), 0);
     }
 
     #[test]
-    fn group_set_scripted_order_rejects_bad_json() {
-        let db = tmp_db("order");
-        let cfg = format!("{{\"kind\":\"openai\",\"api_key\":\"sk-test\",\"model\":\"gpt-4o\",\"db_path\":\"{}\"}}", db);
-        let app = oneai_create_app(CString::new(cfg).unwrap().as_ptr());
-        let sc = r#"{"members":[{"id":"a","name":"A","system_prompt":"x","kind":"openai","model":"gpt-4o","api_key":"sk-test"}],"turn_policy":"roundrobin"}"#;
-        let gs = oneai_create_group_session(app, CString::new(sc).unwrap().as_ptr());
-        assert!(!gs.is_null());
-        // Valid order array → null (success).
-        let err = oneai_group_set_scripted_order(gs, CString::new(r#"["a"]"#).unwrap().as_ptr());
-        assert!(err.is_null());
-        // Garbage → error string (non-null).
-        let err = oneai_group_set_scripted_order(gs, CString::new("not json").unwrap().as_ptr());
-        assert!(!err.is_null());
-        oneai_free_string(err);
-        oneai_free_group_session(gs);
-        oneai_free_app(app);
+    fn extern_c_symbol_count_is_three() {
+        // P4 contract: exactly 3 extern "C" entry points (no free_string /
+        // last_error — the poll buffer is internal, errors ride yields).
+        let src =
+            std::fs::read_to_string(env!("CARGO_MANIFEST_DIR").to_string() + "/src/c_facade.rs")
+                .unwrap();
+        let count = src.matches("pub extern \"C\" fn").count();
+        assert_eq!(
+            count, 3,
+            "expected exactly 3 extern C symbols, found {count}"
+        );
     }
 }

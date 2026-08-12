@@ -3408,6 +3408,7 @@ mod issue18_tests {
                     args: c.args,
                 })
                 .collect(),
+            speaker: None,
         }
     }
     fn ev_tool_result(call_id: String, tool_name: String, output: ToolOutput) -> EngineYield {
@@ -3416,6 +3417,7 @@ mod issue18_tests {
             call_id,
             tool_name,
             output,
+            speaker: None,
         }
     }
     fn ev_iter(iteration: usize, paradigm: ParadigmKind) -> EngineYield {
@@ -3429,18 +3431,21 @@ mod issue18_tests {
         EngineYield::Thinking {
             turn_id: String::new(),
             text,
+            speaker: None,
         }
     }
     fn ev_stream(text: String) -> EngineYield {
         EngineYield::StreamChunk {
             turn_id: String::new(),
             text,
+            speaker: None,
         }
     }
     fn ev_direct(text: String) -> EngineYield {
         EngineYield::DirectAnswer {
             turn_id: String::new(),
             text,
+            speaker: None,
         }
     }
     fn ev_complete(r: AgentLoopResult) -> EngineYield {

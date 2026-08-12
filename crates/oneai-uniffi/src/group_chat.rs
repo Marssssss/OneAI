@@ -253,6 +253,57 @@ impl OneAiGroupChatSession {
             persistence: Some(persistence),
         }))
     }
+
+    /// Borrow the underlying engine `GroupChatSession` (crate-visible). Used by
+    /// the in-process 3-symbol c_facade pump to drive the session through a
+    /// `GroupChatBusObserver` (bus yields) instead of the `ChatEventCallback`
+    /// the uniffi `start`/`run_task` methods wire up.
+    pub(crate) fn inner_session(&self) -> Arc<oneai_agent::group_chat::GroupChatSession> {
+        self.inner.clone()
+    }
+}
+
+/// Convert a bus DTO scenario (`Directive::StartGroupChat` payload) into the
+/// uniffi view the shared `OneAiGroupChatSession::build` consumes. The field
+/// shapes are identical by design (P4-A's `BusGroupScenario` mirrors this
+/// view) — the conversion is mechanical so the 3-symbol pump reuses the same
+/// build path (provider construction, resource wiring, config mapping) the
+/// macOS uniffi group-chat binding uses.
+impl From<&oneai_bus::BusGroupScenario> for ScenarioSpecView {
+    fn from(s: &oneai_bus::BusGroupScenario) -> Self {
+        ScenarioSpecView {
+            members: s
+                .members
+                .iter()
+                .map(|m| AgentSpecView {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    system_prompt: m.system_prompt.clone(),
+                    kind: m.kind.clone(),
+                    model: m.model.clone(),
+                    api_key: m.api_key.clone(),
+                    base_url: m.base_url.clone(),
+                    color: m.color.clone(),
+                    avatar: m.avatar.clone(),
+                })
+                .collect(),
+            turn_policy: s.turn_policy.clone(),
+            script_order: s.script_order.clone(),
+            moderator_id: s.moderator_id.clone(),
+            opener_agent_id: s.opener_agent_id.clone(),
+            opener_line: s.opener_line.clone(),
+            title: s.title.clone(),
+            review_loop: s.review_loop.as_ref().map(|r| ReviewLoopSpecView {
+                reviewer_id: r.reviewer_id.clone(),
+                approve_marker: r.approve_marker.clone(),
+                max_rounds: r.max_rounds,
+            }),
+            locale: s.locale.map(|l| match l {
+                oneai_bus::BusLocale::En => ChatLocaleView::En,
+                _ => ChatLocaleView::Zh,
+            }),
+        }
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]

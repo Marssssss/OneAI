@@ -141,13 +141,22 @@ mod tests {
     use std::io::Write;
 
     fn write_temp_jsonl(content: &str) -> std::path::PathBuf {
+        // Monotonic counter guarantees a unique path even when two tests call
+        // this in the same nanosecond (under workspace-parallel test runs the
+        // nanosecond-only timestamp collided, making one test read the other's
+        // file — `File::create` truncates the loser's path).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
-            "oneai_swebench_test_{}.jsonl",
+            "oneai_swebench_test_{}_{}_{}.jsonl",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(),
+            n,
         ));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();

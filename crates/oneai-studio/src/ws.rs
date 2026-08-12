@@ -99,10 +99,12 @@ mod tests {
             EngineYield::DirectAnswer {
                 turn_id: "t".into(),
                 text: "hello".into(),
+                speaker: None,
             },
             EngineYield::StreamChunk {
                 turn_id: "t".into(),
                 text: "chunk".into(),
+                speaker: None,
             },
             EngineYield::Error {
                 recoverable: false,
@@ -125,6 +127,7 @@ mod tests {
         bus.emit(EngineYield::StreamChunk {
             turn_id: "t".into(),
             text: "hi".into(),
+            speaker: None,
         })
         .unwrap();
         assert!(matches!(
