@@ -19,6 +19,7 @@ tracing = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 oneai-core = { workspace = true }
+oneai-bus = { workspace = true }
 oneai-provider = { workspace = true }
 oneai-parser = { workspace = true }
 oneai-skill = { workspace = true }

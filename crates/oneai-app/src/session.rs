@@ -185,6 +185,9 @@ struct AppResources {
     #[allow(dead_code)]
     tool_registry: Arc<oneai_tool::ToolRegistry>,
     interaction_gate: Arc<dyn oneai_core::traits::InteractionGate>,
+    /// Engine bus (when `AppBuilder::engine_bus` was called). `None` for
+    /// direct-drive apps.
+    engine_bus: Option<Arc<oneai_bus::InProcessBus>>,
     memory_manager: Arc<MemoryManager>,
     rag_index: Option<Arc<DocumentIndex>>,
     #[allow(dead_code)]
@@ -283,6 +286,7 @@ impl AppSession {
                 tool_executor: app.tool_executor.clone(),
                 tool_registry: app.tool_registry.clone(),
                 interaction_gate: app.interaction_gate.clone(),
+                engine_bus: app.engine_bus.clone(),
                 memory_manager: app.memory_manager.clone(),
                 rag_index: app.rag_index.clone(),
                 persistence: app.persistence.clone(),
@@ -1397,6 +1401,49 @@ impl AppSession {
         let throwaway_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>> =
             Arc::new(tokio::sync::Mutex::new(None));
         self.run_agent(task, &SilentObserver, throwaway_slot).await
+    }
+
+    /// Run one agent turn driven by the unified engine bus.
+    ///
+    /// Requires `AppBuilder::engine_bus()` to have been called (the app's
+    /// interaction gate is then a `BusInteractionGate` over the same bus, so
+    /// approval decision points surface as `EngineYield::ApprovalRequest` and
+    /// resolve via `Directive::Approve`). Emits `TurnStart` before and
+    /// `TurnComplete` after; the `BusObserver` emits the intermediate yields
+    /// (`IterationStart` / `StreamChunk` / `ToolCalls` / `ToolResult` / etc.)
+    /// during the turn. Returns the projected `BusTurnSummary`.
+    pub async fn run_turn_via_bus(
+        &mut self,
+        task: &str,
+        interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
+    ) -> Result<oneai_bus::BusTurnSummary> {
+        use oneai_agent::BusObserver;
+        use oneai_bus::{EngineBus, EngineYield};
+
+        let bus = self.app.engine_bus.clone().ok_or_else(|| {
+            oneai_core::error::OneAIError::Agent(
+                "engine_bus not configured; call AppBuilder::engine_bus() before run_turn_via_bus"
+                    .into(),
+            )
+        })?;
+        let turn_id = format!("{}_{}", self.session_id, uuid::Uuid::new_v4());
+        let engine_bus: Arc<dyn EngineBus> = bus.clone();
+
+        // Turn start (no-op on zero subscribers — see InProcessBus::emit).
+        let _ = bus.emit(EngineYield::TurnStart {
+            turn_id: turn_id.clone(),
+            task: task.to_string(),
+        });
+
+        // Drive the loop with a bus-backed observer + (already-wired)
+        // bus-backed interaction gate. The observer emits the intermediate
+        // yields (IterationStart / StreamChunk / ToolCalls / ToolResult /
+        // TurnComplete via on_complete) during the turn; TurnStart is emitted
+        // here because no observer callback brackets the whole turn.
+        let observer = BusObserver::new(engine_bus, turn_id.clone());
+        let result = self.run_agent(task, &observer, interrupt_slot).await?;
+
+        Ok((&result).into())
     }
 
     /// Compact the conversation in place — the manual `/compact` entry point.

@@ -449,3 +449,63 @@ async fn cross_session_unfinished_work_surfaced() {
         "continue_task must restore the canonical goal from the working-state store"
     );
 }
+
+// ─── Engine bus (P1) ──────────────────────────────────────────────────────────
+
+/// A bus-driven turn emits `TurnStart`, the observer's lifecycle yields, and
+/// `TurnComplete`, and returns a projected `BusTurnSummary`. Validates the full
+/// AppBuilder.engine_bus → AppSession.run_turn_via_bus → BusObserver → AgentLoop
+/// → yield stream chain.
+#[tokio::test]
+async fn e2e_bus_driven_turn_emits_yields() {
+    use oneai_bus::{EngineBus, EngineYield};
+
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::always_answers("The answer is 42"));
+
+    // engine_bus() returns (builder, directive_rx) — the bus is stored on App.
+    let (builder, _directive_rx) = AppBuilder::new().provider(provider).engine_bus();
+    let app = builder
+        .default_parser()
+        .build()
+        .await
+        .expect("build should succeed");
+    let bus = app
+        .engine_bus
+        .as_ref()
+        .expect("engine_bus set on App")
+        .clone();
+
+    // Subscribe BEFORE the turn so we observe TurnStart.
+    let mut sub = bus.subscribe_yields();
+    let mut session = app.create_session();
+    let summary = session
+        .run_turn_via_bus(
+            "What is the answer?",
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .unwrap();
+
+    assert!(summary.completed, "turn completed");
+    assert!(summary.iterations >= 1);
+
+    // Drain the yield stream — the turn has already finished, so all emits
+    // are buffered in the broadcast channel.
+    let mut saw_turn_start = false;
+    let mut saw_turn_complete = false;
+    while let Ok(y) = sub.try_recv() {
+        match y {
+            EngineYield::TurnStart { task, .. } => {
+                saw_turn_start = true;
+                assert_eq!(task, "What is the answer?");
+            }
+            EngineYield::TurnComplete { summary, .. } => {
+                saw_turn_complete = true;
+                assert!(summary.completed);
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_turn_start, "TurnStart emitted");
+    assert!(saw_turn_complete, "TurnComplete emitted");
+}

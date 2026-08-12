@@ -28,6 +28,8 @@
 pub mod agent_loop;
 pub mod agent_runner;
 pub mod async_task_runner;
+pub mod bus_interaction_gate;
+pub mod bus_observer;
 pub mod context_assembler;
 pub mod error_recovery;
 pub mod group_chat;
@@ -55,6 +57,8 @@ pub mod worktree_isolation;
 pub use agent_loop::*;
 pub use agent_runner::*;
 pub use async_task_runner::*;
+pub use bus_interaction_gate::BusInteractionGate;
+pub use bus_observer::BusObserver;
 pub use context_assembler::*;
 pub use error_recovery::*;
 pub use guardian::LlmGuardian;

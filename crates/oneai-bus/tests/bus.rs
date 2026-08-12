@@ -54,7 +54,6 @@ async fn emit_reaches_subscriber() {
         turn_id: "t_1".to_string(),
         task: "demo".to_string(),
     })
-    .await
     .unwrap();
     let received = sub.recv().await.unwrap();
     assert!(matches!(received, EngineYield::TurnStart { .. }));

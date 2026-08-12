@@ -49,8 +49,12 @@ pub trait EngineBus: Send + Sync {
     /// receiver; lagging subscribers see a `RecvError::Lagged`.
     fn subscribe_yields(&self) -> broadcast::Receiver<EngineYield>;
 
-    /// Engine side: emit a yield to all subscribers.
-    async fn emit(&self, y: EngineYield) -> Result<()>;
+    /// Engine side: emit a yield to all subscribers. **Synchronous** — the
+    /// engine emits from sync `AgentLoopObserver` callbacks (which cannot
+    /// `.await`), and the in-process bus's `broadcast::send` is itself sync.
+    /// Out-of-process sidecars emit to their LOCAL bus here; a separate
+    /// forwarder task drains the local bus's yields onto the wire (async).
+    fn emit(&self, y: EngineYield) -> Result<()>;
 
     /// Engine side: ask for an approval. Broadcasts
     /// [`EngineYield::ApprovalRequest`] with a fresh `request_id`, then blocks
@@ -162,7 +166,7 @@ impl EngineBus for InProcessBus {
         self.yield_tx.subscribe()
     }
 
-    async fn emit(&self, y: EngineYield) -> Result<()> {
+    fn emit(&self, y: EngineYield) -> Result<()> {
         // broadcast::send returns Err only when there are zero receivers — a
         // turn may legitimately run with no subscriber yet, so treat as no-op.
         let _ = self.yield_tx.send(y);
@@ -179,8 +183,7 @@ impl EngineBus for InProcessBus {
         self.emit(EngineYield::ApprovalRequest {
             request_id,
             request: req,
-        })
-        .await?;
+        })?;
         rx.await.map_err(|_| BusError::Closed)
     }
 

@@ -131,6 +131,10 @@ pub struct AppBuilder {
     /// Unified interaction gate — every loop-suspend decision point.
     /// When `None` at `build()` time, defaults to `NoopInteractionGate` (zero latency).
     interaction_gate: Option<Arc<dyn InteractionGate>>,
+    /// Engine bus — when set (via [`AppBuilder::engine_bus`]), the app's
+    /// interaction gate becomes a `BusInteractionGate` over this bus and
+    /// `AppSession::run_turn_via_bus` is available (emits `EngineYield`s).
+    engine_bus: Option<Arc<oneai_bus::InProcessBus>>,
     /// Output parser.
     parser: Option<Arc<dyn OutputParser>>,
     /// Memory manager.
@@ -310,6 +314,7 @@ impl AppBuilder {
             provider: None,
             tool_registry: Arc::new(ToolRegistry::new()),
             interaction_gate: None,
+            engine_bus: None,
             parser: None,
             memory_manager: None,
             rag_index: None,
@@ -469,6 +474,24 @@ impl AppBuilder {
     pub fn noop_interaction_gate(mut self) -> Self {
         self.interaction_gate = Some(Arc::new(NoopInteractionGate));
         self
+    }
+
+    /// Enable the unified engine bus — constructs an `InProcessBus`, sets the
+    /// app's interaction gate to a `BusInteractionGate` over it (so every
+    /// approval decision point surfaces as an `EngineYield::ApprovalRequest`
+    /// and resolves via `Directive::Approve`), and exposes the bus to
+    /// `AppSession::run_turn_via_bus` for yield emission.
+    ///
+    /// Returns the builder plus the directive `Receiver` the engine driver /
+    /// directive-pump task reads `Directive::UserMessage` / `SwitchParadigm` /
+    /// `Shutdown` off (the bus handles `Approve`/`Interrupt` itself).
+    pub fn engine_bus(mut self) -> (Self, tokio::sync::mpsc::Receiver<oneai_bus::Directive>) {
+        let (bus, directive_rx) = oneai_bus::InProcessBus::new();
+        let bus = Arc::new(bus);
+        let gate = oneai_agent::BusInteractionGate::new(bus.clone());
+        self.interaction_gate = Some(Arc::new(gate));
+        self.engine_bus = Some(bus);
+        (self, directive_rx)
     }
 
     /// Use a channel-based interaction gate with all points enabled.
@@ -2600,6 +2623,7 @@ impl AppBuilder {
             tool_registry: self.tool_registry,
             tool_executor,
             interaction_gate,
+            engine_bus: self.engine_bus,
             parser,
             memory_manager,
             rag_index: self.rag_index,
@@ -2667,6 +2691,10 @@ pub struct App {
     pub tool_executor: Arc<ToolExecutor>,
     /// Unified interaction gate — every loop-suspend decision point.
     pub interaction_gate: Arc<dyn InteractionGate>,
+    /// Engine bus (when `AppBuilder::engine_bus` was called). `None` for
+    /// non-bus (direct-drive) apps; `Some` lets `AppSession::run_turn_via_bus`
+    /// emit `EngineYield`s and means `interaction_gate` is a `BusInteractionGate`.
+    pub engine_bus: Option<Arc<oneai_bus::InProcessBus>>,
     /// Output parser.
     pub parser: Arc<dyn OutputParser>,
     /// Memory manager.
