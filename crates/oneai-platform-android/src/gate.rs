@@ -105,9 +105,9 @@ impl AndroidInteractionBridge {
     /// Poll for a pending tool-approval request (non-blocking).
     ///
     /// Returns a JSON-encoded string of the request, or None if no item is
-    /// pending or the item is not a ToolApproval (auto-proceeded). The
-    /// response sender is dropped — use the `JniInteractionBridge` to track
-    /// pending senders by ID and reply.
+    /// pending or the item is not a ToolApproval (auto-proceeded). The response
+    /// sender is dropped — a caller that needs to reply by id should hold the
+    /// `InteractionPendingItem` from `poll_pending_item` instead.
     pub fn poll_pending_json(&self) -> Option<String> {
         let mut inner = self.inner.lock().unwrap();
         match inner.try_recv() {

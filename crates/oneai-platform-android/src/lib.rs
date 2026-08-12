@@ -1,27 +1,32 @@
 //! # OneAI Platform — Android
 //!
-//! Android platform adapter for the OneAI framework.
-//! Provides an interaction gate that bridges to Android AlertDialog
-//! via JNI, allowing the Kotlin/Java side to show native dialogs
-//! for high-risk tool approval.
+//! Android platform adapter for the OneAI framework. Provides a
+//! `PlatformInteractionGate` (`AndroidInteractionGate`) for a non-bus uniffi
+//! app: low-risk tool-approval requests auto-proceed, the rest land on a
+//! channel the Kotlin side polls via `AndroidInteractionBridge` and resolves
+//! with `AlertDialog`.
 //!
-//! Usage:
+//! P4 removed the separate `JniInteractionBridge` (id-keyed pending tracker)
+//! — the in-process 3-symbol bus pump resolves approvals as
+//! `EngineYield::ApprovalRequest` ↔ `Directive::Approve`, so the bus path no
+//! longer needs this gate. It stays as a fallback shell for a non-bus app;
+//! native bus consumers see `approval_request` yields off the pump.
+//!
+//! Usage (non-bus fallback):
 //! ```ignore
 //! let (gate, bridge) = AndroidInteractionGate::new(16, RiskLevel::Medium);
 //! let app = AppBuilder::new()
 //!     .interaction_gate(Arc::new(gate))
 //!     .build()?;
 //!
-//! // In Kotlin: OneAIInteractionHandler polls the bridge and shows AlertDialog
+//! // In Kotlin: poll the bridge and show AlertDialog
 //! ```
 
 mod gate;
-mod jni_bridge;
 
 use oneai_core::RiskLevel;
 
 pub use gate::{AndroidInteractionBridge, AndroidInteractionGate};
-pub use jni_bridge::JniInteractionBridge;
 
 /// Factory for creating Android interaction gates.
 pub struct AndroidInteractionGateFactory;

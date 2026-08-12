@@ -1,20 +1,20 @@
 //! # OneAI Platform — iOS
 //!
-//! iOS platform adapter for the OneAI framework.
-//! Provides an interaction gate that bridges to iOS UIAlertController
-//! via a C callback mechanism, allowing the Swift side to present
-//! native dialogs for high-risk tool approval.
+//! iOS platform adapter for the OneAI framework. Provides a `PlatformInteractionGate`
+//! (`IOSInteractionGate`) for a non-bus uniffi app: low-risk tool-approval requests
+//! auto-proceed, the rest land on a channel the Swift side polls via
+//! `IOSInteractionBridge` and resolves with `UIAlertController`.
 //!
-//! The bridge uses a simple C ABI: the Swift code registers a callback
-//! function pointer at init, which receives JSON-encoded tool-approval
-//! request strings and sends responses back via another callback.
+//! P4 removed the C-callback poll layer — the in-process 3-symbol bus pump
+//! (`oneai_submit_directive` / `oneai_poll_yield` / `oneai_shutdown`) resolves
+//! approvals as `EngineYield::ApprovalRequest` ↔ `Directive::Approve`, so the
+//! bus path no longer needs this gate. It stays as a fallback shell for a
+//! non-bus app; native bus consumers see `approval_request` yields off the pump.
 
-mod callback_bridge;
 mod gate;
 
 use oneai_core::RiskLevel;
 
-pub use callback_bridge::CallbackInteractionBridge;
 pub use gate::{IOSInteractionBridge, IOSInteractionGate};
 
 /// Factory for creating iOS interaction gates.
