@@ -338,7 +338,7 @@ impl EvolutionLoop {
 | `crates/oneai-domain/src/memory_profile.rs` | **E0**: 加 `MemoryProfile::from_config(cfg)` 构造 + 各枚举的 `parse`/`from_str` | 中 |
 | `crates/oneai-eval/src/replay.rs` | `Trajectory` 已 pub, 复用; 可能加 `Trajectory::with_trace` 一起存树 | 极小 |
 | `crates/oneai-app/src/builder.rs` | **不改**（`domain_pack()` 已满足） | 0 |
-| `crates/oneai-cli-demo` 或 `examples/cli` | 加 `evolve` 子命令 | 新增 |
+| `examples/cli`（crate `oneai-cli`，bin `oneai`） | 加 `evolve` 子命令 | 新增 |
 | `README.md` + `README_EN.md` | 加自演进章节（双向同步） | 文档 |
 
 **对 AppBuilder 的态度**：与 studio/supervisor 一致——**不加 AppBuilder 方法**，演化循环是外层驱动器，通过构造 `App` + 直接调 `EvalRunner` 驱动，不污染 App 的组装面。

@@ -188,12 +188,12 @@ oneai wasm unload <name>              # unload a module
 ```bash
 oneai mcp serve [--domain coding]       # run as an MCP server (compatible with Claude Code/Cursor)
 oneai mcp list                          # list configured MCP servers
-oneai mcp add <name> --transport stdio|sse|streamable_http [--command ...] [--url ...] [--args ...] [--enabled]
+oneai mcp add <name> --transport stdio|sse|streamable_http [--command ...] [--url ...] [--args ...] [--enabled] [--lazy]
 oneai mcp remove <name>                # remove an MCP server
 oneai mcp connect <name>              # test a connection and show discovered tools
 ```
 
-Mechanism: [mcp-mechanism_EN.md](mcp-mechanism_EN.md) (MCP).
+`--lazy` (Stage 5) makes the server skip connecting at startup — it's triggered on demand via `tool_search` by `McpLazyConnectTool`; after connecting, the real tools surface to the model and the trigger vanishes. HTTP-transport servers run the full OAuth 2.0 PKCE flow (`--manual` switches to manual code paste, SSH/headless-friendly; tokens persist at `~/.oneai/mcp_oauth/<server>.json`, auto-refresh on 401). A server asking the user back mid-`tools/call` goes through elicitation, via the `InteractionGate::McpElicitation` point. Tools are registered namespaced as `mcp__<server>__<tool>`; each server can carry `McpToolPermissions` setting `PermissionLevel`/`ToolExposure`. Mechanism: [mcp-mechanism_EN.md](mcp-mechanism_EN.md) (MCP).
 
 ## A2A (Agent-to-Agent protocol)
 
@@ -229,6 +229,26 @@ oneai supervisor rpc-stream <id> [--socket <path>]     # streaming RPC
 ```
 
 Mechanism: [supervisor-mechanism_EN.md](supervisor-mechanism_EN.md) (Supervisor).
+
+## Serve (engine-bus sidecar)
+
+```bash
+oneai serve [--socket ~/.oneai/serve.sock] [--domain ...] [--model ...] [--user <id>]  # launch the engine-bus sidecar
+```
+
+Exposes an `AppSession` over the unified engine bus to **out-of-process frontends** (native apps / IDE plugins): write `Directive` JSON lines and read `EngineYield` JSON lines over the socket. UDS (Unix) / named pipe (Windows). Differs from `oneai supervisor serve`: the supervisor is an instance-registry RPC (request/response `spawn/list/stop`); `serve` is a bidirectional concurrent bus (arbitrary-time directive ↔ arbitrary-time yield + approval `request_id` correlation), on a separate socket so both coexist. Mechanism: [bus-mechanism_EN.md](bus-mechanism_EN.md) (engine bus).
+
+## Evolve (self-evolution)
+
+```bash
+oneai evolve run --seed <pack.yaml> --suite <name> [--max-generations 3] [--target 0.85] [--patience 2]   # run a generation / multi-gen loop
+oneai evolve report ~/.oneai/evolve/run-<ts>    # inspect artifacts offline
+oneai evolve diff  ~/.oneai/evolve/run-<ts>    # seed vs frontier config diff
+oneai evolve lesson ~/.oneai/evolve/run-<ts>   # cross-generation lesson log
+oneai evolve step  ~/.oneai/evolve/run-<ts> --suite <name>   # resume one generation
+```
+
+A GEPA-style outer evolution loop — no model weight updates, only mutation over the `DomainPackConfig` (7-layer pack) + `AgentLoopConfig` text/numeric knob space; each generation is scored by a real eval suite, Pareto multi-objective selects the frontier, lessons merge to carry the frontier forward. Three safety gates (`DomainPackValidator` + PermissionResolver static gate + judge/candidate separation) + two regression gates (held-out overfitting check + replay determinism-drift check). Mechanism: [self-evolution-mechanism_EN.md](self-evolution-mechanism_EN.md) (self-evolution).
 
 ## Web UI
 

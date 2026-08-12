@@ -247,7 +247,7 @@ OneAI 有**两套**裁剪/压缩实现，分工不同：
 
 ### 7.2 交互门对上下文的控制
 
-`InteractionGate` 的 5 个决策点里，两个直接改写上下文（`agent_loop.rs:1144-1181`）：
+`InteractionGate` 的 7 个决策点里，两个直接改写上下文（`PreInfer`/`PostInfer`，`agent_loop.rs:1144-1181`）：
 
 - **PreInfer**：应用层可 `ProceedWith{InjectSystemMessage}` **临时注入**（不写持久日志，防累积，:1156-1160）、`ReplaceRequest` 重写、`Revise{feedback}` 把反馈**既作持久 user turn 又加入本轮请求**（:1166-1172）、`Abort`。
 - **PostInfer**：可校验/过滤/替换响应，或要求 feedback-grounded 重试。

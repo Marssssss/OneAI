@@ -1,6 +1,6 @@
 # OneAI MCP Mechanism
 
-> MCP (Model Context Protocol) server host + client + plugin registry — OneAI is both an MCP server (exposing its tools to external MCP clients like Claude Code / Cursor / VS Code) and an MCP client (connecting to external MCP servers to reuse their tools); JSON-RPC protocol + TOML config + stdio/SSE/streamable-http transports.
+> MCP (Model Context Protocol) server host + client + plugin registry — OneAI is both an MCP server (exposing its tools to external MCP clients like Claude Code / Cursor / VS Code) and an MCP client (connecting to external MCP servers to reuse their tools); JSON-RPC protocol + TOML config + stdio/SSE/streamable-http transports + OAuth 2.0 PKCE + bidirectional elicitation + model-transparent lazy connect.
 
 ## 1. Overview (what it is)
 
@@ -97,6 +97,16 @@ pub struct McpServerConfigFile { /* load_default/save_default TOML */ }
 
 **Plugin management:** `McpPluginRegistry::from_config_file()` loads plugin config from `~/.oneai` TOML; `add_entry`/`remove_entry` mutate; `McpPluginEntry::to_server_config` converts to connection config; `McpClient::from_config` connects.
 
+**Multi-server & enterprise capabilities (#31 Stage 1–5).** OneAI's MCP client is not just "connect one server" — it is an enterprise-grade multi-source manager:
+
+- **Multi-server connection management (Stage 1+2)**: `McpPluginRegistry` manages multiple servers; each `McpPluginEntry` carries `McpToolPermissions` (default `Standard`/`Direct`, zero behavior change) setting that server's tools' `PermissionLevel` + `ToolExposure`. Discovered tools are registered under **namespaced names** `mcp__<server>__<tool>` (`normalize_tool_name`), so two servers exposing a same-named tool don't collide. The DomainPack `PermissionProfile` can still tighten on top (e.g. force `mcp__filesystem__delete_file` to `Full`/`Hidden`).
+- **OAuth 2.0 PKCE full flow (Stage 3)**: HTTP-transport servers run discovery → (dynamic) registration → authorize → exchange → store → refresh → retry. Two login UXes: loopback redirect (default — a one-shot `127.0.0.1` listener + system browser launch) or manual paste (`--manual`, SSH/headless-friendly, no port bound). Tokens persist at `~/.oneai/mcp_oauth/<server>.json` carrying everything needed to refresh, so the transport-level 401-retry can refresh without consulting the registry config. PKCE uses S256; `state` is a random hex CSRF token.
+- **Immutable `McpBinding` snapshot + connection-identity separation (Stage 4-1)**: a connection produces an immutable binding snapshot (tool list + metadata frozen), separated from the "connection identity" (which connect) — concurrent calls see a consistent snapshot, no drift from mid-flight reconnect/refresh.
+- **Tool catalog cache LRU + generation (Stage 4-2)**: `tools/list` results are cached per server, LRU-evicted + generation-stamped — on reconnect/config change the generation bumps and the cache is invalidated wholesale, so the model never uses stale tool definitions.
+- **Bidirectional elicitation (Stage 4-3)**: an external server mid-`tools/call` sends `elicitation/create` asking the user back (for a credential / a value). Routed through `InteractionGate::McpElicitation` (on-demand, not per-iteration) — a run with UI pops a native dialog, a no-UI `NoopInteractionGate` **declines** (no fabricated data sent back to the server).
+- **Multi-source registration + priority merge (Stage 4-4)**: MCP tools can come from 5 sources (TOML config / DomainPack declaration / runtime add / lazy trigger / discovery), merged + deduped by priority — on a name clash the higher-priority source wins.
+- **Model-transparent lazy connect (Stage 5)**: a server marked `lazy: true` is not connected at startup (`connect_all_enabled` skips it), and its `mcp__<server>__<tool>` wrappers aren't registered — the model can neither see nor call them. `McpLazyConnectTool` (one per lazy server, `ToolExposure::Deferred`) is discovered via `tool_search` and then triggers: `ensure_connected` (connect + discover) → `DataLayerReloader::reload_data_layer` (register the real wrappers into the live registry) → returns the discovered tool names. After a successful connect the trigger's `service_available()` returns false, so it **vanishes from `tool_search` too** (the real tools are now in the registry, the trigger is redundant) — codex's "LazyWhenCached + vanish-after-cache" pattern. The next AgentLoop iteration reads the live registry, and the real `mcp__<server>__<tool>` tools surface to the model automatically.
+
 ## 6. Dependencies
 
 | Direction | Who | What |
@@ -119,6 +129,9 @@ pub struct McpServerConfigFile { /* load_default/save_default TOML */ }
 | `McpPluginRegistry` + `McpPluginEntry` | `crates/oneai-mcp/src/plugin.rs:143,61` (`to_server_config:89`) |
 | `McpServerConfigFile` (TOML load/save + `default_path`/`default_config`) | `crates/oneai-mcp/src/config.rs:34,42,52,75,105,113` |
 | `discovery` (discover external servers) | `crates/oneai-mcp/src/discovery.rs` |
+| OAuth 2.0 PKCE full flow + 401 refresh + persistence | `crates/oneai-mcp/src/oauth.rs` |
+| Model-transparent lazy-connect trigger (`McpLazyConnectTool`) | `crates/oneai-mcp/src/lazy_connect.rs` |
+| Immutable `McpBinding` snapshot + catalog cache LRU/generation | `crates/oneai-mcp/src/{plugin,client}.rs` |
 | `transport` (stdio/SSE/streamable-http) | `crates/oneai-mcp/src/transport.rs` |
 | Underlying impl (rmcp wrapper) | `crates/oneai-tool/src/mcp_real.rs` |
 

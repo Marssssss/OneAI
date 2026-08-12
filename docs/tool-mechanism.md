@@ -1,6 +1,6 @@
 # OneAI 工具系统机制
 
-> `Tool` trait + Registry + 执行器 + 16 内置工具 + MCP 客户端 + Footprint ladder + 三级权限 gate：模型能调用什么、按多大的 schema 足迹暴露、由谁来批准——三条决策在一个 crate 内闭合。
+> `Tool` trait + Registry + 执行器 + 17 内置工具 + MCP 客户端 + Footprint ladder + ToolExposure 六值可见性 + 三级权限 gate + 沙箱网络授权：模型能调用什么、按多大的 schema 足迹暴露、谁来批准、脚本出网放不放行——四条决策在一个 crate 内闭合。
 
 ## 1. 概述（是什么）
 
@@ -16,9 +16,13 @@
 
 **执行。** `ToolExecutor` 是工具执行的单一入口。它内嵌权限解析、InteractionGate 审批、超时三件事，使得任何调用方（AgentLoop、WorkflowExecutor、直接 RPC）拿到的执行语义都一致。
 
-**16 个内置工具。** 按权限分级组织：`Read` 级有 FileRead / FileList / Grep / Glob / Environment / WebFetch / WebSearch；`Standard` 级有 FileEdit / FileWrite / NotebookEdit / ApplyPatch / Calculator / Browser；`Full` 级有 Shell / FileDelete / Schedule。其中 ApplyPatch 支持多文件统一 diff 一次性编辑，Schedule 把 cron 调度作为工具暴露给模型。
+**17 个内置工具。** 按权限分级组织：`Read` 级有 FileRead / FileList / Grep / Glob / Environment / WebFetch / WebSearch；`Standard` 级有 FileEdit / FileWrite / NotebookEdit / ApplyPatch / Calculator / Browser / `code_interpreter`（沙箱化 CPython，#27 一等公民能力——脚本内可组合多次工具调用 + 循环/条件/重试，经 stdin/stdout JSON-RPC 回 host 走同一审批路径，Footprint 探 `python3` 缺失即从 schema 消失）；`Full` 级有 Shell / FileDelete / Schedule。其中 ApplyPatch 支持多文件统一 diff 一次性编辑，Schedule 把 cron 调度作为工具暴露给模型。
 
 **外部接入。** MCP 客户端（基于 `rmcp`）支持 stdio / SSE / streamable-http 三种传输，把远端 MCP server 的工具适配为本 crate 的 `Tool`；`FileOperations` trait 抽象出 Local/Remote 两种文件操作，Remote 经 `TerminalBackend` 在容器内用 `cat`/`base64`/`printf`/`find -printf` 操作文件，并用 `shell_quote` 防注入。
+
+**可见性六值（`ToolExposure`，#27）。** 一个工具对模型是否在初始 schema、是否可经 `tool_search` 发现、是否可在 code mode 脚本里调用，是三个正交维度，组合出六值：`Direct`（初始 schema + 可 code mode，默认）/ `Deferred`（不在初始 schema、经 `tool_search` 发现、可 code mode）/ `DeferredModelOnly`（可发现但不可 code mode）/ `DirectModelOnly`（在初始 schema 但不可 code mode）/ `CodeModeOnly`（只可 code mode，从不出现在 schema/`tool_search`）/ `Hidden`（注册可调度但永不对模型/脚本可见）。有效值经 `ExposureResolver` 解析——DomainPack 第③层 `PermissionProfile.tool_exposure` map 覆写工具自身的 `Tool::exposure`。这让"工具在哪一层对模型可见"也成为声明式可配，与 Footprint ladder 互补（ladder 决定"以多大足迹落地"，ToolExposure 决定"落地后对谁可见"）。与 Codex 拉齐。
+
+**沙箱网络授权（#28 Stage 1–6）。** `code_interpreter` / `shell` 在 Seatbelt（mac）/ Bubblewrap（linux）沙箱里被限到 loopback-only 出网；脚本的 HTTPS 请求经 `HTTPS_PROXY` 漏到本地 HTTP CONNECT 代理（`network_proxy.rs`）。代理查 `HostAllowlistStore`（已批准直连、已拒 403、未知按 `NetworkApprovalMode{Prompt/Defer/Deny}`），放行后落 `host_allowlist`、拒绝落 `host_denylist`（互斥），下次同 host 不再问。shell 命令侧：`Guardian`（持 `ApprovalPolicy` 四级 `Never`/`OnFailure`/`OnRequest`/`OnUntrustedDir`，默认 `OnFailure`）+ `ExecPolicy`（token-prefix 规则引擎，strictest-wins）在 `GuardianContext` 里命中规则即跳过 reviewer；审批通过后 `record_shell_approval` 把该 argv 写成 amendment 加进 `ExecPolicyStore`（`live = base ∪ amendments`，`RwLock` 热替换 + JSONL 持久化 dedup），下次同模式自动放行——"审一次学一次"闭合。文件工具侧：CodingPack 把 FileRead/Edit/Write/List 经 `SandboxedFileOps` 路由（`file_ops.rs:552`），与 `ShellTool` 共用 `default_sandbox_backend`（mac Seatbelt / linux Bubblewrap），沙箱是同一套。三条路径（工具权限解析 / 沙箱出网 / ExecPolicy 规则）都经 `InteractionGate` 的 `ToolApproval`/`NetworkApproval` 点，不绕审批。详见 [permission-mechanism](permission-mechanism.md)。
 
 **显式不做什么**，这条边界同样重要：它不解析 LLM 的文本输出（归 `oneai-parser`）；不做 USD 成本统计（用量只按 token 维度，工具只返回 `ToolOutput`）；不持有会话状态——每次 `execute` 都是独立的、无状态调用；它也不直接读 DomainPack 配置，而是经注入的 `PermissionResolver` 间接消费领域策略，从而保持依赖方向干净。
 
@@ -137,7 +141,14 @@ pub struct GatedTool { inner: Arc<dyn Tool>, check: ServiceCheck }   // 全方�
 | 多文件统一 diff | `crates/oneai-tool/src/apply_patch.rs`（`parse_unified_diff:77`/`DiffHunk:39`/`DiffLine:26`/`ApplyPatchTool:484`）|
 | `FileOperations` trait + Local/Remote | `crates/oneai-tool/src/file_ops.rs:109,186,317` |
 | `ShellTool` 安全前置（黑名单 + 写检测）| `crates/oneai-tool/src/tool_interfaces.rs:54` |
+| `ToolExposure`（6 值可见性）+ `ExposureResolver` | `crates/oneai-core/src/types.rs:848` + `crates/oneai-core/src/traits.rs` |
+| `CodeInterpreterTool`（`code_interpreter`，沙箱 CPython + JSON-RPC 回 host）| `crates/oneai-tool/src/code.rs` |
+| `Guardian` + `GuardianContext` + `ApprovalPolicy`（4 级）| `crates/oneai-tool/src/guardian.rs:140` + `crates/oneai-core/src/types.rs:1010` |
+| `ExecPolicy`/`ExecRule`/`PatternToken`/`ExecPolicyStore`（热替换 amendment）| `crates/oneai-tool/src/exec_policy.rs:75,100,122,290` |
+| `NetworkApprovalMode` + 本地 CONNECT egress 代理 | `crates/oneai-tool/src/network_proxy.rs` |
+| `HostAllowlistStore` trait + `SqliteHostAllowlist` | `crates/oneai-core/src/traits.rs` + `crates/oneai-persistence/src/host_allowlist.rs` |
 | `SandboxBackend`（Seatbelt/Docker/Regex）| `crates/oneai-tool/src/sandbox.rs:67,97,288,393` |
+| `SandboxedFileOps`（文件工具沙箱路由）| `crates/oneai-tool/src/file_ops.rs:552` |
 | `TerminalBackend` trait + Local/Docker/Modal/Daytona | `crates/oneai-tool/src/terminal.rs:131,211` + `terminal/docker.rs` + feature-gated `modal`/`daytona` |
 | MCP 客户端（三传输 + Content-Length 帧）| `crates/oneai-tool/src/mcp_real.rs`（`McpTransport:130`/`McpFramingParser:26`）|
 | Footprint gate 过滤调用点 | `crates/oneai-agent/src/agent_loop.rs:1460,3031,5122,5163,5227` |
@@ -149,7 +160,7 @@ pub struct GatedTool { inner: Arc<dyn Tool>, check: ServiceCheck }   // 全方�
 | **Claude Code** | 工具 + skill（progressive disclosure）+ Bash 沙箱黑名单 | OneAI 的 Footprint ladder 是它的推广：把"工具在哪一档落地"显式成 5 档决策规则；`service_available()` 让缺失服务**消失**而非 disabled——Claude Code 的 disabled 工具仍可能被模型尝试 |
 | **OpenAI Function Calling** | 函数 schema 全量常驻，无 footprint 概念 | OneAI 用 ladder 压 schema 膨胀；`extend`/`skill` 档让"不增加 schema 也能加能力"成为第一选项 |
 | **LangChain Tools** | `BaseTool` 单 trait，无权限分级、无消失机制 | OneAI 多了三级权限 + Footprint gate + DomainPack 横切权限解析；LangChain 工具始终在 schema 里 |
-| **AutoGen** | 工具 + function registration，权限靠 user proxy | OneAI 把权限内建为 `InteractionGate` 的 5 决策点之一，原生 UI 审批，不依赖外部 proxy |
+| **AutoGen** | 工具 + function registration，权限靠 user proxy | OneAI 把权限内建为 `InteractionGate` 的 7 决策点之一，原生 UI 审批，不依赖外部 proxy |
 | **MCP（Anthropic 规范）** | 外部进程暴露工具 | OneAI 既是 MCP **客户端**（`mcp_real.rs` 适配为 `Tool`），也是 MCP **服务端**（见 [mcp-mechanism](mcp-mechanism.md)），双向对等 |
 
 OneAI 的独特点有两处：Footprint ladder 是一等公民的设计规则（不是事后优化），以及工具能自扩展工具面（`added_tool_names` → `on_tools_added`）——后者多数框架没有。
@@ -161,12 +172,14 @@ OneAI 的独特点有两处：Footprint ladder 是一等公民的设计规则（
 - **替换同名工具**：`override_tool`（Phase 4.2 Gondolin 模式，`ContainerizedCodingPack` 把 `read_file`/`shell` 换成 VM 后端实现，VM 即安全边界不砍权限）。
 - **切执行后端**：`AppBuilder::terminal_backend(...)`（Local / Docker / Modal / Daytona）；`cleanup(hibernate=true)` 是唯一拆卸 chokepoint（停 + 留可恢复 vs 销毁）。
 - **域权限策略**：DomainPack 第③层 `PermissionProfile` → `PermissionResolver` 注入 `ToolExecutor`。
+- **工具可见性分级**：`Tool::exposure` 返 `ToolExposure`（默认 `Direct`，零行为变化）；DomainPack `PermissionProfile.tool_exposure` map 覆写（`ExposureResolver` 解析）。
+- **沙箱网络授权（#28）**：`AppBuilder::network_approval_mode(Prompt/Defer/Deny)`（默认 Prompt）；`exec_rules_path(path)` 指定 ExecPolicy 基础规则文件（默认 `~/.oneai/rules/default.rules`）；`with_exec_amendment(bool)` 开关审批后热替换（默认开）；`code_interpreter` 工作目录 / NetworkPolicy 经 builder 字段设。
 - **沙箱 env**：CodingPack 默认走 seatbelt `allow-default` + 定向写禁止（见 [Issue #16](https://github.com/) ——`(deny default)` 会禁掉 process-fork，使 `||`/`&&`/管道全部 exit 128，故改 allow-default）。
 
 ## 10. 深入阅读
 
 - [CLAUDE.md — Tools / Footprint ladder 章节](../CLAUDE.md)
-- [permission-mechanism.md](permission-mechanism.md) —— 三级权限 + InteractionGate 5 决策点
+- [permission-mechanism.md](permission-mechanism.md) —— 三级权限 + InteractionGate 7 决策点
 - [domain-pack-mechanism.md](domain-pack-mechanism.md) —— 第①层工具+装饰器、第③层 PermissionProfile
 - [skill-mechanism.md](skill-mechanism.md) —— Footprint ladder 的 `skill` 档（零 schema 提示）
 - [multi-agent-mechanism.md](multi-agent-mechanism.md) —— AgentLoop 如何装配/执行工具

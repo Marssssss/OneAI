@@ -7,8 +7,8 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml/badge.svg)](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
-[![Crates: 27](https://img.shields.io/badge/Crates-27-orange.svg)]()
-[![Tests: 1700+](https://img.shields.io/badge/Tests-1700%2B-green.svg)]()
+[![Crates: 29](https://img.shields.io/badge/Crates-29-orange.svg)]()
+[![Tests: 2100+](https://img.shields.io/badge/Tests-2100%2B-green.svg)]()
 [![Version: 1.1.0](https://img.shields.io/badge/Version-1.1.0-blue.svg)]()
 [![Rust: edition 2021](https://img.shields.io/badge/Rust-edition%202021-dea584.svg)]()
 [![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
@@ -42,6 +42,7 @@ One Rust core (`oneai-core`) drives native apps on macOS / Windows / Linux / And
 ## Highlights · why OneAI
 
 - **Six native targets from one core** — one Rust core drives native apps on macOS / Windows / Linux / Android / iOS / HarmonyOS. Not a WebView shell.
+- **Unified engine bus** — one protocol of `Directive` (frontend → engine) + `EngineYield` (engine → frontend), shared by the TUI, Studio web, six native apps, and the `oneai serve` sidecar; a frontend only needs to "write Directives, read EngineYields".
 - **Dynamic AgentLoop** — not a fixed pipeline; each iteration the model decides (direct answer / tool call / delegate to a sub-agent / switch paradigm), bounded by a token budget rather than a hardcoded `max_iterations`.
 - **DomainPack — switch domains in one line** — 7 declarative layers (tools / context / permissions / paradigms / compression / workflows / memory), mergeable, validatable against a JSON Schema, shareable via a pack market.
 - **Scenario GroupChat** — an engine-level multi-role primitive: cast + turn policy + per-field visibility + debrief/review loops, with 5 built-in presets ready to use.
@@ -67,11 +68,19 @@ Pick the path that matches your role:
 
 Two native desktop apps share the same design, scenario system, and settings panel — macOS is SwiftUI, Windows is WinUI 3 / C#, feature-aligned. **Configuration and usage are identical**; only installation differs.
 
-**macOS (download & go)**: grab `OneAI-1.1.0-macos.zip` from [GitHub Releases](https://github.com/Marssssss/OneAI/releases), unzip, and drag into *Applications*. The .app is unsigned / unnotarized (arm64, Apple Silicon, macOS 13+); the browser-downloaded copy carries a quarantine flag — **strip it with one terminal line**:
+**macOS (build from source — recommended)**: needs only Command Line Tools, no Xcode. Two steps — first build the Rust static lib and bindings, then compile the SwiftUI app:
 
 ```bash
-xattr -cr /Applications/OneAI.app   # then double-click to open, no dialog
+./scripts/build_apple.sh        # stages liboneai.a + headers + Swift binding
+./platforms/macos/build_macos.sh
+open platforms/macos/build/OneAI.app
 ```
+
+> You can also download a packaged .app from [GitHub Releases](https://github.com/Marssssss/OneAI/releases). **Releases often lag behind source**, though, so for the latest features build from source as shown above. A copy downloaded from a browser carries a quarantine flag — strip it with one line and you can double-click straight in:
+>
+> ```bash
+> xattr -cr /Applications/OneAI.app
+> ```
 
 **Windows (build from source)**: requires Visual Studio with the WindowsAppSDK 1.8 workload.
 
@@ -89,9 +98,7 @@ dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug -r win-x64
 - **API key** / **Base URL** (blank = official endpoint) / **Model** (e.g. `gpt-4o` / `claude-sonnet-4-6` / `llama3` / `qwen-plus`).
 - **Embedding settings**: leave blank for `auto`-probe (probe chain in [RAG mechanism](docs/rag-mechanism_EN.md)).
 
-Each agent can additionally override model / key / base_url in the scenario editor to mix vendors. Usage: pick one of 5 built-in presets from *Start from a scenario* (**mock interview / language partner / debate / writing workshop / brainstorm**), or *Edit scenario* to compose your own. In-session: token-by-token markdown streaming + thinking bubbles, command palette (macOS `⌘K` / Windows `Ctrl+K`), voice input, artifact canvas.
-
-> Build macOS from source: `./scripts/build_apple.sh && ./platforms/macos/build_macos.sh && open platforms/macos/build/OneAI.app`.
+Each agent can additionally override model / key / base_url in the scenario editor to mix vendors. Pick one of 5 built-in presets from *Start from a scenario* (**mock interview / language partner / debate / writing workshop / brainstorm**), or *Edit scenario* to compose your own. While running you get token-by-token markdown streaming with thinking bubbles, a command palette (macOS `⌘K` / Windows `Ctrl+K`), voice input, and an artifact canvas.
 
 ### 2. TUI / CLI (general agentic execution)
 
@@ -109,7 +116,7 @@ export ONEAI_MODEL="llama3"
 ```
 
 ```bash
-cargo run -p oneai-cli      # or: cargo install oneai-cli, then just: oneai
+cargo run -p oneai-cli      # or: cargo install --path examples/cli, then just: oneai
 ```
 
 Enter the interactive agent: type a task and watch the full pipeline run live — streaming thinking bubbles, tool calls, plan checklist, usage stats, traces.
@@ -146,7 +153,7 @@ cargo add oneai-app
 cargo add tokio --features full
 ```
 
-The integration point is `AppBuilder` in `crates/oneai-app/src/builder.rs` — every subsystem is optional and plugged in via builder methods (**the LLM provider is optional too**; tool-only or workflow-only usage needs no provider). On top of `App` you call `create_session()` to get an `AppSession`; **the inference entry that drives the AgentLoop is `session.run_agent(task, observer, interrupt_slot)`** — pass the user input as the `task` string and the loop adds it to the conversation itself. You do *not* call `send_user_message` first.
+The integration point is `AppBuilder` in `crates/oneai-app/src/builder.rs` — every subsystem is optional and plugged in on demand via builder methods (**the LLM provider is optional too**; tool-only or workflow-only usage needs no provider). `build()` gives you an `App`, and `create_session()` gives you an `AppSession`. The inference entry that drives the AgentLoop is `session.run_agent(task, observer, interrupt_slot)`: pass the user input as the `task` string and the loop adds it to the conversation itself — you do *not* call `send_user_message` first.
 
 #### Minimal (silent inference)
 
@@ -235,7 +242,7 @@ while let Some(chunk) = rx.recv().await { /* render */ }
 
 - **`task` *is* the user input**: do not `send_user_message` then `run_agent` — that double-adds the message. `run_agent` adds the task to the conversation internally (see the comment in `session.rs`).
 - **Multi-turn chat**: call `run_agent` repeatedly within one session; the conversation accumulates history and the AgentLoop auto-compresses when context exceeds the token budget (`ContextBudgetManager` gates it, budget scales with the model's real window). Manual compression: `session.compact(keep_recent_turns)`.
-- **Interrupt / resume**: clone `interrupt_slot` to the UI thread, take the `AgentLoop` handle inside and call `interrupt()` — takes effect at iteration boundaries. The `ChannelInteractionGate` / `ThresholdInteractionGate` also intercept 5 decision points (tool approval, plan decision, …) — see `AppBuilder::channel_interaction_gate` / `threshold_interaction_gate`.
+- **Interrupt / resume**: clone `interrupt_slot` to the UI thread, take the `AgentLoop` handle inside and call `interrupt()` — takes effect at iteration boundaries. The `ChannelInteractionGate` / `ThresholdInteractionGate` also intercept decision points like tool approval and plan decisions — see `AppBuilder::channel_interaction_gate` / `threshold_interaction_gate`.
 - **Cross-session resume**: `app.create_session_with_id(id).await` replays history from SQLite; to bind to a working-state task use `session.continue_task(task_id)` (crash recovery + cross-session task continuation).
 - **Domain switch**: `.domain_pack(coding_pack("/dir"))` on the builder switches domain in one line — the AgentLoop uses the corresponding system prompt + tool whitelist + paradigm strategies; merge multiple with `.domain_packs(vec![...])` (permissions strictest-wins).
 - **Tool-only / workflow-only (no provider)**: skip `.provider(...)`, call `session.execute_tool("calculator", json!({"expression":"2+3"})).await` directly (returns `ToolOutput.content`), or `session.execute_workflow(&config).await` to run a StateGraph — see the "no LLM needed" example below:
@@ -250,6 +257,29 @@ println!("{}", r.content); // → "5"
 ```
 
 Plain integration only needs `oneai-app`; to shrink your dependency surface, pull individual crates (`oneai-core` / `-provider` / `-domain` / `-tool` / `-memory` / `-rag` …) — full list in [Architecture — Crate map](docs/architecture_EN.md#crate-map). For a deeper architectural read see [CLAUDE.md](CLAUDE.md); to drive each subsystem end-to-end see the [CLI reference](docs/cli-reference_EN.md) — the `chat` subcommand in `examples/cli` is a complete reference implementation of `run_agent` + a custom observer + an interrupt slot, ready to copy.
+
+#### Building a UI / native frontend? Take the engine bus
+
+`run_agent` + `AgentLoopObserver` suits **embedding into your own Rust app** — the engine calls your observer back directly. But if you are building a **separate frontend process or native app** (macOS Swift, Windows C#, mobile, or even a web Studio), take the engine bus instead: two channels — `Directive` (frontend → engine) and `EngineYield` (engine → frontend) — one shared protocol for every frontend.
+
+```rust
+use oneai_app::AppBuilder;
+
+// engine_bus() enables the bus: installs BusInteractionGate, returns (builder, directive_rx)
+let (builder, directive_rx) = AppBuilder::new()
+    .provider(...)
+    .engine_bus();
+let app = builder.build()?;
+let bus = app.engine_bus.clone().expect("engine_bus is set");
+
+let mut session = app.create_session();
+// Subscribe to the yield stream: each turn the engine yields stream chunks / tool calls / approval requests
+let mut yields = bus.subscribe_yields();
+// Run a turn — the engine emits EngineYield; the frontend can also submit Directives (UserMessage / Approve / Interrupt …)
+session.run_turn_via_bus("user input here", interrupt_slot).await?;
+```
+
+A frontend's role is simple: write `Directive`s, read `EngineYield`s. An in-process frontend (TUI, same-process UI) holds an `Arc<InProcessBus>` directly; an out-of-process one (native app, IDE plugin) goes through the `oneai serve` sidecar over newline-JSON on UDS (Unix) / named pipe (Windows). Approval reuses the same pair of channels — `EngineYield::ApprovalRequest` carries a `request_id`, the frontend replies with `Directive::Approve`, so no per-frontend mpsc is needed. Full protocol, sidecar, and the c_facade 3-symbol pump in [Engine bus mechanism](docs/bus-mechanism_EN.md).
 
 ---
 
@@ -271,7 +301,11 @@ Each iteration the model dynamically chooses among *direct answer / tool call / 
 
 ## Cross-platform: desktop & mobile
 
-One Rust core, two FFI paths, six native targets:
+One Rust core, three paths to six native targets:
+
+1. **UniFFI bindings** — Kotlin / Swift bind `oneai-core` traits directly.
+2. **Hand-written `extern "C"` facade** — C# / C++ / ArkTS go through a UTF-8 JSON facade (`c_facade`) with a 3-symbol bus pump (build engine, submit, drain).
+3. **`oneai serve` sidecar** — when a native process does not embed the Rust lib, it talks to the engine bus over UDS (Unix) / named pipe (Windows), sending/receiving `Directive`/`EngineYield` as newline-JSON. See [Engine bus mechanism](docs/bus-mechanism_EN.md).
 
 | Platform | Stack | Binding language | Native approval dialog |
 |---|---|---|---|
@@ -292,7 +326,7 @@ OneAI runs [SWE-bench Lite](https://www.swebench.com/) as a coding-agent eval, c
 
 ```bash
 # Smoke: a single instance to confirm the loop
-cargo run -p oneai-cli-demo -- eval swebench \
+cargo run -p oneai-cli -- eval swebench \
     --dataset ./swe_bench_lite.jsonl \
     --instances astropy__astropy-12907 \
     --workspace ./swebench-workspace --run-id oneai-smoke
@@ -308,14 +342,14 @@ OneAI ships a **GEPA-style outer evolution loop** (`oneai-evolve` crate): it doe
 
 ```bash
 # Run a single/multi-generation loop (variation scored against a builtin suite)
-cargo run -p oneai-cli-demo -- evolve run \
+cargo run -p oneai-cli -- evolve run \
     --seed ./my-pack.yaml --suite coding_basics \
     --max-generations 3 --target 0.85 --patience 2
 # Inspect artifacts offline
-cargo run -p oneai-cli-demo -- evolve report ~/.oneai/evolve/run-<ts>
-cargo run -p oneai-cli-demo -- evolve diff   ~/.oneai/evolve/run-<ts>   # seed-vs-frontier config diff
-cargo run -p oneai-cli-demo -- evolve lesson ~/.oneai/evolve/run-<ts>  # cross-generation lesson log
-cargo run -p oneai-cli-demo -- evolve step  ~/.oneai/evolve/run-<ts> --suite coding_basics  # resume one gen
+cargo run -p oneai-cli -- evolve report ~/.oneai/evolve/run-<ts>
+cargo run -p oneai-cli -- evolve diff   ~/.oneai/evolve/run-<ts>   # seed-vs-frontier config diff
+cargo run -p oneai-cli -- evolve lesson ~/.oneai/evolve/run-<ts>  # cross-generation lesson log
+cargo run -p oneai-cli -- evolve step  ~/.oneai/evolve/run-<ts> --suite coding_basics  # resume one gen
 ```
 
 The full mechanism (five-stage loop / variation-substrate map / safety gates / layered reward-hacking defense / replay applicability) is in the [Self-evolution mechanism whitepaper](docs/self-evolution-mechanism.md); design rationale in the [implementation plan](docs/self-evolution-system-2026-08.md).

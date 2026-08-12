@@ -1,6 +1,6 @@
 # OneAI Tool System Mechanism
 
-> `Tool` trait + Registry + executor + 16 built-in tools + MCP client + Footprint ladder + 3-tier permission gate: what the model can call, at what schema footprint it is exposed, and who approves it — three decisions closed within one crate.
+> `Tool` trait + Registry + executor + 17 built-in tools + MCP client + Footprint ladder + ToolExposure 6-value visibility + 3-tier permission gate + sandboxed egress: what the model can call, at what schema footprint it is exposed, who approves, and whether a script's outbound network is let through — four decisions closed within one crate.
 
 ## 1. Overview (what it is)
 
@@ -16,9 +16,13 @@ In the dependency layering it sits in the feature layer: downstream it depends o
 
 **Execution.** `ToolExecutor` is the single entry point for tool execution. It embeds permission resolution, the InteractionGate approval, and timeout, so any caller (AgentLoop, WorkflowExecutor, direct RPC) gets consistent execution semantics.
 
-**16 built-in tools.** Organized by permission tier: `Read` tier — FileRead / FileList / Grep / Glob / Environment / WebFetch / WebSearch; `Standard` tier — FileEdit / FileWrite / NotebookEdit / ApplyPatch / Calculator / Browser; `Full` tier — Shell / FileDelete / Schedule. ApplyPatch supports multi-file unified-diff editing in one shot; Schedule exposes cron scheduling as a tool to the model.
+**17 built-in tools.** Organized by permission tier: `Read` tier — FileRead / FileList / Grep / Glob / Environment / WebFetch / WebSearch; `Standard` tier — FileEdit / FileWrite / NotebookEdit / ApplyPatch / Calculator / Browser / `code_interpreter` (sandboxed CPython, #27 first-class capability — a script can compose multiple tool calls + loops/conditionals/retries, marshalled back to the host over stdin/stdout JSON-RPC through the same approval path; Footprint probes `python3` and vanishes from the schema if absent); `Full` tier — Shell / FileDelete / Schedule. ApplyPatch supports multi-file unified-diff editing in one shot; Schedule exposes cron scheduling as a tool to the model.
 
 **External integration.** The MCP client (based on `rmcp`) supports stdio / SSE / streamable-http transports, adapting remote MCP server tools into this crate's `Tool`; the `FileOperations` trait abstracts Local/Remote file ops, where Remote operates inside a container via `TerminalBackend` using `cat`/`base64`/`printf`/`find -printf`, with `shell_quote` for injection safety.
+
+**6-value visibility (`ToolExposure`, #27).** Whether a tool is in the initial schema, discoverable via `tool_search`, or callable from a code-mode script are three orthogonal dimensions, combining into six values: `Direct` (initial schema + code-mode callable, default) / `Deferred` (not in initial schema, found via `tool_search`, code-mode callable) / `DeferredModelOnly` (discoverable but not code-mode) / `DirectModelOnly` (in initial schema but not code-mode) / `CodeModeOnly` (only code-mode, never in schema/`tool_search`) / `Hidden` (registered & dispatchable but never visible to model or scripts). The effective value is resolved through `ExposureResolver` — DomainPack layer-③ `PermissionProfile.tool_exposure` map overrides the tool's own `Tool::exposure`. This makes "which layer a tool is visible at" declaratively configurable, complementing the Footprint ladder (the ladder decides "at what footprint it lands", ToolExposure decides "visible to whom after landing"). Aligned with Codex.
+
+**Sandboxed egress (#28 Stage 1–6).** `code_interpreter` / `shell` are restricted to loopback-only egress inside the Seatbelt (mac) / Bubblewrap (linux) sandbox; the script's HTTPS requests are funnelled via `HTTPS_PROXY` to a local HTTP CONNECT proxy (`network_proxy.rs`). The proxy checks `HostAllowlistStore` (approved → tunnel, denied → 403, unknown → `NetworkApprovalMode{Prompt/Defer/Deny}`); after admission the host lands in `host_allowlist`, after denial in `host_denylist` (mutually exclusive), so the same host isn't re-prompted. On the shell-command side: `Guardian` (holding an `ApprovalPolicy` of four levels `Never`/`OnFailure`/`OnRequest`/`OnUntrustedDir`, default `OnFailure`) + `ExecPolicy` (a token-prefix rule engine, strictest-wins) — `GuardianContext` skips the reviewer when a rule matches; after approval, `record_shell_approval` writes that argv as an amendment into `ExecPolicyStore` (`live = base ∪ amendments`, `RwLock` hot-swap + JSONL persistence with dedup), so the next identical-pattern command auto-releases — the "approve once, learn once" closure. On the file-tool side: CodingPack routes FileRead/Edit/Write/List through `SandboxedFileOps` (`file_ops.rs:552`), sharing `default_sandbox_backend` (mac Seatbelt / linux Bubblewrap) with `ShellTool` — one sandbox. All three paths (tool permission resolution / sandbox egress / ExecPolicy rules) go through the `InteractionGate` `ToolApproval`/`NetworkApproval` points — no bypassing approval. See [permission-mechanism](permission-mechanism_EN.md).
 
 **Explicitly does not**, and this boundary matters too: it does not parse LLM text output (that's `oneai-parser`); no USD cost tracking (usage is token-only, tools only return `ToolOutput`); no session state held (each `execute` is independent and stateless); it does not read DomainPack config directly either — it consumes domain policy indirectly via the injected `PermissionResolver`, keeping the dependency direction clean.
 
@@ -137,7 +141,14 @@ The tool system runs through this chain each AgentLoop iteration:
 | Multi-file unified diff | `crates/oneai-tool/src/apply_patch.rs` (`parse_unified_diff:77`/`DiffHunk:39`/`DiffLine:26`/`ApplyPatchTool:484`) |
 | `FileOperations` trait + Local/Remote | `crates/oneai-tool/src/file_ops.rs:109,186,317` |
 | `ShellTool` safety pre-flight (blacklist + write detection) | `crates/oneai-tool/src/tool_interfaces.rs:54` |
+| `ToolExposure` (6-value visibility) + `ExposureResolver` | `crates/oneai-core/src/types.rs:848` + `crates/oneai-core/src/traits.rs` |
+| `CodeInterpreterTool` (`code_interpreter`, sandboxed CPython + JSON-RPC back to host) | `crates/oneai-tool/src/code.rs` |
+| `Guardian` + `GuardianContext` + `ApprovalPolicy` (4 levels) | `crates/oneai-tool/src/guardian.rs:140` + `crates/oneai-core/src/types.rs:1010` |
+| `ExecPolicy`/`ExecRule`/`PatternToken`/`ExecPolicyStore` (hot-swap amendment) | `crates/oneai-tool/src/exec_policy.rs:75,100,122,290` |
+| `NetworkApprovalMode` + local CONNECT egress proxy | `crates/oneai-tool/src/network_proxy.rs` |
+| `HostAllowlistStore` trait + `SqliteHostAllowlist` | `crates/oneai-core/src/traits.rs` + `crates/oneai-persistence/src/host_allowlist.rs` |
 | `SandboxBackend` (Seatbelt/Docker/Regex) | `crates/oneai-tool/src/sandbox.rs:67,97,288,393` |
+| `SandboxedFileOps` (file-tool sandbox routing) | `crates/oneai-tool/src/file_ops.rs:552` |
 | `TerminalBackend` trait + Local/Docker/Modal/Daytona | `crates/oneai-tool/src/terminal.rs:131,211` + `terminal/docker.rs` + feature-gated `modal`/`daytona` |
 | MCP client (3 transports + Content-Length framing) | `crates/oneai-tool/src/mcp_real.rs` (`McpTransport:130`/`McpFramingParser:26`) |
 | Footprint gate filter call sites | `crates/oneai-agent/src/agent_loop.rs:1460,3031,5122,5163,5227` |
@@ -149,7 +160,7 @@ The tool system runs through this chain each AgentLoop iteration:
 | **Claude Code** | Tools + skills (progressive disclosure) + Bash sandbox blacklist | OneAI's Footprint ladder generalizes it: an explicit 5-rung decision rule for "which rung does a tool live at"; `service_available()` makes a missing service **vanish** rather than disabled — Claude Code's disabled tools can still be tried by the model |
 | **OpenAI Function Calling** | Function schemas all resident, no footprint concept | OneAI uses the ladder to curb schema bloat; `extend`/`skill` rungs make "add capability without adding schema" the first option |
 | **LangChain Tools** | `BaseTool` single trait, no permission tiers, no vanish mechanism | OneAI adds 3-tier permissions + Footprint gate + DomainPack cross-cutting permission resolution; LangChain tools are always in the schema |
-| **AutoGen** | Tools + function registration, permissions via user proxy | OneAI bakes permissions into `InteractionGate`'s 5 decision points, native UI approval, no external proxy dependency |
+| **AutoGen** | Tools + function registration, permissions via user proxy | OneAI bakes permissions into `InteractionGate`'s 7 decision points, native UI approval, no external proxy dependency |
 | **MCP (Anthropic spec)** | External process exposes tools | OneAI is both an MCP **client** (`mcp_real.rs` adapts to `Tool`) and an MCP **server** (see [mcp-mechanism](mcp-mechanism_EN.md)), bidirectional |
 
 OneAI's distinct points: the Footprint ladder is a first-class design rule (not an afterthought), and tools can self-extend the tool surface (`added_tool_names` → `on_tools_added`) — the latter most frameworks lack.
@@ -161,13 +172,15 @@ OneAI's distinct points: the Footprint ladder is a first-class design rule (not 
 - **Replace a same-named tool**: `override_tool` (Phase 4.2 Gondolin mode, `ContainerizedCodingPack` swaps `read_file`/`shell` for VM-backed impls; the VM is the security boundary, no permission cut).
 - **Switch execution backend**: `AppBuilder::terminal_backend(...)` (Local / Docker / Modal / Daytona); `cleanup(hibernate=true)` is the sole teardown chokepoint (stop+keep restorable vs destroy).
 - **Domain permission policy**: DomainPack layer 3 `PermissionProfile` → `PermissionResolver` injected into `ToolExecutor`.
+- **Tool visibility tiering**: `Tool::exposure` returns a `ToolExposure` (default `Direct`, zero behavior change); DomainPack `PermissionProfile.tool_exposure` map overrides it (resolved by `ExposureResolver`).
+- **Sandboxed egress (#28)**: `AppBuilder::network_approval_mode(Prompt/Defer/Deny)` (default Prompt); `exec_rules_path(path)` points at the ExecPolicy base rules file (default `~/.oneai/rules/default.rules`); `with_exec_amendment(bool)` toggles post-approval hot-swap (default on); the `code_interpreter` working dir / NetworkPolicy are set via builder fields.
 - **Sandbox env**: CodingPack defaults to seatbelt `allow-default` + targeted write ban (see Issue #16 — `(deny default)` disables process-fork, making `||`/`&&`/pipes all exit 128, hence allow-default).
 - **CLI**: no standalone `tool` subcommand (tools are driven indirectly via the provider/agent paths); MCP tools via `oneai mcp *`.
 
 ## 10. Further reading
 
 - [CLAUDE.md — Tools / Footprint ladder](../CLAUDE.md)
-- [permission-mechanism](permission-mechanism_EN.md) — 3-tier permissions + InteractionGate 5 decision points
+- [permission-mechanism](permission-mechanism_EN.md) — 3-tier permissions + InteractionGate 7 decision points
 - [domain-pack-mechanism](domain-pack-mechanism_EN.md) — layer 1 tools+decorators, layer 3 PermissionProfile
 - [skill-mechanism](skill-mechanism_EN.md) — the Footprint ladder `skill` rung (zero-schema prompt)
 - [multi-agent-mechanism](multi-agent-mechanism_EN.md) — how the AgentLoop assembles/executes tools

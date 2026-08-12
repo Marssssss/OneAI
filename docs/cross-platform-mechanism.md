@@ -151,7 +151,7 @@ OneAI 独特点：**Rust 内核 + 各端原生 UI（非套壳）+ 双 FFI 通路
 
 ## 10. 深入阅读
 
-- [permission-mechanism.md](permission-mechanism.md) —— `PlatformInteractionGate` 与 5 决策点
+- [permission-mechanism.md](permission-mechanism.md) —— `PlatformInteractionGate` 与 7 决策点
 - [multi-agent-mechanism.md](multi-agent-mechanism.md) —— GroupChat FFI + 场景化多角色对话
 - [memory-mechanism.md](memory-mechanism.md) —— `sqlite_persistence_at` 跨重启记忆
 - [CLAUDE.md — 跨平台 / Network proxy 章节](../CLAUDE.md)

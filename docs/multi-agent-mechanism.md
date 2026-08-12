@@ -319,7 +319,7 @@ while 还有 pending:
 | **长程上下文** | 持久/临时分离 + 固定块重注入抗压缩 | LangGraph state channels、Letta memory blocks | OneAI 的"重注入而非靠压缩器"思路独特 |
 | **记忆** | Letta 三层 + Mem0 冲突更新 + 三因子召回 + 压缩耦合抽取 | Letta、Mem0、Generative Agents、Zep-Graphiti | 融合多家，"压缩即丢失"闭环是亮点（详见记忆白皮书） |
 | **协议互操作** | A2A SDK（P2-5）+ MCP server 生态（P3-6） | Google A2A Protocol、Anthropic MCP | OneAI 既实现 A2A 客户端/服务端又接 MCP |
-| **人类在环** | InteractionGate 5 决策点 + 中断/恢复 + Checkpoint 时间旅行 | LangGraph interrupt、AutoGen human-in-loop | OneAI 用统一 5 决策点 gate 收敛，Studio 提供时间旅行 |
+| **人类在环** | InteractionGate 7 决策点 + 中断/恢复 + Checkpoint 时间旅行 | LangGraph interrupt、AutoGen human-in-loop | OneAI 用统一 7 决策点 gate 收敛，Studio 提供时间旅行 |
 | **声明式领域** | DomainPack 7 层可合并 | CrewAI 的 role/goal、AgentScope 的配置 | OneAI 更彻底：编排、记忆、压缩、图流全声明式 |
 
 ### 9.2 对标 AutoGen / LangGraph

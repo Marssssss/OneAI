@@ -151,7 +151,7 @@ OneAI's distinct points: **Rust core + per-target native UI (no shell)** + **two
 
 ## 10. Further reading
 
-- [permission-mechanism](permission-mechanism_EN.md) — `PlatformInteractionGate` and the 5 decision points
+- [permission-mechanism](permission-mechanism_EN.md) — `PlatformInteractionGate` and the 7 decision points
 - [multi-agent-mechanism](multi-agent-mechanism_EN.md) — GroupChat FFI + scenario multi-role chat
 - [memory-mechanism](memory-mechanism_EN.md) — `sqlite_persistence_at` cross-restart memory
 - [CLAUDE.md — Cross-platform / Network proxy](../CLAUDE.md)

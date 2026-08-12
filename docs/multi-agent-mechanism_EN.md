@@ -324,7 +324,7 @@ Besides sub-agent delegation within the main Loop, OneAI provides an engine-leve
 | **Long-horizon context** | persistent/temporary separation + fixed-block re-injection against compression | LangGraph state channels, Letta memory blocks | OneAI's "re-inject rather than rely on the compressor" approach is distinctive |
 | **Memory** | Letta three layers + Mem0 conflict update + three-factor recall + compression-coupled extraction | Letta, Mem0, Generative Agents, Zep-Graphiti | fuses several; the "compression = loss" closed loop is a highlight (see the memory whitepaper) |
 | **Protocol interop** | A2A SDK (P2-5) + MCP server ecosystem (P3-6) | Google A2A Protocol, Anthropic MCP | OneAI implements both A2A client/server and consumes MCP |
-| **Human-in-the-loop** | InteractionGate 5 decision points + interrupt/resume + Checkpoint time travel | LangGraph interrupt, AutoGen human-in-loop | OneAI converges on a unified 5-decision-point gate; Studio provides time travel |
+| **Human-in-the-loop** | InteractionGate 7 decision points + interrupt/resume + Checkpoint time travel | LangGraph interrupt, AutoGen human-in-loop | OneAI converges on a unified 7-decision-point gate; Studio provides time travel |
 | **Declarative domain** | DomainPack 7 layers, mergeable | CrewAI role/goal, AgentScope config | OneAI goes further: orchestration, memory, compression, and graph flow are all declarative |
 
 ### 9.2 vs AutoGen / LangGraph

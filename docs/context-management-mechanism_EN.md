@@ -247,7 +247,7 @@ This **synergizes** with the ephemeral-assembly paradigm: reinjecting pinned blo
 
 ### 7.2 Interaction-gate control of context
 
-Of `InteractionGate`'s 5 decision points, two directly rewrite context (`agent_loop.rs:1144-1181`):
+Of `InteractionGate`'s 7 decision points, two directly rewrite context (`PreInfer`/`PostInfer`, `agent_loop.rs:1144-1181`):
 
 - **PreInfer**: the application layer may `ProceedWith{InjectSystemMessage}` **temporarily inject** (not written to the durable log, to prevent accumulation, :1156-1160), `ReplaceRequest` rewrite, `Revise{feedback}` making the feedback **both a durable user turn and part of this turn's request** (:1166-1172), or `Abort`.
 - **PostInfer**: may validate/filter/replace the response, or request a feedback-grounded retry.

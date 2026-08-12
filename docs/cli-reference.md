@@ -188,12 +188,12 @@ oneai wasm unload <name>              # 卸载模块
 ```bash
 oneai mcp serve [--domain coding]       # 作为 MCP 服务器运行（兼容 Claude Code/Cursor）
 oneai mcp list                          # 列出已配置 MCP 服务器
-oneai mcp add <name> --transport stdio|sse|streamable_http [--command ...] [--url ...] [--args ...] [--enabled]
+oneai mcp add <name> --transport stdio|sse|streamable_http [--command ...] [--url ...] [--args ...] [--enabled] [--lazy]
 oneai mcp remove <name>                # 移除 MCP 服务器
 oneai mcp connect <name>              # 测试连接并展示发现的工具
 ```
 
-机制：[mcp-mechanism.md](mcp-mechanism.md)（MCP）。
+`--lazy`（Stage 5）让该 server 启动时不连、经 `tool_search` 触发 `McpLazyConnectTool` 按需连——连接后真工具浮给模型、trigger 自 vanishing。HTTP 传输的 server 走 OAuth 2.0 PKCE 全流程（`--manual` 改手动粘贴授权码，SSH/headless 友好；token 持久在 `~/.oneai/mcp_oauth/<server>.json`，401 自动刷新重试）。server 在 `tools/call` 中途反向问用户走 elicitation，经 `InteractionGate::McpElicitation` 点。工具以 `mcp__<server>__<tool>` namespaced 注册，每个 server 可带 `McpToolPermissions` 设 `PermissionLevel`/`ToolExposure`。机制：[mcp-mechanism.md](mcp-mechanism.md)。
 
 ## A2A（Agent-to-Agent 协议）
 
@@ -229,6 +229,26 @@ oneai supervisor rpc-stream <id> [--socket <path>]     # 流式 RPC
 ```
 
 机制：[supervisor-mechanism.md](supervisor-mechanism.md)（Supervisor）。
+
+## Serve（引擎总线 sidecar）
+
+```bash
+oneai serve [--socket ~/.oneai/serve.sock] [--domain ...] [--model ...] [--user <id>]  # 启动引擎总线 sidecar
+```
+
+把一个 `AppSession` 经统一引擎总线暴露给**跨进程前端**（原生 App / IDE 插件）：socket 上写 `Directive` JSON 行、读 `EngineYield` JSON 行。UDS（Unix）/ named pipe（Windows）。区别于 `oneai supervisor serve`：supervisor 是实例注册 RPC（request/response `spawn/list/stop`），serve 是双向并发总线（任意时 directive ↔ 任意时 yield + 审批 `request_id` 关联），用分离 socket 故两者共存。机制：[bus-mechanism.md](bus-mechanism.md)（引擎总线）。
+
+## Evolve（自演进）
+
+```bash
+oneai evolve run --seed <pack.yaml> --suite <name> [--max-generations 3] [--target 0.85] [--patience 2]   # 跑一代/多代闭环
+oneai evolve report ~/.oneai/evolve/run-<ts>    # 离线检视产物
+oneai evolve diff  ~/.oneai/evolve/run-<ts>    # seed vs frontier 配置 diff
+oneai evolve lesson ~/.oneai/evolve/run-<ts>   # 跨代 lesson 日志
+oneai evolve step  ~/.oneai/evolve/run-<ts> --suite <name>   # 续跑一代
+```
+
+GEPA 式外层演化循环——不动模型权重，只在 `DomainPackConfig`（7 层 pack）+ `AgentLoopConfig` 的文本/数值旋钮空间里变异，每代用真实 eval suite 打分、Pareto 多目标选前沿、lesson 合并携带进下一代。三道安全闸（`DomainPackValidator` + PermissionResolver 静态闸 + judge/candidate 分离）+ 两道回归闸（held-out 过拟合检测 + replay 确定性漂移）。机制：[self-evolution-mechanism.md](self-evolution-mechanism.md)（自演进）。
 
 ## Web UI
 

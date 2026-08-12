@@ -1,6 +1,6 @@
 # OneAI MCP 机制
 
-> MCP（Model Context Protocol）服务宿主 + 客户端 + 插件注册——让 OneAI 既是 MCP 服务端（把自己的工具暴露给 Claude Code/Cursor/VS Code 等外部 MCP 客户端），又是 MCP 客户端（连接外部 MCP server 复用其工具）；JSON-RPC 协议 + TOML 配置 + stdio/SSE/streamable-http 传输。
+> MCP（Model Context Protocol）服务宿主 + 客户端 + 插件注册——让 OneAI 既是 MCP 服务端（把自己的工具暴露给 Claude Code/Cursor/VS Code 等外部 MCP 客户端），又是 MCP 客户端（连接外部 MCP server 复用其工具）；JSON-RPC 协议 + TOML 配置 + stdio/SSE/streamable-http 传输 + OAuth 2.0 PKCE + 双向 elicitation + 模型透明 lazy 连接。
 
 ## 1. 概述（是什么）
 
@@ -97,6 +97,16 @@ pub struct McpServerConfigFile { /* load_default/save_default TOML */ }
 
 **插件管理：** `McpPluginRegistry::from_config_file()` 从 `~/.oneai` TOML 加载插件配置，`add_entry`/`remove_entry` 增删，`McpPluginEntry::to_server_config` 转连接配置，`McpClient::from_config` 连接。
 
+**多服务器与企业级能力（#31 Stage 1–5）。** OneAI 的 MCP 客户端不止"连一个 server"——它是一套企业级多源管理：
+
+- **多服务器连接管理（Stage 1+2）**：`McpPluginRegistry` 同时管多个 server，每个 `McpPluginEntry` 带 `McpToolPermissions`（默认 `Standard`/`Direct`，零行为变化）设该 server 工具的 `PermissionLevel` + `ToolExposure`。发现的工具以 **namespaced 名** `mcp__<server>__<tool>` 注册（`normalize_tool_name`），两个 server 同名工具不撞。DomainPack `PermissionProfile` 仍可在其上收紧（如把 `mcp__filesystem__delete_file` 强制 `Full`/`Hidden`）。
+- **OAuth 2.0 PKCE 全流程（Stage 3）**：HTTP 传输的 server 走 discovery → (动态) registration → authorize → exchange → store → refresh → retry。两种登录 UX：loopback redirect（默认，起 `127.0.0.1` 一次性 listener + 调系统浏览器）或 manual paste（`--manual`，SSH/headless 友好，不绑端口）。token 持久在 `~/.oneai/mcp_oauth/<server>.json`，带刷新所需全量信息，故传输层 401-retry 可不查 registry 配置直接刷新。PKCE 用 S256、`state` 随机 hex CSRF。
+- **不可变 `McpBinding` 快照 + 连接身份分离（Stage 4-1）**：一次连接产出一个不可变 binding 快照（工具列表 + 元数据冻结），与"连接身份"（哪次连的）分离——并发调用看到的是一致快照，不因中途重连/刷新而漂移。
+- **工具目录缓存 LRU + generation（Stage 4-2）**：`tools/list` 结果按 server 缓存，LRU 淘汰 + generation 号失效——重连/配置变后 generation 变，缓存整批失效，避免模型用过时的工具定义。
+- **双向 elicitation（Stage 4-3）**：外部 server 在 `tools/call` 中途发 `elicitation/create` 反向问用户（要凭据 / 选值）。经 `InteractionGate::McpElicitation` 点（按需触发，非每轮）——有 UI 的 run 弹原生对话框，无 UI 的 `NoopInteractionGate` **decline**（不伪造数据回 server）。
+- **多来源注册 + 优先级合并（Stage 4-4）**：MCP 工具可来自 5 个 source（TOML 配置 / DomainPack 声明 / 运行时 add / lazy 触发 / discovery），按优先级合并去重——同名时高优先级 source 胜。
+- **模型透明 lazy 连接（Stage 5）**：标 `lazy: true` 的 server 启动时不连（`connect_all_enabled` 跳过），其 `mcp__<server>__<tool>` wrapper 也不注册——模型既看不见也调不到。`McpLazyConnectTool`（每个 lazy server 一个，`ToolExposure::Deferred`）被 `tool_search` 发现后触发：调 `ensure_connected`（连 + discover）→ `DataLayerReloader::reload_data_layer`（把真 wrapper 注册进 live registry）→ 返回发现的工具名。连接成功后该 trigger 的 `service_available()` 返 false，**从 `tool_search` 也 vanishing**（真工具已在 registry，trigger 冗余）——codex 的 "LazyWhenCached + vanish-after-cache" 模式。下一轮 AgentLoop 读 live registry，真 `mcp__<server>__<tool>` 工具自动浮现给模型。
+
 ## 6. 依赖关系
 
 | 方向 | 谁 | 内容 |
@@ -119,7 +129,10 @@ pub struct McpServerConfigFile { /* load_default/save_default TOML */ }
 | `McpPluginRegistry` + `McpPluginEntry` | `crates/oneai-mcp/src/plugin.rs:143,61`（`to_server_config:89`）|
 | `McpServerConfigFile`（TOML load/save + `default_path`/`default_config`）| `crates/oneai-mcp/src/config.rs:34,42,52,75,105,113` |
 | `discovery`（发现外部 server）| `crates/oneai-mcp/src/discovery.rs` |
-| `transport`（stdio/SSE/streamable-http）| `crates/oneai-mcp/src/transport.rs` |
+| OAuth 2.0 PKCE 全流程 + 401 刷新 + 持久 | `crates/oneai-mcp/src/oauth.rs` |
+| 模型透明 lazy 连接触发（`McpLazyConnectTool`）| `crates/oneai-mcp/src/lazy_connect.rs` |
+| 不可变 `McpBinding` 快照 + 目录缓存 LRU/generation | `crates/oneai-mcp/src/{plugin,client}.rs` |
+| 传输（stdio/SSE/streamable-http）| `crates/oneai-mcp/src/transport.rs` |
 | 底层实现（rmcp 包装）| `crates/oneai-tool/src/mcp_real.rs` |
 
 ## 8. 与业界对比

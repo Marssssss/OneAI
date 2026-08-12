@@ -6,14 +6,15 @@ OneAI 是一个用 Rust 编写的全栈 Agent 框架，提供构建、运行、�
 
 ## 设计原则
 
-- **模块化** —— 28 个独立 crate，各司其职，按需使用。
+- **模块化** —— 29 个独立 crate，各司其职，按需使用。
 - **类型安全** —— 密封枚举层级（公开枚举都加 `#[non_exhaustive]`）、trait 驱动抽象，无字符串配置。
+- **统一引擎总线** —— [oneai-bus](bus-mechanism.md) 是引擎与一切前端之间的唯一 seam：`Directive`（前端→引擎）+ `EngineYield`（引擎→前端）两通道，TUI / Studio Web / 六端原生 App / `oneai serve` sidecar 全走它，前端只当「Directive writer + Yield reader」。
 - **领域可插拔** —— [DomainPack](domain-pack-mechanism.md) 让领域知识声明式、可组合、一行切换；可对照 JSON Schema 校验，并通过 pack 市场共享。
-- **多 Agent 原生** —— 模型驱动的 SubAgent 分层委托（`delegate` 元工具，一轮多委托 + 依赖感知并行波次调度）+ 范式切换（`switch_paradigm` 进入 Plan/Reflect/Explore 图流）+ 引擎级 [GroupChat](multi-agent-mechanism.md) 原语驱动场景化多角色对话。
+- **多 Agent 原生** —— 模型驱动的 SubAgent 分层委托（`delegate` 元工具，一轮多委托 + 依赖感知并行波次调度）+ 范式切换（`switch_paradigm` 进入 Plan/Reflect/Explore 图流）+ 引擎级 [GroupChat](multi-agent-mechanism.md) 原语驱动场景化多角色对话（群聊 yield 带 `speaker` 标签经 bus 发出）。
 - **生产级基础设施** —— [ProviderPool](provider-mechanism.md) 降级链、SmartRouter 多因子路由、用量统计、限流、熔断、Token 感知的上下文管理。
 - **跨平台** —— [UniFFI + 手写 extern "C" facade](cross-platform-mechanism.md) 支持 macOS / Windows / Linux / Android / iOS / HarmonyOS，同一套 Rust 内核。
-- **可评测** —— 内置 [OpenInference 兼容轨迹](trace-mechanism.md) + 独立[评测框架](eval-mechanism.md)（6 指标、3 套件 + SWE-bench 三轴）。
-- **人机协作** —— 高风险工具通过[原生 UI 对话框审批](permission-mechanism.md)；执行前的 Plan 模式审批门。
+- **可评测可自演进** —— 内置 [OpenInference 兼容轨迹](trace-mechanism.md) + 独立[评测框架](eval-mechanism.md)（6 指标、3 套件 + SWE-bench 三轴）+ [自演进外循环](self-evolution-mechanism.md)（GEPA 式在 pack/loop 配置空间变异 + Pareto 选择，不动权重）。
+- **人机协作 + 沙箱** —— 高风险工具通过[原生 UI 对话框审批](permission-mechanism.md)；执行前的 Plan 模式审批门；`code_interpreter` / `shell` 在 Seatbelt（mac）/ Bubblewrap（linux）沙箱内执行，出网经本地 CONNECT 代理 + per-host 审批白名单。
 - **动态 Agentic Loop** —— 不是固定管线；每轮迭代动态决策（直接回答 / 工具调用 / 委托子 Agent / 切换范式）。
 
 ## 依赖分层
@@ -23,15 +24,17 @@ OneAI 是一个用 Rust 编写的全栈 Agent 框架，提供构建、运行、�
 ```
 oneai-core                      基础：类型 + 核心 trait（无下游依赖）
       ↑
+oneai-bus                       引擎↔前端协议（Directive/EngineYield + EngineBus，依赖 core）
+      ↑
 oneai-provider / -parser / -memory / -tool / -skill / -rag
 / -workflow / -domain / -trace / -persistence / -a2a / -wasm
 / -eval / -studio / -mcp / -scheduler / -gateway / -supervisor / -vector   特性 crate（依赖 core）
       ↑
-oneai-agent                     执行引擎：AgentLoop + 范式 + 委托
+oneai-agent                     执行引擎：AgentLoop + 范式 + 委托（接 bus：BusObserver/BusInteractionGate）
       ↑
-oneai-app                       集成层：AppBuilder → App → AppSession（唯一组装入口）
+oneai-app                       集成层：AppBuilder → App → AppSession（唯一组装入口，engine_bus() 接线）
       ↑
-oneai-uniffi + oneai-platform-* FFI / 原生平台适配
+oneai-uniffi + oneai-platform-* FFI / 原生平台适配（c_facade 3 符号 bus 泵 / oneai serve sidecar）
 ```
 
 集成入口是 **`oneai-app` 的 `AppBuilder`**（`crates/oneai-app/src/builder.rs`）。每个子系统都是可选的、通过 builder 方法插装（LLM Provider 也是可选的）。改子系统的构造或接线，这是唯一要动的地方。深入到贡献者级别的工作指引见 [CLAUDE.md](../CLAUDE.md)。
@@ -49,11 +52,13 @@ flowchart TB
     subgraph FFI ["🔌 FFI 层 · oneai-uniffi + oneai-platform-*"]
         direction LR
         UniFFI["UniFFI 绑定<br/>Kotlin · Swift · Python"]
-        CFacade["手写 extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON 过界，CJK 正确往返"]
+        CFacade["手写 extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON 过界，CJK 正确往返<br/>+ 3 符号 bus 泵"]
     end
 
+    Bus["🚌 oneai-bus · 统一引擎总线<br/>Directive (前端→引擎, mpsc 512)<br/>EngineYield (引擎→前端, broadcast 1024)<br/>in-process Arc<InProcessBus> 或 oneai serve sidecar (UDS/named-pipe)<br/>BusObserver / BusInteractionGate / GroupChatBusObserver"]
+
     subgraph App ["🧩 集成层 · oneai-app"]
-        Builder["AppBuilder → App → AppSession<br/>唯一组装入口 · 每个子系统可选、按需插装"]
+        Builder["AppBuilder → App → AppSession<br/>唯一组装入口 · 每个子系统可选、按需插装<br/>engine_bus() 接线总线"]
     end
 
     subgraph Agent ["⚙️ 执行引擎 · oneai-agent（动态循环，非固定管线）"]
@@ -74,7 +79,7 @@ flowchart TB
             Parser["oneai-parser<br/>3 层输出防御：约束解码→模糊修复→自纠重提示"]
         end
         subgraph F2 ["工具 · 技能 · RAG"]
-            Tool["oneai-tool<br/>Registry + 16 内置工具 + MCP 客户端 + InteractionGate"]
+            Tool["oneai-tool<br/>Registry + 17 内置工具 + MCP 客户端 + InteractionGate"]
             Skill["oneai-skill<br/>选择器 + 注册 + 约定目录发现"]
             Rag["oneai-rag<br/>EmbeddingService + 混合检索 + 自动 embedding"]
         end
@@ -94,15 +99,17 @@ flowchart TB
     end
 
     subgraph Core ["🧱 基础层 · oneai-core（无下游依赖）"]
-        CoreT["类型：ContentBlock · Message · Conversation · PermissionLevel · Budget<br/>ContextBudgetManager · PlatformCapabilities · ModelContextResolver<br/>核心 trait：LlmProvider · Tool · InteractionGate(5 决策点)<br/>EmbeddingService · UsageTracker · RateLimiter · CircuitBreaker · TokenCounter"]
+        CoreT["类型：ContentBlock · Message · Conversation · PermissionLevel · Budget<br/>ContextBudgetManager · PlatformCapabilities · ModelContextResolver<br/>核心 trait：LlmProvider · Tool · InteractionGate(7 决策点：5 每轮 + 2 按需)<br/>EmbeddingService · UsageTracker · RateLimiter · CircuitBreaker · TokenCounter"]
     end
 
     Native --> UniFFI
     Native --> CFacade
-    TUI --> Builder
-    UniFFI --> Builder
-    CFacade --> Builder
+    TUI --> Bus
+    UniFFI --> Bus
+    CFacade --> Bus
+    Bus -->|Directive 流| Builder
     Builder --> Loop
+    Loop -->|AgentLoopObserver → EngineYield| Bus
     Loop --> Features
     Domain -. 横切领域配置 .-> Features
     Features --> Core
@@ -116,10 +123,11 @@ flowchart TB
 | Crate | 说明 |
 |-------|------|
 | `oneai-core` | 核心类型、trait、PermissionLevel、Budget、PlatformCapabilities、ModelContextResolver |
+| `oneai-bus` | 统一引擎↔前端协议 —— Directive/EngineYield + EngineBus（in-process + sidecar wire codec） |
 | `oneai-provider` | LLM Provider（OpenAI/Anthropic/Gemini/Ollama）+ ProviderPool + SmartRouter |
 | `oneai-parser` | 3 层输出解析防御 |
 | `oneai-memory` | 记忆系统（三层 + 压缩增量抽取 + 持久化，接 `oneai-vector` 默认栈） |
-| `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、16 内置工具 |
+| `oneai-tool` | 工具注册、MCP 客户端、InteractionGate、执行器、17 内置工具 |
 | `oneai-skill` | 技能选择器 + 注册 + 内置领域技能 + 生命周期 |
 | `oneai-domain` | DomainPack 系统（7 层）、CodingPack、市场、规范校验器 |
 | `oneai-agent` | AgentLoop + SubAgent + ReAct/Plan/Reflect/Explore + delegate/switch_paradigm 元工具 + GroupChat |
@@ -131,6 +139,7 @@ flowchart TB
 | `oneai-a2a` | A2A 协议 SDK — 客户端 + 服务端宿主 + DomainPack→AgentCard |
 | `oneai-wasm` | WASM 沙箱引擎 — Wasmtime + WasmTool + 模块注册 |
 | `oneai-eval` | 评测框架 — 用例/指标/Runner/3 套件 + SWE-bench 三轴 |
+| `oneai-evolve` | 自演进外循环 — 轨迹采集→EDD 评分→子图诊断→GEPA 变异/Pareto 选择（不动权重，CLI 驱动） |
 | `oneai-studio` | Studio Web UI — axum HTTP+WS + D3.js StateGraph 可视化 + Checkpoint 时间旅行 |
 | `oneai-mcp` | MCP 服务生态 — 宿主 + 插件注册 + 配置 |
 | `oneai-gateway` | 消息网关 — axum webhook + 飞书/企业微信/Loopback adapter |
@@ -143,27 +152,29 @@ flowchart TB
 | `oneai-platform-ios` | iOS 平台 |
 | `oneai-platform-harmony` | HarmonyOS 平台 |
 
-> 全工作区约 1700 测试（以 `cargo test --workspace` 为准，逐 crate 计数易漂移故不列）。另有 `oneai-staticlib`（crate-type=staticlib 的打包 crate，排除在 `default-members` 之外，故不计入上表）。
+> 全工作区约 2100 测试（以 `cargo test --workspace` 为准，逐 crate 计数易漂移故不列）。17 个内置工具（含 `code_interpreter` 沙箱化 CPython）。另有 `oneai-staticlib`（crate-type=staticlib 的打包 crate，排除在 `default-members` 之外，故不计入上表）。
 
 ## 模块设计文档索引
 
 | 模块 | 文档 | 一句话 |
 |---|---|---|
+| 引擎总线 | [bus-mechanism.md](bus-mechanism.md) | Directive/EngineYield 协议 + in-process/sidecar 双形态 |
 | AgentLoop / 委托 / GroupChat | [multi-agent-mechanism.md](multi-agent-mechanism.md) | 动态循环 + 模型驱动委托 + 场景化多角色对话 |
 | 记忆 | [memory-mechanism.md](memory-mechanism.md) | Letta 三层 + 压缩增量抽取 + 持久化 |
 | 上下文管理 | [context-management-mechanism.md](context-management-mechanism.md) | 持久/瞬时分离装配 + token 预算 + 三层模型上下文解析 |
 | Working State | [working-state-mechanism.md](working-state-mechanism.md) | 文件事件日志 + 投影 + 跨 session 续接 |
 | DomainPack | [domain-pack-mechanism.md](domain-pack-mechanism.md) | 7 层声明式领域配置，一行切换 |
-| 权限 / InteractionGate | [permission-mechanism.md](permission-mechanism.md) | 三级权限 + 5 决策点统一 gate |
-| 工具系统 | [tool-mechanism.md](tool-mechanism.md) | Tool trait + 16 工具 + Footprint ladder |
+| 权限 / InteractionGate | [permission-mechanism.md](permission-mechanism.md) | 三级权限 + 7 决策点统一 gate（5 每轮 + 2 按需） |
+| 工具系统 | [tool-mechanism.md](tool-mechanism.md) | Tool trait + 17 工具 + Footprint ladder + ToolExposure + 沙箱网络授权 |
 | 技能 | [skill-mechanism.md](skill-mechanism.md) | 渐进式披露 + 约定目录发现 + 生命周期 + curator |
 | Provider / 路由 / 解析器 | [provider-mechanism.md](provider-mechanism.md) | Provider 抽象 + 降级池 + SmartRouter + 3 层解析 |
 | RAG / Embedding | [rag-mechanism.md](rag-mechanism.md) | EmbeddingService + auto 探测 + 默认检索栈 |
 | 工作流 / StateGraph | [workflow-mechanism.md](workflow-mechanism.md) | DAG + 有环图，与 AgentLoop 闭环 |
 | 评测 | [eval-mechanism.md](eval-mechanism.md) | Eval 框架 + SWE-bench 三轴 |
+| 自演进 | [self-evolution-mechanism.md](self-evolution-mechanism.md) | GEPA 式外循环 + Pareto + 安全闸/回归闸 |
 | A2A | [a2a-mechanism.md](a2a-mechanism.md) | Agent 间协议 SDK（客户端 + 服务端 + DomainPack→AgentCard） |
 | WASM 沙箱 | [wasm-mechanism.md](wasm-mechanism.md) | Wasmtime 沙箱 + WasmTool + fuel/epoch 限量 |
-| MCP | [mcp-mechanism.md](mcp-mechanism.md) | 服务宿主 + 客户端 + 插件注册（双向对等） |
+| MCP | [mcp-mechanism.md](mcp-mechanism.md) | 服务宿主 + 客户端 + 插件注册 + OAuth/elicitation/lazy |
 | Studio | [studio-mechanism.md](studio-mechanism.md) | axum HTTP+WS + D3 可视化 + 检查点时间旅行 |
 | Scheduler | [scheduler-mechanism.md](scheduler-mechanism.md) | 内存计时器 + 持久 cron + CAS at-most-once |
 | Gateway | [gateway-mechanism.md](gateway-mechanism.md) | 消息平台桥接（飞书/企微/Loopback）+ 流式 coalescer |

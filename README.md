@@ -7,8 +7,8 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml/badge.svg)](https://github.com/Marssssss/OneAI/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
-[![Crates: 27](https://img.shields.io/badge/Crates-27-orange.svg)]()
-[![Tests: 1700+](https://img.shields.io/badge/Tests-1700%2B-green.svg)]()
+[![Crates: 29](https://img.shields.io/badge/Crates-29-orange.svg)]()
+[![Tests: 2100+](https://img.shields.io/badge/Tests-2100%2B-green.svg)]()
 [![Version: 1.1.0](https://img.shields.io/badge/Version-1.1.0-blue.svg)]()
 [![Rust: edition 2021](https://img.shields.io/badge/Rust-edition%202021-dea584.svg)]()
 [![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
@@ -42,6 +42,7 @@
 ## Highlights · 为什么选 OneAI
 
 - **六端原生** —— 一套 Rust 内核驱动 macOS / Windows / Linux / Android / iOS / HarmonyOS 原生 App，不是 WebView 套壳。
+- **统一引擎总线** —— 一套 `Directive`（前端→引擎）+ `EngineYield`（引擎→前端）协议，TUI、Studio Web、六端原生 App、`oneai serve` sidecar 共用；前端只需实现「写 Directive、读 EngineYield」。
 - **动态 AgentLoop** —— 不是固定管线；每轮模型动态决策（直接回答 / 工具调用 / 委托子 Agent / 切换范式），迭代上限由 Token 预算约束。
 - **DomainPack 一行切领域** —— 7 层声明式配置（工具 / 上下文 / 权限 / 范式 / 压缩 / 工作流 / 记忆），可合并、可对照 JSON Schema 校验、可经市场共享。
 - **场景化 GroupChat** —— 引擎级多角色对话原语：角色阵容 + 轮次策略 + 背景字段可见性 + 复盘/审改循环，5 个内置预设开箱即用。
@@ -67,11 +68,19 @@
 
 两个原生桌面 App 共用同一设计、场景系统与设置面板——macOS 为 SwiftUI、Windows 为 WinUI 3 / C#，功能对齐。**配置与使用方式完全一致**，差异只在安装。
 
-**macOS（下载即用）**：从 [GitHub Releases](https://github.com/Marssssss/OneAI/releases) 下载 `OneAI-1.1.0-macos.zip`，解压拖入「应用程序」。该 .app 未签名 / 未公证（arm64，Apple Silicon，macOS 13+）；从浏览器下载的副本带隔离标记，**终端一行剥掉即可**：
+**macOS（源码构建，推荐）**：只需 Command Line Tools，无需装 Xcode。两步——先构建 Rust 静态库与绑定，再编译 SwiftUI App：
 
 ```bash
-xattr -cr /Applications/OneAI.app   # 之后双击直接打开，无弹窗
+./scripts/build_apple.sh        # 产出 liboneai.a + headers + Swift 绑定
+./platforms/macos/build_macos.sh
+open platforms/macos/build/OneAI.app
 ```
+
+> 也可从 [GitHub Releases](https://github.com/Marssssss/OneAI/releases) 下载已打包的 .app。不过 **release 往往滞后于源码**，想要最新功能还是走上面的源码构建。从浏览器下载的副本会带隔离标记，终端一行剥掉即可双击直开：
+>
+> ```bash
+> xattr -cr /Applications/OneAI.app
+> ```
 
 **Windows（源码构建）**：需 Visual Studio 含 WindowsAppSDK 1.8 workload。
 
@@ -89,9 +98,7 @@ dotnet run --project platforms\windows\OneAI\OneAI.csproj -c Debug -r win-x64
 - **API Key** / **Base URL**（留空走官方端点）/ **Model**（如 `gpt-4o` / `claude-sonnet-4-6` / `llama3` / `qwen-plus`）。
 - **Embedding 设置**：默认留空即 `auto` 探测（探测链见 [RAG 机制](docs/rag-mechanism.md)）。
 
-每个 Agent 还可在场景编辑器里单独覆写 model / key / base_url，混用多家厂商。使用：侧边栏「从场景开始」选 5 个内置预设之一（**面试演练 / 语言伙伴 / 辩论赛 / 写作工坊 / 头脑风暴**），或「编辑场景」拖拽式自建。运行中：流式逐字渲染 markdown + 思考气泡、命令面板（macOS `⌘K` / Windows `Ctrl+K`）、语音输入、产物画布。
-
-> 从源码构建 macOS：`./scripts/build_apple.sh && ./platforms/macos/build_macos.sh && open platforms/macos/build/OneAI.app`。
+每个 Agent 还可在场景编辑器里单独覆写 model / key / base_url，混用多家厂商。侧边栏「从场景开始」选 5 个内置预设之一（**面试演练 / 语言伙伴 / 辩论赛 / 写作工坊 / 头脑风暴**），或「编辑场景」拖拽式自建。运行时可看到流式逐字渲染的 markdown 与思考气泡，唤出命令面板（macOS `⌘K` / Windows `Ctrl+K`）、语音输入、产物画布。
 
 ### 二、TUI / CLI（通用 Agentic 执行）
 
@@ -109,7 +116,7 @@ export ONEAI_MODEL="llama3"
 ```
 
 ```bash
-cargo run -p oneai-cli      # 或：cargo install oneai-cli，然后直接 oneai
+cargo run -p oneai-cli      # 或：cargo install --path examples/cli，然后直接 oneai
 ```
 
 进入交互式 Agent：输入任务即可看到完整管线实时运行——流式思考气泡、工具调用、计划清单、用量统计、轨迹日志。
@@ -146,7 +153,7 @@ cargo add oneai-app
 cargo add tokio --features full
 ```
 
-集成入口是 `crates/oneai-app/src/builder.rs` 的 `AppBuilder`——每个子系统都可选、通过 builder 方法插装（**LLM Provider 也是可选的**，纯工具 / 纯工作流用法无需 Provider）。`App` 之上用 `create_session()` 拿到 `AppSession`，之后**让 AgentLoop 跑起来的推理入口就是 `session.run_agent(task, observer, interrupt_slot)`**——把用户输入作为 `task` 字符串直接传进去，循环自己会把这条 user message 加进 conversation，不需要先 `send_user_message`。
+集成入口是 `crates/oneai-app/src/builder.rs` 的 `AppBuilder`——每个子系统都可选，按需用 builder 方法插装（**LLM Provider 也是可选的**，纯工具 / 纯工作流用法无需 Provider）。`build()` 得到 `App`，再 `create_session()` 拿到 `AppSession`。让 AgentLoop 跑起来的推理入口是 `session.run_agent(task, observer, interrupt_slot)`：把用户输入作为 `task` 字符串直接传进去即可，循环会自己把这条消息加进 conversation，不必先 `send_user_message`。
 
 #### 最小可跑（静默推理）
 
@@ -235,7 +242,7 @@ while let Some(chunk) = rx.recv().await { /* render */ }
 
 - **`task` 就是用户输入**：不要先 `send_user_message` 再 `run_agent`——会重复入消息。`run_agent` 内部已把 task 加进 conversation（`session.rs` 注释说明）。
 - **多轮对话**：一个 session 内连续调多次 `run_agent`，conversation 累积历史；上下文超 token 预算时 AgentLoop 自动压缩（`ContextBudgetManager` 门控，预算按模型真实窗口缩放），无需你管。手动压缩走 `session.compact(keep_recent_turns)`。
-- **中断 / 恢复**：把 `interrupt_slot` clone 到 UI 线程，取其中的 `AgentLoop` 句柄调 `interrupt()`，在迭代边界生效；`InteractionGate` 的 `ChannelInteractionGate` / `ThresholdInteractionGate` 还能拦截工具审批、Plan 决策等 5 个决策点（见 `AppBuilder::channel_interaction_gate` / `threshold_interaction_gate`）。
+- **中断 / 恢复**：把 `interrupt_slot` clone 到 UI 线程，取其中的 `AgentLoop` 句柄调 `interrupt()`，在迭代边界生效；`InteractionGate` 的 `ChannelInteractionGate` / `ThresholdInteractionGate` 还能拦截工具审批、Plan 决策等决策点（见 `AppBuilder::channel_interaction_gate` / `threshold_interaction_gate`）。
 - **跨 session 续聊**：`app.create_session_with_id(id).await` 从 SQLite 回放历史；要绑定到 working-state 任务用 `session.continue_task(task_id)`（崩溃恢复 + 跨 session 任务续跑）。
 - **领域切换**：builder 上 `.domain_pack(coding_pack("/dir"))` 一行切领域，AgentLoop 用对应 system prompt + 工具白名单 + 范式策略；多领域合并 `.domain_packs(vec![...])`（权限 strictest-wins）。
 - **纯工具 / 纯工作流（无 Provider）**：跳过 `.provider(...)`，直接 `session.execute_tool("calculator", json!({"expression":"2+3"})).await`（返回 `ToolOutput.content`），或 `session.execute_workflow(&config).await` 跑 StateGraph——见下面「无 LLM 也能用」示例：
@@ -250,6 +257,29 @@ println!("{}", r.content); // → "5"
 ```
 
 一般集成只需 `oneai-app`；想缩小依赖面时按需单独依赖 `oneai-core` / `-provider` / `-domain` / `-tool` / `-memory` / `-rag` 等，完整列表见 [架构 — Crate 总览](docs/architecture.md#crate-总览)。深入理解架构读 [CLAUDE.md](CLAUDE.md)，驱动各子系统跑一遍见 [CLI 参考](docs/cli-reference.md)——`examples/cli` 的 `chat` 子命令就是 `run_agent` + 自定义 observer + interrupt slot 的完整参考实现，照抄即可。
+
+#### 构建 UI / 原生前端？走引擎总线
+
+`run_agent` + `AgentLoopObserver` 适合**嵌入到你自己的 Rust 应用里**——引擎直接回调你的 observer。但如果你要做**独立的前端进程或原生 App**（macOS Swift、Windows C#、移动端，乃至一个 Web Studio），就该走引擎总线：`Directive`（前端→引擎）与 `EngineYield`（引擎→前端）两个通道，所有前端共用同一套协议。
+
+```rust
+use oneai_app::AppBuilder;
+
+// engine_bus() 启用总线：装入 BusInteractionGate，并返回 (builder, directive_rx)
+let (builder, directive_rx) = AppBuilder::new()
+    .provider(...)
+    .engine_bus();
+let app = builder.build()?;
+let bus = app.engine_bus.clone().expect("engine_bus 已接");
+
+let mut session = app.create_session();
+// 前端订阅 yield 流：引擎每轮把流式片段 / 工具调用 / 审批请求 yield 出来
+let mut yields = bus.subscribe_yields();
+// 跑回合——引擎发 EngineYield；前端同时可往 bus 提交 Directive（UserMessage / Approve / Interrupt …）
+session.run_turn_via_bus("用户输入", interrupt_slot).await?;
+```
+
+前端的角色很简单：写 `Directive`、读 `EngineYield`。同进程的前端（TUI、同进程 UI）直接持有 `Arc<InProcessBus>`；跨进程的（原生 App、IDE 插件）走 `oneai serve` sidecar，用 newline-JSON over UDS（Unix）/ named pipe（Windows）对接。审批也复用同一对通道——`EngineYield::ApprovalRequest` 带 `request_id`，前端回 `Directive::Approve` 关联，不必再各自起 mpsc。完整协议、sidecar、c_facade 三符号泵见 [引擎总线机制](docs/bus-mechanism.md)。
 
 ---
 
@@ -271,7 +301,11 @@ flowchart TB
 
 ## 跨平台：桌面与移动端
 
-一套 Rust 内核，通过两条 FFI 通路打到六端原生 App：
+一套 Rust 内核，通过三条通路打到六端原生 App：
+
+1. **UniFFI 绑定** —— Kotlin / Swift 直接绑 `oneai-core` trait。
+2. **手写 `extern "C"` facade** —— C# / C++ / ArkTS 走 UTF-8 JSON facade（`c_facade`），内含一个三符号的总线泵（建引擎、提交指令、拉取输出）。
+3. **`oneai serve` sidecar** —— 原生进程不内嵌 Rust 库时，经 UDS（Unix）/ named pipe（Windows）接引擎总线，用 newline-JSON 收发 `Directive`/`EngineYield`。详见 [引擎总线机制](docs/bus-mechanism.md)。
 
 | 平台 | 技术 | 绑定语言 | 原生审批对话框 |
 |---|---|---|---|
@@ -292,7 +326,7 @@ OneAI 接入 [SWE-bench Lite](https://www.swebench.com/) 做 coding agent 评测
 
 ```bash
 # 冒烟：单实例确认闭环
-cargo run -p oneai-cli-demo -- eval swebench \
+cargo run -p oneai-cli -- eval swebench \
     --dataset ./swe_bench_lite.jsonl \
     --instances astropy__astropy-12907 \
     --workspace ./swebench-workspace --run-id oneai-smoke
@@ -308,14 +342,14 @@ OneAI 自带一个 **GEPA 式外层演化循环**（`oneai-evolve` crate）：�
 
 ```bash
 # 跑一代/多代闭环（变异在 builtin suite 上打分）
-cargo run -p oneai-cli-demo -- evolve run \
+cargo run -p oneai-cli -- evolve run \
     --seed ./my-pack.yaml --suite coding_basics \
     --max-generations 3 --target 0.85 --patience 2
 # 离线检视产物
-cargo run -p oneai-cli-demo -- evolve report ~/.oneai/evolve/run-<ts>
-cargo run -p oneai-cli-demo -- evolve diff   ~/.oneai/evolve/run-<ts>   # seed vs frontier 配置 diff
-cargo run -p oneai-cli-demo -- evolve lesson ~/.oneai/evolve/run-<ts>  # 跨代 lesson 日志
-cargo run -p oneai-cli-demo -- evolve step  ~/.oneai/evolve/run-<ts> --suite coding_basics  # 续跑一代
+cargo run -p oneai-cli -- evolve report ~/.oneai/evolve/run-<ts>
+cargo run -p oneai-cli -- evolve diff   ~/.oneai/evolve/run-<ts>   # seed vs frontier 配置 diff
+cargo run -p oneai-cli -- evolve lesson ~/.oneai/evolve/run-<ts>  # 跨代 lesson 日志
+cargo run -p oneai-cli -- evolve step  ~/.oneai/evolve/run-<ts> --suite coding_basics  # 续跑一代
 ```
 
 完整机制（五段闭环 / 变异基质全图 / 安全闸 / reward-hacking 分层防护 / replay 适用边界）见 [自演进系统机制白皮书](docs/self-evolution-mechanism.md)，设计依据见 [实施计划](docs/self-evolution-system-2026-08.md)。
