@@ -1,4 +1,11 @@
 // OneAIBusClient.cs
+// ⚠️ SUPERSEDED — kept for reference. The canonical Windows sidecar client is
+// now OneAiRpcClient.cs (JSON-RPC 2.0 over the `oneai app-server` named pipe,
+// matching the macOS OneAiRpcClient.swift + the VS Code server.ts). This old
+// file spoke the raw newline-JSON bus protocol to `oneai serve` (the escape
+// hatch) and is NOT the path new frontends should take. Do not build against
+// it — use OneAiRpcClient.cs + EngineProcessManager.cs.
+//
 // Windows native frontend for `oneai serve` (the engine-bus sidecar).
 //
 // A Directive writer + Yield reader over a named pipe. This replaces the
