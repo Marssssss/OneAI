@@ -1,0 +1,14 @@
+# Ship dist/extension.js (the esbuild bundle) + the static webview JS.
+# Exclude the TS sources, build tooling, and node_modules — the bundle
+# inlines the extension code; the webview JS under src/webview/ stays.
+.vscode/**
+.vscode-test/**
+node_modules/**
+.gitignore
+esbuild.js
+tsconfig.json
+**/*.map
+src/extension.ts
+src/server.ts
+**/*.ts
+!src/webview/**

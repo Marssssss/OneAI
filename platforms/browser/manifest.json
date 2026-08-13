@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "OneAI",
+  "version": "0.2.0",
+  "description": "OneAI agent in the browser — talks the engine over Chrome native messaging. No manual server start: the browser spawns `oneai app-server --listen native-messaging` on connect (host manifest installed once by install-host.sh).",
+  "action": {
+    "default_title": "OneAI",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["nativeMessaging"],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "oneai@oneai",
+      "strict_min_version": "115.0"
+    }
+  }
+}

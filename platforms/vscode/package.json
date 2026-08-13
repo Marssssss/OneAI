@@ -1,0 +1,79 @@
+{
+  "name": "oneai",
+  "displayName": "OneAI",
+  "description": "OneAI agent — spawn the engine over JSON-RPC, chat + multi-agent scenarios in a webview. The engine binary (`oneai`) is spawned as a child process on activation (Codex/LSP model) — no manual server start.",
+  "version": "0.2.0",
+  "publisher": "oneai",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["AI", "Chat", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "oneai.chat",
+        "title": "OneAI: Open Chat",
+        "category": "OneAI"
+      },
+      {
+        "command": "oneai.scenarios",
+        "title": "OneAI: Open Scenario Editor",
+        "category": "OneAI"
+      },
+      {
+        "command": "oneai.restart",
+        "title": "OneAI: Restart Engine",
+        "category": "OneAI"
+      }
+    ],
+    "configuration": {
+      "title": "OneAI",
+      "properties": {
+        "oneai.oneaiPath": {
+          "type": "string",
+          "default": "oneai",
+          "markdownDescription": "Path to the `oneai` CLI binary (the engine). Defaults to `oneai` on PATH. The extension spawns `oneai app-server --listen stdio` on activation (Codex/LSP model — you never start a server manually)."
+        },
+        "oneai.providerKind": {
+          "type": "string",
+          "enum": ["openai", "anthropic", "ollama"],
+          "default": "openai",
+          "markdownDescription": "LLM provider kind passed to the engine via env. Real keys come from `oneai.apiKey` / `oneai.baseUrl`."
+        },
+        "oneai.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "LLM API key. Written to `ONEAI_API_KEY` in the spawned engine's env. Leave empty for Ollama (local)."
+        },
+        "oneai.baseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "LLM base URL → `ONEAI_BASE_URL`. For proxies / Azure / Ollama hosts."
+        },
+        "oneai.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Default model name → `ONEAI_MODEL`."
+        },
+        "oneai.autoRestart": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Restart the engine child process with exponential backoff if it exits unexpectedly."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package --no-yarn",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}

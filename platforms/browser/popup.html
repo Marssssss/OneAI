@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline';" />
+<title>OneAI</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; width: 420px; height: 520px; display: flex; flex-direction: column; }
+  #bar { display: flex; border-bottom: 1px solid #ddd; font-size: 12px; }
+  #bar button { flex: 1; padding: 6px; border: none; background: none; cursor: pointer; }
+  #bar button.active { background: #eef; }
+  #chat, #editor { flex: 1; overflow-y: auto; padding: 8px; display: none; }
+  #chat.show, #editor.show { display: block; }
+  .msg { margin: 6px 0; padding: 6px; border-radius: 6px; }
+  .msg.user { background: #eef; }
+  .msg.assistant { background: #fff; border: 1px solid #ddd; }
+  .msg .speaker { font-size: 11px; opacity: .6; }
+  .thinking { opacity: .6; font-style: italic; }
+  .approval { background: #ffe; border: 1px solid #dd0; padding: 6px; }
+  #composer { display: flex; border-top: 1px solid #ddd; }
+  #composer textarea { flex: 1; height: 3em; resize: none; padding: 6px; border: none; font-family: inherit; }
+  #composer button { padding: 6px 12px; }
+  #editor .field { margin: 6px 0; }
+  #editor label { display: block; font-size: 11px; opacity: .7; }
+  #editor input, #editor select, #editor textarea { width: 100%; box-sizing: border-box; }
+  #editor .errors { color: #c00; font-size: 11px; }
+  #editor .row { display: flex; gap: 6px; }
+  #editor .row > * { flex: 1; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <button id="tab-chat" class="active">Chat</button>
+    <button id="tab-editor">Scenario Editor</button>
+  </div>
+  <div id="chat" class="show">
+    <div id="scenarios"></div>
+    <div id="messages"></div>
+  </div>
+  <div id="editor"></div>
+  <div id="composer">
+    <textarea id="input" placeholder="Message… (Shift+Enter newline)"></textarea>
+    <button id="send">Send</button>
+  </div>
+  <script src="rpc-native.js"></script>
+  <script src="chat.js"></script>
+</body>
+</html>
