@@ -6,6 +6,8 @@
 
 `oneai-bus` 是 OneAI 引擎与前端之间的统一总线。在它之前，OneAI 有四条互不收敛的前端通路：TUI 直连 `AppSession`、Studio 走 WebSocket 广播、A2A 走 JSON-RPC + SSE、Supervisor 走换行分隔 JSON 的 IPC——每条都各自定义事件形状与审批回路。`oneai-bus` 把它们收敛成一个协议：前端写 [`Directive`]、读 [`EngineYield`]，引擎反之。
 
+> 非同一语言的前端（IDE 插件 / web / TS-JS / 桌面 macOS-Swift·Windows-C#）不直接说 newline-JSON——它们说 [`oneai-app-server`](app-server-mechanism.md) 的 JSON-RPC 2.0 前端协议（L2 适配器，映射到本层 `Directive`/`EngineYield`）。本层（L3）仍是内部 canonical；TUI in-process 直连，跳过 L2 零序列化；`oneai serve` 的 newline-JSON passthrough 降为选配 escape hatch。
+
 它在依赖分层里位置很特别：只依赖 `oneai-core`（一个无下游依赖的 crate），却被 `oneai-agent`（引擎侧 `BusObserver`/`BusInteractionGate`）与 `oneai-uniffi`/`oneai-app`（前端侧 c_facade 泵、`oneai serve` sidecar）共同消费。这是因为它是「协议 crate」——类型必须对所有上下游都可见，而协议本身只引用 `oneai-core` 的 `Serialize` 类型（`ContentBlock`/`InteractionRequest`/`ToolOutput` 等），不引用 `oneai-agent` 的类型（那些以 DTO 投影形式重新定义在本 crate，agent 侧提供 `From` 转换）。
 
 两个枚举都标 `#[non_exhaustive]`：新变体可在小版本里加而不破坏消费者（承 v0.2.0 / 1.x 稳定承诺，P3-1），wire 消费者必须优雅处理未知变体。
@@ -107,7 +109,9 @@ pub struct InProcessBus {
 4. pump 造 `BusObserver{bus, turn_id}`，调 `session.run_turn_via_bus(task, slot)`——引擎跑 `AgentLoop`，每个 observer 回调被 `BusObserver` 翻成一个 `EngineYield` 经 `bus.emit` 发出。
 5. 前端 drain `receiver.recv()` 渲染。`TurnComplete` 后本轮结束。
 
-**sidecar turn（原生 App）。** `oneai serve`（`examples/cli/src/cmd_serve.rs`）起一个 `AppSession` + `EngineBus`，监听 UDS（Unix）/ named pipe（Win）socket `~/.oneai/serve.sock`。每个连接跑 `bridge_connection(stream, bus)`：yield forwarder（`bus.subscribe_yields()` → 每条 yield 序列化成一行 JSON 写回）与 directive reader（读一行 → `parse_directive` → `bus.submit`）并发跑，任一端关闭即拆。原生前端是 socket 上的 Directive writer + Yield reader（`examples/native/{macos,windows}/OneAIBusClient.*`）。区别于 `oneai supervisor serve`：supervisor 是实例注册 RPC（request/response `spawn/list/stop`），sidecar 是双向并发总线（任意时 directive ↔ 任意时 yield + 审批 `request_id` 关联），用分离 socket 故两者共存。
+**sidecar turn（原生 App）。** `oneai serve`（`examples/cli/src/cmd_serve.rs`）起一个 `AppSession` + `EngineBus`，监听 UDS（Unix）/ named pipe（Win）socket `~/.oneai/serve.sock`。每个连接跑 `bridge_connection(stream, bus)`：yield forwarder（`bus.subscribe_yields()` → 每条 yield 序列化成一行 JSON 写回）与 directive reader（读一行 → `parse_directive` → `bus.submit`）并发跑，任一端关闭即拆。原生前端是 socket 上的 Directive writer + Yield reader（`examples/native/{macos,windows}/OneAIBusClient.*`，newline-JSON passthrough）。区别于 `oneai supervisor serve`：supervisor 是实例注册 RPC（request/response `spawn/list/stop`），sidecar 是双向并发总线（任意时 directive ↔ 任意时 yield + 审批 `request_id` 关联），用分离 socket 故两者共存。
+
+> **`oneai app-server`（推荐）** 是 sidecar 的 JSON-RPC 2.0 升级版——同一引擎 + bus，但 wire 讲 JSON-RPC 前端协议（`turn/run`/`event`/…），喂 IDE/web/桌面四类非 Rust 前端，见 [app-server-mechanism.md](app-server-mechanism.md)。`oneai serve` 的 newline-JSON passthrough 降为选配 escape hatch；TUI in-process 不变。
 
 **审批回路。** 引擎遇需审批的工具/计划 → `BusInteractionGate::request(req)` → `bus.request_approval(req)`：分配 `apr_N`、登记 oneshot、广播 `ApprovalRequest{request_id, req}`、await。前端读到后提交 `Approve{request_id, response}`，总线按 id fulfill oneshot，引擎 `request_approval` 返回 `response`。in-process 同步前端可用 `InProcessBus::resolve_approval(id, resp)`（不经 async `submit`）。
 
