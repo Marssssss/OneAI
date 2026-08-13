@@ -305,7 +305,7 @@ flowchart TB
 
 1. **UniFFI 绑定** —— Kotlin / Swift 直接绑 `oneai-core` trait。
 2. **手写 `extern "C"` facade** —— C# / C++ / ArkTS 走 UTF-8 JSON facade（`c_facade`），内含一个三符号的总线泵（建引擎、提交指令、拉取输出）。
-3. **`oneai serve` sidecar** —— 原生进程不内嵌 Rust 库时，经 UDS（Unix）/ named pipe（Windows）接引擎总线，用 newline-JSON 收发 `Directive`/`EngineYield`。详见 [引擎总线机制](docs/bus-mechanism.md)。
+3. **`oneai serve` sidecar / `oneai app-server`** —— 原生进程不内嵌 Rust 库时，经 UDS（Unix）/ named pipe（Windows）接引擎总线。`oneai serve` 用 newline-JSON 透传 `Directive`/`EngineYield`（选配 escape hatch）；`oneai app-server` 讲 JSON-RPC 2.0 前端协议（`turn/run`/`approval/respond`/`session/*`/`group/*`/`scenario/*`/`event` 通知），多 transport（**stdio** / **ipc** / **ws** / **native-messaging**）并发监听，喂四类非 Rust 前端——**VS Code 扩展**（`platforms/vscode`，激活 spawn stdio，Codex/LSP 模型）、**浏览器扩展**（`platforms/browser`，Chrome/Firefox native messaging，零手动起 server）、**macOS/Windows 原生 sidecar**（`OneAiRpcClient` over ipc，`EngineProcessManager` 自动 spawn）。前端**永远不手动起 server**——能 spawn 进程的前端自己 owns spawn（Codex 模型），`scenario/*` 共享场景库 + 单一权威 `scenario/validate` 校验。详见 [引擎总线机制](docs/bus-mechanism.md) 与 [App-Server 机制](docs/app-server-mechanism.md)。
 
 | 平台 | 技术 | 绑定语言 | 原生审批对话框 |
 |---|---|---|---|

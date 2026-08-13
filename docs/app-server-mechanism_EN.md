@@ -81,7 +81,14 @@ bus passthrough (escape hatch, still available). Separate sockets
 | `group/open` | `{}` | `GroupStart` | ack |
 | `group/run` | `{user_input:String}` | `GroupUserMessage` | ack |
 | `group/set_order` | `{order:[String]}` | `GroupSetScriptedOrder` | ack |
+| `scenario/list` | `{}` | — (sync CRUD, not a Directive) | `{scenarios:[BusScenario]}` |
+| `scenario/get` | `{id:String}` | — | `BusScenario` (missing → `-32602`) |
+| `scenario/upsert` | `{scenario:BusScenario}` | — | `{ok, id?}` (validates first; returns errors if invalid) |
+| `scenario/delete` | `{id:String}` | — | ack |
+| `scenario/validate` | `{scenario:BusScenario}` | — | `{ok, errors:[{field,code,message}]}` |
 | `shutdown` | `{}` | `Shutdown` | ack |
+
+- **`scenario/*` is pure shared-state CRUD — no Directive/bus** — it reads/writes the process-wide `ScenarioStore` and returns immediately. One shared scenario library (macOS / VS Code / browser edit the same `~/.oneai/scenarios.json`); `scenario/validate` is the single authoritative validator (kills the per-frontend client-side mirror drift). `BusScenario` is the rich editor unit (cast + turn policy + topic fields + debrief + review loop); the frontend compiles it to `BusGroupScenario` for `group/start` (see `BusScenario::to_group_scenario`).
 
 - **"returns"** = the Dispatcher fulfills a oneshot when the matching yield
   arrives (strips the `kind` tag, returns only the fields); **ack** =
@@ -175,4 +182,38 @@ ephemeral port + `tokio-tungstenite` client round-trip).
 - [cross-platform-mechanism.md](cross-platform-mechanism.md) — desktop sidecar
   vs mobile Shape A vs TUI in-process
 - [cli-reference.md](cli-reference.md) — the `oneai app-server` subcommand
-- Source: `crates/oneai-app-server/src/` (5 files) + `examples/cli/src/cmd_app_server.rs`
+- Source: `crates/oneai-app-server/src/` (6 files: `lib`/`protocol`/`adapter`/`dispatcher`/`transport`/`scenario`) + `examples/cli/src/cmd_app_server.rs` + `platforms/{vscode,browser,macos,windows}`
+
+## 11. Auto-spawn (Codex model) — the user never starts a server
+
+Design principle: **a frontend that can spawn a process owns the spawn** —
+the user never runs `oneai app-server` manually. This is the Codex CLI model:
+the VS Code extension `child_process.spawn`s the engine on activation, speaks
+JSON-RPC over stdio, restarts with exponential backoff on crash, disposes on
+deactivate. Dispatched by frontend spawn capability:
+
+| Frontend | Can spawn | Auto-spawn approach |
+|---|---|---|
+| VS Code extension | ✅ | activation `spawn(oneai, app-server --listen stdio)` (`platforms/vscode/src/server.ts`); webview relays via postMessage (it cannot spawn) |
+| Browser extension | ❌ (sandbox) | Chrome native messaging: `install-host.sh` registers a host manifest once, then the browser spawns `oneai app-server --listen native-messaging` on connect (4-byte LE length-prefix framing, `serve_native_messaging`) |
+| macOS desktop | ✅ | `EngineProcessManager.swift` spawns `oneai app-server --listen ipc://<ephemeral app-server-<pid>.sock>` (`.app/Contents/Resources/bin` first → PATH), hands off to `OneAiRpcClient`, restarts on exit |
+| Windows desktop | ✅ | `EngineProcessManager.cs` spawns `--listen pipe://oneai-<pid>` (skeleton; wiring deferred) |
+| Mobile | ❌ | in-process c_facade (Shape A; on-device, no spawn) |
+
+**stdout discipline**: in `stdio` and `native-messaging` modes stdout is the
+message stream — `oneai app-server` routes banners/diagnostics to stderr (LSP
+convention), and `tracing` likewise to stderr, so stdout carries only framed
+messages and never corrupts the protocol.
+
+**Binary discovery**: frontends check the bundle first (`.app/Contents/
+Resources/bin/oneai` / inside the `.vsix`), then PATH — consistent with
+signature decoupling + independent engine-binary upgrades; VS Code uses a
+`oneai.oneaiPath` setting + PATH fallback (mirrors Codex `codex.cliPath`).
+
+**macOS wiring status (honest)**: the `OneAiRpcClient` + `EngineProcessManager`
+infra is complete, compiles, and doesn't break the existing app build; the
+`ChatViewModel` `oneai_engine_transport` flag wiring (single-agent +
+group/scenarios via sidecar, FFI global fallback) + the `specView`
+topic-baking port is the remaining work, which needs macOS-host runtime
+verification — FFI remains the default transport, sidecar infra pending
+adoption.
