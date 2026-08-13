@@ -220,6 +220,406 @@ fn default_scripted() -> String {
     "scripted".to_string()
 }
 
+/// A single scenario-validation problem, surfaced by
+/// [`BusGroupScenario::validate`] and the app-server `scenario/validate`
+/// method. Centralizing the check in the wire-DTO crate means every frontend
+/// (macOS / VS Code / browser) calls one authoritative validator instead of
+/// each re-implementing a client-side mirror that drifts from the engine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioError {
+    /// Dot-path to the offending field, e.g. `members.0.name`, `script_order`.
+    pub field: String,
+    /// Stable machine code (e.g. `empty`, `unknown_id`, `missing`) — frontends
+    /// localize the display text off this rather than baking in the English
+    /// `message`.
+    pub code: String,
+    /// English human message; a fallback for frontends without a translation.
+    pub message: String,
+}
+
+impl BusGroupScenario {
+    /// Validate this scenario against the same checks the engine enforces at
+    /// `GroupChatSession::build` (`oneai-agent/src/group_chat.rs`: members
+    /// non-empty; scripted order / moderator / opener must reference existing
+    /// members). This is the *wire-level pre-check* run before a
+    /// `Directive::StartGroupChat` submit (and by `scenario/validate` for live
+    /// editor feedback); the engine build re-checks on the parsed config as
+    /// launch-time defense-in-depth. Returns all problems found (not just the
+    /// first) so an editor can flag every field at once.
+    pub fn validate(&self) -> Vec<ScenarioError> {
+        let mut errs = Vec::new();
+        let ids: std::collections::HashSet<&str> =
+            self.members.iter().map(|m| m.id.as_str()).collect();
+
+        if self.members.is_empty() {
+            errs.push(ScenarioError {
+                field: "members".into(),
+                code: "empty".into(),
+                message: "group chat needs at least one member".into(),
+            });
+            return errs; // member-id checks below are meaningless with no members
+        }
+        for (i, m) in self.members.iter().enumerate() {
+            if m.name.trim().is_empty() {
+                errs.push(ScenarioError {
+                    field: format!("members.{i}.name"),
+                    code: "empty".into(),
+                    message: format!("member {} ({}) is missing a name", i, m.id),
+                });
+            }
+            if m.system_prompt.trim().is_empty() {
+                errs.push(ScenarioError {
+                    field: format!("members.{i}.system_prompt"),
+                    code: "empty".into(),
+                    message: format!("member '{}' is missing a system prompt", m.id),
+                });
+            }
+        }
+        // turn_policy: "scripted" | "moderator" | anything-else ⇒ round-robin
+        // (mirrors the fallthrough parse in ScenarioSpecView::from).
+        match self.turn_policy.as_str() {
+            "scripted" => {
+                if let Some(order) = &self.script_order {
+                    for id in order {
+                        if !ids.contains(id.as_str()) {
+                            errs.push(ScenarioError {
+                                field: "script_order".into(),
+                                code: "unknown_id".into(),
+                                message: format!("scripted order references unknown member '{id}'"),
+                            });
+                        }
+                    }
+                }
+            }
+            "moderator" => {
+                let mid = self.moderator_id.as_deref().unwrap_or("");
+                if mid.trim().is_empty() {
+                    errs.push(ScenarioError {
+                        field: "moderator_id".into(),
+                        code: "missing".into(),
+                        message: "moderator policy requires a moderator_id".into(),
+                    });
+                } else if !ids.contains(mid) {
+                    errs.push(ScenarioError {
+                        field: "moderator_id".into(),
+                        code: "unknown_id".into(),
+                        message: format!("moderator '{mid}' is not a member"),
+                    });
+                }
+            }
+            _ => {} // round-robin — no id references to check
+        }
+        if let Some(op) = self
+            .opener_agent_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            if !ids.contains(op) {
+                errs.push(ScenarioError {
+                    field: "opener_agent_id".into(),
+                    code: "unknown_id".into(),
+                    message: format!("opener '{op}' is not a member"),
+                });
+            }
+        }
+        if let Some(rl) = &self.review_loop {
+            if !ids.contains(rl.reviewer_id.as_str()) {
+                errs.push(ScenarioError {
+                    field: "review_loop.reviewer_id".into(),
+                    code: "unknown_id".into(),
+                    message: format!("reviewer '{}' is not a member", rl.reviewer_id),
+                });
+            }
+            if rl.max_rounds == 0 {
+                errs.push(ScenarioError {
+                    field: "review_loop.max_rounds".into(),
+                    code: "invalid".into(),
+                    message: "review_loop.max_rounds must be at least 1".into(),
+                });
+            }
+        }
+        errs
+    }
+
+    /// True when [`validate`](Self::validate) finds no problems.
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_empty()
+    }
+}
+
+// ─── Rich scenario (shared store / editor unit) ──────────────────────────────
+//
+// `BusGroupScenario` above is the *engine launch payload* — minimal, the form
+// `Directive::StartGroupChat` consumes. The non-Rust frontends' scenario
+// *editor* edits a richer model (the macOS `Scenario` Swift struct: cast +
+// turn policy + topic-intake fields + a debrief phase + icon/name). To let
+// every frontend (macOS / VS Code / browser) share ONE scenario library and
+// ONE editor over `scenario/*`, that richer model is promoted here to a
+// shared wire DTO: [`BusScenario`]. It mirrors the macOS `Scenario: Codable`
+// JSON shape exactly so the Swift struct round-trips it unchanged.
+//
+// At launch, the frontend compiles a `BusScenario` (+ collected topic values)
+// into a `BusGroupScenario` via [`BusScenario::to_group_scenario`], baking the
+// topic background into member system prompts — and submits `group/start`.
+// The two DTOs stay separate: the engine never sees `topic_fields`/`debrief`.
+
+/// One topic-intake field the user fills before starting a scenario (e.g.
+/// "应聘岗位"). `visible_to` = None ⇒ the value is shared background for ALL
+/// members; Some(ids) ⇒ only those members see it in their system prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BusTopicField {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// Member ids allowed to see this field's value in their background.
+    /// None = all members; Some = only those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_to: Option<Vec<String>>,
+}
+
+/// Optional "debrief" phase config. After the user triggers the debrief, the
+/// turn policy is switched to a scripted order containing only
+/// `debrief_member_id`, and `summary_prompt` is sent to that member for a
+/// full-session summary. The other members no longer participate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BusDebriefConfig {
+    pub button_label: String,
+    pub summary_prompt: String,
+    pub debrief_member_id: String,
+}
+
+/// A scenario member — mirrors [`BusAgentSpec`] plus a UI-only `role` (short
+/// label) the engine does not consume. [`BusScenario::to_group_scenario`]
+/// drops `role` when compiling the launch payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BusScenarioMember {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub system_prompt: String,
+    #[serde(default = "default_openai")]
+    pub kind: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+/// A multi-agent scenario — the shared store / editor unit over `scenario/*`.
+/// Mirrors the macOS `Scenario` Swift struct field-for-field so the two
+/// `Codable`s produce/consume the same JSON. The engine consumes the compiled
+/// [`BusGroupScenario`] (see [`Self::to_group_scenario`]), never this directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusScenario {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub members: Vec<BusScenarioMember>,
+    /// `scripted` | `moderator` | `roundrobin` (mirrors macOS `TurnPolicy`).
+    #[serde(default = "default_scripted")]
+    pub turn_policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_order: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moderator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener_line: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_fields: Option<Vec<BusTopicField>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debrief: Option<BusDebriefConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_loop: Option<BusReviewLoop>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<BusLocale>,
+}
+
+impl BusScenario {
+    /// Validate this rich scenario. Extends [`BusGroupScenario::validate`]
+    /// with the editor-only references: each `topic_fields[].visible_to` id
+    /// and `debrief.debrief_member_id` must reference an existing member.
+    /// Returns all problems found.
+    pub fn validate(&self) -> Vec<ScenarioError> {
+        let mut errs = Vec::new();
+        let ids: std::collections::HashSet<&str> =
+            self.members.iter().map(|m| m.id.as_str()).collect();
+
+        if self.name.trim().is_empty() {
+            errs.push(ScenarioError {
+                field: "name".into(),
+                code: "empty".into(),
+                message: "scenario is missing a name".into(),
+            });
+        }
+        if self.members.is_empty() {
+            errs.push(ScenarioError {
+                field: "members".into(),
+                code: "empty".into(),
+                message: "group chat needs at least one member".into(),
+            });
+            return errs;
+        }
+        for (i, m) in self.members.iter().enumerate() {
+            if m.name.trim().is_empty() {
+                errs.push(ScenarioError {
+                    field: format!("members.{i}.name"),
+                    code: "empty".into(),
+                    message: format!("member {} ({}) is missing a name", i, m.id),
+                });
+            }
+            if m.system_prompt.trim().is_empty() {
+                errs.push(ScenarioError {
+                    field: format!("members.{i}.system_prompt"),
+                    code: "empty".into(),
+                    message: format!("member '{}' is missing a system prompt", m.id),
+                });
+            }
+        }
+        match self.turn_policy.as_str() {
+            "scripted" => {
+                if let Some(order) = &self.script_order {
+                    for id in order {
+                        if !ids.contains(id.as_str()) {
+                            errs.push(ScenarioError {
+                                field: "script_order".into(),
+                                code: "unknown_id".into(),
+                                message: format!("scripted order references unknown member '{id}'"),
+                            });
+                        }
+                    }
+                }
+            }
+            "moderator" => {
+                let mid = self.moderator_id.as_deref().unwrap_or("");
+                if mid.trim().is_empty() {
+                    errs.push(ScenarioError {
+                        field: "moderator_id".into(),
+                        code: "missing".into(),
+                        message: "moderator policy requires a moderator_id".into(),
+                    });
+                } else if !ids.contains(mid) {
+                    errs.push(ScenarioError {
+                        field: "moderator_id".into(),
+                        code: "unknown_id".into(),
+                        message: format!("moderator '{mid}' is not a member"),
+                    });
+                }
+            }
+            // "roundrobin" or anything else ⇒ round-robin fallthrough (no refs).
+            _ => {}
+        }
+        if let Some(op) = self
+            .opener_agent_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            if !ids.contains(op) {
+                errs.push(ScenarioError {
+                    field: "opener_agent_id".into(),
+                    code: "unknown_id".into(),
+                    message: format!("opener '{op}' is not a member"),
+                });
+            }
+        }
+        if let Some(fields) = &self.topic_fields {
+            for (fi, f) in fields.iter().enumerate() {
+                if let Some(vis) = &f.visible_to {
+                    for vid in vis {
+                        if !ids.contains(vid.as_str()) {
+                            errs.push(ScenarioError {
+                                field: format!("topic_fields.{fi}.visible_to"),
+                                code: "unknown_id".into(),
+                                message: format!(
+                                    "topic field '{}' is visible to unknown member '{vid}'",
+                                    f.id
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(db) = &self.debrief {
+            if !ids.contains(db.debrief_member_id.as_str()) {
+                errs.push(ScenarioError {
+                    field: "debrief.debrief_member_id".into(),
+                    code: "unknown_id".into(),
+                    message: format!("debrief member '{}' is not a member", db.debrief_member_id),
+                });
+            }
+        }
+        if let Some(rl) = &self.review_loop {
+            if !ids.contains(rl.reviewer_id.as_str()) {
+                errs.push(ScenarioError {
+                    field: "review_loop.reviewer_id".into(),
+                    code: "unknown_id".into(),
+                    message: format!("reviewer '{}' is not a member", rl.reviewer_id),
+                });
+            }
+            if rl.max_rounds == 0 {
+                errs.push(ScenarioError {
+                    field: "review_loop.max_rounds".into(),
+                    code: "invalid".into(),
+                    message: "review_loop.max_rounds must be at least 1".into(),
+                });
+            }
+        }
+        errs
+    }
+
+    /// True when [`validate`](Self::validate) finds no problems.
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_empty()
+    }
+
+    /// Compile this rich scenario into the engine launch payload, dropping the
+    /// UI-only fields (`icon`, `name`, `role`, `topic_fields`, `debrief`) the
+    /// engine does not consume. NOTE: topic-value baking (appending the
+    /// collected intake answers to each member's `system_prompt` per
+    /// `visible_to`) is the frontend's pre-submit step — it mutates
+    /// `system_prompt` on these members *before* calling this. This fn only
+    /// maps member→[`BusAgentSpec`] (dropping `role`) and passes the rest
+    /// through. Sharing it here keeps every frontend's compile identical.
+    pub fn to_group_scenario(&self) -> BusGroupScenario {
+        BusGroupScenario {
+            members: self
+                .members
+                .iter()
+                .map(|m| BusAgentSpec {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    system_prompt: m.system_prompt.clone(),
+                    kind: m.kind.clone(),
+                    model: m.model.clone(),
+                    api_key: m.api_key.clone(),
+                    base_url: m.base_url.clone(),
+                    color: m.color.clone(),
+                    avatar: m.avatar.clone(),
+                })
+                .collect(),
+            turn_policy: self.turn_policy.clone(),
+            script_order: self.script_order.clone(),
+            moderator_id: self.moderator_id.clone(),
+            opener_agent_id: self.opener_agent_id.clone(),
+            opener_line: self.opener_line.clone(),
+            title: Some(self.name.clone()),
+            review_loop: self.review_loop.clone(),
+            locale: self.locale,
+        }
+    }
+}
+
 // ─── Directive (inbound) ─────────────────────────────────────────────────────
 
 /// An instruction the frontend submits to the engine. The engine acts on it
@@ -699,5 +1099,233 @@ mod tests {
         for c in cases {
             let _ = serde_json::from_str::<Directive>(&c).unwrap();
         }
+    }
+
+    // ── BusGroupScenario::validate ───────────────────────────────────────
+
+    fn member(id: &str, name: &str, prompt: &str) -> BusAgentSpec {
+        BusAgentSpec {
+            id: id.into(),
+            name: name.into(),
+            system_prompt: prompt.into(),
+            kind: "openai".into(),
+            model: String::new(),
+            api_key: None,
+            base_url: None,
+            color: None,
+            avatar: None,
+        }
+    }
+
+    fn valid_scenario() -> BusGroupScenario {
+        BusGroupScenario {
+            members: vec![member("a", "A", "prompt-a")],
+            turn_policy: "scripted".into(),
+            script_order: Some(vec!["a".into()]),
+            moderator_id: None,
+            opener_agent_id: Some("a".into()),
+            opener_line: None,
+            title: None,
+            review_loop: Some(BusReviewLoop {
+                reviewer_id: "a".into(),
+                approve_marker: "ok".into(),
+                max_rounds: 2,
+            }),
+            locale: None,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_a_sound_scenario() {
+        assert!(valid_scenario().is_valid(), "baseline should be clean");
+    }
+
+    #[test]
+    fn validate_rejects_empty_members() {
+        let mut s = valid_scenario();
+        s.members.clear();
+        let errs = s.validate();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].field, "members");
+        assert_eq!(errs[0].code, "empty");
+        // Returns early — no spurious downstream member-id errors.
+    }
+
+    #[test]
+    fn validate_flags_blank_member_name_and_prompt() {
+        let mut s = valid_scenario();
+        s.members.push(member("b", "  ", ""));
+        let errs = s.validate();
+        let fields: Vec<&str> = errs.iter().map(|e| e.field.as_str()).collect();
+        assert!(fields.contains(&"members.1.name"));
+        assert!(fields.contains(&"members.1.system_prompt"));
+    }
+
+    #[test]
+    fn validate_flags_scripted_order_unknown_id() {
+        let mut s = valid_scenario();
+        s.script_order = Some(vec!["a".into(), "ghost".into()]);
+        let errs = s.validate();
+        assert_eq!(errs[0].field, "script_order");
+        assert_eq!(errs[0].code, "unknown_id");
+        assert!(errs[0].message.contains("ghost"));
+    }
+
+    #[test]
+    fn validate_flags_moderator_missing_and_unknown() {
+        // moderator policy with no moderator_id → missing.
+        let mut s = valid_scenario();
+        s.turn_policy = "moderator".into();
+        s.moderator_id = None;
+        let errs = s.validate();
+        assert_eq!(errs[0].field, "moderator_id");
+        assert_eq!(errs[0].code, "missing");
+
+        // moderator_id pointing at a non-member → unknown_id.
+        s.moderator_id = Some("nobody".into());
+        let errs = s.validate();
+        assert_eq!(errs[0].field, "moderator_id");
+        assert_eq!(errs[0].code, "unknown_id");
+    }
+
+    #[test]
+    fn validate_flags_opener_and_reviewer_unknown_and_zero_rounds() {
+        let mut s = valid_scenario();
+        s.opener_agent_id = Some("outsider".into());
+        s.review_loop = Some(BusReviewLoop {
+            reviewer_id: "outsider".into(),
+            approve_marker: "ok".into(),
+            max_rounds: 0,
+        });
+        let errs = s.validate();
+        let codes: Vec<&str> = errs.iter().map(|e| e.code.as_str()).collect();
+        // Three independent problems flagged together, not short-circuited.
+        assert_eq!(errs.len(), 3);
+        assert!(codes.iter().filter(|c| **c == "unknown_id").count() == 2);
+        assert!(codes.contains(&"invalid"));
+    }
+
+    #[test]
+    fn validate_round_robin_needs_no_refs() {
+        // Any turn_policy other than scripted/moderator falls through to
+        // round-robin — no id refs required, so a lone member is valid.
+        let mut s = valid_scenario();
+        s.turn_policy = "roundrobin".into();
+        s.script_order = None;
+        assert!(s.is_valid());
+    }
+
+    // ── BusScenario (rich) ──────────────────────────────────────────────
+
+    fn rich_member(id: &str, name: &str) -> BusScenarioMember {
+        BusScenarioMember {
+            id: id.into(),
+            name: name.into(),
+            role: None,
+            system_prompt: "prompt".into(),
+            kind: "openai".into(),
+            model: String::new(),
+            api_key: None,
+            base_url: None,
+            color: None,
+            avatar: None,
+        }
+    }
+
+    fn valid_rich() -> BusScenario {
+        BusScenario {
+            id: "sc1".into(),
+            name: "Interview".into(),
+            icon: Some("person.2".into()),
+            members: vec![rich_member("coach", "Coach")],
+            turn_policy: "moderator".into(),
+            script_order: None,
+            moderator_id: Some("coach".into()),
+            opener_agent_id: Some("coach".into()),
+            opener_line: None,
+            topic_fields: Some(vec![BusTopicField {
+                id: "role".into(),
+                label: "应聘岗位".into(),
+                placeholder: None,
+                visible_to: None,
+            }]),
+            debrief: Some(BusDebriefConfig {
+                button_label: "结束".into(),
+                summary_prompt: "summarize".into(),
+                debrief_member_id: "coach".into(),
+            }),
+            review_loop: None,
+            locale: Some(BusLocale::Zh),
+        }
+    }
+
+    #[test]
+    fn rich_validate_accepts_sound_scenario() {
+        assert!(valid_rich().is_valid());
+    }
+
+    #[test]
+    fn rich_validate_flags_topic_visible_to_unknown_member() {
+        let mut s = valid_rich();
+        s.topic_fields = Some(vec![BusTopicField {
+            id: "secret".into(),
+            label: "项目经历".into(),
+            placeholder: None,
+            visible_to: Some(vec!["ghost".into()]),
+        }]);
+        let errs = s.validate();
+        assert_eq!(errs[0].field, "topic_fields.0.visible_to");
+        assert_eq!(errs[0].code, "unknown_id");
+    }
+
+    #[test]
+    fn rich_validate_flags_debrief_member_unknown() {
+        let mut s = valid_rich();
+        s.debrief = Some(BusDebriefConfig {
+            button_label: "结束".into(),
+            summary_prompt: "summarize".into(),
+            debrief_member_id: "outsider".into(),
+        });
+        let errs = s.validate();
+        assert_eq!(errs[0].field, "debrief.debrief_member_id");
+        assert_eq!(errs[0].code, "unknown_id");
+    }
+
+    #[test]
+    fn rich_validate_flags_missing_name() {
+        let mut s = valid_rich();
+        s.name = "  ".into();
+        let errs = s.validate();
+        assert!(errs.iter().any(|e| e.field == "name" && e.code == "empty"));
+    }
+
+    #[test]
+    fn to_group_scenario_drops_ui_fields_and_maps_members() {
+        let rich = valid_rich();
+        let g = rich.to_group_scenario();
+        // Engine payload has no topic_fields/debrief/icon/name/role.
+        assert_eq!(g.members.len(), 1);
+        assert_eq!(g.members[0].id, "coach");
+        // No UI-only fields leak into the engine payload's JSON.
+        let gj = serde_json::to_string(&g).unwrap();
+        assert!(!gj.contains("topic_fields"));
+        assert!(!gj.contains("debrief"));
+        assert!(!gj.contains("role"));
+        // title carries the scenario name; turn_policy/moderator_id preserved.
+        assert_eq!(g.title.as_deref(), Some("Interview"));
+        assert_eq!(g.turn_policy, "moderator");
+        assert_eq!(g.moderator_id.as_deref(), Some("coach"));
+    }
+
+    #[test]
+    fn rich_scenario_round_trips_through_json() {
+        // The Swift Scenario Codable must produce/consume this exact JSON.
+        let rich = valid_rich();
+        let j = serde_json::to_string(&rich).unwrap();
+        let back: BusScenario = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.id, rich.id);
+        assert_eq!(back.members[0].id, "coach");
+        assert_eq!(back.topic_fields.as_ref().unwrap()[0].label, "应聘岗位");
+        assert_eq!(back.debrief.unwrap().debrief_member_id, "coach");
     }
 }

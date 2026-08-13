@@ -1,0 +1,36 @@
+[package]
+name = "oneai-app-server"
+description = "OneAI App-Server — JSON-RPC 2.0 frontend protocol layer over the engine bus (stdio / unix-socket / named-pipe / WebSocket)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+
+# WebSocket transport (browser / JS frontends). Feature-gated so the crate
+# stays light when WS is not needed; default-on for the CLI.
+tokio-tungstenite = { workspace = true, optional = true }
+
+# Internal crates — sits at the same layer as oneai-supervisor / oneai-studio
+# (below oneai-app). Reuses IpcListener/IpcStream for the stdio/UDS/pipe
+# transports; the engine itself is built by the CLI, not this crate.
+oneai-core = { workspace = true }
+oneai-bus = { workspace = true }
+oneai-supervisor = { workspace = true }
+
+[features]
+default = ["ws"]
+ws = ["dep:tokio-tungstenite"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

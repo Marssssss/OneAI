@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/oneai-core",
     "crates/oneai-bus",
+    "crates/oneai-app-server",
     "crates/oneai-provider",
     "crates/oneai-agent",
     "crates/oneai-workflow",
@@ -46,6 +47,7 @@ members = [
 default-members = [
     "crates/oneai-core",
     "crates/oneai-bus",
+    "crates/oneai-app-server",
     "crates/oneai-provider",
     "crates/oneai-agent",
     "crates/oneai-workflow",
@@ -214,6 +216,7 @@ uniffi = "0.32"
 # are rejected by `cargo publish`). Bump in lockstep with [workspace.package].
 oneai-core = { path = "crates/oneai-core", version = "1.1.0" }
 oneai-bus = { path = "crates/oneai-bus", version = "1.1.0" }
+oneai-app-server = { path = "crates/oneai-app-server", version = "1.1.0" }
 oneai-provider = { path = "crates/oneai-provider", version = "1.1.0" }
 oneai-agent = { path = "crates/oneai-agent", version = "1.1.0" }
 oneai-workflow = { path = "crates/oneai-workflow", version = "1.1.0" }

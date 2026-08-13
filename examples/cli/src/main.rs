@@ -68,6 +68,7 @@
 //!   oneai graph run <n> <task> — Execute a state graph with a real LLM
 
 mod cmd_a2a;
+mod cmd_app_server;
 mod cmd_chat;
 mod cmd_config;
 mod cmd_cron;
@@ -188,6 +189,24 @@ enum Commands {
         /// IPC socket path (default: ~/.oneai/serve.sock)
         #[arg(long)]
         socket: Option<String>,
+        /// Domain pack (default: coding)
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model override
+        #[arg(long)]
+        model: Option<String>,
+        /// Default user identity for memory namespacing
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Serve the engine over JSON-RPC 2.0 (the unified non-Rust-frontend
+    /// protocol — IDE plugin / web / macOS-Swift / Windows-C#). One `--listen`
+    /// per transport: `stdio`, `ipc://<path>`, `ws://<host>:<port>`. Repeats.
+    AppServer {
+        /// Transport(s) to listen on (repeatable). `stdio` | `ipc://<path>` |
+        /// `ws://<host>:<port>`. Default: `ipc://~/.oneai/app-server.sock`.
+        #[arg(long = "listen", value_name = "SPEC")]
+        listen: Vec<String>,
         /// Domain pack (default: coding)
         #[arg(long)]
         domain: Option<String>,
@@ -1605,6 +1624,18 @@ fn main() {
         }) => cmd_serve::cmd_serve(
             &config,
             socket.as_deref(),
+            domain.as_deref(),
+            model.as_deref(),
+            user.as_deref(),
+        ),
+        Some(Commands::AppServer {
+            listen,
+            domain,
+            model,
+            user,
+        }) => cmd_app_server::cmd_app_server(
+            &config,
+            &listen,
             domain.as_deref(),
             model.as_deref(),
             user.as_deref(),

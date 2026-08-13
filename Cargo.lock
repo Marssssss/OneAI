@@ -3811,6 +3811,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneai-app-server"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "dirs 5.0.1",
+ "futures",
+ "oneai-bus",
+ "oneai-core",
+ "oneai-supervisor",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "oneai-bus"
 version = "1.1.0"
 dependencies = [
@@ -3851,6 +3871,7 @@ dependencies = [
  "oneai-a2a",
  "oneai-agent",
  "oneai-app",
+ "oneai-app-server",
  "oneai-bus",
  "oneai-core",
  "oneai-domain",

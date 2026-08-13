@@ -48,6 +48,7 @@ oneai-skill = { workspace = true }
 oneai-eval = { workspace = true }
 oneai-studio = { workspace = true }
 oneai-supervisor = { workspace = true }
+oneai-app-server = { workspace = true }
 oneai-mcp = { workspace = true }
 oneai-a2a = { workspace = true }
 oneai-wasm = { workspace = true }
