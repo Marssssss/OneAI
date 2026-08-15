@@ -789,13 +789,15 @@ final class ChatViewModel: ObservableObject {
     /// restores the full streamed output (issue #13). Group rounds are short
     /// and group resume isn't wired, so group is interrupted + dropped.
     private func interruptInFlight() async {
-        // Sidecar: cancel the in-flight turn (if any) via turn/cancel so its
-        // events don't contaminate the next conversation — the sidecar has
-        // one engine session in Slice 1 (no session/* wired), so a
-        // mid-stream switch must actually stop the run. No background
-        // buffering for sidecar (Slice 1 is always-visible).
+        // Sidecar: cancel the in-flight turn/round (if any) via turn/cancel so
+        // its events don't contaminate the next conversation — the sidecar is
+        // always-visible (no background buffering). Group rounds don't register
+        // a bus cancel token (the round runs to completion), but turn/cancel is
+        // harmless when nothing's registered; for single-agent it fires the
+        // token registered at TurnStart. Send whenever `running` (the ack nature
+        // of group/run + turn/run means turn_id isn't a reliable proxy).
         if transport == .sidecar {
-            if running, sidecarTurnId != nil, let rpc = rpcClient {
+            if running, let rpc = rpcClient {
                 _ = try? await rpc.call("turn/cancel", params: [String: String]())
             }
             if let t = activeSpeakerItem { t.streaming = false; t.done = true }
@@ -834,9 +836,8 @@ final class ChatViewModel: ObservableObject {
     /// the values are sent as the first user message to kick off the first
     /// round (e.g. writing workshop → writer drafts).
     func newConversation(scenario: Scenario?, topicValues: [String: String]?) async {
-        // Sidecar transport: single-agent turns go over JSON-RPC. Group chat
-        // via sidecar is Phase D Slice 2 (not yet wired) — surface that
-        // honestly rather than silently falling back to a half-path.
+        // Sidecar transport: turns go over JSON-RPC. Single-agent = turn/run;
+        // group chat = group/start + group/open|group/run. (Phase D Slice 2.)
         if transport == .sidecar {
             await interruptInFlight()
             pendingScenario = nil
@@ -848,27 +849,60 @@ final class ChatViewModel: ObservableObject {
             olderCursor = nil
             olderJumpId = nil
             debriefActive = false
-            if scenario != nil {
-                self.error = NSLocalizedString("群聊 sidecar 暂未接入(Phase D Slice 2);请在设置中切换到 FFI 引擎。", comment: "")
-                currentScenario = nil
-            } else {
-                items.removeAll()
-                error = nil
-                currentSessionId = nil
-                running = false
-                // Create a fresh engine session so the upcoming turn/run
-                // saves under a NEW conversation row (the sidecar's
+            guard let scenario = scenario else {
+                // Single-agent: create a fresh engine session so the upcoming
+                // turn/run saves under a NEW conversation row (the sidecar's
                 // CreateSession directive swaps the pump's runtime session;
                 // turn/run then runs on it + run_agent auto-saves it). The
                 // returned id binds currentSessionId so the sidebar can mark
                 // this conversation current and a later turn_complete refresh
                 // surfaces it. No scenario ⇒ engine assigns the id.
+                items.removeAll()
+                error = nil
+                currentSessionId = nil
+                running = false
                 if let rpc = rpcClient,
                    let res = try? await rpc.call("session/create", params: [String: String]()),
                    let id = res["id"] as? String {
                     currentSessionId = id
                     StreamLog.log("sess", "sidecar session/create id=\(id)")
                 }
+                return
+            }
+            // Group chat via sidecar: group/start builds the engine-side
+            // GroupChatSession; group/open (opener) or group/run (first user
+            // msg) drives the first round. Streaming + the round-end
+            // turn_complete arrive as `event` notifications.
+            guard let rpc = rpcClient else { self.error = "sidecar 引擎未就绪"; return }
+            items.removeAll()
+            error = nil
+            currentSessionId = nil   // group-chat conversation id is engine-side
+            running = true
+            groupStreamKey = "group:" + UUID().uuidString
+            sidecarStreamKey = groupStreamKey
+            setActiveStreamKey(groupStreamKey)
+            sidecarTurnId = nil
+            let spec = buildGroupScenarioJSON(scenario: scenario, topicValues: topicValues)
+            do {
+                _ = try await rpc.call("group/start", params: ["scenario": spec])
+                StreamLog.log("sess", "sidecar group/start scenario=\(scenario.id)")
+                if scenario.openerAgentId != nil {
+                    _ = try await rpc.call("group/open", params: [String: String]())
+                    StreamLog.log("run", "sidecar group/open (opener)")
+                } else {
+                    // No opener — kick off the first round with a user message
+                    // built from the collected topic values (writing workshop).
+                    let firstMsg = Self.firstUserMessage(for: scenario, topicValues: topicValues)
+                    if !firstMsg.isEmpty {
+                        await runGroupTaskSidecar(firstMsg, addUserItem: true)
+                    } else {
+                        running = false
+                    }
+                }
+            } catch {
+                self.error = String(format: NSLocalizedString("场景启动失败: %@", comment: ""), friendlyError(error))
+                currentScenario = nil
+                running = false
             }
             return
         }
@@ -962,15 +996,92 @@ final class ChatViewModel: ObservableObject {
         return vals.joined(separator: " · ")
     }
 
+    /// Build the JSON-RPC `BusGroupScenario` payload for `group/start` from a
+    /// `Scenario` + collected topic values. Mirrors `Scenario.specView` /
+    /// `Agent.specView` (the FFI path's `ScenarioSpecView`): bakes the visible
+    /// topic fields into each member's `system_prompt` as `【场景背景】…`, folds
+    /// every non-blank value into the title suffix, and inherits the app's
+    /// provider config where an agent leaves kind/apiKey/baseUrl/model nil.
+    ///
+    /// Emits snake_case keys matching `crates/oneai-bus::BusGroupScenario`
+    /// (the `app-server` adapter parses `group/start`'s `scenario` param as
+    /// that DTO) — NOT the camelCase `Scenario` Codable (which mirrors the rich
+    /// `BusScenario` editor unit the macOS sidebar reads from disk directly).
+    private func buildGroupScenarioJSON(scenario: Scenario, topicValues: [String: String]?) -> [String: Any] {
+        let fields = scenario.topicFields ?? []
+        let pairs: [(field: TopicField, value: String)] = fields.compactMap { f in
+            let v = (topicValues?[f.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return v.isEmpty ? nil : (f, v)
+        }
+        let titleParts = pairs.map { $0.value }
+        let title = titleParts.isEmpty ? scenario.name : "\(scenario.name)·" + titleParts.joined(separator: "·")
+
+        let members = scenario.agents.map { agent -> [String: Any] in
+            // Background for THIS member: only fields it's allowed to see.
+            let visible = pairs.filter { p in
+                guard let allowed = p.field.visibleTo else { return true }
+                return allowed.contains(agent.id)
+            }
+            let lines = visible.map { "\($0.field.label): \($0.value)" }
+            let background = lines.isEmpty ? "" : "【场景背景】\n" + lines.joined(separator: "\n")
+            let prompt = background.isEmpty ? agent.systemPrompt : "\(agent.systemPrompt)\n\n\(background)"
+            var m: [String: Any] = [
+                "id": agent.id,
+                "name": agent.name,
+                "system_prompt": prompt,
+                "kind": agent.kind ?? kind,
+                "model": agent.model ?? model,
+                "color": agent.color,
+                "avatar": agent.avatar,
+            ]
+            // nil ⇒ inherit the app's provider; only forward an explicit override
+            // or the app setting when the agent leaves it nil.
+            let key = agent.apiKey ?? (apiKey.isEmpty ? nil : apiKey)
+            let url = agent.baseUrl ?? (baseUrl.isEmpty ? nil : baseUrl)
+            if let key = key { m["api_key"] = key }
+            if let url = url { m["base_url"] = url }
+            return m
+        }
+
+        var spec: [String: Any] = [
+            "members": members,
+            "turn_policy": scenario.turnPolicy.specValue,
+            "title": title,
+            "locale": AppLocale.current.rawValue,
+        ]
+        if let order = scenario.scriptOrder { spec["script_order"] = order }
+        if let mod = scenario.moderatorId { spec["moderator_id"] = mod }
+        if let op = scenario.openerAgentId { spec["opener_agent_id"] = op }
+        if let line = scenario.openerLine { spec["opener_line"] = line }
+        if let rl = scenario.reviewLoop {
+            spec["review_loop"] = [
+                "reviewer_id": rl.reviewerId,
+                "approve_marker": rl.approveMarker,
+                "max_rounds": rl.maxRounds,
+            ] as [String: Any]
+        }
+        return spec
+    }
+
     /// Trigger the scenario's debrief phase (e.g. "结束面试"): switch the turn
     /// policy to a scripted order containing only the debrief member, then send
     /// the summary prompt so that member produces a full-session summary.
     /// Subsequent user messages route only to the debrief member — the other
     /// members (e.g. the interviewer) no longer participate.
     func endScenarioDebrief() async {
-        guard !running, let gs = groupSession, let debrief = currentScenario?.debrief,
-              !debriefActive else { return }
+        guard !running, let debrief = currentScenario?.debrief, !debriefActive else { return }
         debriefActive = true
+        if transport == .sidecar {
+            // group/set_order narrows the turn policy to the debrief member;
+            // the subsequent group/run sends the summary prompt, and only that
+            // member responds. runGroupTaskSidecar handles streaming.
+            if let rpc = rpcClient {
+                _ = try? await rpc.call("group/set_order", params: ["order": [debrief.debriefMemberId]])
+            }
+            await runGroupTaskSidecar(debrief.summaryPrompt, addUserItem: true)
+            return
+        }
+        guard let gs = groupSession else { return }
         await gs.setScriptedOrder(order: [debrief.debriefMemberId])
         // Send the summary prompt as a user turn; with the now-singleton order
         // only the debrief member responds. runGroupTask handles streaming/save.
@@ -1416,12 +1527,19 @@ final class ChatViewModel: ObservableObject {
 
     func runTask(_ task: String, addUserItem: Bool = true) async {
         lastUserTask = task
-        if groupSession != nil {
-            await runGroupTask(task, addUserItem: addUserItem)
+        if transport == .sidecar {
+            // Group chat over sidecar has no FFI `groupSession`; route on
+            // `currentScenario != nil` (a scenario is active). Single-agent
+            // falls through to runTaskSidecar.
+            if currentScenario != nil {
+                await runGroupTaskSidecar(task, addUserItem: addUserItem)
+            } else {
+                await runTaskSidecar(task, addUserItem: addUserItem)
+            }
             return
         }
-        if transport == .sidecar {
-            await runTaskSidecar(task, addUserItem: addUserItem)
+        if groupSession != nil {
+            await runGroupTask(task, addUserItem: addUserItem)
             return
         }
         guard let s = session else { self.error = "session not built"; return }
@@ -1601,15 +1719,70 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Ensure a sidecar AssistantItem exists for the in-flight turn (the
-    /// first event of a turn seeds it; `turn/run` already appended one, but a
-    /// late-arriving event after a tear-down-rebuild guards against nil).
-    private func ensureSidecarTurn() {
+    /// Multi-agent turn over the sidecar JSON-RPC client. Mirrors the FFI
+    /// `runGroupTask`'s visible-path: append the UserItem, reset the active
+    /// speaker item (a new round starts; the first fragment seeds it), set
+    /// `running`, then `group/run` (ack). The round's speaker-tagged fragments
+    /// arrive as `event` notifications routed by `sidecarItemFor(speaker:)`;
+    /// the round-end `turn_complete` (emitted by the sidecar runtime on round
+    /// success) finalizes the last member's item + clears `running`.
+    private func runGroupTaskSidecar(_ task: String, addUserItem: Bool) async {
+        guard let rpc = rpcClient else { self.error = "sidecar 引擎未就绪"; return }
+        StreamLog.log("run", "sidecar group runTask start len=\(task.count)")
+        if addUserItem { items.append(.user(UserItem(text: task))) }
+        activeSpeakerItem = nil     // a new round starts; first event seeds item
+        activeSpeakerId = nil
+        running = true
+        error = nil
+        lastTurnTokens = 0
+        lastCacheHitPct = nil
+        sidecarTurnId = nil
+        // The group's stream key (set at group start); visible key matches so
+        // events render, and `handleSidecarEvent`'s turn_complete guard
+        // (currentStreamKey == sidecarStreamKey) clears `running`.
+        sidecarStreamKey = groupStreamKey
+        setActiveStreamKey(groupStreamKey)
+        do {
+            _ = try await rpc.call("group/run", params: ["user_input": task])
+            StreamLog.log("run", "sidecar group/run sent len=\(task.count)")
+        } catch {
+            if activeSpeakerItem == nil {
+                let item = AssistantItem()
+                activeSpeakerItem = item
+                items.append(.assistant(item))
+            }
+            activeSpeakerItem?.error = friendlyError(error)
+            activeSpeakerItem?.streaming = false
+            activeSpeakerItem?.done = true
+            if currentStreamKey() == sidecarStreamKey { running = false }
+            StreamLog.log("run", "sidecar group/run err=\(friendlyError(error))")
+        }
+    }
+
+    /// Resolve the AssistantItem a sidecar fragment event mutates, with
+    /// speaker routing for group chat. Mirrors the FFI `handle`'s speaker
+    /// switch (1257-1263): a fragment carrying a non-nil `speaker` that
+    /// differs from the active item's `speakerId` finalizes the previous item
+    /// and starts a new one. `speaker == nil` (single-agent) reuses/creates
+    /// one item. Always-visible (the sidecar has no background buffering).
+    private func sidecarItemFor(speaker: String?) -> AssistantItem? {
+        if let sid = speaker, activeSpeakerItem?.speakerId != sid {
+            // New speaker → finalize the previous member's item, start fresh.
+            if let prev = activeSpeakerItem { prev.streaming = false; prev.done = true }
+            let item = AssistantItem()
+            item.speakerId = sid
+            activeSpeakerItem = item
+            items.append(.assistant(item))
+            activeSpeakerId = sid
+            return item
+        }
         if activeSpeakerItem == nil {
             let item = AssistantItem()
+            if let sid = speaker { item.speakerId = sid; activeSpeakerId = sid }
             activeSpeakerItem = item
             items.append(.assistant(item))
         }
+        return activeSpeakerItem
     }
 
     /// Route a sidecar `event` notification into the active AssistantItem.
@@ -1626,10 +1799,16 @@ final class ChatViewModel: ObservableObject {
         // (engine stuck in a tool loop).
         StreamLog.log("sidecar", "event kind=\(event.kind)")
         switch event.kind {
+        case "speaker_turn":
+            // Engine brackets a member's turn with this before their fragments.
+            // The first fragment carries the same `speaker` id and seeds the
+            // item via `sidecarItemFor`, so this is informational only (log);
+            // pre-creating an empty bubble here would flash before any content.
+            let sp = (p["speaker"] as? String) ?? ""
+            StreamLog.log("sidecar", "speaker_turn=\(sp)")
         case "stream_chunk":
             let text = (p["text"] as? String) ?? ""
-            ensureSidecarTurn()
-            guard let t = activeSpeakerItem else { break }
+            guard let t = sidecarItemFor(speaker: p["speaker"] as? String) else { break }
             let flipped = t.thinkingActive
             if flipped { t.thinkingActive = false; t.thinkingDone = true }
             t.streaming = true; t.text += text
@@ -1638,23 +1817,22 @@ final class ChatViewModel: ObservableObject {
             bumpStreamTick(isHot: true)
         case "thinking":
             let text = (p["text"] as? String) ?? ""
-            ensureSidecarTurn()
-            activeSpeakerItem?.thinkingActive = true
-            activeSpeakerItem?.thinking += text
-            activeSpeakerItem?.version += 1
+            guard let t = sidecarItemFor(speaker: p["speaker"] as? String) else { break }
+            t.thinkingActive = true
+            t.thinking += text
+            t.version += 1
             bumpStreamTick(isHot: true)
         case "direct_answer":
             let text = (p["text"] as? String) ?? ""
-            ensureSidecarTurn()
-            guard let t = activeSpeakerItem else { break }
+            guard let t = sidecarItemFor(speaker: p["speaker"] as? String) else { break }
             if !text.isEmpty { t.text = text }
             if t.thinkingActive { t.thinkingActive = false; t.thinkingDone = true }
             t.version += 1
             bumpStreamTick(isHot: false)
         case "tool_calls":
             // calls: [{id, name, args}]
-            ensureSidecarTurn()
-            guard let calls = p["calls"] as? [[String: Any]], let t = activeSpeakerItem else { break }
+            guard let t = sidecarItemFor(speaker: p["speaker"] as? String),
+                  let calls = p["calls"] as? [[String: Any]] else { break }
             for c in calls {
                 let id = (c["id"] as? String) ?? UUID().uuidString
                 if t.steps.contains(where: { $0.callId == id }) { continue }
@@ -1669,7 +1847,8 @@ final class ChatViewModel: ObservableObject {
             let output = p["output"] as? [String: Any]
             let content = (output?["content"] as? String) ?? ""
             let success = (output?["success"] as? Bool) ?? true
-            guard let t = activeSpeakerItem else { break }
+            // tool_result carries the speaker too — route to that member's item.
+            guard let t = sidecarItemFor(speaker: p["speaker"] as? String) else { break }
             if let idx = t.steps.firstIndex(where: { $0.callId == callId }) {
                 t.steps[idx].result = content
                 t.steps[idx].ok = success

@@ -175,7 +175,13 @@ impl OneAiGroupChatSession {
     /// Build the FFI wrapper from a scenario spec + the app's shared
     /// (non-provider) resources. Each member gets its own provider from
     /// `AgentSpecView`.
-    pub(crate) fn build(
+    ///
+    /// `pub` (not `pub(crate)`) so the JSON-RPC sidecar runtime
+    /// (`examples/cli/src/cmd_app_server.rs::AppServerRuntime`) can build a
+    /// group session off the same `App` it drives single-agent turns through —
+    /// mirroring the in-process c_facade path. The returned `inner_session()`
+    /// is then driven through a `GroupChatBusObserver` over the bus.
+    pub fn build(
         scenario: ScenarioSpecView,
         app: &oneai_app::App,
     ) -> std::result::Result<Arc<Self>, OneAIErrorView> {
@@ -254,11 +260,11 @@ impl OneAiGroupChatSession {
         }))
     }
 
-    /// Borrow the underlying engine `GroupChatSession` (crate-visible). Used by
-    /// the in-process 3-symbol c_facade pump to drive the session through a
-    /// `GroupChatBusObserver` (bus yields) instead of the `ChatEventCallback`
-    /// the uniffi `start`/`run_task` methods wire up.
-    pub(crate) fn inner_session(&self) -> Arc<oneai_agent::group_chat::GroupChatSession> {
+    /// Borrow the underlying engine `GroupChatSession`. Used by both the
+    /// in-process 3-symbol c_facade pump and the JSON-RPC sidecar runtime to
+    /// drive the session through a `GroupChatBusObserver` (bus yields) instead
+    /// of the `ChatEventCallback` the uniffi `start`/`run_task` methods wire up.
+    pub fn inner_session(&self) -> Arc<oneai_agent::group_chat::GroupChatSession> {
         self.inner.clone()
     }
 }

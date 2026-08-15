@@ -12,14 +12,18 @@
 //! schema (one schema for all non-Rust frontends, IDE/MCP tool-chain friendly).
 //! See `docs/app-server-mechanism.md`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use oneai_agent::AgentLoop;
+use oneai::group_chat::{OneAiGroupChatSession, ScenarioSpecView};
+use oneai_agent::group_chat::{GroupChatSession, TurnPolicy};
+use oneai_agent::{AgentLoop, GroupChatBusObserver};
 use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
 use oneai_app_server::{
     default_scenarios_path, serve_all, AppServerError, FileScenarioStore, ListenSpec,
     SharedScenarioStore,
 };
+use oneai_bus::{EngineBus, EngineYield};
 use oneai_core::error::Result;
 use oneai_core::{traits::LlmProvider, Message};
 use oneai_provider::ProviderFactory;
@@ -74,6 +78,11 @@ fn parse_specs(listen: &[String]) -> oneai_app_server::Result<Vec<ListenSpec>> {
 struct AppServerRuntime {
     app: Arc<App>,
     session: AppSession,
+    /// Active group-chat session when a `StartGroupChat` has displaced single-
+    /// agent turns. `group/start`·`group/run` drive it; a new single-agent
+    /// conversation (`session/create`) leaves it stale but unused (the next
+    /// `StartGroupChat` rebuilds it). Mirrors `CFacadeRuntime.group`/`group_slot`.
+    group: Option<Arc<GroupChatSession>>,
 }
 
 #[async_trait::async_trait]
@@ -145,6 +154,105 @@ impl DirectiveRuntime for AppServerRuntime {
     async fn session_id(&mut self) -> String {
         self.session.session_id().to_string()
     }
+
+    // ── Group chat (Phase D Slice 2) ────────────────────────────────────
+    //
+    // The trait's default group methods error out ("group chat not active on
+    // this runtime") — they exist so non-group runtimes typecheck unchanged.
+    // The JSON-RPC sidecar needs group chat, so we override them here, mirroring
+    // `CFacadeRuntime` (crates/oneai-uniffi/src/c_facade.rs): build a
+    // `GroupChatSession` off the shared `App` resources via the uniffi
+    // `OneAiGroupChatSession::build`, then drive each round through a
+    // `GroupChatBusObserver` over `app.engine_bus` (the same bus single-agent
+    // turns yield to). Speaker-tagged fragments + `SpeakerTurn` flow to the
+    // frontend; a single round-level `TurnComplete` is emitted on success so an
+    // out-of-process frontend (which can't observe the `await` returning) can
+    // clear its `running` flag — the `GroupChatBusObserver` deliberately
+    // no-ops `on_complete` so N members don't each emit one.
+
+    async fn start_group(&mut self, scenario: oneai_bus::BusGroupScenario) -> Result<()> {
+        // BusGroupScenario → the uniffi ScenarioSpecView (same field shape by
+        // design) → per-member providers + shared app resources.
+        let spec = ScenarioSpecView::from(&scenario);
+        let gs = OneAiGroupChatSession::build(spec, &self.app)
+            .map_err(|e| oneai_core::error::OneAIError::Config(format!("{e:?}")))?;
+        self.group = Some(gs.inner_session());
+        Ok(())
+    }
+
+    async fn group_start(&mut self) -> Result<()> {
+        let group = self
+            .group
+            .clone()
+            .ok_or_else(|| oneai_core::error::OneAIError::Agent("group chat not active".into()))?;
+        let turn_id = group_turn_id();
+        let observer = GroupChatBusObserver::new(self.engine_bus()?, turn_id.clone());
+        let res = group.start(&observer).await;
+        if res.is_ok() {
+            let _ = self.emit_turn_complete(turn_id);
+        }
+        res
+    }
+
+    async fn group_run_task(&mut self, user_input: &str) -> Result<()> {
+        let group = self
+            .group
+            .clone()
+            .ok_or_else(|| oneai_core::error::OneAIError::Agent("group chat not active".into()))?;
+        let turn_id = group_turn_id();
+        let observer = GroupChatBusObserver::new(self.engine_bus()?, turn_id.clone());
+        let res = group.run_task(user_input, &observer).await;
+        if res.is_ok() {
+            let _ = self.emit_turn_complete(turn_id);
+        }
+        res
+    }
+
+    async fn group_set_scripted_order(&mut self, order: Vec<String>) {
+        if let Some(group) = &self.group {
+            group.set_turn_policy(TurnPolicy::Scripted { order }).await;
+        }
+    }
+}
+
+// ─── AppServerRuntime group helpers ──────────────────────────────────────────
+
+impl AppServerRuntime {
+    /// The bus the pump drives; `engine_bus()` was called at startup so it's
+    /// always `Some` here. Returned as `Arc<dyn EngineBus>` for the observer.
+    fn engine_bus(&self) -> Result<Arc<dyn EngineBus>> {
+        let bus = self.app.engine_bus.clone().ok_or_else(|| {
+            oneai_core::error::OneAIError::Agent(
+                "engine_bus not configured; call AppBuilder::engine_bus() before group chat".into(),
+            )
+        })?;
+        Ok(bus)
+    }
+
+    /// Emit the single round-level `TurnComplete` after a group round succeeds.
+    /// `final_answer` is empty — the members' answers rode `DirectAnswer`
+    /// yields, and the frontend's `turn_complete` handler leaves the last
+    /// member's bubble intact behind its `if !final.is_empty()` guard.
+    fn emit_turn_complete(&self, turn_id: String) -> Result<()> {
+        let bus = self.engine_bus()?;
+        let _ = bus.emit(EngineYield::TurnComplete {
+            turn_id,
+            summary: oneai_bus::BusTurnSummary {
+                final_answer: String::new(),
+                iterations: 0,
+                completed: true,
+                active_paradigm: oneai_bus::BusParadigmKind::ReAct,
+            },
+        });
+        Ok(())
+    }
+}
+
+/// Monotonic group-round id (mirrors `c_facade::group_turn_id`'s uuid scheme
+/// without pulling uuid into the CLI — a unique-enough bracketing key).
+static GROUP_TURN_SEQ: AtomicU64 = AtomicU64::new(0);
+fn group_turn_id() -> String {
+    format!("group_{}", GROUP_TURN_SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 // ─── ConversationStore impl ──────────────────────────────────────────────────
@@ -282,6 +390,7 @@ pub fn cmd_app_server(
         let runtime = Arc::new(Mutex::new(AppServerRuntime {
             app: app.clone(),
             session,
+            group: None,
         }));
         let interrupt_slot: Arc<Mutex<Option<AgentLoop>>> = Arc::new(Mutex::new(None));
 

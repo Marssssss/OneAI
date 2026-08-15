@@ -35,8 +35,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use oneai_agent::{group_chat::GroupChatSession, AgentLoop, GroupChatBusObserver};
 use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
 use oneai_bus::{
-    serialize_yield, BusEngineConfig, BusGroupScenario, Directive, EngineBus, EngineYield,
-    InProcessBus,
+    serialize_yield, BusEngineConfig, BusGroupScenario, BusParadigmKind, BusTurnSummary, Directive,
+    EngineBus, EngineYield, InProcessBus,
 };
 use oneai_core::error::{OneAIError, Result};
 use oneai_core::traits::LlmProvider;
@@ -362,16 +362,38 @@ impl DirectiveRuntime for CFacadeRuntime {
 
     async fn group_start(&mut self) -> Result<()> {
         let group = self.require_group()?;
+        let turn_id = group_turn_id();
         let observer =
-            GroupChatBusObserver::new(self.bus.clone() as Arc<dyn EngineBus>, group_turn_id());
-        group.start(&observer).await
+            GroupChatBusObserver::new(self.bus.clone() as Arc<dyn EngineBus>, turn_id.clone());
+        let res = group.start(&observer).await;
+        // A group round is delimited for bus consumers by this single
+        // round-level `TurnComplete` — the `GroupChatBusObserver` deliberately
+        // no-ops `on_complete` (so N members don't each emit one). The in-
+        // process FFI path signals round-end via its `await` returning; an
+        // out-of-process bus consumer (sidecar / mobile c_facade) has no
+        // await to observe, so it needs this yield to clear `running`.
+        if res.is_ok() {
+            let _ = self.bus.emit(EngineYield::TurnComplete {
+                turn_id,
+                summary: group_round_summary(),
+            });
+        }
+        res
     }
 
     async fn group_run_task(&mut self, user_input: &str) -> Result<()> {
         let group = self.require_group()?;
+        let turn_id = group_turn_id();
         let observer =
-            GroupChatBusObserver::new(self.bus.clone() as Arc<dyn EngineBus>, group_turn_id());
-        group.run_task(user_input, &observer).await
+            GroupChatBusObserver::new(self.bus.clone() as Arc<dyn EngineBus>, turn_id.clone());
+        let res = group.run_task(user_input, &observer).await;
+        if res.is_ok() {
+            let _ = self.bus.emit(EngineYield::TurnComplete {
+                turn_id,
+                summary: group_round_summary(),
+            });
+        }
+        res
     }
 
     async fn group_set_scripted_order(&mut self, order: Vec<String>) {
@@ -386,6 +408,20 @@ impl DirectiveRuntime for CFacadeRuntime {
 /// ids internally; this brackets the round's yields the pump emits).
 fn group_turn_id() -> String {
     format!("group_{}", uuid::Uuid::new_v4())
+}
+
+/// Minimal `BusTurnSummary` for the round-level `TurnComplete` a group round
+/// emits on success. The members' actual answers rode `DirectAnswer` yields
+/// (one per member); `final_answer` is empty so the frontend's `turn_complete`
+/// handler leaves the last member's bubble intact (its `if !final.is_empty()`
+/// guard). `completed: true` signals the round ended cleanly.
+fn group_round_summary() -> BusTurnSummary {
+    BusTurnSummary {
+        final_answer: String::new(),
+        iterations: 0,
+        completed: true,
+        active_paradigm: BusParadigmKind::ReAct,
+    }
 }
 
 // ─── extern "C" surface (exactly 3 symbols) ────────────────────────────

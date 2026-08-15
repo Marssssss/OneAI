@@ -922,6 +922,87 @@ mod tests {
         assert!(chunks.iter().any(|(s, _)| s == "coach"));
     }
 
+    /// A real mock-provider group round driven through `GroupChatBusObserver`
+    /// over an `InProcessBus` emits `SpeakerTurn` + speaker-tagged fragments —
+    /// but, by design, NO `TurnComplete` during the round (the observer no-ops
+    /// `on_complete` so N members don't each emit one). This is the gap the
+    /// sidecar/c_facade runtimes fill by emitting a single round-level
+    /// `TurnComplete` after `run_task` returns (an out-of-process frontend
+    /// can't observe the `await` returning, so it needs that yield to clear
+    /// `running`). Guards that premise: if the observer ever starts emitting a
+    /// per-round `TurnComplete`, the duplicate would surface to frontends.
+    #[tokio::test]
+    async fn bus_observer_round_emits_speakers_but_no_turn_complete() {
+        use crate::GroupChatBusObserver;
+        use oneai_bus::{EngineBus, EngineYield, InProcessBus};
+
+        let provider = Arc::new(MockProvider::from_script(vec![
+            ScriptedResponse::direct_answer("面试官的问题"),
+            ScriptedResponse::direct_answer("指导员的点评"),
+        ]));
+        let cfg = GroupChatConfig {
+            members: vec![
+                GroupChatMemberSpec {
+                    id: "interviewer".into(),
+                    name: "面试官".into(),
+                    system_prompt: "你是面试官".into(),
+                },
+                GroupChatMemberSpec {
+                    id: "coach".into(),
+                    name: "指导员".into(),
+                    system_prompt: "你是指导员".into(),
+                },
+            ],
+            turn_policy: TurnPolicy::Scripted {
+                order: vec!["interviewer".into(), "coach".into()],
+            },
+            opener_agent_id: None,
+            opener_line: None,
+            title: None,
+            review_loop: None,
+            locale: ChatLocale::Zh,
+        };
+        let session = GroupChatSession::new(cfg, resources(provider)).unwrap();
+        let bus: Arc<InProcessBus> = Arc::new(InProcessBus::default());
+        let mut rx = bus.subscribe_yields();
+        let obs = GroupChatBusObserver::new(bus.clone() as Arc<dyn EngineBus>, "t1");
+        session
+            .run_task("用户回答", &obs as &dyn GroupChatObserver)
+            .await
+            .unwrap();
+
+        // Drain every yield the round emitted.
+        let mut yields = Vec::new();
+        while let Ok(y) = rx.try_recv() {
+            yields.push(y);
+        }
+        // At least one SpeakerTurn per member, tagged with that member.
+        let speakers: Vec<String> = yields
+            .iter()
+            .filter_map(|y| match y {
+                EngineYield::SpeakerTurn { speaker, .. } => Some(speaker.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(speakers.contains(&"interviewer".to_string()));
+        assert!(speakers.contains(&"coach".to_string()));
+        // Fragments carry the speaking member's id (not None — this is group).
+        let tagged = yields.iter().any(|y| {
+            matches!(y,
+            EngineYield::StreamChunk { speaker: Some(s), .. }
+            | EngineYield::DirectAnswer { speaker: Some(s), .. }
+                if s == "interviewer" || s == "coach")
+        });
+        assert!(tagged, "expected speaker-tagged fragments");
+        // The design premise: no TurnComplete during the round.
+        assert!(
+            !yields
+                .iter()
+                .any(|y| matches!(y, EngineYield::TurnComplete { .. })),
+            "group observer must not emit TurnComplete (round-level emit is the runtime's job)"
+        );
+    }
+
     #[tokio::test]
     async fn opener_runs_before_user_and_is_tagged() {
         let provider = Arc::new(MockProvider::from_script(vec![

@@ -146,7 +146,7 @@ then spawn `run`), avoiding a lost-first-yield race.
 | frontend | path | via app-server? |
 |---|---|---|
 | TUI (`examples/cli`) | in-process, `Arc<InProcessBus>` direct to L3 | no (zero serialization) |
-| native macOS/Windows (desktop sidecar) | `oneai app-server --listen ipc://` JSON-RPC client | **yes** (migrating; old `OneAIBusClient` newline-JSON demoted to escape hatch) |
+| native macOS/Windows (desktop sidecar) | `oneai app-server --listen ipc://` JSON-RPC client | **yes** (macOS: infra + single-agent/history/group all wired, FFI still default; Windows: client+spawn skeleton only) |
 | IDE plugin (TS) | spawn `oneai app-server --listen stdio` JSON-RPC | **yes** (pending) |
 | web/JS | `ws://` JSON-RPC | **yes** (pending) |
 | mobile (iOS/Android/HarmonyOS) | in-process c_facade 3-symbol pump (Shape A) | no (on-device: no spawn, no cloud-engine fallback) |
@@ -211,9 +211,20 @@ signature decoupling + independent engine-binary upgrades; VS Code uses a
 `oneai.oneaiPath` setting + PATH fallback (mirrors Codex `codex.cliPath`).
 
 **macOS wiring status (honest)**: the `OneAiRpcClient` + `EngineProcessManager`
-infra is complete, compiles, and doesn't break the existing app build; the
-`ChatViewModel` `oneai_engine_transport` flag wiring (single-agent +
-group/scenarios via sidecar, FFI global fallback) + the `specView`
-topic-baking port is the remaining work, which needs macOS-host runtime
-verification — FFI remains the default transport, sidecar infra pending
-adoption.
+infra is complete, compiles, and doesn't break the existing app build. The
+`ChatViewModel` `oneai_engine_transport` flag is fully wired — single-agent
+turns, history (`session/list`·`create`·`load`), **and** group chat/scenarios
+(`group/start`·`open`·`run`·`set_order` + `speaker_turn` routing +
+`BusGroupScenario` topic-baking) all go over the sidecar; FFI remains the
+default transport as a global fallback. The engine-side prerequisite is also
+in place: the sidecar runtime (`AppServerRuntime`) previously used the trait's
+default group methods, which error out ("group chat not active on this
+runtime"); it now overrides `start_group`/`group_start`/`group_run_task`/
+`group_set_scripted_order`, mirroring `CFacadeRuntime`, and emits a single
+round-level `TurnComplete` on group-round success (`GroupChatBusObserver::
+on_complete` is a deliberate no-op so N members don't each emit one; an
+out-of-process frontend can't observe the `await` returning, so the runtime
+emits one round-end yield so the frontend can clear `running`). FFI remains
+the default transport; sidecar group chat awaits macOS-host runtime
+verification (rebuild the Rust lib + relink, then run a scenario to check
+speaker routing + round-end + debrief).

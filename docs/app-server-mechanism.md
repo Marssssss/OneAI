@@ -103,7 +103,7 @@ tokio::select! { _ = server => {}, _ = tokio::signal::ctrl_c() => {} }
 | 前端 | 路径 | 是否经 app-server |
 |---|---|---|
 | TUI（`examples/cli`） | in-process，`Arc<InProcessBus>` 直连 L3 | 否（零序列化） |
-| 原生 macOS（桌面 sidecar） | app 内 `OneAiRpcClient`（UDS ipc）+ `EngineProcessManager` spawn `oneai app-server --listen ipc://<ephemeral>` | **是**（infra 落地；`ChatViewModel` 仍在 FFI 默认，sidecar 接线带开关待 macOS 宿主验证，见 §11） |
+| 原生 macOS（桌面 sidecar） | app 内 `OneAiRpcClient`（UDS ipc）+ `EngineProcessManager` spawn `oneai app-server --listen ipc://<ephemeral>` | **是**（infra 落地 + 单 agent/历史/群聊全量接线，FFI 仍默认；待 macOS 宿主运行时实测，见 §11） |
 | 原生 Windows（桌面 sidecar） | `OneAiRpcClient.cs`（named pipe ipc）+ `EngineProcessManager.cs` spawn | **是**（client+spawn 骨架；WinUI 接线延后，Windows 本机不可编译） |
 | VS Code 扩展（TS） | `platforms/vscode`：激活 spawn `oneai app-server --listen stdio`，webview 经 postMessage 中转 | **是**（完整扩展 + chat webview；tsc/esbuild 净，0 漏洞；ExtensionHost 运行时验证待用户宿主） |
 | 浏览器扩展 | `platforms/browser`：Chrome/Firefox native messaging（4B-LE 前缀）spawn `oneai app-server --listen native-messaging` | **是**（popup + scenario editor；install-host.sh macOS/Linux；Windows host 延后） |
@@ -144,5 +144,5 @@ tokio::select! { _ = server => {}, _ = tokio::signal::ctrl_c() => {} }
 
 **二进制定位**：前端先查 bundle（`.app/Contents/Resources/bin/oneai` / `.vsix` 内），再退 PATH——与「签名解耦、引擎二进制独立升级」一致；VS Code 用 `oneai.oneaiPath` 配置 + PATH fallback（对齐 Codex `codex.cliPath`）。
 
-**macOS 接线现状（诚实）**：`OneAiRpcClient` + `EngineProcessManager` infra 完整可编译、不破坏现有 app 编译；`ChatViewModel` 的 `oneai_engine_transport` 开关接线（单 agent + group/scenarios 走 sidecar，FFI 全局兜底）+ `specView` topic-baking 移植是剩余工作，需 macOS 宿主运行时验证——FFI 仍是默认 transport，sidecar infra 待采纳。
+**macOS 接线现状（诚实）**：`OneAiRpcClient` + `EngineProcessManager` infra 完整可编译、不破坏现有 app 编译。`ChatViewModel` 的 `oneai_engine_transport` 开关已全量接线——单 agent turn、历史会话（`session/list`·`create`·`load`）**和** 群聊/场景（`group/start`·`open`·`run`·`set_order` + `speaker_turn` 路由 + `BusGroupScenario` topic-baking）都走 sidecar，FFI 仍是默认 transport 全局兜底。引擎侧前提也已补齐：sidecar runtime（`AppServerRuntime`）此前用 trait 默认 group 方法直接报错（"group chat not active on this runtime"），现已覆写 `start_group`/`group_start`/`group_run_task`/`group_set_scripted_order` 镜像 `CFacadeRuntime`，并补发群聊 round 级 `TurnComplete`（`GroupChatBusObserver::on_complete` 故意 no-op 避免每成员各发一条，bus 消费者无 await 返回可观察，故由 runtime 在 round 成功后补发一条让前端清 `running`）。FFI 仍是默认 transport；sidecar 群聊待 macOS 宿主运行时实测（rebuild Rust lib + relink 后跑场景看 speaker 路由 + 回合结束 + debrief）。
 
