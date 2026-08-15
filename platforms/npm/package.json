@@ -1,5 +1,5 @@
 {
-  "name": "oneai",
+  "name": "oneai-cli",
   "version": "0.1.0",
   "description": "Cross-platform launcher for the OneAI engine (oneai-cli TUI + subcommands). Postinstall fetches the platform binary from GitHub Releases; the bin forwards argv + stdio with zero business logic. Falls back to `oneai` on PATH if no binary is downloaded (e.g. a dev who `cargo install`-ed).",
   "license": "Apache-2.0",

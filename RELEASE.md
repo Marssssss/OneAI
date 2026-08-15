@@ -3,7 +3,7 @@
 Releasing OneAI = four aligned artifacts on the same `vX.Y.Z`: the **crates.io
 SDK** (Rust users `cargo add`/`cargo install`), the **platform binaries**
 (attached to the GitHub Release, fetched by the npm shell), the **npm shell**
-(`npm install -g oneai`, no cargo), and (macOS) the **`.app` zip**.
+(`npm install -g oneai-cli`, no cargo), and (macOS) the **`.app` zip**.
 
 The workspace `version` (currently `0.1.0`) is the single source — every
 artifact carries it. Bump it in `Cargo.toml` `[workspace.package]` (the
@@ -92,11 +92,11 @@ crates.io version — yank is the supported retraction.)
 ```bash
 cd platforms/npm
 npm pack            # sanity-check: bin/oneai.js + install.js + README.md, zero deps
-npm publish         # oneai@0.1.0 — postinstall fetches the just-uploaded binaries
+npm publish         # oneai-cli@0.1.0 — postinstall fetches the just-uploaded binaries
 ```
 
 Publish npm **after** step 1's binaries are attached, so a fresh
-`npm install -g oneai@0.1.0` can fetch its platform binary immediately.
+`npm install -g oneai-cli@0.1.0` can fetch its platform binary immediately.
 (If a user installs before binaries exist, the postinstall soft-fails and
 the launcher falls back to `oneai` on PATH.)
 
@@ -105,7 +105,7 @@ the launcher falls back to `oneai` on PATH.)
 ```bash
 cargo install oneai-cli              # registry (crates.io)
 oneai --version                      # 0.1.0
-npm install -g oneai                 # binary download via npm
+npm install -g oneai-cli                 # binary download via npm
 oneai --version
 # macOS app: attach OneAI-0.1.0-macos.zip to the release, link in the notes
 ```

@@ -1,6 +1,6 @@
 # oneai (npm)
 
-Cross-platform launcher for the OneAI engine — `npm install -g oneai` gets
+Cross-platform launcher for the OneAI engine — `npm install -g oneai-cli` gets
 you the `oneai` command (the TUI + all subcommands: `app-server`, `serve`,
 `session`, `evolve`, …) **without Rust/cargo**.
 
@@ -13,7 +13,7 @@ binary. Every feature (AgentLoop, TUI, app-server, sidecar, …) lives in the
 Rust binary.
 
 ```bash
-npm install -g oneai
+npm install -g oneai-cli
 oneai                 # launch the TUI
 oneai app-server --listen stdio   # JSON-RPC engine process
 ```
