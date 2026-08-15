@@ -1998,6 +1998,12 @@ extension ChatViewModel: EngineProcessManagerDelegate {
             // plain-field writes in `handleSidecarEvent` are main-actor
             // (mirrors the FFI callback's main-thread marshalling).
             client.callbackQueue = .main
+            // Phase G3: the scenario library is server-authoritative over
+            // `scenario/*`. Hand the store the client + pull the shared
+            // library (merging local presets + server customs, migrating
+            // local customs on first connect).
+            self.agentStore.rpcClient = client
+            Task { await self.agentStore.refresh() }
             let cont = self.sidecarStartCont
             self.sidecarStartCont = nil
             cont?.resume()

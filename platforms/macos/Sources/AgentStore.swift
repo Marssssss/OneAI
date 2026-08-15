@@ -22,6 +22,12 @@ private let SCENARIO_SCHEMA_VERSION = 6
 final class AgentStore: ObservableObject {
     @Published var scenarios: [Scenario] = []
 
+    /// The sidecar JSON-RPC client (set by `ChatViewModel` once the app-server
+    /// child is up). `nil` ⇒ FFI transport ⇒ everything stays local-file.
+    /// `weak` so tearing down the VM's `rpcClient` auto-nils the store's ref
+    /// without a second write site.
+    weak var rpcClient: OneAiRpcClient?
+
     private let fileURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -38,18 +44,133 @@ final class AgentStore: ObservableObject {
 
     // MARK: - CRUD
 
-    func upsert(_ scenario: Scenario) {
+    /// Insert or replace by id. In sidecar mode custom scenarios (id does not
+    /// start with `preset-`) are upserted to the shared server store first,
+    /// then mirrored into the local cache; presets stay local (they're
+    /// per-frontend, locale-bound defaults — not shared library). Async so the
+    /// RPC round-trip can suspend off the main actor.
+    func upsert(_ scenario: Scenario) async {
+        let isPreset = scenario.id.hasPrefix("preset-")
+        if !isPreset, let rpc = rpcClient, let dto = scenario.toBusDTO().asJSONObject {
+            do {
+                let res = try await rpc.call("scenario/upsert", params: ["scenario": dto])
+                // upsert returns {ok:true, id} or {ok:false, errors:[…]} when
+                // the scenario fails validate. The editor validates first, so
+                // a false-ok is unexpected — log + still cache locally.
+                if (res["ok"] as? Bool) == false {
+                    storeLog("scenario/upsert rejected by server validate")
+                }
+            } catch {
+                storeLog("scenario/upsert err=\(error); caching locally only")
+            }
+        }
+        await MainActor.run {
+            self.upsertLocal(scenario)
+            self.save()
+        }
+    }
+
+    /// Remove by id. Customs are deleted from the server store in sidecar
+    /// mode; presets are removed from the local cache only.
+    func delete(_ scenario: Scenario) async {
+        let isPreset = scenario.id.hasPrefix("preset-")
+        if !isPreset, let rpc = rpcClient {
+            do {
+                _ = try await rpc.call("scenario/delete", params: ["id": scenario.id])
+            } catch {
+                storeLog("scenario/delete err=\(error); removing locally only")
+            }
+        }
+        await MainActor.run {
+            self.scenarios.removeAll { $0.id == scenario.id }
+            self.save()
+        }
+    }
+
+    private func upsertLocal(_ scenario: Scenario) {
         if let idx = scenarios.firstIndex(where: { $0.id == scenario.id }) {
             scenarios[idx] = scenario
         } else {
             scenarios.append(scenario)
         }
-        save()
     }
 
-    func delete(_ scenario: Scenario) {
-        scenarios.removeAll { $0.id == scenario.id }
-        save()
+    // MARK: - Sidecar scenario library (Phase G3)
+
+    /// Pull the shared scenario library from the server store and merge with
+    /// the local preset set. Called by the VM once the sidecar client is up.
+    ///
+    /// Merge rule: `scenarios = localPresets + serverCustoms`. Presets are
+    /// ALWAYS local (locale-bound, per-frontend defaults — the server's own
+    /// `preset-*` entries, e.g. the engine's minimal builtin seed, are ignored
+    /// so the richer localized presets win). Customs (user-created, non-preset
+    /// ids) are server-authoritative + shared across frontends.
+    ///
+    /// First sidecar connect: the server has no customs yet, so the local
+    /// customs are migrated to the shared store (a user coming from FFI mode
+    /// doesn't lose their custom scenarios). After that, the server is the
+    /// authority for customs; a custom deleted on another frontend disappears
+    /// here on the next refresh.
+    func refresh() async {
+        guard let rpc = rpcClient else { return }
+        do {
+            let res = try await rpc.call("scenario/list", params: [String: String]())
+            var serverCustoms = Scenario.fromListResult(res)
+                .filter { !$0.id.hasPrefix("preset-") }
+            if serverCustoms.isEmpty {
+                // First connect — push the local customs up so they're shared.
+                let localCustoms = scenarios.filter { !$0.id.hasPrefix("preset-") }
+                for c in localCustoms {
+                    if let dto = c.toBusDTO().asJSONObject {
+                        _ = try? await rpc.call("scenario/upsert", params: ["scenario": dto])
+                    }
+                }
+                serverCustoms = localCustoms
+            }
+            let localPresets = scenarios.filter { $0.id.hasPrefix("preset-") }
+            let merged = localPresets + serverCustoms
+            await MainActor.run {
+                self.scenarios = merged
+                self.save()
+            }
+        } catch {
+            // Server unavailable — keep the local cache (loaded at init). The
+            // sidebar still works offline; edits fall back to local-only.
+            storeLog("scenario/list err=\(error); using local cache")
+        }
+    }
+
+    /// Validate a scenario before saving. Sidecar: ask the engine for the
+    /// authoritative check (`scenario/validate`) — kills the per-frontend
+    /// mirror drift. FFI: the local mirror (the engine validate lives in
+    /// `oneai-bus`, not exposed over FFI for a direct call, so the mirror is
+    /// the pragmatic local check). Returns the first problem as a localized
+    /// message, or nil if launchable.
+    func validate(_ scenario: Scenario) async -> String? {
+        if let rpc = rpcClient, let dto = scenario.toBusDTO().asJSONObject {
+            do {
+                let res = try await rpc.call("scenario/validate", params: ["scenario": dto])
+                let ok = (res["ok"] as? Bool) ?? true
+                if ok { return nil }
+                if let errs = res["errors"] as? [[String: Any]], !errs.isEmpty {
+                    let first = errs.compactMap { dict -> ScenarioErrorDTO? in
+                        guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+                        return try? JSONDecoder().decode(ScenarioErrorDTO.self, from: data)
+                    }.first
+                    if let first { return ScenarioErrorLocalizer.message(for: first) }
+                }
+                return nil
+            } catch {
+                storeLog("scenario/validate err=\(error); falling back to local mirror")
+            }
+        }
+        return Self.validateLocal(scenario)
+    }
+
+    private func storeLog(_ msg: String) {
+        var s = msg
+        s.append("\n")
+        FileHandle.standardError.write(s.data(using: .utf8) ?? Data())
     }
 
     // MARK: - Persistence
@@ -89,6 +210,51 @@ final class AgentStore: ObservableObject {
     }
 
     // MARK: - Built-in presets
+
+    /// The FFI/local validate mirror — the pragmatic launchability check when
+    /// the sidecar server isn't available. Mirrors `BusScenario::validate`
+    /// (`crates/oneai-bus`): name non-empty, ≥1 member, each member named +
+    /// has a system prompt, scripted order / moderator / opener / debrief /
+    /// reviewer ids must reference existing members. Returns the first problem
+    /// as a localized message, or nil if launchable.
+    static func validateLocal(_ sc: Scenario) -> String? {
+        if sc.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return NSLocalizedString("请填写场景名。", comment: "")
+        }
+        if sc.agents.isEmpty {
+            return NSLocalizedString("至少需要一个智能体(演员表不能为空)。", comment: "")
+        }
+        let ids = Set(sc.agents.map { $0.id })
+        for (i, a) in sc.agents.enumerated() {
+            if a.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(format: NSLocalizedString("第 %d 个智能体缺少名字。", comment: ""), i + 1)
+            }
+            if a.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(format: NSLocalizedString("智能体「%@」缺少系统提示词。", comment: ""), a.name)
+            }
+        }
+        if let order = sc.scriptOrder {
+            for id in order where !ids.contains(id) {
+                return String(format: NSLocalizedString("轮次顺序引用了不存在的角色 id「%@」。", comment: ""), id)
+            }
+        }
+        if let mid = sc.moderatorId, !mid.isEmpty, !ids.contains(mid) {
+            return String(format: NSLocalizedString("主持人 id「%@」不在演员表中。", comment: ""), mid)
+        }
+        if let op = sc.openerAgentId, !op.isEmpty, !ids.contains(op) {
+            return String(format: NSLocalizedString("开场角色 id「%@」不在演员表中。", comment: ""), op)
+        }
+        if sc.turnPolicy == .moderator {
+            let mid = sc.moderatorId ?? ""
+            if mid.isEmpty {
+                return NSLocalizedString("主持人策略需要选择一个主持人。", comment: "")
+            }
+        }
+        if let debrief = sc.debrief, !ids.contains(debrief.debriefMemberId) {
+            return NSLocalizedString("结束阶段的接管角色不在演员表中。", comment: "")
+        }
+        return nil
+    }
 
     /// The five preset scenarios shipped with the app, localized for the
     /// effective `locale`. IDs are stable so a user can edit a preset (it

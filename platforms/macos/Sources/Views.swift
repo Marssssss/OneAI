@@ -280,11 +280,11 @@ private struct Sidebar: View {
             ForEach(agentStore.scenarios) { sc in
                 ScenarioRow(scenario: sc, isCurrent: vm.currentScenario?.id == sc.id,
                             onTap: { startScenario(sc) },
-                            onDelete: { agentStore.delete(sc) })
+                            onDelete: { Task { await agentStore.delete(sc) } })
                     .equatable()
                     .contextMenu {
                         Button("编辑场景") { vm.overlay = .scenarioEditor(sc) }
-                        Button("删除场景", role: .destructive) { agentStore.delete(sc) }
+                        Button("删除场景", role: .destructive) { Task { await agentStore.delete(sc) } }
                     }
             }
         }
