@@ -24,6 +24,30 @@ directly with `swiftc` (no `.xcodeproj`) by `build_macos.sh`, mirroring how
 open platforms/macos/build/OneAI.app
 ```
 
+## Transport: FFI (default) vs app-server sidecar
+
+The macOS app can reach the engine through **two transports**, toggled by the
+`oneai_engine_transport` switch in `ChatViewModel`:
+
+- **FFI / in-process (default)** — the `.app` links `liboneai.a` directly and
+  calls `OneAIApp` over the UniFFI Swift binding. This is the verified,
+  shipping path; everything in *What it does* below describes it.
+- **app-server sidecar (opt-in, newer)** — the app's `EngineProcessManager`
+  auto-spawns `oneai app-server --listen ipc://<ephemeral>` (preferring
+  `.app/Contents/Resources/bin` → PATH) and talks JSON-RPC 2.0 over UDS via
+  `OneAiRpcClient`. Same engine, same scenarios; the desktop app no longer
+  embeds the Rust lib.
+
+**Honest status of the sidecar transport:** the infra (`OneAiRpcClient` +
+`EngineProcessManager`) is complete and compiles without breaking the FFI
+build; single-agent turns, history (`session/list`·`create`·`load`), **and**
+group chat / scenarios (`group/start`·`open`·`run`·`set_order` + `speaker_turn`
+routing + `BusGroupScenario` topic-baking) are all wired through the sidecar.
+FFI remains the default global transport. The sidecar path is **awaiting a
+real-machine runtime test** on macOS (rebuild the Rust lib + relink, then run
+a scenario and check speaker routing + turn-end + debrief). See the honest
+per-frontend table in [App-Server mechanism](../../docs/app-server-mechanism.md) (§7 frontend-access status, §11 auto-spawn).
+
 ## What it does (feature parity with Android S5)
 
 - Provider settings (openai / anthropic / ollama presets) persisted in

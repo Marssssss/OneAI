@@ -1,12 +1,21 @@
 # OneAI 跨平台机制
 
-> 一套 Rust 内核（`oneai-core`+`oneai-app`）经两条 FFI 通路打到六端原生 App：UniFFI 绑定（Kotlin/Swift）覆盖 Android 与 Apple 平台，手写 `extern "C"` JSON facade 覆盖 Windows（C# P/Invoke）与 HarmonyOS（NAPI）——因 `uniffi-bindgen` 0.32 无 C#/ArkTS 生成器；所有字符串以 UTF-8 过界、CJK 正确往返。
+> 一套 Rust 内核（`oneai-core`+`oneai-app`）经**两种前端连接模型**打到六端原生 App：①**in-process FFI**（UniFFI 绑定 Kotlin/Swing 覆盖 Android·Apple，手写 `extern "C"` JSON facade 覆盖 Windows C#·HarmonyOS ArkTS——因 `uniffi-bindgen` 0.32 无 C#/ArkTS 生成器）；②**out-of-process app-server sidecar**（桌面/IDE/web 前端经 [`oneai-app-server`](app-server-mechanism.md) 的 JSON-RPC 2.0 协议 + auto-spawn 接引擎，不内嵌 Rust 库）。所有字符串以 UTF-8 过界、CJK 正确往返。
 
 ## 1. 概述（是什么）
 
-OneAI 的跨平台不是 WebView 套壳，而是让同一份 Rust 引擎逻辑以**原生 App**形态在 macOS/Windows/Linux/Android/iOS/HarmonyOS 上运行。`oneai-uniffi` 是绑定层，把 `oneai-app` 的 `AppBuilder`/`App`/`AppSession` 暴露给外语；`oneai-platform-{desktop,android,ios,harmony}` 各自提供原生 `InteractionGate`（NSAlert/MessageBox/AlertDialog/UIController/CommonDialog）；`oneai-staticlib` 是薄 staticlib 打包 crate，产出 `liboneai.a` 供 Apple xcframework 与 HarmonyOS NAPI 链接。
+OneAI 的跨平台不是 WebView 套壳，而是让同一份 Rust 引擎逻辑以**原生 App**形态在 macOS/Windows/Linux/Android/iOS/HarmonyOS 上运行。前端接入引擎有**两种连接模型**，按「前端能否/是否需要 spawn 引擎进程」分派：
 
-绑定策略分两层：UniFFI 生成器覆盖 Kotlin/Swift（Android、Apple），手写 `extern "C"` JSON facade 覆盖 C#（Windows P/Invoke）与 ArkTS（HarmonyOS NAPI）。两条通路都汇到同一个 `OneAIApp` Rust 入口。一个关键 FFI 纪律：extern C 传 String 必须用 `CString::new().as_ptr()`（NUL 结尾），`String::as_ptr` 非 NUL 会导致 `CStr::from_ptr` 越界 UB——macOS 侥幸绿、Linux CI 必崩。
+- **in-process FFI**（默认，移动端唯一选项）：外语 UI 进程直接内嵌 Rust 静态库/动态库，经 UniFFI 或 extern C facade 调 `OneAIApp`。移动端 on-device 无 spawn 能力也无云端引擎兜底，故**只能**走这条。桌面 App 的 FFI 路径是已验证的默认 transport。
+- **out-of-process app-server sidecar**（桌面/IDE/web）：前端不内嵌 Rust 库，而是由前端（或其宿主）auto-spawn `oneai app-server` 子进程，经 JSON-RPC 2.0（stdio/ipc/ws/native-messaging）对话。VS Code 扩展、浏览器扩展、macOS/Windows 桌面 sidecar 走这条——Codex 式「能 spawn 的前端自己 owns spawn」，用户永不手动起 server。详见 [App-Server 机制](app-server-mechanism.md)。
+
+两种模型背后是**同一个 `oneai-bus` 协议**（`Directive`/`EngineYield`）：in-process 直连 `Arc<InProcessBus>`（零序列化），app-server 把 JSON-RPC method/event 适配到 bus 的 Directive/EngineYield（L2 适配器）。故审批关联（`request_id`）、中断（`CancellationToken`）、群聊 `speaker` 标签跨两种模型行为一致。
+
+`oneai-uniffi` 是 FFI 绑定层，把 `oneai-app` 的 `AppBuilder`/`App`/`AppSession` 暴露给外语；`oneai-platform-{desktop,android,ios,harmony}` 各自提供原生 `InteractionGate`（NSAlert/MessageBox/AlertDialog/UIController/CommonDialog）；`oneai-staticlib` 是薄 staticlib 打包 crate，产出 `liboneai.a` 供 Apple xcframework 与 HarmonyOS NAPI 链接。
+
+绑定策略分两层：UniFFI 生成器覆盖 Kotlin/Swift（Android、Apple），手写 `extern "C"` JSON facade 覆盖 C#（Windows P/Invoke）与 ArkTS（HarmonyOS NAPI）。两条 FFI 通路都汇到同一个 `OneAIApp` Rust 入口。一个关键 FFI 纪律：extern C 传 String 必须用 `CString::new().as_ptr()`（NUL 结尾），`String::as_ptr` 非 NUL 会导致 `CStr::from_ptr` 越界 UB——macOS 侥幸绿、Linux CI 必崩。
+
+> 本页聚焦 **in-process FFI** 连接模型（§2-§9）。out-of-process app-server sidecar 模型见 [App-Server 机制](app-server-mechanism.md)（含四前端接入现状、Codex 式 auto-spawn、JSON-RPC schema 表、各前端真机实测状态）。
 
 ## 2. 职责与能力（做什么）
 
@@ -40,9 +49,16 @@ OneAI 的跨平台不是 WebView 套壳，而是让同一份 Rust 引擎逻辑�
 
 ```mermaid
 flowchart TB
+    subgraph FE2 ["🖥️ out-of-process 前端（桌面/IDE/web）"]
+        direction LR
+        Sidecar["VS Code 扩展 / 浏览器扩展 / macOS·Windows 桌面 sidecar<br/>auto-spawn `oneai app-server`（Codex 式）"]
+    end
+    AppServer["🧾 oneai-app-server · JSON-RPC 2.0（L2）<br/>method/event ↔ Directive/EngineYield<br/>stdio / ipc / ws / native-messaging"]
+
     Native["macOS SwiftUI / Windows WinUI3 C# / Linux / Android Compose / iOS SwiftUI / HarmonyOS ArkUI"]
     Uni["UniFFI 绑定 (Kotlin/Swift)<br/>View types + AppBuilderWrapper + OneAIApp"]
     CFacade["extern C JSON facade<br/>#[no_mangle] oneai_* + AppHandle/SessionHandle + EventCb"]
+    Bus["🚌 oneai-bus · Directive/EngineYield (in-process 或 oneai serve sidecar)"]
     App["oneai-app OneAIApp (统一 Rust 入口)"]
     Engine["oneai-agent AgentLoop + GroupChat + 各特性 crate"]
     Gates["原生 PlatformInteractionGate<br/>NSAlert/MessageBox/AlertDialog/UIController/CommonDialog"]
@@ -51,6 +67,10 @@ flowchart TB
     Native --> CFacade
     Uni --> App
     CFacade --> App
+    App --> Bus
+    Sidecar -->|JSON-RPC| AppServer
+    AppServer -->|Directive/EngineYield| Bus
+    Bus --> Engine
     App --> Engine
     Native --> Gates
     Gates -. ToolApproval 决策点 .-> App
@@ -98,6 +118,18 @@ pub trait PlatformInteractionGate: InteractionGate { /* 原生 UI 对话框 */ }
 5. staticlib 仅在打包时显式构建（`cargo build -p oneai-staticlib`），不在日常 build。
 
 **macOS 流式 20fps 合并**：per-token DispatchQueue.main.async 会淹没主队列；`StreamCallback` coalesce hot fragment 20fps flush，非 hot 立即按序（详见 [stream 机制](#)）。
+
+### App-Server sidecar turn（桌面/IDE/web 前端）
+
+不内嵌 Rust 库的前端走这条——前端（或其宿主）auto-spawn `oneai app-server --listen <transport>` 子进程，经 JSON-RPC 2.0 对话引擎：
+
+1. **spawn**：VS Code 扩展激活时 `child_process.spawn(oneai, app-server --listen stdio)`；浏览器经 native-messaging 注册的 host 由浏览器按需 spawn；macOS/Windows 桌面 App 的 `EngineProcessManager` spawn `--listen ipc://<ephemeral>`。用户**永不手动起 server**（Codex 式）。
+2. **turn/run**：前端发 `turn/run {content}`，适配器提交 `Directive::UserMessage`，引擎起回合——`turn/run` 在 TurnStart 即返 `turn_id`（非阻塞到回合结束）。
+3. **event 流**：引擎每个 observer 回调经 `BusObserver` 翻成 `EngineYield`，适配器广播单一 `event` 通知（`params` = 完整 yield，含 `kind` tag：`stream_chunk`/`thinking`/`tool_calls`/`tool_result`/`speaker_turn`/…）。前端按 `params.kind` 渲染。
+4. **审批回路**：遇 `event` 的 `approval_request`（带 `request_id`），前端弹原生对话框，回 `approval/respond {request_id, response}`——与 in-process 的 `BusInteractionGate` 走的是同一对 bus 通道，行为一致。
+5. **回合结束**：前端收到 `turn_complete` 的 `event` 收尾。
+
+完整 JSON-RPC method 表、`event` yield 变体、四前端接入现状与「待实测」诚实标记见 [App-Server 机制](app-server-mechanism.md)（§4 schema、§7 前端接入现状表、§11 auto-spawn）。
 
 ## 6. 依赖关系
 
@@ -153,7 +185,9 @@ OneAI 独特点：**Rust 内核 + 各端原生 UI（非套壳）+ 双 FFI 通路
 
 - [permission-mechanism.md](permission-mechanism.md) —— `PlatformInteractionGate` 与 7 决策点
 - [multi-agent-mechanism.md](multi-agent-mechanism.md) —— GroupChat FFI + 场景化多角色对话
+- [bus-mechanism.md](bus-mechanism.md) —— 引擎↔前端统一协议（两种连接模型的共同底座）
+- [app-server-mechanism.md](app-server-mechanism.md) —— out-of-process app-server sidecar 连接模型：JSON-RPC schema、四前端接入现状、auto-spawn
 - [memory-mechanism.md](memory-mechanism.md) —— `sqlite_persistence_at` 跨重启记忆
 - [CLAUDE.md — 跨平台 / Network proxy 章节](../CLAUDE.md)
-- 源码：`crates/oneai-uniffi/src/`（8 文件 / ~3.9K LOC）+ `crates/oneai-platform-{desktop,android,ios,harmony}/src/` + `crates/oneai-staticlib/`
-- 各端工程：`platforms/{macos,windows,android,harmony}/`
+- 源码：`crates/oneai-uniffi/src/`（8 文件 / ~3.9K LOC）+ `crates/oneai-platform-{desktop,android,ios,harmony}/src/` + `crates/oneai-staticlib/` + `crates/oneai-app-server/src/`
+- 各端工程：`platforms/{macos,windows,android,harmony,vscode,browser,npm}/`

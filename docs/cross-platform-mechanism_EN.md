@@ -1,12 +1,21 @@
 # OneAI Cross-Platform Mechanism
 
-> One Rust core (`oneai-core`+`oneai-app`) reaches six native-app targets via two FFI paths: UniFFI bindings (Kotlin/Swift) for Android and Apple targets, a hand-written `extern "C"` JSON facade for Windows (C# P/Invoke) and HarmonyOS (NAPI) — because `uniffi-bindgen` 0.32 has no C#/ArkTS generator; all strings cross the boundary as UTF-8, CJK round-trips correctly.
+> One Rust core (`oneai-core`+`oneai-app`) reaches six native-app targets via **two frontend-connection models**: ① **in-process FFI** (UniFFI bindings for Kotlin/Swift on Android·Apple, a hand-written `extern "C"` JSON facade for Windows C#·HarmonyOS ArkTS — because `uniffi-bindgen` 0.32 has no C#/ArkTS generator); ② **out-of-process app-server sidecar** (desktop/IDE/web frontends reach the engine via [`oneai-app-server`](app-server-mechanism_EN.md)'s JSON-RPC 2.0 protocol + auto-spawn, without embedding the Rust lib). All strings cross the boundary as UTF-8, CJK round-trips correctly.
 
 ## 1. Overview (what it is)
 
-OneAI's cross-platform story is not a WebView shell — it runs the same Rust engine logic as **native apps** on macOS/Windows/Linux/Android/iOS/HarmonyOS. `oneai-uniffi` is the binding layer exposing `oneai-app`'s `AppBuilder`/`App`/`AppSession` to foreign languages; `oneai-platform-{desktop,android,ios,harmony}` each provide a native `InteractionGate` (NSAlert/MessageBox/AlertDialog/UIController/CommonDialog); `oneai-staticlib` is a thin staticlib packaging crate producing `liboneai.a` for the Apple xcframework and HarmonyOS NAPI to link.
+OneAI's cross-platform story is not a WebView shell — it runs the same Rust engine logic as **native apps** on macOS/Windows/Linux/Android/iOS/HarmonyOS. There are **two connection models** for a frontend to reach the engine, dispatched by "can/should the frontend spawn the engine process":
 
-The binding strategy is two-layer: the UniFFI generator covers Kotlin/Swift (Android, Apple), a hand-written `extern "C"` JSON facade covers C# (Windows P/Invoke) and ArkTS (HarmonyOS NAPI). Both paths converge on the same `OneAIApp` Rust entry. One key FFI discipline: passing a String over extern C must use `CString::new().as_ptr()` (NUL-terminated); `String::as_ptr` is not NUL-terminated and causes `CStr::from_ptr` out-of-bounds UB — macOS happens to pass, Linux CI crashes.
+- **in-process FFI** (default; the only option on mobile): the foreign-language UI process directly embeds the Rust static/dynamic lib and calls `OneAIApp` via UniFFI or the extern C facade. Mobile has no on-device spawn and no cloud-engine fallback, so it **must** use this path. On desktop, FFI is the verified default transport.
+- **out-of-process app-server sidecar** (desktop/IDE/web): the frontend does not embed the Rust lib; instead it (or its host) auto-spawns a `oneai app-server` subprocess and talks JSON-RPC 2.0 (stdio/ipc/ws/native-messaging). The VS Code extension, browser extension, and macOS/Windows desktop sidecar use this — the Codex-style "a frontend that can spawn owns the spawn", so the user never starts a server manually. See [App-Server mechanism](app-server-mechanism_EN.md).
+
+Behind both models lies the **same `oneai-bus` protocol** (`Directive`/`EngineYield`): in-process holds `Arc<InProcessBus>` directly (zero serialization); the app-server adapts JSON-RPC method/event to the bus's Directive/EngineYield (L2 adapter). So approval correlation (`request_id`), interrupt (`CancellationToken`), and the group-chat `speaker` tag behave identically across both models.
+
+`oneai-uniffi` is the FFI binding layer exposing `oneai-app`'s `AppBuilder`/`App`/`AppSession` to foreign languages; `oneai-platform-{desktop,android,ios,harmony}` each provide a native `InteractionGate` (NSAlert/MessageBox/AlertDialog/UIController/CommonDialog); `oneai-staticlib` is a thin staticlib packaging crate producing `liboneai.a` for the Apple xcframework and HarmonyOS NAPI to link.
+
+The binding strategy is two-layer: the UniFFI generator covers Kotlin/Swift (Android, Apple), a hand-written `extern "C"` JSON facade covers C# (Windows P/Invoke) and ArkTS (HarmonyOS NAPI). Both FFI paths converge on the same `OneAIApp` Rust entry. One key FFI discipline: passing a String over extern C must use `CString::new().as_ptr()` (NUL-terminated); `String::as_ptr` is not NUL-terminated and causes `CStr::from_ptr` out-of-bounds UB — macOS happens to pass, Linux CI crashes.
+
+> This page focuses on the **in-process FFI** connection model (§2-§9). The out-of-process app-server sidecar model is in [App-Server mechanism](app-server-mechanism_EN.md) (four-frontend access status, Codex-style auto-spawn, JSON-RPC schema tables, per-frontend real-machine test status).
 
 ## 2. Responsibilities & capabilities (what it does)
 
@@ -40,9 +49,16 @@ The binding strategy is two-layer: the UniFFI generator covers Kotlin/Swift (And
 
 ```mermaid
 flowchart TB
+    subgraph FE2 ["🖥️ out-of-process frontends (desktop/IDE/web)"]
+        direction LR
+        Sidecar["VS Code ext / browser ext / macOS·Windows desktop sidecar<br/>auto-spawn `oneai app-server` (Codex-style)"]
+    end
+    AppServer["🧾 oneai-app-server · JSON-RPC 2.0 (L2)<br/>method/event ↔ Directive/EngineYield<br/>stdio / ipc / ws / native-messaging"]
+
     Native["macOS SwiftUI / Windows WinUI3 C# / Linux / Android Compose / iOS SwiftUI / HarmonyOS ArkUI"]
     Uni["UniFFI bindings (Kotlin/Swift)<br/>View types + AppBuilderWrapper + OneAIApp"]
     CFacade["extern C JSON facade<br/>#[no_mangle] oneai_* + AppHandle/SessionHandle + EventCb"]
+    Bus["🚌 oneai-bus · Directive/EngineYield (in-process or oneai serve sidecar)"]
     App["oneai-app OneAIApp (unified Rust entry)"]
     Engine["oneai-agent AgentLoop + GroupChat + feature crates"]
     Gates["native PlatformInteractionGate<br/>NSAlert/MessageBox/AlertDialog/UIController/CommonDialog"]
@@ -51,6 +67,10 @@ flowchart TB
     Native --> CFacade
     Uni --> App
     CFacade --> App
+    App --> Bus
+    Sidecar -->|JSON-RPC| AppServer
+    AppServer -->|Directive/EngineYield| Bus
+    Bus --> Engine
     App --> Engine
     Native --> Gates
     Gates -. ToolApproval decision point .-> App
@@ -98,6 +118,18 @@ pub trait PlatformInteractionGate: InteractionGate { /* native UI dialogs */ }
 5. The staticlib is built explicitly only when packaging (`cargo build -p oneai-staticlib`), not in daily builds.
 
 **macOS streaming 20fps coalescing**: per-token DispatchQueue.main.async floods the main queue; `StreamCallback` coalesces hot fragments 20fps flush, non-hot immediate in-order (see the stream mechanism).
+
+### App-Server sidecar turn (desktop/IDE/web frontends)
+
+Frontends that don't embed the Rust lib use this path — the frontend (or its host) auto-spawns a `oneai app-server --listen <transport>` subprocess and talks JSON-RPC 2.0 to the engine:
+
+1. **spawn**: the VS Code extension spawns `oneai app-server --listen stdio` on activation; the browser spawns it via the registered native-messaging host on demand; the macOS/Windows desktop `EngineProcessManager` spawns `--listen ipc://<ephemeral>`. The user **never starts a server manually** (Codex-style).
+2. **turn/run**: the frontend sends `turn/run {content}`; the adapter submits `Directive::UserMessage` and the engine starts the turn — `turn/run` returns `turn_id` at TurnStart (non-blocking until turn end).
+3. **event stream**: each engine observer callback is translated by `BusObserver` into an `EngineYield`; the adapter broadcasts a single `event` notification (`params` = the full yield, with a `kind` tag: `stream_chunk`/`thinking`/`tool_calls`/`tool_result`/`speaker_turn`/…). The frontend renders by `params.kind`.
+4. **approval loop**: on an `event` with `approval_request` (carrying `request_id`), the frontend shows a native dialog and replies `approval/respond {request_id, response}` — the same pair of bus channels as the in-process `BusInteractionGate`, identical behavior.
+5. **turn end**: the frontend finishes on the `turn_complete` `event`.
+
+The full JSON-RPC method table, `event` yield variants, four-frontend access status, and honest "awaiting real-machine test" markers are in [App-Server mechanism](app-server-mechanism_EN.md) (§4 schema, §7 frontend-access table, §11 auto-spawn).
 
 ## 6. Dependencies
 
@@ -153,7 +185,9 @@ OneAI's distinct points: **Rust core + per-target native UI (no shell)** + **two
 
 - [permission-mechanism](permission-mechanism_EN.md) — `PlatformInteractionGate` and the 7 decision points
 - [multi-agent-mechanism](multi-agent-mechanism_EN.md) — GroupChat FFI + scenario multi-role chat
+- [bus-mechanism](bus-mechanism_EN.md) — unified engine↔frontend protocol (the shared foundation of both connection models)
+- [app-server-mechanism](app-server-mechanism_EN.md) — the out-of-process app-server sidecar connection model: JSON-RPC schema, four-frontend access status, auto-spawn
 - [memory-mechanism](memory-mechanism_EN.md) — `sqlite_persistence_at` cross-restart memory
 - [CLAUDE.md — Cross-platform / Network proxy](../CLAUDE.md)
-- Source: `crates/oneai-uniffi/src/` (8 files / ~3.9K LOC) + `crates/oneai-platform-{desktop,android,ios,harmony}/src/` + `crates/oneai-staticlib/`
-- Per-target projects: `platforms/{macos,windows,android,harmony}/`
+- Source: `crates/oneai-uniffi/src/` (8 files / ~3.9K LOC) + `crates/oneai-platform-{desktop,android,ios,harmony}/src/` + `crates/oneai-staticlib/` + `crates/oneai-app-server/src/`
+- Per-target projects: `platforms/{macos,windows,android,harmony,vscode,browser,npm}/`

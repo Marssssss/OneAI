@@ -238,6 +238,24 @@ oneai serve [--socket ~/.oneai/serve.sock] [--domain ...] [--model ...] [--user 
 
 把一个 `AppSession` 经统一引擎总线暴露给**跨进程前端**（原生 App / IDE 插件）：socket 上写 `Directive` JSON 行、读 `EngineYield` JSON 行。UDS（Unix）/ named pipe（Windows）。区别于 `oneai supervisor serve`：supervisor 是实例注册 RPC（request/response `spawn/list/stop`），serve 是双向并发总线（任意时 directive ↔ 任意时 yield + 审批 `request_id` 关联），用分离 socket 故两者共存。机制：[bus-mechanism.md](bus-mechanism.md)（引擎总线）。
 
+## App-Server（JSON-RPC 前端服务）
+
+```bash
+# 并发监听多 transport；不传 --listen 默认 ipc://~/.oneai/app-server.sock
+oneai app-server --listen stdio --listen ipc://~/.oneai/app-server.sock --listen ws://127.0.0.1:8787
+```
+
+`oneai serve`（newline-JSON passthrough，上述）的 **JSON-RPC 2.0 升级版**——同一引擎 + 同一 bus，但 wire 讲面向前端的 JSON-RPC 操作导向 schema（`turn/run` 有返回值、`session/*`/`group/*`/`scenario/*` CRUD、`approval/respond`、`event` 通知），喂四类**非 Rust 前端**：VS Code 扩展（`--listen stdio`，激活时 spawn）、浏览器扩展（`--listen native-messaging`，4B-LE 前缀成帧）、macOS/Windows 桌面 sidecar（`--listen ipc://<ephemeral>`，`EngineProcessManager` auto-spawn）。**用户永不手动起 server**——能 spawn 进程的前端自己 owns spawn（Codex 式）。`--listen` 取值：
+
+| 取值 | 用途 |
+|---|---|
+| `stdio` | IDE 扩展 spawn（LSP 式），stdout 是成帧消息流 |
+| `ipc://<path>` | Unix UDS / Windows named pipe，桌面 sidecar |
+| `ws://<host>:<port>` | 浏览器 / web 客户端 |
+| `native-messaging` | 浏览器扩展（Chrome/Firefox，4B-LE 前缀成帧） |
+
+完整 JSON-RPC method 表（`turn/run`·`approval/respond`·`session/*`·`group/*`·`scenario/*`·`shutdown`）、`event` 通知的 `params.kind` 全变体、四前端接入现状与 auto-spawn 细节见 [app-server-mechanism.md](app-server-mechanism.md)（§4 schema、§7 前端接入现状、§11 auto-spawn）。
+
 ## Evolve（自演进）
 
 ```bash

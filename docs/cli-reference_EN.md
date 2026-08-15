@@ -238,6 +238,24 @@ oneai serve [--socket ~/.oneai/serve.sock] [--domain ...] [--model ...] [--user 
 
 Exposes an `AppSession` over the unified engine bus to **out-of-process frontends** (native apps / IDE plugins): write `Directive` JSON lines and read `EngineYield` JSON lines over the socket. UDS (Unix) / named pipe (Windows). Differs from `oneai supervisor serve`: the supervisor is an instance-registry RPC (request/response `spawn/list/stop`); `serve` is a bidirectional concurrent bus (arbitrary-time directive ↔ arbitrary-time yield + approval `request_id` correlation), on a separate socket so both coexist. Mechanism: [bus-mechanism_EN.md](bus-mechanism_EN.md) (engine bus).
 
+## App-Server (JSON-RPC frontend server)
+
+```bash
+# Bind multiple transports concurrently; no --listen defaults to ipc://~/.oneai/app-server.sock
+oneai app-server --listen stdio --listen ipc://~/.oneai/app-server.sock --listen ws://127.0.0.1:8787
+```
+
+The **JSON-RPC 2.0 upgrade** of `oneai serve` (the newline-JSON passthrough above) — same engine + same bus, but the wire speaks a frontend-facing, operation-oriented JSON-RPC schema (`turn/run` has a return value, `session/*`/`group/*`/`scenario/*` CRUD, `approval/respond`, `event` notifications), feeding four **non-Rust frontend** classes: the VS Code extension (`--listen stdio`, spawned on activation), the browser extension (`--listen native-messaging`, 4B-LE length-prefixed framing), and the macOS/Windows desktop sidecar (`--listen ipc://<ephemeral>`, `EngineProcessManager` auto-spawn). **The user never starts a server manually** — any frontend that can spawn a process owns the spawn (Codex-style). `--listen` values:
+
+| value | use |
+|---|---|
+| `stdio` | IDE extension spawn (LSP-style); stdout is the framed message stream |
+| `ipc://<path>` | Unix UDS / Windows named pipe; desktop sidecar |
+| `ws://<host>:<port>` | browser / web client |
+| `native-messaging` | browser extension (Chrome/Firefox; 4B-LE length-prefix framing) |
+
+The full JSON-RPC method table (`turn/run`·`approval/respond`·`session/*`·`group/*`·`scenario/*`·`shutdown`), all `event` notification `params.kind` variants, four-frontend access status, and auto-spawn details are in [app-server-mechanism_EN.md](app-server-mechanism_EN.md) (§4 schema, §7 frontend-access status, §11 auto-spawn).
+
 ## Evolve (self-evolution)
 
 ```bash

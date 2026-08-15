@@ -32,6 +32,25 @@ dotnet build -r win-x64 platforms\windows\OneAI.sln -c Debug
 dotnet run --project platforms\windows\OneAI\OneAI.csproj -r win-x64 -c Debug
 ```
 
+## Transport: FFI (default) vs app-server sidecar
+
+The Windows app can reach the engine through **two transports**:
+
+- **FFI / in-process (default)** — the app P/Invokes `oneai_native.dll` (the
+  `extern "C"` JSON facade). This is the verified, shipping path; everything
+  in *Architecture* / *Feature parity* below describes it.
+- **app-server sidecar (newer, skeleton)** — a C# `OneAiRpcClient` over a
+  Windows named pipe + an `EngineProcessManager` that spawns
+  `oneai app-server --listen pipe://oneai-<pid>`. Same JSON-RPC 2.0 frontend
+  protocol as the macOS sidecar and the VS Code / browser frontends.
+
+**Honest status of the sidecar transport:** only the **spawn + client skeleton**
+is in place (`OneAiRpcClient.cs` + `EngineProcessManager.cs`); WinUI wiring to
+the view-model is **deferred**, and the C#/XAML build itself can't be compiled
+on this machine (no MSVC toolchain locally — see Caveats). FFI remains the
+default. When the WinUI sidecar wiring lands, see the per-frontend table in
+[App-Server mechanism](../../docs/app-server-mechanism.md) (§7 frontend-access status, §11 auto-spawn).
+
 ## Architecture
 
 ```

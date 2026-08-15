@@ -6,9 +6,9 @@ OneAI is a full-stack agent framework written in Rust, providing everything need
 
 ## Design principles
 
-- **Modular** — 29 independent crates, each with one job, used on demand.
+- **Modular** — 31 independent crates, each with one job, used on demand.
 - **Type-safe** — sealed-enum hierarchies (every public enum is `#[non_exhaustive]`), trait-driven abstractions, no string-config.
-- **Unified engine bus** — [oneai-bus](bus-mechanism_EN.md) is the single seam between the engine and every frontend: two channels `Directive` (frontend → engine) + `EngineYield` (engine → frontend). TUI / Studio web / six native apps / the `oneai serve` sidecar all consume it; a frontend is just a "Directive writer + Yield reader".
+- **Unified engine bus + three-layer frontend protocol** — [oneai-bus](bus-mechanism_EN.md) is the single seam between the engine and every frontend: two channels `Directive` (frontend → engine) + `EngineYield` (engine → frontend). TUI / six native apps / the `oneai serve` sidecar all consume it; a frontend is just a "Directive writer + Yield reader". Non-Rust frontends (IDE / web / TS-JS / desktop Swift·C#) don't speak newline-JSON directly — they go through [oneai-app-server](app-server-mechanism_EN.md), a JSON-RPC 2.0 frontend-protocol layer (an L2 adapter mapping to the L3 bus's Directive/EngineYield). One engine process feeds four frontend classes concurrently: VS Code / browser / macOS·Windows desktop sidecar.
 - **Domain-pluggable** — [DomainPack](domain-pack-mechanism_EN.md) makes domain knowledge declarative, composable, one-line-switchable; validatable against a JSON Schema and shareable via a pack market.
 - **Natively multi-agent** — model-driven SubAgent hierarchical delegation (`delegate` meta-tool, multi-delegate per turn + dependency-aware parallel-wave scheduling) + paradigm switch (`switch_paradigm` into Plan/Reflect/Explore graph flows) + engine-level [GroupChat](multi-agent-mechanism_EN.md) primitive for scenario-based multi-role conversations (group-chat yields carry a `speaker` tag over the bus).
 - **Production-grade infrastructure** — [ProviderPool](provider-mechanism_EN.md) fallback chain, SmartRouter multi-factor routing, usage tracking, rate limiting, circuit breaking, token-aware context management.
@@ -26,6 +26,9 @@ oneai-core                      foundation: types + core traits (no downstream d
       ↑
 oneai-bus                       engine↔frontend protocol (Directive/EngineYield + EngineBus, depends on core)
       ↑
+oneai-app-server                JSON-RPC 2.0 frontend-protocol layer (L2 adapter: method/event ↔ Directive/EngineYield,
+                                multi-transport stdio/ipc/ws/native-messaging, feeds non-Rust frontends; depends on bus + supervisor)
+      ↑
 oneai-provider / -parser / -memory / -tool / -skill / -rag
 / -workflow / -domain / -trace / -persistence / -a2a / -wasm
 / -eval / -studio / -mcp / -scheduler / -gateway / -supervisor / -vector   feature crates (depend on core)
@@ -37,16 +40,19 @@ oneai-app                       integration layer: AppBuilder → App → AppSes
 oneai-uniffi + oneai-platform-* FFI / native adapters (c_facade 3-symbol bus pump / oneai serve sidecar)
 ```
 
+> `oneai-app-server` sits unusually: above the bus but outside the feature crates — it's a "protocol-adapter layer", not a feature layer. It only maps JSON-RPC schema to the bus's Directive/EngineYield and holds no business logic; the CLI (`oneai app-server`) builds the engine then hands `Arc<InProcessBus>` to its `serve_all`. It depends on `oneai-bus` + `oneai-supervisor` (for `IpcListener`), not on `oneai-app`.
+
 The integration point is **`oneai-app`'s `AppBuilder`** (`crates/oneai-app/src/builder.rs`). Every subsystem is optional and plugged in via builder methods (the LLM provider included). When changing how a subsystem is constructed or wired, this is the single place to update. For contributor-grade working guidance see [CLAUDE.md](../CLAUDE.md).
 
 ## Architecture diagram
 
 ```mermaid
 flowchart TB
-    subgraph FE ["🖥️ Frontends — two frontends, one core"]
+    subgraph FE ["🖥️ Frontends — one core, multiple access paths"]
         direction LR
         TUI["CLI / TUI<br/>oneai-cli · ratatui+crossterm<br/>general agentic execution / subsystem exploration"]
         Native["Native apps<br/>macOS · Win · Linux<br/>Android · iOS · HarmonyOS<br/>scenario-based multi-agent group chat"]
+        Nrc["Non-Rust frontends<br/>VS Code extension · browser extension<br/>desktop sidecar (Swift/C#)"]
     end
 
     subgraph FFI ["🔌 FFI layer · oneai-uniffi + oneai-platform-*"]
@@ -55,7 +61,9 @@ flowchart TB
         CFacade["Hand-written extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON across the boundary, CJK round-trips correctly<br/>+ 3-symbol bus pump"]
     end
 
-    Bus["🚌 oneai-bus · unified engine bus<br/>Directive (frontend→engine, mpsc 512)<br/>EngineYield (engine→frontend, broadcast 1024)<br/>in-process Arc<InProcessBus> or oneai serve sidecar (UDS/named-pipe)<br/>BusObserver / BusInteractionGate / GroupChatBusObserver"]
+    AppServer["🧾 oneai-app-server · JSON-RPC 2.0 frontend-protocol layer (L2)<br/>method/event ↔ Directive/EngineYield<br/>multi-transport: stdio / ipc / ws / native-messaging<br/>feeds the four Nrc frontend classes (Codex-style auto-spawn)"]
+
+    Bus["🚌 oneai-bus · unified engine bus (L3)<br/>Directive (frontend→engine, mpsc 512)<br/>EngineYield (engine→frontend, broadcast 1024)<br/>in-process Arc<InProcessBus> or oneai serve sidecar (UDS/named-pipe)<br/>BusObserver / BusInteractionGate / GroupChatBusObserver"]
 
     subgraph App ["🧩 Integration layer · oneai-app"]
         Builder["AppBuilder → App → AppSession<br/>the one assembly point · every subsystem optional, plugged in on demand<br/>engine_bus() wires the bus"]
@@ -107,6 +115,8 @@ flowchart TB
     TUI --> Bus
     UniFFI --> Bus
     CFacade --> Bus
+    Nrc -->|JSON-RPC over stdio/ipc/ws/native-msg| AppServer
+    AppServer -->|Directive/EngineYield| Bus
     Bus -->|Directive stream| Builder
     Builder --> Loop
     Loop -->|AgentLoopObserver → EngineYield| Bus
@@ -124,6 +134,7 @@ flowchart TB
 |-------|------|
 | `oneai-core` | Core types, traits, PermissionLevel, Budget, PlatformCapabilities, ModelContextResolver |
 | `oneai-bus` | Unified engine↔frontend protocol — Directive/EngineYield + EngineBus (in-process + sidecar wire codec) |
+| `oneai-app-server` | JSON-RPC 2.0 frontend-protocol layer (L2 adapter: method/event ↔ Directive/EngineYield, multi-transport stdio/ipc/ws/native-messaging, feeds IDE/web/desktop — the four non-Rust frontend classes) |
 | `oneai-provider` | LLM provider (OpenAI/Anthropic/Gemini/Ollama) + ProviderPool + SmartRouter |
 | `oneai-parser` | 3-layer output-parser defense |
 | `oneai-memory` | Memory system (3 tiers + compression-coupled extraction + persistence, wired to the `oneai-vector` default stack) |
@@ -159,6 +170,7 @@ flowchart TB
 | Module | Doc | One-liner |
 |---|---|---|
 | Engine bus | [bus-mechanism_EN.md](bus-mechanism_EN.md) | Directive/EngineYield protocol + in-process/sidecar dual form |
+| App-Server | [app-server-mechanism_EN.md](app-server-mechanism_EN.md) | JSON-RPC 2.0 frontend protocol layer + multi-transport + four non-Rust frontend classes |
 | AgentLoop / delegation / GroupChat | [multi-agent-mechanism_EN.md](multi-agent-mechanism_EN.md) | Dynamic loop + model-driven delegation + scenario multi-role chat |
 | Memory | [memory-mechanism_EN.md](memory-mechanism_EN.md) | Letta 3 tiers + compression-coupled extraction + persistence |
 | Context management | [context-management-mechanism_EN.md](context-management-mechanism_EN.md) | Durable/ephemeral separation + token budget + 3-layer model-context resolution |

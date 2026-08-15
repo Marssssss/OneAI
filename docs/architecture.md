@@ -6,9 +6,9 @@ OneAI 是一个用 Rust 编写的全栈 Agent 框架，提供构建、运行、�
 
 ## 设计原则
 
-- **模块化** —— 29 个独立 crate，各司其职，按需使用。
+- **模块化** —— 31 个独立 crate，各司其职，按需使用。
 - **类型安全** —— 密封枚举层级（公开枚举都加 `#[non_exhaustive]`）、trait 驱动抽象，无字符串配置。
-- **统一引擎总线** —— [oneai-bus](bus-mechanism.md) 是引擎与一切前端之间的唯一 seam：`Directive`（前端→引擎）+ `EngineYield`（引擎→前端）两通道，TUI / Studio Web / 六端原生 App / `oneai serve` sidecar 全走它，前端只当「Directive writer + Yield reader」。
+- **统一引擎总线 + 前端协议三层** —— [oneai-bus](bus-mechanism.md) 是引擎与一切前端之间的唯一 seam：`Directive`（前端→引擎）+ `EngineYield`（引擎→前端）两通道，TUI / 六端原生 App / `oneai serve` sidecar 全走它，前端只当「Directive writer + Yield reader」。非 Rust 前端（IDE / web / TS-JS / 桌面 Swift·C#）不直说 newline-JSON，而经 [oneai-app-server](app-server-mechanism.md) 的 JSON-RPC 2.0 前端协议层（L2 适配器，映射到 L3 bus 的 Directive/EngineYield），一个引擎进程并发喂 VS Code / 浏览器 / macOS·Windows 桌面 sidecar 四类前端。
 - **领域可插拔** —— [DomainPack](domain-pack-mechanism.md) 让领域知识声明式、可组合、一行切换；可对照 JSON Schema 校验，并通过 pack 市场共享。
 - **多 Agent 原生** —— 模型驱动的 SubAgent 分层委托（`delegate` 元工具，一轮多委托 + 依赖感知并行波次调度）+ 范式切换（`switch_paradigm` 进入 Plan/Reflect/Explore 图流）+ 引擎级 [GroupChat](multi-agent-mechanism.md) 原语驱动场景化多角色对话（群聊 yield 带 `speaker` 标签经 bus 发出）。
 - **生产级基础设施** —— [ProviderPool](provider-mechanism.md) 降级链、SmartRouter 多因子路由、用量统计、限流、熔断、Token 感知的上下文管理。
@@ -26,6 +26,9 @@ oneai-core                      基础：类型 + 核心 trait（无下游依赖
       ↑
 oneai-bus                       引擎↔前端协议（Directive/EngineYield + EngineBus，依赖 core）
       ↑
+oneai-app-server                JSON-RPC 2.0 前端协议层（L2 适配器：method/event ↔ Directive/EngineYield，
+                                多 transport stdio/ipc/ws/native-messaging，喂非 Rust 前端；依赖 bus + supervisor）
+      ↑
 oneai-provider / -parser / -memory / -tool / -skill / -rag
 / -workflow / -domain / -trace / -persistence / -a2a / -wasm
 / -eval / -studio / -mcp / -scheduler / -gateway / -supervisor / -vector   特性 crate（依赖 core）
@@ -37,16 +40,19 @@ oneai-app                       集成层：AppBuilder → App → AppSession（
 oneai-uniffi + oneai-platform-* FFI / 原生平台适配（c_facade 3 符号 bus 泵 / oneai serve sidecar）
 ```
 
+> `oneai-app-server` 位置特别：它在 bus 之上、特性 crate 之外，是「协议适配层」而非「特性层」——只把 JSON-RPC schema 映射到 bus 的 Directive/EngineYield，不含业务逻辑；CLI（`oneai app-server`）构建引擎后把 `Arc<InProcessBus>` 传给它的 `serve_all`。它依赖 `oneai-bus` + `oneai-supervisor`（取 `IpcListener`），不依赖 `oneai-app`。
+
 集成入口是 **`oneai-app` 的 `AppBuilder`**（`crates/oneai-app/src/builder.rs`）。每个子系统都是可选的、通过 builder 方法插装（LLM Provider 也是可选的）。改子系统的构造或接线，这是唯一要动的地方。深入到贡献者级别的工作指引见 [CLAUDE.md](../CLAUDE.md)。
 
 ## 架构图
 
 ```mermaid
 flowchart TB
-    subgraph FE ["🖥️ 前端 · Frontends —— 两种前端，同一内核"]
+    subgraph FE ["🖥️ 前端 · Frontends —— 同一内核，多条接入路径"]
         direction LR
         TUI["CLI / TUI<br/>oneai-cli · ratatui+crossterm<br/>通用 Agentic 执行 / 子系统探索"]
         Native["原生 App<br/>macOS · Win · Linux<br/>Android · iOS · HarmonyOS<br/>场景化多 Agent 群聊"]
+        Nrc["非 Rust 前端<br/>VS Code 扩展 · 浏览器扩展<br/>桌面 sidecar（Swift/C#）"]
     end
 
     subgraph FFI ["🔌 FFI 层 · oneai-uniffi + oneai-platform-*"]
@@ -55,7 +61,9 @@ flowchart TB
         CFacade["手写 extern C facade<br/>C# · C++ · ArkTS<br/>UTF-8 JSON 过界，CJK 正确往返<br/>+ 3 符号 bus 泵"]
     end
 
-    Bus["🚌 oneai-bus · 统一引擎总线<br/>Directive (前端→引擎, mpsc 512)<br/>EngineYield (引擎→前端, broadcast 1024)<br/>in-process Arc<InProcessBus> 或 oneai serve sidecar (UDS/named-pipe)<br/>BusObserver / BusInteractionGate / GroupChatBusObserver"]
+    AppServer["🧾 oneai-app-server · JSON-RPC 2.0 前端协议层（L2）<br/>method/event ↔ Directive/EngineYield<br/>多 transport：stdio / ipc / ws / native-messaging<br/>喂 Nrc 四类前端（Codex 式 auto-spawn）"]
+
+    Bus["🚌 oneai-bus · 统一引擎总线（L3）<br/>Directive (前端→引擎, mpsc 512)<br/>EngineYield (引擎→前端, broadcast 1024)<br/>in-process Arc<InProcessBus> 或 oneai serve sidecar (UDS/named-pipe)<br/>BusObserver / BusInteractionGate / GroupChatBusObserver"]
 
     subgraph App ["🧩 集成层 · oneai-app"]
         Builder["AppBuilder → App → AppSession<br/>唯一组装入口 · 每个子系统可选、按需插装<br/>engine_bus() 接线总线"]
@@ -107,6 +115,8 @@ flowchart TB
     TUI --> Bus
     UniFFI --> Bus
     CFacade --> Bus
+    Nrc -->|JSON-RPC over stdio/ipc/ws/native-msg| AppServer
+    AppServer -->|Directive/EngineYield| Bus
     Bus -->|Directive 流| Builder
     Builder --> Loop
     Loop -->|AgentLoopObserver → EngineYield| Bus
@@ -124,6 +134,7 @@ flowchart TB
 |-------|------|
 | `oneai-core` | 核心类型、trait、PermissionLevel、Budget、PlatformCapabilities、ModelContextResolver |
 | `oneai-bus` | 统一引擎↔前端协议 —— Directive/EngineYield + EngineBus（in-process + sidecar wire codec） |
+| `oneai-app-server` | JSON-RPC 2.0 前端协议层（L2 适配器：method/event ↔ Directive/EngineYield，多 transport stdio/ipc/ws/native-messaging，喂 IDE/web/桌面四类非 Rust 前端） |
 | `oneai-provider` | LLM Provider（OpenAI/Anthropic/Gemini/Ollama）+ ProviderPool + SmartRouter |
 | `oneai-parser` | 3 层输出解析防御 |
 | `oneai-memory` | 记忆系统（三层 + 压缩增量抽取 + 持久化，接 `oneai-vector` 默认栈） |
@@ -159,6 +170,7 @@ flowchart TB
 | 模块 | 文档 | 一句话 |
 |---|---|---|
 | 引擎总线 | [bus-mechanism.md](bus-mechanism.md) | Directive/EngineYield 协议 + in-process/sidecar 双形态 |
+| App-Server | [app-server-mechanism.md](app-server-mechanism.md) | JSON-RPC 2.0 前端协议层 + 多 transport + 四类非 Rust 前端 |
 | AgentLoop / 委托 / GroupChat | [multi-agent-mechanism.md](multi-agent-mechanism.md) | 动态循环 + 模型驱动委托 + 场景化多角色对话 |
 | 记忆 | [memory-mechanism.md](memory-mechanism.md) | Letta 三层 + 压缩增量抽取 + 持久化 |
 | 上下文管理 | [context-management-mechanism.md](context-management-mechanism.md) | 持久/瞬时分离装配 + token 预算 + 三层模型上下文解析 |
