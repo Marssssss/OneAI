@@ -13,7 +13,12 @@ opens a webview panel that:
 - renders `event` notifications (`stream_chunk`, `thinking`, `tool_calls`,
   `approval_request`, `speaker_turn`, `turn_complete`, …),
 - lists the shared scenario library (`scenario/list`) and starts a multi-agent
-  group chat (`group/start` → `group/open` → `group/run`).
+  group chat (`group/start` → `group/open` → `group/run`), and
+- hosts the **scenario editor** (Scenarios tab / `OneAI: Open Scenario Editor`):
+  cast + turn policy, live-validated via `scenario/validate`, saved via
+  `scenario/upsert`, deleted via `scenario/delete`. The editor is the shared
+  `platforms/shared/scenario-editor.js` (committed copy in
+  `src/webview/scenario-editor.js`, auto-resynced by `npm run compile`).
 
 If the engine exits, the extension restarts it with exponential backoff
 (`oneai.autoRestart`).
@@ -23,7 +28,8 @@ If the engine exits, the extension restarts it with exponential backoff
 ```bash
 cd platforms/vscode
 npm install
-npm run compile        # esbuild → dist/extension.js
+npm run compile        # esbuild → dist/extension.js (also resyncs the
+                      # shared scenario-editor.js copy into src/webview/)
 ```
 
 ## Run
@@ -43,7 +49,10 @@ key). Then run **OneAI: Open Chat**.
 - `src/extension.ts` — activation, commands, webview panel, postMessage ↔ engine relay.
 - `src/server.ts` — `OneAiServer`: spawn + newline-JSON-RPC + restart.
 - `src/webview/rpc-webview.js` — the webview's postMessage JSON-RPC client.
-- `src/webview/chat.js` — event rendering + scenario sidebar + send.
+- `src/webview/chat.js` — event rendering + scenario sidebar + send + editor tab.
+- `src/webview/scenario-editor.js` — **AUTO-GENERATED** copy of
+  `platforms/shared/scenario-editor.js` (the cross-frontend scenario editor);
+  edit the source, not this copy.
 
 The webview cannot spawn the engine; it relays JSON-RPC through the extension
 host. The browser extension (`platforms/browser`) speaks the same JSON-RPC

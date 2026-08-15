@@ -2,6 +2,21 @@
 // no runtime node_modules needed in the .vsix). The webview HTML/JS is shipped
 // as static assets (src/webview/*) and referenced via vscode-webview URIs.
 const esbuild = require("esbuild");
+const fs = require("fs");
+const path = require("path");
+
+// Re-sync the shared scenario editor into the webview root. The webview can
+// only load scripts under src/webview/ (its localResourceRoots), so the
+// canonical source in platforms/shared/ is copied here on every compile —
+// this keeps the committed copy from drifting. (CI also checks via
+// platforms/shared/sync.sh.) No-op if the source is unchanged.
+try {
+  const src = path.resolve(__dirname, "../shared/scenario-editor.js");
+  const dest = path.resolve(__dirname, "src/webview/scenario-editor.js");
+  if (fs.existsSync(src)) fs.copyFileSync(src, dest);
+} catch (e) {
+  console.warn("[oneai] scenario-editor sync skipped:", e.message);
+}
 
 const watch = process.argv.includes("--watch");
 

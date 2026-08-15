@@ -134,9 +134,18 @@ function chatHtml(webview: vscode.Webview, context: vscode.ExtensionContext): st
   body { font-family: var(--vscode-font-family); margin: 0; display: flex; height: 100vh; }
   #sidebar { width: 220px; border-right: 1px solid var(--vscode-panel-border); overflow-y: auto; }
   #sidebar h3 { padding: 8px 12px; margin: 0; font-size: 11px; text-transform: uppercase; opacity: .7; }
-  #sidebar .item { padding: 6px 12px; cursor: pointer; }
+  #sidebar .item { padding: 6px 12px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
   #sidebar .item:hover { background: var(--vscode-list-hover-background); }
+  #sidebar .item .row-actions { display: none; gap: 2px; }
+  #sidebar .item:hover .row-actions { display: inline-flex; }
+  #sidebar .item .row-actions button { padding: 0 4px; background: none; border: none; cursor: pointer; color: inherit; }
+  #sidebar .item.new { font-weight: 600; }
   #main { flex: 1; display: flex; flex-direction: column; }
+  #tabs { display: flex; border-bottom: 1px solid var(--vscode-panel-border); }
+  #tabs button { padding: 6px 14px; border: none; background: none; cursor: pointer; color: var(--vscode-foreground); opacity: .7; }
+  #tabs button.active { opacity: 1; border-bottom: 2px solid var(--vscode-focusBorder); }
+  .view { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  .view.show { display: flex; }
   #messages { flex: 1; overflow-y: auto; padding: 8px; }
   .msg { margin: 6px 0; padding: 8px; border-radius: 6px; }
   .msg.user { background: var(--vscode-input-background); }
@@ -147,6 +156,13 @@ function chatHtml(webview: vscode.Webview, context: vscode.ExtensionContext): st
   #composer { display: flex; border-top: 1px solid var(--vscode-panel-border); }
   #composer textarea { flex: 1; resize: none; height: 4em; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: none; padding: 8px; font-family: inherit; }
   #composer button { padding: 8px 16px; }
+  #editor-view { overflow-y: auto; padding: 12px; }
+  #editor-view .field { margin: 6px 0; }
+  #editor-view label { display: block; font-size: 11px; opacity: .7; }
+  #editor-view input, #editor-view select, #editor-view textarea { width: 100%; box-sizing: border-box; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px; font-family: inherit; }
+  #editor-view .errors { color: var(--vscode-errorForeground, #c00); font-size: 11px; margin-top: 6px; }
+  #editor-view .row { display: flex; gap: 6px; }
+  #editor-view .row > * { flex: 1; }
 </style>
 </head>
 <body>
@@ -155,13 +171,21 @@ function chatHtml(webview: vscode.Webview, context: vscode.ExtensionContext): st
     <div id="scenario-list"></div>
   </div>
   <div id="main">
-    <div id="messages"></div>
-    <div id="composer">
-      <textarea id="input" placeholder="Message the agent… (Shift+Enter for newline)"></textarea>
-      <button id="send">Send</button>
+    <div id="tabs">
+      <button id="tab-chat" class="active">Chat</button>
+      <button id="tab-scenarios">Scenarios</button>
     </div>
+    <div id="chat-view" class="view show">
+      <div id="messages"></div>
+      <div id="composer">
+        <textarea id="input" placeholder="Message the agent… (Shift+Enter for newline)"></textarea>
+        <button id="send">Send</button>
+      </div>
+    </div>
+    <div id="editor-view" class="view"></div>
   </div>
   <script nonce="${nonce}" src="${js("rpc-webview.js")}"></script>
+  <script nonce="${nonce}" src="${js("scenario-editor.js")}"></script>
   <script nonce="${nonce}" src="${js("chat.js")}"></script>
 </body>
 </html>`;

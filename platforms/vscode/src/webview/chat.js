@@ -1,8 +1,10 @@
 // chat.js — the webview UI: renders `event` notifications (turn_start /
 // stream_chunk / thinking / tool_calls / approval_request / speaker_turn /
-// turn_complete …) into the messages surface, sends `turn/run`, and shows the
-// scenario sidebar (scenario/list → open a group chat via group/start +
-// group/open + group/run). Multi-agent scenarios render speaker-tagged turns.
+// turn_complete …) into the messages surface, sends `turn/run`, shows the
+// scenario sidebar (scenario/list → start a group chat / edit / delete),
+// and hosts the cross-frontend scenario editor (the shared
+// scenario-editor.js, mounted in the #editor-view tab). Multi-agent
+// scenarios render speaker-tagged turns.
 //
 // Event shapes (params.kind → fields) mirror crates/oneai-bus EngineYield —
 // see docs/app-server-mechanism.md §4. The `event` notification's params is
@@ -15,9 +17,37 @@
   const input = document.getElementById("input");
   const send = document.getElementById("send");
   const scenarioList = document.getElementById("scenario-list");
+  const chatView = document.getElementById("chat-view");
+  const editorView = document.getElementById("editor-view");
+  const tabChat = document.getElementById("tab-chat");
+  const tabScenarios = document.getElementById("tab-scenarios");
 
   let currentTurn = null; // live assistant bubble being streamed into
   let liveScenario = null; // the active BusScenario, if in group mode
+  let editor = null; // OneAiScenarioEditor instance (lazy — built on first use)
+
+  // ── Tabs ─────────────────────────────────────────────────────────────
+  // The `oneai.scenarios` command (extension.ts) posts a `navigate` message
+  // with view="scenarios"; rpc-webview.js re-dispatches it as a CustomEvent.
+  function showView(v) {
+    chatView.classList.toggle("show", v === "chat");
+    editorView.classList.toggle("show", v === "scenarios");
+    tabChat.classList.toggle("active", v === "chat");
+    tabScenarios.classList.toggle("active", v === "scenarios");
+  }
+  tabChat.onclick = () => showView("chat");
+  tabScenarios.onclick = () => {
+    showView("scenarios");
+    ensureEditor();
+    editor.render();
+  };
+  window.addEventListener("navigate", (e) => {
+    showView(e.detail || "chat");
+    if ((e.detail || "") === "scenarios") {
+      ensureEditor();
+      editor.render();
+    }
+  });
 
   // ── Rendering ───────────────────────────────────────────────────────
   function bubble(role, speaker) {
@@ -42,7 +72,7 @@
   }
 
   // ── Event handlers (one per params.kind) ────────────────────────────
-  rpc.onEvent("turn_start", (p) => {
+  rpc.onEvent("turn_start", () => {
     currentTurn = bubble("assistant", null);
   });
   rpc.onEvent("stream_chunk", (p) => {
@@ -116,33 +146,82 @@
     }
   });
 
-  // ── Scenario sidebar: scenario/list → click to start a group chat ───
+  // ── Scenario sidebar: scenario/list → start / edit / delete ────────
   async function loadScenarios() {
     const res = await rpc.call("scenario/list", {});
     const scenarios = (res && res.scenarios) || [];
     scenarioList.innerHTML = "";
+
+    const newBtn = document.createElement("div");
+    newBtn.className = "item new";
+    newBtn.textContent = "+ New scenario";
+    newBtn.addEventListener("click", () => openEditor(null));
+    scenarioList.appendChild(newBtn);
+
     for (const sc of scenarios) {
       const item = document.createElement("div");
       item.className = "item";
-      item.textContent = sc.name || sc.id;
-      item.title = (sc.members || []).map((m) => m.name).join(", ");
-      item.addEventListener("click", () => startScenario(sc));
+      const label = document.createElement("span");
+      label.textContent = sc.name || sc.id;
+      label.title = (sc.members || []).map((m) => m.name).join(", ");
+      label.addEventListener("click", () => startScenario(sc));
+
+      const actions = document.createElement("span");
+      actions.className = "row-actions";
+      const edit = document.createElement("button");
+      edit.textContent = "✎";
+      edit.title = "Edit";
+      edit.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openEditor(sc);
+      });
+      const del = document.createElement("button");
+      del.textContent = "🗑";
+      del.title = "Delete";
+      del.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete scenario "${sc.name || sc.id}"?`)) return;
+        await rpc.call("scenario/delete", { id: sc.id });
+        loadScenarios();
+      });
+      actions.appendChild(edit);
+      actions.appendChild(del);
+      item.appendChild(label);
+      item.appendChild(actions);
       scenarioList.appendChild(item);
     }
+  }
+
+  // ── Scenario editor tab (shared scenario-editor.js) ───────────────
+  // Lazy-create on first open so the scenario/list RPC for the preset picker
+  // doesn't fire until the user actually opens the editor.
+  function ensureEditor() {
+    if (editor) return;
+    editor = OneAiScenarioEditor.create({
+      rpc,
+      root: editorView,
+      onSaved: () => loadScenarios(),
+      onDeleted: () => loadScenarios(),
+      onError: (m) => appendText(bubble("assistant", "error"), "⚠️ " + m),
+    });
+  }
+
+  function openEditor(sc) {
+    showView("scenarios");
+    ensureEditor();
+    if (sc) editor.edit(sc);
+    else editor.newScenario();
   }
 
   async function startScenario(sc) {
     liveScenario = sc;
     messages.innerHTML = "";
     bubble("user", null).textContent = `🎬 ${sc.name}`;
-    // Compile the rich BusScenario → engine BusGroupScenario payload. The
-    // shared `toGroupScenario` lives in scenario-editor.js; for the launch
-    // flow we just submit the rich object as `scenario` — the app-server
-    // adapter's StartGroupChat deserialize ignores the editor-only fields
-    // (topic_fields/debrief/icon/name) via serde defaults, and the engine
-    // consumes members/turn_policy/etc. (Topic-value baking into member
-    // prompts is a future shared step; for now members ship their stored
-    // system_prompt.)
+    // Submit the rich BusScenario as `scenario` — the app-server adapter's
+    // StartGroupChat deserialize ignores editor-only fields (topic_fields/
+    // debrief/icon/name) via serde defaults; the engine consumes members/
+    // turn_policy/etc. (Topic-value baking into member prompts is a future
+    // shared step; for now members ship their stored system_prompt.)
     await rpc.call("group/start", { scenario: sc });
     if (sc.opener_agent_id) {
       await rpc.call("group/open", {}); // opener turn

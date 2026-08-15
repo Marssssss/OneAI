@@ -1,9 +1,9 @@
 // chat.js — the browser popup UI. Same JSON-RPC surface as the VS Code
 // webview's chat.js (rpc.call / rpc.onEvent), but over native messaging
 // (rpcNative). Renders events into #messages, sends turn/run, lists scenarios,
-// and hosts a live scenario editor (cast + turn policy + topic fields) that
-// calls scenario/validate on every edit — the single authoritative validator
-// shipped in Phase G, no client-side mirror.
+// and hosts the shared scenario editor (scenario-editor.js) — cast + turn
+// policy, live-validated via scenario/validate (the single authoritative
+// validator shipped in Phase G, no client-side mirror).
 (function () {
   "use strict";
 
@@ -12,12 +12,13 @@
   const input = document.getElementById("input");
   const send = document.getElementById("send");
   const scenarios = document.getElementById("scenarios");
-  const editor = document.getElementById("editor");
+  const editorRoot = document.getElementById("editor");
   const tabChat = document.getElementById("tab-chat");
   const tabEditor = document.getElementById("tab-editor");
 
   let currentTurn = null;
   let liveScenario = null;
+  let editor = null; // OneAiScenarioEditor instance (lazy)
 
   // ── Tab switch ──────────────────────────────────────────────────────
   function show(which) {
@@ -25,7 +26,10 @@
     document.getElementById("editor").classList.toggle("show", which === "editor");
     tabChat.classList.toggle("active", which === "chat");
     tabEditor.classList.toggle("active", which === "editor");
-    if (which === "editor") renderEditor();
+    if (which === "editor") {
+      ensureEditor();
+      editor.render();
+    }
   }
   tabChat.onclick = () => show("chat");
   tabEditor.onclick = () => show("editor");
@@ -125,135 +129,19 @@
     else await rpc.call("group/run", { user_input: " " });
   }
 
-  // ── Scenario editor (live scenario/validate) ────────────────────────
-  // The form edits a BusScenario's name + cast (name/system_prompt/kind) +
-  // turn_policy + topic fields, validating on every edit via scenario/validate
-  // — the shared authoritative validator (Phase G). This is the cross-frontend
-  // scenario editor: the same form runs in the VS Code webview (future) and
-  // here; only the rpc transport differs.
-  let editing = null; // the BusScenario being edited
-
-  async function renderEditor() {
-    if (!editing) {
-      // Start from a fresh blank scenario or the first preset.
-      try {
-        const res = await rpc.call("scenario/list", {});
-        editing = ((res && res.scenarios) || [])[0] || blankScenario();
-      } catch {
-        editing = blankScenario();
-      }
-    }
-    editor.innerHTML = "";
-    const name = field("Name", "input", editing.name);
-    name.input.oninput = () => { editing.name = name.input.value; validate(); };
-    editor.appendChild(name.row);
-
-    const policy = field("Turn policy", "select", editing.turn_policy, ["scripted", "moderator", "roundrobin"]);
-    policy.input.onchange = () => { editing.turn_policy = policy.input.value; validate(); };
-    editor.appendChild(policy.row);
-
-    // Cast.
-    const castHeader = document.createElement("div");
-    castHeader.textContent = "Cast";
-    castHeader.style.fontWeight = "bold";
-    editor.appendChild(castHeader);
-    editing.members.forEach((m, i) => editor.appendChild(memberRow(m, i, validate)));
-
-    const addMember = document.createElement("button");
-    addMember.textContent = "+ member";
-    addMember.onclick = () => {
-      editing.members.push({ id: "m" + Date.now(), name: "", system_prompt: "", kind: "openai", model: "" });
-      renderEditor();
-    };
-    editor.appendChild(addMember);
-
-    // Save (validates first; rejects if invalid).
-    const save = document.createElement("button");
-    save.textContent = "Save";
-    save.onclick = async () => {
-      const res = await rpc.call("scenario/upsert", { scenario: editing });
-      if (res && res.ok === false) return; // errors already shown by validate()
-      loadScenarios();
-    };
-    editor.appendChild(save);
-
-    const errBox = document.createElement("div");
-    errBox.className = "errors";
-    errBox.id = "errors";
-    editor.appendChild(errBox);
-    validate();
-  }
-
-  function memberRow(m, i, validate) {
-    const row = document.createElement("div");
-    row.className = "field";
-    row.style.border = "1px solid #eee";
-    const nm = document.createElement("input");
-    nm.value = m.name;
-    nm.placeholder = "name";
-    nm.oninput = () => { m.name = nm.value; validate(); };
-    const prompt = document.createElement("input");
-    prompt.value = m.system_prompt;
-    prompt.placeholder = "system prompt";
-    prompt.oninput = () => { m.system_prompt = prompt.value; validate(); };
-    const wrap = document.createElement("div");
-    wrap.className = "row";
-    wrap.appendChild(nm);
-    wrap.appendChild(prompt);
-    row.appendChild(wrap);
-    const del = document.createElement("button");
-    del.textContent = "remove";
-    del.onclick = () => { editing.members.splice(i, 1); renderEditor(); };
-    row.appendChild(del);
-    return row;
-  }
-
-  async function validate() {
-    if (!editing) return;
-    const res = await rpc.call("scenario/validate", { scenario: editing });
-    const box = document.getElementById("errors");
-    if (!box) return;
-    const errs = (res && res.errors) || [];
-    box.innerHTML = "";
-    for (const e of errs) {
-      const d = document.createElement("div");
-      d.textContent = e.field + ": " + e.message;
-      box.appendChild(d);
-    }
-  }
-
-  function blankScenario() {
-    return {
-      id: "sc-" + Date.now(),
-      name: "",
-      members: [{ id: "a", name: "", system_prompt: "", kind: "openai", model: "" }],
-      turn_policy: "roundrobin",
-    };
-  }
-
-  function field(label, tag, value, options) {
-    const row = document.createElement("div");
-    row.className = "field";
-    const lab = document.createElement("label");
-    lab.textContent = label;
-    const input =
-      tag === "select"
-        ? document.createElement("select")
-        : document.createElement(tag === "textarea" ? "textarea" : "input");
-    if (tag === "select") {
-      for (const o of options) {
-        const opt = document.createElement("option");
-        opt.value = o;
-        opt.textContent = o;
-        if (o === value) opt.selected = true;
-        input.appendChild(opt);
-      }
-    } else {
-      input.value = value || "";
-    }
-    row.appendChild(lab);
-    row.appendChild(input);
-    return { row, input };
+  // ── Scenario editor (shared scenario-editor.js) ────────────────────
+  // The same form runs in the VS Code webview and here; only the rpc
+  // transport differs. Live-validates via scenario/validate, saves via
+  // scenario/upsert, deletes via scenario/delete.
+  function ensureEditor() {
+    if (editor) return;
+    editor = OneAiScenarioEditor.create({
+      rpc,
+      root: editorRoot,
+      onSaved: () => loadScenarios(),
+      onDeleted: () => loadScenarios(),
+      onError: (m) => text(bubble("assistant"), "⚠️ " + m),
+    });
   }
 
   // ── Boot: connect native messaging, then load scenarios ─────────────
