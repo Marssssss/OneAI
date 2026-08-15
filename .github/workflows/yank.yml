@@ -1,0 +1,44 @@
+# Yank a version across all publishable workspace crates (best-effort).
+#
+# Used to retract the premature 1.0.0 (now that 0.1.0 is published) so
+# `cargo add oneai-*` resolves to 0.1.0 as the latest available version.
+# crates.io versions are immutable — yank hides a version from NEW dependency
+# resolution (existing Cargo.locks still resolve); it's the supported retraction.
+#
+# Triggered manually (workflow_dispatch) so it never fires accidentally. The
+# crates that don't have the given version (e.g. the 6 newer crates with only
+# 0.1.0) just error "no such version" — `|| true` skips them.
+name: yank
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to yank across all workspace crates"
+        required: true
+        default: "1.0.0"
+
+jobs:
+  yank:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Yank ${{ inputs.version }} across workspace (best-effort)
+        shell: bash
+        run: |
+          set +e
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "ERROR: CARGO_REGISTRY_TOKEN secret is empty" >&2
+            exit 1
+          fi
+          crates=$(cargo metadata --no-deps --format-version 1 | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(' '.join(p['name'] for p in d['packages'] if p.get('publish') is None))")
+          for c in $crates; do
+            echo "── yank $c@$VERSION"
+            cargo yank --vers "$VERSION" "$c" 2>&1 | tail -1
+          done
+          echo "✓ yank pass complete (version $VERSION)"
