@@ -2,7 +2,7 @@
 
 > Letta 式三层 + Mem0 式冲突更新 + 三因子召回 + 压缩耦合抽取的声明式记忆引擎：工作记忆单源在 `Conversation`，长期记忆按 `(user_id, subject, predicate)` 原子冲突更新，压缩掉的信息被抽取成事实落档——「压缩即丢失」被闭环堵死；行为由 DomainPack 第 7 层 `MemoryProfile` 声明。
 
-> 版本：对应代码库 `0.2.0` / 1.0.0 线。本文基于对 `crates/oneai-memory`、`oneai-rag`、`oneai-persistence`、`oneai-domain`、`oneai-app` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。文末与业界前沿记忆系统（Mem0 / Letta / Generative Agents / Zep-Graphiti / A-MEM / Cognee）对标。
+> 版本：对应代码库 `0.1.0` 线。本文基于对 `crates/oneai-memory`、`oneai-rag`、`oneai-persistence`、`oneai-domain`、`oneai-app` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。文末与业界前沿记忆系统（Mem0 / Letta / Generative Agents / Zep-Graphiti / A-MEM / Cognee）对标。
 
 ---
 

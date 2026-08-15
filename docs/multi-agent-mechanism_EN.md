@@ -2,7 +2,7 @@
 
 > A Claude-Code-style dynamic Agentic Loop + model-driven delegate/switch_paradigm meta-tools + LangGraph-style cyclic StateGraph closed-loop + engine-level GroupChat primitive + compression-coupled memory multi-agent engine: each turn the model decides direct-answer / tool-call / delegate-to-sub-agent / switch-paradigm — not a fixed pipeline; orchestration behavior is declared by DomainPack.
 
-> Version: corresponds to the 1.1.0 line of the codebase. This document is written from a file-by-file review of the source of `crates/oneai-agent`, `oneai-workflow`, `oneai-domain`, `oneai-memory`, and `oneai-core`; mechanisms are annotated with `file:line` for verification. At the end, it is benchmarked against state-of-the-art multi-agent systems (LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code subagents / Google A2A / MCP).
+> Version: corresponds to the 0.1.0 line of the codebase. This document is written from a file-by-file review of the source of `crates/oneai-agent`, `oneai-workflow`, `oneai-domain`, `oneai-memory`, and `oneai-core`; mechanisms are annotated with `file:line` for verification. At the end, it is benchmarked against state-of-the-art multi-agent systems (LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code subagents / Google A2A / MCP).
 >
 > Note: At the time of writing this environment could not access the internet for retrieval; the state-of-the-art benchmarking section is based on training knowledge up to early 2025, and checkable paper/project names are marked where possible; exact version numbers are subject to each project's latest release.
 >
@@ -395,7 +395,7 @@ Synthesizing the benchmarking, OneAI has independent designs versus the state of
 | PlanState | `crates/oneai-agent/src/plan_state.rs:17` |
 | DomainPack | `crates/oneai-domain/src/domain_pack.rs:50` |
 
-*This document is kept in sync with the `0.2.0`/1.0.0 code line. When mechanisms change, update the file:line index accordingly.*
+*This document is kept in sync with the `0.1.0` code line. When mechanisms change, update the file:line index accordingly.*
 
 ---
 

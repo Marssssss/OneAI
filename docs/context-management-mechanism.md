@@ -2,7 +2,7 @@
 
 > 持久日志/瞬时装配分离 + 抗压缩重注入 + token-预算驱动终止 + 三层模型上下文解析 + 四策略裁剪 + 压缩耦合抽取 + 缓存感知装配的上下文引擎：`state.conversation` 是唯一持久日志，每轮在其克隆上瞬时重建装配，被压缩掉的状态靠下一轮重注入而非靠压缩器保留。
 
-> 版本：对应代码库 `0.2.0` / 1.0.0 线。本文基于对 `crates/oneai-core`（`budget.rs`/`context_manager.rs`/`context_accounting.rs`/`token_counter.rs`/`model_context.rs`）、`crates/oneai-agent`（`agent_loop.rs`/`context_assembler.rs`/`sub_agent.rs`）、`crates/oneai-memory`（`compression.rs`/`core_memory_source.rs`）、`crates/oneai-domain`（`context_source.rs`/`compression_template.rs`）、`crates/oneai-provider`（`anthropic.rs`）源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。姊妹篇《记忆机制白皮书》(`docs/memory-mechanism.md`) 聚焦记忆三层与召回，本文聚焦**上下文窗口的装配、预算、解析、裁剪、压缩、锚定、缓存与多代理隔离**。
+> 版本：对应代码库 `0.1.0` 线。本文基于对 `crates/oneai-core`（`budget.rs`/`context_manager.rs`/`context_accounting.rs`/`token_counter.rs`/`model_context.rs`）、`crates/oneai-agent`（`agent_loop.rs`/`context_assembler.rs`/`sub_agent.rs`）、`crates/oneai-memory`（`compression.rs`/`core_memory_source.rs`）、`crates/oneai-domain`（`context_source.rs`/`compression_template.rs`）、`crates/oneai-provider`（`anthropic.rs`）源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。姊妹篇《记忆机制白皮书》(`docs/memory-mechanism.md`) 聚焦记忆三层与召回，本文聚焦**上下文窗口的装配、预算、解析、裁剪、压缩、锚定、缓存与多代理隔离**。
 
 ---
 

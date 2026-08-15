@@ -2,7 +2,7 @@
 
 > A declarative memory engine — Letta-style 3 tiers + Mem0-style conflict updates + Generative-Agents-style 3-factor recall + compression-coupled extraction: working memory is single-sourced on `Conversation`, long-term memory updates atomically per `(user_id, subject, predicate)`, and compressed-away turns are extracted into facts on file — closing the "compression-equals-loss" hole; behavior is declared by DomainPack layer 7 `MemoryProfile`.
 
-> Version: corresponds to codebase `0.2.0` / 1.0.0 line. This document is written from a file-by-file review of the `crates/oneai-memory`, `oneai-rag`, `oneai-persistence`, `oneai-domain`, and `oneai-app` sources; every mechanism is annotated with `file:line` for verification. The end benchmarks against industry-frontier memory systems (Mem0 / Letta / Generative Agents / Zep-Graphiti / A-MEM / Cognee).
+> Version: corresponds to codebase `0.1.0` line. This document is written from a file-by-file review of the `crates/oneai-memory`, `oneai-rag`, `oneai-persistence`, `oneai-domain`, and `oneai-app` sources; every mechanism is annotated with `file:line` for verification. The end benchmarks against industry-frontier memory systems (Mem0 / Letta / Generative Agents / Zep-Graphiti / A-MEM / Cognee).
 
 ---
 

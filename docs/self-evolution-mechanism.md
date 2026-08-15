@@ -2,7 +2,7 @@
 
 > 五段闭环的外层驱动器：轨迹采集 → EDD 评分 → Minimal Subgraph 诊断 → GEPA Pareto 变异合并 → 重跑，外加 E5 安全护栏（DomainPackValidator + PermissionResolver 静态闸 + held-out 全 suite 回归闸 + replay 确定性回归闸）+ 跨代 lesson 记忆 + CLI 全套（run/step/report/diff/lesson）。
 
-> 版本：对应代码库 1.1.0 线。本文基于对 `crates/oneai-evolve`、`oneai-domain`、`oneai-eval`、`oneai-app` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。设计依据见同目录 `docs/self-evolution-system-2026-08.md`。
+> 版本：对应代码库 0.1.0 线。本文基于对 `crates/oneai-evolve`、`oneai-domain`、`oneai-eval`、`oneai-app` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。设计依据见同目录 `docs/self-evolution-system-2026-08.md`。
 
 ---
 

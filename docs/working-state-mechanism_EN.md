@@ -2,7 +2,7 @@
 
 > An event-sourced per-task file log + in-memory projection + per-step incremental persistence + cross-session index discovery working-state engine: a task's goal/steps/decisions/blockers land as an append-only JSONL event stream in `<root>/tasks/{task_id}.jsonl`; the hot path reads only the `LoopState` in-memory projection (zero file IO); a new session reads the lightweight `tasks.index.json` once to surface the previous session's unfinished work; behavior is declared by DomainPack layer 7 `MemoryProfile.working_state`.
 
-> Version: corresponds to the 1.1.0 line of the codebase. This document is written based on a file-by-file review of the `crates/oneai-core`, `oneai-persistence`, `oneai-agent`, `oneai-app`, and `oneai-domain` source code; every mechanism is annotated with `file:line` for verification. The design rationale is in the sibling `docs/agent-working-state-and-cross-session-resume.md` (Chinese research reference) and `~/.claude/plans/vectorized-hopping-willow.md` (implementation plan).
+> Version: corresponds to the 0.1.0 line of the codebase. This document is written based on a file-by-file review of the `crates/oneai-core`, `oneai-persistence`, `oneai-agent`, `oneai-app`, and `oneai-domain` source code; every mechanism is annotated with `file:line` for verification. The design rationale is in the sibling `docs/agent-working-state-and-cross-session-resume.md` (Chinese research reference) and `~/.claude/plans/vectorized-hopping-willow.md` (implementation plan).
 
 ---
 

@@ -523,7 +523,7 @@ impl Default for ThreadSafeContentStore {
 /// 2. If query has no embedding → keyword search on content store
 /// 3. Results are looked up in content store for full content
 #[deprecated(
-    since = "1.1.0",
+    since = "0.1.0",
     note = "legacy MemoryEntry-based回溯 layer (M2); the canonical long-term memory is the \
             `MemoryFact`-based `fact_archive` (Mem0-style, three-factor recall). Retained only \
             for backward compatibility and direct low-level use; prefer `MemoryFactStore`."

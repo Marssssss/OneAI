@@ -2,7 +2,7 @@
 
 > Claude-Code 式动态 Agentic Loop + 模型驱动 delegate/switch_paradigm 元工具 + LangGraph 式可循环 StateGraph 闭环 + 引擎级 GroupChat 原语 + 压缩耦合记忆的多 Agent 引擎：每轮由模型决定直接作答/调工具/委托子 Agent/切换范式，非固定管线；编排行为由 DomainPack 声明。
 
-> 版本：对应代码库 1.1.0 线。本文基于对 `crates/oneai-agent`、`oneai-workflow`、`oneai-domain`、`oneai-memory`、`oneai-core` 源码的逐文件审阅撰写，机制均标注 `file:line` 以便核对。文末与业界前沿多 Agent 系统（LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code 子代理 / Google A2A / MCP）对标。
+> 版本：对应代码库 0.1.0 线。本文基于对 `crates/oneai-agent`、`oneai-workflow`、`oneai-domain`、`oneai-memory`、`oneai-core` 源码的逐文件审阅撰写，机制均标注 `file:line` 以便核对。文末与业界前沿多 Agent 系统（LangGraph / AutoGen / CrewAI / OpenAI Swarm / MetaGPT / SWE-agent / Claude Code 子代理 / Google A2A / MCP）对标。
 >
 > 说明：撰写时本环境无法联网检索，前沿对标部分基于截至 2025 年初的训练知识，已尽量标注可核对的论文/项目名；具体版本号以各项目最新发布为准。
 >
@@ -390,7 +390,7 @@ OneAI 既实现 **Google A2A 协议**（`oneai-a2a`：P2-5 客户端 SDK + P4-1 
 | PlanState | `crates/oneai-agent/src/plan_state.rs:17` |
 | DomainPack | `crates/oneai-domain/src/domain_pack.rs:50` |
 
-*本文随 `0.2.0`/1.0.0 线代码同步。机制变更请同步更新文件:行索引。*
+*本文随 `0.1.0` 线代码同步。机制变更请同步更新文件:行索引。*
 
 ---
 

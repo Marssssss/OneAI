@@ -24,7 +24,7 @@ labels: ["bug", "triage"]
 
 ## Environment
 
-- OneAI version: <!-- e.g. 1.1.0, or `git rev-parse HEAD` -->
+- OneAI version: <!-- e.g. 0.1.0, or `git rev-parse HEAD` -->
 - Rust toolchain: <!-- `rustc --version` -->
 - OS / arch:
 - LLM provider (if relevant): <!-- OpenAI / Anthropic / Ollama / none -->

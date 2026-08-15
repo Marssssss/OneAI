@@ -143,7 +143,7 @@ done
 # — Distribution zip (unsigned) —————————————————————————————
 # The app is NOT code-signed or notarized. Users must right-click → Open on
 # first launch to bypass Gatekeeper's "unidentified developer" quarantine.
-APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MACOS_DIR/Info.plist" 2>/dev/null || echo "1.0.0")"
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MACOS_DIR/Info.plist" 2>/dev/null || echo "0.1.0")"
 ZIP_NAME="OneAI-${APP_VERSION}-macos.zip"
 
 echo ""

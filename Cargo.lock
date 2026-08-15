@@ -3724,7 +3724,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneai-a2a"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3748,7 +3748,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-agent"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3777,7 +3777,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-app"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-app-server"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3833,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-bus"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "oneai-core",
@@ -3846,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-channel-demo"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "oneai-app",
  "oneai-core",
@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-cli"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "arboard",
  "async-trait",
@@ -3911,7 +3911,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-core"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3929,7 +3929,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-desktop-demo"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "oneai-app",
  "oneai-core",
@@ -3945,7 +3945,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-domain"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3966,7 +3966,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-eval"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3989,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-evolve"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4012,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-gateway"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "aes",
  "async-trait",
@@ -4041,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-mcp"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4068,7 +4068,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-memory"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4089,7 +4089,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-parser"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -4105,7 +4105,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-persistence"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-platform-android"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "jni",
@@ -4140,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-platform-desktop"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "objc2",
@@ -4158,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-platform-harmony"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "oneai-app",
@@ -4173,7 +4173,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-platform-ios"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "oneai-app",
@@ -4188,7 +4188,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-provider"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4211,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-rag"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4230,7 +4230,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-scheduler"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4252,7 +4252,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-skill"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "dirs 5.0.1",
@@ -4272,14 +4272,14 @@ dependencies = [
 
 [[package]]
 name = "oneai-staticlib"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "oneai-uniffi",
 ]
 
 [[package]]
 name = "oneai-studio"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4307,7 +4307,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-supervisor"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4329,7 +4329,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-tool"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4359,7 +4359,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-trace"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4373,7 +4373,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-uniffi"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-vector"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "ndarray",
@@ -4423,7 +4423,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-wasm"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4443,7 +4443,7 @@ dependencies = [
 
 [[package]]
 name = "oneai-workflow"
-version = "1.1.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",

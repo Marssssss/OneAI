@@ -9,7 +9,7 @@
 [![crates.io](https://img.shields.io/crates/v/oneai-app.svg)](https://crates.io/crates/oneai-app)
 [![Crates: 29](https://img.shields.io/badge/Crates-29-orange.svg)]()
 [![Tests: 2100+](https://img.shields.io/badge/Tests-2100%2B-green.svg)]()
-[![Version: 1.1.0](https://img.shields.io/badge/Version-1.1.0-blue.svg)]()
+[![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-blue.svg)]()
 [![Rust: edition 2021](https://img.shields.io/badge/Rust-edition%202021-dea584.svg)]()
 [![Platforms: 6](https://img.shields.io/badge/Platforms-macOS%20%7C%20Win%20%7C%20Linux%20%7C%20Android%20%7C%20iOS%20%7C%20HarmonyOS-blue.svg)]()
 

@@ -2,7 +2,7 @@
 
 > 事件溯源的 per-task 文件日志 + 内存投影 + 每步增量持久化 + 跨 session index 发现的工作状态引擎：任务目标/步骤/决策/卡点作为 append-only JSONL 事件流落盘，热路径零文件 IO 读内存投影，新 session 读一次 index 即 surface 上次未完成工作；行为由 DomainPack 第 7 层 `MemoryProfile.working_state` 声明。
 
-> 版本：对应代码库 1.1.0 线。本文基于对 `crates/oneai-core`、`oneai-persistence`、`oneai-agent`、`oneai-app`、`oneai-domain` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。设计依据见同目录 `docs/agent-working-state-and-cross-session-resume.md`（调研参考）与 `~/.claude/plans/vectorized-hopping-willow.md`（落地方案）。
+> 版本：对应代码库 0.1.0 线。本文基于对 `crates/oneai-core`、`oneai-persistence`、`oneai-agent`、`oneai-app`、`oneai-domain` 源码的逐文件审阅撰写，所有机制均标注 `file:line` 以便核对。设计依据见同目录 `docs/agent-working-state-and-cross-session-resume.md`（调研参考）与 `~/.claude/plans/vectorized-hopping-willow.md`（落地方案）。
 
 ---
 

@@ -4,7 +4,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] — 2026-07-15
+## [Unreleased]
+
+**Versioning restarts at 0.1.0.** The `1.0.0` (2026-07-15) and `1.1.0`
+(2026-07-21) tags were premature — `crates.io` was never published and there
+are no external users — and substantial iteration / optimization remains ahead
+(see `docs/gap-analysis-2026-07.md` + `docs/evolution-plan-2026-07.md`). They
+are **retracted**: the shared crate version is reset from `1.1.0` → `0.1.0`,
+and the next release will be `0.1.0`, inheriting all work shipped through the
+`1.1.0` macOS builds. The existing `v1.0.0` / `v1.1.0` GitHub Releases
+(macOS `.app` zips) remain as historical artifacts.
+
+## [1.0.0] — 2026-07-15 (retracted)
 
 First stable, public release. The Rust core, the `oneai-cli` TUI, and the
 unsigned macOS app are now distributable; Windows / Android / iOS / HarmonyOS
@@ -12,7 +23,8 @@ apps remain pre-release.
 
 ### Agent SDK (crates.io)
 
-The following crates are published to crates.io under a shared `1.0.0` version:
+The following crates were slated for crates.io under a shared `1.0.0` version
+(never published — retracted; see [Unreleased] above):
 
 - `oneai-core` — `ContentBlock`/`Message`/`Conversation`, `PermissionLevel`,
   `Budget`, `ContextBudgetManager`, core traits (`LlmProvider`, `Tool`,
@@ -74,4 +86,5 @@ first launch requires right-click → Open to bypass Gatekeeper. macOS 13+.
 - TUI is distributed only via crates.io (`cargo install`); no prebuilt
   binaries or Homebrew formula in this release.
 
+[Unreleased]: https://github.com/Marssssss/OneAI/tree/main
 [1.0.0]: https://github.com/Marssssss/OneAI/releases/tag/v1.0.0
