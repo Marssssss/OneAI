@@ -34,8 +34,6 @@ members = [
     "crates/oneai-evolve",
     "xtask",
     "examples/cli",
-    "examples/desktop-app",
-    "examples/rust",
 ]
 # oneai-staticlib (the liboneai.a staticlib) is a workspace member so `-p`
 # works and its workspace-inherited deps resolve, BUT it is excluded from
@@ -76,8 +74,6 @@ default-members = [
     "crates/oneai-gateway",
     "crates/oneai-evolve",
     "examples/cli",
-    "examples/desktop-app",
-    "examples/rust",
 ]
 
 [workspace.package]

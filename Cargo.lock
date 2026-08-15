@@ -3845,20 +3845,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oneai-channel-demo"
-version = "0.1.0"
-dependencies = [
- "oneai-app",
- "oneai-core",
- "oneai-memory",
- "oneai-tool",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "oneai-cli"
 version = "0.1.0"
 dependencies = [
@@ -3925,22 +3911,6 @@ dependencies = [
  "tracing",
  "uniffi",
  "uuid",
-]
-
-[[package]]
-name = "oneai-desktop-demo"
-version = "0.1.0"
-dependencies = [
- "oneai-app",
- "oneai-core",
- "oneai-memory",
- "oneai-persistence",
- "oneai-platform-desktop",
- "oneai-tool",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
