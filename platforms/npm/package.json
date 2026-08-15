@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Marssssss/OneAI",
+    "url": "git+https://github.com/Marssssss/OneAI.git",
     "directory": "platforms/npm"
   },
   "bin": {
