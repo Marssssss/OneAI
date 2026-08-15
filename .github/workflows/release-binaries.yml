@@ -1,0 +1,55 @@
+# Build per-platform `oneai` engine binaries and attach them to the GitHub
+# Release on a `v*` tag. These assets are what the npm shell's postinstall
+# fetches (see platforms/npm/install.js) — the asset contract is documented
+# in platforms/npm/README.md.
+#
+# Best-effort per platform: oneai-cli links oneai-vector (ort / ONNX Runtime),
+# whose prebuilt availability varies (notably macOS x86_64 has none). A failing
+# slice is non-fatal — that platform's users fall back to a `oneai` on PATH
+# (cargo install). Don't gate the release on a single platform's ort gap.
+name: release-binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # attach assets to the release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14,        target: aarch64-apple-darwin,        os: macos,   ext: "" }
+          - { runner: macos-13,        target: x86_64-apple-darwin,         os: macos,   ext: "" }
+          - { runner: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,   os: linux,   ext: "" }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  os: linux,   ext: "" }
+          - { runner: windows-2022,    target: x86_64-pc-windows-msvc,     os: windows, ext: ".exe" }
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build oneai-cli (release)
+        run: cargo build --release --target ${{ matrix.target }} -p oneai-cli
+      - name: Strip (non-Windows)
+        if: matrix.os != 'windows'
+        run: |
+          strip "target/${{ matrix.target }}/release/oneai"
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp "target/${{ matrix.target }}/release/oneai${{ matrix.ext }}" \
+             "stage/oneai-${{ matrix.target }}${{ matrix.ext }}"
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: stage/oneai-${{ matrix.target }}${{ matrix.ext }}
+          fail_on_unmatched: false
