@@ -17,7 +17,7 @@ const a = (function () {
   const ext = isWin ? ".exe" : "";
   let name;
   if (p === "darwin" && arch === "arm64") name = "oneai-aarch64-apple-darwin";
-  else if (p === "darwin" && arch === "x64") name = "oneai-x86_64-apple-darwin";
+  // macOS x86_64 has no prebuilt — falls through to PATH fallback below.
   else if (p === "linux" && arch === "x64") name = "oneai-x86_64-unknown-linux-gnu";
   else if (p === "linux" && arch === "arm64") name = "oneai-aarch64-unknown-linux-gnu";
   else if (isWin && arch === "x64") name = "oneai-x86_64-pc-windows-msvc";

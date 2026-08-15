@@ -33,7 +33,7 @@ the releases + `cargo install`.
 | platform / arch            | asset name                              |
 |----------------------------|-----------------------------------------|
 | darwin arm64               | `oneai-aarch64-apple-darwin`            |
-| darwin x86_64              | `oneai-x86_64-apple-darwin`             |
+| darwin x86_64              | *(no prebuilt — falls back to PATH)*    |
 | linux x86_64               | `oneai-x86_64-unknown-linux-gnu`        |
 | linux arm64                | `oneai-aarch64-unknown-linux-gnu`       |
 | win32 x86_64               | `oneai-x86_64-pc-windows-msvc.exe`       |

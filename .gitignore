@@ -33,3 +33,7 @@ swe_bench_verified.jsonl
 
 # OneAI evolve run artifacts (CLI writes to <cwd>/.oneai/evolve/...). Regenerable.
 .oneai/
+
+# npm shell: downloaded binary artifacts (postinstall writes here)
+platforms/npm/bin/oneai-*
+!platforms/npm/bin/oneai.js

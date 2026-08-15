@@ -39,7 +39,8 @@ function asset() {
   const ext = isWin ? ".exe" : "";
   let name;
   if (p === "darwin" && a === "arm64") name = "oneai-aarch64-apple-darwin";
-  else if (p === "darwin" && a === "x64") name = "oneai-x86_64-apple-darwin";
+  // NB: macOS x86_64 has no prebuilt (ort-sys can't link ONNX for x64 mac) —
+  // falls through to `null` → the PATH fallback below (cargo install).
   else if (p === "linux" && a === "x64") name = "oneai-x86_64-unknown-linux-gnu";
   else if (p === "linux" && a === "arm64") name = "oneai-aarch64-unknown-linux-gnu";
   else if (isWin && a === "x64") name = "oneai-x86_64-pc-windows-msvc";
