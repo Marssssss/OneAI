@@ -40,11 +40,13 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+pub mod conversation;
 pub mod dispatcher;
 pub mod protocol;
 pub mod scenario;
 pub mod transport;
 
+pub use conversation::{ConversationStore, InMemoryConversationStore, SharedConversationStore};
 pub use dispatcher::Dispatcher;
 pub use protocol::{Notification, Request, Response, RpcError};
 pub use scenario::{
@@ -186,6 +188,7 @@ pub async fn serve_all(
     specs: Vec<ListenSpec>,
     bus: Arc<InProcessBus>,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) -> Result<JoinHandle<()>> {
     if specs.is_empty() {
         return Err(AppServerError::InvalidSpec(
@@ -205,34 +208,37 @@ pub async fn serve_all(
         let bus = bus.clone();
         let dispatcher = dispatcher.clone();
         let scenario_store = scenario_store.clone();
+        let session_store = session_store.clone();
         let handle = match spec {
             ListenSpec::Stdio => {
                 // stdio is a single pre-connected stream; serve_stdio spawns
                 // the stdin/stdout pumps + serve_connection and returns the
                 // serve task handle.
-                transport::serve_stdio(bus, dispatcher, scenario_store)
+                transport::serve_stdio(bus, dispatcher, scenario_store, session_store)
             }
             ListenSpec::Ipc(path) => {
-                let h = transport::serve_ipc(&path, bus, dispatcher, scenario_store).await?;
+                let h = transport::serve_ipc(&path, bus, dispatcher, scenario_store, session_store)
+                    .await?;
                 h
             }
             ListenSpec::Ws(addr) => {
                 #[cfg(feature = "ws")]
                 {
                     let (h, _bound) =
-                        transport::serve_ws(addr, bus, dispatcher, scenario_store).await?;
+                        transport::serve_ws(addr, bus, dispatcher, scenario_store, session_store)
+                            .await?;
                     h
                 }
                 #[cfg(not(feature = "ws"))]
                 {
-                    let _ = (addr, bus, dispatcher, scenario_store);
+                    let _ = (addr, bus, dispatcher, scenario_store, session_store);
                     return Err(AppServerError::InvalidSpec(
                         "ws:// transport requires the `ws` feature".into(),
                     ));
                 }
             }
             ListenSpec::NativeMessaging => {
-                transport::serve_native_messaging(bus, dispatcher, scenario_store)
+                transport::serve_native_messaging(bus, dispatcher, scenario_store, session_store)
             }
         };
         handles.push(handle);
@@ -316,6 +322,7 @@ mod integration {
     //! harness, but driving [`serve_connection`] instead of `bridge_connection`.
     use super::{
         adapter::serve_connection,
+        conversation::{InMemoryConversationStore, SharedConversationStore},
         dispatcher::Dispatcher,
         protocol::{method, Request, Response},
         scenario::{builtin_presets, InMemoryScenarioStore},
@@ -324,7 +331,7 @@ mod integration {
     use oneai_bus::{
         BusParadigmKind, BusTurnSummary, Directive, EngineBus, EngineYield, InProcessBus,
     };
-    use oneai_core::{ContentBlock, InteractionRequest};
+    use oneai_core::{ContentBlock, InteractionRequest, SessionInfo};
     use serde_json::{json, Value};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -479,6 +486,16 @@ mod integration {
     }
 
     fn harness(needs_approval: bool) -> (std::sync::Arc<InProcessBus>, Harness) {
+        harness_with(
+            needs_approval,
+            std::sync::Arc::new(InMemoryConversationStore::new()),
+        )
+    }
+
+    fn harness_with(
+        needs_approval: bool,
+        session_store: SharedConversationStore,
+    ) -> (std::sync::Arc<InProcessBus>, Harness) {
         let (bus, directive_rx) = InProcessBus::new();
         let bus = std::sync::Arc::new(bus);
         let (_driver, interrupt_token) =
@@ -494,6 +511,7 @@ mod integration {
             bus.clone(),
             dispatcher,
             scenario_store,
+            session_store,
             inbound_rx,
             outbound_tx,
         ));
@@ -629,7 +647,9 @@ mod integration {
         let (bus, _rx) = InProcessBus::new();
         let bus = std::sync::Arc::new(bus);
         let store: SharedScenarioStore = std::sync::Arc::new(InMemoryScenarioStore::new());
-        let err = serve_all(vec![], bus, store).await.unwrap_err();
+        let sessions: SharedConversationStore =
+            std::sync::Arc::new(InMemoryConversationStore::new());
+        let err = serve_all(vec![], bus, store, sessions).await.unwrap_err();
         assert!(matches!(err, super::AppServerError::InvalidSpec(_)));
     }
 
@@ -652,11 +672,14 @@ mod integration {
 
         let scenario_store: SharedScenarioStore =
             std::sync::Arc::new(InMemoryScenarioStore::from_seed(builtin_presets()));
+        let session_store: SharedConversationStore =
+            std::sync::Arc::new(InMemoryConversationStore::new());
         let (_handle, bound) = super::transport::serve_ws(
             "127.0.0.1:0".parse().unwrap(),
             bus.clone(),
             dispatcher.clone(),
             scenario_store,
+            session_store,
         )
         .await
         .expect("ws bind");
@@ -706,6 +729,38 @@ mod integration {
             "did not observe turn_start event + turn_id response over ws \
              (saw_turn_start={saw_turn_start}, saw_response={saw_response})"
         );
+    }
+
+    // ── session/list over the full adapter path ─────────────────────────
+
+    /// `session/list` returns the seeded conversations with the epoch-millis
+    /// shape the FFI `SessionInfoView` exposes, so a foreign UI decodes one
+    /// struct regardless of transport.
+    #[tokio::test]
+    async fn session_list_returns_seeded_sessions_with_millis_shape() {
+        let now = chrono::Utc::now();
+        let seed = vec![
+            SessionInfo::with_title("s1".into(), now, now, 3, Some("first user msg".into())),
+            SessionInfo::new("s2".into(), now, now, 0),
+        ];
+        let (_bus, mut h) = harness_with(
+            false,
+            std::sync::Arc::new(InMemoryConversationStore::from_seed(seed)),
+        );
+        h.send_req(Request::new(json!(20), method::SESSION_LIST, json!({})))
+            .await;
+        let resp = h.wait_for_response(&json!(20)).await;
+        let result = resp.result.expect("ok response");
+        let sessions = result["sessions"].as_array().expect("sessions array");
+        assert_eq!(sessions.len(), 2);
+        // Epoch-millis fields present (the FFI SessionInfoView shape).
+        assert_eq!(sessions[0]["id"], "s1");
+        assert!(sessions[0]["created_at_ms"].as_i64().is_some());
+        assert!(sessions[0]["updated_at_ms"].as_i64().is_some());
+        assert_eq!(sessions[0]["message_count"], 3);
+        assert_eq!(sessions[0]["title"], "first user msg");
+        assert_eq!(sessions[1]["id"], "s2");
+        assert!(sessions[1]["title"].is_null());
     }
 
     // ── scenario/* over the full adapter path ────────────────────────────

@@ -34,3 +34,4 @@ ws = ["dep:tokio-tungstenite"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+chrono = { workspace = true }

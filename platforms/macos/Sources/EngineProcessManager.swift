@@ -38,18 +38,28 @@ public final class EngineProcessManager {
     private var started = false
     private var stopped = false
 
+    /// Extra env vars merged into the child's environment on spawn. The macOS
+    /// app keeps the user's provider config in UserDefaults (not process env),
+    /// so the VM injects `ONEAI_API_KEY` / `ONEAI_BASE_URL` / `ONEAI_MODEL`
+    /// here — otherwise the spawned app-server starts with no provider and
+    /// turns reject. Set before `start()`.
+    public var extraEnv: [String: String] = [:]
+
     /// The app's bundle-relative `oneai` location, checked before PATH so a
     /// signed .app carries its engine (independent of the user's PATH).
     static func resolveOneaiBin() -> String? {
-        // 1. Bundled next to the app executable.
-        if let exe = Bundle.main.executableURL?.deletingLastPathComponent() {
-            let bundled = exe
-                .appendingPathComponent("Resources")
-                .appendingPathComponent("bin")
-                .appendingPathComponent("oneai")
-            if FileManager.default.isExecutableFile(atPath: bundled.path) {
-                return bundled.path
-            }
+        // 1. Bundled in the .app at Contents/Resources/bin/oneai (staged by
+        //    build_macos.sh from target/release/oneai). Bundle.main.bundleURL
+        //    is the .app dir itself, so this lands at Contents/Resources/…
+        //    (NOT MacOS/Resources — the prior appending from the executable
+        //    dir pointed at the wrong nested path).
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Resources")
+            .appendingPathComponent("bin")
+            .appendingPathComponent("oneai")
+        if FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled.path
         }
         // 2. PATH (so a `cargo install` oneai works without bundling).
         if let found = findOnPath("oneai"), FileManager.default.isExecutableFile(atPath: found) {
@@ -102,11 +112,37 @@ public final class EngineProcessManager {
         p.executableURL = URL(fileURLWithPath: bin)
         // The child inherits env (provider keys etc.); the app-server reads
         // them via ONEAI_API_KEY / ONEAI_BASE_URL / ONEAI_MODEL just like the
-        // CLI.
-        p.environment = ProcessInfo.processInfo.environment
+        // CLI. The VM injects the user's UserDefaults provider config via
+        // `extraEnv` (the app's settings UI writes UserDefaults, not env).
+        var env = ProcessInfo.processInfo.environment
+        for (k, v) in extraEnv { env[k] = v }
+        p.environment = env
         p.arguments = ["app-server", "--listen", "ipc://\(socketPath)"]
+        // Pin the child's CWD to a bounded empty workspace. cmd_app_server
+        // inits `coding_pack(".")` → the CodingPack's context sources
+        // (RepoMapSource + 6 others) recursively walk the project root. A GUI
+        // app launched from Finder has CWD `/`, so without this the sidecar
+        // would walk the ENTIRE filesystem on iteration 1's context assembly
+        // (thousands of readdir/getdirentries calls → the turn hangs forever
+        // at "iteration 1 started", no chunks, no error). The CLI doesn't hit
+        // this (run from a real project dir); the sidecar has no project, so a
+        // dedicated empty dir bounds the scan to nothing. Created on demand.
+        let sidecarCwd = (oneaiDir as NSString).appendingPathComponent("sidecar-cwd")
+        try? FileManager.default.createDirectory(
+            atPath: sidecarCwd, withIntermediateDirectories: true)
+        p.currentDirectoryURL = URL(fileURLWithPath: sidecarCwd)
         p.standardOutput = FileHandle(forWritingAtPath: "/dev/null")
-        p.standardError = FileHandle(forUpdatingAtPath: (oneaiDir as NSString).appendingPathComponent("app-server-sidecar.log"))
+        // Redirect stderr to a log file so the sidecar's tracing output (init'd
+        // by `init_stderr_logging` in cmd_app_server) + banners are captured
+        // for debugging stuck turns. `FileHandle(forUpdatingAtPath:)` returns
+        // nil for a NON-EXISTENT file (it does NOT create it), so the sidecar
+        // would inherit no stderr and its logs vanished — create the file
+        // first, then open for writing (truncate each spawn so a stale
+        // crashed-run's log doesn't grow unbounded across restarts).
+        let sidecarLogPath = (oneaiDir as NSString)
+            .appendingPathComponent("app-server-sidecar.log")
+        FileManager.default.createFile(atPath: sidecarLogPath, contents: nil)
+        p.standardError = try? FileHandle(forWritingTo: URL(fileURLWithPath: sidecarLogPath))
         p.terminationHandler = { [weak self] proc in
             self?.handleExit(code: proc.terminationStatus)
         }

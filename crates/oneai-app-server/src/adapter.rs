@@ -31,11 +31,11 @@ use tokio::task::JoinHandle;
 use oneai_bus::{
     BusGroupScenario, BusParadigmKind, BusScenario, Directive, EngineBus, InProcessBus,
 };
-use oneai_core::{ContentBlock, InteractionResponse, InterruptReason};
+use oneai_core::{ContentBlock, InteractionResponse, InterruptReason, SessionInfo};
 
 use crate::dispatcher::Dispatcher;
 use crate::protocol::{decode_inbound, method, Notification, Response, RpcError};
-use crate::SharedScenarioStore;
+use crate::{SharedConversationStore, SharedScenarioStore};
 
 /// Serve one connection until either side closes.
 ///
@@ -47,6 +47,7 @@ pub async fn serve_connection(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
     mut inbound_rx: mpsc::Receiver<String>,
     outbound_tx: mpsc::Sender<String>,
 ) {
@@ -71,13 +72,15 @@ pub async fn serve_connection(
                 let bus = bus.clone();
                 let dispatcher = dispatcher.clone();
                 let scenario_store = scenario_store.clone();
+                let session_store = session_store.clone();
                 let out_tx = outbound_tx.clone();
                 // Each request runs on its own task so a long turn/run (awaiting
                 // TurnStart) doesn't block the next inbound message (e.g. an
                 // approval/respond arriving mid-turn). JSON-RPC id correlation
                 // makes out-of-order responses fine.
                 tokio::spawn(async move {
-                    let resp = handle_request(req, bus, dispatcher, scenario_store).await;
+                    let resp =
+                        handle_request(req, bus, dispatcher, scenario_store, session_store).await;
                     send(&out_tx, &resp);
                 });
                 let _ = id; // id is read inside handle_request via req.id
@@ -128,6 +131,7 @@ async fn handle_request(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) -> Response {
     let id = req.id.clone();
     let params = req.params;
@@ -233,6 +237,15 @@ async fn handle_request(
                 return Response::err(id, RpcError::internal(e.to_string()));
             }
             resolve_or_closed(id, rx).await
+        }
+        // session/list — synchronous CRUD against the shared conversation store
+        // (no Directive/bus round-trip; mirrors scenario/list). Returns the
+        // epoch-millis shape the FFI SessionInfoView exposes so a foreign UI
+        // renders one list regardless of transport.
+        method::SESSION_LIST => {
+            let sessions = session_store.list().await;
+            let arr: Vec<Value> = sessions.iter().map(session_info_to_json).collect();
+            Response::ok(id, json!({"sessions": arr}))
         }
         // session/delete + conversation/compact are ack methods — their result
         // (SessionDeleted / CompactResult / Error) arrives as an `event`
@@ -400,6 +413,22 @@ fn opt_field<T: DeserializeOwned>(params: &Value, key: &str) -> Option<T> {
     serde_json::from_value(params.get(key)?.clone()).ok()
 }
 
+/// Serialize a `SessionInfo` to the epoch-millis shape the FFI
+/// `SessionInfoView` exposes (`id` / `created_at_ms` / `updated_at_ms` /
+/// `message_count` / `title`). The FFI path flattens `chrono::DateTime` to
+/// millis at the UniFFI boundary (chrono can't cross FFI directly); the
+/// sidecar JSON-RPC path mirrors that exact shape so a foreign UI decodes
+/// one struct regardless of transport.
+fn session_info_to_json(s: &SessionInfo) -> Value {
+    json!({
+        "id": s.id,
+        "created_at_ms": s.created_at.timestamp_millis(),
+        "updated_at_ms": s.updated_at.timestamp_millis(),
+        "message_count": s.message_count,
+        "title": s.title,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,8 +457,10 @@ mod tests {
         let dispatcher = Dispatcher::default();
         let scenario_store: SharedScenarioStore =
             Arc::new(crate::scenario::InMemoryScenarioStore::new());
+        let session_store: SharedConversationStore =
+            Arc::new(crate::conversation::InMemoryConversationStore::new());
         let req = crate::protocol::Request::new(json!(1), "no/such/method", json!({}));
-        let resp = handle_request(req, bus, dispatcher, scenario_store).await;
+        let resp = handle_request(req, bus, dispatcher, scenario_store, session_store).await;
         let err = resp.error.expect("error response");
         assert_eq!(err.code, error_code::METHOD_NOT_FOUND);
         assert_eq!(resp.id, json!(1));

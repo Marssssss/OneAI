@@ -297,11 +297,17 @@ impl SeatbeltBackend {
             NetworkPolicy::Allowed => rules.push("(allow network*)".to_string()),
             NetworkPolicy::LoopbackProxy => {
                 // Loopback only — the sandboxed process may reach the host's
-                // local egress proxy on 127.0.0.1:<port>. `(local)` is more
-                // specific than a blanket rule, so non-local stays denied by
-                // `(deny default)` (no blanket `(deny network*)` — it would
-                // race the local allow on precedence).
-                rules.push("(allow network* (local))".to_string());
+                // local egress proxy on 127.0.0.1:<port>. `(local ip)` filters
+                // to local (loopback) IP addresses; `(local)` alone is invalid
+                // SBPL on macOS 14+/Darwin 24+ and crashes `sandbox-exec`'s
+                // parser (`sbpl_parser.c:128 is_pair(p)` assertion → SIGABRT),
+                // which surfaced as `Exit code: -1` (signal kill, no output)
+                // for EVERY seatbelt-wrapped shell call. `(local ip)` is the
+                // valid idiom and matches the same loopback-only intent.
+                // Non-local stays denied by `(deny default)` (no blanket
+                // `(deny network*)` — it would race the local allow on
+                // precedence).
+                rules.push("(allow network* (local ip))".to_string());
             }
             // `Denied` is fully covered by `(deny default)`, but emit an
             // explicit `(deny network*)` so the posture is self-describing.
@@ -859,7 +865,7 @@ mod tests {
             .with_network_policy(NetworkPolicy::LoopbackProxy);
         let profile = backend.generate_profile();
         assert!(
-            profile.contains("(allow network* (local))"),
+            profile.contains("(allow network* (local ip))"),
             "loopback must be allowed for the host proxy"
         );
         // No blanket allow (direct internet stays denied by deny-default).

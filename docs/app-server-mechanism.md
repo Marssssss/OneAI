@@ -43,6 +43,7 @@ oneai app-server --listen stdio --listen ipc://~/.oneai/app-server.sock --listen
 | `config/update` | `{plan_mode?:bool}` | `UpdateConfig` | ack |
 | `session/create` | `{id?:String}` | `CreateSession` | SessionCreated 即返 `{id}` |
 | `session/load` | `{id:String}` | `LoadSession` | SessionLoaded 即返 `{id,messages}` |
+| `session/list` | `{}` | —（同步 CRUD，非 Directive） | `{sessions:[{id,created_at_ms,updated_at_ms,message_count,title}]}` |
 | `session/clear` | `{}` | `ClearSession` | SessionCleared 即返 `{id}` |
 | `session/delete` | `{id:String}` | `DeleteSession` | ack（结果经 `event`） |
 | `conversation/compact` | `{keep_recent_turns:usize}` | `Compact` | ack（结果经 `event`） |
@@ -118,7 +119,7 @@ tokio::select! { _ = server => {}, _ = tokio::signal::ctrl_c() => {} }
 
 ## 9. 测试
 
-`crates/oneai-app-server`（45 测）：单元（`ListenSpec` 解析含 native-messaging / 信封 round-trip / 方法→Directive 映射 / Dispatcher FIFO 与 kind 剥离 / native-messaging 成帧 round-trip + 4B-LE 前缀 + 超长拒绝 + EOF / `BusGroupScenario::validate` 各分支 / `BusScenario::validate` rich + `to_group_scenario` + JSON round-trip / `ScenarioStore` 原子 rename + upsert/replace + builtin 预设校验）+ 集成（mpsc-channel 驱动的 `serve_connection`：`turn/run`→event 流+turn_id / approval 回路 / `turn/cancel` fire token / `session/create` / 未知方法 -32601 / 坏 JSON -32700 / **scenario/list·validate·upsert·get·delete 全回路**）+ WS e2e（真 ephemeral port + `tokio-tungstenite` 客户端 round-trip）。
+`crates/oneai-app-server`（48 测）：单元（`ListenSpec` 解析含 native-messaging / 信封 round-trip / 方法→Directive 映射 / Dispatcher FIFO 与 kind 剥离 / native-messaging 成帧 round-trip + 4B-LE 前缀 + 超长拒绝 + EOF / `BusGroupScenario::validate` 各分支 / `BusScenario::validate` rich + `to_group_scenario` + JSON round-trip / `ScenarioStore` 原子 rename + upsert/replace + builtin 预设校验 / `ConversationStore` in-memory 顺序 + 空集）+ 集成（mpsc-channel 驱动的 `serve_connection`：`turn/run`→event 流+turn_id / approval 回路 / `turn/cancel` fire token / `session/create` / `session/list` 返 epoch-millis shape / 未知方法 -32601 / 坏 JSON -32700 / **scenario/list·validate·upsert·get·delete 全回路**）+ WS e2e（真 ephemeral port + `tokio-tungstenite` 客户端 round-trip）。
 
 ## 10. 深入阅读
 

@@ -204,6 +204,19 @@ struct ChatScreen: View {
                 OverlayLayer(overlay: ov, vm: vm)
                     .transition(.opacity)
             }
+
+            // Sidecar tool-approval prompt (Phase D) — the sidecar engine uses
+            // BusInteractionGate, which surfaces approvals the FFI path's
+            // NoopInteractionGate auto-grants. Render an Allow/Deny card; the
+            // engine blocks until `vm.respondApproval` answers.
+            if let pa = vm.pendingApproval {
+                ZStack {
+                    Color.black.opacity(0.35).ignoresSafeArea()
+                        .contentShape(Rectangle())
+                    ApprovalOverlay(approval: pa, vm: vm)
+                        .transition(.opacity)
+                }
+            }
         }
         .animation(.easeInOut(duration: 0.15), value: vm.overlay == nil)
     }
@@ -2033,5 +2046,47 @@ private struct DeleteConfirmOverlay: View {
             }
         }
         .padding(20).frame(width: 360)
+    }
+}
+
+// MARK: - Sidecar tool-approval card (Phase D)
+
+/// A tool-approval prompt from the sidecar engine — rendered when
+/// `vm.pendingApproval != nil`. Allow → `approval/respond` with
+/// `InteractionResponse::Proceed`; Deny → `Abort`. The engine blocks until
+/// answered, so the card is non-dismissable (no tap-outside, no Escape — the
+/// user must choose). Mirrors `DeleteConfirmOverlay`'s chrome.
+private struct ApprovalOverlay: View {
+    let approval: PendingApproval
+    @ObservedObject var vm: ChatViewModel
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("工具审批").font(.oHeadline)
+            Text(approval.toolName).font(.oSubheadlineBold)
+                .foregroundStyle(Theme.primary)
+            if !approval.justification.isEmpty {
+                Text(approval.justification)
+                    .font(.oSubheadline).foregroundStyle(Theme.onSurfaceVar)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 12) {
+                Spacer()
+                Button(NSLocalizedString("拒绝", comment: ""), role: .destructive) {
+                    let allow = false
+                    Task { await vm.respondApproval(allow) }
+                }
+                Button(NSLocalizedString("允许", comment: "")) {
+                    let allow = true
+                    Task { await vm.respondApproval(allow) }
+                }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20).frame(width: 360)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.surfaceVar, lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
     }
 }

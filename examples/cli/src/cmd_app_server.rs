@@ -29,6 +29,21 @@ use tokio::sync::Mutex;
 use crate::cmd_pack::get_builtin_pack;
 use crate::config::OneaiConfig;
 
+/// Init a `tracing_subscriber` that writes to stderr. The macOS app redirects
+/// the sidecar's stderr to `~/.oneai/app-server-sidecar.log`, so this surfaces
+/// engine activity (iterations, tool calls, approvals, errors) there for
+/// debugging a stuck turn. `RUST_LOG` overrides the default filter.
+fn init_stderr_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,oneai=info,oneai_agent=info,oneai_provider=info,oneai_app_server=info")
+    });
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
 /// Default `--listen` if none given: an IPC socket at
 /// `~/.oneai/app-server.sock` (separate from `serve.sock` / `server.sock`).
 fn default_listen() -> Vec<String> {
@@ -132,6 +147,26 @@ impl DirectiveRuntime for AppServerRuntime {
     }
 }
 
+// ─── ConversationStore impl ──────────────────────────────────────────────────
+//
+// Backs the `session/list` JSON-RPC method (synchronous CRUD — no bus). Wraps
+// the same `Arc<App>` the runtime drives, so the sidecar frontend's sidebar
+// reads exactly the conversations this process persists. `App::
+// list_conversations` swallows backend errors (unwrap_or_default), so this
+// returns the list directly — a failing backend surfaces as an empty list,
+// never a panic.
+
+struct AppConversationStore {
+    app: Arc<App>,
+}
+
+#[async_trait::async_trait]
+impl oneai_app_server::ConversationStore for AppConversationStore {
+    async fn list(&self) -> Vec<oneai_core::SessionInfo> {
+        self.app.list_conversations().await
+    }
+}
+
 // ─── cmd_app_server ──────────────────────────────────────────────────────────
 
 pub fn cmd_app_server(
@@ -141,6 +176,15 @@ pub fn cmd_app_server(
     model: Option<&str>,
     user: Option<&str>,
 ) {
+    // Init tracing to stderr BEFORE anything else. The macOS app spawns this
+    // process as a sidecar and redirects its stderr to
+    // ~/.oneai/app-server-sidecar.log — so engine spans (iterations, tool
+    // calls, approvals, errors) are captured there for debugging. Without a
+    // subscriber the engine's `tracing::*` calls are no-ops and a stuck turn
+    // is invisible. `RUST_LOG` overrides the default (info for the engine +
+    // provider crates). Stdio transport keeps stdout as the message stream.
+    init_stderr_logging();
+
     let specs = match parse_specs(listen) {
         Ok(s) => s,
         Err(AppServerError::InvalidSpec(e)) => {
@@ -189,7 +233,24 @@ pub fn cmd_app_server(
         if let Some(uid) = user {
             builder = builder.user_id(uid);
         }
-        builder = builder.sqlite_persistence().working_state("./.oneai");
+        // SQLite persistence. Default path is ~/.oneai/oneai.db, but when a
+        // host (the macOS app's sidecar spawn) sets ONEAI_DB_PATH, persist at
+        // that path instead — so the sidecar shares the SAME DB the in-process
+        // FFI engine writes (~/Library/Application Support/oneai.db on macOS).
+        // Switching transports then never loses history: the sidebar reads the
+        // rows whichever engine is active. SQLite WAL + busy_timeout make the
+        // cross-process sharing safe (only one engine is ever active at once —
+        // the FFI app isn't built in sidecar mode, and vice versa).
+        if let Some(db_path) = std::env::var("ONEAI_DB_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            eprintln!("   SQLite DB (shared): {db_path}");
+            builder = builder.sqlite_persistence_at(&db_path);
+        } else {
+            builder = builder.sqlite_persistence();
+        }
+        builder = builder.working_state("./.oneai");
 
         let domain_pack_name = domain.unwrap_or("coding");
         let domain_pack = get_builtin_pack(domain_pack_name, ".")
@@ -208,6 +269,15 @@ pub fn cmd_app_server(
             .engine_bus
             .clone()
             .expect("engine_bus() was called on the builder");
+
+        // Conversation listing handle for `session/list` — wraps the same
+        // `Arc<App>` the runtime drives, so a sidecar frontend's sidebar
+        // reads the conversations this very process persists (and, when the
+        // macOS app points `ONEAI_DB_PATH` at its Application Support DB,
+        // the SAME rows the in-process FFI engine wrote — switching transports
+        // never loses history).
+        let conversation_store: oneai_app_server::SharedConversationStore =
+            Arc::new(AppConversationStore { app: app.clone() });
 
         let runtime = Arc::new(Mutex::new(AppServerRuntime {
             app: app.clone(),
@@ -241,7 +311,7 @@ pub fn cmd_app_server(
 
         // Multi-transport JSON-RPC server. Binds all `--listen` specs
         // concurrently against the one bus.
-        let server = serve_all(specs, bus, scenario_store).await?;
+        let server = serve_all(specs, bus, scenario_store, conversation_store).await?;
 
         eprintln!("✅ Listening. Connect a JSON-RPC frontend.");
         eprintln!("   Methods: turn/run, turn/cancel, approval/respond, session/*, …");

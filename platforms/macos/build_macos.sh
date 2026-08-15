@@ -112,6 +112,22 @@ else
   echo "  (no OneAI.icns — icon falls back to default; generate via iconutil)"
 fi
 
+# — Sidecar engine binary (Phase D) ————————————————————————————
+# The sidecar transport (oneai_engine_transport=sidecar) spawns
+# `oneai app-server --listen ipc://…` from the .app. EngineProcessManager
+# looks for the binary at .app/Contents/Resources/bin/oneai first, then PATH.
+# Bundle it when a release build exists so sidecar works out-of-the-box;
+# otherwise warn (sidecar then needs `cargo install oneai` on PATH).
+SIDECAR_BIN="$ONEAI_ROOT/target/release/oneai"
+mkdir -p "$BUILD_DIR/OneAI.app/Contents/Resources/bin"
+if [[ -f "$SIDECAR_BIN" && -x "$SIDECAR_BIN" ]]; then
+  cp "$SIDECAR_BIN" "$BUILD_DIR/OneAI.app/Contents/Resources/bin/oneai"
+  echo "   Bundled sidecar engine: Contents/Resources/bin/oneai"
+else
+  echo "   ⚠ no target/release/oneai — sidecar transport will rely on PATH"
+  echo "     (build it: cargo build --release -p oneai-cli, or cargo install oneai)"
+fi
+
 # Localizations (.lproj) — each <lang>.lproj/Localizable.strings under
 # Resources/ ships as Contents/Resources/<lang>.lproj/Localizable.strings so
 # Bundle.main resolves SwiftUI LocalizedStringKey lookups (zh-Hans keys map

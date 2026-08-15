@@ -29,7 +29,7 @@ use oneai_supervisor::{IpcListener, IpcStream};
 
 use crate::adapter::serve_connection;
 use crate::dispatcher::Dispatcher;
-use crate::SharedScenarioStore;
+use crate::{SharedConversationStore, SharedScenarioStore};
 
 /// Channel buffer for the per-connection inbound/outbound JSON queues. Turns a
 /// slow frontend into back-pressure rather than unbounded memory.
@@ -42,6 +42,7 @@ pub fn serve_stdio(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
     let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -55,6 +56,7 @@ pub fn serve_stdio(
         bus,
         dispatcher,
         scenario_store,
+        session_store,
         inbound_rx,
         outbound_tx,
     ))
@@ -68,6 +70,7 @@ pub async fn serve_ipc(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) -> std::io::Result<JoinHandle<()>> {
     let mut listener = IpcListener::bind(path).await?;
     tracing::info!(path = %path.display(), "app-server: ipc listener bound");
@@ -78,8 +81,10 @@ pub async fn serve_ipc(
                     let bus = bus.clone();
                     let dispatcher = dispatcher.clone();
                     let scenario_store = scenario_store.clone();
+                    let session_store = session_store.clone();
                     tokio::spawn(async move {
-                        serve_line_stream(stream, bus, dispatcher, scenario_store).await;
+                        serve_line_stream(stream, bus, dispatcher, scenario_store, session_store)
+                            .await;
                     });
                 }
                 Err(e) => {
@@ -97,6 +102,7 @@ async fn serve_line_stream(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) {
     let (read, mut write) = tokio::io::split(stream);
     let (inbound_tx, inbound_rx) = mpsc::channel::<String>(CHANNEL_BUFFER);
@@ -140,7 +146,15 @@ async fn serve_line_stream(
         }
     });
 
-    serve_connection(bus, dispatcher, scenario_store, inbound_rx, outbound_tx).await;
+    serve_connection(
+        bus,
+        dispatcher,
+        scenario_store,
+        session_store,
+        inbound_rx,
+        outbound_tx,
+    )
+    .await;
     reader.abort();
     writer.abort();
 }
@@ -155,6 +169,7 @@ pub async fn serve_ws(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) -> std::io::Result<(JoinHandle<()>, std::net::SocketAddr)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -167,10 +182,18 @@ pub async fn serve_ws(
                         let bus = bus.clone();
                         let dispatcher = dispatcher.clone();
                         let scenario_store = scenario_store.clone();
+                        let session_store = session_store.clone();
                         tokio::spawn(async move {
                             match tokio_tungstenite::accept_async(stream).await {
                                 Ok(ws) => {
-                                    serve_ws_stream(ws, bus, dispatcher, scenario_store).await
+                                    serve_ws_stream(
+                                        ws,
+                                        bus,
+                                        dispatcher,
+                                        scenario_store,
+                                        session_store,
+                                    )
+                                    .await
                                 }
                                 Err(e) => {
                                     tracing::warn!(%peer, error = %e, "app-server: ws handshake failed")
@@ -197,6 +220,7 @@ async fn serve_ws_stream(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -229,7 +253,15 @@ async fn serve_ws_stream(
         }
     });
 
-    serve_connection(bus, dispatcher, scenario_store, inbound_rx, outbound_tx).await;
+    serve_connection(
+        bus,
+        dispatcher,
+        scenario_store,
+        session_store,
+        inbound_rx,
+        outbound_tx,
+    )
+    .await;
     reader.abort();
     writer.abort();
 }
@@ -259,6 +291,7 @@ pub fn serve_native_messaging(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
+    session_store: SharedConversationStore,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
     let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -270,6 +303,7 @@ pub fn serve_native_messaging(
         bus,
         dispatcher,
         scenario_store,
+        session_store,
         inbound_rx,
         outbound_tx,
     ))

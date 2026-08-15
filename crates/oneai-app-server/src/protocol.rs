@@ -52,6 +52,14 @@ pub mod method {
     pub const SESSION_LOAD: &str = "session/load";
     pub const SESSION_CLEAR: &str = "session/clear";
     pub const SESSION_DELETE: &str = "session/delete";
+    /// List saved conversations (metadata only — synchronous CRUD, mirrors
+    /// `scenario/list`: handled directly against the shared conversation
+    /// store, no bus/Directive). Returns `{sessions: [...]}` where each entry
+    /// carries `id` / `created_at_ms` / `updated_at_ms` / `message_count` /
+    /// `title` — the same shape the FFI `list_conversations` returns as
+    /// `SessionInfoView`, so a foreign UI renders one list regardless of
+    /// transport.
+    pub const SESSION_LIST: &str = "session/list";
 
     // Conversation ops.
     pub const CONVERSATION_COMPACT: &str = "conversation/compact";

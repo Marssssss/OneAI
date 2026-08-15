@@ -118,6 +118,27 @@ enum ChatEntry: Identifiable {
     }
 }
 
+// MARK: - Sidecar transport (Phase D)
+
+/// Which engine backend the app talks to. `.ffi` (default) = the in-process
+/// c_facade staticlib (best UX — no process/socket). `.sidecar` = spawn
+/// `oneai app-server` and drive it over JSON-RPC (Codex model: the frontend
+/// that can spawn owns the spawn). Selected by UserDefaults
+/// `oneai_engine_transport`. See Phase D in the plan — Slice 1 wires the
+/// single-agent sidecar path; group/scenario via sidecar is Slice 2.
+enum ChatTransport: String { case ffi, sidecar }
+
+/// A pending tool-approval request the sidecar engine surfaced (it uses
+/// `BusInteractionGate`, which emits `EngineYield::ApprovalRequest`; the FFI
+/// path uses `NoopInteractionGate` and never prompts). The UI renders an
+/// Allow/Deny overlay; `respondApproval` sends `approval/respond`.
+struct PendingApproval: Identifiable {
+    let id = UUID()
+    let requestId: String
+    let toolName: String
+    let justification: String
+}
+
 // MARK: - Streaming callback (foreign-implemented ChatEventCallback)
 
 final class StreamCallback: ChatEventCallback, @unchecked Sendable {
@@ -418,6 +439,39 @@ final class ChatViewModel: ObservableObject {
     private var session: OneAiSession? = nil
     /// Group-chat session when `currentScenario != nil`.
     private var groupSession: OneAiGroupChatSession? = nil
+
+    // ── Sidecar transport state (Phase D) ─────────────────────────────────
+    // Built only when `transport == .sidecar`. The `OneAiRpcClient` is the
+    // single channel for turn/run, approval/respond, and the `event`
+    // notification stream (stream_chunk / thinking / tool_calls /
+    // turn_complete / approval_request / …). `engineMgr` owns the spawned
+    // `oneai app-server` child (locate binary → spawn → wait for socket →
+    // hand client here → restart on crash). FFI path leaves all three nil.
+    private var engineMgr: EngineProcessManager? = nil
+    private var rpcClient: OneAiRpcClient? = nil
+    /// turn_id of the in-flight sidecar turn (from `turn/run`'s result, sent
+    /// at TurnStart). Used by `stop()` to cancel.
+    private var sidecarTurnId: String? = nil
+    /// Per-conversation stream key for the sidecar single-agent path —
+    /// mirrors the FFI path's `setActiveStreamKey(sessionId())` so the
+    /// existing visibility machinery (background buffering in particular)
+    /// can route sidecar events too, even though Slice 1 is always-visible.
+    private var sidecarStreamKey: String = ""
+    /// Resumes `ensureApp`'s `withCheckedThrowingContinuation` once the
+    /// EngineProcessManager delegate reports the client is connected (or
+    /// failed to start). Set in `ensureApp`, resumed in the delegate.
+    private var sidecarStartCont: CheckedContinuation<Void, Error>?
+    /// A pending tool-approval request from the sidecar engine (the FFI
+    /// path's NoopInteractionGate never produces these). Non-nil → ChatScreen
+    /// renders an Allow/Deny overlay; `respondApproval` resolves it.
+    @Published var pendingApproval: PendingApproval? = nil
+
+    /// Which engine backend. Read from UserDefaults `oneai_engine_transport`
+    /// (default `.ffi`).
+    var transport: ChatTransport {
+        let v = prefs.string(forKey: "oneai_engine_transport") ?? "ffi"
+        return ChatTransport(rawValue: v) ?? .ffi
+    }
     /// The AssistantItem currently accumulating events for the active speaker.
     private var activeSpeakerItem: AssistantItem? = nil
     /// Throttle: last time `streamTick` was bumped for a hot-path event
@@ -495,6 +549,19 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Provider config
 
+    /// Map the user's UserDefaults provider config to the env vars the
+    /// spawned `oneai app-server` child reads (`ONEAI_API_KEY` /
+    /// `ONEAI_BASE_URL` / `ONEAI_MODEL` — see `examples/cli/src/config.rs`).
+    /// The provider *kind* is inferred from the base url on the Rust side
+    /// (ProviderFactory), same rule as `Self.inferKind`, so no kind env var.
+    private func providerEnvMap() -> [String: String] {
+        var env: [String: String] = [:]
+        if !apiKey.isEmpty { env["ONEAI_API_KEY"] = apiKey }
+        if !baseUrl.isEmpty { env["ONEAI_BASE_URL"] = baseUrl }
+        if !model.isEmpty { env["ONEAI_MODEL"] = model }
+        return env
+    }
+
     func saveConfig() {
         prefs.set(model, forKey: "model")
         prefs.set(apiKey, forKey: "apiKey")
@@ -518,8 +585,7 @@ final class ChatViewModel: ObservableObject {
 
     /// Build the embedding config view. Returns nil when provider=auto with no
     /// key/base, so the Rust side falls through to zero-config auto-detection.
-    private func embeddingConfigView() -> EmbeddingConfigView? {
-        let provider = embProvider.isEmpty ? "auto" : embProvider
+    private func embeddingConfigView() -> EmbeddingConfigView? {        let provider = embProvider.isEmpty ? "auto" : embProvider
         if provider == "auto" && embApiKey.isEmpty && embBaseUrl.isEmpty {
             return nil
         }
@@ -535,6 +601,45 @@ final class ChatViewModel: ObservableObject {
     // MARK: App lifecycle
 
     func ensureApp() async {
+        // Sidecar transport: don't build the in-process FFI app — spawn the
+        // `oneai app-server` sidecar and connect a JSON-RPC client instead.
+        // Slice 1 wires single-agent turns; group/scenario stay FFI (Slice 2).
+        if transport == .sidecar {
+            guard rpcClient == nil, engineMgr == nil else { return }
+            StreamLog.start()
+            initOneaiLog(logDir: appSupportDir)
+            if !streamHeartbeatStarted {
+                streamHeartbeatStarted = true
+                Self.scheduleHeartbeat()
+            }
+            let mgr = EngineProcessManager()
+            mgr.extraEnv = providerEnvMap()
+            // Share the SAME SQLite DB as the in-process FFI engine
+            // (~/Library/Application Support/oneai.db — `dbPath`). The
+            // sidecar reads ONEAI_DB_PATH and calls sqlite_persistence_at,
+            // so a session saved under FFI appears in the sidecar's sidebar
+            // and vice versa — switching transports never loses history.
+            // SQLite WAL + busy_timeout make the cross-process sharing safe;
+            // only one engine is ever active (the FFI app isn't built in
+            // sidecar mode).
+            mgr.extraEnv["ONEAI_DB_PATH"] = dbPath
+            // Surface the engine's tracing spans in the sidecar's stderr log
+            // (~/.oneai/app-server-sidecar.log) — the app-server inits a
+            // stderr subscriber that reads RUST_LOG (default info). Without
+            // this a stuck turn is invisible (no engine logs).
+            mgr.extraEnv["RUST_LOG"] = "info"
+            mgr.delegate = self
+            engineMgr = mgr
+            do {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    self.sidecarStartCont = cont
+                    mgr.start()
+                }
+            } catch {
+                self.error = "引擎 sidecar 启动失败: \(friendlyError(error))"
+            }
+            return
+        }
         guard app == nil else { return }
         StreamLog.start()
         // Install the Rust-side tracing subscriber → oneai_rust.log in the
@@ -596,6 +701,16 @@ final class ChatViewModel: ObservableObject {
         app = nil
         session = nil
         groupSession = nil
+        // Sidecar: tear down the child + client so ensureApp re-spawns with
+        // the (possibly changed) provider env. Settings save → rebuildApp →
+        // fresh sidecar carrying the new ONEAI_API_KEY / base url / model.
+        if transport == .sidecar {
+            engineMgr?.stop()
+            engineMgr = nil
+            rpcClient = nil
+            sidecarTurnId = nil
+            pendingApproval = nil
+        }
         await ensureApp()
         await refreshSessions()
         if let saved = savedScenario {
@@ -616,6 +731,28 @@ final class ChatViewModel: ObservableObject {
     }
 
     func refreshSessions() async {
+        // Sidecar: list over JSON-RPC `session/list` (synchronous CRUD — the
+        // app-server returns the same epoch-millis shape the FFI
+        // `listConversations` yields, so the sidebar renders one list
+        // regardless of transport). The rpcClient is ready only after
+        // `didStart`; before that, bail (the cold-start `.task` calls this
+        // after ensureApp, and rebuildApp calls it after re-spawn).
+        if transport == .sidecar {
+            guard let rpc = rpcClient else { return }
+            do {
+                let res = try await rpc.call("session/list", params: [String: String]())
+                let arr = (res["sessions"] as? [[String: Any]]) ?? []
+                let sorted = arr.compactMap { Self.sessionInfoView(from: $0) }
+                    .sorted { $0.updatedAtMs > $1.updatedAtMs }
+                // refreshSessions may be called from a non-main context
+                // (the turn_complete handler spawns a Task), so marshal the
+                // @Published write to the main actor.
+                await MainActor.run { self.sessions = sorted }
+            } catch {
+                StreamLog.log("sess", "sidecar session/list err=\(friendlyError(error))")
+            }
+            return
+        }
         guard let a = app else { return }
         let list = await a.listConversations()
         sessions = list.sorted { $0.updatedAtMs > $1.updatedAtMs }
@@ -652,6 +789,23 @@ final class ChatViewModel: ObservableObject {
     /// restores the full streamed output (issue #13). Group rounds are short
     /// and group resume isn't wired, so group is interrupted + dropped.
     private func interruptInFlight() async {
+        // Sidecar: cancel the in-flight turn (if any) via turn/cancel so its
+        // events don't contaminate the next conversation — the sidecar has
+        // one engine session in Slice 1 (no session/* wired), so a
+        // mid-stream switch must actually stop the run. No background
+        // buffering for sidecar (Slice 1 is always-visible).
+        if transport == .sidecar {
+            if running, sidecarTurnId != nil, let rpc = rpcClient {
+                _ = try? await rpc.call("turn/cancel", params: [String: String]())
+            }
+            if let t = activeSpeakerItem { t.streaming = false; t.done = true }
+            sidecarTurnId = nil
+            setActiveStreamKey("")
+            running = false
+            activeSpeakerItem = nil
+            activeSpeakerId = nil
+            return
+        }
         if currentScenario == nil, let sid = currentSessionId,
            running, let turn = activeSpeakerItem, let s = session {
             // Preserve the live turn + session object FIRST (while the visible
@@ -680,6 +834,44 @@ final class ChatViewModel: ObservableObject {
     /// the values are sent as the first user message to kick off the first
     /// round (e.g. writing workshop → writer drafts).
     func newConversation(scenario: Scenario?, topicValues: [String: String]?) async {
+        // Sidecar transport: single-agent turns go over JSON-RPC. Group chat
+        // via sidecar is Phase D Slice 2 (not yet wired) — surface that
+        // honestly rather than silently falling back to a half-path.
+        if transport == .sidecar {
+            await interruptInFlight()
+            pendingScenario = nil
+            currentScenario = scenario
+            groupSession = nil
+            activeSpeakerItem = nil
+            activeSpeakerId = nil
+            hasOlder = false
+            olderCursor = nil
+            olderJumpId = nil
+            debriefActive = false
+            if scenario != nil {
+                self.error = NSLocalizedString("群聊 sidecar 暂未接入(Phase D Slice 2);请在设置中切换到 FFI 引擎。", comment: "")
+                currentScenario = nil
+            } else {
+                items.removeAll()
+                error = nil
+                currentSessionId = nil
+                running = false
+                // Create a fresh engine session so the upcoming turn/run
+                // saves under a NEW conversation row (the sidecar's
+                // CreateSession directive swaps the pump's runtime session;
+                // turn/run then runs on it + run_agent auto-saves it). The
+                // returned id binds currentSessionId so the sidebar can mark
+                // this conversation current and a later turn_complete refresh
+                // surfaces it. No scenario ⇒ engine assigns the id.
+                if let rpc = rpcClient,
+                   let res = try? await rpc.call("session/create", params: [String: String]()),
+                   let id = res["id"] as? String {
+                    currentSessionId = id
+                    StreamLog.log("sess", "sidecar session/create id=\(id)")
+                }
+            }
+            return
+        }
         guard let a = app else { return }
         StreamLog.log("sess", "newConversation entry scenario=\(scenario?.id ?? "nil") running=\(running) curId=\(currentSessionId ?? "nil") items=\(items.count)")
         // Stop a still-streaming previous turn before swapping sessions — see
@@ -788,6 +980,46 @@ final class ChatViewModel: ObservableObject {
     /// Resume a saved single-agent session (group-chat resume not wired yet —
     /// group chats are created fresh per conversation in v1).
     func loadSession(_ id: String) async {
+        // Sidecar: load over JSON-RPC `session/load` (bus-driven — the pump
+        // swaps the runtime session to the loaded conversation and emits
+        // SessionLoaded{ id, messages }). Decode the raw Message JSON
+        // (role / content[].text flatten / metadata["speaker"]) into the
+        // flat MessageView shape `rebuildEntries` consumes, so a reloaded
+        // sidecar history shows the same bubble count + fold the user saw
+        // live. Full message list (no pagination) — the simple-path closed
+        // loop; long conversations are windowed client-side on render.
+        if transport == .sidecar {
+            guard let rpc = rpcClient else { return }
+            StreamLog.log("sess", "sidecar loadSession id=\(id)")
+            await interruptInFlight()
+            pendingScenario = nil
+            currentScenario = nil
+            groupSession = nil
+            debriefActive = false
+            do {
+                let res = try await rpc.call("session/load", params: ["id": id])
+                let resolvedId = (res["id"] as? String) ?? id
+                let msgs = Self.messageViews(fromSidecar: res["messages"])
+                var lastTask: String? = nil
+                let rebuilt = Self.rebuildEntries(from: msgs, lastTask: &lastTask)
+                await MainActor.run {
+                    self.currentSessionId = resolvedId
+                    self.items = rebuilt
+                    self.lastUserTask = lastTask
+                    self.error = nil
+                    self.hasOlder = false
+                    self.olderCursor = nil
+                    self.olderJumpId = nil
+                    self.activeSpeakerItem = nil
+                    self.running = false
+                    self.streamTick.value += 1
+                    self.scrollRequest += 1
+                }
+            } catch {
+                self.error = "加载会话失败: \(friendlyError(error))"
+            }
+            return
+        }
         guard let a = app else { return }
         StreamLog.log("sess", "loadSession id=\(id) running=\(running) curId=\(currentSessionId ?? "nil")")
         // Stop a still-streaming previous turn first (issue 4): otherwise its
@@ -927,6 +1159,50 @@ final class ChatViewModel: ObservableObject {
         }
         flushPending()
         return rebuilt
+    }
+
+    /// Decode one `session/list` entry (the epoch-millis shape the app-server
+    /// emits — identical to the FFI `SessionInfoView`) into the FFI struct so
+    /// `SessionRow` renders sidecar and FFI rows through the same path. nil
+    /// when the row is missing the required `id` (a malformed entry is
+    /// dropped rather than crashing the whole list).
+    private static func sessionInfoView(from dict: [String: Any]) -> SessionInfoView? {
+        guard let id = dict["id"] as? String else { return nil }
+        let created = (dict["created_at_ms"] as? Int64) ?? 0
+        let updated = (dict["updated_at_ms"] as? Int64) ?? 0
+        let count = (dict["message_count"] as? UInt64) ?? 0
+        let title = dict["title"] as? String
+        return SessionInfoView(
+            id: id,
+            createdAtMs: created,
+            updatedAtMs: updated,
+            messageCount: count,
+            title: title
+        )
+    }
+
+    /// Decode the raw `Message` JSON `session/load` returns into the flat
+    /// `MessageView` shape `rebuildEntries` consumes. Each message serializes
+    /// as `{ role, content: [{ type: "text", text }], metadata: {...} }`
+    /// (oneai_core's wire shape — Role is `#[serde(rename_all="lowercase")]`,
+    /// matching the FFI MessageView role strings). Flatten the text blocks,
+    /// read `metadata["speaker"]` for group-chat attribution (nil for single-
+    /// agent). Returns `[]` on a missing/malformed array.
+    private static func messageViews(fromSidecar raw: Any?) -> [MessageView] {
+        guard let arr = raw as? [[String: Any]] else { return [] }
+        return arr.compactMap { m -> MessageView? in
+            guard let role = m["role"] as? String else { return nil }
+            // Flatten text content blocks into one string (mirrors the FFI
+            // MessageView.text = concat of text blocks).
+            var text = ""
+            if let blocks = m["content"] as? [[String: Any]] {
+                for b in blocks where (b["type"] as? String) == "text" {
+                    if let t = b["text"] as? String { text += t }
+                }
+            }
+            let speaker = (m["metadata"] as? [String: Any])?["speaker"] as? String
+            return MessageView(role: role, text: text, speaker: speaker)
+        }
     }
 
     /// Prepend one older page of transcript to `items` (lazy "load earlier
@@ -1107,7 +1383,15 @@ final class ChatViewModel: ObservableObject {
         case .streamChunk, .thinking: hot = true
         default: hot = false
         }
-        if hot {
+        bumpStreamTick(isHot: hot)
+    }
+
+    /// Transport-agnostic throttle core: hot events (streamChunk/thinking +
+    /// the sidecar's stream_chunk/thinking) coalesce to ~20 fps; everything
+    /// else flushes immediately and resets the window. Shared by the FFI
+    /// `handle(_ event: ChatEventView)` and the sidecar `handleSidecarEvent`.
+    private func bumpStreamTick(isHot: Bool) {
+        if isHot {
             let now = Date()
             if now.timeIntervalSince(lastStreamFlush) < Self.streamFlushInterval {
                 return   // within the throttle window — skip this refresh
@@ -1134,6 +1418,10 @@ final class ChatViewModel: ObservableObject {
         lastUserTask = task
         if groupSession != nil {
             await runGroupTask(task, addUserItem: addUserItem)
+            return
+        }
+        if transport == .sidecar {
+            await runTaskSidecar(task, addUserItem: addUserItem)
             return
         }
         guard let s = session else { self.error = "session not built"; return }
@@ -1252,7 +1540,303 @@ final class ChatViewModel: ObservableObject {
     }
 
     func stop() async {
+        if transport == .sidecar {
+            // Cancel the in-flight sidecar turn (if any) via turn/cancel.
+            // The adapter defaults a missing reason to a generic client
+            // cancel, so an empty params object is fine.
+            if let rpc = rpcClient, sidecarTurnId != nil {
+                _ = try? await rpc.call("turn/cancel", params: [String: String]())
+            }
+            if let t = activeSpeakerItem { t.streaming = false; t.done = true }
+            sidecarTurnId = nil
+            running = false
+            streamTick.value += 1
+            return
+        }
         if let gs = groupSession { await gs.interrupt() }
         await session?.interrupt()
+    }
+
+    // MARK: Sidecar run (Phase D, Slice 1)
+
+    /// Single-agent turn over the sidecar JSON-RPC client. Mirrors the FFI
+    /// `runTask`'s visible-path: append a UserItem + a streaming
+    /// AssistantItem, set `running`, reset the per-turn indicators, then
+    /// `turn/run`. The `turn/run` result resolves at TurnStart (carries
+    /// `turn_id`); the actual stream + `turn_complete` arrive as `event`
+    /// notifications handled by `handleSidecarEvent`, so this method does
+    /// NOT mark the turn done — that happens on `turn_complete`.
+    private func runTaskSidecar(_ task: String, addUserItem: Bool) async {
+        guard let rpc = rpcClient else { self.error = "sidecar 引擎未就绪"; return }
+        StreamLog.log("run", "sidecar runTask start len=\(task.count)")
+        if addUserItem { items.append(.user(UserItem(text: task))) }
+        let turn = AssistantItem()
+        activeSpeakerItem = turn
+        items.append(.assistant(turn))
+        running = true
+        error = nil
+        lastTurnTokens = 0
+        lastCacheHitPct = nil
+        sidecarTurnId = nil
+        // Fresh per-conversation stream key; visible key matches so events
+        // render (no backgrounding in Slice 1, but the routing machinery is
+        // shared with the FFI path and expects a non-empty visible key).
+        sidecarStreamKey = "sidecar:" + UUID().uuidString
+        setActiveStreamKey(sidecarStreamKey)
+        // ContentBlock is `#[serde(tag="type")]`; Text → {"type":"text","text":…}.
+        let params: [String: Any] = ["content": [["type": "text", "text": task]]]
+        do {
+            let res = try await rpc.call("turn/run", params: params)
+            if let tid = res["turn_id"] as? String {
+                sidecarTurnId = tid
+                StreamLog.log("run", "sidecar turn/run resolved turn_id=\(tid)")
+            } else {
+                StreamLog.log("run", "sidecar turn/run result no turn_id: \(res)")
+            }
+        } catch {
+            turn.error = friendlyError(error)
+            turn.streaming = false; turn.done = true
+            if currentStreamKey() == sidecarStreamKey { running = false }
+            StreamLog.log("run", "sidecar runTask err=\(friendlyError(error))")
+        }
+    }
+
+    /// Ensure a sidecar AssistantItem exists for the in-flight turn (the
+    /// first event of a turn seeds it; `turn/run` already appended one, but a
+    /// late-arriving event after a tear-down-rebuild guards against nil).
+    private func ensureSidecarTurn() {
+        if activeSpeakerItem == nil {
+            let item = AssistantItem()
+            activeSpeakerItem = item
+            items.append(.assistant(item))
+        }
+    }
+
+    /// Route a sidecar `event` notification into the active AssistantItem.
+    /// Independent of the FFI `handle(_ event: ChatEventView)` — the FFI
+    /// path's `ChatEventView` enum and the sidecar's `[String: Any]` EngineYield
+    /// are different shapes; this is the sidecar's own event→items fold. Reuses
+    /// the same `AssistantItem` fields + `bumpStreamTick(isHot:)` throttle so
+    /// the rendering + coalescing machinery is identical to the FFI path.
+    func handleSidecarEvent(_ event: OneAiEvent) {
+        let p = event.params
+        // Log every event kind so a stuck turn is diagnosable from
+        // oneai_stream.log — shows whether stream_chunk/turn_complete arrive
+        // (engine completed but render broke) vs. only tool/approval events
+        // (engine stuck in a tool loop).
+        StreamLog.log("sidecar", "event kind=\(event.kind)")
+        switch event.kind {
+        case "stream_chunk":
+            let text = (p["text"] as? String) ?? ""
+            ensureSidecarTurn()
+            guard let t = activeSpeakerItem else { break }
+            let flipped = t.thinkingActive
+            if flipped { t.thinkingActive = false; t.thinkingDone = true }
+            t.streaming = true; t.text += text
+            if flipped { lastStreamFlush = Date.distantPast }
+            t.version += 1
+            bumpStreamTick(isHot: true)
+        case "thinking":
+            let text = (p["text"] as? String) ?? ""
+            ensureSidecarTurn()
+            activeSpeakerItem?.thinkingActive = true
+            activeSpeakerItem?.thinking += text
+            activeSpeakerItem?.version += 1
+            bumpStreamTick(isHot: true)
+        case "direct_answer":
+            let text = (p["text"] as? String) ?? ""
+            ensureSidecarTurn()
+            guard let t = activeSpeakerItem else { break }
+            if !text.isEmpty { t.text = text }
+            if t.thinkingActive { t.thinkingActive = false; t.thinkingDone = true }
+            t.version += 1
+            bumpStreamTick(isHot: false)
+        case "tool_calls":
+            // calls: [{id, name, args}]
+            ensureSidecarTurn()
+            guard let calls = p["calls"] as? [[String: Any]], let t = activeSpeakerItem else { break }
+            for c in calls {
+                let id = (c["id"] as? String) ?? UUID().uuidString
+                if t.steps.contains(where: { $0.callId == id }) { continue }
+                let name = (c["name"] as? String) ?? "?"
+                let args = c["args"].map { String(describing: $0) } ?? ""
+                t.steps.append(ToolStep(callId: id, name: name, args: args))
+            }
+            t.version += 1
+            bumpStreamTick(isHot: false)
+        case "tool_result":
+            let callId = (p["call_id"] as? String) ?? ""
+            let output = p["output"] as? [String: Any]
+            let content = (output?["content"] as? String) ?? ""
+            let success = (output?["success"] as? Bool) ?? true
+            guard let t = activeSpeakerItem else { break }
+            if let idx = t.steps.firstIndex(where: { $0.callId == callId }) {
+                t.steps[idx].result = content
+                t.steps[idx].ok = success
+            } else if let idx = t.steps.lastIndex(where: { $0.result == nil }) {
+                t.steps[idx].result = content
+                t.steps[idx].ok = success
+            }
+            t.version += 1
+            bumpStreamTick(isHot: false)
+        case "token_usage":
+            // Real per-inference usage from the provider (mirrors the FFI
+            // `.tokenUsage` arm). Drives the top-bar token + cache badge.
+            let usage = p["usage"] as? [String: Any]
+            let prompt = (usage?["prompt_tokens"] as? Int) ?? 0
+            let completion = (usage?["completion_tokens"] as? Int) ?? 0
+            let cacheRead = (usage?["cache_read_tokens"] as? Int) ?? 0
+            if (prompt + completion) > 0 {
+                lastTurnTokens += prompt + completion
+                let denom = max(Double(prompt), 1)
+                lastCacheHitPct = Double(cacheRead) / denom * 100
+                bumpStreamTick(isHot: false)
+            }
+        case "turn_complete":
+            let summary = p["summary"] as? [String: Any]
+            let final = (summary?["final_answer"] as? String) ?? ""
+            if let t = activeSpeakerItem {
+                if !final.isEmpty { t.text = final }
+                if t.thinkingActive { t.thinkingActive = false; t.thinkingDone = true }
+                t.streaming = false; t.done = true
+                if lastTurnTokens == 0 {
+                    lastTurnTokens = (final.count + t.thinking.count) / 4
+                }
+                t.version += 1
+            }
+            if currentStreamKey() == sidecarStreamKey { running = false }
+            sidecarTurnId = nil
+            bumpStreamTick(isHot: false)
+            StreamLog.log("run", "sidecar turn_complete")
+            // The turn auto-saved the conversation (run_agent persists on
+            // completion); refresh the sidebar so a brand-new chat appears
+            // and an updated session bubbles up in updatedAt order.
+            Task { [weak self] in
+                await self?.refreshSessions()
+            }
+        case "error":
+            let msg = (p["message"] as? String) ?? "engine error"
+            if let t = activeSpeakerItem {
+                t.error = msg; t.streaming = false; t.done = true
+                t.version += 1
+            } else {
+                self.error = msg
+            }
+            if currentStreamKey() == sidecarStreamKey { running = false }
+            bumpStreamTick(isHot: false)
+        case "approval_request":
+            // Sidecar uses BusInteractionGate → it surfaces approvals the FFI
+            // NoopInteractionGate auto-grants. For Slice-1 parity with the FFI
+            // transport (which NEVER prompts — best UX, no friction), auto-
+            // approve every tool call (Proceed) and log the tool so the
+            // engine never blocks on a prompt. The `ApprovalOverlay` UI stays
+            // available for a later slice that surfaces real approval gating;
+            // it's just not set here. (Same trust model as the FFI app, which
+            // auto-runs shell/file tools via Noop.)
+            let reqId = (p["request_id"] as? String) ?? ""
+            // InteractionRequest is externally-tagged: {"ToolApproval":{"approval":{…}}}.
+            var toolName = "engine"
+            if let request = p["request"] as? [String: Any],
+               let approval = request["ToolApproval"] as? [String: Any],
+               let a = approval["approval"] as? [String: Any] {
+                if let n = a["tool_name"] as? String { toolName = n }
+            }
+            StreamLog.log("sidecar", "approval_request auto-proceed tool=\(toolName) id=\(reqId)")
+            // Fire-and-forget: respond so the engine unblocks. handleSidecarEvent
+            // is sync (runs on the main callback queue), so dispatch the async
+            // respond onto a Task — it must not block the event loop.
+            let rpc = rpcClient
+            Task { [weak self] in
+                guard let rpc = rpc else { return }
+                let params: [String: Any] = ["request_id": reqId, "response": "Proceed"]
+                do {
+                    _ = try await rpc.call("approval/respond", params: params)
+                } catch {
+                    self?.error = "auto-approval respond 失败: \(friendlyError(error))"
+                }
+            }
+        default:
+            // Unknown `kind` — the bus is `#[non_exhaustive]`; new yield
+            // variants arrive as unknown kinds a frontend ignores. No-op.
+            break
+        }
+    }
+
+    /// Resolve the pending sidecar approval: `approval/respond` with
+    /// `InteractionResponse::Proceed` (allow) or `Abort` (deny). The engine
+    /// unblocks and the turn continues / aborts.
+    func respondApproval(_ allow: Bool) async {
+        guard let rpc = rpcClient, let pa = pendingApproval else { return }
+        pendingApproval = nil
+        // InteractionResponse is externally-tagged: `Proceed` (unit) → bare
+        // string "Proceed"; `Abort { reason }` → {"Abort":{"reason":…}}.
+        let response: Any = allow
+            ? "Proceed"
+            : ["Abort": ["reason": NSLocalizedString("用户拒绝", comment: "")]]
+        let params: [String: Any] = ["request_id": pa.requestId, "response": response]
+        do {
+            _ = try await rpc.call("approval/respond", params: params)
+        } catch {
+            self.error = "审批回复失败: \(friendlyError(error))"
+        }
+    }
+}
+
+// MARK: - Sidecar transport delegates (Phase D, Slice 1)
+
+extension ChatViewModel: OneAiRpcClientDelegate {
+    func rpcClient(_ client: OneAiRpcClient, didReceive event: OneAiEvent) {
+        // callbackQueue is set to .main in `engineProcessManager(_:didStart:)`,
+        // so this already lands on the main actor — `@Published` mutations +
+        // `activeSpeakerItem` field writes are safe.
+        handleSidecarEvent(event)
+    }
+
+    func rpcClient(_ client: OneAiRpcClient, didCloseWithError error: Error?) {
+        // The EngineProcessManager restarts the child; surface a transport
+        // error only if a turn is mid-flight so the user sees why it stalled.
+        if running, let t = activeSpeakerItem {
+            t.error = NSLocalizedString("引擎连接断开,正在重连…", comment: "")
+            t.streaming = false
+            t.version += 1
+            running = false
+            bumpStreamTick(isHot: false)
+        }
+        rpcClient = nil
+    }
+}
+
+extension ChatViewModel: EngineProcessManagerDelegate {
+    func engineProcessManager(_ mgr: EngineProcessManager, didStart client: OneAiRpcClient) {
+        // didStart fires from a background queue (connectClient's Task); hop
+        // to main before touching VM state (incl. resuming the ensureApp
+        // continuation).
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.rpcClient = client
+            client.delegate = self
+            // Deliver events on main so `@Published` mutations + the
+            // plain-field writes in `handleSidecarEvent` are main-actor
+            // (mirrors the FFI callback's main-thread marshalling).
+            client.callbackQueue = .main
+            let cont = self.sidecarStartCont
+            self.sidecarStartCont = nil
+            cont?.resume()
+        }
+    }
+
+    func engineProcessManager(_ mgr: EngineProcessManager, didFailWith error: Error) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let cont = self.sidecarStartCont
+            self.sidecarStartCont = nil
+            // Only resume once — a late didFail after a successful start is
+            // surfaced as a transport error, not an ensureApp throw.
+            if let cont = cont {
+                cont.resume(throwing: error)
+            } else if self.rpcClient == nil {
+                self.error = "引擎 sidecar 失败: \(friendlyError(error))"
+            }
+        }
     }
 }
