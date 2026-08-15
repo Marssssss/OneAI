@@ -224,11 +224,11 @@ pub async fn connect(path: &Path) -> io::Result<IpcStream> {
     {
         let name = to_pipe_name(path);
         // tokio's named_pipe module has no `Client::connect` (that type doesn't
-        // exist) — the client is built via `ClientOptions::new().create(&name)`
-        // (returns a `NamedPipeClient`, which `from_pipe_client` wraps). The
-        // handle connects on first I/O; `create` opens it synchronously (fast,
-        // non-blocking for a present server, errors immediately if absent).
-        let client = tokio::net::windows::named_pipe::ClientOptions::new().create(&name)?;
+        // exist) — the client is built via `ClientOptions::new().open(&name)`
+        // (note: `.open`, not `.create` — `create` is `ServerOptions`'s method;
+        // `open` returns a `NamedPipeClient`, which `from_pipe_client`
+        // wraps). The handle connects on first I/O; `open` is synchronous.
+        let client = tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?;
         Ok(IpcStream::from_pipe_client(client))
     }
     #[cfg(not(any(unix, windows)))]
