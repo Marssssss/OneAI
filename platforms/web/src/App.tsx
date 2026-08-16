@@ -43,8 +43,17 @@ import styles from './App.module.css'
 import type { Theme } from './theme'
 import { readInitialTheme, THEME_STORAGE_KEY } from './theme'
 
+// When `VITE_APP_SERVER_URL` is set (e.g. `npm run dev` pointing at a separate
+// `oneai app-server --listen ws://127.0.0.1:8787`), use it. Otherwise derive
+// from the page origin so the SAME built dist works on any host:port — i.e.
+// the `oneai web` single-port server (SPA + /ws same-origin) needs no rebuild.
 const APP_SERVER_URL =
-  (import.meta.env.VITE_APP_SERVER_URL as string | undefined) ?? 'ws://127.0.0.1:8787'
+  (import.meta.env.VITE_APP_SERVER_URL as string | undefined) ??
+  (() => {
+    if (typeof window === 'undefined') return 'ws://127.0.0.1:8787'
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    return `${proto}://${window.location.host}/ws`
+  })()
 
 interface FramePrefs {
   sidebarWidth: number

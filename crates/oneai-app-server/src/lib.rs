@@ -44,6 +44,8 @@ pub mod conversation;
 pub mod dialog;
 pub mod dispatcher;
 pub mod feedback;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod probe;
 pub mod protocol;
 pub mod scenario;
@@ -55,6 +57,8 @@ pub use feedback::{
     FeedbackEntry, FeedbackStore, InMemoryFeedbackStore, SharedFeedbackStore, KIND_DOWN, KIND_NOTE,
     KIND_UP,
 };
+#[cfg(feature = "http")]
+pub use http::serve_web;
 pub use probe::{
     AppConfigSnapshot, AppProbe, ConfigFileView, DomainPackInfo, DomainPackList, NullAppProbe,
     ProviderEntryDto, ProviderInfo, ProviderOpResult, SharedAppProbe, SkillInfo, SkillOpResult,

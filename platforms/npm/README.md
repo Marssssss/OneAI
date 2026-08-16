@@ -2,21 +2,34 @@
 
 Cross-platform launcher for the OneAI engine — `npm install -g oneai-cli` gets
 you the `oneai` command (the TUI + all subcommands: `app-server`, `serve`,
-`session`, `evolve`, …) **without Rust/cargo**.
+`session`, `evolve`, `web`, …) **without Rust/cargo**.
 
 ## What it is
 
 This is the Codex-style "npm shell": the package carries **zero business logic**.
 On `postinstall` it fetches the prebuilt `oneai` binary for your platform from
 the matching GitHub Release; the `bin` just forwards `argv` + `stdio` to that
-binary. Every feature (AgentLoop, TUI, app-server, sidecar, …) lives in the
-Rust binary.
+binary. Every feature (AgentLoop, TUI, app-server, sidecar, webUI, …) lives in
+the Rust binary. The package additionally bundles the **webUI dist**
+(platform-independent JS, built at publish via `prepublishOnly`) so `oneai web`
+is a true one-command launch — no source checkout, no separate Vite process.
 
 ```bash
+npx oneai-cli web     # one command: engine + webUI + open browser (mirrors `npx @deepseek-ai/dsh web`)
+# or
 npm install -g oneai-cli
 oneai                 # launch the TUI
 oneai app-server --listen stdio   # JSON-RPC engine process
 ```
+
+## `oneai web`
+
+`npx oneai-cli web` builds the engine in-process, serves the prebuilt SPA
+static assets **and** the `/ws` JSON-RPC endpoint on one port (default
+`http://127.0.0.1:8787`), and opens the browser. The launcher sets
+`ONEAI_WEB_DIST` to the bundled `web-dist/` so the binary serves this package's
+dist; override with `--dist <path>` or set `ONEAI_WEB_DIST` yourself. Flags:
+`--port`, `--host`, `--dist`, `--no-open`, `--domain`, `--model`, `--user`.
 
 ## Fallback
 
@@ -24,7 +37,9 @@ If `postinstall` couldn't fetch a binary (no prebuilt for your platform, the
 release isn't published yet, offline install), the launcher falls back to a
 `oneai` on PATH — so a dev who `cargo install oneai-cli`-ed keeps working
 unchanged. Run with no binary available and you'll get a message pointing at
-the releases + `cargo install`.
+the releases + `cargo install`. (`oneai web` also auto-detects a local
+`platforms/web/dist` or `--dist`, so a cargo binary works without the bundled
+dist.)
 
 ## Asset contract
 
@@ -49,9 +64,16 @@ Runtime prebuilt and is skipped — those users fall back to PATH).
 
 ```bash
 cd platforms/npm
-npm pack          # sanity-check the tarball contents (bin/oneai.js + install.js + README)
-npm publish       # after the matching vX.Y.Z GitHub Release with binaries is live
+npm run build:web   # (optional) build the webUI dist into web-dist/ ahead of time
+npm pack            # sanity-check the tarball (bin/oneai.js + install.js + README + web-dist/)
+npm publish         # prepublishOnly builds web-dist/ automatically; publish after the vX.Y.Z GitHub Release is live
 ```
+
+`npm publish` runs `prepublishOnly` → `scripts/build-web.sh` which builds the
+webUI (`platforms/web`: `npm ci && npm run build`) and stages the output into
+`web-dist/` so the published tarball carries the dist. The dist is gitignored
+(`platforms/npm/web-dist/`) — it lives in the tarball, not the repo. Requires
+node/npm at publish time (on the maintainer's machine).
 
 The npm version is kept in lockstep with the workspace `version` (currently
 `0.1.0`) so the download URL always points at the right release.

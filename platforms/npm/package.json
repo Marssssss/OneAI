@@ -1,7 +1,7 @@
 {
   "name": "oneai-cli",
   "version": "0.1.0",
-  "description": "Cross-platform launcher for the OneAI engine (oneai-cli TUI + subcommands). Postinstall fetches the platform binary from GitHub Releases; the bin forwards argv + stdio with zero business logic. Falls back to `oneai` on PATH if no binary is downloaded (e.g. a dev who `cargo install`-ed).",
+  "description": "Cross-platform launcher for the OneAI engine (oneai-cli TUI + subcommands, `oneai web` one-command webUI). Postinstall fetches the platform binary from GitHub Releases; the bin forwards argv + stdio with zero business logic. The web dist is bundled here (built at publish via prepublishOnly). Falls back to `oneai` on PATH if no binary is downloaded (e.g. a dev who `cargo install`-ed).",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -12,12 +12,15 @@
     "oneai": "bin/oneai.js"
   },
   "scripts": {
-    "postinstall": "node install.js"
+    "postinstall": "node install.js",
+    "build:web": "bash scripts/build-web.sh",
+    "prepublishOnly": "bash scripts/build-web.sh"
   },
   "files": [
     "bin/oneai.js",
     "install.js",
-    "README.md"
+    "README.md",
+    "web-dist/"
   ],
   "engines": {
     "node": ">=16"

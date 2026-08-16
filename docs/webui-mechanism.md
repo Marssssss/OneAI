@@ -92,6 +92,15 @@ WebUI 是一个 Vite + React 19 + TypeScript SPA（`platforms/web/`）。它不�
 
 `npm run build` = `tsc --noEmit && vite build`（`dist/`）。`npm run typecheck` 单独 tsc。shiki 语言包懒加载；首屏只装对话域。bundle 较大（shiki 全语言）属已知，可后续 `manualChunks` 优化。npm devDep 不经 cargo 供应链门（`Cargo.lock`/`deny.toml` 不受影响）；`npm audit` 须 0 漏（vitest 升 4.x 清零 esbuild 旧链传递）。
 
+## 13.5 一行启动（`oneai web`）
+
+对标 deepseek-harness `npx @deepseek-ai/dsh web`：**一个命令**拉起引擎 + webUI + 浏览器，零源码、零额外进程。引擎进程同端口（axum）既托管 SPA 静态 dist、又提供 `/ws` JSON-RPC 升级——`oneai-app-server` 的 `serve_web`（feature `http`，axum0.8+`tower-http fs`）把 `ServeDir`（含 `index.html` SPA fallback）+ `WebSocketUpgrade` 挂到一路由，`serve_ws_axum` 桥接 axum WebSocket 到既有 `serve_connection` 的 `mpsc<String>` seam（复用全部 JSON-RPC 处理，零重复）。
+
+- **运行**：`npx oneai-cli web`（npm 包内带 dist、postinstall 拉平台二进制）或 `oneai web`（全局/cargo 装）。默认 `http://127.0.0.1:8787`，自动开浏览器（`--no-open` 跳过，`--port/--host/--dist/--domain/--model/--user` 可配）。
+- **ws URL 自洽**：`App.tsx` 在 `VITE_APP_SERVER_URL` 未设时从页面 origin 派生 `${wss?}://${host}/ws`，故同一份 dist 在任意 host:port 都能用，无需按端口重构建；dev（`npm run dev` on 5173）仍可用 env 覆盖指向独立 app-server。
+- **dist 来源**：web dist 是平台无关 JS，打进 `oneai-cli` npm tarball（`npm publish` 的 `prepublishOnly` 跑 `platforms/npm/scripts/build-web.sh` 构建+stage 进 `web-dist/`，gitignore）；launcher 启动时注入 `ONEAI_WEB_DIST` 指向包内 dist。cargo/二进制用户走 `--dist` 或自动探测（`./platforms/web/dist` / `~/.oneai/web-dist`）。
+- **复用**：CLI 的 `build_engine_server`（抽自 `cmd_app_server`，建 app+pool+stores+probe+pump）被 `cmd_web` 与 `cmd_app_server` 共用，引擎构建一处。`serve_web` 内部建 `Dispatcher`+`subscribe_yields`（同 `serve_all`）。
+
 ## 14. 深入阅读
 
 - `docs/webui-refactor-design.md`（+`_EN`）—— W1–W5 分阶段迁移路径与取舍表。

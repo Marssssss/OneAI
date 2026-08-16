@@ -95,6 +95,7 @@ mod cmd_token;
 mod cmd_usage;
 mod cmd_version;
 mod cmd_wasm;
+mod cmd_web;
 mod cmd_workflow;
 mod config;
 mod tui;
@@ -207,6 +208,36 @@ enum Commands {
         /// `ws://<host>:<port>`. Default: `ipc://~/.oneai/app-server.sock`.
         #[arg(long = "listen", value_name = "SPEC")]
         listen: Vec<String>,
+        /// Domain pack (default: coding)
+        #[arg(long)]
+        domain: Option<String>,
+        /// Model override
+        #[arg(long)]
+        model: Option<String>,
+        /// Default user identity for memory namespacing
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Launch the webUI — one command: builds the engine, serves the prebuilt
+    /// SPA static assets + the `/ws` JSON-RPC endpoint on one port, and opens
+    /// the default browser. `npx oneai-cli web` (the npm package bundles the
+    /// dist + fetches the platform binary on install) or `oneai web` (global
+    /// install). Mirrors deepseek-harness's `npx @deepseek-ai/dsh web`.
+    Web {
+        /// Port to listen on (default: 8787)
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        /// Host to bind (default: 127.0.0.1 — local only)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Path to the prebuilt web dist (overrides auto-detect). Auto-detect
+        /// order: `ONEAI_WEB_DIST` env → `<exe_dir>/web-dist` →
+        /// `./platforms/web/dist` → `~/.oneai/web-dist`.
+        #[arg(long, value_name = "PATH")]
+        dist: Option<String>,
+        /// Don't open the browser (just print the URL)
+        #[arg(long = "no-open")]
+        no_open: bool,
         /// Domain pack (default: coding)
         #[arg(long)]
         domain: Option<String>,
@@ -1636,6 +1667,24 @@ fn main() {
         }) => cmd_app_server::cmd_app_server(
             &config,
             &listen,
+            domain.as_deref(),
+            model.as_deref(),
+            user.as_deref(),
+        ),
+        Some(Commands::Web {
+            port,
+            host,
+            dist,
+            no_open,
+            domain,
+            model,
+            user,
+        }) => cmd_web::cmd_web(
+            &config,
+            port,
+            host,
+            dist.as_deref(),
+            no_open,
             domain.as_deref(),
             model.as_deref(),
             user.as_deref(),

@@ -3815,6 +3815,7 @@ name = "oneai-app-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "dirs 5.0.1",
  "futures",
@@ -3828,6 +3829,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tokio-util",
+ "tower-http",
  "tracing",
 ]
 

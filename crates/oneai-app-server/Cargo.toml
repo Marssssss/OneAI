@@ -21,6 +21,13 @@ dirs = { workspace = true }
 # stays light when WS is not needed; default-on for the CLI.
 tokio-tungstenite = { workspace = true, optional = true }
 
+# HTTP transport (`oneai web`): axum serves the SPA static dir + the `/ws`
+# upgrade on one port (same-origin). The `ws`/`fs` features are added on top of
+# the workspace pin (which pins `json` / `cors,trace`); additive feature
+# unification keeps one copy. `http` implies `ws` (the bridge reuses it).
+axum = { workspace = true, optional = true, features = ["ws"] }
+tower-http = { workspace = true, optional = true, features = ["fs"] }
+
 # Internal crates — sits at the same layer as oneai-supervisor / oneai-studio
 # (below oneai-app). Reuses IpcListener/IpcStream for the stdio/UDS/pipe
 # transports; the engine itself is built by the CLI, not this crate.
@@ -29,9 +36,11 @@ oneai-bus = { workspace = true }
 oneai-supervisor = { workspace = true }
 
 [features]
-default = ["ws"]
+default = ["ws", "http"]
 ws = ["dep:tokio-tungstenite"]
+http = ["ws", "dep:axum", "dep:tower-http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
 chrono = { workspace = true }
+tokio-tungstenite = { workspace = true }

@@ -75,6 +75,29 @@ VS Code/browser ports, sharing the same engine authority.
   debounce) with localized inline errors; `scenario/upsert`/`delete`. Presets
   are read-only.
 
+## Quick launch (one command)
+
+For end users — no source checkout, no separate processes. The engine serves
+the prebuilt SPA **and** the `/ws` JSON-RPC endpoint on one port, then opens
+the browser:
+
+```bash
+npx oneai-cli web            # npm package: bundles the dist + fetches the platform binary on install
+# or, with a global/cargo install:
+oneai web                    # serves http://127.0.0.1:8787 and opens the browser
+oneai web --no-open --port 8080   # headless / custom port
+```
+
+The SPA's ws URL is derived from the page origin (`ws://<host>:<port>/ws`)
+when `VITE_APP_SERVER_URL` is unset, so the same built dist works on any port.
+
+The web dist (platform-independent JS) ships inside the `oneai-cli` npm
+tarball — `npm publish` builds it via `prepublishOnly`
+(`platforms/npm/scripts/build-web.sh`) and the launcher points the binary at
+it via `ONEAI_WEB_DIST`. For cargo/binary users, `oneai web` auto-detects
+`./platforms/web/dist` (run `npm run build` once) or `--dist <path>` /
+`ONEAI_WEB_DIST=<path>`.
+
 ## Develop
 
 Start the engine's ws transport in one terminal:

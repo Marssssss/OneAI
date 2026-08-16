@@ -24,7 +24,7 @@ use oneai_app_server::{
     DomainPackInfo, DomainPackList, FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo,
     ProviderOpResult, SharedAppProbe, SharedScenarioStore, SkillInfo, SkillOpResult,
 };
-use oneai_bus::{EngineBus, EngineYield};
+use oneai_bus::{EngineBus, EngineYield, InProcessBus};
 use oneai_core::error::Result;
 use oneai_core::ProviderPoolConfig;
 use oneai_core::{traits::LlmProvider, Message};
@@ -42,7 +42,7 @@ use crate::config::{OneaiConfig, ProviderEntryConfig};
 /// the sidecar's stderr to `~/.oneai/app-server-sidecar.log`, so this surfaces
 /// engine activity (iterations, tool calls, approvals, errors) there for
 /// debugging a stuck turn. `RUST_LOG` overrides the default filter.
-fn init_stderr_logging() {
+pub(crate) fn init_stderr_logging() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info,oneai=info,oneai_agent=info,oneai_provider=info,oneai_app_server=info")
@@ -756,6 +756,157 @@ fn entry_to_model_config_strict(dto: &ProviderEntryDto) -> ModelConfig {
     }
 }
 
+// ─── EngineServer ────────────────────────────────────────────────────────────
+//
+// The shared engine build: identical whether the frontend wire is multi-
+// transport JSON-RPC (`app-server`) or the single-port HTTP+ws `web` server.
+// `build_engine_server` constructs the App (provider pool, SQLite
+// persistence, working-state, domain pack, skills/tools), the AppSession, the
+// in-process bus, the directive pump (detached — owned by the tokio runtime),
+// and the three frontend-facing handles a transport needs (conversation /
+// feedback / scenario stores + the config probe). Both `cmd_app_server` and
+// `cmd_web` call this so there is one place that wires the engine.
+
+/// The handles a transport binds against. The pump + `AppServerRuntime` +
+/// `App` Arc stay alive inside the (detached) pump task — these four are the
+/// transport-facing surface.
+pub(crate) struct EngineServer {
+    pub bus: Arc<InProcessBus>,
+    pub scenario_store: SharedScenarioStore,
+    pub conversation_store: oneai_app_server::SharedConversationStore,
+    pub feedback_store: oneai_app_server::SharedFeedbackStore,
+    pub probe: SharedAppProbe,
+}
+
+/// Build the engine + pump + stores + probe. `provider_config` is the launch
+/// provider (env / `--model`) computed once by the caller (it also needs it
+/// for the startup banner). The pump is spawned detached — the tokio runtime
+/// owns it for the process lifetime (the returned `EngineServer` keeps the
+/// stores/probe, which hold `Arc<App>` clones, alive).
+pub(crate) async fn build_engine_server(
+    config: &OneaiConfig,
+    provider_config: Option<ModelConfig>,
+    domain: Option<&str>,
+    user: Option<&str>,
+) -> std::result::Result<EngineServer, Box<dyn std::error::Error + Send + Sync>> {
+    // Engine bus — wires the InProcessBus + BusInteractionGate (approvals
+    // surface as EngineYield::ApprovalRequest ↔ Directive::Approve).
+    let (builder, directive_rx) = AppBuilder::new()
+        .default_parser()
+        .default_rate_limiter()
+        .engine_bus();
+    let mut builder = builder.generation_config(config.generation.clone());
+    // Clone before the move into ProviderFactory::create — start_group
+    // injects these defaults into group-chat members that lack their own.
+    let runtime_provider_config = provider_config.clone();
+    // Build the provider POOL (the `App.provider`). Multi-provider
+    // (`[[providers]]`) when configured, else a single-entry pool from the
+    // legacy/env provider (model override applied via `provider_config`).
+    let pool: Option<Arc<ProviderPool>> = if !config.providers.is_empty() {
+        let entries: Vec<ProviderEntry> = config
+            .to_pool_model_configs()
+            .into_iter()
+            .map(|(name, mc)| ProviderEntry::new(name, Arc::from(ProviderFactory::create(mc)), 0))
+            .collect();
+        let pool = ProviderPool::new(entries, ProviderPoolConfig::default());
+        if let Some(active) = &config.active_provider {
+            let _ = pool.set_active_by_name(active);
+        }
+        Some(Arc::new(pool))
+    } else {
+        provider_config.as_ref().map(|mc| {
+            Arc::new(ProviderPool::single(
+                Arc::from(ProviderFactory::create(mc.clone())),
+                "default",
+            ))
+        })
+    };
+    let probe_pool = pool.clone();
+    if let Some(p) = pool {
+        builder = builder.provider(p);
+    }
+    if let Some(uid) = user {
+        builder = builder.user_id(uid);
+    }
+    // SQLite persistence. Default path is ~/.oneai/oneai.db, but when a
+    // host (the macOS app's sidecar spawn) sets ONEAI_DB_PATH, persist at
+    // that path instead — so the sidecar shares the SAME DB the in-process
+    // FFI engine writes. Switching transports then never loses history.
+    if let Some(db_path) = std::env::var("ONEAI_DB_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        eprintln!("   SQLite DB (shared): {db_path}");
+        builder = builder.sqlite_persistence_at(&db_path);
+    } else {
+        builder = builder.sqlite_persistence();
+    }
+    builder = builder.working_state("./.oneai");
+
+    let domain_pack_name = domain.unwrap_or("coding");
+    let domain_pack =
+        get_builtin_pack(domain_pack_name, ".").unwrap_or_else(|| oneai_domain::coding_pack("."));
+    builder = builder.domain_pack(domain_pack);
+
+    let app = builder.build().await?;
+    let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
+    let _ = app.skill_registry.register_builtin(skills).await;
+    let _ = app.register_tool(Arc::new(CalculatorTool::new())).await;
+    let _ = app.register_skill_tools().await;
+
+    let session = app.create_session();
+    let app = Arc::new(app);
+    let bus = app
+        .engine_bus
+        .clone()
+        .expect("engine_bus() was called on the builder");
+
+    let conversation_store: oneai_app_server::SharedConversationStore =
+        Arc::new(AppConversationStore { app: app.clone() });
+    let feedback_store: oneai_app_server::SharedFeedbackStore =
+        Arc::new(AppFeedbackStore { app: app.clone() });
+    let probe: SharedAppProbe = Arc::new(AppProbeImpl {
+        app: app.clone(),
+        domain_pack_name: domain.map(|d| d.to_string()),
+        provider_config: runtime_provider_config.clone(),
+        pool: probe_pool,
+    });
+    let runtime = Arc::new(Mutex::new(AppServerRuntime {
+        app: app.clone(),
+        session,
+        group: None,
+        provider_config: runtime_provider_config,
+    }));
+    let interrupt_slot: Arc<Mutex<Option<AgentLoop>>> = Arc::new(Mutex::new(None));
+
+    // Engine driver — the shared pump (detached; tokio owns it). Drains
+    // Directive::UserMessage → run_turn_via_bus; Shutdown stops it.
+    let _pump = oneai_app::spawn_directive_pump(directive_rx, runtime, interrupt_slot, bus.clone());
+
+    // Shared scenario library — `~/.oneai/scenarios.json` (seeded with builtin
+    // presets on first run). A bad file degrades to an in-memory store so the
+    // transport still binds.
+    let scenario_store: SharedScenarioStore = {
+        let path = default_scenarios_path();
+        match FileScenarioStore::new(path.clone()).await {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                eprintln!("⚠️  scenario store at {} unavailable: {e}", path.display());
+                eprintln!("   scenario/* methods will fail; other transports unaffected.");
+                Arc::new(oneai_app_server::InMemoryScenarioStore::new())
+            }
+        }
+    };
+
+    Ok(EngineServer {
+        bus,
+        scenario_store,
+        conversation_store,
+        feedback_store,
+        probe,
+    })
+}
+
 // ─── cmd_app_server ──────────────────────────────────────────────────────────
 
 pub fn cmd_app_server(
@@ -808,153 +959,17 @@ pub fn cmd_app_server(
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if let Err(e) = rt.block_on(async move {
-        // Engine bus — wires the InProcessBus + BusInteractionGate (approvals
-        // surface as EngineYield::ApprovalRequest ↔ Directive::Approve).
-        let (builder, directive_rx) = AppBuilder::new()
-            .default_parser()
-            .default_rate_limiter()
-            .engine_bus();
-        let mut builder = builder.generation_config(config.generation.clone());
-        // Clone before the move into ProviderFactory::create — start_group
-        // injects these defaults into group-chat members that lack their own.
-        let runtime_provider_config = provider_config.clone();
-        // Build the provider POOL (the `App.provider`). Multi-provider
-        // (`[[providers]]`) when configured, else a single-entry pool from the
-        // legacy/env provider (model override applied via `provider_config`).
-        // The pool IS `App.provider`; the probe mutates it live for
-        // `provider/add`·`delete`·`set_active` (atomic `active_index` switch,
-        // live entry add/remove — no `App.provider` swap needed).
-        let pool: Option<Arc<ProviderPool>> = if !config.providers.is_empty() {
-            let entries: Vec<ProviderEntry> = config
-                .to_pool_model_configs()
-                .into_iter()
-                .map(|(name, mc)| {
-                    ProviderEntry::new(name, Arc::from(ProviderFactory::create(mc)), 0)
-                })
-                .collect();
-            let pool = ProviderPool::new(entries, ProviderPoolConfig::default());
-            if let Some(active) = &config.active_provider {
-                let _ = pool.set_active_by_name(active);
-            }
-            Some(Arc::new(pool))
-        } else {
-            provider_config.as_ref().map(|mc| {
-                Arc::new(ProviderPool::single(
-                    Arc::from(ProviderFactory::create(mc.clone())),
-                    "default",
-                ))
-            })
-        };
-        let probe_pool = pool.clone();
-        if let Some(p) = pool {
-            builder = builder.provider(p);
-        }
-        if let Some(uid) = user {
-            builder = builder.user_id(uid);
-        }
-        // SQLite persistence. Default path is ~/.oneai/oneai.db, but when a
-        // host (the macOS app's sidecar spawn) sets ONEAI_DB_PATH, persist at
-        // that path instead — so the sidecar shares the SAME DB the in-process
-        // FFI engine writes (~/Library/Application Support/oneai.db on macOS).
-        // Switching transports then never loses history: the sidebar reads the
-        // rows whichever engine is active. SQLite WAL + busy_timeout make the
-        // cross-process sharing safe (only one engine is ever active at once —
-        // the FFI app isn't built in sidecar mode, and vice versa).
-        if let Some(db_path) = std::env::var("ONEAI_DB_PATH")
-            .ok()
-            .filter(|s| !s.is_empty())
-        {
-            eprintln!("   SQLite DB (shared): {db_path}");
-            builder = builder.sqlite_persistence_at(&db_path);
-        } else {
-            builder = builder.sqlite_persistence();
-        }
-        builder = builder.working_state("./.oneai");
-
-        let domain_pack_name = domain.unwrap_or("coding");
-        let domain_pack = get_builtin_pack(domain_pack_name, ".")
-            .unwrap_or_else(|| oneai_domain::coding_pack("."));
-        builder = builder.domain_pack(domain_pack);
-
-        let app = builder.build().await?;
-        let skills = oneai_skill::builtin::skills_for_domain(domain_pack_name);
-        let _ = app.skill_registry.register_builtin(skills).await;
-        let _ = app.register_tool(Arc::new(CalculatorTool::new())).await;
-        let _ = app.register_skill_tools().await;
-
-        let session = app.create_session();
-        let app = Arc::new(app);
-        let bus = app
-            .engine_bus
-            .clone()
-            .expect("engine_bus() was called on the builder");
-
-        // Conversation listing handle for `session/list` — wraps the same
-        // `Arc<App>` the runtime drives, so a sidecar frontend's sidebar
-        // reads the conversations this very process persists (and, when the
-        // macOS app points `ONEAI_DB_PATH` at its Application Support DB,
-        // the SAME rows the in-process FFI engine wrote — switching transports
-        // never loses history).
-        let conversation_store: oneai_app_server::SharedConversationStore =
-            Arc::new(AppConversationStore { app: app.clone() });
-
-        // Feedback store — backs `feedback/submit` + `feedback/list` (sync
-        // CRUD, same seam as `conversation_store`). Wraps the same `Arc<App>`,
-        // delegating to `App::record_feedback` / `list_feedback` → the shared
-        // SQLite store (`ONEAI_DB_PATH`).
-        let feedback_store: oneai_app_server::SharedFeedbackStore =
-            Arc::new(AppFeedbackStore { app: app.clone() });
-
-        // App probe — backs the `config/*` / `provider/*` / `domainpack/*` /
-        // `skill/*` JSON-RPC methods (read-only config + skill lifecycle).
-        let probe: SharedAppProbe = Arc::new(AppProbeImpl {
-            app: app.clone(),
-            domain_pack_name: domain.map(|d| d.to_string()),
-            provider_config: runtime_provider_config.clone(),
-            pool: probe_pool,
-        });
-
-        let runtime = Arc::new(Mutex::new(AppServerRuntime {
-            app: app.clone(),
-            session,
-            group: None,
-            provider_config: runtime_provider_config,
-        }));
-        let interrupt_slot: Arc<Mutex<Option<AgentLoop>>> = Arc::new(Mutex::new(None));
-
-        // Engine driver — the shared pump. Drains Directive::UserMessage →
-        // run_turn_via_bus; Shutdown stops it.
-        let _pump =
-            oneai_app::spawn_directive_pump(directive_rx, runtime, interrupt_slot, bus.clone());
-
-        // Shared scenario library — the `scenario/*` methods back every
-        // frontend's editor off one store + one validator. File-backed at
-        // `~/.oneai/scenarios.json` (seeded with builtin presets on first run).
-        let scenario_store: SharedScenarioStore = {
-            let path = default_scenarios_path();
-            match FileScenarioStore::new(path.clone()).await {
-                Ok(s) => Arc::new(s),
-                Err(e) => {
-                    eprintln!("⚠️  scenario store at {} unavailable: {e}", path.display());
-                    eprintln!("   scenario/* methods will fail; other transports unaffected.");
-                    // An empty in-memory store so serve_all still binds; the
-                    // scenario/* methods return internal errors rather than
-                    // panicking. Keeps a bad scenarios.json from taking down
-                    // the whole app-server.
-                    Arc::new(oneai_app_server::InMemoryScenarioStore::new())
-                }
-            }
-        };
+        let es = build_engine_server(config, provider_config, domain, user).await?;
 
         // Multi-transport JSON-RPC server. Binds all `--listen` specs
         // concurrently against the one bus.
         let server = serve_all(
             specs,
-            bus,
-            scenario_store,
-            conversation_store,
-            feedback_store,
-            probe,
+            es.bus,
+            es.scenario_store,
+            es.conversation_store,
+            es.feedback_store,
+            es.probe,
         )
         .await?;
 

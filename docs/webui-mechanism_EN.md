@@ -92,6 +92,15 @@ Two layers, both in `platforms/web/`, via `npm run test` / `npm run e2e`:
 
 `npm run build` = `tsc --noEmit && vite build` (`dist/`). `npm run typecheck` is tsc alone. shiki language bundles are lazy-loaded; first paint loads only the conversation domain. The bundle is large (full shiki languages) — known, can be optimized later via `manualChunks`. npm devDeps do not pass the cargo supply-chain gate (`Cargo.lock`/`deny.toml` are unaffected); `npm audit` must be 0 (upgrading vitest to 4.x cleared the old esbuild transitive chain).
 
+## 13.5. One-command launch (`oneai web`)
+
+Mirrors deepseek-harness's `npx @deepseek-ai/dsh web`: **one command** lifts the engine + webUI + browser, no source, no extra processes. The engine process serves the SPA static dist **and** the `/ws` JSON-RPC upgrade on one port — `oneai-app-server`'s `serve_web` (feature `http`, axum 0.8 + `tower-http` `fs`) mounts `ServeDir` (with `index.html` SPA fallback) + `WebSocketUpgrade` on one router, and `serve_ws_axum` bridges the axum WebSocket to the existing `serve_connection` `mpsc<String>` seam (reuses all JSON-RPC handling, zero duplication).
+
+- **Run**: `npx oneai-cli web` (npm package bundles the dist + fetches the platform binary on install) or `oneai web` (global/cargo install). Default `http://127.0.0.1:8787`, auto-opens the browser (`--no-open` skips; `--port/--host/--dist/--domain/--model/--user` configurable).
+- **Self-contained ws URL**: when `VITE_APP_SERVER_URL` is unset, `App.tsx` derives it from the page origin `${wss?}://${host}/ws`, so the same built dist works on any host:port with no per-port rebuild; dev (`npm run dev` on 5173) can still override via env to point at a standalone app-server.
+- **Dist source**: the web dist is platform-independent JS bundled into the `oneai-cli` npm tarball (`npm publish`'s `prepublishOnly` runs `platforms/npm/scripts/build-web.sh` to build + stage into `web-dist/`, gitignored); the launcher injects `ONEAI_WEB_DIST` to the package's dist. Cargo/binary users use `--dist` or auto-detect (`./platforms/web/dist` / `~/.oneai/web-dist`).
+- **Reuse**: the CLI's `build_engine_server` (extracted from `cmd_app_server`, builds app+pool+stores+probe+pump) is shared by `cmd_web` and `cmd_app_server` — one engine-build path. `serve_web` builds its own `Dispatcher`+`subscribe_yields` (like `serve_all`).
+
 ## 14. Further reading
 
 - `docs/webui-refactor-design.md` (+`_EN`) — the W1–W5 phased migration path and trade-off table.

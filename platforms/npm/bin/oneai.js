@@ -56,7 +56,18 @@ if (!bin) {
 
 // Forward argv (drop the node + script path) + inherit stdio so the TUI /
 // app-server behave exactly as if the binary were called directly.
-const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
+//
+// When the package bundles the webUI dist (web-dist/, built at publish), point
+// `oneai web` at it via ONEAI_WEB_DIST — unless the caller already set it (an
+// override) or no dist is bundled (older publish). The binary's `cmd_web`
+// auto-detects it from here.
+const env = { ...process.env };
+const bundledDist = path.join(__dirname, "..", "web-dist");
+if (!env.ONEAI_WEB_DIST && fs.existsSync(path.join(bundledDist, "index.html"))) {
+  env.ONEAI_WEB_DIST = bundledDist;
+}
+
+const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit", env });
 
 // Propagate the engine's exit code; signal death → 128+signum (shell convention).
 if (result.signal) process.kill(process.pid, result.signal);
