@@ -120,15 +120,15 @@ function resolveSpeaker(
 ): SpeakerMeta | null {
   if (speaker === null) return null
   if (speaker === 'user' || speaker.length === 0) {
-    return { name: userLabel, color: '#8A8A8A' }
+    return { name: userLabel, color: 'var(--oneai-speaker-fallback)' }
   }
   if (members !== null) {
     const m = members.find((x) => x.id === speaker)
     if (m !== undefined) {
-      return { name: m.name, color: m.color ?? '#8A8A8A' }
+      return { name: m.name, color: m.color ?? 'var(--oneai-speaker-fallback)' }
     }
   }
-  return { name: speaker, color: '#8A8A8A' }
+  return { name: speaker, color: 'var(--oneai-speaker-fallback)' }
 }
 
 /** Derive a `data:` URL from an image content block's base64 data. */

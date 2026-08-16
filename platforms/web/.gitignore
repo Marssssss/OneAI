@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+# Playwright e2e artifacts (traces, screenshots, HTML reports)
+test-results/
+playwright-report/

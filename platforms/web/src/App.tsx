@@ -37,6 +37,9 @@ import { DomainPackModal } from './domainpack/DomainPackModal'
 import { sessionMetaStore, useSessionMeta } from './store/sessionMeta'
 import { localeStore, useLocale } from './i18n'
 import './theme/markdown.css'
+import styles from './App.module.css'
+import type { Theme } from './theme'
+import { readInitialTheme, THEME_STORAGE_KEY } from './theme'
 
 const APP_SERVER_URL =
   (import.meta.env.VITE_APP_SERVER_URL as string | undefined) ?? 'ws://127.0.0.1:8787'
@@ -47,7 +50,6 @@ interface FramePrefs {
   detailsOpen: boolean
 }
 
-type Theme = 'light' | 'dark'
 
 type ModalState =
   | { kind: 'picker' }
@@ -66,7 +68,12 @@ export default function App(): React.ReactNode {
   const scenarioList = useMemo(() => new ScenarioListStore(rpc), [rpc])
   const settings = useMemo(() => new SettingsStore(rpc), [rpc])
   const [status, setStatus] = useState<ConnectionStatus>('closed')
-  const [theme, setTheme] = useState<Theme>(() => readInitialTheme())
+  const [theme, setTheme] = useState<Theme>(() => readInitialTheme().theme)
+  // Tracks whether the user has explicitly chosen a theme (toggle). Until they
+  // do, the theme follows the OS `prefers-color-scheme` live — so an OS flip
+  // after load still re-themes the app. Once explicit, we persist + stop
+  // following (explicit choice wins, mirrors dsh's behavior).
+  const themeExplicit = useRef<boolean>(readInitialTheme().explicit)
   const { locale, t } = useLocale()
   // planMode is the App-owned toggle synced via config/update; the live
   // paradigm (from paradigm_switch yields) also feeds the chip's "on" state.
@@ -79,6 +86,8 @@ export default function App(): React.ReactNode {
   })
   const [prefs, setPrefs] = useState<FramePrefs>(prefsRef.current)
   const [detailsTab, setDetailsTab] = useState<DetailsTab>('tool')
+  // Mobile nav drawer (controlled by App so pick handlers can close it).
+  const [drawerOpen, setDrawerOpen] = useState(false)
 
   // Connect on mount; dispose on unmount.
   useEffect(() => {
@@ -92,15 +101,23 @@ export default function App(): React.ReactNode {
     }
   }, [rpc, projection])
 
-  // Apply the theme attribute.
+  // Apply the theme attribute. Persistence happens only on explicit toggle
+  // (toggleTheme) — an OS-derived theme is intentionally NOT persisted so
+  // live OS-theme following keeps working until the user picks one.
   useEffect(() => {
     document.body.setAttribute('data-oneai-theme', theme)
-    try {
-      localStorage.setItem('oneai-theme', theme)
-    } catch {
-      /* ignore */
-    }
   }, [theme])
+
+  // Follow the OS theme live while the user hasn't explicitly chosen one.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!themeExplicit.current) setTheme(e.matches ? 'dark' : 'light')
+    }
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
 
   // When the socket opens: ensure we have a session, then load the lists.
   const creatingRef = useRef(false)
@@ -145,6 +162,7 @@ export default function App(): React.ReactNode {
   const handleNewSession = async () => {
     // New single-agent chat — leave any active scenario.
     projection.exitScenario()
+    setDrawerOpen(false)
     try {
       await rpc.call<{ id?: string }, { id?: string }>('session/create', {})
       await sessionList.refresh()
@@ -154,6 +172,7 @@ export default function App(): React.ReactNode {
   }
   const handlePickSession = (id: string) => {
     projection.exitScenario()
+    setDrawerOpen(false)
     void projection.loadSession(id)
   }
   const handleRenameSession = (id: string, currentTitle: string) => {
@@ -175,7 +194,18 @@ export default function App(): React.ReactNode {
     sessionMetaStore.forget(id)
     await sessionList.refresh()
   }
-  const toggleTheme = () => setTheme((th) => (th === 'dark' ? 'light' : 'dark'))
+  const toggleTheme = () => {
+    themeExplicit.current = true
+    setTheme((th) => {
+      const next = th === 'dark' ? 'light' : 'dark'
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, next)
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }
   const toggleLocale = () =>
     localeStore.setLocale(localeStore.getLocale() === 'zh' ? 'en' : 'zh')
 
@@ -238,6 +268,7 @@ export default function App(): React.ReactNode {
 
   // ── scenario handlers ───────────────────────────────────────────────────────
   const handlePickScenario = (scenario: BusScenario) => {
+    setDrawerOpen(false)
     const hasTopics = (scenario.topic_fields ?? []).length > 0
     if (hasTopics) {
       setModal({ kind: 'intake', scenario })
@@ -331,6 +362,21 @@ export default function App(): React.ReactNode {
         }
         prefs={prefs}
         onPrefsChange={setPrefs}
+        drawerOpen={drawerOpen}
+        onDrawerOpenChange={setDrawerOpen}
+        mobileBar={
+          <>
+            <span className={styles.mobileTitle}>{t('app.title')}</span>
+            <button
+              className={styles.mobileThemeBtn}
+              onClick={toggleTheme}
+              title={t('theme.toggle')}
+              aria-label={t('theme.toggle')}
+            >
+              {theme === 'dark' ? '☀' : '☾'}
+            </button>
+          </>
+        }
       />
       {modal?.kind === 'picker' && (
         <ScenarioPicker
@@ -390,18 +436,3 @@ export default function App(): React.ReactNode {
   )
 }
 
-function readInitialTheme(): Theme {
-  try {
-    const stored = localStorage.getItem('oneai-theme')
-    if (stored === 'dark' || stored === 'light') return stored
-  } catch {
-    /* ignore */
-  }
-  if (
-    typeof window !== 'undefined' &&
-    window.matchMedia?.('(prefers-color-scheme: dark)').matches
-  ) {
-    return 'dark'
-  }
-  return 'light'
-}

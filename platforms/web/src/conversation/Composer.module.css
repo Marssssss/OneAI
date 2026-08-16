@@ -112,7 +112,7 @@
   border-radius: var(--oneai-radius);
   border: none;
   background: var(--oneai-red);
-  color: #fff;
+  color: var(--oneai-accent-fg);
   font-size: 14px;
   cursor: pointer;
   display: flex;
@@ -218,7 +218,7 @@
 }
 .attachmentRemove:hover {
   background: var(--oneai-red);
-  color: #fff;
+  color: var(--oneai-accent-fg);
 }
 
 .fileInput {

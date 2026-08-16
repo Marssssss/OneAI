@@ -28,7 +28,7 @@
   border-radius: 50%;
   border: none;
   background: rgba(0, 0, 0, 0.5);
-  color: #fff;
+  color: var(--oneai-accent-fg);
   font-size: 16px;
   cursor: pointer;
   display: flex;

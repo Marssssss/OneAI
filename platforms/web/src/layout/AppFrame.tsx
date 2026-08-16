@@ -17,6 +17,10 @@ const SIDEBAR_COLLAPSED = 56
 const DETAILS_MIN = 300
 const CENTER_MIN = 640
 const GUTTER = 6 // resize handle between an expanded sidebar and the center
+// Below this viewport width the 3-column grid is abandoned for a single-column
+// mobile layout: sidebar becomes a slide-in drawer, details hides, a top bar
+// surfaces the nav toggle + quick theme switch. Matches `--oneai-mobile-breakpoint`.
+const MOBILE_BREAKPOINT = 900
 
 interface Columns {
   sidebar: number
@@ -83,6 +87,13 @@ interface AppFrameProps {
   /** Sticky prefs the parent owns so collapse state survives re-mounts. */
   prefs: Prefs
   onPrefsChange: (p: Prefs) => void
+  /** Top-bar content on mobile (title + quick theme toggle). The hamburger
+   * nav button is rendered by AppFrame itself; this fills the rest. */
+  mobileBar?: ReactNode
+  /** Mobile drawer open state (controlled). Lifted so the parent's nav
+   * pick handlers can close it after a selection. */
+  drawerOpen: boolean
+  onDrawerOpenChange: (open: boolean) => void
 }
 
 export function AppFrame({
@@ -91,16 +102,36 @@ export function AppFrame({
   details,
   prefs,
   onPrefsChange,
+  mobileBar,
+  drawerOpen,
+  onDrawerOpenChange,
 }: AppFrameProps): ReactNode {
   const [width, setWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280,
   )
+  const isMobile = width <= MOBILE_BREAKPOINT
 
   useEffect(() => {
     const onResize = () => setWidth(window.innerWidth)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
+
+  // Leaving mobile (window widened past the breakpoint) closes the drawer so
+  // it doesn't reappear as a stale overlay next time the user shrinks back.
+  useEffect(() => {
+    if (!isMobile && drawerOpen) onDrawerOpenChange(false)
+  }, [isMobile, drawerOpen, onDrawerOpenChange])
+
+  // Close the mobile drawer on Escape.
+  useEffect(() => {
+    if (!isMobile || !drawerOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onDrawerOpenChange(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isMobile, drawerOpen, onDrawerOpenChange])
 
   // The grid template's column count MUST match the rendered child count —
   // a stray grid child (the gutter) lands in the wrong track and shoves the
@@ -135,6 +166,39 @@ export function AppFrame({
     },
     [prefs, onPrefsChange],
   )
+
+  // Mobile: single column with a top bar + slide-in drawer. Details is a
+  // secondary panel and is hidden on mobile (the column solver's 640px center
+  // floor is meaningless on a phone). The sidebar node is reused inside the
+  // drawer so all its actions (new session, pick, theme/locale toggles) work.
+  if (isMobile) {
+    return (
+      <div className={styles.frameMobile}>
+        <header className={styles.mobileBar}>
+          <button
+            className={styles.hamburger}
+            onClick={() => onDrawerOpenChange(true)}
+            aria-label="Open navigation"
+          >
+            ☰
+          </button>
+          {mobileBar}
+        </header>
+        <main className={styles.center}>{center}</main>
+        {drawerOpen && (
+          <>
+            <div
+              className={styles.scrim}
+              onClick={() => onDrawerOpenChange(false)}
+            />
+            <aside className={`${styles.drawer} ${styles.drawerOpen}`}>
+              {sidebar}
+            </aside>
+          </>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className={styles.frame} style={{ gridTemplateColumns: gridTemplate }}>

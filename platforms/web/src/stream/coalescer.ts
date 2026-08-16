@@ -42,10 +42,16 @@ export class StreamCoalescer {
     const elapsed = Date.now() - this.lastFlush
     const wait = Math.max(0, FLUSH_INTERVAL_MS - elapsed)
     // Sleep `wait` ms, then drain on the next animation frame so the flush
-    // lands in the browser's paint cycle rather than mid-task.
+    // lands in the browser's paint cycle rather than mid-task. rAF is absent
+    // in some non-browser environments (jsdom, SSR); fall back to a 0ms timer
+    // there so the drain still fires.
+    const scheduleDrain =
+      typeof requestAnimationFrame === 'function'
+        ? (fn: () => void) => requestAnimationFrame(fn)
+        : (fn: () => void) => setTimeout(fn, 0)
     setTimeout(() => {
       if (!this.scheduled) return // a flushNow cancelled it
-      requestAnimationFrame(() => this.drain())
+      scheduleDrain(() => this.drain())
     }, wait)
   }
 

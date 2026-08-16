@@ -96,3 +96,14 @@
   font-size: 13px;
   text-align: center;
 }
+
+/* Mobile touch targets — bump session rows to the 44px floor inside the
+ * slide-in drawer so taps don't miss. Desktop density is untouched. */
+@media (max-width: 900px) {
+  .item {
+    min-height: var(--oneai-touch-target);
+  }
+  .item > * {
+    min-height: var(--oneai-touch-target);
+  }
+}

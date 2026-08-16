@@ -35,6 +35,11 @@ interface ScenarioEditorProps {
 }
 
 let blankSeq = 0
+// Default speaker color for a freshly added member. Persisted as scenario
+// data (a real hex — the `<input type=color>` requires it), so it is NOT a
+// theme token; theme-awareness for colorless speakers lives in ChatView via
+// `--oneai-speaker-fallback`.
+const DEFAULT_SPEAKER_COLOR = '#4D6BFE'
 function blankScenario(): BusScenario {
   const t = Date.now()
   blankSeq += 1
@@ -50,7 +55,7 @@ function blankScenario(): BusScenario {
         system_prompt: '',
         kind: 'openai',
         model: '',
-        color: '#4D6BFE',
+        color: DEFAULT_SPEAKER_COLOR,
       },
     ],
     turn_policy: 'roundrobin',
@@ -130,7 +135,7 @@ export function ScenarioEditor({
           system_prompt: '',
           kind: 'openai',
           model: '',
-          color: '#4D6BFE',
+          color: DEFAULT_SPEAKER_COLOR,
         },
       ],
     }))
@@ -259,7 +264,7 @@ export function ScenarioEditor({
                 <input
                   className={styles.color}
                   type="color"
-                  value={m.color ?? '#4D6BFE'}
+                  value={m.color ?? DEFAULT_SPEAKER_COLOR}
                   disabled={isPreset}
                   onChange={(e) => patchMember(i, { color: e.target.value })}
                 />

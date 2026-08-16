@@ -475,7 +475,13 @@ export class ProjectionStore {
 
   // ── EngineYield consumer ───────────────────────────────────────────────────
 
-  private consume(y: EngineYield): void {
+  /** Apply a single EngineYield, mutating the working state + scheduling a
+   * snapshot re-build (coalesced for hot variants, immediate otherwise).
+   *
+   * Public so tests can drive the store directly with a scripted yield
+   * sequence (no real ws). Production wiring still goes through `attach()`
+   * → `rpc.onEvent` → here. */
+  consume(y: EngineYield): void {
     switch (y.kind) {
       case 'turn_start': {
         this.state.currentTurnId = y.turn_id

@@ -51,3 +51,70 @@
   overflow: hidden;
   min-width: 0;
 }
+
+/* ── Mobile: single column + slide-in drawer ─────────────────────────── */
+
+.frameMobile {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: var(--oneai-bg);
+  overflow: hidden;
+}
+
+.mobileBar {
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+  height: 52px;
+  padding: 0 12px;
+  background: var(--oneai-bg-subtle);
+  border-bottom: 1px solid var(--oneai-border);
+  flex: 0 0 auto;
+}
+
+.hamburger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--oneai-touch-target);
+  min-height: var(--oneai-touch-target);
+  border: none;
+  background: transparent;
+  color: var(--oneai-text);
+  font-size: 20px;
+  cursor: pointer;
+  border-radius: var(--oneai-radius-sm);
+}
+.hamburger:hover {
+  background: var(--oneai-bg-elevated);
+}
+
+/* The drawer slides in from the left over a scrim. Same sidebar node as the
+ * desktop column, so it carries the full nav + theme/locale toggles. */
+.drawer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: min(86vw, var(--oneai-sidebar-max));
+  background: var(--oneai-bg-subtle);
+  border-right: 1px solid var(--oneai-border);
+  overflow: hidden;
+  z-index: 40;
+  transform: translateX(-100%);
+  transition: transform var(--oneai-dur) var(--oneai-ease);
+  display: flex;
+  flex-direction: column;
+}
+.drawerOpen {
+  transform: translateX(0);
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--oneai-bg-overlay);
+  z-index: 30;
+}
