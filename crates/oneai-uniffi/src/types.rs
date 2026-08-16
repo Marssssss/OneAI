@@ -414,6 +414,10 @@ pub struct SessionInfoView {
     /// truncated). `None` when the conversation has no user message yet.
     /// Render this as the drawer row label; fall back to a generic label.
     pub title: Option<String>,
+    /// The workspace (working-directory path) the user bound this session to
+    /// at creation. `None` for sessions created without one. Foreign UIs group
+    /// the session list by this label.
+    pub workspace: Option<String>,
 }
 
 impl From<oneai_core::SessionInfo> for SessionInfoView {
@@ -424,6 +428,7 @@ impl From<oneai_core::SessionInfo> for SessionInfoView {
             updated_at_ms: s.updated_at.timestamp_millis(),
             message_count: s.message_count as u64,
             title: s.title,
+            workspace: s.workspace,
         }
     }
 }

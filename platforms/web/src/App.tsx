@@ -30,6 +30,8 @@ import { ScenarioPicker } from './scenario/ScenarioPicker'
 import { TopicIntake } from './scenario/TopicIntake'
 import { ScenarioEditor } from './scenario/ScenarioEditor'
 import { SessionRenameModal } from './scenario/SessionRenameModal'
+import { ConfirmDialog } from './components/ConfirmDialog'
+import { workspaceStore, useWorkspace } from './workspace/workspaceStore'
 import { SettingsRoot } from './settings/SettingsRoot'
 import { SettingsStore } from './settings/settingsStore'
 import { SkillsModal } from './skills/SkillsModal'
@@ -56,6 +58,8 @@ type ModalState =
   | { kind: 'intake'; scenario: BusScenario }
   | { kind: 'editor'; scenario: BusScenario | null }
   | { kind: 'renameSession'; id: string; title: string }
+  | { kind: 'confirmDeleteSession'; id: string }
+  | { kind: 'workspaceSwitchBlocked' }
   | { kind: 'settings' }
   | { kind: 'skills' }
   | { kind: 'domainpack' }
@@ -90,6 +94,9 @@ export default function App(): React.ReactNode {
   const [detailsTab, setDetailsTab] = useState<DetailsTab>('tool')
   // Mobile nav drawer (controlled by App so pick handlers can close it).
   const [drawerOpen, setDrawerOpen] = useState(false)
+  // Workspace dropdown (popover, not a modal) — open only on the welcome
+  // (empty) state; mid-conversation the chip shows a "start a new chat" prompt.
+  const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(false)
 
   // Connect on mount; dispose on unmount.
   useEffect(() => {
@@ -129,7 +136,13 @@ export default function App(): React.ReactNode {
     creatingRef.current = true
     ;(async () => {
       try {
-        await rpc.call<{ id?: string }, { id?: string }>('session/create', {})
+        // Bind the persisted workspace (if any) so a user who reloads with a
+        // workspace selected starts their first chat in it without re-picking.
+        const ws = workspaceStore.getSnapshot().current ?? undefined
+        await rpc.call<{ id?: string; workspace?: string }, { id?: string }>(
+          'session/create',
+          { workspace: ws },
+        )
       } catch {
         /* engine may already have a live session — ignore */
       }
@@ -159,6 +172,7 @@ export default function App(): React.ReactNode {
   const sessions = useSessionList(sessionList)
   const scenarios = useScenarioList(scenarioList)
   const sessionMeta = useSessionMeta()
+  const workspaceSnap = useWorkspace()
 
   // Resolve the active session's display title for the conversation header
   // (client-side rename override wins over the engine's auto-derived title).
@@ -169,12 +183,27 @@ export default function App(): React.ReactNode {
       : null
 
   // ── handlers ────────────────────────────────────────────────────────────────
+  const currentWorkspacePath = workspaceSnap.current
+  const workspaceLabel =
+    currentWorkspacePath === null
+      ? null
+      : workspaceStore.labelFor(currentWorkspacePath)
+
   const handleNewSession = async () => {
-    // New single-agent chat — leave any active scenario.
+    // New single-agent chat — leave any active scenario. Binds the currently
+    // selected workspace (deepseek-harness parity) so the agent operates in
+    // that directory (engine persists metadata["workspace"] + Part C cwd).
+    // Read the workspace LIVE from the store — a render-captured const would
+    // be stale when this fires right after `workspaceStore.setCurrent` in the
+    // same synchronous handler (the picker auto-bind path).
     projection.exitScenario()
     setDrawerOpen(false)
     try {
-      await rpc.call<{ id?: string }, { id?: string }>('session/create', {})
+      const ws = workspaceStore.getSnapshot().current ?? undefined
+      await rpc.call<{ id?: string; workspace?: string }, { id?: string }>(
+        'session/create',
+        { workspace: ws },
+      )
       await sessionList.refresh()
     } catch {
       /* offline */
@@ -194,8 +223,13 @@ export default function App(): React.ReactNode {
   const handleUnarchiveSession = (id: string) => {
     sessionMetaStore.unarchive(id)
   }
-  const handleDeleteSession = async (id: string) => {
-    if (!window.confirm(t('session.confirmDelete'))) return
+  const handleDeleteSession = (id: string) => {
+    // In-page confirm (no browser `window.confirm`). The actual delete runs on
+    // confirm — see `confirmDeleteSession`.
+    setModal({ kind: 'confirmDeleteSession', id })
+  }
+  const performDeleteSession = async (id: string) => {
+    setModal(null)
     try {
       await rpc.call<{ id: string }, { ok: boolean }>('session/delete', { id })
     } catch {
@@ -203,6 +237,54 @@ export default function App(): React.ReactNode {
     }
     sessionMetaStore.forget(id)
     await sessionList.refresh()
+  }
+
+  // Workspace chip click: on the welcome/empty page open the picker; mid-
+  // conversation, prompt that switching needs a new chat (deepseek parity).
+  const handleWorkspaceClick = () => {
+    if (snap.nodes.length === 0) {
+      setWorkspaceDropdownOpen(true)
+    } else {
+      setModal({ kind: 'workspaceSwitchBlocked' })
+    }
+  }
+  // Dropdown "select" — set the chosen workspace current and bind it to a
+  // fresh session (the welcome page is empty, so re-creating is lossless).
+  // An empty path means "no workspace" (the default app-global cwd). The
+  // dropdown closes itself via its own onClose before calling onSelect.
+  const handleWorkspaceSelect = (path: string) => {
+    workspaceStore.setCurrent(path.length > 0 ? path : null)
+    void handleNewSession()
+  }
+  // "添加工作区" — close the dropdown, ask the sidecar to show the native OS
+  // folder picker (`osascript choose folder` / `zenity` / `kdialog`), and on a
+  // real path upsert + bind to a fresh session. Browsers can't get a host
+  // path; the local sidecar can (deepseek-harness parity).
+  const handleAddWorkspace = async () => {
+    setWorkspaceDropdownOpen(false)
+    try {
+      const res = await rpc.call<unknown, { path?: string | null }>(
+        'dialog/pick_directory',
+        {},
+      )
+      const p = res?.path ?? null
+      if (p && p.length > 0) {
+        workspaceStore.upsert(p)
+        handleWorkspaceSelect(p)
+      }
+    } catch (e) {
+      // Most common cause: the running sidecar is a stale binary that
+      // predates the `dialog/pick_directory` RPC (→ "method not found").
+      // Rebuild the sidecar (`cargo build --release -p oneai-cli`) and
+      // restart. Log the detail so devtools shows which.
+      // eslint-disable-next-line no-console
+      console.error('[workspace] dialog/pick_directory failed:', e)
+      alert(
+        t('workspace.pickFailed') +
+          '\n' +
+          (e instanceof Error ? e.message : String(e)),
+      )
+    }
   }
   const toggleTheme = () => {
     themeExplicit.current = true
@@ -361,6 +443,12 @@ export default function App(): React.ReactNode {
               void projection.submitFeedback(nodeId, kind, text)
             }
             sessionTitle={sessionTitle}
+            workspaceLabel={workspaceLabel}
+            onWorkspaceClick={handleWorkspaceClick}
+            workspaceDropdownOpen={workspaceDropdownOpen}
+            onCloseWorkspaceDropdown={() => setWorkspaceDropdownOpen(false)}
+            onSelectWorkspace={handleWorkspaceSelect}
+            onAddWorkspace={handleAddWorkspace}
           />
         }
         details={
@@ -426,6 +514,30 @@ export default function App(): React.ReactNode {
           onSubmit={(title) => {
             sessionMetaStore.rename(modal.id, title)
             setModal(null)
+          }}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.kind === 'confirmDeleteSession' && (
+        <ConfirmDialog
+          title={t('session.delete')}
+          message={t('session.confirmDelete')}
+          confirmLabel={t('session.delete')}
+          cancelLabel={t('scenario.cancel')}
+          danger
+          onConfirm={() => void performDeleteSession(modal.id)}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.kind === 'workspaceSwitchBlocked' && (
+        <ConfirmDialog
+          title={t('workspace.switchBlocked')}
+          message={t('workspace.switchBlockedHint')}
+          confirmLabel={t('workspace.newChat')}
+          cancelLabel={t('scenario.cancel')}
+          onConfirm={() => {
+            setModal(null)
+            void handleNewSession()
           }}
           onClose={() => setModal(null)}
         />

@@ -396,7 +396,11 @@ impl Tool for CodeInterpreterTool {
             shell_quote(&bridge_path.to_string_lossy())
         );
 
-        let wrapped = self.sandbox.wrap_command(&inner_cmd, &self.working_dir)?;
+        // Prefer the session's active workspace as the script's cwd
+        // (deepseek-harness parity); fall back to the baked working_dir.
+        let working_dir =
+            oneai_core::active_cwd::active_cwd().unwrap_or_else(|| self.working_dir.clone());
+        let wrapped = self.sandbox.wrap_command(&inner_cmd, &working_dir)?;
 
         let (shell, shell_arg) = crate::tool_interfaces::resolve_shell();
 

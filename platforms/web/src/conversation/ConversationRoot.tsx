@@ -46,6 +46,18 @@ interface ConversationRootProps {
    * user is in a conversation (nodes on screen) — the "OneAI" wordmark is
    * never shown. */
   sessionTitle: string | null
+  /** The workspace chip label (alias), or null when no workspace is selected.
+   *  The composer renders the picker button left of the mode chip. */
+  workspaceLabel: string | null
+  /** Click handler for the workspace chip — the caller decides dropdown
+   *  (empty state) vs. "start a new chat" prompt (mid-conversation). */
+  onWorkspaceClick: () => void
+  /** Whether the workspace dropdown (popover) is open. */
+  workspaceDropdownOpen: boolean
+  onCloseWorkspaceDropdown: () => void
+  onSelectWorkspace: (path: string) => void
+  /** Open the native OS folder picker (App owns the RPC). */
+  onAddWorkspace: () => void
 }
 
 export function ConversationRoot({
@@ -65,6 +77,12 @@ export function ConversationRoot({
   onDebrief,
   onSubmitFeedback,
   sessionTitle,
+  workspaceLabel,
+  onWorkspaceClick,
+  workspaceDropdownOpen,
+  onCloseWorkspaceDropdown,
+  onSelectWorkspace,
+  onAddWorkspace,
 }: ConversationRootProps): ReactNode {
   const { t } = useLocale()
   const statusText =
@@ -105,10 +123,16 @@ export function ConversationRoot({
       metrics={snapshot.metrics}
       settingsStore={settingsStore}
       attachmentsEnabled={snapshot.currentScenario === null}
+      workspaceLabel={workspaceLabel}
       onSend={onSend}
       onStop={onStop}
       onCycleMode={onCycleMode}
       onSlash={onSlash}
+      onWorkspaceClick={onWorkspaceClick}
+      workspaceDropdownOpen={workspaceDropdownOpen}
+      onCloseWorkspaceDropdown={onCloseWorkspaceDropdown}
+      onSelectWorkspace={onSelectWorkspace}
+      onAddWorkspace={onAddWorkspace}
     />
   )
 

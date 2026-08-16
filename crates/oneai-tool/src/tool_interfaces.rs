@@ -599,7 +599,13 @@ impl Tool for ShellTool {
             .unwrap_or(self.default_timeout_secs)
             .min(self.max_timeout_secs);
 
-        let working_dir = self.allowed_working_dirs.first().cloned();
+        // Prefer the session's active workspace as the command's cwd
+        // (deepseek-harness parity); fall back to the baked allowlist's first
+        // entry (the app-global cwd). The Seatbelt backend re-derives its
+        // write-allowlist from the same source so writes inside the workspace
+        // are permitted.
+        let working_dir = oneai_core::active_cwd::active_cwd()
+            .or_else(|| self.allowed_working_dirs.first().cloned());
         let mut opts =
             crate::terminal::ExecOptions::new(timeout, working_dir, self.max_output_bytes);
 

@@ -12,6 +12,8 @@
   display: flex;
   gap: var(--oneai-gap);
   align-items: center;
+  /* Anchors the workspace dropdown popover (position:absolute; bottom:100%). */
+  position: relative;
 }
 
 /* Push the provider/model switcher to the row's right edge. */
@@ -55,6 +57,21 @@
   font-family: var(--oneai-font-mono);
   font-size: 12px;
   opacity: 0.85;
+}
+
+/* Workspace picker chip — sits LEFT of the mode chip. The alias truncates so
+ * a long path name doesn't blow out the chips row. */
+.workspaceChip {
+  max-width: 200px;
+}
+.workspaceAlias {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspaceCaret {
+  font-size: 10px;
+  opacity: 0.7;
 }
 
 .inputRow {

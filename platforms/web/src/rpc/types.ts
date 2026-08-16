@@ -566,6 +566,10 @@ export interface SessionInfo {
   updated_at_ms: number
   message_count: number
   title: string
+  /** The workspace (host working-dir path) this session was bound to at
+   *  creation; absent for legacy/workspace-less sessions. The sidebar groups
+   *  by this (the "其他" bucket holds absent ones). */
+  workspace?: string
 }
 
 export interface OkResult {

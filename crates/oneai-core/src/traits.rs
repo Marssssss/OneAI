@@ -1421,6 +1421,15 @@ pub struct SessionInfo {
     /// loading full histories.
     #[serde(default)]
     pub title: Option<String>,
+
+    /// The workspace (working-directory path) the user bound this session to at
+    /// creation — a frontend "select workspace" affordance (deepseek-harness
+    /// parity). `None` for sessions created without one (the legacy default:
+    /// the agent's app-global cwd). Persisted in `conversation.metadata
+    /// ["workspace"]`; surfaced here so `session/list` groups sessions by
+    /// workspace without re-reading every conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 impl SessionInfo {
@@ -1437,6 +1446,7 @@ impl SessionInfo {
             updated_at,
             message_count,
             title: None,
+            workspace: None,
         }
     }
 
@@ -1455,7 +1465,16 @@ impl SessionInfo {
             updated_at,
             message_count,
             title,
+            workspace: None,
         }
+    }
+
+    /// Builder-style workspace setter — `list_conversations` derives this from
+    /// `conversation.metadata["workspace"]`; callers that already hold the
+    /// conversation set it directly.
+    pub fn with_workspace(mut self, workspace: Option<String>) -> Self {
+        self.workspace = workspace;
+        self
     }
 }
 

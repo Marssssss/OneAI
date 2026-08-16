@@ -1,10 +1,16 @@
 // SessionList — the saved-conversations list backed by the `session/list`
-// synchronous RPC. Each row shows the (possibly client-overridden) title +
-// message count + a "⋯" more menu (rename / archive / delete). Archived
-// sessions (web-local localStorage flag) are hidden from the main list and
-// shown under a collapsed "已归档 (N)" expander with an un-archive action.
-// Delete is engine-backed (`session/delete`); rename + archive are web-local
-// until a server-side RPC lands.
+// synchronous RPC. Each row shows the (possibly client-overridden) title + a
+// "⋯" more menu (rename / archive / delete). Archived sessions (web-local
+// localStorage flag) are hidden from the main list and shown under a
+// collapsed "已归档 (N)" expander with an un-archive action. Delete is
+// engine-backed (`session/delete`); rename + archive are web-local until a
+// server-side RPC lands.
+//
+// Workspace grouping (deepseek-harness parity): the list defaults to grouping
+// active sessions by their bound `workspace` path (the picker sets it at
+// session/create); a toggle switches to flat. Sessions with no workspace
+// (legacy / created without one) fall into the "其他" group, rendered last.
+// The currently-selected workspace's group is pinned to the top.
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
@@ -12,7 +18,29 @@ import { useLocale } from '../i18n'
 import type { SessionInfo } from '../rpc/types'
 import type { SessionMeta } from '../store/sessionMeta'
 import { MoreMenu } from '../components/MoreMenu'
+import { useWorkspace, workspaceStore } from '../workspace/workspaceStore'
 import styles from './SessionList.module.css'
+
+type GroupMode = 'group' | 'flat'
+
+const GROUP_MODE_KEY = 'oneai-session-group-mode'
+
+function readGroupMode(): GroupMode {
+  try {
+    const v = localStorage.getItem(GROUP_MODE_KEY)
+    return v === 'flat' ? 'flat' : 'group'
+  } catch {
+    return 'group'
+  }
+}
+
+function writeGroupMode(m: GroupMode): void {
+  try {
+    localStorage.setItem(GROUP_MODE_KEY, m)
+  } catch {
+    /* ignore */
+  }
+}
 
 interface SessionListProps {
   sessions: SessionInfo[]
@@ -36,7 +64,11 @@ export function SessionList({
   onDelete,
 }: SessionListProps): ReactNode {
   const { t } = useLocale()
+  const workspaceSnap = useWorkspace()
+  const [groupMode, setGroupMode] = useState<GroupMode>(() => readGroupMode())
   const [showArchived, setShowArchived] = useState(false)
+  // Collapsed group keys (workspace path, or '' for the "其他" bucket).
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
 
   if (sessions.length === 0) {
     return <div className={styles.empty}>{t('sidebar.empty')}</div>
@@ -65,7 +97,6 @@ export function SessionList({
       >
         <button className={styles.pick} onClick={() => onPick(s.id)} title={title}>
           <span className={styles.title}>{title || s.id}</span>
-          <span className={styles.meta}>{s.message_count}</span>
         </button>
         <MoreMenu
           items={items}
@@ -81,9 +112,86 @@ export function SessionList({
     )
   }
 
+  // ── workspace grouping ──────────────────────────────────────────────────
+  // Build ordered groups: [current workspace] then other workspaces (in
+  // first-seen / most-recent order — `active` is already updated_at DESC),
+  // then the "其他" (no-workspace) bucket last.
+  const groups: { key: string; label: string; sessions: SessionInfo[] }[] = []
+  const byKey = new Map<string, SessionInfo[]>()
+  const noKey = '__none__'
+  for (const s of active) {
+    const k = s.workspace ?? noKey
+    const arr = byKey.get(k) ?? []
+    arr.push(s)
+    byKey.set(k, arr)
+  }
+  // Pin the currently-selected workspace's group first (if it has sessions).
+  const currentPath = workspaceSnap.current
+  const order: string[] = []
+  if (currentPath !== null && byKey.has(currentPath)) order.push(currentPath)
+  for (const k of byKey.keys()) {
+    if (k === noKey || k === currentPath) continue
+    order.push(k)
+  }
+  // "其他" last.
+  if (byKey.has(noKey)) order.push(noKey)
+  for (const k of order) {
+    const sessions_ = byKey.get(k)!
+    const label =
+      k === noKey
+        ? t('workspace.other')
+        : workspaceStore.labelFor(k)
+    groups.push({ key: k, label, sessions: sessions_ })
+  }
+
+  const toggleGroup = (key: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const cycleGroupMode = () => {
+    const next: GroupMode = groupMode === 'group' ? 'flat' : 'group'
+    setGroupMode(next)
+    writeGroupMode(next)
+  }
+
   return (
     <div className={styles.list}>
-      {active.map((s) => row(s, false))}
+      <button
+        className={styles.modeToggle}
+        onClick={cycleGroupMode}
+        title={groupMode === 'group' ? t('workspace.flat') : t('workspace.groupBy')}
+      >
+        {groupMode === 'group' ? t('workspace.groupBy') : t('workspace.flat')}
+      </button>
+
+      {groupMode === 'flat'
+        ? active.map((s) => row(s, false))
+        : groups.map((g) => (
+            <div key={g.key} className={styles.group}>
+              <button
+                className={styles.groupHeader}
+                onClick={() => toggleGroup(g.key)}
+                title={g.key === noKey ? undefined : g.key}
+              >
+                <span className={styles.groupLabel}>{g.label}</span>
+                <span className={styles.groupCount}>{g.sessions.length}</span>
+                <span className={styles.caret}>
+                  {collapsed.has(g.key) ? '▸' : '▾'}
+                </span>
+              </button>
+              {!collapsed.has(g.key) && (
+                <div className={styles.groupList}>
+                  {g.sessions.map((s) => row(s, false))}
+                </div>
+              )}
+            </div>
+          ))}
+
       {active.length === 0 && archived.length > 0 && (
         <div className={styles.empty}>{t('sidebar.allArchived')}</div>
       )}

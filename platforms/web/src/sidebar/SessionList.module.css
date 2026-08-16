@@ -54,12 +54,6 @@
   white-space: nowrap;
 }
 
-.meta {
-  font-size: 12px;
-  color: var(--oneai-text-tertiary);
-  flex-shrink: 0;
-}
-
 .archivedToggle {
   display: flex;
   align-items: center;
@@ -82,6 +76,72 @@
 .caret {
   font-size: 11px;
 }
+
+/* Group/flat mode toggle — a small pill above the list. */
+.modeToggle {
+  align-self: flex-start;
+  padding: 3px 9px;
+  margin-bottom: 6px;
+  border: 1px solid var(--oneai-border-strong);
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-family);
+  font-size: 11px;
+  border-radius: 11px;
+  cursor: pointer;
+  transition: border-color var(--oneai-dur) var(--oneai-ease),
+    color var(--oneai-dur) var(--oneai-ease);
+}
+.modeToggle:hover {
+  border-color: var(--oneai-brand-500);
+  color: var(--oneai-text-secondary);
+}
+
+/* Workspace group — collapsible header + nested rows. */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-family);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--oneai-radius-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.groupHeader:hover {
+  color: var(--oneai-text-secondary);
+}
+.groupLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.groupCount {
+  font-size: 11px;
+  opacity: 0.7;
+}
+.groupList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .archivedList {
   display: flex;
   flex-direction: column;

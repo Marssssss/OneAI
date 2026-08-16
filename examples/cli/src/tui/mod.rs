@@ -1040,7 +1040,10 @@ fn handle_user_input_async(
                 let submitted = rt.block_on(async {
                     use oneai_bus::{Directive, EngineBus};
                     engine_bus
-                        .submit(Directive::CreateSession { id: None })
+                        .submit(Directive::CreateSession {
+                            id: None,
+                            workspace: None,
+                        })
                         .await
                         .is_ok()
                 });

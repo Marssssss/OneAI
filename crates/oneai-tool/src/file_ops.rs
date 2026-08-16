@@ -570,7 +570,14 @@ impl SandboxedFileOps {
     /// which FileOperations impl does the actual IO — complementing (not
     /// replacing) each tool's own `path_has_traversal` pre-flight.
     fn check(&self, path: &str) -> Result<()> {
-        if path_within(Path::new(path), &self.allowed_roots) {
+        let mut roots = self.allowed_roots.clone();
+        // Include the session's active workspace (user-picked) so file tools
+        // can read/write the workspace the agent is bound to. Mirrors the
+        // Seatbelt write-allowlist expansion in `sandbox.rs`.
+        if let Some(w) = oneai_core::active_cwd::active_cwd() {
+            roots.push(w);
+        }
+        if path_within(Path::new(path), &roots) {
             Ok(())
         } else {
             Err(OneAIError::Other(format!(

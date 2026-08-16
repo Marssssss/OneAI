@@ -61,6 +61,16 @@ pub mod method {
     /// transport.
     pub const SESSION_LIST: &str = "session/list";
 
+    /// Open the native OS directory picker (deepseek-harness parity). The
+    /// sidecar — a local process — shells out to the platform's folder-chooser
+    /// (`osascript choose folder` on macOS, `zenity`/`kdialog` on Linux,
+    /// `rfd`/Win32 `IFileOpenDialog` on Windows) and returns the chosen
+    /// absolute path. `{ path: Option<String> }` — `None` when the user cancels.
+    /// Browsers can't get a host path from any web picker (sandbox); the local
+    /// backend can, so the web frontend asks it to show the dialog. No file
+    /// upload — the agent operates on the real folder (the path is absolute).
+    pub const DIALOG_PICK_DIRECTORY: &str = "dialog/pick_directory";
+
     // Per-message feedback — synchronous CRUD against the shared feedback
     // store (no bus/Directive, like session/list). `feedback/submit` records a
     // 👍/👎/note for one assistant message (params: session_id / turn_id /

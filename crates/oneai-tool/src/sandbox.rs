@@ -245,8 +245,16 @@ impl SeatbeltBackend {
         // dirs — stays write-protected).
         rules.push("(deny file-write*)".to_string());
 
-        // Project / explicitly-allowed write dirs.
-        for dir in &self.allowed_write_dirs {
+        // Project / explicitly-allowed write dirs. Include the session's
+        // active workspace (deepseek-harness parity: the user picked it, so
+        // the agent may write there) alongside the baked allowlist. Reads are
+        // already broad-allowed above, so `pwd`/`ls`/`cat` work regardless;
+        // this only opens writes inside the workspace.
+        let mut write_dirs = self.allowed_write_dirs.clone();
+        if let Some(w) = oneai_core::active_cwd::active_cwd() {
+            write_dirs.push(w);
+        }
+        for dir in &write_dirs {
             if let Some(p) = profile_subpath(dir) {
                 rules.push(format!("(allow file-write* (subpath \"{p}\"))",));
             }

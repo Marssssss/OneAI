@@ -19,6 +19,7 @@
 //! Breaking changes will be signaled by a minor version bump (0.x → 0.y).
 //! Patch versions (0.x.y → 0.x.z) are always backward-compatible.
 
+pub mod active_cwd;
 pub mod budget;
 pub mod catalog;
 pub mod circuit_breaker;

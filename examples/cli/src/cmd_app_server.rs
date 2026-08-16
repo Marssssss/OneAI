@@ -129,11 +129,15 @@ impl DirectiveRuntime for AppServerRuntime {
         self.session.provider().cloned()
     }
 
-    async fn create_session(&mut self, id: Option<String>) -> String {
-        let new = match id {
+    async fn create_session(&mut self, id: Option<String>, workspace: Option<String>) -> String {
+        let mut new = match id {
             Some(wanted) => self.app.create_session_with_id(&wanted).await,
             None => self.app.create_session(),
         };
+        // Persist the workspace the frontend bound this session to (a fresh
+        // chat created under a chosen working directory). Only acts when Some;
+        // re-opening an existing session keeps its stored workspace.
+        new.set_workspace(workspace.as_deref());
         let nid = new.session_id().to_string();
         self.session = new;
         nid

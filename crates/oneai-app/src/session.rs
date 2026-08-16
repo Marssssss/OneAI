@@ -251,6 +251,23 @@ struct AppResources {
 }
 
 impl AppSession {
+    /// Derive the construction-time working-state project scope from the
+    /// conversation's `workspace` metadata (set at session/create or restored
+    /// on load); fall back to the process cwd for workspace-less sessions.
+    /// The accessor re-reads metadata live so a post-construction
+    /// `set_workspace` also takes effect; this captures the loaded-session case.
+    fn derive_working_state_project(conversation: &Conversation) -> String {
+        if let Some(ws) = conversation.metadata.get("workspace") {
+            if !ws.is_empty() {
+                return ws.clone();
+            }
+        }
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_default()
+    }
+
     /// Create a new session from an App.
     pub(crate) fn new(app: &crate::builder::App) -> Self {
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -311,10 +328,7 @@ impl AppSession {
                 working_state_store: app.working_state_store.clone(),
                 skill_metadata_store: app.skill_metadata_store.clone(),
                 skill_curator: app.skill_curator.clone(),
-                working_state_project: std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.to_str().map(|s| s.to_string()))
-                    .unwrap_or_default(),
+                working_state_project: Self::derive_working_state_project(&conversation),
                 #[cfg(feature = "otel")]
                 metrics_provider: app.metrics_provider.clone(),
             }),
@@ -338,6 +352,35 @@ impl AppSession {
     /// Enable/disable plan mode for subsequent `run_agent` calls.
     pub fn set_plan_mode(&mut self, on: bool) {
         self.plan_mode = on;
+    }
+
+    /// Bind this session to a workspace (a working-directory path the user
+    /// picked at session/create — deepseek-harness parity). Persisted in
+    /// `conversation.metadata["workspace"]` so it survives resume and feeds
+    /// `SessionInfo.workspace` for sidebar grouping. Only acts when `Some`
+    /// (a re-opened session keeps its stored workspace); an empty/whitespace
+    /// value clears the key. The runtime cwd threading (tools resolving this
+    /// workspace as their active dir) is layered on top in the agent loop.
+    pub fn set_workspace(&mut self, workspace: Option<&str>) {
+        if let Some(ws) = workspace {
+            let trimmed = ws.trim();
+            if trimmed.is_empty() {
+                self.conversation.metadata.remove("workspace");
+            } else {
+                self.conversation
+                    .metadata
+                    .insert("workspace".to_string(), trimmed.to_string());
+            }
+        }
+    }
+
+    /// The workspace path this session is bound to (`metadata["workspace"]`),
+    /// if any. `None` for legacy/workspace-less sessions.
+    pub fn workspace(&self) -> Option<&str> {
+        self.conversation
+            .metadata
+            .get("workspace")
+            .map(|s| s.as_str())
     }
 
     /// Force the active paradigm for subsequent turns (frontend-driven
@@ -409,9 +452,17 @@ impl AppSession {
         self.app.skill_curator.clone()
     }
 
-    /// The working-state project scope (cwd) for this session.
-    pub fn working_state_project(&self) -> &str {
-        &self.app.working_state_project
+    /// The working-state project scope (cwd / repo) for this session. Derived
+    /// lazily from `conversation.metadata["workspace"]` (set at session/create
+    /// or restored on load) so a `set_workspace` after construction takes
+    /// effect; falls back to the process cwd for workspace-less sessions.
+    pub fn working_state_project(&self) -> String {
+        if let Some(ws) = self.conversation.metadata.get("workspace") {
+            if !ws.is_empty() {
+                return ws.clone();
+            }
+        }
+        self.app.working_state_project.clone()
     }
 
     /// Bind this session to an existing durable working-state task — a
@@ -850,6 +901,10 @@ impl AppSession {
         observer: &dyn AgentLoopObserver,
         interrupt_slot: Arc<tokio::sync::Mutex<Option<oneai_agent::AgentLoop>>>,
     ) -> Result<AgentLoopResult> {
+        // Bind the session's workspace as the active cwd for this turn — the
+        // shell tool's working_dir, the Seatbelt write-allowlist, file-ops
+        // roots, and the "Working Directory:" context all resolve off it.
+        oneai_core::active_cwd::set_active_cwd(self.workspace().map(std::path::PathBuf::from));
         let provider = self.app.provider.as_ref()
             .ok_or(oneai_core::error::OneAIError::Provider(
                 "No LLM provider configured. Set ONEAI_API_KEY and ONEAI_BASE_URL environment variables.".to_string()
@@ -941,7 +996,7 @@ impl AppSession {
                     self.unfinished_work_surfaced = true;
                     let user = self.app.memory_manager.user_id().await;
                     match store
-                        .list_open_tasks(&user, &self.app.working_state_project)
+                        .list_open_tasks(&user, &self.working_state_project())
                         .await
                     {
                         Ok(open) if !open.is_empty() => {
@@ -986,7 +1041,7 @@ impl AppSession {
                         self.reconciliation_surfaced = true;
                         Some(std::sync::Arc::new(
                             oneai_domain::builtin_sources::GitReconciliationSource::new(
-                                self.app.working_state_project.clone(),
+                                self.working_state_project(),
                                 store,
                                 task_id,
                                 self.session_id.clone(),
@@ -1003,7 +1058,7 @@ impl AppSession {
             };
 
         // Build context assembler (core source first, then domain sources).
-        let context_assembler = if let Some(domain) = &self.app.domain_pack {
+        let mut context_assembler = if let Some(domain) = &self.app.domain_pack {
             let mut sources =
                 vec![core_memory_source as std::sync::Arc<dyn oneai_domain::ContextSource>];
             sources.extend(domain.context_sources.clone());
@@ -1025,6 +1080,22 @@ impl AppSession {
             }
             oneai_agent::ContextAssembler::with_context_sources(sources)
         };
+
+        // Rebind the project-scoped context sources (git status / file tree /
+        // CLAUDE.md / repo map) to the session's workspace so the model sees
+        // the workspace's project context, not the app-global cwd's. Mirrors
+        // the model-driven switch_project (Issue #19) but fired per-turn from
+        // the bound workspace (deepseek-harness parity). When the session has
+        // no workspace, rebind back to the app-global cwd so a previous
+        // session's workspace doesn't leak (sources are shared across
+        // sessions). Sources whose `rebind_project_dir` is a no-op are
+        // unaffected.
+        let rebind_to = self
+            .workspace()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        context_assembler.rebind_project_dir(&rebind_to);
 
         // Propagate usage/rate/circuit from the App into the loop
         // config. Without this, the loop builds `..AgentLoopConfig::default()`
@@ -1291,7 +1362,7 @@ impl AppSession {
                 .with_working_state_store(store)
                 .with_working_state_scope(
                     user,
-                    self.app.working_state_project.clone(),
+                    self.working_state_project(),
                     self.session_id.clone(),
                 )
         } else {
@@ -1449,6 +1520,7 @@ impl AppSession {
 
     /// Run the Agentic Loop silently (no observer callbacks).
     pub async fn run_agent_silent(&mut self, task: &str) -> Result<AgentLoopResult> {
+        oneai_core::active_cwd::set_active_cwd(self.workspace().map(std::path::PathBuf::from));
         struct SilentObserver;
         impl AgentLoopObserver for SilentObserver {
             fn on_iteration_start(&self, _: usize, _: ParadigmKind) {}

@@ -41,6 +41,7 @@
 
 pub mod adapter;
 pub mod conversation;
+pub mod dialog;
 pub mod dispatcher;
 pub mod feedback;
 pub mod probe;
@@ -450,7 +451,7 @@ mod integration {
                     // directive (which is AFTER the adapter's register-before-
                     // submit), the dispatcher's pending is already queued — no
                     // race. Lets session/create etc. resolve naturally.
-                    Directive::CreateSession { id } => {
+                    Directive::CreateSession { id, .. } => {
                         let sid = id.unwrap_or_else(|| "auto".into());
                         let _ = bus.emit(EngineYield::SessionCreated { id: sid });
                     }

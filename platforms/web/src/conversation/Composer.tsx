@@ -22,6 +22,7 @@ import type { SettingsStore } from '../settings/settingsStore'
 import { useLocale } from '../i18n'
 import { ModelSelect } from './ModelSelect'
 import { MetricsBar } from './MetricsBar'
+import { WorkspaceDropdown } from '../workspace/WorkspaceDropdown'
 import styles from './Composer.module.css'
 
 export type SlashCommand =
@@ -67,10 +68,24 @@ interface ComposerProps {
   /** §W4 attachments — disabled in group-chat mode (its bus directive is
    * plain-text only). When false the attach button + drop zone hide. */
   attachmentsEnabled: boolean
+  /** The workspace (working-directory) chip label, or null when no workspace
+   *  is selected. Sits left of the mode chip. Clicking routes through
+   *  `onWorkspaceClick` — the caller decides dropdown-vs-blocked (the latter
+   *  when a conversation is mid-flight). */
+  workspaceLabel: string | null
   onSend: (text: string, images?: ContentBlock[]) => void
   onStop: () => void
   onCycleMode: () => void
   onSlash: (cmd: SlashCommand) => void
+  onWorkspaceClick: () => void
+  /** Workspace dropdown (popover) state — rendered inside the chips row when
+   *  open, anchored under the chip. The dropdown self-closes via onClose
+   *  before firing onSelect. */
+  workspaceDropdownOpen: boolean
+  onCloseWorkspaceDropdown: () => void
+  onSelectWorkspace: (path: string) => void
+  /** Open the native OS folder picker (App owns the RPC). */
+  onAddWorkspace: () => void
 }
 
 const PARADIGM_GLYPH: Record<BusParadigmKind, string> = {
@@ -125,10 +140,16 @@ export function Composer({
   metrics,
   settingsStore,
   attachmentsEnabled,
+  workspaceLabel,
   onSend,
   onStop,
   onCycleMode,
   onSlash,
+  onWorkspaceClick,
+  workspaceDropdownOpen,
+  onCloseWorkspaceDropdown,
+  onSelectWorkspace,
+  onAddWorkspace,
 }: ComposerProps): ReactNode {
   const { t } = useLocale()
   const [text, setText] = useState('')
@@ -220,6 +241,25 @@ export function Composer({
       )}
 
       <div className={styles.chips}>
+        {workspaceDropdownOpen && (
+          <WorkspaceDropdown
+            onClose={onCloseWorkspaceDropdown}
+            onSelect={onSelectWorkspace}
+            onAddWorkspace={onAddWorkspace}
+          />
+        )}
+        <button
+          className={`${styles.chip} ${styles.workspaceChip} ${workspaceLabel !== null ? styles.chipOn : ''}`}
+          onClick={onWorkspaceClick}
+          title={t('workspace.select')}
+          aria-label={t('workspace.select')}
+        >
+          <span className={styles.chipLabel}>📂</span>
+          <span className={styles.workspaceAlias}>
+            {workspaceLabel ?? t('workspace.select')}
+          </span>
+          <span className={styles.workspaceCaret}>▾</span>
+        </button>
         <button
           className={`${styles.chip} ${mode !== 'normal' ? styles.chipOn : ''}`}
           onClick={onCycleMode}

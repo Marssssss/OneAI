@@ -56,7 +56,10 @@ async fn directive_session_lifecycle_round_trips() {
             force: true,
             no_llm: false,
         },
-        BusDirective::CreateSession { id: None },
+        BusDirective::CreateSession {
+            id: None,
+            workspace: None,
+        },
         BusDirective::LoadSession {
             id: "abc123".to_string(),
         },

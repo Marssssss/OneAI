@@ -104,8 +104,9 @@ pub trait DirectiveRuntime: Send {
     fn provider(&self) -> Option<Arc<dyn LlmProvider>>;
 
     /// Start a fresh session. `id` = None ⇒ engine assigns; Some ⇒ bind to it.
-    /// Returns the new session id.
-    async fn create_session(&mut self, id: Option<String>) -> String;
+    /// `workspace` = a working-directory path the user bound this session to
+    /// (None ⇒ app-global cwd). Returns the new session id.
+    async fn create_session(&mut self, id: Option<String>, workspace: Option<String>) -> String;
 
     /// Load a saved session by id (or unique short prefix). Returns the
     /// resolved id and the loaded message history.
@@ -322,9 +323,9 @@ pub fn spawn_directive_pump<R: DirectiveRuntime + 'static>(
                     };
                     let _ = bus.emit(EngineYield::InitResult { message: msg });
                 }
-                Directive::CreateSession { id } => {
+                Directive::CreateSession { id, workspace } => {
                     // Start a fresh session. `id` None ⇒ engine assigns; Some ⇒ bind.
-                    let new_id = { rt.lock().await.create_session(id).await };
+                    let new_id = { rt.lock().await.create_session(id, workspace).await };
                     let _ = bus.emit(EngineYield::SessionCreated { id: new_id });
                 }
                 Directive::LoadSession { id } => {

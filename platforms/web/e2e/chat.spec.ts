@@ -6,8 +6,9 @@ import { expect, test } from '@playwright/test'
 test('streamed reply appears after send', async ({ page }) => {
   await page.goto('/')
 
-  // The composer textarea placeholder contains "OneAI" in both locales.
-  const composer = page.getByPlaceholder(/OneAI/i)
+  // The composer textarea placeholder (zh "告诉我你在想什么…", en "Tell me what
+  // you're thinking…") — match either locale.
+  const composer = page.getByPlaceholder(/想什么|thinking/i)
   await expect(composer).toBeVisible()
 
   // Type + Enter to send (Enter sends; Shift+Enter is newline).

@@ -1010,7 +1010,7 @@ impl MemoryPersistence for SqliteSessionStore {
         // positions; only the sidebar uses the folded count.
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_at, updated_at, title, messages_json \
+                "SELECT id, created_at, updated_at, title, messages_json, metadata_json \
                  FROM conversations ORDER BY updated_at DESC",
             )
             .map_err(|e| {
@@ -1023,7 +1023,15 @@ impl MemoryPersistence for SqliteSessionStore {
                 let updated_at: String = row.get(2)?;
                 let title: Option<String> = row.get(3)?;
                 let messages_json: String = row.get(4)?;
-                Ok((id, created_at, updated_at, title, messages_json))
+                let metadata_json: Option<String> = row.get(5)?;
+                Ok((
+                    id,
+                    created_at,
+                    updated_at,
+                    title,
+                    messages_json,
+                    metadata_json,
+                ))
             })
             .map_err(|e| {
                 OneAIError::Persistence(format!("Failed to execute conversation list query: {}", e))
@@ -1034,28 +1042,44 @@ impl MemoryPersistence for SqliteSessionStore {
         // before the first marker (session ids are uuids and never contain it).
         let mut snapshots: HashMap<String, Vec<Vec<oneai_core::Message>>> = HashMap::new();
         // Preserve SQL order (updated_at DESC) for the returned list.
-        let mut tops: Vec<(String, String, String, Option<String>, usize)> = Vec::new();
+        let mut tops: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            usize,
+            Option<String>,
+        )> = Vec::new();
 
         for row in rows {
-            let (id, created_at_str, updated_at_str, title, messages_json) = row.map_err(|e| {
-                OneAIError::Persistence(format!("Failed to read conversation row: {}", e))
-            })?;
+            let (id, created_at_str, updated_at_str, title, messages_json, metadata_json) = row
+                .map_err(|e| {
+                    OneAIError::Persistence(format!("Failed to read conversation row: {}", e))
+                })?;
             // Tolerate legacy/corrupt blobs: an unparseable row contributes
             // 0 rather than hiding every conversation from the sidebar.
             let msgs: Vec<oneai_core::Message> =
                 serde_json::from_str(&messages_json).unwrap_or_default();
+            // Derive the workspace label the frontend groups by, from the
+            // persisted `conversation.metadata["workspace"]` (set at
+            // session/create). Tolerate missing/legacy/corrupt metadata.
+            let workspace = metadata_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                .and_then(|v| v.get("workspace").cloned())
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
             if id.contains(oneai_core::DISCARDED_SNAPSHOT_MARKER) {
                 if let Some(parent) = id.split(oneai_core::DISCARDED_SNAPSHOT_MARKER).next() {
                     snapshots.entry(parent.to_string()).or_default().push(msgs);
                 }
             } else {
                 let count = folded_display_count(&msgs);
-                tops.push((id, created_at_str, updated_at_str, title, count));
+                tops.push((id, created_at_str, updated_at_str, title, count, workspace));
             }
         }
 
         let mut sessions = Vec::with_capacity(tops.len());
-        for (id, created_at_str, updated_at_str, title, mut count) in tops {
+        for (id, created_at_str, updated_at_str, title, mut count, workspace) in tops {
             if let Some(children) = snapshots.get(&id) {
                 for child in children {
                     count += folded_display_count(child);
@@ -1067,9 +1091,10 @@ impl MemoryPersistence for SqliteSessionStore {
             let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
-            sessions.push(SessionInfo::with_title(
-                id, created_at, updated_at, count, title,
-            ));
+            sessions.push(
+                SessionInfo::with_title(id, created_at, updated_at, count, title)
+                    .with_workspace(workspace),
+            );
         }
 
         tracing::debug!("Listed {} conversations", sessions.len());

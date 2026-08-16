@@ -57,10 +57,11 @@ impl DirectiveRuntime for SessionState {
         self.session.provider().cloned()
     }
 
-    async fn create_session(&mut self, id: Option<String>) -> String {
+    async fn create_session(&mut self, id: Option<String>, workspace: Option<String>) -> String {
         match id {
             Some(wanted) => {
-                let new = self.app.create_session_with_id(&wanted).await;
+                let mut new = self.app.create_session_with_id(&wanted).await;
+                new.set_workspace(workspace.as_deref());
                 let nid = new.session_id().to_string();
                 self.session = new;
                 nid
@@ -68,6 +69,7 @@ impl DirectiveRuntime for SessionState {
             // None ⇒ fresh uuid; reset_session swaps the AppSession in place.
             None => {
                 SessionState::reset_session(self);
+                self.session.set_workspace(workspace.as_deref());
                 self.session.session_id().to_string()
             }
         }

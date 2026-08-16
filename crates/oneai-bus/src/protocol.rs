@@ -670,8 +670,15 @@ pub enum Directive {
         no_llm: bool,
     },
     /// Start a fresh session. `id` = None ⇒ the engine assigns a new id; Some
-    /// ⇒ bind to that id (must not already exist). Result: [`EngineYield::SessionCreated`].
-    CreateSession { id: Option<String> },
+    /// ⇒ bind to that id (must not already exist). `workspace` = a working-
+    /// directory path the user chose (deepseek-harness parity); the engine
+    /// persists it in `conversation.metadata["workspace"]` and threads it as
+    /// the session's active cwd (see AppSession). `None` ⇒ the app-global cwd.
+    /// Result: [`EngineYield::SessionCreated`].
+    CreateSession {
+        id: Option<String>,
+        workspace: Option<String>,
+    },
     /// Load a previously-saved session by id (full id or a unique short prefix,
     /// resolved by the engine). Result: [`EngineYield::SessionLoaded`] (empty
     /// `messages` ⇒ not found / empty).

@@ -454,9 +454,17 @@ impl ContextSource for EnvironmentInfoSource {
     }
 
     async fn load(&self) -> Result<String> {
-        let cwd = std::env::current_dir()
+        // Prefer the session's active workspace (deepseek-harness parity: a
+        // user-picked working directory set at turn start) over the process
+        // cwd, so the model reports the workspace it actually operates in.
+        let cwd = oneai_core::active_cwd::active_cwd()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let platform = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| {

@@ -7,7 +7,7 @@ import { expect, test } from '@playwright/test'
 test('tool approval panel appears and resumes on allow', async ({ page }) => {
   await page.goto('/')
 
-  const composer = page.getByPlaceholder(/OneAI/i)
+  const composer = page.getByPlaceholder(/想什么|thinking/i)
   await expect(composer).toBeVisible()
 
   await composer.fill('please approve this')

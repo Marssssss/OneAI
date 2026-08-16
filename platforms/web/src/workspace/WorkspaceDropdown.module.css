@@ -1,0 +1,142 @@
+/* Transparent click-away backdrop (popover, not a modal — no overlay tint). */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: transparent;
+}
+
+/* Anchored popover panel — sits just under the chips row, left-aligned with
+ * the workspace chip. Positioned relative to the composer wrap. */
+.panel {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  z-index: 100;
+  min-width: 240px;
+  max-width: 320px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border-strong);
+  border-radius: var(--oneai-radius-md, var(--oneai-radius-lg));
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.subhead {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text);
+  font-family: var(--oneai-font-family);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--oneai-radius-sm);
+  border: 1px solid transparent;
+}
+.row:hover {
+  background: var(--oneai-bg-subtle);
+}
+.rowActive {
+  border-color: var(--oneai-brand-500);
+  background: var(--oneai-bg-subtle);
+}
+.icon {
+  flex-shrink: 0;
+}
+.alias {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.check {
+  flex-shrink: 0;
+  color: var(--oneai-brand-500);
+  font-size: 13px;
+}
+.remove {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--oneai-radius-sm);
+  color: var(--oneai-text-tertiary);
+  cursor: pointer;
+  font-size: 13px;
+}
+.remove:hover {
+  background: var(--oneai-bg);
+  color: var(--oneai-text);
+}
+
+.empty {
+  padding: 6px 8px;
+  color: var(--oneai-text-tertiary);
+  font-size: 13px;
+}
+
+.addBtn {
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--oneai-brand-500);
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+  border-radius: var(--oneai-radius-sm);
+}
+.addBtn:hover {
+  background: var(--oneai-brand-600);
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  line-height: 1.5;
+}
+
+.noneBtn {
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-family);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--oneai-radius-sm);
+}
+.noneBtn:hover {
+  color: var(--oneai-text-secondary);
+}

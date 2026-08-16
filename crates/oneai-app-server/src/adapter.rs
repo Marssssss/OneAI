@@ -230,8 +230,15 @@ async fn handle_request(
         //     the result yield) ───────────────────────────────────────────
         method::SESSION_CREATE => {
             let sid = opt_field::<String>(&params, "id");
+            // The workspace the user bound this session to (a working-directory
+            // path); None ⇒ app-global cwd. Forwarded into the directive so the
+            // engine persists + applies it.
+            let workspace = opt_field::<String>(&params, "workspace");
             let rx = dispatcher.register_session_create(id.clone());
-            if let Err(e) = bus.submit(Directive::CreateSession { id: sid }).await {
+            if let Err(e) = bus
+                .submit(Directive::CreateSession { id: sid, workspace })
+                .await
+            {
                 return Response::err(id, RpcError::internal(e.to_string()));
             }
             resolve_or_closed(id, rx).await
@@ -262,6 +269,16 @@ async fn handle_request(
             let sessions = session_store.list().await;
             let arr: Vec<Value> = sessions.iter().map(session_info_to_json).collect();
             Response::ok(id, json!({"sessions": arr}))
+        }
+        // dialog/pick_directory — open the native OS folder picker (macOS
+        // `osascript choose folder` / Linux zenity·kdialog / Windows
+        // FolderBrowserDialog) and return the chosen absolute path. The local
+        // sidecar can show a native dialog (a browser can't get a host path);
+        // the web frontend delegates to it. `None` ⇐ user cancelled or no
+        // picker installed. No bus round-trip — handled inline.
+        method::DIALOG_PICK_DIRECTORY => {
+            let path = crate::dialog::pick_directory().await;
+            Response::ok(id, json!({ "path": path }))
         }
         // feedback/submit — record one per-message 👍/👎/note. Sync CRUD
         // against the shared feedback store (no bus round-trip, like
@@ -569,18 +586,22 @@ async fn skill_op(probe: &SharedAppProbe, id: &Value, params: &Value, kind: OpKi
 
 /// Serialize a `SessionInfo` to the epoch-millis shape the FFI
 /// `SessionInfoView` exposes (`id` / `created_at_ms` / `updated_at_ms` /
-/// `message_count` / `title`). The FFI path flattens `chrono::DateTime` to
-/// millis at the UniFFI boundary (chrono can't cross FFI directly); the
-/// sidecar JSON-RPC path mirrors that exact shape so a foreign UI decodes
-/// one struct regardless of transport.
+/// `message_count` / `title` / `workspace`). The FFI path flattens
+/// `chrono::DateTime` to millis at the UniFFI boundary (chrono can't cross
+/// FFI directly); the sidecar JSON-RPC path mirrors that exact shape so a
+/// foreign UI decodes one struct regardless of transport.
 fn session_info_to_json(s: &SessionInfo) -> Value {
-    json!({
+    let mut v = json!({
         "id": s.id,
         "created_at_ms": s.created_at.timestamp_millis(),
         "updated_at_ms": s.updated_at.timestamp_millis(),
         "message_count": s.message_count,
         "title": s.title,
-    })
+    });
+    if let Some(w) = &s.workspace {
+        v["workspace"] = json!(w);
+    }
+    v
 }
 
 #[cfg(test)]
