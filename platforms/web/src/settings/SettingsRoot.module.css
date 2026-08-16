@@ -19,7 +19,7 @@
   text-align: left;
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--oneai-text-secondary);
   padding: 8px 10px;
   border-radius: var(--oneai-radius-sm);
@@ -54,7 +54,7 @@
 }
 
 .rowLabel {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-tertiary);
   min-width: 120px;
   flex-shrink: 0;
@@ -68,13 +68,13 @@
 }
 
 .value {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--oneai-text);
 }
 
 .toggle {
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   background: var(--oneai-bg-subtle);
   border: 1px solid var(--oneai-border);
   color: var(--oneai-text);
@@ -87,13 +87,13 @@
 }
 
 .hint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
 }
 
 .code {
   font-family: var(--oneai-font-mono);
-  font-size: 13px;
+  font-size: 14px;
   color: var(--oneai-text);
   background: var(--oneai-bg-subtle);
   padding: 1px 6px;
@@ -101,7 +101,7 @@
 }
 
 .activeBadge {
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--oneai-green);
@@ -132,12 +132,12 @@
 }
 
 .packDesc {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-secondary);
 }
 
 .restartHint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-amber);
   border: 1px dashed var(--oneai-amber);
   border-radius: var(--oneai-radius-sm);
@@ -149,11 +149,11 @@
   padding: 20px;
   text-align: center;
   color: var(--oneai-text-tertiary);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .errorBanner {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-red);
   background: var(--oneai-red-bg);
   border-radius: var(--oneai-radius-sm);
@@ -178,7 +178,7 @@
 }
 
 .skillDesc {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -192,7 +192,7 @@
 }
 
 .stateBadge {
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   padding: 1px 6px;
@@ -214,11 +214,11 @@
 }
 
 .pinBadge {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .useCount {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
   font-family: var(--oneai-font-mono);
 }
@@ -230,7 +230,7 @@
 
 .miniBtn {
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   background: var(--oneai-bg-elevated);
   border: 1px solid var(--oneai-border);
   color: var(--oneai-text-secondary);
@@ -253,7 +253,7 @@
 }
 
 .providerModel {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
   font-family: var(--oneai-font-mono);
   margin-left: auto;
@@ -277,7 +277,7 @@
 }
 
 .configFileLabel {
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--oneai-text-tertiary);
@@ -290,7 +290,7 @@
 
 .configPath {
   font-family: var(--oneai-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-secondary);
   word-break: break-all;
 }
@@ -302,7 +302,7 @@
   border: 1px solid var(--oneai-border);
   border-radius: var(--oneai-radius-sm);
   font-family: var(--oneai-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
@@ -328,7 +328,7 @@
 
 .input {
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   background: var(--oneai-bg-elevated);
   border: 1px solid var(--oneai-border);
   color: var(--oneai-text);
@@ -342,7 +342,7 @@
 
 .addToggle {
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   background: none;
   border: 1px dashed var(--oneai-border-strong);
   color: var(--oneai-text-secondary);

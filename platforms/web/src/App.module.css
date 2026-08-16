@@ -3,7 +3,7 @@
 .mobileTitle {
   flex: 1 1 auto;
   font-weight: 600;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--oneai-text);
   /* Truncate so a long session title can't wrap the bar to two lines. */
   overflow: hidden;
@@ -20,7 +20,7 @@
   border: none;
   background: transparent;
   color: var(--oneai-text);
-  font-size: 18px;
+  font-size: 19px;
   cursor: pointer;
   border-radius: var(--oneai-radius-sm);
 }

@@ -8,7 +8,7 @@
   padding: var(--oneai-gap-lg);
   text-align: center;
   color: var(--oneai-text-tertiary);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .row {
@@ -44,7 +44,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 19px;
   background: var(--oneai-bg-subtle);
   border-radius: var(--oneai-radius-sm);
 }
@@ -57,10 +57,10 @@
 }
 .name {
   font-weight: 600;
-  font-size: 13px;
+  font-size: 14px;
 }
 .desc {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -69,7 +69,7 @@
 .badge {
   flex-shrink: 0;
   align-self: center;
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--oneai-text-tertiary);
@@ -87,7 +87,7 @@
   background: var(--oneai-bg-subtle);
   color: var(--oneai-text-secondary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 15px;
   transition: background var(--oneai-dur) var(--oneai-ease),
     color var(--oneai-dur) var(--oneai-ease);
 }
@@ -108,7 +108,7 @@
   color: var(--oneai-accent-fg);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
   transition: background var(--oneai-dur) var(--oneai-ease);
 }

@@ -19,7 +19,7 @@ import {
 import type { BusLocale, BusScenario, InteractionResponse } from './rpc/types'
 import { AppFrame } from './layout/AppFrame'
 import { ConversationRoot } from './conversation/ConversationRoot'
-import type { SlashCommand } from './conversation/Composer'
+import { type SlashCommand, type InteractionMode, nextMode } from './conversation/Composer'
 import { DetailsPanel, type DetailsTab } from './details/DetailsPanel'
 import { SidebarRoot } from './sidebar/SidebarRoot'
 import {
@@ -75,9 +75,11 @@ export default function App(): React.ReactNode {
   // following (explicit choice wins, mirrors dsh's behavior).
   const themeExplicit = useRef<boolean>(readInitialTheme().explicit)
   const { locale, t } = useLocale()
-  // planMode is the App-owned toggle synced via config/update; the live
-  // paradigm (from paradigm_switch yields) also feeds the chip's "on" state.
-  const [planMode, setPlanMode] = useState(false)
+  // Interaction mode (Normal → Auto → Plan), mirroring the TUI's
+  // InteractionMode. Replaces the old binary planMode toggle. The live
+  // paradigm (from paradigm_switch yields) is surfaced separately by the
+  // Composer chip when the model auto-switches to reflect/explore.
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('normal')
   const [modal, setModal] = useState<ModalState>(null)
   const prefsRef = useRef<FramePrefs>({
     sidebarWidth: 264,
@@ -222,19 +224,25 @@ export default function App(): React.ReactNode {
     setPrefs({ ...prefs, detailsOpen: false })
   }
 
-  // Plan-mode toggle: flip plan_mode (config/update) and switch the
-  // paradigm to/from 'plan'. The chip reflects both the local flag and the
-  // live paradigm.
-  const handleTogglePlan = () => {
-    const next = !(planMode || snap.paradigm === 'plan')
-    setPlanMode(next)
-    void projection.setPlanMode(next)
-    void projection.switchParadigm(next ? 'plan' : 're_act')
+  // Apply an interaction mode: Normal (default approval, re_act), Auto
+  // (silently allow tools — frontend short-circuits the approval bar), Plan
+  // (block tool execution — engine plan_mode + paradigm plan). Side-effects
+  // fire on every transition so engine + projection stay in sync with the UI.
+  const applyMode = (mode: InteractionMode) => {
+    setInteractionMode(mode)
+    const plan = mode === 'plan'
+    void projection.setPlanMode(plan)
+    void projection.switchParadigm(plan ? 'plan' : 're_act')
+    projection.setAutoApprove(mode === 'auto')
+  }
+
+  const handleCycleMode = () => {
+    applyMode(nextMode(interactionMode))
   }
 
   const handleSlash = (cmd: SlashCommand) => {
     if (cmd === 'plan') {
-      handleTogglePlan()
+      applyMode(interactionMode === 'plan' ? 'normal' : 'plan')
     } else if (cmd === 'clear') {
       projection.exitScenario()
       void projection.clearSession()
@@ -330,12 +338,12 @@ export default function App(): React.ReactNode {
             snapshot={snap}
             connection={status}
             theme={theme}
-            planMode={planMode || snap.paradigm === 'plan'}
+            mode={interactionMode}
             scenarios={scenarios}
             settingsStore={settings}
             onSend={(text, images) => void projection.sendMessage(text, images)}
             onStop={() => void projection.cancelTurn()}
-            onTogglePlan={handleTogglePlan}
+            onCycleMode={handleCycleMode}
             onSlash={handleSlash}
             onSelectTool={handleSelectTool}
             onRespondApproval={handleRespondApproval}
@@ -418,11 +426,11 @@ export default function App(): React.ReactNode {
           store={settings}
           theme={theme}
           locale={locale}
-          planMode={planMode || snap.paradigm === 'plan'}
+          planMode={interactionMode === 'plan'}
           connection={status}
           onToggleTheme={toggleTheme}
           onToggleLocale={toggleLocale}
-          onTogglePlan={handleTogglePlan}
+          onTogglePlan={() => applyMode(interactionMode === 'plan' ? 'normal' : 'plan')}
           onClose={() => setModal(null)}
         />
       )}

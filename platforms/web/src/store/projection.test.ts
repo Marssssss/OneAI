@@ -20,23 +20,27 @@ describe('ProjectionStore.consume', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())
 
-  it('seeds a streaming assistant node on turn_start, appends stream_chunk text, finalizes on turn_complete', () => {
+  it('defers the assistant node seed to the first stream_chunk (so a leading thinking fragment owns the top slot), finalizes on turn_complete', () => {
     const store = new ProjectionStore(fakeRpc())
     const y = (o: EngineYield) => store.consume(o)
 
     y({ kind: 'turn_start', turn_id: 't1', task: 'hello' })
     let snap = store.getSnapshot()
     expect(snap.turnActive).toBe(true)
-    expect(snap.nodes).toHaveLength(1)
-    expect(snap.nodes[0].kind).toBe('text')
-    expect(snap.nodes[0].state).toBe('streaming')
+    // No eager empty bubble — the seed is deferred to the first chunk (TypingDots
+    // signals "in flight"), so a leading thinking fragment renders above text.
+    expect(snap.nodes).toHaveLength(0)
 
     // Two stream chunks — coalesced (deferred), so flush explicitly by time.
+    // The first chunk seeds the streaming text node.
     y({ kind: 'stream_chunk', turn_id: 't1', text: 'Hel', speaker: null })
     y({ kind: 'stream_chunk', turn_id: 't1', text: 'lo', speaker: null })
     vi.advanceTimersByTime(60); vi.advanceTimersToNextFrame() // fire the 50ms timer + its queued rAF drain
 
     snap = store.getSnapshot()
+    expect(snap.nodes).toHaveLength(1)
+    expect(snap.nodes[0].kind).toBe('text')
+    expect(snap.nodes[0].state).toBe('streaming')
     expect(snap.nodes[0].text).toBe('Hello')
 
     y({ kind: 'turn_complete', turn_id: 't1', summary: null })
@@ -80,6 +84,31 @@ describe('ProjectionStore.consume', () => {
     expect(done.toolState).toBe('done')
     expect(done.toolOutput?.success).toBe(true)
     expect(done.toolOutput?.artifacts).toHaveLength(1)
+  })
+
+  it('dedupes tool_calls re-emitted with the same call id (streaming + decision paths both fire)', () => {
+    const store = new ProjectionStore(fakeRpc())
+    const y = (o: EngineYield) => store.consume(o)
+
+    y({ kind: 'turn_start', turn_id: 't2', task: '' })
+    y({
+      kind: 'tool_calls',
+      turn_id: 't2',
+      calls: [{ id: 'call_a', name: 'bash', args: { command: 'echo hi' } }],
+      speaker: null,
+    })
+    // The decision path re-emits the same call id (what the engine does in one
+    // streaming iteration) — must NOT spawn a second pending card.
+    y({
+      kind: 'tool_calls',
+      turn_id: 't2',
+      calls: [{ id: 'call_a', name: 'bash', args: { command: 'echo hi' } }],
+      speaker: null,
+    })
+    const snap = store.getSnapshot()
+    const toolNodes = snap.nodes.filter((n) => n.kind === 'tool')
+    expect(toolNodes).toHaveLength(1)
+    expect(toolNodes[0].callId).toBe('call_a')
   })
 
   it('aggregates the turn tool artifacts as deliverables on the final assistant text node', () => {

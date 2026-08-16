@@ -6,7 +6,7 @@
 
 .empty {
   padding: 20px 14px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--oneai-text-tertiary);
   text-align: center;
 }
@@ -28,14 +28,14 @@
 }
 
 .overviewLabel {
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--oneai-text-tertiary);
 }
 
 .overviewValue {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--oneai-text);
   font-family: var(--oneai-font-mono);
@@ -45,7 +45,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-secondary);
   font-family: var(--oneai-font-mono);
 }
@@ -68,14 +68,14 @@
 }
 
 .groupTitle {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--oneai-text);
   font-family: var(--oneai-font-mono);
 }
 
 .groupMeta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
   font-family: var(--oneai-font-mono);
 }
@@ -106,14 +106,14 @@
   grid-template-columns: 18px 1fr auto;
   align-items: baseline;
   gap: 6px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-secondary);
 }
 
 .entryIcon {
   text-align: center;
   color: var(--oneai-text-tertiary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .entryTitle {
@@ -123,7 +123,7 @@
 }
 
 .entryMs {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--oneai-text-tertiary);
   font-family: var(--oneai-font-mono);
 }

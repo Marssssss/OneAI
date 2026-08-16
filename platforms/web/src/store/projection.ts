@@ -7,6 +7,7 @@ import type {
   BusScenario,
   BusScenarioMember,
   BusLocale,
+  BusUsageRecord,
   ConfigUpdateParams,
   ContentBlock,
   EngineYield,
@@ -133,6 +134,32 @@ export interface ProjectionSnapshot {
   usage: UsageSnapshot
   /** Performance.now() marks per turn, for timing-overview rendering. */
   turnTimings: { turnId: string; startedAt: number | null; endedAt: number | null; iterations: number }[]
+  /** Aggregated session metrics for the composer metrics strip
+   *  (turns/steps/first-token/tok-per-s/cache hit/in-out tokens). */
+  metrics: SessionMetrics
+}
+
+/** Session-wide aggregate metrics, derived from per-turn timing + per-turn
+ *  usage maps. All fields default to 0 so a fresh session renders an empty
+ *  (hidden) strip rather than NaN. */
+export interface SessionMetrics {
+  /** Number of turns seen this session. */
+  turns: number
+  /** Sum of per-turn iteration counts (agent "steps"). */
+  steps: number
+  /** Mean ms from turn_start to the first stream_chunk, across turns that
+   *  produced text. null when no turn has streamed yet. */
+  firstTokenMs: number | null
+  /** Sum of completion tokens across turns (for tok/s). */
+  totalCompletion: number
+  /** Sum of prompt tokens across turns (input total). */
+  totalPrompt: number
+  /** Sum of cache-read tokens across turns. */
+  totalCacheRead: number
+  /** Sum of cache-creation tokens across turns. */
+  totalCacheCreation: number
+  /** Sum of completed-turn wall durations (ms). */
+  totalDurationMs: number
 }
 
 interface WorkingState {
@@ -156,6 +183,28 @@ interface WorkingState {
   turnStartPerf: Map<string, number>
   turnEndPerf: Map<string, number>
   turnIterations: Map<string, number>
+  /** performance.now() of the first stream_chunk per turn (for first-token
+   *  latency). Absent until the turn produces text. */
+  firstTokenPerf: Map<string, number>
+  /** Latest per-turn usage record (TokenUsage carries no turn_id, so we
+   *  attribute it to the active currentTurnId on arrival). */
+  turnUsage: Map<string, BusUsageRecord>
+  /** Auto-accept mode: silently Proceed on incoming ToolApproval requests
+   *  (mirrors the TUI's InteractionMode::AutoAccept) instead of queueing them
+   *  for the approval bar. Other variants (plan/network/elicitation) still
+   *  surface — only tool execution is auto-allowed. */
+  autoApprove: boolean
+}
+
+const EMPTY_METRICS: SessionMetrics = {
+  turns: 0,
+  steps: 0,
+  firstTokenMs: null,
+  totalCompletion: 0,
+  totalPrompt: 0,
+  totalCacheRead: 0,
+  totalCacheCreation: 0,
+  totalDurationMs: 0,
 }
 
 const EMPTY: ProjectionSnapshot = {
@@ -177,6 +226,7 @@ const EMPTY: ProjectionSnapshot = {
   subagents: [],
   usage: { usage: null, context: null },
   turnTimings: [],
+  metrics: EMPTY_METRICS,
 }
 
 let nodeSeq = 0
@@ -208,6 +258,9 @@ export class ProjectionStore {
     turnStartPerf: new Map(),
     turnEndPerf: new Map(),
     turnIterations: new Map(),
+    firstTokenPerf: new Map(),
+    turnUsage: new Map(),
+    autoApprove: false,
   }
   private snapshot: ProjectionSnapshot = EMPTY
   private listeners = new Set<() => void>()
@@ -258,6 +311,7 @@ export class ProjectionStore {
       endedAt: this.state.turnEndPerf.get(turnId) ?? null,
       iterations: this.state.turnIterations.get(turnId) ?? 0,
     }))
+    const metrics = this.computeMetrics(turnTimings)
     this.snapshot = {
       version: this.snapshot.version + 1,
       sessionId: this.state.sessionId,
@@ -280,8 +334,51 @@ export class ProjectionStore {
       subagents: [...this.state.subagents],
       usage: this.state.usage,
       turnTimings,
+      metrics,
     }
     for (const l of this.listeners) l()
+  }
+
+  /** Fold per-turn timing + usage maps into the session metrics aggregate. */
+  private computeMetrics(
+    turnTimings: { turnId: string; startedAt: number | null; endedAt: number | null; iterations: number }[],
+  ): SessionMetrics {
+    let steps = 0
+    let totalCompletion = 0
+    let totalPrompt = 0
+    let totalCacheRead = 0
+    let totalCacheCreation = 0
+    let totalDurationMs = 0
+    const latencies: number[] = []
+    for (const t of turnTimings) {
+      steps += t.iterations
+      const u = this.state.turnUsage.get(t.turnId)
+      if (u !== undefined) {
+        totalPrompt += u.prompt_tokens
+        totalCompletion += u.completion_tokens
+        totalCacheRead += u.cache_read_tokens
+        totalCacheCreation += u.cache_creation_tokens
+      }
+      if (t.startedAt !== null && t.endedAt !== null) {
+        totalDurationMs += t.endedAt - t.startedAt
+      }
+      const ft = this.state.firstTokenPerf.get(t.turnId)
+      if (t.startedAt !== null && ft !== undefined) {
+        latencies.push(ft - t.startedAt)
+      }
+    }
+    const firstTokenMs =
+      latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : null
+    return {
+      turns: turnTimings.length,
+      steps,
+      firstTokenMs,
+      totalCompletion,
+      totalPrompt,
+      totalCacheRead,
+      totalCacheCreation,
+      totalDurationMs,
+    }
   }
 
   // ── trajectory ledger helpers ──────────────────────────────────────────────
@@ -398,6 +495,8 @@ export class ProjectionStore {
     this.state.turnStartPerf.clear()
     this.state.turnEndPerf.clear()
     this.state.turnIterations.clear()
+    this.state.firstTokenPerf.clear()
+    this.state.turnUsage.clear()
   }
 
   /** Flush now (bypass the coalescer) — for non-hot mutations. */
@@ -489,13 +588,14 @@ export class ProjectionStore {
         this.state.turnStartPerf.set(y.turn_id, performance.now())
         this.state.turnEndPerf.delete(y.turn_id)
         this.state.turnIterations.set(y.turn_id, 0)
-        // Single-agent: seed an empty bubble eagerly so the user sees progress
-        // the moment the turn starts. Group chat: defer to `speaker_turn` /
-        // `stream_chunk` (which carry the member id) to avoid a stale empty
-        // placeholder node before the first speaker is known.
-        if (this.state.currentScenario === null) {
-          this.seedAssistant(y.turn_id, this.state.currentSpeaker)
-        }
+        // Do NOT eagerly seed an empty assistant text bubble here. A thinking
+        // fragment (Anthropic/o1-style) arrives before the answer; with an
+        // eager text node already on the list, the thinking node appended after
+        // it would render BELOW the answer. Deferring the seed to the first
+        // `stream_chunk`/`direct_answer` lets a leading `thinking` event own
+        // the top slot — and the `TypingDots` row already signals "in flight"
+        // so no progress affordance is lost. Group chat keeps deferring to
+        // `speaker_turn`/`stream_chunk` (they carry the member id).
         this.pushTrajectory(y.turn_id, 'turn_start', y.task.length > 0 ? y.task : 'turn start')
         this.emitNow()
         break
@@ -521,6 +621,11 @@ export class ProjectionStore {
           if (seeded !== null) {
             this.replaceNode(seeded.id, { text: seeded.text + y.text })
           }
+        }
+        // First stream_chunk for this turn = first generated token; record
+        // its arrival for the first-token-latency metric.
+        if (!this.state.firstTokenPerf.has(y.turn_id)) {
+          this.state.firstTokenPerf.set(y.turn_id, performance.now())
         }
         this.coalescer.request()
         break
@@ -573,6 +678,24 @@ export class ProjectionStore {
         // seeds a fresh text node after the cards).
         this.finalizeStreamingText(y.turn_id)
         for (const c of y.calls) {
+          // Dedupe by call id within the turn: the engine's streaming path
+          // (`on_tool_calls` per `ToolCallComplete`) and the decision path
+          // (`AgentDecision::ToolCalls`) can both fire for the same call id in
+          // one iteration. Without this guard each emission spawned a fresh
+          // pending card, leaving duplicate "tool" blocks (one stuck pending
+          // because tool_result only matches the first). Refresh args in place.
+          const existingIdx = this.state.nodes.findIndex(
+            (n) => n.kind === 'tool' && n.callId === c.id && n.turnId === y.turn_id,
+          )
+          if (existingIdx >= 0) {
+            const n = this.state.nodes[existingIdx]
+            this.replaceNode(n.id, {
+              toolName: n.toolName ?? c.name,
+              toolArgs: c.args,
+              toolState: n.toolState ?? 'pending',
+            })
+            continue
+          }
           this.state.nodes = [
             ...this.state.nodes,
             {
@@ -696,6 +819,11 @@ export class ProjectionStore {
           { request_id: y.request_id, request: y.request, seq: approvalSeq },
         ]
         this.emitNow()
+        // Auto-accept: silently allow tool execution (Proceed) without showing
+        // the approval bar. Plan/network/elicitation still queue.
+        if (this.state.autoApprove && Object.keys(y.request)[0] === 'ToolApproval') {
+          void this.respondApproval(y.request_id, { Proceed: null })
+        }
         break
       }
       case 'turn_complete': {
@@ -900,6 +1028,12 @@ export class ProjectionStore {
       }
       case 'token_usage': {
         this.state.usage = { ...this.state.usage, usage: y.usage }
+        // Attribute the usage record to the active turn (TokenUsage carries no
+        // turn_id). The latest record per turn wins; metrics aggregate the
+        // per-turn latest at emit time.
+        if (this.state.currentTurnId !== null) {
+          this.state.turnUsage.set(this.state.currentTurnId, y.usage)
+        }
         const total = y.usage.prompt_tokens + y.usage.completion_tokens
         this.pushTrajectory(null, 'token_usage', `usage: ${total} tokens`, {
           detail: y.usage,
@@ -1068,6 +1202,14 @@ export class ProjectionStore {
       this.state.lastError = e instanceof Error ? e.message : String(e)
       this.emitNow()
     }
+  }
+
+  /** Set auto-accept mode (silently Proceed on tool approvals). Purely
+   *  frontend — no engine config; the projection short-circuits the approval
+   *  bar for ToolApproval requests while this is on. */
+  setAutoApprove(on: boolean): void {
+    this.state.autoApprove = on
+    this.emitNow()
   }
 
   /** Select a tool node for the details rail (opens the rail via App). */

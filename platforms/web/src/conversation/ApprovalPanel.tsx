@@ -41,8 +41,13 @@ function narrow(req: InteractionRequest): RequestVariant {
   const key = Object.keys(req)[0] as keyof InteractionRequest
   const payload = (req as Record<string, Record<string, unknown>>)[key] ?? {}
   switch (key) {
-    case 'ToolApproval':
-      return { kind: 'tool', approval: payload as unknown as ApprovalRequest }
+    case 'ToolApproval': {
+      // Wire form is `{ ToolApproval: { approval: ApprovalRequest } }` (externally
+      // tagged enum + named-struct variant) — unwrap the `.approval` field, not
+      // the whole payload, or tool_name/args render empty.
+      const inner = payload as { approval?: ApprovalRequest }
+      return { kind: 'tool', approval: inner.approval ?? (payload as unknown as ApprovalRequest) }
+    }
     case 'PlanReview':
       return { kind: 'plan_review', ...(payload as unknown as { plan: string; steps: { id: string; description: string }[] }) }
     case 'PlanDecision':
@@ -68,30 +73,32 @@ export function ApprovalPanel({
   const variant = narrow(current.request)
 
   return (
-    <div className={styles.bar}>
-      <div className={styles.headline}>
-        <span className={styles.icon}>⚠</span>
-        <span className={styles.title}>{t('approval.waiting')}</span>
-        {queueDepth > 0 && (
-          <span className={styles.queue}>+{queueDepth} {t('approval.queued')}</span>
-        )}
-      </div>
-      <div className={styles.body}>
-        {variant.kind === 'tool' && (
-          <ToolApprovalView approval={variant.approval} onRespond={(r) => onRespond(current.request_id, r)} respondLabel={t('approval.allow')} refuseLabel={t('approval.refuse')} />
-        )}
-        {variant.kind === 'plan_review' && (
-          <PlanReviewView plan={variant.plan} steps={variant.steps} onRespond={(r) => onRespond(current.request_id, r)} acceptLabel={t('approval.accept')} reviseLabel={t('approval.revise')} revisePlaceholder={t('approval.revise.placeholder')} />
-        )}
-        {variant.kind === 'plan_decision' && (
-          <PlanDecisionView decision_id={variant.decision_id} question={variant.question} context={variant.context} options={variant.options} onRespond={(r) => onRespond(current.request_id, r)} pickLabel={t('approval.pick')} />
-        )}
-        {variant.kind === 'network' && (
-          <NetworkApprovalView host={variant.host} requested_by={variant.requested_by} onRespond={(r) => onRespond(current.request_id, r)} allowLabel={t('approval.allow.host')} denyLabel={t('approval.deny')} />
-        )}
-        {variant.kind === 'elicitation' && (
-          <ElicitationView server={variant.server} message={variant.message} requested_schema={variant.requested_schema} onRespond={(r) => onRespond(current.request_id, r)} submitLabel={t('approval.submit')} declineLabel={t('approval.decline')} cancelLabel={t('approval.cancel')} />
-        )}
+    <div className={styles.barWrap}>
+      <div className={styles.bar}>
+        <div className={styles.headline}>
+          <span className={styles.icon}>⚠</span>
+          <span className={styles.title}>{t('approval.waiting')}</span>
+          {queueDepth > 0 && (
+            <span className={styles.queue}>+{queueDepth} {t('approval.queued')}</span>
+          )}
+        </div>
+        <div className={styles.body}>
+          {variant.kind === 'tool' && (
+            <ToolApprovalView approval={variant.approval} onRespond={(r) => onRespond(current.request_id, r)} respondLabel={t('approval.allow')} refuseLabel={t('approval.refuse')} />
+          )}
+          {variant.kind === 'plan_review' && (
+            <PlanReviewView plan={variant.plan} steps={variant.steps} onRespond={(r) => onRespond(current.request_id, r)} acceptLabel={t('approval.accept')} reviseLabel={t('approval.revise')} revisePlaceholder={t('approval.revise.placeholder')} />
+          )}
+          {variant.kind === 'plan_decision' && (
+            <PlanDecisionView decision_id={variant.decision_id} question={variant.question} context={variant.context} options={variant.options} onRespond={(r) => onRespond(current.request_id, r)} pickLabel={t('approval.pick')} />
+          )}
+          {variant.kind === 'network' && (
+            <NetworkApprovalView host={variant.host} requested_by={variant.requested_by} onRespond={(r) => onRespond(current.request_id, r)} allowLabel={t('approval.allow.host')} denyLabel={t('approval.deny')} />
+          )}
+          {variant.kind === 'elicitation' && (
+            <ElicitationView server={variant.server} message={variant.message} requested_schema={variant.requested_schema} onRespond={(r) => onRespond(current.request_id, r)} submitLabel={t('approval.submit')} declineLabel={t('approval.decline')} cancelLabel={t('approval.cancel')} />
+          )}
+        </div>
       </div>
     </div>
   )

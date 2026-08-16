@@ -14,7 +14,7 @@
 }
 
 .logo {
-  font-size: 16px;
+  font-size: 17px;
   color: var(--oneai-brand-500);
 }
 
@@ -26,7 +26,7 @@
   color: var(--oneai-text);
   border-radius: var(--oneai-radius-sm);
   font-family: var(--oneai-font-family);
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
   transition: background var(--oneai-dur) var(--oneai-ease),
     border-color var(--oneai-dur) var(--oneai-ease);
@@ -48,10 +48,12 @@
 }
 
 .sectionLabel {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--oneai-text-tertiary);
+  /* Section header — same size as the rows below (13px) but bold + secondary
+   * so it reads as a heading, not a faint 11px tertiary caption that's smaller
+   * and lighter than its own children. */
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--oneai-text-secondary);
   padding: 0 6px;
   margin-top: var(--oneai-gap);
 }
@@ -71,7 +73,7 @@
   gap: 2px;
 }
 .scenarioEmpty {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-tertiary);
   padding: 4px 6px;
 }
@@ -108,11 +110,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--oneai-brand-500);
 }
 .scenarioName {
-  font-size: 13px;
+  font-size: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -126,7 +128,7 @@
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
   font-family: var(--oneai-font-family);
-  font-size: 12px;
+  font-size: 13px;
   text-align: left;
   transition: border-color var(--oneai-dur) var(--oneai-ease),
     color var(--oneai-dur) var(--oneai-ease);
@@ -145,21 +147,24 @@
 }
 
 .footBtn {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border: 1px solid var(--oneai-border);
   background: var(--oneai-bg-elevated);
   color: var(--oneai-text-secondary);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 15px;
+  font-size: 18px;
+  line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: background var(--oneai-dur) var(--oneai-ease),
-    color var(--oneai-dur) var(--oneai-ease);
+    color var(--oneai-dur) var(--oneai-ease),
+    border-color var(--oneai-dur) var(--oneai-ease);
 }
 .footBtn:hover {
   background: var(--oneai-bg-subtle);
+  border-color: var(--oneai-border-strong);
   color: var(--oneai-text);
 }

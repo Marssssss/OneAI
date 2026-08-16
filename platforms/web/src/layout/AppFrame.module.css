@@ -83,7 +83,7 @@
   border: none;
   background: transparent;
   color: var(--oneai-text);
-  font-size: 20px;
+  font-size: 21px;
   cursor: pointer;
   border-radius: var(--oneai-radius-sm);
 }

@@ -2,7 +2,7 @@
  * conversation/Markdown.tsx. Token-driven so it tracks light/dark. */
 
 .oneai-md {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.6;
 }
 .oneai-md > *:first-child {
@@ -56,7 +56,8 @@
 .oneai-md pre {
   margin: 0.6em 0;
   padding: 12px 14px;
-  background: #0d1117;
+  background: var(--oneai-code-bg);
+  color: var(--oneai-code-fg);
   border-radius: var(--oneai-radius-sm);
   overflow-x: auto;
   border: 1px solid var(--oneai-border);
@@ -66,6 +67,7 @@
   padding: 0;
   font-size: 0.85em;
   line-height: 1.5;
+  color: inherit;
 }
 .oneai-md blockquote {
   margin: 0.6em 0;

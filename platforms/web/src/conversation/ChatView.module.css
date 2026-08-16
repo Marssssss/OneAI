@@ -99,24 +99,72 @@
 
 .thinking {
   width: 100%;
-  padding: 8px 12px;
+  padding: 0;
   background: var(--oneai-bg-subtle);
   border-left: 3px solid var(--oneai-text-tertiary);
   border-radius: var(--oneai-radius-sm);
   color: var(--oneai-text-secondary);
+  font-size: 14px;
+  overflow: hidden;
+}
+.thinkingOpen {
+  /* expanded — full text below */
+}
+
+.thinkingToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--oneai-text-secondary);
+  min-width: 0;
+}
+.thinkingToggle:hover {
+  background: var(--oneai-bg-elevated);
+}
+
+.thinkingLabel {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--oneai-text-tertiary);
+}
+
+/* The single-line collapsed view: one row, ellipsized, auto-scrolled to the
+ * tail while streaming. `nowrap` keeps it one line; the toggle expands. */
+.thinkingLine {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--oneai-font-mono);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--oneai-text-tertiary);
+}
+
+.thinkingChevron {
+  flex-shrink: 0;
+  color: var(--oneai-text-tertiary);
   font-size: 13px;
 }
-.thinkingLabel {
-  display: block;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--oneai-text-tertiary);
-  margin-bottom: 4px;
-}
+
 .thinkingText {
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--oneai-border);
   white-space: pre-wrap;
   font-family: var(--oneai-font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow-y: auto;
+  color: var(--oneai-text-secondary);
 }
 
 .speakerRow {
@@ -135,7 +183,7 @@
   flex-shrink: 0;
 }
 .speakerName {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--oneai-text-secondary);
 }
@@ -189,7 +237,7 @@
   border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
-  font-size: 14px;
+  font-size: 15px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -214,7 +262,7 @@
 }
 
 .feedbackNote {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
   font-style: italic;
 }

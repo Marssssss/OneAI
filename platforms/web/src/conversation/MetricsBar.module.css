@@ -1,0 +1,37 @@
+.strip {
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--oneai-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Allow the metrics to shrink out of the way of the model button on
+   * narrow widths rather than pushing the row to wrap. */
+  user-select: none;
+}
+
+.group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.value {
+  font-weight: 600;
+  color: var(--oneai-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.unit {
+  color: var(--oneai-text-tertiary);
+}
+
+.sep {
+  color: var(--oneai-text-tertiary);
+  margin: 0 1px;
+}

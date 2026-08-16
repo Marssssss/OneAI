@@ -19,7 +19,7 @@
 
 .brand {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .headerRight {
@@ -29,7 +29,7 @@
 }
 
 .status {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-secondary);
   display: inline-flex;
   align-items: center;
@@ -55,7 +55,7 @@
 
 .paradigm {
   font-family: var(--oneai-font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-brand-500);
 }
 
@@ -73,7 +73,7 @@
   background: var(--oneai-red-bg);
   color: var(--oneai-red);
   border: 1px solid var(--oneai-red);
-  font-size: 13px;
+  font-size: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -90,12 +90,12 @@
   color: var(--oneai-text-secondary);
 }
 .emptyTitle {
-  font-size: 18px;
+  font-size: 19px;
   font-weight: 600;
   color: var(--oneai-text);
 }
 .emptySubtitle {
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .heroChips {
@@ -117,7 +117,7 @@
   border-radius: 999px;
   cursor: pointer;
   font-family: var(--oneai-font-family);
-  font-size: 13px;
+  font-size: 14px;
   transition: border-color var(--oneai-dur) var(--oneai-ease),
     background var(--oneai-dur) var(--oneai-ease);
 }
@@ -126,7 +126,7 @@
   background: var(--oneai-bg-subtle);
 }
 .heroIcon {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--oneai-brand-500);
 }
 
@@ -144,7 +144,7 @@
   border-radius: 999px;
   cursor: pointer;
   font-family: var(--oneai-font-family);
-  font-size: 13px;
+  font-size: 14px;
   transition: background var(--oneai-dur) var(--oneai-ease);
 }
 .debriefBtn:hover {

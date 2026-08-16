@@ -32,7 +32,7 @@
 }
 .title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 15px;
   color: var(--oneai-text);
 }
 .close {
@@ -43,7 +43,7 @@
   color: var(--oneai-text-tertiary);
   cursor: pointer;
   border-radius: var(--oneai-radius-sm);
-  font-size: 14px;
+  font-size: 15px;
   display: flex;
   align-items: center;
   justify-content: center;

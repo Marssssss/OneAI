@@ -39,6 +39,14 @@
    * own chosen color is persisted scenario data, a real hex, not a token.) */
   --oneai-speaker-fallback: var(--oneai-text-tertiary);
 
+  /* Code block surfaces (the markdown `.oneai-md pre` + shiki plain fallback).
+   * shiki-highlighted blocks set their own inline bg per theme and win; these
+   * tokens only color the plain fallback (unsupported lang / pre-highlight) so
+   * it never renders black-on-black. Light: dark ink on light panel; dark:
+   * light ink on near-black panel. */
+  --oneai-code-bg: #f6f8fa;
+  --oneai-code-fg: #1f2328;
+
   /* Geometry. */
   --oneai-radius-sm: 6px;
   --oneai-radius: 10px;
@@ -96,6 +104,9 @@ body[data-oneai-theme='dark'] {
   --oneai-red-bg: #450a0a;
 
   --oneai-speaker-fallback: var(--oneai-text-tertiary);
+
+  --oneai-code-bg: #0d1117;
+  --oneai-code-fg: #e6edf3;
 }
 
 html,
@@ -109,7 +120,7 @@ body {
   background: var(--oneai-bg);
   color: var(--oneai-text);
   font-family: var(--oneai-font-family);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;

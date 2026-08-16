@@ -6,7 +6,7 @@
   color: var(--oneai-text);
   border-radius: var(--oneai-radius-sm);
   font-family: var(--oneai-font-family);
-  font-size: 14px;
+  font-size: 15px;
   box-sizing: border-box;
   transition: border-color var(--oneai-dur) var(--oneai-ease);
 }
@@ -22,7 +22,7 @@
   color: var(--oneai-accent-fg);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
 }
 .primary:hover {
@@ -35,7 +35,7 @@
   color: var(--oneai-text);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
 }
 .secondary:hover {

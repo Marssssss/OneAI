@@ -5,7 +5,7 @@
 }
 
 .label {
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--oneai-text-tertiary);
@@ -64,21 +64,21 @@
 }
 
 .kind {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--oneai-text);
   font-family: var(--oneai-font-mono);
 }
 
 .status {
-  font-size: 10px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--oneai-text-tertiary);
 }
 
 .task {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -94,7 +94,7 @@
 }
 
 .summaryText {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text);
 }
 
@@ -107,12 +107,12 @@
 }
 
 .findings li {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-secondary);
 }
 
 .tokens {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--oneai-text-tertiary);
   font-family: var(--oneai-font-mono);
 }

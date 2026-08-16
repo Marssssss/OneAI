@@ -10,7 +10,7 @@
   gap: 6px;
 }
 .label {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--oneai-text);
   display: flex;
@@ -19,7 +19,7 @@
 }
 .partial {
   color: var(--oneai-amber);
-  font-size: 12px;
+  font-size: 13px;
   cursor: help;
 }
 .input {
@@ -29,7 +29,7 @@
   color: var(--oneai-text);
   border-radius: var(--oneai-radius-sm);
   font-family: var(--oneai-font-family);
-  font-size: 13px;
+  font-size: 14px;
   transition: border-color var(--oneai-dur) var(--oneai-ease);
 }
 .input:focus {
@@ -38,7 +38,7 @@
 }
 
 .hint {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-tertiary);
   line-height: 1.5;
 }
@@ -50,7 +50,7 @@
   color: var(--oneai-accent-fg);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
   transition: background var(--oneai-dur) var(--oneai-ease);
 }
@@ -68,7 +68,7 @@
   color: var(--oneai-text);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
 }
 .secondary:hover {

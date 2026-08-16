@@ -13,7 +13,7 @@
   color: var(--oneai-text-tertiary);
   cursor: pointer;
   border-radius: var(--oneai-radius-sm);
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1;
   display: flex;
   align-items: center;
@@ -50,7 +50,7 @@
   cursor: pointer;
   border-radius: 4px;
   font-family: var(--oneai-font-family);
-  font-size: 13px;
+  font-size: 14px;
   text-align: left;
   transition: background var(--oneai-dur-fast) var(--oneai-ease);
 }

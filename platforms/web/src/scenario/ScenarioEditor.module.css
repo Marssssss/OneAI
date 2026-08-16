@@ -18,16 +18,16 @@
   min-width: 0;
 }
 .label {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--oneai-text-secondary);
 }
 .hint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
 }
 .err {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-red);
 }
 
@@ -40,14 +40,14 @@
   color: var(--oneai-text);
   border-radius: var(--oneai-radius-sm);
   font-family: var(--oneai-font-family);
-  font-size: 13px;
+  font-size: 14px;
   transition: border-color var(--oneai-dur) var(--oneai-ease);
   width: 100%;
   box-sizing: border-box;
 }
 .inputMono {
   font-family: var(--oneai-font-mono);
-  font-size: 12px;
+  font-size: 13px;
 }
 .textarea {
   resize: vertical;
@@ -77,7 +77,7 @@
 }
 
 .sectionLabel {
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--oneai-text-tertiary);
@@ -106,7 +106,7 @@
   color: var(--oneai-text-secondary);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   font-family: var(--oneai-font-family);
 }
 .addBtn:hover {
@@ -121,7 +121,7 @@
   color: var(--oneai-red);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   height: 32px;
 }
 .miniBtn:hover {
@@ -134,14 +134,14 @@
   color: var(--oneai-red);
   border: 1px solid var(--oneai-red);
   border-radius: var(--oneai-radius-sm);
-  font-size: 12px;
+  font-size: 13px;
 }
 .presetNote {
   padding: 8px 10px;
   background: var(--oneai-amber-bg);
   color: var(--oneai-amber);
   border-radius: var(--oneai-radius-sm);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .primary {
@@ -151,7 +151,7 @@
   color: var(--oneai-accent-fg);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
 }
 .primary:hover:not(:disabled) {
@@ -168,7 +168,7 @@
   color: var(--oneai-text);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
 }
 .secondary:hover {
@@ -182,7 +182,7 @@
   color: var(--oneai-red);
   border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   font-family: var(--oneai-font-family);
 }
 .danger:hover {

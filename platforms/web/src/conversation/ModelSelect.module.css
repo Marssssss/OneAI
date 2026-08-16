@@ -8,17 +8,21 @@
   align-items: center;
   gap: 6px;
   font: inherit;
-  font-size: 12px;
-  background: var(--oneai-bg-subtle);
-  border: 1px solid var(--oneai-border);
+  font-size: 13px;
+  /* Match the adjacent composer `.chip` (elevated + strong border) so the
+   * model switcher reads as one control in the chips row, not a stray. */
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border-strong);
   color: var(--oneai-text-secondary);
-  padding: 4px 8px;
-  border-radius: var(--oneai-radius-sm);
+  padding: 4px 10px;
+  border-radius: 14px;
   cursor: pointer;
-  max-width: 220px;
+  max-width: 240px;
+  transition: border-color var(--oneai-dur) var(--oneai-ease),
+    background var(--oneai-dur) var(--oneai-ease);
 }
 .trigger:hover:not(:disabled) {
-  border-color: var(--oneai-border-strong);
+  border-color: var(--oneai-brand-500);
   color: var(--oneai-text);
 }
 .trigger:disabled {
@@ -27,19 +31,23 @@
 }
 
 .glyph {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .label {
+  /* Match the adjacent mode/attach `.chipLabel` (12px / 600 / inherit family)
+   * so the model switcher reads as one peer control, not a fainter mono tag. */
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: inherit;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--oneai-font-mono);
-  font-size: 11px;
 }
 
 .caret {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--oneai-text-tertiary);
 }
 
@@ -52,7 +60,7 @@
   background: var(--oneai-bg-elevated);
   border: 1px solid var(--oneai-border);
   border-radius: var(--oneai-radius);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 4px 16px var(--oneai-bg-overlay);
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -64,7 +72,7 @@
 
 .empty {
   padding: 8px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--oneai-text-tertiary);
   text-align: center;
 }
@@ -74,7 +82,7 @@
   align-items: center;
   gap: 8px;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   background: none;
   border: none;
   text-align: left;
@@ -99,7 +107,7 @@
 }
 
 .itemModel {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--oneai-text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -109,6 +117,6 @@
 
 .itemActiveDot {
   color: var(--oneai-green);
-  font-size: 10px;
+  font-size: 11px;
   margin-left: auto;
 }

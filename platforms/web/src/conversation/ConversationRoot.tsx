@@ -15,10 +15,9 @@ import type { BusScenario, ContentBlock, FeedbackKind } from '../rpc/types'
 import type { ScenarioEntry } from '../scenario/scenarioStore'
 import type { InteractionResponse } from '../rpc/types'
 import { ChatView } from './ChatView'
-import { Composer, type SlashCommand } from './Composer'
+import { Composer, type SlashCommand, type InteractionMode } from './Composer'
 import { ApprovalPanel } from './ApprovalPanel'
 import { GoalBar } from './GoalBar'
-import { ModelSelect } from './ModelSelect'
 import type { SettingsStore } from '../settings/settingsStore'
 import styles from './ConversationRoot.module.css'
 
@@ -26,7 +25,7 @@ interface ConversationRootProps {
   snapshot: ProjectionSnapshot
   connection: 'connecting' | 'open' | 'closed' | 'error'
   theme: 'light' | 'dark'
-  planMode: boolean
+  mode: InteractionMode
   scenarios: ScenarioEntry[]
   settingsStore: SettingsStore
   /** Send a user message. `images` (W4 attachments) are image content blocks
@@ -34,7 +33,7 @@ interface ConversationRootProps {
    * (its bus directive is plain-text only). */
   onSend: (text: string, images?: ContentBlock[]) => void
   onStop: () => void
-  onTogglePlan: () => void
+  onCycleMode: () => void
   onSlash: (cmd: SlashCommand) => void
   onSelectTool: (nodeId: string) => void
   onRespondApproval: (requestId: string, response: InteractionResponse) => void
@@ -48,12 +47,12 @@ export function ConversationRoot({
   snapshot,
   connection,
   theme,
-  planMode,
+  mode,
   scenarios,
   settingsStore,
   onSend,
   onStop,
-  onTogglePlan,
+  onCycleMode,
   onSlash,
   onSelectTool,
   onRespondApproval,
@@ -84,7 +83,6 @@ export function ConversationRoot({
             : t('app.title')}
         </span>
         <div className={styles.headerRight}>
-          <ModelSelect store={settingsStore} />
           <span className={`${styles.status} ${styles[`status_${connection}`]}`}>
             {statusText}
             {snapshot.paradigm !== 're_act' && (
@@ -155,11 +153,13 @@ export function ConversationRoot({
           stopLabel={t('composer.stop')}
           turnActive={snapshot.turnActive}
           paradigm={snapshot.paradigm}
-          planMode={planMode}
+          mode={mode}
+          metrics={snapshot.metrics}
+          settingsStore={settingsStore}
           attachmentsEnabled={snapshot.currentScenario === null}
           onSend={onSend}
           onStop={onStop}
-          onTogglePlan={onTogglePlan}
+          onCycleMode={onCycleMode}
           onSlash={onSlash}
         />
       </div>

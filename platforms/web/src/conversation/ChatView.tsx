@@ -203,10 +203,7 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
     return (
       <div className={styles.row}>
         <SpeakerHeader meta={speaker} thinking />
-        <div className={styles.thinking}>
-          <span className={styles.thinkingLabel}>· {t('thinking')}</span>
-          <div className={styles.thinkingText}>{node.text}</div>
-        </div>
+        <ThinkingBlock node={node} label={t('thinking')} />
       </div>
     )
   }
@@ -297,6 +294,66 @@ function SpeakerHeader({
       <span className={styles.speakerName}>{meta.name}</span>
     </div>
   )
+}
+
+// ThinkingBlock — deepseek-harness style: a single-line, collapsed-by-default
+// reasoning affordance. While streaming, the one line follows the live text
+// (auto-scrolled to the tail so the latest reasoning shows). Once the fragment
+// is done, the line shows the first sentence; clicking expands the full text.
+const ThinkingBlock = memo(function ThinkingBlock({
+  node,
+  label,
+}: {
+  node: ChatNode
+  label: string
+}): ReactNode {
+  const [expanded, setExpanded] = useState(false)
+  const lineRef = useRef<HTMLDivElement>(null)
+  const streaming = node.state === 'streaming'
+  const collapsedLine = streaming ? node.text : firstSentence(node.text)
+
+  // While streaming & collapsed, keep the single line pinned to the tail so
+  // the latest reasoning is visible (mirrors dsh's scrolling one-line display).
+  useEffect(() => {
+    if (expanded || !streaming) return
+    const el = lineRef.current
+    if (el !== null) {
+      el.scrollLeft = el.scrollWidth
+    }
+  }, [node.text, expanded, streaming])
+
+  return (
+    <div className={`${styles.thinking} ${expanded ? styles.thinkingOpen : ''}`}>
+      <button
+        className={styles.thinkingToggle}
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className={styles.thinkingLabel}>
+          {streaming ? '💭 ' + label + '…' : '💭 ' + label}
+        </span>
+        {!expanded && (
+          <span className={styles.thinkingLine} ref={lineRef}>
+            {collapsedLine.length > 0 ? collapsedLine : ''}
+          </span>
+        )}
+        <span className={styles.thinkingChevron} aria-hidden>
+          {expanded ? '▾' : '▸'}
+        </span>
+      </button>
+      {expanded && <div className={styles.thinkingText}>{node.text}</div>}
+    </div>
+  )
+})
+
+/** First sentence of a thinking fragment — split on terminal punctuation or
+ * newline, trimmed + truncated to one line. Returns '' for empty input. */
+function firstSentence(text: string): string {
+  const t = text.trim()
+  if (t.length === 0) return ''
+  const m = t.split(/[。.!?\n]/)[0] ?? ''
+  const s = m.trim().replace(/\s+/g, ' ')
+  return s.length > 120 ? s.slice(0, 119) + '…' : s
 }
 
 function TypingDots(): ReactNode {

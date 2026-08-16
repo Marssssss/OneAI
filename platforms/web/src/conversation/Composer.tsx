@@ -1,18 +1,27 @@
-// Composer — the message input + send/stop button + plan-mode chip + slash
-// command palette.
+// Composer — the message input + send/stop button + mode-cycler chip +
+// slash command palette + provider/model switcher + session metrics strip.
 //
 //  - Enter sends, Shift+Enter for a newline.
 //  - While a turn is in flight the button becomes Stop → turn/cancel.
-//  - Plan-mode chip reflects the App-owned `planMode` flag (toggled via
-//    config/update) and the live `paradigm` from paradigm_switch yields.
+//  - Mode chip cycles Normal → Auto → Plan (mirrors the TUI InteractionMode);
+//    hover the chip for a tooltip describing the current mode. The live
+//    `paradigm` from paradigm_switch yields surfaces a tag when the model
+//    auto-switched to reflect/explore.
+//  - The provider/model switcher lives at the row's right edge (moved here
+//    from the header so it sits beside the mode + attach controls).
+//  - The metrics strip (turns/steps/first-token/tok-s/cache/in-out) sits
+//    between the attach button and the model switcher.
 //  - Slash commands: typing `/` surfaces a candidate popup; Enter on a known
-//    `/command` dispatches it instead of sending a message. W2 ships the three
-//    engine-backed commands; /model / /permission need W4 RPCs.
+//    `/command` dispatches it instead of sending a message.
 
 import { useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { BusParadigmKind, ContentBlock } from '../rpc/types'
+import type { SessionMetrics } from '../store/projection'
+import type { SettingsStore } from '../settings/settingsStore'
 import { useLocale } from '../i18n'
+import { ModelSelect } from './ModelSelect'
+import { MetricsBar } from './MetricsBar'
 import styles from './Composer.module.css'
 
 export type SlashCommand =
@@ -26,6 +35,17 @@ export type SlashCommand =
   | 'settings'
   | 'skills'
   | 'domainpack'
+
+/** The 3-state interaction mode — mirrors the TUI's `InteractionMode`
+ * (Normal → AutoAccept → Plan → Normal). The composer cycles on click. */
+export type InteractionMode = 'normal' | 'auto' | 'plan'
+
+export const MODE_ORDER: InteractionMode[] = ['normal', 'auto', 'plan']
+
+export function nextMode(m: InteractionMode): InteractionMode {
+  const i = MODE_ORDER.indexOf(m)
+  return MODE_ORDER[(i + 1) % MODE_ORDER.length]
+}
 
 /** A staged image attachment: the wire block (sent in turn/run `content`) +
  * a `data:` URL preview for the thumbnail. */
@@ -41,13 +61,15 @@ interface ComposerProps {
   stopLabel: string
   turnActive: boolean
   paradigm: BusParadigmKind
-  planMode: boolean
+  mode: InteractionMode
+  metrics: SessionMetrics
+  settingsStore: SettingsStore
   /** §W4 attachments — disabled in group-chat mode (its bus directive is
    * plain-text only). When false the attach button + drop zone hide. */
   attachmentsEnabled: boolean
   onSend: (text: string, images?: ContentBlock[]) => void
   onStop: () => void
-  onTogglePlan: () => void
+  onCycleMode: () => void
   onSlash: (cmd: SlashCommand) => void
 }
 
@@ -56,6 +78,12 @@ const PARADIGM_GLYPH: Record<BusParadigmKind, string> = {
   re_act: '',
   reflect: ' ↻',
   explore: ' ⌕',
+}
+
+const MODE_META: Record<InteractionMode, { glyph: string; labelKey: string; tipKey: string }> = {
+  normal: { glyph: '', labelKey: 'mode.normal', tipKey: 'mode.normal.tip' },
+  auto: { glyph: '⚡', labelKey: 'mode.auto', tipKey: 'mode.auto.tip' },
+  plan: { glyph: '📋', labelKey: 'mode.plan', tipKey: 'mode.plan.tip' },
 }
 
 /** Read one image File into a `ContentBlock::image` (base64 data, no data-URI
@@ -93,11 +121,13 @@ export function Composer({
   stopLabel,
   turnActive,
   paradigm,
-  planMode,
+  mode,
+  metrics,
+  settingsStore,
   attachmentsEnabled,
   onSend,
   onStop,
-  onTogglePlan,
+  onCycleMode,
   onSlash,
 }: ComposerProps): ReactNode {
   const { t } = useLocale()
@@ -191,13 +221,16 @@ export function Composer({
 
       <div className={styles.chips}>
         <button
-          className={`${styles.chip} ${planMode ? styles.chipOn : ''}`}
-          onClick={onTogglePlan}
-          title={t('command.plan')}
+          className={`${styles.chip} ${mode !== 'normal' ? styles.chipOn : ''}`}
+          onClick={onCycleMode}
+          title={t(MODE_META[mode].tipKey)}
+          aria-label={t('mode.cycle')}
         >
-          <span className={styles.chipLabel}>{t('plan.mode')}</span>
-          <span className={styles.chipState}>{planMode ? t('plan.on') : t('plan.off')}</span>
-          {paradigm !== 're_act' && (
+          <span className={styles.chipLabel}>
+            {MODE_META[mode].glyph ? MODE_META[mode].glyph + ' ' : ''}
+            {t(MODE_META[mode].labelKey)}
+          </span>
+          {paradigm !== 're_act' && paradigm !== 'plan' && (
             <span className={styles.chipParadigm}>{paradigm}{PARADIGM_GLYPH[paradigm]}</span>
           )}
         </button>
@@ -211,6 +244,10 @@ export function Composer({
             <span className={styles.chipLabel}>📎</span>
           </button>
         )}
+        <MetricsBar metrics={metrics} />
+        <div className={styles.modelSlot}>
+          <ModelSelect store={settingsStore} />
+        </div>
         <input
           ref={fileInputRef}
           type="file"
