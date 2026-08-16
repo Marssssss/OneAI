@@ -92,6 +92,59 @@
   font-size: 14px;
 }
 
+.heroChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--oneai-gap);
+  justify-content: center;
+  margin-top: var(--oneai-gap-lg);
+  max-width: 560px;
+}
+.heroChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--oneai-border-strong);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+  transition: border-color var(--oneai-dur) var(--oneai-ease),
+    background var(--oneai-dur) var(--oneai-ease);
+}
+.heroChip:hover {
+  border-color: var(--oneai-brand-500);
+  background: var(--oneai-bg-subtle);
+}
+.heroIcon {
+  font-size: 14px;
+  color: var(--oneai-brand-500);
+}
+
+.debriefBar {
+  display: flex;
+  justify-content: center;
+  padding: var(--oneai-gap) var(--oneai-gap-lg) 0;
+  flex-shrink: 0;
+}
+.debriefBtn {
+  padding: 8px 16px;
+  border: 1px solid var(--oneai-brand-500);
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+  transition: background var(--oneai-dur) var(--oneai-ease);
+}
+.debriefBtn:hover {
+  background: var(--oneai-brand-600);
+}
+
 .composer {
   border-top: 1px solid var(--oneai-border);
   padding: var(--oneai-gap) var(--oneai-gap-lg) calc(var(--oneai-gap) + env(safe-area-inset-bottom));

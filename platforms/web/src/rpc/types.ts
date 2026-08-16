@@ -373,3 +373,136 @@ export interface TurnCancelParams {
 export interface ConversationCompactParams {
   keep_recent_turns: number
 }
+
+// ─── Scenario library (scenario/*) + group chat (group/*) ────────────────────
+// Mirrors oneai-bus::protocol — `BusScenario` (rich editor unit) /
+// `BusGroupScenario` (compiled engine launch payload) and friends. Field-for-
+// field, snake_case (serde rename_all = "snake_case" on the locale enum only;
+// the structs use default serde = field name). The engine consumes the
+// *compiled* `BusGroupScenario` over `group/start`; it never sees the editor-
+// only fields (`icon`/`name`/`role`/`topic_fields`/`debrief`).
+
+export type BusLocale = 'en' | 'zh'
+
+export interface BusReviewLoop {
+  reviewer_id: string
+  approve_marker: string
+  /** Default 1 when absent on the wire (server default_one). */
+  max_rounds?: number
+}
+
+export interface BusDebriefConfig {
+  button_label: string
+  summary_prompt: string
+  debrief_member_id: string
+}
+
+export interface BusTopicField {
+  id: string
+  label: string
+  placeholder?: string
+  /** Member ids allowed to see this field's value in their background. Absent
+   *  ⇒ all members; present ⇒ only those. */
+  visible_to?: string[]
+}
+
+export interface BusScenarioMember {
+  id: string
+  name: string
+  /** Short UI-only label the engine drops on compile. */
+  role?: string
+  system_prompt: string
+  /** Provider kind; `""`/absent ⇒ inherit the app's configured provider. */
+  kind?: string
+  /** Model name; `""`/absent ⇒ inherit. */
+  model?: string
+  api_key?: string
+  base_url?: string
+  color?: string
+  avatar?: string
+}
+
+/** The rich scenario editor unit — what `scenario/*` stores return/edit. */
+export interface BusScenario {
+  id: string
+  name: string
+  icon?: string
+  members: BusScenarioMember[]
+  /** `scripted` | `moderator` | `roundrobin` (anything else ⇒ round-robin). */
+  turn_policy: string
+  script_order?: string[]
+  moderator_id?: string
+  opener_agent_id?: string
+  opener_line?: string
+  topic_fields?: BusTopicField[]
+  debrief?: BusDebriefConfig
+  review_loop?: BusReviewLoop
+  locale?: BusLocale
+}
+
+/** The compiled engine launch payload — `group/start`'s `scenario` param.
+ *  The frontend compiles a `BusScenario` (+ collected topic values) into this
+ *  via `compileGroupScenario`, baking the topic background into member
+ *  `system_prompt`s per `visible_to` and dropping UI-only fields. Mirrors
+ *  `BusGroupScenario` (members = `BusAgentSpec`, no `role`). */
+export interface BusGroupScenario {
+  members: {
+    id: string
+    name: string
+    system_prompt: string
+    kind?: string
+    model?: string
+    api_key?: string
+    base_url?: string
+    color?: string
+    avatar?: string
+  }[]
+  turn_policy: string
+  script_order?: string[]
+  moderator_id?: string
+  opener_agent_id?: string
+  opener_line?: string
+  title?: string
+  review_loop?: BusReviewLoop
+  locale?: BusLocale
+}
+
+/** One scenario-validation problem, surfaced by `scenario/validate` /
+ *  `scenario/upsert` (when `ok:false`). Frontends localize off `code`. */
+export interface ScenarioError {
+  /** Dot-path to the offending field, e.g. `members.0.name`, `script_order`. */
+  field: string
+  /** Stable machine code: `empty` | `unknown_id` | `missing` | `invalid`. */
+  code: string
+  /** English fallback message. */
+  message: string
+}
+
+// ── scenario/* RPC results ──
+
+export interface ScenarioListResult {
+  scenarios: BusScenario[]
+}
+export interface ScenarioValidateResult {
+  ok: boolean
+  errors: ScenarioError[]
+}
+export interface ScenarioUpsertResult {
+  ok: boolean
+  /** Present when ok:true. */
+  id?: string
+  /** Present when ok:false. */
+  errors?: ScenarioError[]
+}
+
+// ── group/* RPC params (all ack — results stream as `event` notifications) ──
+
+export interface GroupStartParams {
+  scenario: BusGroupScenario
+}
+export interface GroupRunParams {
+  user_input: string
+}
+export interface GroupSetOrderParams {
+  order: string[]
+}

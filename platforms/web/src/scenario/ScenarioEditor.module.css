@@ -1,0 +1,190 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oneai-gap-lg);
+}
+
+.row2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--oneai-gap);
+  align-items: start;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--oneai-text-secondary);
+}
+.hint {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+}
+.err {
+  font-size: 11px;
+  color: var(--oneai-red);
+}
+
+.input,
+.inputMono,
+.textarea {
+  padding: 7px 9px;
+  border: 1px solid var(--oneai-border-strong);
+  background: var(--oneai-bg);
+  color: var(--oneai-text);
+  border-radius: var(--oneai-radius-sm);
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+  transition: border-color var(--oneai-dur) var(--oneai-ease);
+  width: 100%;
+  box-sizing: border-box;
+}
+.inputMono {
+  font-family: var(--oneai-font-mono);
+  font-size: 12px;
+}
+.textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.input:focus,
+.inputMono:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--oneai-brand-500);
+}
+.input:disabled,
+.inputMono:disabled,
+.textarea:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.color {
+  width: 100%;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--oneai-border-strong);
+  border-radius: var(--oneai-radius-sm);
+  background: var(--oneai-bg);
+  cursor: pointer;
+}
+
+.sectionLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--oneai-text-tertiary);
+  border-bottom: 1px solid var(--oneai-border);
+  padding-bottom: 4px;
+  margin-top: 4px;
+}
+.sectionLabel:first-child {
+  margin-top: 0;
+}
+
+.member {
+  border: 1px solid var(--oneai-border);
+  border-radius: var(--oneai-radius-sm);
+  padding: var(--oneai-gap);
+  display: flex;
+  flex-direction: column;
+  gap: var(--oneai-gap);
+}
+
+.addBtn {
+  align-self: flex-start;
+  padding: 6px 12px;
+  border: 1px dashed var(--oneai-border-strong);
+  background: transparent;
+  color: var(--oneai-text-secondary);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--oneai-font-family);
+}
+.addBtn:hover {
+  border-color: var(--oneai-brand-500);
+  color: var(--oneai-brand-500);
+}
+.miniBtn {
+  align-self: end;
+  padding: 6px 10px;
+  border: 1px solid var(--oneai-red);
+  background: transparent;
+  color: var(--oneai-red);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font-size: 11px;
+  height: 32px;
+}
+.miniBtn:hover {
+  background: var(--oneai-red-bg);
+}
+
+.saveErr {
+  padding: 8px 10px;
+  background: var(--oneai-red-bg);
+  color: var(--oneai-red);
+  border: 1px solid var(--oneai-red);
+  border-radius: var(--oneai-radius-sm);
+  font-size: 12px;
+}
+.presetNote {
+  padding: 8px 10px;
+  background: var(--oneai-amber-bg);
+  color: var(--oneai-amber);
+  border-radius: var(--oneai-radius-sm);
+  font-size: 12px;
+}
+
+.primary {
+  padding: 8px 16px;
+  border: 1px solid var(--oneai-brand-500);
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: var(--oneai-font-family);
+}
+.primary:hover:not(:disabled) {
+  background: var(--oneai-brand-600);
+}
+.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.secondary {
+  padding: 8px 16px;
+  border: 1px solid var(--oneai-border-strong);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: var(--oneai-font-family);
+}
+.secondary:hover {
+  background: var(--oneai-bg-subtle);
+}
+.danger {
+  margin-right: auto;
+  padding: 8px 16px;
+  border: 1px solid var(--oneai-red);
+  background: transparent;
+  color: var(--oneai-red);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: var(--oneai-font-family);
+}
+.danger:hover {
+  background: var(--oneai-red-bg);
+}

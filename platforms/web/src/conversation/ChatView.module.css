@@ -119,6 +119,27 @@
   font-family: var(--oneai-font-mono);
 }
 
+.speakerRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 4px;
+}
+.speakerRowThinking {
+  padding-top: 4px;
+}
+.speakerDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.speakerName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--oneai-text-secondary);
+}
+
 .errorBubble {
   max-width: 100%;
   width: 100%;

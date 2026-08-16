@@ -1,0 +1,117 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oneai-gap);
+}
+
+.empty {
+  padding: var(--oneai-gap-lg);
+  text-align: center;
+  color: var(--oneai-text-tertiary);
+  font-size: 13px;
+}
+
+.row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--oneai-gap);
+  border: 1px solid var(--oneai-border);
+  border-radius: var(--oneai-radius);
+  overflow: hidden;
+  transition: border-color var(--oneai-dur) var(--oneai-ease);
+}
+.row:hover {
+  border-color: var(--oneai-brand-500);
+}
+
+.pickBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--oneai-text);
+  min-width: 0;
+}
+.icon {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  background: var(--oneai-bg-subtle);
+  border-radius: var(--oneai-radius-sm);
+}
+.meta {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.desc {
+  font-size: 12px;
+  color: var(--oneai-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badge {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+  border: 1px solid var(--oneai-border-strong);
+  border-radius: var(--oneai-radius-sm);
+  padding: 1px 6px;
+  margin-right: 8px;
+}
+
+.editBtn {
+  width: 40px;
+  flex-shrink: 0;
+  border: none;
+  border-left: 1px solid var(--oneai-border);
+  background: var(--oneai-bg-subtle);
+  color: var(--oneai-text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background var(--oneai-dur) var(--oneai-ease),
+    color var(--oneai-dur) var(--oneai-ease);
+}
+.editBtn:hover {
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--oneai-gap-lg);
+}
+.newBtn {
+  padding: 8px 14px;
+  border: 1px solid var(--oneai-brand-500);
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: var(--oneai-font-family);
+  transition: background var(--oneai-dur) var(--oneai-ease);
+}
+.newBtn:hover {
+  background: var(--oneai-brand-600);
+}

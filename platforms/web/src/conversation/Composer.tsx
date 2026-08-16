@@ -15,7 +15,13 @@ import type { BusParadigmKind } from '../rpc/types'
 import { useLocale } from '../i18n'
 import styles from './Composer.module.css'
 
-export type SlashCommand = 'plan' | 'clear' | 'compact'
+export type SlashCommand =
+  | 'plan'
+  | 'clear'
+  | 'compact'
+  | 'scenario'
+  | 'newScenario'
+  | 'editScenario'
 
 interface ComposerProps {
   placeholder: string
@@ -57,6 +63,9 @@ export function Composer({
       { cmd: 'plan' as const, label: '/plan', desc: t('command.plan') },
       { cmd: 'clear' as const, label: '/clear', desc: t('command.clear') },
       { cmd: 'compact' as const, label: '/compact', desc: t('command.compact') },
+      { cmd: 'scenario' as const, label: '/scenario', desc: t('command.scenario') },
+      { cmd: 'newScenario' as const, label: '/new-scenario', desc: t('command.newScenario') },
+      { cmd: 'editScenario' as const, label: '/edit-scenario', desc: t('command.editScenario') },
     ],
     [t],
   )
@@ -67,8 +76,7 @@ export function Composer({
     : []
 
   const runSlash = (raw: string): boolean => {
-    const name = raw.slice(1).trim()
-    const match = commands.find((c) => c.cmd === name)
+    const match = commands.find((c) => c.label === raw.trim())
     if (match === undefined) return false
     onSlash(match.cmd)
     setText('')

@@ -9,8 +9,25 @@
 .item {
   display: flex;
   align-items: center;
-  gap: var(--oneai-gap);
+  gap: 2px;
   width: 100%;
+  padding: 0 4px 0 0;
+  border-radius: var(--oneai-radius-sm);
+  position: relative;
+}
+.item:hover {
+  background: var(--oneai-bg-elevated);
+}
+.active {
+  background: var(--oneai-bg-elevated);
+}
+
+.pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
   padding: 8px 10px;
   border: none;
   background: transparent;
@@ -18,18 +35,15 @@
   font-family: var(--oneai-font-family);
   font-size: 13px;
   text-align: left;
-  border-radius: var(--oneai-radius-sm);
   cursor: pointer;
-  transition: background var(--oneai-dur) var(--oneai-ease),
-    color var(--oneai-dur) var(--oneai-ease);
+  border-radius: var(--oneai-radius-sm);
+  transition: color var(--oneai-dur) var(--oneai-ease);
 }
-.item:hover {
-  background: var(--oneai-bg-elevated);
+.item:hover .pick,
+.active .pick {
   color: var(--oneai-text);
 }
-.active {
-  background: var(--oneai-bg-elevated);
-  color: var(--oneai-text);
+.active .pick {
   font-weight: 500;
 }
 
@@ -44,6 +58,36 @@
   font-size: 11px;
   color: var(--oneai-text-tertiary);
   flex-shrink: 0;
+}
+
+.archivedToggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 6px 10px;
+  margin-top: 4px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-family);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--oneai-radius-sm);
+}
+.archivedToggle:hover {
+  color: var(--oneai-text-secondary);
+}
+.caret {
+  font-size: 10px;
+}
+.archivedList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 8px;
+  opacity: 0.85;
 }
 
 .empty {

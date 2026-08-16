@@ -1,0 +1,69 @@
+.wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  cursor: pointer;
+  border-radius: var(--oneai-radius-sm);
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--oneai-dur) var(--oneai-ease),
+    color var(--oneai-dur) var(--oneai-ease);
+}
+.btn:hover {
+  background: var(--oneai-bg-subtle);
+  color: var(--oneai-text);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  min-width: 140px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border-strong);
+  border-radius: var(--oneai-radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  z-index: 50;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.item {
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text);
+  cursor: pointer;
+  border-radius: 4px;
+  font-family: var(--oneai-font-family);
+  font-size: 13px;
+  text-align: left;
+  transition: background var(--oneai-dur-fast) var(--oneai-ease);
+}
+.item:hover:not(:disabled) {
+  background: var(--oneai-bg-subtle);
+}
+.item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.danger {
+  color: var(--oneai-red);
+}
+.danger:hover:not(:disabled) {
+  background: var(--oneai-red-bg);
+}

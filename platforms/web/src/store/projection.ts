@@ -3,9 +3,15 @@ import type { OneAiRpcClient } from '../rpc/client'
 import type {
   ApprovalRespondParams,
   BusParadigmKind,
+  BusScenario,
+  BusScenarioMember,
+  BusLocale,
   ConfigUpdateParams,
   ContentBlock,
   EngineYield,
+  GroupRunParams,
+  GroupSetOrderParams,
+  GroupStartParams,
   InteractionRequest,
   InteractionResponse,
   ParadigmSwitchParams,
@@ -16,6 +22,7 @@ import type {
   TurnRunParams,
 } from '../rpc/types'
 import { StreamCoalescer } from '../stream/coalescer'
+import { compileGroupScenario, firstUserMessage } from '../scenario/compile'
 
 // The projection store is the external store backing useSyncExternalStore.
 //
@@ -85,6 +92,15 @@ export interface ProjectionSnapshot {
   approvalQueueDepth: number
   /** Id of the tool node whose args/result the details rail shows. */
   selectedToolNodeId: string | null
+  /** Active multi-agent scenario, or null in single-agent mode. Drives
+   *  speaker-tagged bubbles + the debrief button. */
+  currentScenario: BusScenario | null
+  /** Members of the active scenario (for speaker name/color resolution). */
+  scenarioMembers: BusScenarioMember[] | null
+  /** True once the scenario's debrief phase has been triggered. */
+  debriefActive: boolean
+  /** True when a debrief is configured and not yet triggered. */
+  debriefAvailable: boolean
 }
 
 interface WorkingState {
@@ -97,6 +113,8 @@ interface WorkingState {
   paradigm: BusParadigmKind
   approvalQueue: ApprovalItem[]
   selectedToolNodeId: string | null
+  currentScenario: BusScenario | null
+  debriefActive: boolean
 }
 
 const EMPTY: ProjectionSnapshot = {
@@ -109,6 +127,10 @@ const EMPTY: ProjectionSnapshot = {
   currentApproval: null,
   approvalQueueDepth: 0,
   selectedToolNodeId: null,
+  currentScenario: null,
+  scenarioMembers: null,
+  debriefActive: false,
+  debriefAvailable: false,
 }
 
 let nodeSeq = 0
@@ -131,6 +153,8 @@ export class ProjectionStore {
     paradigm: 're_act',
     approvalQueue: [],
     selectedToolNodeId: null,
+    currentScenario: null,
+    debriefActive: false,
   }
   private snapshot: ProjectionSnapshot = EMPTY
   private listeners = new Set<() => void>()
@@ -172,6 +196,9 @@ export class ProjectionStore {
   /** Flush the working state into a fresh snapshot + notify React. */
   private emit(): void {
     const q = this.state.approvalQueue
+    const sc = this.state.currentScenario
+    const debriefAvailable =
+      sc !== null && sc.debrief !== undefined && !this.state.debriefActive
     this.snapshot = {
       version: this.snapshot.version + 1,
       sessionId: this.state.sessionId,
@@ -185,6 +212,10 @@ export class ProjectionStore {
       currentApproval: q.length > 0 ? q[0] : null,
       approvalQueueDepth: q.length > 0 ? q.length - 1 : 0,
       selectedToolNodeId: this.state.selectedToolNodeId,
+      currentScenario: sc,
+      scenarioMembers: sc !== null ? sc.members : null,
+      debriefActive: this.state.debriefActive,
+      debriefAvailable,
     }
     for (const l of this.listeners) l()
   }
@@ -265,9 +296,23 @@ export class ProjectionStore {
       case 'turn_start': {
         this.state.currentTurnId = y.turn_id
         this.state.turnActive = true
-        // Seed the assistant node eagerly so the user sees an empty bubble
-        // the moment the turn starts (before any stream_chunk lands).
-        this.seedAssistant(y.turn_id, this.state.currentSpeaker)
+        // Single-agent: seed an empty bubble eagerly so the user sees progress
+        // the moment the turn starts. Group chat: defer to `speaker_turn` /
+        // `stream_chunk` (which carry the member id) to avoid a stale empty
+        // placeholder node before the first speaker is known.
+        if (this.state.currentScenario === null) {
+          this.seedAssistant(y.turn_id, this.state.currentSpeaker)
+        }
+        this.coalescer.request()
+        break
+      }
+      case 'speaker_turn': {
+        // Round-level boundary in a group turn: finalize the previous
+        // speaker's streaming text node for this turn (so its bubble flips to
+        // done as the round progresses, not all-at-once at turn_complete) and
+        // record the new speaker so the next stream_chunk seeds a fresh node.
+        this.finalizeStreamingText(y.turn_id)
+        this.state.currentSpeaker = y.speaker
         this.coalescer.request()
         break
       }
@@ -490,6 +535,11 @@ export class ProjectionStore {
         break
       }
       case 'session_loaded': {
+        // Loading a saved single-agent session leaves any active scenario —
+        // a stale scenario would tag the next single-agent turn's bubbles.
+        this.state.currentScenario = null
+        this.state.debriefActive = false
+        this.state.currentSpeaker = null
         this.state.sessionId = y.id
         this.state.nodes = messagesToNodes(y.messages)
         this.emitNow()
@@ -626,6 +676,124 @@ export class ProjectionStore {
     } catch (e) {
       this.state.lastError = e instanceof Error ? e.message : String(e)
       this.emitNow()
+    }
+  }
+
+  // ── W3 actions: scenario group chat ───────────────────────────────────────
+
+  /** Leave scenario mode (return to single-agent). Called on New chat /
+   *  loading a saved session so a stale scenario doesn't tag the next
+   *  single-agent turn's bubbles. */
+  exitScenario(): void {
+    this.state.currentScenario = null
+    this.state.debriefActive = false
+    this.state.currentSpeaker = null
+    this.emitNow()
+  }
+
+  /**
+   * Start a multi-agent scenario. Compiles the rich `BusScenario` + collected
+   * topic values into the engine launch payload (baking the visible topic
+   * background into each member's system prompt), submits `group/start`, then
+   * either runs the opener turn (`group/open`) or kicks the first round with
+   * a user message built from the topic values (`group/run`). Streaming +
+   * the round-end `turn_complete` arrive as `event` notifications, routed by
+   * the `speaker` field on each fragment. Mirrors macOS `newConversation`.
+   */
+  async startScenario(
+    scenario: BusScenario,
+    values: Record<string, string>,
+    locale: BusLocale,
+  ): Promise<void> {
+    this.state.currentScenario = scenario
+    this.state.debriefActive = false
+    this.state.currentSpeaker = null
+    this.state.currentTurnId = null
+    this.state.nodes = []
+    this.state.lastError = null
+    this.state.sessionId = null // group-chat conversation id is engine-side
+    this.state.turnActive = true
+    this.emitNow()
+    const spec = compileGroupScenario(scenario, values, locale)
+    try {
+      await this.rpc.call<GroupStartParams, { ok: boolean }>('group/start', {
+        scenario: spec,
+      })
+      if (scenario.opener_agent_id !== undefined && scenario.opener_agent_id !== null) {
+        // Opener speaks first (it knows the topic from its system prompt).
+        await this.rpc.call<unknown, { ok: boolean }>('group/open', {})
+      } else {
+        // No opener — kick off the first round with a user message built
+        // from the collected topic values (e.g. writing workshop).
+        const firstMsg = firstUserMessage(scenario, values)
+        if (firstMsg.length > 0) {
+          await this.groupRun(firstMsg, firstMsg)
+        } else {
+          this.state.turnActive = false
+          this.emitNow()
+        }
+      }
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.state.turnActive = false
+      this.emitNow()
+    }
+  }
+
+  /** Append the user's message and run the round's speakers (`group/run`).
+   *  `display` is the bubble text shown locally (defaults to the input — for
+   *  the debrief it's a friendly marker, while the engine receives the
+   *  summary prompt). */
+  async groupRun(userInput: string, display?: string): Promise<void> {
+    this.pushUserMessage(display ?? userInput)
+    // Optimistically mark the round in flight so Stop/TypingDots show even if
+    // the engine doesn't emit a fresh turn_start for the group round (group
+    // turn_complete fires per round; turn_start is single-agent-eager).
+    this.state.turnActive = true
+    this.emitNow()
+    try {
+      await this.rpc.call<GroupRunParams, { ok: boolean }>('group/run', {
+        user_input: userInput,
+      })
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.state.turnActive = false
+      this.emitNow()
+    }
+  }
+
+  /** Trigger the scenario's debrief phase: narrow the turn policy to the
+   *  debrief member (`group/set_order`), then send the summary prompt
+   *  (`group/run`) for a single-member summary. Subsequent user messages route
+   *  only to that member. Mirrors macOS `endScenarioDebrief`. */
+  async debrief(markerLabel: string): Promise<void> {
+    const sc = this.state.currentScenario
+    if (sc === null || sc.debrief === undefined || this.state.debriefActive) return
+    if (this.state.turnActive) return
+    this.state.debriefActive = true
+    this.emitNow()
+    try {
+      await this.rpc.call<GroupSetOrderParams, { ok: boolean }>(
+        'group/set_order',
+        { order: [sc.debrief.debrief_member_id] },
+      )
+      await this.groupRun(sc.debrief.summary_prompt, markerLabel)
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.state.debriefActive = false
+      this.emitNow()
+    }
+  }
+
+  /** Send a user message in whichever mode is active: group (`group/run`)
+   *  when a scenario is running, single-agent (`turn/run`) otherwise. The
+   *  App routes all composer sends through this so the mode switch is
+   *  transparent to the UI. */
+  async sendMessage(text: string): Promise<void> {
+    if (this.state.currentScenario !== null) {
+      await this.groupRun(text)
+    } else {
+      await this.runTurn(text)
     }
   }
 }

@@ -26,6 +26,7 @@ use oneai_app_server::{
 use oneai_bus::{EngineBus, EngineYield};
 use oneai_core::error::Result;
 use oneai_core::{traits::LlmProvider, Message};
+use oneai_core::{CloudProviderKind, ModelConfig};
 use oneai_provider::ProviderFactory;
 use oneai_tool::CalculatorTool;
 use tokio::sync::Mutex;
@@ -83,6 +84,16 @@ struct AppServerRuntime {
     /// conversation (`session/create`) leaves it stale but unused (the next
     /// `StartGroupChat` rebuilds it). Mirrors `CFacadeRuntime.group`/`group_slot`.
     group: Option<Arc<GroupChatSession>>,
+    /// The app-server's configured provider defaults (from env / `--model`),
+    /// captured at startup so `start_group` can inject them into scenario
+    /// members that don't bring their own provider config. Group-chat members
+    /// build standalone providers off the spec (`build_member_provider`) —
+    /// unlike single-agent turns, they do NOT inherit the app's provider. A
+    /// web/IDE frontend can't bake its provider config into the spec (it
+    /// doesn't own the server-side env), so the server injects the defaults
+    /// for "inherit" members (no api_key + no base_url + empty model),
+    /// mirroring the macOS app's client-side `buildGroupScenarioJSON` bake.
+    provider_config: Option<ModelConfig>,
 }
 
 #[async_trait::async_trait]
@@ -171,9 +182,24 @@ impl DirectiveRuntime for AppServerRuntime {
     // no-ops `on_complete` so N members don't each emit one.
 
     async fn start_group(&mut self, scenario: oneai_bus::BusGroupScenario) -> Result<()> {
+        // No provider configured for the app-server at all → group members
+        // can't infer one (they build off the spec, not the app's provider).
+        // Surface a clear, actionable error instead of a confusing network
+        // failure to api.openai.com mid-turn.
+        let config = match &self.provider_config {
+            Some(c) => c.clone(),
+            None => {
+                return Err(oneai_core::error::OneAIError::Config(
+                    "no LLM provider configured for group chat; start the app-server with \
+                     ONEAI_API_KEY / ONEAI_BASE_URL / ONEAI_MODEL (or --model)"
+                        .into(),
+                ));
+            }
+        };
         // BusGroupScenario → the uniffi ScenarioSpecView (same field shape by
         // design) → per-member providers + shared app resources.
-        let spec = ScenarioSpecView::from(&scenario);
+        let mut spec = ScenarioSpecView::from(&scenario);
+        inject_provider_defaults(&mut spec, &config);
         let gs = OneAiGroupChatSession::build(spec, &self.app)
             .map_err(|e| oneai_core::error::OneAIError::Config(format!("{e:?}")))?;
         self.group = Some(gs.inner_session());
@@ -245,6 +271,43 @@ impl AppServerRuntime {
             },
         });
         Ok(())
+    }
+}
+
+/// Inject the app-server's configured provider defaults into scenario members
+/// that don't bring their own. A member is an "inherit" member (full inherit
+/// of the app's provider, including `kind`) when it carries no api_key, no
+/// base_url, and an empty model — the shape of every preset. Members that
+/// bring a partial override (e.g. their own api_key) keep their `kind` and
+/// only fill the missing fields. Maps `CloudProviderKind` → the
+/// `build_member_provider` kind string; Gemini group chat isn't wired there
+/// yet, so for Gemini we leave `kind` alone (best-effort) rather than crash
+/// the build.
+fn inject_provider_defaults(spec: &mut ScenarioSpecView, config: &ModelConfig) {
+    let app_kind = match config.cloud_kind {
+        Some(CloudProviderKind::OpenAI) => Some("openai"),
+        Some(CloudProviderKind::Anthropic) => Some("anthropic"),
+        // Gemini has no build_member_provider arm; leave the member's kind.
+        Some(CloudProviderKind::Gemini) | None => None,
+    };
+    for m in &mut spec.members {
+        let full_inherit = m.api_key.is_none() && m.base_url.is_none() && m.model.is_empty();
+        if full_inherit {
+            if let Some(kind) = app_kind {
+                m.kind = kind.to_string();
+            }
+        }
+        if m.api_key.is_none() {
+            m.api_key = config.api_key.clone();
+        }
+        if m.base_url.is_none() {
+            m.base_url = config.base_url.clone();
+        }
+        if m.model.is_empty() {
+            if let Some(name) = &config.model_name {
+                m.model = name.clone();
+            }
+        }
     }
 }
 
@@ -334,6 +397,9 @@ pub fn cmd_app_server(
             .default_rate_limiter()
             .engine_bus();
         let mut builder = builder.generation_config(config.generation.clone());
+        // Clone before the move into ProviderFactory::create — start_group
+        // injects these defaults into group-chat members that lack their own.
+        let runtime_provider_config = provider_config.clone();
         if let Some(mc) = provider_config {
             let provider = ProviderFactory::create(mc);
             builder = builder.provider(Arc::from(provider));
@@ -391,6 +457,7 @@ pub fn cmd_app_server(
             app: app.clone(),
             session,
             group: None,
+            provider_config: runtime_provider_config,
         }));
         let interrupt_slot: Arc<Mutex<Option<AgentLoop>>> = Arc::new(Mutex::new(None));
 
