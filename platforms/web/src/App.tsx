@@ -160,6 +160,14 @@ export default function App(): React.ReactNode {
   const scenarios = useScenarioList(scenarioList)
   const sessionMeta = useSessionMeta()
 
+  // Resolve the active session's display title for the conversation header
+  // (client-side rename override wins over the engine's auto-derived title).
+  const activeSession = sessions.find((s) => s.id === snap.sessionId) ?? null
+  const sessionTitle =
+    activeSession !== null
+      ? (sessionMeta.titles[activeSession.id] ?? activeSession.title)
+      : null
+
   // ── handlers ────────────────────────────────────────────────────────────────
   const handleNewSession = async () => {
     // New single-agent chat — leave any active scenario.
@@ -352,6 +360,7 @@ export default function App(): React.ReactNode {
             onSubmitFeedback={(nodeId, kind, text) =>
               void projection.submitFeedback(nodeId, kind, text)
             }
+            sessionTitle={sessionTitle}
           />
         }
         details={

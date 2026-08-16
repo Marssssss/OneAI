@@ -87,18 +87,39 @@ export function ChatView({
   return (
     <div className={styles.scroll} ref={scrollRef}>
       <div className={styles.list}>
-        {nodes.map((n) => (
-          <ChatNodeSeat
-            key={n.id}
-            node={n}
-            theme={theme}
-            members={members}
-            selected={selectedToolNodeId === n.id}
-            onSelect={onSelectTool}
-            onOpenImage={onOpenImage}
-            onSubmitFeedback={onSubmitFeedback}
-          />
-        ))}
+        {/* The 👍/👎 affordance belongs only to a turn's final text output, not
+         * to every intermediate step's text (the agent loop often emits several
+         * text blocks across iterations before its terminal answer). Walk the
+         * node list once to mark, per turn_id, the last assistant text node —
+         * ChatNodeSeat gates the feedback row on `isTurnFinal`. */}
+        {(() => {
+          const finalByTurn = new Map<string, string>()
+          for (let i = nodes.length - 1; i >= 0; i -= 1) {
+            const n = nodes[i]
+            if (
+              n.kind === 'text' &&
+              n.role === 'assistant' &&
+              n.turnId !== null
+            ) {
+              if (!finalByTurn.has(n.turnId)) finalByTurn.set(n.turnId, n.id)
+            }
+          }
+          return nodes.map((n) => (
+            <ChatNodeSeat
+              key={n.id}
+              node={n}
+              theme={theme}
+              members={members}
+              selected={selectedToolNodeId === n.id}
+              onSelect={onSelectTool}
+              onOpenImage={onOpenImage}
+              onSubmitFeedback={onSubmitFeedback}
+              isTurnFinal={
+                n.turnId !== null && finalByTurn.get(n.turnId) === n.id
+              }
+            />
+          ))
+        })()}
         {turnActive && <TypingDots />}
       </div>
       {lightbox !== null && (
@@ -150,6 +171,7 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   onSelect,
   onOpenImage,
   onSubmitFeedback,
+  isTurnFinal,
 }: {
   node: ChatNode
   theme: 'light' | 'dark'
@@ -158,6 +180,10 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   onSelect: (nodeId: string) => void
   onOpenImage: (src: string, alt: string) => void
   onSubmitFeedback: (nodeId: string, kind: FeedbackKind, text?: string) => void
+  /** True when this is the last assistant text node of its turn — the only
+   * node eligible for the 👍/👎 row (intermediate step outputs are not
+   * feedbackable; feedback reacts to a turn's terminal answer). */
+  isTurnFinal: boolean
 }): ReactNode {
   const { t } = useLocale()
   if (node.role === 'user') {
@@ -224,12 +250,18 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   }
   // assistant text
   const empty = node.text.length === 0
-  // Feedback is only available on the **current live conversation** — a node
-  // has a `turnId` only while it's a live turn's output. Reloaded/historical
-  // messages replay without a turn_id, so they render no 👍/👎 buttons (by
-  // design: feedback reacts to a fresh model output, not stored history).
+  // Feedback is only available on the **current live conversation's terminal
+  // answer** — a node has a `turn_id` only while it's a live turn's output, and
+  // `isTurnFinal` narrows it to the turn's last text node (intermediate step
+  // outputs are not feedbackable). Reloaded/historical messages replay without
+  // a turn_id, so they render no 👍/👎 buttons either (by design: feedback
+  // reacts to a fresh model output, not stored history).
   const feedbackDone =
-    node.state === 'done' && !empty && node.turnId !== null && node.turnId.length > 0
+    isTurnFinal &&
+    node.state === 'done' &&
+    !empty &&
+    node.turnId !== null &&
+    node.turnId.length > 0
   const currentKind = node.feedback?.kind
   return (
     <div className={styles.row}>

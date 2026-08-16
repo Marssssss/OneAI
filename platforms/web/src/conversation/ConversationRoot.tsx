@@ -41,6 +41,11 @@ interface ConversationRootProps {
   onDebrief: () => void
   /** §W4 B4 — record a 👍/👎/note against one assistant message node. */
   onSubmitFeedback: (nodeId: string, kind: FeedbackKind, text?: string) => void
+  /** Title of the currently-active session (client-overridden title wins),
+   * or null when no session is active. Shown in the header only while the
+   * user is in a conversation (nodes on screen) — the "OneAI" wordmark is
+   * never shown. */
+  sessionTitle: string | null
 }
 
 export function ConversationRoot({
@@ -59,6 +64,7 @@ export function ConversationRoot({
   onPickScenario,
   onDebrief,
   onSubmitFeedback,
+  sessionTitle,
 }: ConversationRootProps): ReactNode {
   const { t } = useLocale()
   const statusText =
@@ -73,15 +79,21 @@ export function ConversationRoot({
   const empty = snapshot.nodes.length === 0
   const scenarioActive = snapshot.currentScenario !== null
   const heroChips = scenarios.slice(0, 5)
+  // Header brand: scenario name while a scenario runs, otherwise the session
+  // title — but only once the user is actually in a conversation (messages on
+  // screen). The welcome/empty state shows no wordmark. The "OneAI" app title
+  // is intentionally never rendered here.
+  const brand =
+    scenarioActive && snapshot.currentScenario !== null
+      ? snapshot.currentScenario.name
+      : empty
+        ? ''
+        : (sessionTitle ?? '')
 
   return (
     <div className={styles.root}>
       <header className={styles.header}>
-        <span className={styles.brand}>
-          {scenarioActive && snapshot.currentScenario !== null
-            ? snapshot.currentScenario.name
-            : t('app.title')}
-        </span>
+        <span className={styles.brand}>{brand}</span>
         <div className={styles.headerRight}>
           <span className={`${styles.status} ${styles[`status_${connection}`]}`}>
             {statusText}

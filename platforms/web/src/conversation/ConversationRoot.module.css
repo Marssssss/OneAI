@@ -10,9 +10,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 48px;
+  min-height: 48px;
   padding: 0 var(--oneai-gap-lg);
-  border-bottom: 1px solid var(--oneai-border);
   background: var(--oneai-bg);
   flex-shrink: 0;
 }
@@ -152,7 +151,6 @@
 }
 
 .composer {
-  border-top: 1px solid var(--oneai-border);
   padding: var(--oneai-gap) var(--oneai-gap-lg) calc(var(--oneai-gap) + env(safe-area-inset-bottom));
   background: var(--oneai-bg);
   flex-shrink: 0;
