@@ -764,7 +764,14 @@ export class ProjectionStore {
         break
       }
       case 'session_created': {
+        // A fresh session = empty conversation. Clear any previously-loaded
+        // history so the welcome/empty state shows (otherwise a session/create
+        // after loading a historical session left the old messages on screen).
+        this.state.currentScenario = null
+        this.state.debriefActive = false
+        this.state.currentSpeaker = null
         this.state.sessionId = y.id
+        this.state.nodes = []
         this.resetLedgers()
         this.emitNow()
         break
@@ -785,8 +792,25 @@ export class ProjectionStore {
         this.emitNow()
         break
       }
-      case 'session_cleared':
+      case 'session_cleared': {
+        // `/clear` — fresh backend conversation for the live session; the
+        // visible transcript empties.
+        this.state.sessionId = y.id
+        this.state.nodes = []
+        this.state.currentSpeaker = null
+        this.resetLedgers()
+        this.emitNow()
+        break
+      }
       case 'session_deleted': {
+        // Only empty the view if the *active* session was the one deleted;
+        // deleting a different (sidebar) session must not wipe the live view.
+        if (this.state.sessionId === y.id) {
+          this.state.sessionId = null
+          this.state.nodes = []
+          this.state.currentSpeaker = null
+          this.resetLedgers()
+        }
         this.emitNow()
         break
       }
