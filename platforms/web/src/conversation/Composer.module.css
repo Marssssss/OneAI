@@ -1,11 +1,61 @@
 .wrap {
   display: flex;
+  flex-direction: column;
   gap: var(--oneai-gap);
-  align-items: flex-end;
   max-width: 1280px;
   margin: 0 auto;
   width: 100%;
   padding: var(--oneai-gap) 0;
+}
+
+.chips {
+  display: flex;
+  gap: var(--oneai-gap);
+  align-items: center;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  border: 1px solid var(--oneai-border-strong);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--oneai-dur) var(--oneai-ease),
+    background var(--oneai-dur) var(--oneai-ease);
+}
+.chip:hover {
+  border-color: var(--oneai-brand-500);
+}
+.chipOn {
+  border-color: var(--oneai-brand-500);
+  background: var(--oneai-brand-500);
+  color: var(--oneai-accent-fg);
+}
+
+.chipLabel {
+  font-weight: 600;
+}
+.chipState {
+  font-size: 11px;
+  opacity: 0.85;
+}
+.chipParadigm {
+  font-family: var(--oneai-font-mono);
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.inputRow {
+  display: flex;
+  gap: var(--oneai-gap);
+  align-items: flex-end;
+  position: relative;
 }
 
 .input {
@@ -53,4 +103,66 @@
 .button:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+.stopBtn {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--oneai-radius);
+  border: none;
+  background: var(--oneai-red);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.slashPopup {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 4px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border-strong);
+  border-radius: var(--oneai-radius);
+  box-shadow: 0 4px 16px var(--oneai-bg-overlay);
+  display: flex;
+  flex-direction: column;
+  min-width: 240px;
+  z-index: 10;
+  overflow: hidden;
+}
+
+.slashItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--oneai-border);
+  cursor: pointer;
+  font: inherit;
+  color: var(--oneai-text);
+}
+.slashItem:last-child {
+  border-bottom: none;
+}
+.slashItem:hover {
+  background: var(--oneai-bg-subtle);
+}
+
+.slashLabel {
+  font-family: var(--oneai-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--oneai-brand-500);
+}
+.slashDesc {
+  font-size: 12px;
+  color: var(--oneai-text-tertiary);
 }

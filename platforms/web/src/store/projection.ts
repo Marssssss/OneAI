@@ -1,9 +1,18 @@
 import { useSyncExternalStore } from 'react'
 import type { OneAiRpcClient } from '../rpc/client'
 import type {
+  ApprovalRespondParams,
+  BusParadigmKind,
+  ConfigUpdateParams,
   ContentBlock,
   EngineYield,
+  InteractionRequest,
+  InteractionResponse,
+  ParadigmSwitchParams,
+  PlanState,
+  PlanStep,
   SessionInfo,
+  ToolOutput,
   TurnRunParams,
 } from '../rpc/types'
 import { StreamCoalescer } from '../stream/coalescer'
@@ -21,8 +30,16 @@ import { StreamCoalescer } from '../stream/coalescer'
 // ChatViewModel StreamCoalescer semantics.)
 
 export type NodeRole = 'user' | 'assistant' | 'system'
-export type NodeKind = 'user' | 'text' | 'thinking' | 'error'
+export type NodeKind =
+  | 'user'
+  | 'text'
+  | 'thinking'
+  | 'error'
+  | 'tool'
+  | 'plan'
 export type NodeState = 'streaming' | 'done' | 'error'
+
+export type ToolState = 'pending' | 'done' | 'error'
 
 export interface ChatNode {
   /** Stable per-node key — React list reconciliation uses this. */
@@ -33,6 +50,22 @@ export interface ChatNode {
   speaker: string | null
   turnId: string | null
   state: NodeState
+  // ── tool node (kind === 'tool') ──
+  callId?: string
+  toolName?: string
+  toolArgs?: unknown
+  toolOutput?: ToolOutput
+  toolState?: ToolState
+  // ── plan node (kind === 'plan') ──
+  planSteps?: PlanStep[]
+  planRevision?: number
+}
+
+export interface ApprovalItem {
+  request_id: string
+  request: InteractionRequest
+  /** Monotonic arrival order — stable for the queue head/promote-next logic. */
+  seq: number
 }
 
 export interface ProjectionSnapshot {
@@ -44,6 +77,14 @@ export interface ProjectionSnapshot {
   turnActive: boolean
   /** Last fatal engine error message, if any. */
   lastError: string | null
+  /** Active paradigm (react by default; plan/reflect/explore on switch). */
+  paradigm: BusParadigmKind
+  /** Head of the approval queue — the request the UI is currently showing. */
+  currentApproval: ApprovalItem | null
+  /** Number of queued approvals behind the head (for the "N more" badge). */
+  approvalQueueDepth: number
+  /** Id of the tool node whose args/result the details rail shows. */
+  selectedToolNodeId: string | null
 }
 
 interface WorkingState {
@@ -53,6 +94,9 @@ interface WorkingState {
   lastError: string | null
   currentTurnId: string | null
   currentSpeaker: string | null
+  paradigm: BusParadigmKind
+  approvalQueue: ApprovalItem[]
+  selectedToolNodeId: string | null
 }
 
 const EMPTY: ProjectionSnapshot = {
@@ -61,6 +105,10 @@ const EMPTY: ProjectionSnapshot = {
   nodes: [],
   turnActive: false,
   lastError: null,
+  paradigm: 're_act',
+  currentApproval: null,
+  approvalQueueDepth: 0,
+  selectedToolNodeId: null,
 }
 
 let nodeSeq = 0
@@ -68,6 +116,8 @@ function nextNodeId(): string {
   nodeSeq += 1
   return `n${nodeSeq}`
 }
+
+let approvalSeq = 0
 
 export class ProjectionStore {
   private rpc: OneAiRpcClient
@@ -78,6 +128,9 @@ export class ProjectionStore {
     lastError: null,
     currentTurnId: null,
     currentSpeaker: null,
+    paradigm: 're_act',
+    approvalQueue: [],
+    selectedToolNodeId: null,
   }
   private snapshot: ProjectionSnapshot = EMPTY
   private listeners = new Set<() => void>()
@@ -118,6 +171,7 @@ export class ProjectionStore {
 
   /** Flush the working state into a fresh snapshot + notify React. */
   private emit(): void {
+    const q = this.state.approvalQueue
     this.snapshot = {
       version: this.snapshot.version + 1,
       sessionId: this.state.sessionId,
@@ -127,6 +181,10 @@ export class ProjectionStore {
       nodes: [...this.state.nodes],
       turnActive: this.state.turnActive,
       lastError: this.state.lastError,
+      paradigm: this.state.paradigm,
+      currentApproval: q.length > 0 ? q[0] : null,
+      approvalQueueDepth: q.length > 0 ? q.length - 1 : 0,
+      selectedToolNodeId: this.state.selectedToolNodeId,
     }
     for (const l of this.listeners) l()
   }
@@ -188,6 +246,15 @@ export class ProjectionStore {
   private replaceNode(id: string, patch: Partial<ChatNode>): void {
     this.state.nodes = this.state.nodes.map((n) =>
       n.id === id ? { ...n, ...patch } : n,
+    )
+  }
+
+  /** Mark all streaming text nodes for a turn done (finalize before tools). */
+  private finalizeStreamingText(turnId: string): void {
+    this.state.nodes = this.state.nodes.map((n) =>
+      n.turnId === turnId && n.kind === 'text' && n.state === 'streaming'
+        ? { ...n, state: 'done' as NodeState }
+        : n,
     )
   }
 
@@ -258,6 +325,124 @@ export class ProjectionStore {
             this.replaceNode(seeded.id, { text: y.text, state: 'done' })
           }
         }
+        this.emitNow()
+        break
+      }
+      case 'tool_calls': {
+        // Finalize any streaming text node for this turn so tool cards
+        // interleave between finalized text blocks (the next stream_chunk
+        // seeds a fresh text node after the cards).
+        this.finalizeStreamingText(y.turn_id)
+        for (const c of y.calls) {
+          this.state.nodes = [
+            ...this.state.nodes,
+            {
+              id: nextNodeId(),
+              role: 'assistant',
+              kind: 'tool',
+              text: '',
+              speaker: y.speaker,
+              turnId: y.turn_id,
+              state: 'done',
+              callId: c.id,
+              toolName: c.name,
+              toolArgs: c.args,
+              toolState: 'pending',
+            },
+          ]
+        }
+        this.emitNow()
+        break
+      }
+      case 'tool_result': {
+        // Locate the pending tool node for this call id and attach the
+        // result. A tool_result without a matching tool_calls node (e.g.
+        // resumed session) seeds a standalone node.
+        const idx = this.state.nodes.findIndex(
+          (n) =>
+            n.kind === 'tool' &&
+            n.callId === y.call_id &&
+            n.turnId === y.turn_id,
+        )
+        const toolState: ToolState = y.output.success ? 'done' : 'error'
+        if (idx >= 0) {
+          const n = this.state.nodes[idx]
+          this.replaceNode(n.id, {
+            toolName: n.toolName ?? y.tool_name,
+            toolOutput: y.output,
+            toolState,
+          })
+        } else {
+          this.state.nodes = [
+            ...this.state.nodes,
+            {
+              id: nextNodeId(),
+              role: 'assistant',
+              kind: 'tool',
+              text: '',
+              speaker: y.speaker,
+              turnId: y.turn_id,
+              state: 'done',
+              callId: y.call_id,
+              toolName: y.tool_name,
+              toolOutput: y.output,
+              toolState,
+            },
+          ]
+        }
+        this.emitNow()
+        break
+      }
+      case 'paradigm_switch': {
+        this.state.paradigm = y.to
+        this.emitNow()
+        break
+      }
+      case 'plan_update': {
+        // Seed-or-update a single plan node per turn (keyed `plan:<turn_id>`)
+        // so the live plan renders in place as the planner revises it.
+        const planId = `plan:${y.turn_id}`
+        const existing = this.state.nodes.find((n) => n.id === planId)
+        const plan: PlanState | null = y.plan
+        if (plan === null) {
+          // Plan cleared — drop the node if present.
+          if (existing !== undefined) {
+            this.state.nodes = this.state.nodes.filter((n) => n.id !== planId)
+          }
+        } else if (existing !== undefined) {
+          this.replaceNode(existing.id, {
+            planSteps: plan.steps,
+            planRevision:
+              typeof plan.revision === 'number' ? plan.revision : existing.planRevision,
+          })
+        } else {
+          this.state.nodes = [
+            ...this.state.nodes,
+            {
+              id: planId,
+              role: 'assistant',
+              kind: 'plan',
+              text: '',
+              speaker: null,
+              turnId: y.turn_id,
+              state: 'done',
+              planSteps: plan.steps,
+              planRevision: typeof plan.revision === 'number' ? plan.revision : 0,
+            },
+          ]
+        }
+        this.emitNow()
+        break
+      }
+      case 'approval_request': {
+        // Parallel approval queue (issue #20): a second approval_request that
+        // arrives before the first is resolved enqueues behind the head; the
+        // store promotes the next on respond.
+        approvalSeq += 1
+        this.state.approvalQueue = [
+          ...this.state.approvalQueue,
+          { request_id: y.request_id, request: y.request, seq: approvalSeq },
+        ]
         this.emitNow()
         break
       }
@@ -342,6 +527,102 @@ export class ProjectionStore {
   async loadSession(id: string): Promise<void> {
     try {
       await this.rpc.call<{ id: string }, unknown>('session/load', { id })
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+    }
+  }
+
+  // ── W2 actions: approval / paradigm / plan-mode / cancel / details ────────
+
+  /** Respond to a queued approval and promote the next (issue #20 queue). */
+  async respondApproval(
+    requestId: string,
+    response: InteractionResponse,
+  ): Promise<void> {
+    // Optimistically drop the item from the queue so the next is promoted
+    // immediately. Each approval carries a unique request_id; a Revise
+    // re-plan emits a fresh approval_request (new id) rather than reusing.
+    this.state.approvalQueue = this.state.approvalQueue.filter(
+      (a) => a.request_id !== requestId,
+    )
+    this.emitNow()
+    try {
+      await this.rpc.call<ApprovalRespondParams, { ok: boolean }>(
+        'approval/respond',
+        { request_id: requestId, response },
+      )
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+    }
+  }
+
+  /** Cancel the in-flight turn (Stop button). */
+  async cancelTurn(): Promise<void> {
+    try {
+      await this.rpc.call<{ reason?: unknown }, { ok: boolean }>('turn/cancel', {})
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+    }
+  }
+
+  /** Switch the active paradigm (plan/reflect/explore/re_act). */
+  async switchParadigm(to: BusParadigmKind): Promise<void> {
+    this.state.paradigm = to
+    this.emitNow()
+    try {
+      await this.rpc.call<ParadigmSwitchParams, { ok: boolean }>(
+        'paradigm/switch',
+        { to },
+      )
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+    }
+  }
+
+  /** Toggle plan mode on/off (config/update{plan_mode}). */
+  async setPlanMode(on: boolean): Promise<void> {
+    try {
+      await this.rpc.call<ConfigUpdateParams, { ok: boolean }>('config/update', {
+        plan_mode: on,
+      })
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+    }
+  }
+
+  /** Select a tool node for the details rail (opens the rail via App). */
+  selectTool(nodeId: string | null): void {
+    this.state.selectedToolNodeId = nodeId
+    this.emitNow()
+  }
+
+  clearSelection(): void {
+    this.state.selectedToolNodeId = null
+    this.emitNow()
+  }
+
+  /** Compact the conversation (keep_recent_turns). */
+  async compact(keepRecentTurns: number): Promise<void> {
+    try {
+      await this.rpc.call<{ keep_recent_turns: number }, { ok: boolean }>(
+        'conversation/compact',
+        { keep_recent_turns: keepRecentTurns },
+      )
+    } catch (e) {
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+      this.emitNow()
+    }
+  }
+
+  /** Clear the current session. */
+  async clearSession(): Promise<void> {
+    try {
+      await this.rpc.call<unknown, unknown>('session/clear', {})
     } catch (e) {
       this.state.lastError = e instanceof Error ? e.message : String(e)
       this.emitNow()

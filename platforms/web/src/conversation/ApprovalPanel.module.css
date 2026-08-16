@@ -1,0 +1,237 @@
+.bar {
+  margin: 0 var(--oneai-gap-lg) var(--oneai-gap);
+  background: var(--oneai-amber-bg);
+  border: 1px solid var(--oneai-amber);
+  border-radius: var(--oneai-radius);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.headline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon {
+  color: var(--oneai-amber);
+}
+
+.title {
+  font-weight: 600;
+  color: var(--oneai-amber);
+  font-size: 13px;
+}
+
+.queue {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--oneai-amber);
+  background: var(--oneai-bg-elevated);
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--oneai-amber);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attribution {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toolName {
+  font-family: var(--oneai-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--oneai-text);
+  background: var(--oneai-bg-elevated);
+  padding: 2px 8px;
+  border-radius: var(--oneai-radius-sm);
+  border: 1px solid var(--oneai-border);
+}
+
+.just {
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+}
+
+.code {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--oneai-bg-elevated);
+  border-radius: var(--oneai-radius-sm);
+  font-family: var(--oneai-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--oneai-border);
+}
+
+.steps {
+  margin: 0;
+  padding-left: 1.4em;
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+}
+.steps li {
+  margin: 2px 0;
+}
+
+.feedback {
+  resize: vertical;
+  padding: 8px 10px;
+  border-radius: var(--oneai-radius-sm);
+  border: 1px solid var(--oneai-border);
+  font: inherit;
+  font-size: 13px;
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+}
+
+.question {
+  font-weight: 600;
+  color: var(--oneai-text);
+  font-size: 13px;
+}
+
+.context {
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 10px;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border);
+  border-radius: var(--oneai-radius-sm);
+  cursor: pointer;
+  font: inherit;
+  color: var(--oneai-text);
+  transition: border-color var(--oneai-dur) var(--oneai-ease);
+}
+.option:hover {
+  border-color: var(--oneai-brand-500);
+}
+
+.optionLabel {
+  font-weight: 600;
+  font-size: 13px;
+}
+.optionDesc {
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+}
+.optionTrade {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+}
+
+.message {
+  font-size: 13px;
+  color: var(--oneai-text);
+  white-space: pre-wrap;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fieldLabel {
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+}
+
+.req {
+  color: var(--oneai-red);
+  margin-left: 2px;
+}
+
+.input {
+  padding: 6px 8px;
+  border-radius: var(--oneai-radius-sm);
+  border: 1px solid var(--oneai-border);
+  font: inherit;
+  font-size: 13px;
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+}
+
+.allowBtn {
+  padding: 6px 14px;
+  border-radius: var(--oneai-radius-sm);
+  border: 1px solid var(--oneai-green);
+  background: var(--oneai-green);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.allowBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.refuseBtn {
+  padding: 6px 14px;
+  border-radius: var(--oneai-radius-sm);
+  border: 1px solid var(--oneai-red);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-red);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.neutralBtn {
+  padding: 6px 14px;
+  border-radius: var(--oneai-radius-sm);
+  border: 1px solid var(--oneai-border-strong);
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}

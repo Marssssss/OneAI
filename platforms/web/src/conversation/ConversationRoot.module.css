@@ -47,6 +47,12 @@
   background: var(--oneai-red);
 }
 
+.paradigm {
+  font-family: var(--oneai-font-mono);
+  font-size: 11px;
+  color: var(--oneai-brand-500);
+}
+
 .body {
   flex: 1;
   min-height: 0;

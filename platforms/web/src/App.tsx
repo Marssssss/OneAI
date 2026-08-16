@@ -1,7 +1,9 @@
 // App — assembles the RPC client + projection/session stores, drives the
 // connection lifecycle (session/create on open), and mounts the AppFrame
-// shell. W1 wires single-agent streaming chat end-to-end over the app-server
-// ws transport; the details rail + scenario entry land in W2/W3.
+// shell. W2 wires: tool/plan/approval consumes (in projection), the details
+// rail (selected tool → DetailsPanel), plan-mode toggle (config/update +
+// paradigm/switch), Stop (turn/cancel), slash commands, and the parallel
+// approval queue.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { OneAiRpcClient } from './rpc/client'
@@ -12,8 +14,11 @@ import {
   useProjection,
   useSessionList,
 } from './store/projection'
+import type { InteractionResponse } from './rpc/types'
 import { AppFrame } from './layout/AppFrame'
 import { ConversationRoot } from './conversation/ConversationRoot'
+import type { SlashCommand } from './conversation/Composer'
+import { DetailsPanel } from './details/DetailsPanel'
 import { SidebarRoot } from './sidebar/SidebarRoot'
 import { localeStore } from './i18n'
 import './theme/markdown.css'
@@ -35,6 +40,9 @@ export default function App(): React.ReactNode {
   const sessionList = useMemo(() => new SessionListStore(rpc), [rpc])
   const [status, setStatus] = useState<ConnectionStatus>('closed')
   const [theme, setTheme] = useState<Theme>(() => readInitialTheme())
+  // planMode is the App-owned toggle synced via config/update; the live
+  // paradigm (from paradigm_switch yields) also feeds the chip's "on" state.
+  const [planMode, setPlanMode] = useState(false)
   const prefsRef = useRef<FramePrefs>({
     sidebarWidth: 264,
     detailsWidth: 360,
@@ -42,11 +50,7 @@ export default function App(): React.ReactNode {
   })
   const [prefs, setPrefs] = useState<FramePrefs>(prefsRef.current)
 
-  // Connect on mount; dispose on unmount. The projection's engine-event
-  // subscription is driven from this effect (attach/unsubscribe) so StrictMode's
-  // mount/unmount/remount cleanly re-subscribes — subscribing in the store
-  // constructor is lost when the effect cleanup runs (the useMemo singleton
-  // isn't reconstructed).
+  // Connect on mount; dispose on unmount.
   useEffect(() => {
     const offStatus = rpc.onStatus(setStatus)
     const offEvents = projection.attach()
@@ -69,9 +73,6 @@ export default function App(): React.ReactNode {
   }, [theme])
 
   // When the socket opens: ensure we have a session, then load the list.
-  // session/create is blocking-ack → result is {id}. We rely on the projection
-  // store's session_created event for the authoritative id too, but the
-  // response lets us bootstrap before any event races.
   const creatingRef = useRef(false)
   useEffect(() => {
     if (status !== 'open') return
@@ -101,6 +102,7 @@ export default function App(): React.ReactNode {
   const snap = useProjection(projection)
   const sessions = useSessionList(sessionList)
 
+  // ── handlers ────────────────────────────────────────────────────────────────
   const handleNewSession = async () => {
     try {
       await rpc.call<{ id?: string }, { id?: string }>('session/create', {})
@@ -115,6 +117,47 @@ export default function App(): React.ReactNode {
   const toggleTheme = () => setTheme((th) => (th === 'dark' ? 'light' : 'dark'))
   const toggleLocale = () =>
     localeStore.setLocale(localeStore.getLocale() === 'zh' ? 'en' : 'zh')
+
+  // Selecting a tool node opens the details rail and records the selection.
+  const handleSelectTool = (nodeId: string) => {
+    projection.selectTool(nodeId)
+    if (!prefs.detailsOpen) {
+      setPrefs({ ...prefs, detailsOpen: true })
+    }
+  }
+  const handleCloseDetails = () => {
+    projection.clearSelection()
+    setPrefs({ ...prefs, detailsOpen: false })
+  }
+
+  // Plan-mode toggle: flip plan_mode (config/update) and switch the
+  // paradigm to/from 'plan'. The chip reflects both the local flag and the
+  // live paradigm.
+  const handleTogglePlan = () => {
+    const next = !(planMode || snap.paradigm === 'plan')
+    setPlanMode(next)
+    void projection.setPlanMode(next)
+    void projection.switchParadigm(next ? 'plan' : 're_act')
+  }
+
+  const handleSlash = (cmd: SlashCommand) => {
+    if (cmd === 'plan') {
+      handleTogglePlan()
+    } else if (cmd === 'clear') {
+      void projection.clearSession()
+    } else if (cmd === 'compact') {
+      void projection.compact(10)
+    }
+  }
+
+  const handleRespondApproval = (requestId: string, response: InteractionResponse) => {
+    void projection.respondApproval(requestId, response)
+  }
+
+  const selectedToolNode =
+    snap.selectedToolNodeId !== null
+      ? snap.nodes.find((n) => n.id === snap.selectedToolNodeId) ?? null
+      : null
 
   return (
     <AppFrame
@@ -133,8 +176,20 @@ export default function App(): React.ReactNode {
         <ConversationRoot
           snapshot={snap}
           connection={status}
+          theme={theme}
+          planMode={planMode || snap.paradigm === 'plan'}
           onSend={(text) => void projection.runTurn(text)}
+          onStop={() => void projection.cancelTurn()}
+          onTogglePlan={handleTogglePlan}
+          onSlash={handleSlash}
+          onSelectTool={handleSelectTool}
+          onRespondApproval={handleRespondApproval}
         />
+      }
+      details={
+        prefs.detailsOpen ? (
+          <DetailsPanel node={selectedToolNode} onClose={handleCloseDetails} />
+        ) : undefined
       }
       prefs={prefs}
       onPrefsChange={setPrefs}

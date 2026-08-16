@@ -1,0 +1,92 @@
+.card {
+  width: 100%;
+  background: var(--oneai-bg-subtle);
+  border: 1px solid var(--oneai-border);
+  border-left: 3px solid var(--oneai-brand-500);
+  border-radius: var(--oneai-radius);
+  padding: 10px 14px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+  font-weight: 600;
+}
+
+.meta {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-mono);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--oneai-text);
+}
+
+.glyph {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-family: var(--oneai-font-mono);
+}
+
+.s_pending .glyph {
+  color: var(--oneai-text-tertiary);
+}
+.s_pending .desc {
+  color: var(--oneai-text-secondary);
+}
+.s_in_progress .glyph {
+  color: var(--oneai-amber);
+  animation: oneai-pulse 1.2s infinite ease-in-out;
+}
+.s_in_progress .desc {
+  font-weight: 500;
+}
+.s_completed .glyph {
+  color: var(--oneai-green);
+}
+.s_completed .desc {
+  color: var(--oneai-text-secondary);
+  text-decoration: line-through;
+  text-decoration-color: var(--oneai-text-tertiary);
+}
+.s_failed .glyph {
+  color: var(--oneai-red);
+}
+.s_failed .desc {
+  color: var(--oneai-red);
+}
+
+@keyframes oneai-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}

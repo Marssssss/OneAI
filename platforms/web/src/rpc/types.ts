@@ -123,7 +123,7 @@ export interface YieldToolResult {
   turn_id: string
   call_id: string
   tool_name: string
-  output: unknown
+  output: ToolOutput
   speaker: string | null
 }
 export interface YieldSpeakerTurn {
@@ -144,7 +144,24 @@ export interface YieldTurnComplete {
 export interface YieldApprovalRequest {
   kind: 'approval_request'
   request_id: string
-  request: unknown
+  request: InteractionRequest
+}
+export interface YieldParadigmSwitch {
+  kind: 'paradigm_switch'
+  turn_id: string
+  from: BusParadigmKind
+  to: BusParadigmKind
+}
+export interface YieldPlanUpdate {
+  kind: 'plan_update'
+  turn_id: string
+  plan: PlanState | null
+}
+export interface YieldIterationStart {
+  kind: 'iteration_start'
+  turn_id: string
+  iteration: number
+  paradigm: BusParadigmKind
 }
 export interface YieldSessionCreated {
   kind: 'session_created'
@@ -182,16 +199,132 @@ export type EngineYield =
   | YieldError
   | YieldTurnComplete
   | YieldApprovalRequest
+  | YieldParadigmSwitch
+  | YieldPlanUpdate
+  | YieldIterationStart
   | YieldSessionCreated
   | YieldSessionLoaded
   | YieldSessionCleared
   | YieldSessionDeleted
 
 export interface BusToolCall {
-  call_id: string
+  id: string
   name: string
   args: unknown
 }
+
+// ─── Tool result (oneai-core::ToolOutput) ───────────────────────────────────
+export interface ToolOutput {
+  success: boolean
+  content: string
+  error?: string
+  added_tool_names?: string[]
+}
+
+// ─── Paradigm (oneai-bus::BusParadigmKind, snake_case) ──────────────────────
+export type BusParadigmKind = 'plan' | 're_act' | 'reflect' | 'explore'
+
+// ─── Plan state (oneai-agent::PlanState, carried as plan_update.plan) ────────
+export type PlanStepStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
+
+export interface PlanStep {
+  id: string
+  description: string
+  coupled: boolean
+  depends_on?: string[]
+  status?: PlanStepStatus
+  active_form?: string | null
+}
+
+export interface PlanState {
+  steps: PlanStep[]
+  revision?: number
+  [k: string]: unknown
+}
+
+// ─── Interaction gate (oneai-core::InteractionRequest/Response) ────────────
+// Externally-tagged enums, NO rename — wire form is `{"ToolApproval": {...}}` /
+// `{"Proceed": null}`. Narrow by the single object key.
+//
+// PreInfer/PostInfer are engine-internal (NoopGate default-proceed) and never
+// reach a UI; omitted from the union.
+
+export type RiskLevel = 'low' | 'medium' | 'high'
+export type PermissionLevel = 'read' | 'standard' | 'full'
+
+export interface ApprovalRequest {
+  tool_name: string
+  args: unknown
+  risk_level: RiskLevel
+  permission_level?: PermissionLevel
+  justification: string
+}
+
+export interface DecisionOption {
+  id: string
+  label: string
+  description: string
+  tradeoffs: string
+}
+
+export interface PlanReviewRequest {
+  plan: string
+  steps: PlanStep[]
+}
+
+export interface PlanDecisionRequest {
+  decision_id: string
+  question: string
+  context: string
+  options: DecisionOption[]
+}
+
+export interface NetworkApprovalRequest {
+  host: string
+  requested_by: string
+}
+
+export interface McpElicitationRequest {
+  server: string
+  message: string
+  requested_schema: unknown
+}
+
+export type InteractionRequest =
+  | { ToolApproval: { approval: ApprovalRequest } }
+  | { PlanReview: PlanReviewRequest }
+  | { PlanDecision: PlanDecisionRequest }
+  | { NetworkApproval: NetworkApprovalRequest }
+  | { McpElicitation: McpElicitationRequest }
+
+export type ElicitationAction = 'accept' | 'decline' | 'cancel'
+
+export interface InteractionResponseProceed {
+  Proceed: null
+}
+export interface InteractionResponseProceedWith {
+  ProceedWith: { modification: unknown }
+}
+export interface InteractionResponseRevise {
+  Revise: { feedback: string }
+}
+export interface InteractionResponseChoose {
+  Choose: { option_id: string }
+}
+export interface InteractionResponseAbort {
+  Abort: { reason: string }
+}
+export interface InteractionResponseElicitation {
+  ElicitationReply: { action: ElicitationAction; data?: unknown }
+}
+
+export type InteractionResponse =
+  | InteractionResponseProceed
+  | InteractionResponseProceedWith
+  | InteractionResponseRevise
+  | InteractionResponseChoose
+  | InteractionResponseAbort
+  | InteractionResponseElicitation
 
 // ─── Method params / results (the subset W1 uses) ───────────────────────────
 
@@ -216,4 +349,27 @@ export interface SessionInfo {
 
 export interface OkResult {
   ok: boolean
+}
+
+// ─── Method params / results (W2: approval / paradigm / config / cancel) ─────
+
+export interface ApprovalRespondParams {
+  request_id: string
+  response: InteractionResponse
+}
+
+export interface ParadigmSwitchParams {
+  to: BusParadigmKind
+}
+
+export interface ConfigUpdateParams {
+  plan_mode?: boolean
+}
+
+export interface TurnCancelParams {
+  reason?: unknown
+}
+
+export interface ConversationCompactParams {
+  keep_recent_turns: number
 }

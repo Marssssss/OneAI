@@ -11,12 +11,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "micromark-extension-gfm": "^3.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-markdown": "^9.1.0",
-    "remark-gfm": "^4.0.0",
-    "rehype-highlight": "^7.0.0",
-    "highlight.js": "^11.10.0"
+    "shiki": "^4.4.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",

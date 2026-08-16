@@ -1,0 +1,127 @@
+.card {
+  width: 100%;
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border);
+  border-left: 3px solid var(--oneai-text-tertiary);
+  border-radius: var(--oneai-radius);
+  overflow: hidden;
+  transition: border-color var(--oneai-dur) var(--oneai-ease);
+}
+.card.selected {
+  border-color: var(--oneai-brand-500);
+  border-left-color: var(--oneai-brand-500);
+}
+.card.error {
+  border-left-color: var(--oneai-red);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--oneai-text);
+}
+.header:hover {
+  background: var(--oneai-bg-subtle);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--oneai-text-tertiary);
+}
+.dot_pending {
+  background: var(--oneai-amber);
+  animation: oneai-pulse 1.2s infinite ease-in-out;
+}
+.dot_done {
+  background: var(--oneai-green);
+}
+.dot_error {
+  background: var(--oneai-red);
+}
+@keyframes oneai-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.name {
+  font-family: var(--oneai-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--oneai-text);
+}
+
+.status {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+}
+
+.chevron {
+  margin-left: auto;
+  cursor: pointer;
+  color: var(--oneai-text-tertiary);
+  padding: 0 4px;
+}
+
+.body {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--oneai-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--oneai-gap);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sectionLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+}
+
+.code {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--oneai-bg-subtle);
+  border-radius: var(--oneai-radius-sm);
+  font-family: var(--oneai-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.errorText {
+  color: var(--oneai-red);
+}
+
+.added {
+  font-size: 12px;
+  color: var(--oneai-green);
+  font-family: var(--oneai-font-mono);
+}
