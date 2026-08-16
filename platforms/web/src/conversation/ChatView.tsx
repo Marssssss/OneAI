@@ -227,7 +227,12 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   }
   // assistant text
   const empty = node.text.length === 0
-  const feedbackDone = node.state === 'done' && !empty
+  // Feedback is only available on the **current live conversation** — a node
+  // has a `turnId` only while it's a live turn's output. Reloaded/historical
+  // messages replay without a turn_id, so they render no 👍/👎 buttons (by
+  // design: feedback reacts to a fresh model output, not stored history).
+  const feedbackDone =
+    node.state === 'done' && !empty && node.turnId !== null && node.turnId.length > 0
   const currentKind = node.feedback?.kind
   return (
     <div className={styles.row}>

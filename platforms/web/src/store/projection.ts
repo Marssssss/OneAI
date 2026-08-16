@@ -778,10 +778,10 @@ export class ProjectionStore {
         this.state.sessionId = y.id
         this.state.nodes = messagesToNodes(y.messages)
         this.resetLedgers()
-        // W4 B4 — backfill per-message 👍/👎 markers for this session so a
-        // reloaded conversation restores its reaction state. Fire-and-forget:
-        // handleYield is sync; the backfill lands as its own emit when ready.
-        void this.loadFeedback(y.id)
+        // Reloaded messages replay without a turn_id (Message doesn't persist
+        // it), so per-message feedback is not available on history — the UI
+        // hides 👍/👎 on these nodes. New live turns in this loaded session
+        // do carry a turn_id and are feedbackable.
         this.emitNow()
         break
       }
@@ -925,19 +925,26 @@ export class ProjectionStore {
 
   /** Record a 👍/👎/note against one assistant text node. Optimistic: the
    * node's `feedback` is set immediately and cleared/rolled-back on failure.
-   * `nodeId` resolves to the node's `turnId` (the feedback target). */
+   *
+   * The feedback target is the node's runtime `turn_id`. Feedback is therefore
+   * only available on the **current live conversation** — reloaded/historical
+   * messages replay without a turn_id (`Message` doesn't persist it), so the UI
+   * hides the 👍/👎 buttons on them (see ChatView's `feedbackDone` gate). This
+   * is by design: feedback is a reaction to a fresh model output, not a retro
+   * tag on stored history. */
   async submitFeedback(
     nodeId: string,
     kind: FeedbackKind,
     text?: string,
   ): Promise<void> {
     const node = this.state.nodes.find((n) => n.id === nodeId)
-    if (node === null || node === undefined) return
+    if (node === undefined) return
     const sessionId = this.state.sessionId
     const turnId = node.turnId
     if (sessionId === null || turnId === null) {
-      this.state.lastError = 'feedback needs an active session + a finalized turn'
-      this.emitNow()
+      // No live session / no runtime turn_id (a reloaded message) — the UI
+      // gates this too, but guard so a stray call is a silent no-op, not an
+      // engine error.
       return
     }
     const optimistic: FeedbackEntry = {
@@ -969,37 +976,6 @@ export class ProjectionStore {
       this.state.lastError = e instanceof Error ? e.message : String(e)
     }
     this.emitNow()
-  }
-
-  /** Backfill per-message feedback markers for a session — called after a
-   * session loads so reloaded assistant bubbles show their 👍/👎 state. */
-  async loadFeedback(sessionId: string): Promise<void> {
-    try {
-      const res = await this.rpc.call<{ session_id: string }, { feedback: FeedbackEntry[] }>(
-        'feedback/list',
-        { session_id: sessionId },
-      )
-      const byTurn = new Map<string, FeedbackEntry>()
-      for (const e of res.feedback) {
-        // Last-write-wins on turn_id — the most recent reaction wins.
-        byTurn.set(e.turn_id, e)
-      }
-      if (byTurn.size === 0) return
-      let changed = false
-      this.state.nodes = this.state.nodes.map((n) => {
-        if (n.role === 'assistant' && n.kind === 'text' && n.turnId !== null) {
-          const fb = byTurn.get(n.turnId)
-          if (fb !== undefined) {
-            changed = true
-            return { ...n, feedback: fb }
-          }
-        }
-        return n
-      })
-      if (changed) this.emitNow()
-    } catch {
-      // Best-effort: a failing feedback/list must not break session load.
-    }
   }
 
   // ── W2 actions: approval / paradigm / plan-mode / cancel / details ────────
