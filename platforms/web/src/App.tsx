@@ -302,7 +302,7 @@ export default function App(): React.ReactNode {
             planMode={planMode || snap.paradigm === 'plan'}
             scenarios={scenarios}
             settingsStore={settings}
-            onSend={(text) => void projection.sendMessage(text)}
+            onSend={(text, images) => void projection.sendMessage(text, images)}
             onStop={() => void projection.cancelTurn()}
             onTogglePlan={handleTogglePlan}
             onSlash={handleSlash}
@@ -310,6 +310,9 @@ export default function App(): React.ReactNode {
             onRespondApproval={handleRespondApproval}
             onPickScenario={handlePickScenario}
             onDebrief={handleDebrief}
+            onSubmitFeedback={(nodeId, kind, text) =>
+              void projection.submitFeedback(nodeId, kind, text)
+            }
           />
         }
         details={

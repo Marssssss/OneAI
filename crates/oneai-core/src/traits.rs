@@ -1464,6 +1464,36 @@ impl SessionInfo {
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ─── FeedbackEntry ──────────────────────────────────────────────────────────
+
+/// One stored per-message feedback entry — a user's 👍/👎/note reaction to a
+/// specific assistant message, identified by `(session_id, turn_id)`. Lives in
+/// core (like [`SessionInfo`]) so both `oneai-persistence` (the durable store)
+/// and `oneai-app-server` (the `FeedbackStore` trait + wire shape) share one
+/// type without a dep-direction violation.
+///
+/// `kind` is a free-form wire string (`"up"` / `"down"` / `"note"` — constants
+/// live in `oneai-app-server::feedback`); `created_at_ms` is epoch-millis so a
+/// frontend orders entries without a separate round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FeedbackEntry {
+    /// Stable id (store-assigned on record).
+    pub id: String,
+    /// The conversation the feedback belongs to.
+    pub session_id: String,
+    /// The turn whose assistant message this feedback targets.
+    pub turn_id: String,
+    /// The role of the message being reacted to (`"assistant"` today).
+    pub message_role: String,
+    /// `"up"` / `"down"` / `"note"`.
+    pub kind: String,
+    /// Free-text commentary (present for `note`; `None` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Epoch-millis creation timestamp.
+    pub created_at_ms: u64,
+}
+
 // ─── EmbeddingService ──────────────────────────────────────────────────────
 
 /// Embedding service — generates vector embeddings from text.

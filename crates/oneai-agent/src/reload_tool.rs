@@ -90,6 +90,7 @@ impl Tool for ReloadTool {
                     // via the live registry read). Self-report the names so
                     // the loop's diff union also catches them promptly.
                     added_tool_names: names,
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolOutput {

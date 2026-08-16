@@ -690,6 +690,28 @@ pub struct ToolDefinition {
     pub parameters_schema: serde_json::Value,
 }
 
+// ─── Artifact ───────────────────────────────────────────────────────────────
+
+/// A file produced by a tool execution — the **deliverable** surface.
+///
+/// Surfaced on [`ToolOutput::artifacts`] so a frontend can render a
+/// per-turn deliverable strip (the files the agent wrote/patched this turn)
+/// without re-parsing the tool's free-form `content` text. The `path` is a
+/// host-filesystem path (or a `data:`/`file:` URI); a browser frontend can only
+/// inline-display the URI forms — a plain path renders as a chip + copy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Artifact {
+    /// Filesystem path or URI (`data:`/`file:`) of the produced file.
+    pub path: String,
+    /// Inferred MIME type (best-effort, by extension).
+    pub mime_type: String,
+    /// Human-readable one-liner ("wrote 128 bytes", "patched").
+    pub description: String,
+    /// File size in bytes, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
 // ─── ToolOutput ───────────────────────────────────────────────────────────────
 
 /// The output from a tool execution.
@@ -730,6 +752,14 @@ pub struct ToolOutput {
     /// `added_tool_names` default.
     #[serde(default)]
     pub added_tool_names: Vec<String>,
+
+    /// Files this tool execution produced — the **deliverable** surface
+    /// (§W4). Populated by file-writing tools (`write_file`/`apply_patch`)
+    /// on success; read-only tools leave it empty. `EngineYield::ToolResult`
+    /// carries the whole `ToolOutput`, so a frontend renders a per-turn
+    /// deliverable strip straight off this field — no re-parsing `content`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
 }
 
 // ─── RiskLevel (legacy) ────────────────────────────────────────────────────────
@@ -2854,10 +2884,40 @@ mod tests {
             content: "installed".into(),
             error: None,
             added_tool_names: vec!["read_file".into(), "grep".into()],
+            ..Default::default()
         };
         let json = serde_json::to_string(&out).unwrap();
         let back: ToolOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(back.added_tool_names, vec!["read_file", "grep"]);
+    }
+
+    #[test]
+    fn tool_output_round_trips_artifacts() {
+        let out = ToolOutput {
+            success: true,
+            content: "ok".into(),
+            artifacts: vec![Artifact {
+                path: "/tmp/out.txt".into(),
+                mime_type: "text/plain".into(),
+                description: "wrote 4 bytes".into(),
+                size_bytes: Some(4),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&out).unwrap();
+        // Empty fields are skipped — artifacts present.
+        assert!(json.contains(r#""artifacts""#));
+        let back: ToolOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.artifacts.len(), 1);
+        assert_eq!(back.artifacts[0].path, "/tmp/out.txt");
+        assert_eq!(back.artifacts[0].size_bytes, Some(4));
+    }
+
+    #[test]
+    fn tool_output_legacy_json_without_artifacts_deserializes_empty() {
+        let legacy = r#"{"success":true,"content":"ok","added_tool_names":[]}"#;
+        let back: ToolOutput = serde_json::from_str(legacy).unwrap();
+        assert!(back.artifacts.is_empty());
     }
 
     #[test]

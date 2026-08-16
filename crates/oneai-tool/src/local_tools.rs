@@ -5,7 +5,35 @@
 use async_trait::async_trait;
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
-use oneai_core::{RiskLevel, ToolOutput};
+use oneai_core::{Artifact, RiskLevel, ToolOutput};
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+/// Best-effort MIME inference by file extension — no new dependency. Used to
+/// populate [`Artifact::mime_type`] on file-writing tool outputs so a frontend
+/// render an icon / preview hint. Unknown extensions default to `text/plain`.
+pub(crate) fn infer_mime(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().filter(|e| !e.is_empty());
+    match ext.map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("rs") => "text/rust",
+        Some("ts" | "tsx") => "text/typescript",
+        Some("js" | "jsx" | "mjs" | "cjs") => "text/javascript",
+        Some("json") => "application/json",
+        Some("toml") => "application/toml",
+        Some("md") => "text/markdown",
+        Some("py") => "text/x-python",
+        Some("go") => "text/x-go",
+        Some("html" | "htm") => "text/html",
+        Some("css") => "text/css",
+        Some("yaml" | "yml") => "text/yaml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        _ => "text/plain",
+    }
+}
 
 // ─── FileWriteTool ──────────────────────────────────────────────────────────
 
@@ -123,6 +151,16 @@ impl Tool for FileWriteTool {
                 success: true,
                 content: format!("Successfully wrote {} bytes to {}", content.len(), path),
                 error: None,
+                artifacts: vec![Artifact {
+                    path: path.to_string(),
+                    mime_type: infer_mime(path).to_string(),
+                    description: format!(
+                        "{} {} bytes",
+                        if append { "appended" } else { "wrote" },
+                        content.len()
+                    ),
+                    size_bytes: Some(content.len() as u64),
+                }],
                 ..Default::default()
             }),
             Err(e) => Ok(ToolOutput {
@@ -331,4 +369,45 @@ fn evaluate_expression(expr: &str) -> std::result::Result<f64, String> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oneai_core::traits::Tool;
+
+    /// write_file success path must surface the written file as an
+    /// [`Artifact`] deliverable (§W4 A2) — the frontend renders the per-turn
+    /// deliverable strip off this field.
+    #[tokio::test]
+    async fn write_file_surfaces_artifact_on_success() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("oneai_w4_artifact_{}.rs", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        let tool = FileWriteTool::new();
+        let out = tool
+            .execute(serde_json::json!({
+                "path": path_str,
+                "content": "fn main() {}\n"
+            }))
+            .await
+            .expect("write succeeds");
+        assert!(out.success, "content: {:?}", out.content);
+        assert_eq!(out.artifacts.len(), 1, "exactly one artifact");
+        assert_eq!(out.artifacts[0].path, path_str);
+        assert_eq!(out.artifacts[0].mime_type, "text/rust");
+        assert!(out.artifacts[0].size_bytes.is_some());
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `infer_mime` covers the common code-extension table; unknown → text/plain.
+    #[test]
+    fn infer_mime_covers_common_extensions() {
+        assert_eq!(infer_mime("a.rs"), "text/rust");
+        assert_eq!(infer_mime("b.TS"), "text/typescript");
+        assert_eq!(infer_mime("c.png"), "image/png");
+        assert_eq!(infer_mime("d.svg"), "image/svg+xml");
+        assert_eq!(infer_mime("README"), "text/plain");
+        assert_eq!(infer_mime("noext"), "text/plain");
+    }
 }

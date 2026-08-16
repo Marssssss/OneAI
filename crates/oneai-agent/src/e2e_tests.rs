@@ -3816,6 +3816,7 @@ impl Tool for InstallerTool {
             content: "installed".to_string(),
             error: None,
             added_tool_names: names,
+            ..Default::default()
         })
     }
 }

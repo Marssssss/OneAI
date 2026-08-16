@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import type { OneAiRpcClient } from '../rpc/client'
 import type {
   ApprovalRespondParams,
+  Artifact,
   BusParadigmKind,
   BusScenario,
   BusScenarioMember,
@@ -9,6 +10,8 @@ import type {
   ConfigUpdateParams,
   ContentBlock,
   EngineYield,
+  FeedbackEntry,
+  FeedbackKind,
   GroupRunParams,
   GroupSetOrderParams,
   GroupStartParams,
@@ -73,6 +76,16 @@ export interface ChatNode {
   // ── plan node (kind === 'plan') ──
   planSteps?: PlanStep[]
   planRevision?: number
+  // ── W4: attachments / deliverables / feedback ──
+  /** User-authored image/file blocks attached to a user node (drag-drop). */
+  attachments?: ContentBlock[]
+  /** Turn-end file artifacts collected from this turn's tool results — surfaced
+   * on the final assistant text node of the turn (the "deliverable strip"). */
+  deliverables?: Artifact[]
+  /** Per-message 👍/👎/note recorded against this node (assistant text nodes). */
+  feedback?: FeedbackEntry
+  /** Optimistic flag while feedback/submit is in flight. */
+  feedbackPending?: boolean
 }
 
 export interface ApprovalItem {
@@ -394,8 +407,11 @@ export class ProjectionStore {
 
   // ── user actions ────────────────────────────────────────────────────────────
 
-  /** Optimistically append a user node before the engine confirms the turn. */
-  pushUserMessage(text: string): void {
+  /** Optimistically append a user node before the engine confirms the turn.
+   * `images` are the user's drag-dropped/pasted image content blocks, surfaced
+   * as thumbnails in the user bubble (W4 attachments). */
+  pushUserMessage(text: string, images?: ContentBlock[]): void {
+    const attachments = images && images.length > 0 ? images : undefined
     this.state.nodes = [
       ...this.state.nodes,
       {
@@ -406,6 +422,7 @@ export class ProjectionStore {
         speaker: null,
         turnId: null,
         state: 'done',
+        attachments,
       },
     ]
     this.emitNow()
@@ -677,11 +694,42 @@ export class ProjectionStore {
       }
       case 'turn_complete': {
         // Mark any streaming nodes for this turn done.
-        this.state.nodes = this.state.nodes.map((n) =>
-          n.turnId === y.turn_id && n.state === 'streaming'
-            ? { ...n, state: 'done' as NodeState }
-            : n,
-        )
+        // W4 A3 — collect this turn's tool-result artifacts into a deliverable
+        // strip on the final assistant text node of the turn (the last text
+        // node carrying this turn_id). Reads `ToolOutput.artifacts` that file
+        // tools (write_file/apply_patch) populated.
+        const turnArtifacts: Artifact[] = []
+        for (const n of this.state.nodes) {
+          if (
+            n.turnId === y.turn_id &&
+            n.kind === 'tool' &&
+            n.toolOutput?.artifacts &&
+            n.toolOutput.artifacts.length > 0
+          ) {
+            turnArtifacts.push(...n.toolOutput.artifacts)
+          }
+        }
+        this.state.nodes = this.state.nodes.map((n) => {
+          if (n.turnId === y.turn_id && n.state === 'streaming') {
+            return { ...n, state: 'done' as NodeState }
+          }
+          return n
+        })
+        if (turnArtifacts.length > 0) {
+          // Attach to the last assistant text node of the turn (if any).
+          let lastTextIdx = -1
+          for (let i = this.state.nodes.length - 1; i >= 0; i--) {
+            const n = this.state.nodes[i]
+            if (n.turnId === y.turn_id && n.role === 'assistant' && n.kind === 'text') {
+              lastTextIdx = i
+              break
+            }
+          }
+          if (lastTextIdx >= 0) {
+            const n = this.state.nodes[lastTextIdx]
+            this.replaceNode(n.id, { deliverables: turnArtifacts })
+          }
+        }
         this.state.turnActive = false
         this.state.currentSpeaker = null
         this.state.turnEndPerf.set(y.turn_id, performance.now())
@@ -730,6 +778,10 @@ export class ProjectionStore {
         this.state.sessionId = y.id
         this.state.nodes = messagesToNodes(y.messages)
         this.resetLedgers()
+        // W4 B4 — backfill per-message 👍/👎 markers for this session so a
+        // reloaded conversation restores its reaction state. Fire-and-forget:
+        // handleYield is sync; the backfill lands as its own emit when ready.
+        void this.loadFeedback(y.id)
         this.emitNow()
         break
       }
@@ -841,9 +893,13 @@ export class ProjectionStore {
 
   // ── RPC helpers (call site for the conversation domain) ─────────────────────
 
-  async runTurn(text: string): Promise<void> {
-    this.pushUserMessage(text)
-    const content: ContentBlock[] = [{ type: 'text', text }]
+  /** Run a single-agent turn. `images` (W4 attachments) are appended as
+   * `image` content blocks after the text — the engine's `turn/run` parses
+   * `content: Vec<ContentBlock>` and forwards to `Directive::UserMessage`,
+   * so image blocks flow to the provider inline. */
+  async runTurn(text: string, images?: ContentBlock[]): Promise<void> {
+    this.pushUserMessage(text, images)
+    const content: ContentBlock[] = [{ type: 'text', text }, ...(images ?? [])]
     try {
       await this.rpc.call<TurnRunParams, { turn_id: string }>('turn/run', {
         content,
@@ -862,6 +918,87 @@ export class ProjectionStore {
     } catch (e) {
       this.state.lastError = e instanceof Error ? e.message : String(e)
       this.emitNow()
+    }
+  }
+
+  // ── W4 actions: per-message feedback ─────────────────────────────────────
+
+  /** Record a 👍/👎/note against one assistant text node. Optimistic: the
+   * node's `feedback` is set immediately and cleared/rolled-back on failure.
+   * `nodeId` resolves to the node's `turnId` (the feedback target). */
+  async submitFeedback(
+    nodeId: string,
+    kind: FeedbackKind,
+    text?: string,
+  ): Promise<void> {
+    const node = this.state.nodes.find((n) => n.id === nodeId)
+    if (node === null || node === undefined) return
+    const sessionId = this.state.sessionId
+    const turnId = node.turnId
+    if (sessionId === null || turnId === null) {
+      this.state.lastError = 'feedback needs an active session + a finalized turn'
+      this.emitNow()
+      return
+    }
+    const optimistic: FeedbackEntry = {
+      id: `pending-${nodeId}`,
+      session_id: sessionId,
+      turn_id: turnId,
+      message_role: 'assistant',
+      kind,
+      text,
+      created_at_ms: Date.now(),
+    }
+    this.replaceNode(nodeId, { feedback: optimistic, feedbackPending: true })
+    this.emitNow()
+    try {
+      await this.rpc.call<
+        { session_id: string; turn_id: string; message_role: string; kind: string; text?: string },
+        { ok: boolean }
+      >('feedback/submit', {
+        session_id: sessionId,
+        turn_id: turnId,
+        message_role: 'assistant',
+        kind,
+        text,
+      })
+      this.replaceNode(nodeId, { feedbackPending: false })
+    } catch (e) {
+      // Roll back the optimistic marker — the server didn't persist it.
+      this.replaceNode(nodeId, { feedback: undefined, feedbackPending: false })
+      this.state.lastError = e instanceof Error ? e.message : String(e)
+    }
+    this.emitNow()
+  }
+
+  /** Backfill per-message feedback markers for a session — called after a
+   * session loads so reloaded assistant bubbles show their 👍/👎 state. */
+  async loadFeedback(sessionId: string): Promise<void> {
+    try {
+      const res = await this.rpc.call<{ session_id: string }, { feedback: FeedbackEntry[] }>(
+        'feedback/list',
+        { session_id: sessionId },
+      )
+      const byTurn = new Map<string, FeedbackEntry>()
+      for (const e of res.feedback) {
+        // Last-write-wins on turn_id — the most recent reaction wins.
+        byTurn.set(e.turn_id, e)
+      }
+      if (byTurn.size === 0) return
+      let changed = false
+      this.state.nodes = this.state.nodes.map((n) => {
+        if (n.role === 'assistant' && n.kind === 'text' && n.turnId !== null) {
+          const fb = byTurn.get(n.turnId)
+          if (fb !== undefined) {
+            changed = true
+            return { ...n, feedback: fb }
+          }
+        }
+        return n
+      })
+      if (changed) this.emitNow()
+    } catch {
+      // Best-effort: a failing feedback/list must not break session load.
     }
   }
 
@@ -1071,12 +1208,14 @@ export class ProjectionStore {
   /** Send a user message in whichever mode is active: group (`group/run`)
    *  when a scenario is running, single-agent (`turn/run`) otherwise. The
    *  App routes all composer sends through this so the mode switch is
-   *  transparent to the UI. */
-  async sendMessage(text: string): Promise<void> {
+   *  transparent to the UI. `images` (W4 attachments) only flow in
+   *  single-agent mode — group chat's `GroupUserMessage` takes plain text, so
+   *  the UI disables the attachment rail when a scenario is active. */
+  async sendMessage(text: string, images?: ContentBlock[]): Promise<void> {
     if (this.state.currentScenario !== null) {
       await this.groupRun(text)
     } else {
-      await this.runTurn(text)
+      await this.runTurn(text, images)
     }
   }
 }
@@ -1095,6 +1234,10 @@ function messagesToNodes(messages: unknown[]): ChatNode[] {
     // get their own rendering in W2.
     if (msg.role === 'system' || msg.role === 'tool') continue
     const role = roleOf(msg.role)
+    // W4: collect image blocks for a user node's attachment thumbnails.
+    const attachments: ContentBlock[] = (msg.content ?? []).filter(
+      (b) => b.type === 'image' || b.type === 'file',
+    )
     for (const block of msg.content ?? []) {
       if (block.type === 'text') {
         out.push({
@@ -1105,6 +1248,7 @@ function messagesToNodes(messages: unknown[]): ChatNode[] {
           speaker: null,
           turnId: null,
           state: 'done',
+          attachments: role === 'user' && attachments.length > 0 ? attachments : undefined,
         })
       } else if (block.type === 'thinking') {
         out.push({

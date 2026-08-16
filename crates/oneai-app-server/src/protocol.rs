@@ -61,6 +61,14 @@ pub mod method {
     /// transport.
     pub const SESSION_LIST: &str = "session/list";
 
+    // Per-message feedback — synchronous CRUD against the shared feedback
+    // store (no bus/Directive, like session/list). `feedback/submit` records a
+    // 👍/👎/note for one assistant message (params: session_id / turn_id /
+    // message_role? / kind / text?); `feedback/list` returns all entries for a
+    // session so a reloaded session restores its reaction markers.
+    pub const FEEDBACK_SUBMIT: &str = "feedback/submit";
+    pub const FEEDBACK_LIST: &str = "feedback/list";
+
     // Conversation ops.
     pub const CONVERSATION_COMPACT: &str = "conversation/compact";
     pub const PROJECT_INIT: &str = "project/init";

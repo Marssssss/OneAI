@@ -29,7 +29,7 @@ use oneai_supervisor::{IpcListener, IpcStream};
 
 use crate::adapter::serve_connection;
 use crate::dispatcher::Dispatcher;
-use crate::{SharedAppProbe, SharedConversationStore, SharedScenarioStore};
+use crate::{SharedAppProbe, SharedConversationStore, SharedFeedbackStore, SharedScenarioStore};
 
 /// Channel buffer for the per-connection inbound/outbound JSON queues. Turns a
 /// slow frontend into back-pressure rather than unbounded memory.
@@ -43,6 +43,7 @@ pub fn serve_stdio(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -58,6 +59,7 @@ pub fn serve_stdio(
         dispatcher,
         scenario_store,
         session_store,
+        feedback_store,
         probe,
         inbound_rx,
         outbound_tx,
@@ -73,6 +75,7 @@ pub async fn serve_ipc(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) -> std::io::Result<JoinHandle<()>> {
     let mut listener = IpcListener::bind(path).await?;
@@ -85,6 +88,7 @@ pub async fn serve_ipc(
                     let dispatcher = dispatcher.clone();
                     let scenario_store = scenario_store.clone();
                     let session_store = session_store.clone();
+                    let feedback_store = feedback_store.clone();
                     let probe = probe.clone();
                     tokio::spawn(async move {
                         serve_line_stream(
@@ -93,6 +97,7 @@ pub async fn serve_ipc(
                             dispatcher,
                             scenario_store,
                             session_store,
+                            feedback_store,
                             probe,
                         )
                         .await;
@@ -114,6 +119,7 @@ async fn serve_line_stream(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) {
     let (read, mut write) = tokio::io::split(stream);
@@ -163,6 +169,7 @@ async fn serve_line_stream(
         dispatcher,
         scenario_store,
         session_store,
+        feedback_store,
         probe,
         inbound_rx,
         outbound_tx,
@@ -183,6 +190,7 @@ pub async fn serve_ws(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) -> std::io::Result<(JoinHandle<()>, std::net::SocketAddr)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -197,6 +205,7 @@ pub async fn serve_ws(
                         let dispatcher = dispatcher.clone();
                         let scenario_store = scenario_store.clone();
                         let session_store = session_store.clone();
+                        let feedback_store = feedback_store.clone();
                         let probe = probe.clone();
                         tokio::spawn(async move {
                             match tokio_tungstenite::accept_async(stream).await {
@@ -207,6 +216,7 @@ pub async fn serve_ws(
                                         dispatcher,
                                         scenario_store,
                                         session_store,
+                                        feedback_store,
                                         probe,
                                     )
                                     .await
@@ -237,6 +247,7 @@ async fn serve_ws_stream(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) {
     use futures::{SinkExt, StreamExt};
@@ -275,6 +286,7 @@ async fn serve_ws_stream(
         dispatcher,
         scenario_store,
         session_store,
+        feedback_store,
         probe,
         inbound_rx,
         outbound_tx,
@@ -310,6 +322,7 @@ pub fn serve_native_messaging(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -323,6 +336,7 @@ pub fn serve_native_messaging(
         dispatcher,
         scenario_store,
         session_store,
+        feedback_store,
         probe,
         inbound_rx,
         outbound_tx,

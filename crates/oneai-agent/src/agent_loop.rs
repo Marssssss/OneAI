@@ -3280,6 +3280,7 @@ impl AgentLoop {
                         content: confirmation,
                         error: None,
                         added_tool_names: Vec::new(),
+                        ..Default::default()
                     };
                     observer.on_tool_result(&call_id, "switch_project", &tool_output);
                 }

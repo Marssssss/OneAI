@@ -342,6 +342,39 @@ impl oneai_app_server::ConversationStore for AppConversationStore {
     }
 }
 
+// ─── FeedbackStore impl ─────────────────────────────────────────────────────
+//
+// Backs the `feedback/submit` + `feedback/list` JSON-RPC methods (sync CRUD —
+// no bus). Same shape as `AppConversationStore`: wraps the same `Arc<App>` the
+// runtime drives, delegating to `App::record_feedback` / `list_feedback`,
+// which in turn hit the shared SQLite store (`ONEAI_DB_PATH`). `App` swallows
+// backend errors, so `list` returns an empty vec on failure and `record` is a
+// silent no-op — never a panic, never a turn failure.
+
+struct AppFeedbackStore {
+    app: Arc<App>,
+}
+
+#[async_trait::async_trait]
+impl oneai_app_server::FeedbackStore for AppFeedbackStore {
+    async fn record(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        message_role: &str,
+        kind: &str,
+        text: Option<&str>,
+    ) {
+        self.app
+            .record_feedback(session_id, turn_id, message_role, kind, text)
+            .await;
+    }
+
+    async fn list(&self, session_id: &str) -> Vec<oneai_core::FeedbackEntry> {
+        self.app.list_feedback(session_id).await
+    }
+}
+
 // ─── AppProbeImpl — backs the `config/*` / `provider/*` / `domainpack/*` /
 //     `skill/*` JSON-RPC methods. A read-only view of the running config +
 //     the genuinely hot-switchable skill lifecycle (pin/unpin/archive/restore
@@ -861,6 +894,13 @@ pub fn cmd_app_server(
         let conversation_store: oneai_app_server::SharedConversationStore =
             Arc::new(AppConversationStore { app: app.clone() });
 
+        // Feedback store — backs `feedback/submit` + `feedback/list` (sync
+        // CRUD, same seam as `conversation_store`). Wraps the same `Arc<App>`,
+        // delegating to `App::record_feedback` / `list_feedback` → the shared
+        // SQLite store (`ONEAI_DB_PATH`).
+        let feedback_store: oneai_app_server::SharedFeedbackStore =
+            Arc::new(AppFeedbackStore { app: app.clone() });
+
         // App probe — backs the `config/*` / `provider/*` / `domainpack/*` /
         // `skill/*` JSON-RPC methods (read-only config + skill lifecycle).
         let probe: SharedAppProbe = Arc::new(AppProbeImpl {
@@ -904,7 +944,15 @@ pub fn cmd_app_server(
 
         // Multi-transport JSON-RPC server. Binds all `--listen` specs
         // concurrently against the one bus.
-        let server = serve_all(specs, bus, scenario_store, conversation_store, probe).await?;
+        let server = serve_all(
+            specs,
+            bus,
+            scenario_store,
+            conversation_store,
+            feedback_store,
+            probe,
+        )
+        .await?;
 
         eprintln!("✅ Listening. Connect a JSON-RPC frontend.");
         eprintln!("   Methods: turn/run, turn/cancel, approval/respond, session/*, …");

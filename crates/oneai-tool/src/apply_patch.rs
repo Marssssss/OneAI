@@ -17,7 +17,9 @@ use crate::tool_interfaces::PermissionAwareTool;
 use async_trait::async_trait;
 use oneai_core::error::Result;
 use oneai_core::traits::Tool;
-use oneai_core::{PermissionLevel, RiskLevel, ToolOutput};
+use oneai_core::{Artifact, PermissionLevel, RiskLevel, ToolOutput};
+
+use crate::local_tools::infer_mime;
 
 // ─── DiffLine ────────────────────────────────────────────────────────────────
 
@@ -576,6 +578,7 @@ impl Tool for ApplyPatchTool {
                 let mut results = Vec::new();
                 let mut errors = Vec::new();
                 let mut files_changed = 0;
+                let mut artifacts: Vec<Artifact> = Vec::new();
 
                 for (file_path, file_hunk_list) in &file_hunks {
                     // Security: reject path traversal
@@ -649,6 +652,19 @@ impl Tool for ApplyPatchTool {
                             results
                                 .push(format!("Applied {} hunk(s) to {}", hunk_count, file_path));
                             files_changed += 1;
+                            // Deliverable surface — the patched file's path so a
+                            // frontend can list turn-end outputs.
+                            let size = tokio::fs::metadata(file_path).await.map(|m| m.len()).ok();
+                            artifacts.push(Artifact {
+                                path: file_path.clone(),
+                                mime_type: infer_mime(file_path).to_string(),
+                                description: format!(
+                                    "{} {} hunk(s)",
+                                    if is_new_file { "created" } else { "patched" },
+                                    hunk_count
+                                ),
+                                size_bytes: size,
+                            });
                         }
                         Err(e) => {
                             errors.push(format!("Failed to write {}: {}", file_path, e));
@@ -678,6 +694,7 @@ impl Tool for ApplyPatchTool {
                     } else {
                         Some(format!("{} errors during patch application", errors.len()))
                     },
+                    artifacts,
                     ..Default::default()
                 })
             }

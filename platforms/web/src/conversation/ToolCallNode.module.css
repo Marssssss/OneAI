@@ -125,3 +125,55 @@
   color: var(--oneai-green);
   font-family: var(--oneai-font-mono);
 }
+
+/* ── W4 A2: tool-result artifacts ───────────────────────────────────────── */
+
+.artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.artifact {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--oneai-bg-subtle);
+  font-size: 11px;
+}
+
+.artifactIcon {
+  font-size: 12px;
+}
+
+.artifactPath {
+  font-family: var(--oneai-font-mono);
+  font-size: 10px;
+  color: var(--oneai-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+.copyBtn {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: var(--oneai-text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.copyBtn:hover {
+  background: var(--oneai-bg-elevated);
+  color: var(--oneai-text);
+}

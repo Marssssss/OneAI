@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use oneai_core::error::{OneAIError, Result};
@@ -220,7 +221,18 @@ impl SqliteSessionStore {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_key ON memories(user_id, subject, predicate);
             CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
-            CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);"
+            CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
+
+            CREATE TABLE IF NOT EXISTS message_feedback (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                message_role TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT,
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feedback_session ON message_feedback(session_id);"
         ).map_err(|e| OneAIError::Persistence(
             format!("Failed to create session store schema: {}", e)
         ))?;
@@ -267,6 +279,77 @@ impl SqliteSessionStore {
     /// Get the database path.
     pub fn db_path(&self) -> &PathBuf {
         &self.db_path
+    }
+
+    /// Record one per-message feedback entry (§W4 B2). Assigns `id` +
+    /// `created_at_ms`; errors are mapped to `OneAIError::Persistence` so the
+    /// `App` passthrough can `unwrap_or_default` them into a silent no-op
+    /// (mirrors `list_conversations`' error-swallow contract). `text` is
+    /// `Some` only for `note`-kind feedback.
+    pub async fn record_feedback(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        message_role: &str,
+        kind: &str,
+        text: Option<&str>,
+    ) {
+        // Best-effort: a write failure (corrupt db, disk full) surfaces as a
+        // logged no-op rather than a panic — feedback is non-critical UX state.
+        if let Ok(conn) = self.open_connection() {
+            let id = format!("fb-{}", uuid::Uuid::new_v4().simple());
+            let created_at_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let _ = conn.execute(
+                "INSERT INTO message_feedback \
+                 (id, session_id, turn_id, message_role, kind, text, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    id,
+                    session_id,
+                    turn_id,
+                    message_role,
+                    kind,
+                    text,
+                    created_at_ms as i64,
+                ],
+            );
+        }
+    }
+
+    /// All feedback entries for `session_id` (§W4 B2). A read failure surfaces
+    /// as an empty list — never a panic — so a failing backend doesn't hide
+    /// the conversation from the frontend.
+    pub async fn list_feedback(&self, session_id: &str) -> Vec<oneai_core::FeedbackEntry> {
+        let Ok(conn) = self.open_connection() else {
+            return Vec::new();
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT id, session_id, turn_id, message_role, kind, text, created_at_ms \
+             FROM message_feedback WHERE session_id = ?1 ORDER BY created_at_ms ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map(rusqlite::params![session_id], |row| {
+            let text: Option<String> = row.get(5)?;
+            let created_at_ms: i64 = row.get(6)?;
+            Ok(oneai_core::FeedbackEntry {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                turn_id: row.get(2)?,
+                message_role: row.get(3)?,
+                kind: row.get(4)?,
+                text,
+                created_at_ms: created_at_ms as u64,
+            })
+        });
+        match rows {
+            Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -2135,5 +2218,26 @@ mod fact_tests {
         let runner = loaded.iter().find(|f| f.subject == "user.runner").unwrap();
         assert!(pm.pinned, "pinned flag lost across SQLite round-trip");
         assert!(!runner.pinned, "non-pinned flag flipped true");
+    }
+
+    /// §W4 B2 — per-message feedback round-trips through SQLite and is scoped
+    /// per-session (the `feedback/list` query must not leak across sessions).
+    #[tokio::test]
+    async fn feedback_record_then_list_round_trips_and_scopes_by_session() {
+        let s = tmp_store();
+        s.record_feedback("s1", "t1", "assistant", "up", None).await;
+        s.record_feedback("s1", "t2", "assistant", "note", Some("nice"))
+            .await;
+        s.record_feedback("s2", "t9", "assistant", "down", None)
+            .await;
+
+        let s1 = s.list_feedback("s1").await;
+        assert_eq!(s1.len(), 2, "two entries for s1");
+        assert!(s1.iter().any(|e| e.turn_id == "t1" && e.kind == "up"));
+        assert!(s1
+            .iter()
+            .any(|e| e.turn_id == "t2" && e.text.as_deref() == Some("nice")));
+        assert_eq!(s.list_feedback("s2").await.len(), 1);
+        assert!(s.list_feedback("s3").await.is_empty());
     }
 }

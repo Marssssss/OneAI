@@ -11,7 +11,7 @@
 import type { ReactNode } from 'react'
 import { useLocale } from '../i18n'
 import type { ProjectionSnapshot } from '../store/projection'
-import type { BusScenario } from '../rpc/types'
+import type { BusScenario, ContentBlock, FeedbackKind } from '../rpc/types'
 import type { ScenarioEntry } from '../scenario/scenarioStore'
 import type { InteractionResponse } from '../rpc/types'
 import { ChatView } from './ChatView'
@@ -29,7 +29,10 @@ interface ConversationRootProps {
   planMode: boolean
   scenarios: ScenarioEntry[]
   settingsStore: SettingsStore
-  onSend: (text: string) => void
+  /** Send a user message. `images` (W4 attachments) are image content blocks
+   * dragged/dropped/pasted into the composer; group-chat mode ignores them
+   * (its bus directive is plain-text only). */
+  onSend: (text: string, images?: ContentBlock[]) => void
   onStop: () => void
   onTogglePlan: () => void
   onSlash: (cmd: SlashCommand) => void
@@ -37,6 +40,8 @@ interface ConversationRootProps {
   onRespondApproval: (requestId: string, response: InteractionResponse) => void
   onPickScenario: (scenario: BusScenario) => void
   onDebrief: () => void
+  /** §W4 B4 — record a 👍/👎/note against one assistant message node. */
+  onSubmitFeedback: (nodeId: string, kind: FeedbackKind, text?: string) => void
 }
 
 export function ConversationRoot({
@@ -54,6 +59,7 @@ export function ConversationRoot({
   onRespondApproval,
   onPickScenario,
   onDebrief,
+  onSubmitFeedback,
 }: ConversationRootProps): ReactNode {
   const { t } = useLocale()
   const statusText =
@@ -121,6 +127,7 @@ export function ConversationRoot({
             onSelectTool={onSelectTool}
             theme={theme}
             members={snapshot.scenarioMembers}
+            onSubmitFeedback={onSubmitFeedback}
           />
         )}
       </div>
@@ -149,6 +156,7 @@ export function ConversationRoot({
           turnActive={snapshot.turnActive}
           paradigm={snapshot.paradigm}
           planMode={planMode}
+          attachmentsEnabled={snapshot.currentScenario === null}
           onSend={onSend}
           onStop={onStop}
           onTogglePlan={onTogglePlan}

@@ -8,15 +8,21 @@
 // W3: in scenario (group) mode, assistant/thinking bubbles render a speaker
 // header (name + color dot) resolved from the active scenario's members —
 // the `speaker` field on each fragment drives bubble attribution.
+//
+// W4: user bubbles render attachment thumbnails (drag-drop images); assistant
+// text bubbles render a per-turn deliverable strip (file artifacts) + 👍/👎
+// feedback controls; image attachments + image deliverables open a Lightbox.
 
-import { memo, useEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { BusScenarioMember } from '../rpc/types'
+import type { BusScenarioMember, FeedbackKind } from '../rpc/types'
 import type { ChatNode } from '../store/projection'
 import { useLocale } from '../i18n'
 import { IncrementalMarkdown } from './IncrementalMarkdown'
 import { ToolCallNode } from './ToolCallNode'
 import { PlanNode } from './PlanNode'
+import { DeliverableStrip } from './DeliverableStrip'
+import { Lightbox } from './Lightbox'
 import styles from './ChatView.module.css'
 
 interface ChatViewProps {
@@ -27,9 +33,16 @@ interface ChatViewProps {
   theme: 'light' | 'dark'
   /** Active scenario members (for speaker name/color) — null in single-agent. */
   members: BusScenarioMember[] | null
+  /** §W4 B4 — record 👍/👎/note against one assistant text node. */
+  onSubmitFeedback: (nodeId: string, kind: FeedbackKind, text?: string) => void
 }
 
 const FOLLOW_THRESHOLD = 80 // px from bottom — keep auto-following
+
+interface LightboxState {
+  src: string
+  alt: string
+}
 
 export function ChatView({
   nodes,
@@ -38,9 +51,17 @@ export function ChatView({
   onSelectTool,
   theme,
   members,
+  onSubmitFeedback,
 }: ChatViewProps): ReactNode {
   const scrollRef = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
+  const [lightbox, setLightbox] = useState<LightboxState | null>(null)
+
+  // Stable open/close so memoized seats don't all re-render on a parent tick.
+  const onOpenImage = useCallback((src: string, alt: string) => {
+    setLightbox({ src, alt })
+  }, [])
+  const onCloseLightbox = useCallback(() => setLightbox(null), [])
 
   // Bottom-follow: only auto-scroll if the user is near the bottom; once they
   // scroll up during a turn, stop following (resume when they hit bottom).
@@ -74,10 +95,15 @@ export function ChatView({
             members={members}
             selected={selectedToolNodeId === n.id}
             onSelect={onSelectTool}
+            onOpenImage={onOpenImage}
+            onSubmitFeedback={onSubmitFeedback}
           />
         ))}
         {turnActive && <TypingDots />}
       </div>
+      {lightbox !== null && (
+        <Lightbox src={lightbox.src} alt={lightbox.alt} onClose={onCloseLightbox} />
+      )}
     </div>
   )
 }
@@ -105,6 +131,15 @@ function resolveSpeaker(
   return { name: speaker, color: '#8A8A8A' }
 }
 
+/** Derive a `data:` URL from an image content block's base64 data. */
+function imagePreviewSrc(block: { type: string; mime_type?: string; data?: string; uri?: string }): string {
+  if (block.type === 'file' && block.uri !== undefined) return block.uri
+  if (block.type === 'image' && block.data !== undefined && block.mime_type !== undefined) {
+    return `data:${block.mime_type};base64,${block.data}`
+  }
+  return ''
+}
+
 // One row — memoized so a streaming assistant node's text delta doesn't
 // re-render its siblings.
 const ChatNodeSeat = memo(function ChatNodeSeat({
@@ -113,18 +148,44 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   members,
   selected,
   onSelect,
+  onOpenImage,
+  onSubmitFeedback,
 }: {
   node: ChatNode
   theme: 'light' | 'dark'
   members: BusScenarioMember[] | null
   selected: boolean
   onSelect: (nodeId: string) => void
+  onOpenImage: (src: string, alt: string) => void
+  onSubmitFeedback: (nodeId: string, kind: FeedbackKind, text?: string) => void
 }): ReactNode {
   const { t } = useLocale()
   if (node.role === 'user') {
+    const images = (node.attachments ?? []).filter(
+      (b) => b.type === 'image' || b.type === 'file',
+    )
     return (
       <div className={styles.row}>
-        <div className={`${styles.bubble} ${styles.userBubble}`}>{node.text}</div>
+        <div className={`${styles.bubble} ${styles.userBubble}`}>
+          {node.text.length > 0 && <div>{node.text}</div>}
+          {images.length > 0 && (
+            <div className={styles.attachments}>
+              {images.map((b, i) => {
+                const src = imagePreviewSrc(b)
+                if (src.length === 0) return null
+                return (
+                  <img
+                    key={i}
+                    className={styles.attachmentThumb}
+                    src={src}
+                    alt="attachment"
+                    onClick={() => onOpenImage(src, 'attachment')}
+                  />
+                )
+              })}
+            </div>
+          )}
+        </div>
       </div>
     )
   }
@@ -166,6 +227,8 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
   }
   // assistant text
   const empty = node.text.length === 0
+  const feedbackDone = node.state === 'done' && !empty
+  const currentKind = node.feedback?.kind
   return (
     <div className={styles.row}>
       {showSpeaker && <SpeakerHeader meta={speaker} />}
@@ -177,6 +240,36 @@ const ChatNodeSeat = memo(function ChatNodeSeat({
         )}
         {node.state === 'streaming' && !empty && <span className={styles.cursor} />}
       </div>
+      {node.deliverables !== undefined && node.deliverables.length > 0 && (
+        <DeliverableStrip artifacts={node.deliverables} onOpenImage={onOpenImage} />
+      )}
+      {feedbackDone && (
+        <div className={styles.feedbackRow}>
+          <button
+            className={`${styles.feedbackBtn} ${
+              currentKind === 'up' ? styles.feedbackOn : ''
+            } ${node.feedbackPending ? styles.feedbackPending : ''}`}
+            onClick={() => onSubmitFeedback(node.id, 'up')}
+            aria-label="thumbs up"
+            disabled={node.feedbackPending === true}
+          >
+            👍
+          </button>
+          <button
+            className={`${styles.feedbackBtn} ${
+              currentKind === 'down' ? styles.feedbackOn : ''
+            } ${node.feedbackPending ? styles.feedbackPending : ''}`}
+            onClick={() => onSubmitFeedback(node.id, 'down')}
+            aria-label="thumbs down"
+            disabled={node.feedbackPending === true}
+          >
+            👎
+          </button>
+          {node.feedback?.text !== undefined && (
+            <span className={styles.feedbackNote}>{node.feedback.text}</span>
+          )}
+        </div>
+      )}
     </div>
   )
 })

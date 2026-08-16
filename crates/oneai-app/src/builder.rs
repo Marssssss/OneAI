@@ -2848,6 +2848,33 @@ impl App {
         }
     }
 
+    /// Record one per-message feedback entry (§W4). Best-effort no-op when
+    /// SQLite persistence is not enabled or the write fails — feedback is
+    /// non-critical UX state, never a turn failure.
+    pub async fn record_feedback(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        message_role: &str,
+        kind: &str,
+        text: Option<&str>,
+    ) {
+        if let Some(store) = &self.sqlite_store {
+            store
+                .record_feedback(session_id, turn_id, message_role, kind, text)
+                .await;
+        }
+    }
+
+    /// All feedback entries for `session_id` (§W4). Empty when persistence is
+    /// not enabled or the read fails — never panics.
+    pub async fn list_feedback(&self, session_id: &str) -> Vec<oneai_core::FeedbackEntry> {
+        match &self.sqlite_store {
+            Some(store) => store.list_feedback(session_id).await,
+            None => Vec::new(),
+        }
+    }
+
     /// Register a tool — adds it to both the tool executor and workflow executor.
     pub async fn register_tool(&self, tool: Arc<dyn Tool>) -> Result<()> {
         self.tool_registry.register(tool.clone()).await?;

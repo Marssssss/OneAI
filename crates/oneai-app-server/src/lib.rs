@@ -42,6 +42,7 @@
 pub mod adapter;
 pub mod conversation;
 pub mod dispatcher;
+pub mod feedback;
 pub mod probe;
 pub mod protocol;
 pub mod scenario;
@@ -49,6 +50,10 @@ pub mod transport;
 
 pub use conversation::{ConversationStore, InMemoryConversationStore, SharedConversationStore};
 pub use dispatcher::Dispatcher;
+pub use feedback::{
+    FeedbackEntry, FeedbackStore, InMemoryFeedbackStore, SharedFeedbackStore, KIND_DOWN, KIND_NOTE,
+    KIND_UP,
+};
 pub use probe::{
     AppConfigSnapshot, AppProbe, ConfigFileView, DomainPackInfo, DomainPackList, NullAppProbe,
     ProviderEntryDto, ProviderInfo, ProviderOpResult, SharedAppProbe, SkillInfo, SkillOpResult,
@@ -194,6 +199,7 @@ pub async fn serve_all(
     bus: Arc<InProcessBus>,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) -> Result<JoinHandle<()>> {
     if specs.is_empty() {
@@ -215,13 +221,21 @@ pub async fn serve_all(
         let dispatcher = dispatcher.clone();
         let scenario_store = scenario_store.clone();
         let session_store = session_store.clone();
+        let feedback_store = feedback_store.clone();
         let probe = probe.clone();
         let handle = match spec {
             ListenSpec::Stdio => {
                 // stdio is a single pre-connected stream; serve_stdio spawns
                 // the stdin/stdout pumps + serve_connection and returns the
                 // serve task handle.
-                transport::serve_stdio(bus, dispatcher, scenario_store, session_store, probe)
+                transport::serve_stdio(
+                    bus,
+                    dispatcher,
+                    scenario_store,
+                    session_store,
+                    feedback_store,
+                    probe,
+                )
             }
             ListenSpec::Ipc(path) => {
                 let h = transport::serve_ipc(
@@ -230,6 +244,7 @@ pub async fn serve_all(
                     dispatcher,
                     scenario_store,
                     session_store,
+                    feedback_store,
                     probe,
                 )
                 .await?;
@@ -244,6 +259,7 @@ pub async fn serve_all(
                         dispatcher,
                         scenario_store,
                         session_store,
+                        feedback_store,
                         probe,
                     )
                     .await?;
@@ -251,7 +267,15 @@ pub async fn serve_all(
                 }
                 #[cfg(not(feature = "ws"))]
                 {
-                    let _ = (addr, bus, dispatcher, scenario_store, session_store, probe);
+                    let _ = (
+                        addr,
+                        bus,
+                        dispatcher,
+                        scenario_store,
+                        session_store,
+                        feedback_store,
+                        probe,
+                    );
                     return Err(AppServerError::InvalidSpec(
                         "ws:// transport requires the `ws` feature".into(),
                     ));
@@ -262,6 +286,7 @@ pub async fn serve_all(
                 dispatcher,
                 scenario_store,
                 session_store,
+                feedback_store,
                 probe,
             ),
         };
@@ -348,6 +373,7 @@ mod integration {
         adapter::serve_connection,
         conversation::{InMemoryConversationStore, SharedConversationStore},
         dispatcher::Dispatcher,
+        feedback::{InMemoryFeedbackStore, SharedFeedbackStore},
         protocol::{method, Request, Response},
         scenario::{builtin_presets, InMemoryScenarioStore},
         serve_all, NullAppProbe, SharedScenarioStore,
@@ -531,11 +557,13 @@ mod integration {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let scenario_store: SharedScenarioStore =
             std::sync::Arc::new(InMemoryScenarioStore::from_seed(builtin_presets()));
+        let feedback_store: SharedFeedbackStore = std::sync::Arc::new(InMemoryFeedbackStore::new());
         tokio::spawn(serve_connection(
             bus.clone(),
             dispatcher,
             scenario_store,
             session_store,
+            feedback_store,
             std::sync::Arc::new(NullAppProbe),
             inbound_rx,
             outbound_tx,
@@ -674,11 +702,13 @@ mod integration {
         let store: SharedScenarioStore = std::sync::Arc::new(InMemoryScenarioStore::new());
         let sessions: SharedConversationStore =
             std::sync::Arc::new(InMemoryConversationStore::new());
+        let feedback: SharedFeedbackStore = std::sync::Arc::new(InMemoryFeedbackStore::new());
         let err = serve_all(
             vec![],
             bus,
             store,
             sessions,
+            feedback,
             std::sync::Arc::new(NullAppProbe),
         )
         .await
@@ -707,12 +737,14 @@ mod integration {
             std::sync::Arc::new(InMemoryScenarioStore::from_seed(builtin_presets()));
         let session_store: SharedConversationStore =
             std::sync::Arc::new(InMemoryConversationStore::new());
+        let feedback_store: SharedFeedbackStore = std::sync::Arc::new(InMemoryFeedbackStore::new());
         let (_handle, bound) = super::transport::serve_ws(
             "127.0.0.1:0".parse().unwrap(),
             bus.clone(),
             dispatcher.clone(),
             scenario_store,
             session_store,
+            feedback_store,
             std::sync::Arc::new(NullAppProbe),
         )
         .await

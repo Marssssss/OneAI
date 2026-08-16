@@ -413,6 +413,33 @@ export interface ToolOutput {
   content: string
   error?: string
   added_tool_names?: string[]
+  /** §W4 A — files this tool produced (write_file/apply_patch). Absent/empty
+   * for read-only tools. The frontend renders a per-turn deliverable strip
+   * off this. */
+  artifacts?: Artifact[]
+}
+
+// ─── Artifact (oneai-core::Artifact) — a file produced by a tool ────────────
+export interface Artifact {
+  /** Filesystem path or `data:`/`file:` URI. Browser frontends can only
+   * inline-display the URI forms; a plain path renders as a chip + copy. */
+  path: string
+  mime_type: string
+  description: string
+  size_bytes?: number
+}
+
+// ─── Per-message feedback (oneai-core::FeedbackEntry) ──────────────────────
+export type FeedbackKind = 'up' | 'down' | 'note'
+
+export interface FeedbackEntry {
+  id: string
+  session_id: string
+  turn_id: string
+  message_role: string
+  kind: FeedbackKind
+  text?: string
+  created_at_ms: number
 }
 
 // ─── Paradigm (oneai-bus::BusParadigmKind, snake_case) ──────────────────────

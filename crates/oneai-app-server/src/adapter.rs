@@ -36,7 +36,7 @@ use oneai_core::{ContentBlock, InteractionResponse, InterruptReason, SessionInfo
 use crate::dispatcher::Dispatcher;
 use crate::probe::{ProviderEntryDto, SharedAppProbe};
 use crate::protocol::{decode_inbound, method, Notification, Response, RpcError};
-use crate::{SharedConversationStore, SharedScenarioStore};
+use crate::{SharedConversationStore, SharedFeedbackStore, SharedScenarioStore};
 
 /// Serve one connection until either side closes.
 ///
@@ -44,11 +44,13 @@ use crate::{SharedConversationStore, SharedScenarioStore};
 /// by the transport — a line for stdio/ipc, a text frame for ws). `outbound_tx`
 /// accepts one JSON-RPC message per item to write back. The adapter owns neither
 /// channel's transport framing — it only moves parsed messages.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_connection(
     bus: Arc<InProcessBus>,
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
     mut inbound_rx: mpsc::Receiver<String>,
     outbound_tx: mpsc::Sender<String>,
@@ -75,6 +77,7 @@ pub async fn serve_connection(
                 let dispatcher = dispatcher.clone();
                 let scenario_store = scenario_store.clone();
                 let session_store = session_store.clone();
+                let feedback_store = feedback_store.clone();
                 let probe = probe.clone();
                 let out_tx = outbound_tx.clone();
                 // Each request runs on its own task so a long turn/run (awaiting
@@ -82,9 +85,16 @@ pub async fn serve_connection(
                 // approval/respond arriving mid-turn). JSON-RPC id correlation
                 // makes out-of-order responses fine.
                 tokio::spawn(async move {
-                    let resp =
-                        handle_request(req, bus, dispatcher, scenario_store, session_store, probe)
-                            .await;
+                    let resp = handle_request(
+                        req,
+                        bus,
+                        dispatcher,
+                        scenario_store,
+                        session_store,
+                        feedback_store,
+                        probe,
+                    )
+                    .await;
                     send(&out_tx, &resp);
                 });
                 let _ = id; // id is read inside handle_request via req.id
@@ -136,6 +146,7 @@ async fn handle_request(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    feedback_store: SharedFeedbackStore,
     probe: SharedAppProbe,
 ) -> Response {
     let id = req.id.clone();
@@ -251,6 +262,54 @@ async fn handle_request(
             let sessions = session_store.list().await;
             let arr: Vec<Value> = sessions.iter().map(session_info_to_json).collect();
             Response::ok(id, json!({"sessions": arr}))
+        }
+        // feedback/submit — record one per-message 👍/👎/note. Sync CRUD
+        // against the shared feedback store (no bus round-trip, like
+        // session/list). `text` is optional (only for `note`-kind).
+        method::FEEDBACK_SUBMIT => {
+            let session_id = match field::<String>(&params, "session_id") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            let turn_id = match field::<String>(&params, "turn_id") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            let message_role = field::<String>(&params, "message_role")
+                .unwrap_or_else(|_| "assistant".to_string());
+            let kind = match field::<String>(&params, "kind") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            let text = field::<String>(&params, "text").ok();
+            feedback_store
+                .record(&session_id, &turn_id, &message_role, &kind, text.as_deref())
+                .await;
+            Response::ok(id, json!({"ok": true}))
+        }
+        // feedback/list — all feedback entries for a session (so a reloaded
+        // session can restore 👍/👎 markers on its assistant bubbles).
+        method::FEEDBACK_LIST => {
+            let session_id = match field::<String>(&params, "session_id") {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, e),
+            };
+            let entries = feedback_store.list(&session_id).await;
+            let arr: Vec<Value> = entries
+                .iter()
+                .map(|e| {
+                    json!({
+                        "id": e.id,
+                        "session_id": e.session_id,
+                        "turn_id": e.turn_id,
+                        "message_role": e.message_role,
+                        "kind": e.kind,
+                        "text": e.text,
+                        "created_at_ms": e.created_at_ms,
+                    })
+                })
+                .collect();
+            Response::ok(id, json!({"feedback": arr}))
         }
         // session/delete + conversation/compact are ack methods — their result
         // (SessionDeleted / CompactResult / Error) arrives as an `event`
@@ -554,9 +613,20 @@ mod tests {
             Arc::new(crate::scenario::InMemoryScenarioStore::new());
         let session_store: SharedConversationStore =
             Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let feedback_store: SharedFeedbackStore =
+            Arc::new(crate::feedback::InMemoryFeedbackStore::new());
         let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
         let req = crate::protocol::Request::new(json!(1), "no/such/method", json!({}));
-        let resp = handle_request(req, bus, dispatcher, scenario_store, session_store, probe).await;
+        let resp = handle_request(
+            req,
+            bus,
+            dispatcher,
+            scenario_store,
+            session_store,
+            feedback_store,
+            probe,
+        )
+        .await;
         let err = resp.error.expect("error response");
         assert_eq!(err.code, error_code::METHOD_NOT_FOUND);
         assert_eq!(resp.id, json!(1));
@@ -573,9 +643,20 @@ mod tests {
             Arc::new(crate::scenario::InMemoryScenarioStore::new());
         let session_store: SharedConversationStore =
             Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let feedback_store: SharedFeedbackStore =
+            Arc::new(crate::feedback::InMemoryFeedbackStore::new());
         let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
         let req = crate::protocol::Request::new(json!(2), method, params);
-        handle_request(req, bus, dispatcher, scenario_store, session_store, probe).await
+        handle_request(
+            req,
+            bus,
+            dispatcher,
+            scenario_store,
+            session_store,
+            feedback_store,
+            probe,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -669,5 +750,74 @@ mod tests {
         let res = resp.result.unwrap();
         assert!(res["path"].is_string());
         assert!(res["content"].is_string());
+    }
+
+    /// Shared harness for the W4 feedback method tests — one `InMemoryFeedback
+    /// Store` held across submit + list so the round-trip is observable.
+    async fn feedback_response(
+        store: SharedFeedbackStore,
+        method: &str,
+        params: Value,
+    ) -> Response {
+        let (bus, _rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let dispatcher = Dispatcher::default();
+        let scenario_store: SharedScenarioStore =
+            Arc::new(crate::scenario::InMemoryScenarioStore::new());
+        let session_store: SharedConversationStore =
+            Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
+        let req = crate::protocol::Request::new(json!(3), method, params);
+        handle_request(
+            req,
+            bus,
+            dispatcher,
+            scenario_store,
+            session_store,
+            store,
+            probe,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn feedback_submit_then_list_round_trips() {
+        let store: SharedFeedbackStore = Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let submit = feedback_response(
+            store.clone(),
+            "feedback/submit",
+            json!({"session_id": "s1", "turn_id": "t1", "kind": "up"}),
+        )
+        .await;
+        assert!(submit.error.is_none());
+        assert_eq!(submit.result.unwrap()["ok"], json!(true));
+
+        // A note with text.
+        let _ = feedback_response(
+            store.clone(),
+            "feedback/submit",
+            json!({"session_id": "s1", "turn_id": "t2", "kind": "note", "text": "nice"}),
+        )
+        .await;
+
+        let list = feedback_response(store, "feedback/list", json!({"session_id": "s1"})).await;
+        assert!(list.error.is_none());
+        let res = list.result.unwrap();
+        let arr = res["feedback"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr
+            .iter()
+            .any(|e| e["turn_id"] == "t1" && e["kind"] == "up"));
+        assert!(arr
+            .iter()
+            .any(|e| e["turn_id"] == "t2" && e["text"] == "nice"));
+    }
+
+    #[tokio::test]
+    async fn feedback_submit_rejects_missing_fields() {
+        let store: SharedFeedbackStore = Arc::new(crate::feedback::InMemoryFeedbackStore::new());
+        let resp = feedback_response(store, "feedback/submit", json!({"kind": "up"})).await;
+        let err = resp.error.expect("error response");
+        assert_eq!(err.code, error_code::INVALID_PARAMS);
     }
 }

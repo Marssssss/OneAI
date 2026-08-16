@@ -149,3 +149,72 @@
   color: var(--oneai-red);
   border: 1px solid var(--oneai-red);
 }
+
+/* ── W4: user-bubble attachment thumbnails ──────────────────────────────── */
+
+.attachments {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.attachmentThumb {
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--oneai-border);
+  cursor: zoom-in;
+  display: block;
+}
+
+/* ── W4 B4: per-message feedback controls ───────────────────────────────── */
+
+.feedbackRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 0 4px;
+  opacity: 0.6;
+}
+.feedbackRow:hover {
+  opacity: 1;
+}
+
+.feedbackBtn {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--oneai-text-tertiary);
+}
+.feedbackBtn:hover {
+  background: var(--oneai-bg-subtle);
+}
+.feedbackBtn:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.feedbackOn {
+  border-color: var(--oneai-brand-500);
+  background: var(--oneai-bg-subtle);
+  color: var(--oneai-brand-500);
+}
+.feedbackPending {
+  opacity: 0.4;
+}
+
+.feedbackNote {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  font-style: italic;
+}

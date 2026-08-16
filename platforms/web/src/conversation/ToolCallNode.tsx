@@ -34,6 +34,14 @@ export const ToolCallNode = memo(function ToolCallNode({
       ? (output.content.length > 160 ? output.content.slice(0, 160) + '…' : output.content)
       : null
   const added = output?.added_tool_names
+  const artifacts = output?.artifacts
+  const [copied, setCopied] = useState<string | null>(null)
+  const copyPath = (path: string) => {
+    void navigator.clipboard?.writeText(path).then(() => {
+      setCopied(path)
+      window.setTimeout(() => setCopied(null), 1200)
+    })
+  }
 
   return (
     <div
@@ -78,6 +86,29 @@ export const ToolCallNode = memo(function ToolCallNode({
               {output.error !== undefined && output.error !== '' && (
                 <pre className={`${styles.code} ${styles.errorText}`}>{output.error}</pre>
               )}
+            </div>
+          )}
+          {artifacts !== undefined && artifacts.length > 0 && (
+            <div className={styles.section}>
+              <div className={styles.sectionLabel}>📎 {t('tool.artifacts')}</div>
+              <div className={styles.artifacts}>
+                {artifacts.map((a, i) => (
+                  <div className={styles.artifact} key={`${a.path}-${i}`} title={a.description}>
+                    <span className={styles.artifactIcon}>📄</span>
+                    <span className={styles.artifactPath}>{a.path}</span>
+                    <button
+                      className={styles.copyBtn}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        copyPath(a.path)
+                      }}
+                      aria-label="copy path"
+                    >
+                      {copied === a.path ? '✓' : '⧉'}
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
           {added !== undefined && added.length > 0 && (
