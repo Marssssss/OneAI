@@ -61,6 +61,7 @@ type ProviderBuilder = Arc<dyn Fn(&ModelConfig) -> Box<dyn LlmProvider> + Send +
 ///
 /// Wraps an `Arc<dyn LlmProvider>` with metadata for circuit breaker,
 /// rate limiter, and usage tracking integration.
+#[derive(Clone)]
 pub struct ProviderEntry {
     /// Provider name for circuit breaker / rate limiter / usage tracking.
     name: String,
@@ -150,8 +151,13 @@ impl ProviderEntry {
 /// Integrates with CircuitBreaker, RateLimiter, UsageTracker, and FallbackLog
 /// for full production-grade resilience.
 pub struct ProviderPool {
-    /// Ordered provider entries (primary first).
-    entries: Vec<ProviderEntry>,
+    /// Ordered provider entries (primary first). Behind a sync `RwLock` so the
+    /// pool can add/remove entries live (`add_entry`/`remove_entry`) without
+    /// rebuilding — the app-server holds one pool as `App.provider` for its
+    /// whole lifetime and mutates it via the `provider/*` RPCs. Read paths use
+    /// `entries_snapshot()` (clone the `Vec` — cheap, `Arc` bumps — then drop
+    /// the guard before any `.await`, so writes never block on a provider call).
+    entries: Arc<std::sync::RwLock<Vec<ProviderEntry>>>,
 
     /// Pool configuration (max fallbacks, degradation rules, etc.).
     config: ProviderPoolConfig,
@@ -185,6 +191,15 @@ pub struct ProviderPool {
     /// injectable (via `with_provider_builder`) for testing or alternate
     /// factory wiring.
     provider_builder: ProviderBuilder,
+
+    /// Bounded leak cache for `config()`: the `LlmProvider::config(&self) ->
+    /// &ModelConfig` trait returns a reference valid for `&self`, but the entry
+    /// list is behind a `RwLock` (live add/remove) so a read guard can't be
+    /// returned. Instead we leak one `ModelConfig` per distinct provider name
+    /// to `&'static` (mirrors the `FALLBACK_CONFIG` `OnceLock` pattern below
+    /// for the empty-pool case). Bounded by the number of providers ever
+    /// activated — a handful — each `ModelConfig` is a small struct.
+    config_cache: std::sync::Mutex<HashMap<String, &'static ModelConfig>>,
 }
 
 /// Default degraded-provider builder — delegates to `ProviderFactory::create`.
@@ -200,7 +215,7 @@ impl ProviderPool {
         sorted.sort_by_key(|e| e.priority);
 
         Self {
-            entries: sorted,
+            entries: Arc::new(std::sync::RwLock::new(sorted)),
             config,
             circuit_breaker: None,
             rate_limiter: None,
@@ -209,6 +224,7 @@ impl ProviderPool {
             active_index: AtomicU32::new(0),
             fallback_log: Arc::new(InMemoryFallbackLog::new()),
             provider_builder: Arc::new(default_provider_builder),
+            config_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -237,6 +253,62 @@ impl ProviderPool {
             vec![ProviderEntry::new(name, provider, 0)],
             ProviderPoolConfig::default(),
         )
+    }
+
+    /// Snapshot the entries vec under a brief read lock (clone — cheap `Arc`
+    /// bumps) then drop the guard. Every read path uses this so no `.await`
+    /// ever runs while holding the lock.
+    fn entries_snapshot(&self) -> Vec<ProviderEntry> {
+        self.entries.read().expect("entries lock poisoned").clone()
+    }
+
+    /// Live-switch the active provider by name (atomic `active_index` store).
+    /// No `App.provider` swap — the pool IS the provider; it routes to the
+    /// active entry. Returns Err if the name isn't in the pool.
+    pub fn set_active_by_name(&self, name: &str) -> std::result::Result<(), String> {
+        let entries = self.entries_snapshot();
+        let idx = entries
+            .iter()
+            .position(|e| e.name == name)
+            .ok_or_else(|| format!("unknown provider: {name}"))?;
+        self.active_index.store(idx as u32, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Add a provider entry live (push under a write lock). If an entry with the
+    /// same name exists, it's replaced. The added provider is immediately
+    /// selectable via `set_active_by_name`.
+    pub fn add_entry(&self, entry: ProviderEntry) {
+        let mut entries = self.entries.write().expect("entries lock poisoned");
+        if let Some(pos) = entries.iter().position(|e| e.name == entry.name) {
+            entries[pos] = entry;
+        } else {
+            entries.push(entry);
+        }
+    }
+
+    /// Remove a provider entry by name (write lock + retain). If the removed
+    /// entry was active, `active_index` is reset to 0 (the next primary).
+    pub fn remove_entry(&self, name: &str) {
+        let mut entries = self.entries.write().expect("entries lock poisoned");
+        let active_idx = self.active_index.load(Ordering::Relaxed) as usize;
+        if let Some(pos) = entries.iter().position(|e| e.name == name) {
+            entries.remove(pos);
+            // Adjust active_index: if the removed entry was before the active
+            // one, the active shifts left by one; if it WAS the active one,
+            // fall back to 0; otherwise clamp to the new length.
+            let new_active = if entries.is_empty() {
+                0
+            } else if pos < active_idx {
+                active_idx - 1
+            } else if pos == active_idx {
+                0
+            } else {
+                active_idx.min(entries.len() - 1)
+            };
+            self.active_index
+                .store(new_active as u32, Ordering::Relaxed);
+        }
     }
 
     /// Set the circuit breaker for provider health tracking.
@@ -296,9 +368,10 @@ impl ProviderPool {
 
     /// Get the name of the currently active provider.
     pub fn active_provider_name(&self) -> String {
+        let entries = self.entries_snapshot();
         let idx = self.active_index.load(Ordering::Relaxed) as usize;
-        if idx < self.entries.len() {
-            self.entries[idx].name.clone()
+        if idx < entries.len() {
+            entries[idx].name.clone()
         } else {
             "unknown".to_string()
         }
@@ -306,9 +379,10 @@ impl ProviderPool {
 
     /// Get the model name of the currently active provider.
     pub fn active_model_name(&self) -> String {
+        let entries = self.entries_snapshot();
         let idx = self.active_index.load(Ordering::Relaxed) as usize;
-        if idx < self.entries.len() {
-            self.entries[idx].model_name().to_string()
+        if idx < entries.len() {
+            entries[idx].model_name().to_string()
         } else {
             "unknown".to_string()
         }
@@ -326,20 +400,21 @@ impl ProviderPool {
 
     /// Get the current pool status (health snapshot).
     pub async fn status(&self) -> ProviderPoolStatus {
+        let entries = self.entries_snapshot();
         let active_idx = self.active_index.load(Ordering::Relaxed) as usize;
-        let active_name = if active_idx < self.entries.len() {
-            self.entries[active_idx].name.clone()
+        let active_name = if active_idx < entries.len() {
+            entries[active_idx].name.clone()
         } else {
             "unknown".to_string()
         };
-        let active_model = if active_idx < self.entries.len() {
-            self.entries[active_idx].model_name().to_string()
+        let active_model = if active_idx < entries.len() {
+            entries[active_idx].model_name().to_string()
         } else {
             "unknown".to_string()
         };
 
         let mut provider_health = HashMap::new();
-        for entry in &self.entries {
+        for entry in &entries {
             let is_available = !entry.is_in_cooldown().await;
 
             // Check circuit breaker state if configured
@@ -383,8 +458,11 @@ impl ProviderPool {
         let recent_fallback_count = self.fallback_log.total_count();
         let last_fallback = self.fallback_log.recent_events(1).first().cloned();
 
-        ProviderPoolStatus::new(active_name, active_model, self.entries.len())
-            .into_status_with_health(provider_health, recent_fallback_count, last_fallback)
+        ProviderPoolStatus::new(active_name, active_model, entries.len()).into_status_with_health(
+            provider_health,
+            recent_fallback_count,
+            last_fallback,
+        )
     }
 
     // ─── Within-family model degradation ──────────────────────────────────────
@@ -399,7 +477,8 @@ impl ProviderPool {
         if !self.config.degrade_on_fallback || self.config.degradation_rules.is_empty() {
             return Vec::new();
         }
-        let Some(entry) = self.entries.get(entry_idx) else {
+        let entries = self.entries_snapshot();
+        let Some(entry) = entries.get(entry_idx) else {
             return Vec::new();
         };
         let Some(rule) =
@@ -426,7 +505,8 @@ impl ProviderPool {
         entry_idx: usize,
         model_name: &str,
     ) -> Option<Box<dyn LlmProvider>> {
-        let entry = self.entries.get(entry_idx)?;
+        let entries = self.entries_snapshot();
+        let entry = entries.get(entry_idx)?;
         let mut cfg = entry.provider.config().clone();
         cfg.model_name = Some(model_name.to_string());
         Some((self.provider_builder)(&cfg))
@@ -446,7 +526,8 @@ impl ProviderPool {
         entry_idx: usize,
         request: &InferenceRequest,
     ) -> Option<InferenceResponse> {
-        let entry = self.entries.get(entry_idx)?;
+        let entries = self.entries_snapshot();
+        let entry = entries.get(entry_idx)?.clone();
         let from_model = entry.model_name().to_string();
         let chain = self.degradation_chain(entry_idx);
         if chain.is_empty() {
@@ -520,7 +601,8 @@ impl ProviderPool {
         entry_idx: usize,
         request: &InferenceRequest,
     ) -> Option<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>> {
-        let entry = self.entries.get(entry_idx)?;
+        let entries = self.entries_snapshot();
+        let entry = entries.get(entry_idx)?.clone();
         let from_model = entry.model_name().to_string();
         let chain = self.degradation_chain(entry_idx);
         if chain.is_empty() {
@@ -577,7 +659,8 @@ impl ProviderPool {
     /// On success, records success in circuit breaker and usage tracker.
     /// On failure, records failure and logs a FallbackEvent.
     async fn infer_with_fallback(&self, request: InferenceRequest) -> Result<InferenceResponse> {
-        let max_attempts = self.config.max_fallbacks.min(self.entries.len());
+        let entries = self.entries_snapshot();
+        let max_attempts = self.config.max_fallbacks.min(entries.len());
         let mut attempts = 0;
 
         // If a smart router is attached, use it to determine provider order
@@ -600,12 +683,12 @@ impl ProviderPool {
             let mut indices: Vec<usize> = Vec::new();
 
             // Find the recommended provider's index
-            if let Some(idx) = self.entries.iter().position(|e| e.name == recommended_name) {
+            if let Some(idx) = entries.iter().position(|e| e.name == recommended_name) {
                 indices.push(idx);
             }
 
             // Add remaining providers in priority order
-            for (idx, _entry) in self.entries.iter().enumerate() {
+            for (idx, _entry) in entries.iter().enumerate() {
                 if !indices.contains(&idx) {
                     indices.push(idx);
                 }
@@ -620,7 +703,7 @@ impl ProviderPool {
             indices
         } else {
             // Default: use priority order (entries are sorted by priority)
-            (0..self.entries.len()).collect()
+            (0..entries.len()).collect()
         };
 
         for idx in ordered_indices {
@@ -628,7 +711,7 @@ impl ProviderPool {
                 break;
             }
 
-            let entry = &self.entries[idx];
+            let entry = &entries[idx];
             if attempts >= max_attempts {
                 break;
             }
@@ -691,7 +774,7 @@ impl ProviderPool {
 
                     // Update active index
                     self.active_index.store(
-                        self.entries
+                        entries
                             .iter()
                             .position(|e| e.name == entry.name)
                             .unwrap_or(0) as u32,
@@ -738,14 +821,11 @@ impl ProviderPool {
                     }
 
                     // ── Cross-provider fallback — log and continue to next entry
-                    let next_idx = self
-                        .entries
-                        .iter()
-                        .position(|e| e.priority > entry.priority);
+                    let next_idx = entries.iter().position(|e| e.priority > entry.priority);
                     let (next_name, next_model) = if let Some(idx) = next_idx {
                         (
-                            self.entries[idx].name.clone(),
-                            self.entries[idx].model_name().to_string(),
+                            entries[idx].name.clone(),
+                            entries[idx].model_name().to_string(),
                         )
                     } else {
                         ("none".to_string(), "none".to_string())
@@ -767,7 +847,7 @@ impl ProviderPool {
         Err(OneAIError::Fallback(format!(
             "All providers exhausted after {} attempts (pool has {} providers)",
             attempts,
-            self.entries.len()
+            entries.len()
         )))
     }
 
@@ -781,7 +861,8 @@ impl ProviderPool {
         &self,
         request: InferenceRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = InferenceStreamChunk> + Send>>> {
-        let max_attempts = self.config.max_fallbacks.min(self.entries.len());
+        let entries = self.entries_snapshot();
+        let max_attempts = self.config.max_fallbacks.min(entries.len());
         let mut attempts = 0;
 
         // If a smart router is attached, use it to determine provider order
@@ -793,11 +874,11 @@ impl ProviderPool {
             let recommended_name = decision.provider;
             let mut indices: Vec<usize> = Vec::new();
 
-            if let Some(idx) = self.entries.iter().position(|e| e.name == recommended_name) {
+            if let Some(idx) = entries.iter().position(|e| e.name == recommended_name) {
                 indices.push(idx);
             }
 
-            for (idx, _entry) in self.entries.iter().enumerate() {
+            for (idx, _entry) in entries.iter().enumerate() {
                 if !indices.contains(&idx) {
                     indices.push(idx);
                 }
@@ -810,7 +891,7 @@ impl ProviderPool {
 
             indices
         } else {
-            (0..self.entries.len()).collect()
+            (0..entries.len()).collect()
         };
 
         for idx in ordered_indices {
@@ -818,7 +899,7 @@ impl ProviderPool {
                 break;
             }
 
-            let entry = &self.entries[idx];
+            let entry = &entries[idx];
             if attempts >= max_attempts {
                 break;
             }
@@ -874,7 +955,7 @@ impl ProviderPool {
                 Ok(stream) => {
                     // Success — update active index and record success
                     self.active_index.store(
-                        self.entries
+                        entries
                             .iter()
                             .position(|e| e.name == entry.name)
                             .unwrap_or(0) as u32,
@@ -907,14 +988,11 @@ impl ProviderPool {
                     }
 
                     // ── Cross-provider fallback — log and continue to next entry
-                    let next_idx = self
-                        .entries
-                        .iter()
-                        .position(|e| e.priority > entry.priority);
+                    let next_idx = entries.iter().position(|e| e.priority > entry.priority);
                     let (next_name, next_model) = if let Some(idx) = next_idx {
                         (
-                            self.entries[idx].name.clone(),
-                            self.entries[idx].model_name().to_string(),
+                            entries[idx].name.clone(),
+                            entries[idx].model_name().to_string(),
                         )
                     } else {
                         ("none".to_string(), "none".to_string())
@@ -939,12 +1017,26 @@ impl ProviderPool {
 
     /// Get the number of providers in the pool.
     pub fn provider_count(&self) -> usize {
-        self.entries.len()
+        self.entries_snapshot().len()
     }
 
     /// Get provider names in priority order.
     pub fn provider_names(&self) -> Vec<String> {
-        self.entries.iter().map(|e| e.name.clone()).collect()
+        self.entries_snapshot()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    /// Snapshot every entry as `(name, model_config)` — used by the app-server
+    /// probe to report the live provider list (with the active marker resolved
+    /// from `active_index`). Reads each provider's `config()` by reference
+    /// under the brief snapshot lock, then clones out.
+    pub fn provider_entries_view(&self) -> Vec<(String, ModelConfig)> {
+        self.entries_snapshot()
+            .iter()
+            .map(|e| (e.name.clone(), e.provider.config().clone()))
+            .collect()
     }
 }
 
@@ -993,12 +1085,13 @@ impl LlmProvider for ProviderPool {
 
     /// Get capabilities of the currently active provider.
     fn capabilities(&self) -> ModelCapability {
+        let entries = self.entries_snapshot();
         let idx = self.active_index.load(Ordering::Relaxed) as usize;
-        if idx < self.entries.len() {
-            self.entries[idx].provider.capabilities()
-        } else if !self.entries.is_empty() {
+        if idx < entries.len() {
+            entries[idx].provider.capabilities()
+        } else if !entries.is_empty() {
             // Fallback to first entry's capabilities
-            self.entries[0].provider.capabilities()
+            entries[0].provider.capabilities()
         } else {
             // No providers — return minimal capabilities
             ModelCapability {
@@ -1012,30 +1105,43 @@ impl LlmProvider for ProviderPool {
     }
 
     /// Get the model config of the currently active provider.
+    ///
+    /// The trait returns `&ModelConfig` valid for `&self`, but the entry list
+    /// is behind a `RwLock` (live add/remove) — a read guard can't be returned
+    /// as `&`. So we leak one `ModelConfig` per distinct provider name to
+    /// `&'static` (cached in `config_cache`), mirroring the `FALLBACK_CONFIG`
+    /// `OnceLock` below for the empty-pool case. Bounded, safe, consistent.
     fn config(&self) -> &ModelConfig {
-        if !self.entries.is_empty() {
-            let idx = self.active_index.load(Ordering::Relaxed) as usize;
-            if idx < self.entries.len() {
-                self.entries[idx].provider.config()
-            } else {
-                self.entries[0].provider.config()
-            }
+        let entries = self.entries_snapshot();
+        let idx = self.active_index.load(Ordering::Relaxed) as usize;
+        let provider = if idx < entries.len() {
+            &entries[idx]
+        } else if !entries.is_empty() {
+            &entries[0]
         } else {
             // No providers — this shouldn't happen in practice
             // Return a reference from a leaked Box as a last resort
             // (only used in error paths, never in normal operation)
             static FALLBACK_CONFIG: std::sync::OnceLock<ModelConfig> = std::sync::OnceLock::new();
-            FALLBACK_CONFIG.get_or_init(|| ModelConfig {
+            return FALLBACK_CONFIG.get_or_init(|| ModelConfig {
                 provider_type: oneai_core::ProviderType::Cloud,
-                cloud_kind: Some(oneai_core::CloudProviderKind::OpenAI),
+                cloud_kind: None,
                 api_key: None,
                 base_url: None,
                 port: None,
-                model_name: None,
+                model_name: Some("unknown".to_string()),
                 model_path: None,
-                extra: HashMap::new(),
-            })
+                extra: std::collections::HashMap::new(),
+            });
+        };
+        let name = provider.name.clone();
+        let mut cache = self.config_cache.lock().expect("config cache poisoned");
+        if let Some(cfg) = cache.get(&name) {
+            return cfg;
         }
+        let leaked: &'static ModelConfig = Box::leak(Box::new(provider.provider.config().clone()));
+        cache.insert(name, leaked);
+        leaked
     }
 }
 
@@ -1563,7 +1669,8 @@ mod tests {
         assert_eq!(pool.active_provider_name(), "openai");
 
         // Now primary should be in cooldown
-        let entry = &pool.entries[0];
+        let entries = pool.entries_snapshot();
+        let entry = &entries[0];
         assert!(entry.is_in_cooldown().await);
 
         // Fix primary
@@ -1748,5 +1855,106 @@ mod tests {
             pool.fallback_log_recent(1)[0].reason,
             FallbackReason::ModelDegradation { .. }
         ));
+    }
+
+    // ── Live mutation (provider/* RPCs) ──────────────────────────────────────
+
+    fn two_entry_pool() -> ProviderPool {
+        let a = ProviderEntry::new(
+            "openai",
+            Arc::new(TestProvider::from_config(ModelConfig {
+                model_name: Some("gpt-4".into()),
+                ..openai_cfg()
+            })),
+            0,
+        );
+        let b = ProviderEntry::new(
+            "anthropic",
+            Arc::new(TestProvider::from_config(ModelConfig {
+                model_name: Some("claude".into()),
+                ..anthropic_cfg()
+            })),
+            1,
+        );
+        ProviderPool::new(vec![a, b], ProviderPoolConfig::default())
+    }
+
+    fn openai_cfg() -> ModelConfig {
+        ModelConfig {
+            provider_type: oneai_core::ProviderType::Cloud,
+            cloud_kind: Some(oneai_core::CloudProviderKind::OpenAI),
+            api_key: Some("k".into()),
+            base_url: None,
+            port: None,
+            model_name: Some("gpt-4".into()),
+            model_path: None,
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    fn anthropic_cfg() -> ModelConfig {
+        ModelConfig {
+            provider_type: oneai_core::ProviderType::Cloud,
+            cloud_kind: Some(oneai_core::CloudProviderKind::Anthropic),
+            api_key: Some("k".into()),
+            base_url: None,
+            port: None,
+            model_name: Some("claude".into()),
+            model_path: None,
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_active_by_name_live_switches() {
+        let pool = two_entry_pool();
+        assert_eq!(pool.active_provider_name(), "openai");
+        pool.set_active_by_name("anthropic").expect("found");
+        assert_eq!(pool.active_provider_name(), "anthropic");
+        assert_eq!(pool.active_model_name(), "claude");
+        // Unknown name errors.
+        assert!(pool.set_active_by_name("nope").is_err());
+    }
+
+    #[tokio::test]
+    async fn add_entry_is_live_and_replaceable() {
+        let pool = two_entry_pool();
+        assert_eq!(pool.provider_names().len(), 2);
+        let third = ProviderEntry::new(
+            "ollama",
+            Arc::new(TestProvider::from_config(ModelConfig {
+                model_name: Some("llama".into()),
+                ..openai_cfg()
+            })),
+            2,
+        );
+        pool.add_entry(third);
+        assert_eq!(pool.provider_names().len(), 3);
+        assert!(pool.provider_names().contains(&"ollama".to_string()));
+        // Adding a same-name entry replaces (not appends).
+        let dup = ProviderEntry::new(
+            "ollama",
+            Arc::new(TestProvider::from_config(ModelConfig {
+                model_name: Some("llama3".into()),
+                ..openai_cfg()
+            })),
+            3,
+        );
+        pool.add_entry(dup);
+        assert_eq!(pool.provider_names().len(), 3);
+        // The new entry is selectable live.
+        pool.set_active_by_name("ollama").expect("selectable");
+        assert_eq!(pool.active_model_name(), "llama3");
+    }
+
+    #[tokio::test]
+    async fn remove_entry_adjusts_active_index() {
+        let pool = two_entry_pool();
+        pool.set_active_by_name("anthropic").expect("switch");
+        assert_eq!(pool.active_provider_name(), "anthropic");
+        // Remove the active entry → falls back to index 0 (openai).
+        pool.remove_entry("anthropic");
+        assert_eq!(pool.provider_names().len(), 1);
+        assert_eq!(pool.active_provider_name(), "openai");
     }
 }

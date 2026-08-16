@@ -29,7 +29,7 @@ use oneai_supervisor::{IpcListener, IpcStream};
 
 use crate::adapter::serve_connection;
 use crate::dispatcher::Dispatcher;
-use crate::{SharedConversationStore, SharedScenarioStore};
+use crate::{SharedAppProbe, SharedConversationStore, SharedScenarioStore};
 
 /// Channel buffer for the per-connection inbound/outbound JSON queues. Turns a
 /// slow frontend into back-pressure rather than unbounded memory.
@@ -43,6 +43,7 @@ pub fn serve_stdio(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
     let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -57,6 +58,7 @@ pub fn serve_stdio(
         dispatcher,
         scenario_store,
         session_store,
+        probe,
         inbound_rx,
         outbound_tx,
     ))
@@ -71,6 +73,7 @@ pub async fn serve_ipc(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) -> std::io::Result<JoinHandle<()>> {
     let mut listener = IpcListener::bind(path).await?;
     tracing::info!(path = %path.display(), "app-server: ipc listener bound");
@@ -82,9 +85,17 @@ pub async fn serve_ipc(
                     let dispatcher = dispatcher.clone();
                     let scenario_store = scenario_store.clone();
                     let session_store = session_store.clone();
+                    let probe = probe.clone();
                     tokio::spawn(async move {
-                        serve_line_stream(stream, bus, dispatcher, scenario_store, session_store)
-                            .await;
+                        serve_line_stream(
+                            stream,
+                            bus,
+                            dispatcher,
+                            scenario_store,
+                            session_store,
+                            probe,
+                        )
+                        .await;
                     });
                 }
                 Err(e) => {
@@ -103,6 +114,7 @@ async fn serve_line_stream(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) {
     let (read, mut write) = tokio::io::split(stream);
     let (inbound_tx, inbound_rx) = mpsc::channel::<String>(CHANNEL_BUFFER);
@@ -151,6 +163,7 @@ async fn serve_line_stream(
         dispatcher,
         scenario_store,
         session_store,
+        probe,
         inbound_rx,
         outbound_tx,
     )
@@ -170,6 +183,7 @@ pub async fn serve_ws(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) -> std::io::Result<(JoinHandle<()>, std::net::SocketAddr)> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -183,6 +197,7 @@ pub async fn serve_ws(
                         let dispatcher = dispatcher.clone();
                         let scenario_store = scenario_store.clone();
                         let session_store = session_store.clone();
+                        let probe = probe.clone();
                         tokio::spawn(async move {
                             match tokio_tungstenite::accept_async(stream).await {
                                 Ok(ws) => {
@@ -192,6 +207,7 @@ pub async fn serve_ws(
                                         dispatcher,
                                         scenario_store,
                                         session_store,
+                                        probe,
                                     )
                                     .await
                                 }
@@ -221,6 +237,7 @@ async fn serve_ws_stream(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -258,6 +275,7 @@ async fn serve_ws_stream(
         dispatcher,
         scenario_store,
         session_store,
+        probe,
         inbound_rx,
         outbound_tx,
     )
@@ -292,6 +310,7 @@ pub fn serve_native_messaging(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) -> JoinHandle<()> {
     let (inbound_tx, inbound_rx) = mpsc::channel(CHANNEL_BUFFER);
     let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_BUFFER);
@@ -304,6 +323,7 @@ pub fn serve_native_messaging(
         dispatcher,
         scenario_store,
         session_store,
+        probe,
         inbound_rx,
         outbound_tx,
     ))

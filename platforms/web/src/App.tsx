@@ -20,7 +20,7 @@ import type { BusLocale, BusScenario, InteractionResponse } from './rpc/types'
 import { AppFrame } from './layout/AppFrame'
 import { ConversationRoot } from './conversation/ConversationRoot'
 import type { SlashCommand } from './conversation/Composer'
-import { DetailsPanel } from './details/DetailsPanel'
+import { DetailsPanel, type DetailsTab } from './details/DetailsPanel'
 import { SidebarRoot } from './sidebar/SidebarRoot'
 import {
   ScenarioListStore,
@@ -30,6 +30,10 @@ import { ScenarioPicker } from './scenario/ScenarioPicker'
 import { TopicIntake } from './scenario/TopicIntake'
 import { ScenarioEditor } from './scenario/ScenarioEditor'
 import { SessionRenameModal } from './scenario/SessionRenameModal'
+import { SettingsRoot } from './settings/SettingsRoot'
+import { SettingsStore } from './settings/settingsStore'
+import { SkillsModal } from './skills/SkillsModal'
+import { DomainPackModal } from './domainpack/DomainPackModal'
 import { sessionMetaStore, useSessionMeta } from './store/sessionMeta'
 import { localeStore, useLocale } from './i18n'
 import './theme/markdown.css'
@@ -50,6 +54,9 @@ type ModalState =
   | { kind: 'intake'; scenario: BusScenario }
   | { kind: 'editor'; scenario: BusScenario | null }
   | { kind: 'renameSession'; id: string; title: string }
+  | { kind: 'settings' }
+  | { kind: 'skills' }
+  | { kind: 'domainpack' }
   | null
 
 export default function App(): React.ReactNode {
@@ -57,6 +64,7 @@ export default function App(): React.ReactNode {
   const projection = useMemo(() => new ProjectionStore(rpc), [rpc])
   const sessionList = useMemo(() => new SessionListStore(rpc), [rpc])
   const scenarioList = useMemo(() => new ScenarioListStore(rpc), [rpc])
+  const settings = useMemo(() => new SettingsStore(rpc), [rpc])
   const [status, setStatus] = useState<ConnectionStatus>('closed')
   const [theme, setTheme] = useState<Theme>(() => readInitialTheme())
   const { locale, t } = useLocale()
@@ -70,6 +78,7 @@ export default function App(): React.ReactNode {
     detailsOpen: false,
   })
   const [prefs, setPrefs] = useState<FramePrefs>(prefsRef.current)
+  const [detailsTab, setDetailsTab] = useState<DetailsTab>('tool')
 
   // Connect on mount; dispose on unmount.
   useEffect(() => {
@@ -107,9 +116,10 @@ export default function App(): React.ReactNode {
       }
       await sessionList.refresh()
       await scenarioList.refresh(locale)
+      await settings.refresh()
       creatingRef.current = false
     })()
-  }, [status, rpc, sessionList, scenarioList, locale])
+  }, [status, rpc, sessionList, scenarioList, settings, locale])
 
   // Refresh the session list after each completed turn (new title/counts).
   useEffect(() => {
@@ -172,6 +182,7 @@ export default function App(): React.ReactNode {
   // Selecting a tool node opens the details rail and records the selection.
   const handleSelectTool = (nodeId: string) => {
     projection.selectTool(nodeId)
+    setDetailsTab('tool')
     if (!prefs.detailsOpen) {
       setPrefs({ ...prefs, detailsOpen: true })
     }
@@ -209,6 +220,15 @@ export default function App(): React.ReactNode {
       } else {
         setModal({ kind: 'picker' })
       }
+    } else if (cmd === 'trajectory') {
+      setDetailsTab('trajectory')
+      setPrefs({ ...prefs, detailsOpen: true })
+    } else if (cmd === 'settings') {
+      setModal({ kind: 'settings' })
+    } else if (cmd === 'skills') {
+      setModal({ kind: 'skills' })
+    } else if (cmd === 'domainpack') {
+      setModal({ kind: 'domainpack' })
     }
   }
 
@@ -271,6 +291,7 @@ export default function App(): React.ReactNode {
             onPickScenario={handlePickScenario}
             onNewScenario={() => setModal({ kind: 'editor', scenario: null })}
             onEditScenario={(s) => setModal({ kind: 'editor', scenario: s })}
+            onOpenSettings={() => setModal({ kind: 'settings' })}
           />
         }
         center={
@@ -280,6 +301,7 @@ export default function App(): React.ReactNode {
             theme={theme}
             planMode={planMode || snap.paradigm === 'plan'}
             scenarios={scenarios}
+            settingsStore={settings}
             onSend={(text) => void projection.sendMessage(text)}
             onStop={() => void projection.cancelTurn()}
             onTogglePlan={handleTogglePlan}
@@ -292,7 +314,16 @@ export default function App(): React.ReactNode {
         }
         details={
           prefs.detailsOpen ? (
-            <DetailsPanel node={selectedToolNode} onClose={handleCloseDetails} />
+            <DetailsPanel
+              node={selectedToolNode}
+              tab={detailsTab}
+              onTabChange={setDetailsTab}
+              trajectory={snap.trajectory}
+              usage={snap.usage}
+              subagents={snap.subagents}
+              turnTimings={snap.turnTimings}
+              onClose={handleCloseDetails}
+            />
           ) : undefined
         }
         prefs={prefs}
@@ -332,6 +363,25 @@ export default function App(): React.ReactNode {
           }}
           onClose={() => setModal(null)}
         />
+      )}
+      {modal?.kind === 'settings' && (
+        <SettingsRoot
+          store={settings}
+          theme={theme}
+          locale={locale}
+          planMode={planMode || snap.paradigm === 'plan'}
+          connection={status}
+          onToggleTheme={toggleTheme}
+          onToggleLocale={toggleLocale}
+          onTogglePlan={handleTogglePlan}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal?.kind === 'skills' && (
+        <SkillsModal store={settings} onClose={() => setModal(null)} />
+      )}
+      {modal?.kind === 'domainpack' && (
+        <DomainPackModal store={settings} onClose={() => setModal(null)} />
       )}
     </>
   )

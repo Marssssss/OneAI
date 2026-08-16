@@ -163,6 +163,37 @@ export interface YieldIterationStart {
   iteration: number
   paradigm: BusParadigmKind
 }
+export interface YieldDelegate {
+  kind: 'delegate'
+  turn_id: string
+  task: string
+  agent_kind: BusSubAgentKind
+  speaker: string | null
+}
+export interface YieldDelegateComplete {
+  kind: 'delegate_complete'
+  turn_id: string
+  summary: BusSubAgent
+  speaker: string | null
+}
+export interface YieldWorkingState {
+  kind: 'working_state'
+  event: TaskEventPayload
+}
+export interface YieldContextAccounting {
+  kind: 'context_accounting'
+  turn_id: string
+  accounting: ContextAccounting
+}
+export interface YieldTokenUsage {
+  kind: 'token_usage'
+  usage: BusUsageRecord
+}
+export interface YieldToolsAdded {
+  kind: 'tools_added'
+  turn_id: string
+  names: string[]
+}
 export interface YieldSessionCreated {
   kind: 'session_created'
   id: string
@@ -202,6 +233,12 @@ export type EngineYield =
   | YieldParadigmSwitch
   | YieldPlanUpdate
   | YieldIterationStart
+  | YieldDelegate
+  | YieldDelegateComplete
+  | YieldWorkingState
+  | YieldContextAccounting
+  | YieldTokenUsage
+  | YieldToolsAdded
   | YieldSessionCreated
   | YieldSessionLoaded
   | YieldSessionCleared
@@ -212,6 +249,163 @@ export interface BusToolCall {
   name: string
   args: unknown
 }
+
+// ─── Sub-agent (oneai-bus::BusSubAgent / BusSubAgentKind) ───────────────────
+// `BusSubAgentKind` is default-serde (no rename): `Plan`/`Explore`/`Code`/
+// `Review`/`Reflect`/`{"Custom":"<name>"}`. We keep the union loose and treat
+// `Custom` as a discriminated object.
+
+export type BusSubAgentKind =
+  | 'Plan'
+  | 'Explore'
+  | 'Code'
+  | 'Review'
+  | 'Reflect'
+  | { Custom: string }
+
+export interface BusSubAgent {
+  completed: boolean
+  summary: string
+  key_findings: string[]
+  budget_exceeded: boolean
+  agent_kind: BusSubAgentKind
+  tokens_used: number
+}
+
+// ─── Usage (oneai-bus::BusUsageRecord + oneai-core::ContextAccounting) ───────
+
+export interface BusUsageRecord {
+  prompt_tokens: number
+  completion_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+}
+
+export interface ContextAccounting {
+  system_prompt_tokens: number
+  user_messages_tokens: number
+  assistant_messages_tokens: number
+  tool_call_tokens: number
+  tool_result_tokens: number
+  thinking_tokens: number
+  image_tokens: number
+  file_tokens: number
+  [k: string]: number
+}
+
+// ─── Working state (oneai-core working-state types) ─────────────────────────
+// `StepStatus` is default-serde (PascalCase: `Pending`/`InProgress`/`Completed`/
+// `Failed`); `BlockerStatus` is snake_case; `TaskEventPayload` is
+// `#[serde(tag="kind", rename_all="snake_case")]` + `#[non_exhaustive]`.
+
+export type StepStatus = 'Pending' | 'InProgress' | 'Completed' | 'Failed'
+
+export interface WorkingStep {
+  id: string
+  description: string
+  status: StepStatus
+  depends_on: string[]
+  order: number
+  active_form?: string | null
+  updated_at: string
+}
+
+export interface Decision {
+  id: string
+  question: string
+  chosen: string
+  rationale?: string
+  alternatives?: string[]
+  step_id?: string | null
+  ts: string
+}
+
+export type BlockerStatus = 'open' | 'resolved'
+
+export interface Blocker {
+  id: string
+  description: string
+  status: BlockerStatus
+  resolution?: string | null
+  step_id?: string | null
+  ts: string
+}
+
+export interface Note {
+  id: string
+  content: string
+  ts: string
+}
+
+export interface WorkingStateSnapshot {
+  task_id: string
+  goal: string
+  intent?: string
+  status?: string
+  steps: WorkingStep[]
+  decisions: Decision[]
+  blockers: Blocker[]
+  notes: Note[]
+  [k: string]: unknown
+}
+
+// `TaskEventPayload` — only the variants the projection narrows on. Unknown
+// `kind`s (the enum is #[non_exhaustive]) fall through.
+export interface TaskPayloadTask {
+  kind: 'task'
+  goal: string
+  intent?: string
+}
+export interface TaskPayloadStepAdded {
+  kind: 'step_added'
+  step: WorkingStep
+}
+export interface TaskPayloadStepStatusChanged {
+  kind: 'step_status_changed'
+  step_id: string
+  status: StepStatus
+  active_form?: string | null
+}
+export interface TaskPayloadDecisionMade {
+  kind: 'decision_made'
+  decision: Decision
+}
+export interface TaskPayloadBlockerRaised {
+  kind: 'blocker_raised'
+  blocker: Blocker
+}
+export interface TaskPayloadBlockerResolved {
+  kind: 'blocker_resolved'
+  blocker_id: string
+  resolution: string
+}
+export interface TaskPayloadNoteAdded {
+  kind: 'note_added'
+  note: Note
+}
+export interface TaskPayloadSnapshot {
+  kind: 'snapshot'
+  state: WorkingStateSnapshot
+}
+export interface TaskPayloadTaskStatus {
+  kind: 'task_status'
+}
+export interface TaskPayloadReflectionFired {
+  kind: 'reflection_fired'
+  iteration: number
+}
+
+export type TaskEventPayload =
+  | TaskPayloadTask
+  | TaskPayloadStepAdded
+  | TaskPayloadStepStatusChanged
+  | TaskPayloadDecisionMade
+  | TaskPayloadBlockerRaised
+  | TaskPayloadBlockerResolved
+  | TaskPayloadNoteAdded
+  | TaskPayloadSnapshot
+  | TaskPayloadTaskStatus
+  | TaskPayloadReflectionFired
 
 // ─── Tool result (oneai-core::ToolOutput) ───────────────────────────────────
 export interface ToolOutput {
@@ -505,4 +699,92 @@ export interface GroupRunParams {
 }
 export interface GroupSetOrderParams {
   order: string[]
+}
+
+// ─── W4 app probe (config/provider/domainpack/skill) ───────────────────────
+// Mirrors oneai-app-server::probe DTOs (snake_case serde). The settings modal
+// consumes these. `domainpack/switch` and `provider/add` are deliberately
+// absent — the architecture has no live hot-swap path (immutable `Arc` on the
+// running App); a pack/provider change restarts the app-server.
+
+export interface AppConfigSnapshot {
+  domain_pack?: string
+  provider_kind?: string
+  provider_model?: string
+  base_url?: string
+  plan_mode: boolean
+  permission_profile?: string
+}
+
+export interface ProviderInfo {
+  kind: string
+  model: string
+  base_url?: string
+  active: boolean
+}
+
+export interface ProviderListResult {
+  providers: ProviderInfo[]
+}
+
+export interface DomainPackInfo {
+  name: string
+  description?: string
+}
+
+export interface DomainPackList {
+  active?: string
+  available: DomainPackInfo[]
+}
+
+export interface SkillInfo {
+  name: string
+  description?: string
+  use_count: number
+  pinned: boolean
+  state: string
+  origin?: string
+}
+
+export interface SkillListResult {
+  skills: SkillInfo[]
+}
+
+export interface SkillOpResult {
+  ok: boolean
+  skill?: SkillInfo
+  error?: string
+}
+
+export interface SkillOpParams {
+  name: string
+}
+
+// ── Provider lifecycle (provider/add · delete · set_active) + config/read ──
+// `provider/add` writes to config.toml AND adds the provider live to the
+// running pool (immediately switchable). `set_active` is a live atomic
+// active_index switch. Decoupled from any Rust provider enum.
+
+export interface ProviderEntryDto {
+  name: string
+  kind?: string
+  api_key?: string
+  base_url?: string
+  model?: string
+}
+
+export interface ProviderAddParams {
+  entry: ProviderEntryDto
+}
+
+export interface ProviderOpResult {
+  ok: boolean
+  /** Post-op provider list (the UI updates without a re-list). */
+  providers?: ProviderInfo[]
+  error?: string
+}
+
+export interface ConfigFileView {
+  path: string
+  content: string
 }

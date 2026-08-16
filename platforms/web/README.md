@@ -41,6 +41,14 @@ Verified against the Rust sources (`oneai-app-server`/`oneai-bus`):
 - **group/\*** (ack — results stream as `event`s): `group/start` (compiled
   `BusGroupScenario`), `group/open` (opener), `group/run` (user message),
   `group/set_order` (debrief narrowing).
+- **config/provider/domainpack/skill/\*** (synchronous, W4): `config/get`,
+  `provider/list`, `domainpack/list`, `skill/list`, `config/read` (read-only)
+  + `skill/{pin|unpin|archive|restore}` (hot-switchable skill lifecycle) +
+  `provider/{add|delete|set_active}` (writes `~/.oneai/config.toml` `[[providers]]`
+  AND mutates the live `ProviderPool` — a newly-added provider is immediately
+  switchable from the composer; `set_active` is a live atomic `active_index`
+  switch). `domainpack/switch` is absent — no live hot-swap path; a pack
+  change restarts the app-server (`--domain`).
 
 ## Scenario conversation entry (W3)
 
@@ -100,7 +108,25 @@ Override the app-server URL with `VITE_APP_SERVER_URL=ws://host:port`.
   speaker-tagged bubbles, debrief. 5 bilingual presets + local/server merge.
   Verified: typecheck + build green (runtime smoke against a live
   `oneai app-server` pending).
-- **W4 (next)**: capability panel (trajectory/StateGraph visualization) +
-  settings modal + provider config RPC + attachments.
-- **W5**: design-token pixel alignment + dark full-coverage + responsive +
-  share the React scenario editor with the VS Code/browser extensions.
+- **W4 (done)**: capability panel + settings + trajectory. The details rail is
+  now a two-tab container (Tool / Trajectory); the trajectory tab renders a
+  turn-aware event ledger + timing overview (pure consumer of the
+  `iteration_start` / `delegate` / `working_state` / `context_accounting` /
+  `token_usage` / `tools_added` yields W1–W3 dropped) plus a sub-agent
+  directory. A GoalBar dock surfaces the live working-state goal + step
+  progress above the composer. The settings modal (General / Models /
+  Permissions) is backed by the probe RPCs (`config/get` · `provider/list` ·
+  `domainpack/list` · `skill/list` · `config/read`); DomainPacks + Skills
+  moved to standalone modals (`/domainpack` · `/skills`). The Models section
+  is a deepseek-harness-style provider manager: shows the config file path +
+  copy + read-only TOML preview, lists providers with add/delete/set-active
+  (writes `~/.oneai/config.toml` `[[providers]]` AND mutates the live
+  `ProviderPool`), and a composer `ModelSelect` popover for live switching.
+  DomainPack hot-swap is honestly marked restart-required (immutable `Arc` on
+  the live App). Verified: typecheck + build green + Rust tests/clippy/deny
+  green (runtime smoke against a live `oneai app-server` pending — **rebuild
+  the `oneai-cli` binary first**, else the probe RPCs aren't present and
+  Models/Permissions show "offline").
+- **W5 (next)**: design-token pixel alignment + dark full-coverage + responsive +
+  share the React scenario editor with the VS Code/browser extensions; e2e
+  tests; attachments / drag-drop + deliverables + message feedback.

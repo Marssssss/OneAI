@@ -42,12 +42,17 @@
 pub mod adapter;
 pub mod conversation;
 pub mod dispatcher;
+pub mod probe;
 pub mod protocol;
 pub mod scenario;
 pub mod transport;
 
 pub use conversation::{ConversationStore, InMemoryConversationStore, SharedConversationStore};
 pub use dispatcher::Dispatcher;
+pub use probe::{
+    AppConfigSnapshot, AppProbe, ConfigFileView, DomainPackInfo, DomainPackList, NullAppProbe,
+    ProviderEntryDto, ProviderInfo, ProviderOpResult, SharedAppProbe, SkillInfo, SkillOpResult,
+};
 pub use protocol::{Notification, Request, Response, RpcError};
 pub use scenario::{
     default_scenarios_path, FileScenarioStore, InMemoryScenarioStore, ScenarioStore,
@@ -189,6 +194,7 @@ pub async fn serve_all(
     bus: Arc<InProcessBus>,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) -> Result<JoinHandle<()>> {
     if specs.is_empty() {
         return Err(AppServerError::InvalidSpec(
@@ -209,37 +215,55 @@ pub async fn serve_all(
         let dispatcher = dispatcher.clone();
         let scenario_store = scenario_store.clone();
         let session_store = session_store.clone();
+        let probe = probe.clone();
         let handle = match spec {
             ListenSpec::Stdio => {
                 // stdio is a single pre-connected stream; serve_stdio spawns
                 // the stdin/stdout pumps + serve_connection and returns the
                 // serve task handle.
-                transport::serve_stdio(bus, dispatcher, scenario_store, session_store)
+                transport::serve_stdio(bus, dispatcher, scenario_store, session_store, probe)
             }
             ListenSpec::Ipc(path) => {
-                let h = transport::serve_ipc(&path, bus, dispatcher, scenario_store, session_store)
-                    .await?;
+                let h = transport::serve_ipc(
+                    &path,
+                    bus,
+                    dispatcher,
+                    scenario_store,
+                    session_store,
+                    probe,
+                )
+                .await?;
                 h
             }
             ListenSpec::Ws(addr) => {
                 #[cfg(feature = "ws")]
                 {
-                    let (h, _bound) =
-                        transport::serve_ws(addr, bus, dispatcher, scenario_store, session_store)
-                            .await?;
+                    let (h, _bound) = transport::serve_ws(
+                        addr,
+                        bus,
+                        dispatcher,
+                        scenario_store,
+                        session_store,
+                        probe,
+                    )
+                    .await?;
                     h
                 }
                 #[cfg(not(feature = "ws"))]
                 {
-                    let _ = (addr, bus, dispatcher, scenario_store, session_store);
+                    let _ = (addr, bus, dispatcher, scenario_store, session_store, probe);
                     return Err(AppServerError::InvalidSpec(
                         "ws:// transport requires the `ws` feature".into(),
                     ));
                 }
             }
-            ListenSpec::NativeMessaging => {
-                transport::serve_native_messaging(bus, dispatcher, scenario_store, session_store)
-            }
+            ListenSpec::NativeMessaging => transport::serve_native_messaging(
+                bus,
+                dispatcher,
+                scenario_store,
+                session_store,
+                probe,
+            ),
         };
         handles.push(handle);
     }
@@ -326,7 +350,7 @@ mod integration {
         dispatcher::Dispatcher,
         protocol::{method, Request, Response},
         scenario::{builtin_presets, InMemoryScenarioStore},
-        serve_all, SharedScenarioStore,
+        serve_all, NullAppProbe, SharedScenarioStore,
     };
     use oneai_bus::{
         BusParadigmKind, BusTurnSummary, Directive, EngineBus, EngineYield, InProcessBus,
@@ -512,6 +536,7 @@ mod integration {
             dispatcher,
             scenario_store,
             session_store,
+            std::sync::Arc::new(NullAppProbe),
             inbound_rx,
             outbound_tx,
         ));
@@ -649,7 +674,15 @@ mod integration {
         let store: SharedScenarioStore = std::sync::Arc::new(InMemoryScenarioStore::new());
         let sessions: SharedConversationStore =
             std::sync::Arc::new(InMemoryConversationStore::new());
-        let err = serve_all(vec![], bus, store, sessions).await.unwrap_err();
+        let err = serve_all(
+            vec![],
+            bus,
+            store,
+            sessions,
+            std::sync::Arc::new(NullAppProbe),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, super::AppServerError::InvalidSpec(_)));
     }
 
@@ -680,6 +713,7 @@ mod integration {
             dispatcher.clone(),
             scenario_store,
             session_store,
+            std::sync::Arc::new(NullAppProbe),
         )
         .await
         .expect("ws bind");

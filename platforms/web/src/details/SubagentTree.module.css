@@ -1,0 +1,123 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.item {
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--oneai-border);
+  border-radius: var(--oneai-radius-sm);
+  background: var(--oneai-bg-subtle);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 4px;
+  border: 1px solid var(--oneai-border-strong);
+}
+
+.dot_active {
+  background: var(--oneai-brand-500);
+  border-color: var(--oneai-brand-500);
+  animation: oneai-sub-pulse 1.2s ease-in-out infinite;
+}
+
+.dot_done {
+  background: var(--oneai-green);
+  border-color: var(--oneai-green);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kind {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--oneai-text);
+  font-family: var(--oneai-font-mono);
+}
+
+.status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+}
+
+.task {
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--oneai-border);
+}
+
+.summaryText {
+  font-size: 12px;
+  color: var(--oneai-text);
+}
+
+.findings {
+  margin: 0;
+  padding-left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.findings li {
+  font-size: 11px;
+  color: var(--oneai-text-secondary);
+}
+
+.tokens {
+  font-size: 10px;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-mono);
+}
+
+@keyframes oneai-sub-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}

@@ -17,6 +17,9 @@ import type { InteractionResponse } from '../rpc/types'
 import { ChatView } from './ChatView'
 import { Composer, type SlashCommand } from './Composer'
 import { ApprovalPanel } from './ApprovalPanel'
+import { GoalBar } from './GoalBar'
+import { ModelSelect } from './ModelSelect'
+import type { SettingsStore } from '../settings/settingsStore'
 import styles from './ConversationRoot.module.css'
 
 interface ConversationRootProps {
@@ -25,6 +28,7 @@ interface ConversationRootProps {
   theme: 'light' | 'dark'
   planMode: boolean
   scenarios: ScenarioEntry[]
+  settingsStore: SettingsStore
   onSend: (text: string) => void
   onStop: () => void
   onTogglePlan: () => void
@@ -41,6 +45,7 @@ export function ConversationRoot({
   theme,
   planMode,
   scenarios,
+  settingsStore,
   onSend,
   onStop,
   onTogglePlan,
@@ -72,12 +77,15 @@ export function ConversationRoot({
             ? snapshot.currentScenario.name
             : t('app.title')}
         </span>
-        <span className={`${styles.status} ${styles[`status_${connection}`]}`}>
-          {statusText}
-          {snapshot.paradigm !== 're_act' && (
-            <span className={styles.paradigm}> · {snapshot.paradigm}</span>
-          )}
-        </span>
+        <div className={styles.headerRight}>
+          <ModelSelect store={settingsStore} />
+          <span className={`${styles.status} ${styles[`status_${connection}`]}`}>
+            {statusText}
+            {snapshot.paradigm !== 're_act' && (
+              <span className={styles.paradigm}> · {snapshot.paradigm}</span>
+            )}
+          </span>
+        </div>
       </header>
 
       <div className={styles.body}>
@@ -130,6 +138,8 @@ export function ConversationRoot({
         queueDepth={snapshot.approvalQueueDepth}
         onRespond={onRespondApproval}
       />
+
+      <GoalBar working={snapshot.working} />
 
       <div className={styles.composer}>
         <Composer

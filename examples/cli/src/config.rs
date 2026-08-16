@@ -10,9 +10,20 @@ use std::path::PathBuf;
 /// Full OneAI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OneaiConfig {
-    /// LLM provider configuration.
+    /// LLM provider configuration (legacy single-provider section; still works
+    /// for backward compat — surfaced as one "default" entry when `[[providers]]`
+    /// is empty).
     #[serde(default)]
     pub provider: ProviderConfig,
+    /// Multi-provider list (TOML `[[providers]]`). The app-server builds a
+    /// `ProviderPool` from these at launch so any of them is live-switchable
+    /// from the composer. When empty, the legacy `[provider]` section is used.
+    #[serde(default)]
+    pub providers: Vec<ProviderEntryConfig>,
+    /// The active provider name (which `[[providers]]` entry the pool routes
+    /// to at launch). Absent ⇒ the first entry (priority 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_provider: Option<String>,
     /// Domain configuration.
     #[serde(default)]
     pub domain: DomainConfig,
@@ -29,6 +40,23 @@ pub struct OneaiConfig {
     /// users leave this section out entirely.
     #[serde(default)]
     pub embedding: oneai_core::EmbeddingConfig,
+}
+
+/// One entry in the `[[providers]]` list — a named, switchable provider
+/// configuration. `kind` is the cloud protocol ("openai"/"anthropic"/"gemini")
+/// or local ("ollama"); absent ⇒ openai-compatible. `model`/`api_key`/
+/// `base_url` map onto `oneai_core::ModelConfig`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderEntryConfig {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// LLM provider configuration.
@@ -103,6 +131,8 @@ impl Default for OneaiConfig {
     fn default() -> Self {
         Self {
             provider: ProviderConfig::default(),
+            providers: Vec::new(),
+            active_provider: None,
             domain: DomainConfig::default(),
             ui: UiConfig::default(),
             generation: oneai_core::GenerationConfig::new(),
@@ -218,6 +248,110 @@ impl OneaiConfig {
         domain_override
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.domain.default_pack.clone())
+    }
+
+    // ── Multi-provider (`[[providers]]`) management ───────────────────────────
+    //
+    // These mutate `self` in place; the caller persists via `save()`. The
+    // app-server's `AppProbeImpl` calls them for `provider/add` · `/delete` ·
+    // `/set_active`, then rebuilds the live pool — see `cmd_app_server.rs`.
+
+    /// The effective provider list: the `[[providers]]` entries, or — for a
+    /// legacy config with only `[provider]` — a single synthesized "default"
+    /// entry so the UI still surfaces the configured provider.
+    pub fn providers_list(&self) -> Vec<ProviderEntryConfig> {
+        if !self.providers.is_empty() {
+            return self.providers.clone();
+        }
+        // Legacy single-provider fallback.
+        vec![ProviderEntryConfig {
+            name: "default".to_string(),
+            kind: None,
+            api_key: self.provider.api_key.clone(),
+            base_url: self.provider.base_url.clone(),
+            model: if self.provider.model.is_empty() {
+                None
+            } else {
+                Some(self.provider.model.clone())
+            },
+        }]
+    }
+
+    /// Add (or replace by name) a provider entry. Live-pool callers rebuild the
+    /// affected entry after `save()`.
+    pub fn add_provider(&mut self, entry: ProviderEntryConfig) {
+        if let Some(pos) = self.providers.iter().position(|e| e.name == entry.name) {
+            self.providers[pos] = entry;
+        } else {
+            self.providers.push(entry);
+        }
+    }
+
+    /// Remove a provider entry by name. Returns true if removed.
+    pub fn remove_provider(&mut self, name: &str) -> bool {
+        let before = self.providers.len();
+        self.providers.retain(|e| e.name != name);
+        if self.active_provider.as_deref() == Some(name) {
+            self.active_provider = None;
+        }
+        self.providers.len() != before
+    }
+
+    /// Mark a provider as active (the pool's launch default). No-op if unknown.
+    pub fn set_active_provider(&mut self, name: &str) {
+        if self.providers.iter().any(|e| e.name == name) {
+            self.active_provider = Some(name.to_string());
+        }
+    }
+
+    /// Build `(name, ModelConfig)` pairs for every entry — used by the
+    /// app-server to construct a `ProviderPool` at launch. Env-var overrides
+    /// (`ONEAI_API_KEY`/`ONEAI_BASE_URL`/`ONEAI_MODEL`) apply ONLY to a
+    /// `[[providers]]` entry that has the matching field unset — so a fully-
+    /// specified entry is self-contained, and a partial one inherits the env.
+    pub fn to_pool_model_configs(&self) -> Vec<(String, oneai_core::ModelConfig)> {
+        self.providers_list()
+            .into_iter()
+            .map(|e| (e.name.clone(), entry_to_model_config(&e)))
+            .collect()
+    }
+}
+
+/// Map a `ProviderEntryConfig` to a `ModelConfig`. `kind` resolves to a
+/// `CloudProviderKind` (openai/anthropic/gemini) — unknown/absent ⇒ OpenAI-
+/// compatible. Env vars fill in missing `api_key`/`base_url`/`model`.
+fn entry_to_model_config(e: &ProviderEntryConfig) -> oneai_core::ModelConfig {
+    use oneai_core::{CloudProviderKind, ModelConfig, ProviderType};
+    let cloud_kind = e
+        .kind
+        .as_deref()
+        .and_then(|k| match k.to_lowercase().as_str() {
+            "openai" => Some(CloudProviderKind::OpenAI),
+            "anthropic" => Some(CloudProviderKind::Anthropic),
+            "gemini" => Some(CloudProviderKind::Gemini),
+            _ => None,
+        });
+    let api_key = e
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("ONEAI_API_KEY").ok());
+    let base_url = e
+        .base_url
+        .clone()
+        .or_else(|| std::env::var("ONEAI_BASE_URL").ok());
+    let model = e
+        .model
+        .clone()
+        .or_else(|| std::env::var("ONEAI_MODEL").ok());
+    ModelConfig {
+        provider_type: ProviderType::Cloud,
+        cloud_kind,
+        api_key,
+        base_url,
+        port: None,
+        model_name: model,
+        model_path: None,
+        extra: std::collections::HashMap::new(),
     }
 }
 

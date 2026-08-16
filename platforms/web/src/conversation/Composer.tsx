@@ -22,6 +22,10 @@ export type SlashCommand =
   | 'scenario'
   | 'newScenario'
   | 'editScenario'
+  | 'trajectory'
+  | 'settings'
+  | 'skills'
+  | 'domainpack'
 
 interface ComposerProps {
   placeholder: string
@@ -66,6 +70,10 @@ export function Composer({
       { cmd: 'scenario' as const, label: '/scenario', desc: t('command.scenario') },
       { cmd: 'newScenario' as const, label: '/new-scenario', desc: t('command.newScenario') },
       { cmd: 'editScenario' as const, label: '/edit-scenario', desc: t('command.editScenario') },
+      { cmd: 'trajectory' as const, label: '/trajectory', desc: t('command.trajectory') },
+      { cmd: 'settings' as const, label: '/settings', desc: t('command.settings') },
+      { cmd: 'skills' as const, label: '/skills', desc: t('command.skills') },
+      { cmd: 'domainpack' as const, label: '/domainpack', desc: t('command.domainpack') },
     ],
     [t],
   )

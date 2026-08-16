@@ -23,6 +23,13 @@ import type {
 } from '../rpc/types'
 import { StreamCoalescer } from '../stream/coalescer'
 import { compileGroupScenario, firstUserMessage } from '../scenario/compile'
+import type {
+  SubagentNode,
+  TrajectoryEntry,
+  UsageSnapshot,
+  WorkingProjection,
+} from './trajectory'
+import { EMPTY_WORKING, nextSubagentId, nextTrajectorySeq } from './trajectory'
 
 // The projection store is the external store backing useSyncExternalStore.
 //
@@ -101,6 +108,18 @@ export interface ProjectionSnapshot {
   debriefActive: boolean
   /** True when a debrief is configured and not yet triggered. */
   debriefAvailable: boolean
+  // ── W4 trajectory + capability panel (pure consumers of flowing events) ──
+  /** Turn-aware event ledger — the trajectory timeline. Session-scoped
+   *  (cleared on new session / scenario start). */
+  trajectory: TrajectoryEntry[]
+  /** Live working-state projection (goal/steps/decisions/blockers/notes). */
+  working: WorkingProjection
+  /** Sub-agents the model delegated to (active + completed). */
+  subagents: SubagentNode[]
+  /** Latest usage snapshot (token usage + context accounting). */
+  usage: UsageSnapshot
+  /** Performance.now() marks per turn, for timing-overview rendering. */
+  turnTimings: { turnId: string; startedAt: number | null; endedAt: number | null; iterations: number }[]
 }
 
 interface WorkingState {
@@ -115,6 +134,15 @@ interface WorkingState {
   selectedToolNodeId: string | null
   currentScenario: BusScenario | null
   debriefActive: boolean
+  // ── W4 trajectory + capability (session-scoped ledgers) ──
+  trajectory: TrajectoryEntry[]
+  working: WorkingProjection
+  subagents: SubagentNode[]
+  usage: UsageSnapshot
+  /** per-turn performance.now() start marks (for elapsed-ms timing). */
+  turnStartPerf: Map<string, number>
+  turnEndPerf: Map<string, number>
+  turnIterations: Map<string, number>
 }
 
 const EMPTY: ProjectionSnapshot = {
@@ -131,6 +159,11 @@ const EMPTY: ProjectionSnapshot = {
   scenarioMembers: null,
   debriefActive: false,
   debriefAvailable: false,
+  trajectory: [],
+  working: EMPTY_WORKING,
+  subagents: [],
+  usage: { usage: null, context: null },
+  turnTimings: [],
 }
 
 let nodeSeq = 0
@@ -155,6 +188,13 @@ export class ProjectionStore {
     selectedToolNodeId: null,
     currentScenario: null,
     debriefActive: false,
+    trajectory: [],
+    working: { ...EMPTY_WORKING },
+    subagents: [],
+    usage: { usage: null, context: null },
+    turnStartPerf: new Map(),
+    turnEndPerf: new Map(),
+    turnIterations: new Map(),
   }
   private snapshot: ProjectionSnapshot = EMPTY
   private listeners = new Set<() => void>()
@@ -199,6 +239,12 @@ export class ProjectionStore {
     const sc = this.state.currentScenario
     const debriefAvailable =
       sc !== null && sc.debrief !== undefined && !this.state.debriefActive
+    const turnTimings = Array.from(this.state.turnStartPerf.keys()).map((turnId) => ({
+      turnId,
+      startedAt: this.state.turnStartPerf.get(turnId) ?? null,
+      endedAt: this.state.turnEndPerf.get(turnId) ?? null,
+      iterations: this.state.turnIterations.get(turnId) ?? 0,
+    }))
     this.snapshot = {
       version: this.snapshot.version + 1,
       sessionId: this.state.sessionId,
@@ -216,8 +262,129 @@ export class ProjectionStore {
       scenarioMembers: sc !== null ? sc.members : null,
       debriefActive: this.state.debriefActive,
       debriefAvailable,
+      trajectory: [...this.state.trajectory],
+      working: this.state.working,
+      subagents: [...this.state.subagents],
+      usage: this.state.usage,
+      turnTimings,
     }
     for (const l of this.listeners) l()
+  }
+
+  // ── trajectory ledger helpers ──────────────────────────────────────────────
+
+  /** Elapsed ms since the given turn's turn_start (browser performance.now
+   *  delta). null when the turn wasn't seen starting. */
+  private elapsedSinceTurnStart(turnId: string | null): number | null {
+    if (turnId === null) return null
+    const start = this.state.turnStartPerf.get(turnId)
+    if (start === undefined) return null
+    return Math.round(performance.now() - start)
+  }
+
+  /** Apply a working-state event (TaskEventPayload) to the working projection
+   *  + push a trajectory entry. The working projection is rebuilt from the
+   *  event stream (mirrors the engine's derive_state, but lean — only the
+   *  fields the UI renders). */
+  private applyWorkingStateEvent(ev: import('../rpc/types').TaskEventPayload): void {
+    const w = this.state.working
+    const curTurn = this.state.currentTurnId
+    switch (ev.kind) {
+      case 'task':
+        w.goal = ev.goal
+        w.intent = ev.intent ?? null
+        this.pushTrajectory(curTurn, 'working_state', `goal: ${ev.goal}`, { detail: ev })
+        break
+      case 'step_added':
+        w.steps = [...w.steps, ev.step]
+        this.pushTrajectory(curTurn, 'working_state', `step added: ${ev.step.description}`, { detail: ev })
+        break
+      case 'step_status_changed': {
+        w.steps = w.steps.map((s) =>
+          s.id === ev.step_id
+            ? {
+                ...s,
+                status: ev.status,
+                active_form: ev.active_form !== undefined ? ev.active_form : s.active_form,
+              }
+            : s,
+        )
+        this.pushTrajectory(curTurn, 'working_state', `step ${ev.step_id} → ${ev.status}`, { detail: ev })
+        break
+      }
+      case 'decision_made':
+        w.decisions = [...w.decisions, ev.decision]
+        this.pushTrajectory(curTurn, 'working_state', `decision: ${ev.decision.chosen}`, { detail: ev })
+        break
+      case 'blocker_raised':
+        w.blockers = [...w.blockers, ev.blocker]
+        this.pushTrajectory(curTurn, 'working_state', `blocker: ${ev.blocker.description}`, { detail: ev })
+        break
+      case 'blocker_resolved':
+        w.blockers = w.blockers.map((b) =>
+          b.id === ev.blocker_id ? { ...b, status: 'resolved', resolution: ev.resolution } : b,
+        )
+        this.pushTrajectory(curTurn, 'working_state', `blocker resolved: ${ev.blocker_id}`, { detail: ev })
+        break
+      case 'note_added':
+        w.notes = [...w.notes, ev.note]
+        this.pushTrajectory(curTurn, 'working_state', `note: ${ev.note.content.slice(0, 60)}`, { detail: ev })
+        break
+      case 'snapshot': {
+        // A materialized checkpoint — replace the working projection wholesale.
+        const s = ev.state
+        this.state.working = {
+          goal: s.goal ?? null,
+          intent: s.intent ?? null,
+          steps: s.steps ?? [],
+          decisions: s.decisions ?? [],
+          blockers: s.blockers ?? [],
+          notes: s.notes ?? [],
+        }
+        this.pushTrajectory(curTurn, 'working_state', 'working-state snapshot', { detail: ev })
+        break
+      }
+      case 'task_status':
+      case 'reflection_fired':
+        this.pushTrajectory(curTurn, 'working_state', ev.kind === 'reflection_fired' ? 'reflection fired' : 'task status', { detail: ev })
+        break
+      default:
+        // Unknown TaskEventPayload kind — ignore (non_exhaustive contract).
+        break
+    }
+    this.state.working = { ...this.state.working }
+  }
+
+  /** Push a trajectory entry (non-hot → caller flushes via emitNow). */
+  private pushTrajectory(
+    turnId: string | null,
+    kind: TrajectoryEntry['kind'],
+    title: string,
+    extra?: Partial<TrajectoryEntry>,
+  ): void {
+    this.state.trajectory = [
+      ...this.state.trajectory,
+      {
+        seq: nextTrajectorySeq(),
+        turnId,
+        at: Date.now(),
+        ms: this.elapsedSinceTurnStart(turnId),
+        kind,
+        title,
+        ...extra,
+      },
+    ]
+  }
+
+  /** Reset the session-scoped ledgers (new session / scenario start). */
+  private resetLedgers(): void {
+    this.state.trajectory = []
+    this.state.working = { ...EMPTY_WORKING }
+    this.state.subagents = []
+    this.state.usage = { usage: null, context: null }
+    this.state.turnStartPerf.clear()
+    this.state.turnEndPerf.clear()
+    this.state.turnIterations.clear()
   }
 
   /** Flush now (bypass the coalescer) — for non-hot mutations. */
@@ -296,6 +463,9 @@ export class ProjectionStore {
       case 'turn_start': {
         this.state.currentTurnId = y.turn_id
         this.state.turnActive = true
+        this.state.turnStartPerf.set(y.turn_id, performance.now())
+        this.state.turnEndPerf.delete(y.turn_id)
+        this.state.turnIterations.set(y.turn_id, 0)
         // Single-agent: seed an empty bubble eagerly so the user sees progress
         // the moment the turn starts. Group chat: defer to `speaker_turn` /
         // `stream_chunk` (which carry the member id) to avoid a stale empty
@@ -303,7 +473,8 @@ export class ProjectionStore {
         if (this.state.currentScenario === null) {
           this.seedAssistant(y.turn_id, this.state.currentSpeaker)
         }
-        this.coalescer.request()
+        this.pushTrajectory(y.turn_id, 'turn_start', y.task.length > 0 ? y.task : 'turn start')
+        this.emitNow()
         break
       }
       case 'speaker_turn': {
@@ -395,6 +566,9 @@ export class ProjectionStore {
               toolState: 'pending',
             },
           ]
+          this.pushTrajectory(y.turn_id, 'tool_calls', `tool: ${c.name}`, {
+            detail: { callId: c.id, args: c.args },
+          })
         }
         this.emitNow()
         break
@@ -440,6 +614,10 @@ export class ProjectionStore {
       }
       case 'paradigm_switch': {
         this.state.paradigm = y.to
+        this.pushTrajectory(y.turn_id, 'paradigm_switch', `paradigm: ${y.from} → ${y.to}`, {
+          paradigm: y.to,
+          detail: { from: y.from, to: y.to },
+        })
         this.emitNow()
         break
       }
@@ -476,10 +654,16 @@ export class ProjectionStore {
             },
           ]
         }
+        if (plan !== null) {
+          this.pushTrajectory(y.turn_id, 'plan_revision', 'plan revised', {
+            detail: { steps: plan.steps.length, revision: plan.revision },
+          })
+        } else {
+          this.pushTrajectory(y.turn_id, 'plan_revision', 'plan cleared')
+        }
         this.emitNow()
         break
-      }
-      case 'approval_request': {
+      }      case 'approval_request': {
         // Parallel approval queue (issue #20): a second approval_request that
         // arrives before the first is resolved enqueues behind the head; the
         // store promotes the next on respond.
@@ -500,6 +684,8 @@ export class ProjectionStore {
         )
         this.state.turnActive = false
         this.state.currentSpeaker = null
+        this.state.turnEndPerf.set(y.turn_id, performance.now())
+        this.pushTrajectory(y.turn_id, 'turn_complete', 'turn complete')
         this.emitNow()
         break
       }
@@ -531,6 +717,7 @@ export class ProjectionStore {
       }
       case 'session_created': {
         this.state.sessionId = y.id
+        this.resetLedgers()
         this.emitNow()
         break
       }
@@ -542,11 +729,106 @@ export class ProjectionStore {
         this.state.currentSpeaker = null
         this.state.sessionId = y.id
         this.state.nodes = messagesToNodes(y.messages)
+        this.resetLedgers()
         this.emitNow()
         break
       }
       case 'session_cleared':
       case 'session_deleted': {
+        this.emitNow()
+        break
+      }
+      // ── W4: events the W1–W3 projection previously dropped into `default`.
+      //     These feed the trajectory ledger + the capability panel (goal bar,
+      //     subagent tree, context/usage overview). All pure consumers. ──
+      case 'iteration_start': {
+        const prev = this.state.turnIterations.get(y.turn_id) ?? 0
+        this.state.turnIterations.set(y.turn_id, prev + 1)
+        this.pushTrajectory(y.turn_id, 'iteration_start', `iteration ${y.iteration} · ${y.paradigm}`, {
+          iter: y.iteration,
+          paradigm: y.paradigm,
+          detail: { iteration: y.iteration, paradigm: y.paradigm },
+        })
+        this.emitNow()
+        break
+      }
+      case 'delegate': {
+        const id = nextSubagentId(y.turn_id)
+        const kindLabel = typeof y.agent_kind === 'string' ? y.agent_kind : `Custom:${y.agent_kind.Custom}`
+        this.state.subagents = [
+          ...this.state.subagents,
+          {
+            id,
+            turnId: y.turn_id,
+            task: y.task,
+            agentKind: y.agent_kind,
+            status: 'active',
+          },
+        ]
+        this.pushTrajectory(y.turn_id, 'delegate', `delegate → ${kindLabel}`, {
+          detail: { subagentId: id, task: y.task },
+        })
+        this.emitNow()
+        break
+      }
+      case 'delegate_complete': {
+        // Mark the last active subagent for this turn done + attach summary.
+        // (delegate carries no call id; the matching is by recency within the
+        // turn — the most recent still-active delegate completes first.)
+        const idx = [...this.state.subagents]
+          .reverse()
+          .findIndex((s) => s.turnId === y.turn_id && s.status === 'active')
+        if (idx >= 0) {
+          const realIdx = this.state.subagents.length - 1 - idx
+          const n = this.state.subagents[realIdx]
+          this.state.subagents = this.state.subagents.map((s) =>
+            s.id === n.id
+              ? {
+                  ...s,
+                  status: 'done',
+                  summary: {
+                    summary: y.summary.summary,
+                    keyFindings: y.summary.key_findings,
+                    budgetExceeded: y.summary.budget_exceeded,
+                    tokensUsed: y.summary.tokens_used,
+                    completed: y.summary.completed,
+                  },
+                }
+              : s,
+          )
+        }
+        this.pushTrajectory(y.turn_id, 'delegate_complete', 'delegate complete', {
+          detail: { summary: y.summary.summary, keyFindings: y.summary.key_findings },
+        })
+        this.emitNow()
+        break
+      }
+      case 'working_state': {
+        this.applyWorkingStateEvent(y.event)
+        this.emitNow()
+        break
+      }
+      case 'context_accounting': {
+        this.state.usage = { ...this.state.usage, context: y.accounting }
+        this.pushTrajectory(y.turn_id, 'context_accounting', 'context accounting', {
+          detail: y.accounting,
+        })
+        this.emitNow()
+        break
+      }
+      case 'token_usage': {
+        this.state.usage = { ...this.state.usage, usage: y.usage }
+        const total = y.usage.prompt_tokens + y.usage.completion_tokens
+        this.pushTrajectory(null, 'token_usage', `usage: ${total} tokens`, {
+          detail: y.usage,
+        })
+        this.emitNow()
+        break
+      }
+      case 'tools_added': {
+        this.pushTrajectory(y.turn_id, 'tools_added', `+tools: ${y.names.join(', ')}`, {
+          detail: { names: y.names },
+        })
         this.emitNow()
         break
       }
@@ -713,6 +995,7 @@ export class ProjectionStore {
     this.state.lastError = null
     this.state.sessionId = null // group-chat conversation id is engine-side
     this.state.turnActive = true
+    this.resetLedgers()
     this.emitNow()
     const spec = compileGroupScenario(scenario, values, locale)
     try {

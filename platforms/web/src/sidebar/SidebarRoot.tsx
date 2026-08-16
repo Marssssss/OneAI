@@ -31,6 +31,7 @@ interface SidebarRootProps {
   onPickScenario: (scenario: BusScenario) => void
   onNewScenario: () => void
   onEditScenario: (scenario: BusScenario) => void
+  onOpenSettings: () => void
 }
 
 export function SidebarRoot({
@@ -50,6 +51,7 @@ export function SidebarRoot({
   onPickScenario,
   onNewScenario,
   onEditScenario,
+  onOpenSettings,
 }: SidebarRootProps): ReactNode {
   const { t, locale } = useLocale()
   return (
@@ -108,6 +110,9 @@ export function SidebarRoot({
         </button>
         <button className={styles.footBtn} onClick={onToggleLocale} title="language">
           {locale === 'zh' ? '中' : 'EN'}
+        </button>
+        <button className={styles.footBtn} onClick={onOpenSettings} title={t('sidebar.settings')}>
+          ⚙
         </button>
       </div>
     </div>

@@ -34,6 +34,7 @@ use oneai_bus::{
 use oneai_core::{ContentBlock, InteractionResponse, InterruptReason, SessionInfo};
 
 use crate::dispatcher::Dispatcher;
+use crate::probe::{ProviderEntryDto, SharedAppProbe};
 use crate::protocol::{decode_inbound, method, Notification, Response, RpcError};
 use crate::{SharedConversationStore, SharedScenarioStore};
 
@@ -48,6 +49,7 @@ pub async fn serve_connection(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
     mut inbound_rx: mpsc::Receiver<String>,
     outbound_tx: mpsc::Sender<String>,
 ) {
@@ -73,6 +75,7 @@ pub async fn serve_connection(
                 let dispatcher = dispatcher.clone();
                 let scenario_store = scenario_store.clone();
                 let session_store = session_store.clone();
+                let probe = probe.clone();
                 let out_tx = outbound_tx.clone();
                 // Each request runs on its own task so a long turn/run (awaiting
                 // TurnStart) doesn't block the next inbound message (e.g. an
@@ -80,7 +83,8 @@ pub async fn serve_connection(
                 // makes out-of-order responses fine.
                 tokio::spawn(async move {
                     let resp =
-                        handle_request(req, bus, dispatcher, scenario_store, session_store).await;
+                        handle_request(req, bus, dispatcher, scenario_store, session_store, probe)
+                            .await;
                     send(&out_tx, &resp);
                 });
                 let _ = id; // id is read inside handle_request via req.id
@@ -132,6 +136,7 @@ async fn handle_request(
     dispatcher: Dispatcher,
     scenario_store: SharedScenarioStore,
     session_store: SharedConversationStore,
+    probe: SharedAppProbe,
 ) -> Response {
     let id = req.id.clone();
     let params = req.params;
@@ -377,6 +382,69 @@ async fn handle_request(
 
         method::SHUTDOWN => submit_ack(bus, id, Directive::Shutdown).await,
 
+        // ── App probe (read-only config + skill lifecycle) — synchronous,
+        //    handled directly against the shared AppProbe, no Directive/bus.
+        //    `domainpack/switch` / `provider/add` are intentionally absent
+        //    (no hot-swap path — see probe.rs); a pack/provider change
+        //    restarts the app-server. ─────────────────────────────────────
+        method::CONFIG_GET => {
+            let snap = probe.config().await;
+            Response::ok(id, serde_json::to_value(snap).unwrap_or(json!({})))
+        }
+        method::PROVIDER_LIST => {
+            let list = probe.providers().await;
+            Response::ok(id, json!({"providers": list}))
+        }
+        method::PROVIDER_ADD => {
+            let entry = match field::<ProviderEntryDto>(&params, "entry") {
+                Ok(e) => e,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.provider_add(entry).await;
+            Response::ok(
+                id,
+                serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+            )
+        }
+        method::PROVIDER_DELETE => {
+            let name = match field::<String>(&params, "name") {
+                Ok(n) => n,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.provider_delete(&name).await;
+            Response::ok(
+                id,
+                serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+            )
+        }
+        method::PROVIDER_SET_ACTIVE => {
+            let name = match field::<String>(&params, "name") {
+                Ok(n) => n,
+                Err(e) => return Response::err(id, e),
+            };
+            let res = probe.provider_set_active(&name).await;
+            Response::ok(
+                id,
+                serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+            )
+        }
+        method::CONFIG_READ => {
+            let view = probe.config_read().await;
+            Response::ok(id, serde_json::to_value(view).unwrap_or(json!({})))
+        }
+        method::DOMAINPACK_LIST => {
+            let list = probe.domainpacks().await;
+            Response::ok(id, serde_json::to_value(list).unwrap_or(json!({})))
+        }
+        method::SKILL_LIST => {
+            let list = probe.skills().await;
+            Response::ok(id, json!({"skills": list}))
+        }
+        method::SKILL_PIN => skill_op(&probe, &id, &params, OpKind::Pin).await,
+        method::SKILL_UNPIN => skill_op(&probe, &id, &params, OpKind::Unpin).await,
+        method::SKILL_ARCHIVE => skill_op(&probe, &id, &params, OpKind::Archive).await,
+        method::SKILL_RESTORE => skill_op(&probe, &id, &params, OpKind::Restore).await,
+
         // Unknown method.
         _ => Response::err(id, RpcError::method_not_found(&req.method)),
     }
@@ -411,6 +479,33 @@ fn field<T: DeserializeOwned>(params: &Value, key: &str) -> std::result::Result<
 /// Extract an optional typed field; `None` if absent or wrong type.
 fn opt_field<T: DeserializeOwned>(params: &Value, key: &str) -> Option<T> {
     serde_json::from_value(params.get(key)?.clone()).ok()
+}
+
+/// Which skill lifecycle op the inbound method requested.
+enum OpKind {
+    Pin,
+    Unpin,
+    Archive,
+    Restore,
+}
+
+/// Handle a `skill/{pin|unpin|archive|restore}` request: extract the `name`
+/// field, dispatch to the probe, and return the op result.
+async fn skill_op(probe: &SharedAppProbe, id: &Value, params: &Value, kind: OpKind) -> Response {
+    let name = match field::<String>(params, "name") {
+        Ok(n) => n,
+        Err(e) => return Response::err(id.clone(), e),
+    };
+    let res = match kind {
+        OpKind::Pin => probe.skill_pin(&name).await,
+        OpKind::Unpin => probe.skill_unpin(&name).await,
+        OpKind::Archive => probe.skill_archive(&name).await,
+        OpKind::Restore => probe.skill_restore(&name).await,
+    };
+    Response::ok(
+        id.clone(),
+        serde_json::to_value(res).unwrap_or(json!({"ok": false})),
+    )
 }
 
 /// Serialize a `SessionInfo` to the epoch-millis shape the FFI
@@ -459,10 +554,120 @@ mod tests {
             Arc::new(crate::scenario::InMemoryScenarioStore::new());
         let session_store: SharedConversationStore =
             Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
         let req = crate::protocol::Request::new(json!(1), "no/such/method", json!({}));
-        let resp = handle_request(req, bus, dispatcher, scenario_store, session_store).await;
+        let resp = handle_request(req, bus, dispatcher, scenario_store, session_store, probe).await;
         let err = resp.error.expect("error response");
         assert_eq!(err.code, error_code::METHOD_NOT_FOUND);
         assert_eq!(resp.id, json!(1));
+    }
+
+    /// Shared harness for the W4 probe method tests: a `NullAppProbe` (empty
+    /// / not_supported) so we verify routing + response *shape*, not the
+    /// probe's own logic (which the CLI's `AppProbeImpl` owns).
+    async fn probe_response(method: &str, params: Value) -> Response {
+        let (bus, _rx) = InProcessBus::new();
+        let bus = Arc::new(bus);
+        let dispatcher = Dispatcher::default();
+        let scenario_store: SharedScenarioStore =
+            Arc::new(crate::scenario::InMemoryScenarioStore::new());
+        let session_store: SharedConversationStore =
+            Arc::new(crate::conversation::InMemoryConversationStore::new());
+        let probe: SharedAppProbe = Arc::new(crate::probe::NullAppProbe);
+        let req = crate::protocol::Request::new(json!(2), method, params);
+        handle_request(req, bus, dispatcher, scenario_store, session_store, probe).await
+    }
+
+    #[tokio::test]
+    async fn config_get_returns_snapshot() {
+        let resp = probe_response("config/get", json!({})).await;
+        assert!(resp.error.is_none(), "config/get should not error");
+        // NullAppProbe ⇒ all-Default snapshot (plan_mode is the one required
+        // field; the rest are skip-if-none).
+        assert_eq!(resp.result.unwrap()["plan_mode"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn provider_list_returns_array() {
+        let resp = probe_response("provider/list", json!({})).await;
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap()["providers"].is_array());
+    }
+
+    #[tokio::test]
+    async fn domainpack_list_returns_list() {
+        let resp = probe_response("domainpack/list", json!({})).await;
+        assert!(resp.error.is_none());
+        let res = resp.result.unwrap();
+        assert!(res["available"].is_array());
+    }
+
+    #[tokio::test]
+    async fn skill_list_returns_array() {
+        let resp = probe_response("skill/list", json!({})).await;
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap()["skills"].is_array());
+    }
+
+    #[tokio::test]
+    async fn skill_pin_missing_name_is_invalid_params() {
+        // No `name` field ⇒ INVALID_PARAMS, not a probe call.
+        let resp = probe_response("skill/pin", json!({})).await;
+        let err = resp.error.expect("invalid params");
+        assert_eq!(err.code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn skill_pin_null_probe_reports_not_supported() {
+        // With a name but a NullAppProbe, the probe reports not_supported —
+        // surfaced as an *ok result* with ok:false (op errors aren't JSON-RPC
+        // errors, they're a normal result the UI renders).
+        let resp = probe_response("skill/pin", json!({"name": "x"})).await;
+        assert!(resp.error.is_none());
+        let res = resp.result.unwrap();
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["error"].as_str().unwrap().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn provider_add_routes_and_returns_op_result() {
+        let resp = probe_response(
+            "provider/add",
+            json!({"entry": {"name": "openai", "kind": "openai", "model": "gpt-4"}}),
+        )
+        .await;
+        assert!(resp.error.is_none());
+        let res = resp.result.unwrap();
+        assert_eq!(res["ok"], json!(false));
+        assert!(res["error"].as_str().unwrap().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn provider_add_missing_entry_is_invalid_params() {
+        let resp = probe_response("provider/add", json!({})).await;
+        let err = resp.error.expect("invalid params");
+        assert_eq!(err.code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn provider_set_active_routes() {
+        let resp = probe_response("provider/set_active", json!({"name": "x"})).await;
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["ok"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn provider_delete_missing_name_is_invalid_params() {
+        let resp = probe_response("provider/delete", json!({})).await;
+        assert_eq!(resp.error.unwrap().code, error_code::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn config_read_returns_path_and_content() {
+        let resp = probe_response("config/read", json!({})).await;
+        assert!(resp.error.is_none());
+        let res = resp.result.unwrap();
+        assert!(res["path"].is_string());
+        assert!(res["content"].is_string());
     }
 }

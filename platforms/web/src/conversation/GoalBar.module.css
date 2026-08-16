@@ -1,0 +1,116 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  margin: 0 0 var(--oneai-gap) 0;
+  background: var(--oneai-bg-subtle);
+  border: 1px solid var(--oneai-border);
+  border-radius: var(--oneai-radius);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.icon {
+  color: var(--oneai-brand-500);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.goal {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--oneai-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress {
+  font-size: 11px;
+  font-family: var(--oneai-font-mono);
+  color: var(--oneai-text-secondary);
+  background: var(--oneai-bg-elevated);
+  border: 1px solid var(--oneai-border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  flex-shrink: 0;
+}
+
+.blockers {
+  font-size: 11px;
+  color: var(--oneai-amber);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.stepDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1px solid var(--oneai-border-strong);
+  background: var(--oneai-bg-elevated);
+}
+
+.step_pending .stepDot {
+  background: var(--oneai-bg-elevated);
+  border-color: var(--oneai-text-tertiary);
+}
+.step_pending .stepText {
+  color: var(--oneai-text-tertiary);
+}
+
+.step_inprogress .stepDot {
+  background: var(--oneai-brand-500);
+  border-color: var(--oneai-brand-500);
+  animation: oneai-pulse 1.2s ease-in-out infinite;
+}
+
+.step_completed .stepDot {
+  background: var(--oneai-green);
+  border-color: var(--oneai-green);
+}
+.step_completed .stepText {
+  color: var(--oneai-text-secondary);
+  text-decoration: line-through;
+}
+
+.step_failed .stepDot {
+  background: var(--oneai-red);
+  border-color: var(--oneai-red);
+}
+
+.stepText {
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+@keyframes oneai-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}

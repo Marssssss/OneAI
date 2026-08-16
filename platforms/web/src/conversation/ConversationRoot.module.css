@@ -22,6 +22,12 @@
   font-size: 14px;
 }
 
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: var(--oneai-gap);
+}
+
 .status {
   font-size: 12px;
   color: var(--oneai-text-secondary);

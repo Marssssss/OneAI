@@ -79,6 +79,23 @@ pub mod method {
     pub const SCENARIO_DELETE: &str = "scenario/delete";
     pub const SCENARIO_VALIDATE: &str = "scenario/validate";
 
+    // App probe — read-only config + skill lifecycle. Handled directly against
+    // the shared AppProbe, no bus/Directive. `domainpack/switch` and
+    // `provider/add` are deliberately absent (architecture has no hot-swap
+    // path — see probe.rs); a pack/provider change restarts the app-server.
+    pub const CONFIG_GET: &str = "config/get";
+    pub const PROVIDER_LIST: &str = "provider/list";
+    pub const PROVIDER_ADD: &str = "provider/add";
+    pub const PROVIDER_DELETE: &str = "provider/delete";
+    pub const PROVIDER_SET_ACTIVE: &str = "provider/set_active";
+    pub const DOMAINPACK_LIST: &str = "domainpack/list";
+    pub const SKILL_LIST: &str = "skill/list";
+    pub const SKILL_PIN: &str = "skill/pin";
+    pub const SKILL_UNPIN: &str = "skill/unpin";
+    pub const SKILL_ARCHIVE: &str = "skill/archive";
+    pub const SKILL_RESTORE: &str = "skill/restore";
+    pub const CONFIG_READ: &str = "config/read";
+
     // Engine.
     pub const SHUTDOWN: &str = "shutdown";
 }

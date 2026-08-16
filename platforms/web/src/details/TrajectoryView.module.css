@@ -1,0 +1,129 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--oneai-gap-lg);
+}
+
+.empty {
+  padding: 20px 14px;
+  font-size: 13px;
+  color: var(--oneai-text-tertiary);
+  text-align: center;
+}
+
+.overview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--oneai-bg-subtle);
+  border-radius: var(--oneai-radius);
+  border: 1px solid var(--oneai-border);
+}
+
+.overviewRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.overviewLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--oneai-text-tertiary);
+}
+
+.overviewValue {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--oneai-text);
+  font-family: var(--oneai-font-mono);
+}
+
+.usageDetail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--oneai-text-secondary);
+  font-family: var(--oneai-font-mono);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--oneai-border);
+  border-radius: var(--oneai-radius);
+  overflow: hidden;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--oneai-bg-subtle);
+}
+
+.groupTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--oneai-text);
+  font-family: var(--oneai-font-mono);
+}
+
+.groupMeta {
+  font-size: 11px;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-mono);
+}
+
+.timingBar {
+  display: flex;
+  height: 6px;
+  background: var(--oneai-bg-subtle);
+  gap: 1px;
+}
+
+.timingSeg {
+  background: var(--oneai-brand-500);
+  min-width: 2px;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 4px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.entry {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--oneai-text-secondary);
+}
+
+.entryIcon {
+  text-align: center;
+  color: var(--oneai-text-tertiary);
+  font-size: 11px;
+}
+
+.entryTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entryMs {
+  font-size: 10px;
+  color: var(--oneai-text-tertiary);
+  font-family: var(--oneai-font-mono);
+}

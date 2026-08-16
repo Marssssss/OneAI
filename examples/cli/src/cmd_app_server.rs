@@ -20,19 +20,23 @@ use oneai_agent::group_chat::{GroupChatSession, TurnPolicy};
 use oneai_agent::{AgentLoop, GroupChatBusObserver};
 use oneai_app::{App, AppBuilder, AppSession, DirectiveRuntime};
 use oneai_app_server::{
-    default_scenarios_path, serve_all, AppServerError, FileScenarioStore, ListenSpec,
-    SharedScenarioStore,
+    default_scenarios_path, serve_all, AppConfigSnapshot, AppProbe, AppServerError, ConfigFileView,
+    DomainPackInfo, DomainPackList, FileScenarioStore, ListenSpec, ProviderEntryDto, ProviderInfo,
+    ProviderOpResult, SharedAppProbe, SharedScenarioStore, SkillInfo, SkillOpResult,
 };
 use oneai_bus::{EngineBus, EngineYield};
 use oneai_core::error::Result;
+use oneai_core::ProviderPoolConfig;
 use oneai_core::{traits::LlmProvider, Message};
-use oneai_core::{CloudProviderKind, ModelConfig};
-use oneai_provider::ProviderFactory;
+use oneai_core::{CloudProviderKind, ModelConfig, ProviderType, SkillDescriptor};
+use oneai_domain::{MergedDomainPack, PackRegistry};
+use oneai_provider::{ProviderEntry, ProviderFactory, ProviderPool};
+use oneai_skill::{SkillAuthor, SkillMetadata, SkillState};
 use oneai_tool::CalculatorTool;
 use tokio::sync::Mutex;
 
 use crate::cmd_pack::get_builtin_pack;
-use crate::config::OneaiConfig;
+use crate::config::{OneaiConfig, ProviderEntryConfig};
 
 /// Init a `tracing_subscriber` that writes to stderr. The macOS app redirects
 /// the sidecar's stderr to `~/.oneai/app-server-sidecar.log`, so this surfaces
@@ -338,6 +342,383 @@ impl oneai_app_server::ConversationStore for AppConversationStore {
     }
 }
 
+// ─── AppProbeImpl — backs the `config/*` / `provider/*` / `domainpack/*` /
+//     `skill/*` JSON-RPC methods. A read-only view of the running config +
+//     the genuinely hot-switchable skill lifecycle (pin/unpin/archive/restore
+//     via `App.skill_curator`). DomainPack/provider changes restart the
+//     app-server (`--domain` / `--model`) — there's no live hot-swap path
+//     (`App.domain_pack` / `App.provider` are immutable `Arc`s), so those are
+//     NOT exposed as mutable ops here. ──────────────────────────────────────
+
+struct AppProbeImpl {
+    app: Arc<App>,
+    /// Launch-time `--domain` pack name (cleaner than the merged-pack
+    /// concatenated name for display).
+    domain_pack_name: Option<String>,
+    /// Launch-time provider config (env / `--model`) — kept for group-chat
+    /// member injection + the config snapshot's provider fields.
+    provider_config: Option<ModelConfig>,
+    /// The live provider pool (`App.provider` is this `Arc<dyn LlmProvider>`).
+    /// `provider/add`/`delete`/`set_active` mutate this live; the pool routes
+    /// each inference to its `active_index` entry, so a live switch takes
+    /// effect on the next turn with no `App.provider` swap.
+    pool: Option<Arc<ProviderPool>>,
+}
+
+/// Render a `ModelConfig` as a kind string — the cloud provider kind
+/// (openai/anthropic/ollama/gemini) when set, else the provider_type
+/// (cloud/local/...).
+fn provider_kind_str(mc: &ModelConfig) -> Option<String> {
+    if let Some(kind) = mc.cloud_kind {
+        return Some(cloud_kind_str(kind).to_string());
+    }
+    Some(provider_type_str(mc.provider_type).to_string())
+}
+
+fn cloud_kind_str(kind: CloudProviderKind) -> &'static str {
+    match kind {
+        CloudProviderKind::OpenAI => "openai",
+        CloudProviderKind::Anthropic => "anthropic",
+        CloudProviderKind::Gemini => "gemini",
+    }
+}
+
+fn provider_type_str(t: ProviderType) -> &'static str {
+    match t {
+        ProviderType::Cloud => "cloud",
+        ProviderType::Local => "local",
+        ProviderType::Transformers => "transformers",
+    }
+}
+
+/// Map a `SkillState` to its wire string (matches serde `snake_case`).
+fn skill_state_str(s: SkillState) -> &'static str {
+    match s {
+        SkillState::Active => "active",
+        SkillState::Stale => "stale",
+        SkillState::Archived => "archived",
+        _ => "unknown",
+    }
+}
+
+fn skill_author_str(a: SkillAuthor) -> &'static str {
+    match a {
+        SkillAuthor::User => "user",
+        SkillAuthor::Agent => "agent",
+        SkillAuthor::Bundled => "bundled",
+        _ => "unknown",
+    }
+}
+
+/// Build a `SkillInfo` from a descriptor + optional metadata.
+fn skill_info(desc: &SkillDescriptor, meta: Option<&SkillMetadata>) -> SkillInfo {
+    let m = meta.cloned().unwrap_or_default();
+    SkillInfo {
+        name: desc.name.clone(),
+        description: if desc.description.is_empty() {
+            None
+        } else {
+            Some(desc.description.clone())
+        },
+        use_count: m.use_count,
+        pinned: m.pinned,
+        state: skill_state_str(m.state).to_string(),
+        origin: Some(skill_author_str(m.created_by).to_string()),
+    }
+}
+
+#[async_trait::async_trait]
+impl AppProbe for AppProbeImpl {
+    async fn config(&self) -> AppConfigSnapshot {
+        let permission_profile = self
+            .app
+            .domain_pack()
+            .map(|p: &Arc<MergedDomainPack>| p.permission_profile.name.clone());
+        let (kind, model, base_url) = match &self.provider_config {
+            Some(mc) => (
+                provider_kind_str(mc),
+                mc.model_name.clone(),
+                mc.base_url.clone(),
+            ),
+            None => (None, None, None),
+        };
+        AppConfigSnapshot {
+            domain_pack: self.domain_pack_name.clone(),
+            provider_kind: kind,
+            provider_model: model,
+            base_url,
+            plan_mode: false,
+            permission_profile,
+        }
+    }
+
+    async fn providers(&self) -> Vec<ProviderInfo> {
+        // The live pool is the source of truth — it reflects `provider/add`/
+        // `delete` mutations done at runtime. Each entry's `active` flag is
+        // whether the pool currently routes to it (`active_index`).
+        self.provider_list()
+    }
+
+    async fn domainpacks(&self) -> DomainPackList {
+        let registry = PackRegistry::default_path();
+        let available: Vec<DomainPackInfo> = registry
+            .list_builtin()
+            .iter()
+            .map(|e| DomainPackInfo {
+                name: e.name.clone(),
+                description: if e.description.is_empty() {
+                    None
+                } else {
+                    Some(e.description.clone())
+                },
+            })
+            .collect();
+        DomainPackList {
+            active: self.domain_pack_name.clone(),
+            available,
+        }
+    }
+
+    async fn skills(&self) -> Vec<SkillInfo> {
+        let descs = self.app.skill_registry.list().await;
+        let metas = match self.app.skill_metadata_store.as_ref() {
+            Some(store) => store.list().await,
+            None => std::collections::HashMap::new(),
+        };
+        descs
+            .iter()
+            .map(|d| skill_info(d, metas.get(&d.name)))
+            .collect()
+    }
+
+    async fn skill_pin(&self, name: &str) -> SkillOpResult {
+        self.skill_op(name, |c| async move { c.pin(name).await }, "pin")
+            .await
+    }
+    async fn skill_unpin(&self, name: &str) -> SkillOpResult {
+        self.skill_op(name, |c| async move { c.unpin(name).await }, "unpin")
+            .await
+    }
+    async fn skill_archive(&self, name: &str) -> SkillOpResult {
+        self.skill_op(name, |c| async move { c.archive(name).await }, "archive")
+            .await
+    }
+    async fn skill_restore(&self, name: &str) -> SkillOpResult {
+        self.skill_op(name, |c| async move { c.restore(name).await }, "restore")
+            .await
+    }
+
+    async fn provider_add(&self, entry: ProviderEntryDto) -> ProviderOpResult {
+        let name = entry.name.clone();
+        // 1. Persist to config.toml ([[providers]]).
+        let mut cfg = OneaiConfig::load_or_default();
+        cfg.add_provider(dto_to_entry_config(&entry));
+        if let Err(e) = cfg.save() {
+            return ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some(format!("save config: {e}")),
+            };
+        }
+        // 2. Add live to the pool (immediately switchable).
+        if let Some(pool) = self.pool.as_ref() {
+            let mc = entry_to_model_config_strict(&entry);
+            let provider = ProviderFactory::create(mc);
+            pool.add_entry(ProviderEntry::new(name.clone(), Arc::from(provider), 0));
+        }
+        ProviderOpResult {
+            ok: true,
+            providers: Some(self.provider_list()),
+            error: None,
+        }
+    }
+
+    async fn provider_delete(&self, name: &str) -> ProviderOpResult {
+        let mut cfg = OneaiConfig::load_or_default();
+        let removed = cfg.remove_provider(name);
+        if !removed {
+            return ProviderOpResult {
+                ok: false,
+                providers: Some(self.provider_list()),
+                error: Some(format!("unknown provider: {name}")),
+            };
+        }
+        if let Err(e) = cfg.save() {
+            return ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some(format!("save config: {e}")),
+            };
+        }
+        if let Some(pool) = self.pool.as_ref() {
+            pool.remove_entry(name);
+        }
+        ProviderOpResult {
+            ok: true,
+            providers: Some(self.provider_list()),
+            error: None,
+        }
+    }
+
+    async fn provider_set_active(&self, name: &str) -> ProviderOpResult {
+        // 1. Live pool switch (atomic active_index) — takes effect next turn.
+        if let Some(pool) = self.pool.as_ref() {
+            if let Err(e) = pool.set_active_by_name(name) {
+                return ProviderOpResult {
+                    ok: false,
+                    providers: Some(self.provider_list()),
+                    error: Some(e),
+                };
+            }
+        }
+        // 2. Persist `active_provider` to config.toml (launch default).
+        let mut cfg = OneaiConfig::load_or_default();
+        cfg.set_active_provider(name);
+        if let Err(e) = cfg.save() {
+            return ProviderOpResult {
+                ok: false,
+                providers: None,
+                error: Some(format!("save config: {e}")),
+            };
+        }
+        ProviderOpResult {
+            ok: true,
+            providers: Some(self.provider_list()),
+            error: None,
+        }
+    }
+
+    async fn config_read(&self) -> ConfigFileView {
+        let path = OneaiConfig::default_path();
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        ConfigFileView {
+            path: path.display().to_string(),
+            content,
+        }
+    }
+}
+
+impl AppProbeImpl {
+    /// Run a curator op by name, returning the post-op `SkillInfo` (or an
+    /// error message when no curator / unknown skill).
+    async fn skill_op<F, Fut>(&self, name: &str, op: F, label: &str) -> SkillOpResult
+    where
+        F: FnOnce(Arc<oneai_skill::SkillCurator>) -> Fut,
+        Fut: std::future::Future<Output = oneai_skill::SkillMetadata>,
+    {
+        let curator = match self.app.skill_curator.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                return SkillOpResult {
+                    ok: false,
+                    skill: None,
+                    error: Some(format!("skill {label} unavailable: no curator")),
+                }
+            }
+        };
+        // The curator op errors (unknown skill) surface as a panic-free
+        // empty/unchanged metadata; detect unknown skills by checking the
+        // registry first.
+        if curator.registry().find_by_name(name).await.is_none() {
+            return SkillOpResult {
+                ok: false,
+                skill: None,
+                error: Some(format!("unknown skill: {name}")),
+            };
+        }
+        let meta = op(curator).await;
+        let desc = self.app.skill_registry.find_by_name(name).await;
+        let info = desc.as_ref().map(|d| skill_info(d, Some(&meta)));
+        SkillOpResult {
+            ok: true,
+            skill: info,
+            error: None,
+        }
+    }
+
+    /// Sync helper: build the `ProviderInfo` list from the live pool (or the
+    /// launch config fallback). Shared by `providers()` and the provider op
+    /// results so both stay consistent.
+    fn provider_list(&self) -> Vec<ProviderInfo> {
+        let active_name = self.pool.as_ref().map(|p| p.active_provider_name());
+        let pool_entries: Vec<(String, ModelConfig)> = self
+            .pool
+            .as_ref()
+            .map(|p| p.provider_entries_view())
+            .unwrap_or_default();
+        if !pool_entries.is_empty() {
+            return pool_entries
+                .into_iter()
+                .map(|(name, mc)| ProviderInfo {
+                    kind: provider_kind_str(&mc).unwrap_or_else(|| name.clone()),
+                    model: mc.model_name.clone().unwrap_or_default(),
+                    base_url: mc.base_url.clone(),
+                    active: active_name.as_deref() == Some(name.as_str()),
+                })
+                .collect();
+        }
+        self.provider_config
+            .as_ref()
+            .map(|mc| ProviderInfo {
+                kind: provider_kind_str(mc).unwrap_or_default(),
+                model: mc.model_name.clone().unwrap_or_default(),
+                base_url: mc.base_url.clone(),
+                active: true,
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Map a probe DTO to a config `ProviderEntryConfig` (for `[[providers]]`).
+fn dto_to_entry_config(dto: &ProviderEntryDto) -> ProviderEntryConfig {
+    ProviderEntryConfig {
+        name: dto.name.clone(),
+        kind: dto.kind.clone(),
+        api_key: dto.api_key.clone(),
+        base_url: dto.base_url.clone(),
+        model: dto.model.clone(),
+    }
+}
+
+/// Map a probe DTO to a `ModelConfig` for live pool entry construction. Env
+/// vars (`ONEAI_API_KEY`/`BASE_URL`/`MODEL`) only fill in unset fields, so a
+/// fully-specified entry is self-contained.
+fn entry_to_model_config_strict(dto: &ProviderEntryDto) -> ModelConfig {
+    use oneai_core::{CloudProviderKind, ProviderType};
+    let cloud_kind = dto
+        .kind
+        .as_deref()
+        .and_then(|k| match k.to_lowercase().as_str() {
+            "openai" => Some(CloudProviderKind::OpenAI),
+            "anthropic" => Some(CloudProviderKind::Anthropic),
+            "gemini" => Some(CloudProviderKind::Gemini),
+            _ => None,
+        });
+    let api_key = dto
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("ONEAI_API_KEY").ok());
+    let base_url = dto
+        .base_url
+        .clone()
+        .or_else(|| std::env::var("ONEAI_BASE_URL").ok());
+    let model = dto
+        .model
+        .clone()
+        .or_else(|| std::env::var("ONEAI_MODEL").ok());
+    ModelConfig {
+        provider_type: ProviderType::Cloud,
+        cloud_kind,
+        api_key,
+        base_url,
+        port: None,
+        model_name: model,
+        model_path: None,
+        extra: std::collections::HashMap::new(),
+    }
+}
+
 // ─── cmd_app_server ──────────────────────────────────────────────────────────
 
 pub fn cmd_app_server(
@@ -400,9 +781,36 @@ pub fn cmd_app_server(
         // Clone before the move into ProviderFactory::create — start_group
         // injects these defaults into group-chat members that lack their own.
         let runtime_provider_config = provider_config.clone();
-        if let Some(mc) = provider_config {
-            let provider = ProviderFactory::create(mc);
-            builder = builder.provider(Arc::from(provider));
+        // Build the provider POOL (the `App.provider`). Multi-provider
+        // (`[[providers]]`) when configured, else a single-entry pool from the
+        // legacy/env provider (model override applied via `provider_config`).
+        // The pool IS `App.provider`; the probe mutates it live for
+        // `provider/add`·`delete`·`set_active` (atomic `active_index` switch,
+        // live entry add/remove — no `App.provider` swap needed).
+        let pool: Option<Arc<ProviderPool>> = if !config.providers.is_empty() {
+            let entries: Vec<ProviderEntry> = config
+                .to_pool_model_configs()
+                .into_iter()
+                .map(|(name, mc)| {
+                    ProviderEntry::new(name, Arc::from(ProviderFactory::create(mc)), 0)
+                })
+                .collect();
+            let pool = ProviderPool::new(entries, ProviderPoolConfig::default());
+            if let Some(active) = &config.active_provider {
+                let _ = pool.set_active_by_name(active);
+            }
+            Some(Arc::new(pool))
+        } else {
+            provider_config.as_ref().map(|mc| {
+                Arc::new(ProviderPool::single(
+                    Arc::from(ProviderFactory::create(mc.clone())),
+                    "default",
+                ))
+            })
+        };
+        let probe_pool = pool.clone();
+        if let Some(p) = pool {
+            builder = builder.provider(p);
         }
         if let Some(uid) = user {
             builder = builder.user_id(uid);
@@ -453,6 +861,15 @@ pub fn cmd_app_server(
         let conversation_store: oneai_app_server::SharedConversationStore =
             Arc::new(AppConversationStore { app: app.clone() });
 
+        // App probe — backs the `config/*` / `provider/*` / `domainpack/*` /
+        // `skill/*` JSON-RPC methods (read-only config + skill lifecycle).
+        let probe: SharedAppProbe = Arc::new(AppProbeImpl {
+            app: app.clone(),
+            domain_pack_name: domain.map(|d| d.to_string()),
+            provider_config: runtime_provider_config.clone(),
+            pool: probe_pool,
+        });
+
         let runtime = Arc::new(Mutex::new(AppServerRuntime {
             app: app.clone(),
             session,
@@ -487,7 +904,7 @@ pub fn cmd_app_server(
 
         // Multi-transport JSON-RPC server. Binds all `--listen` specs
         // concurrently against the one bus.
-        let server = serve_all(specs, bus, scenario_store, conversation_store).await?;
+        let server = serve_all(specs, bus, scenario_store, conversation_store, probe).await?;
 
         eprintln!("✅ Listening. Connect a JSON-RPC frontend.");
         eprintln!("   Methods: turn/run, turn/cancel, approval/respond, session/*, …");

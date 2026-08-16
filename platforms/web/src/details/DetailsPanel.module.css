@@ -11,9 +11,36 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
+  padding: 6px 8px 6px 12px;
   border-bottom: 1px solid var(--oneai-border);
   flex-shrink: 0;
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.tab {
+  background: none;
+  border: none;
+  color: var(--oneai-text-tertiary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 6px 10px;
+  border-radius: var(--oneai-radius-sm);
+}
+.tab:hover {
+  color: var(--oneai-text);
+  background: var(--oneai-bg-subtle);
+}
+.tabActive {
+  color: var(--oneai-text);
+  background: var(--oneai-bg-subtle);
 }
 
 .title {
